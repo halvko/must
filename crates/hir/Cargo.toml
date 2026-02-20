@@ -1,0 +1,15 @@
+[package]
+name = "hir"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+base-db.workspace = true
+syntax.workspace = true
+salsa.workspace = true
+ena.workspace = true
+rustc-hash.workspace = true
+la-arena.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "syntax"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rowan.workspace = true
+text-size.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true
