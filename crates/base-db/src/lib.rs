@@ -11,7 +11,7 @@
 /// tree either way, a query that read such a flag would recompute on focus
 /// changes rather than on code changes, and the server already tracks
 /// openness next to its `Uri` map — a second copy here could disagree with it.
-#[salsa::input]
+#[salsa::input(debug)]
 pub struct SourceFile {
     /// Display/debug only — the `Uri ↔ SourceFile` map is server state,
     /// not part of the database.

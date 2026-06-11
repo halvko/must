@@ -4,6 +4,7 @@
 //! through [`ide::Analysis`] snapshots so request handling can move to a
 //! worker pool without touching feature code.
 
+mod from_proto;
 mod to_proto;
 
 use std::collections::HashMap;
@@ -12,11 +13,12 @@ use std::error::Error;
 
 use base_db::SourceFile;
 use ide::AnalysisHost;
-use lsp_server::{Connection, ErrorCode, Message, Notification, Response};
+use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
+use lsp_types::request::{GotoDefinition, Request as _};
 
 pub type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -25,6 +27,7 @@ pub fn server_capabilities() -> lsp_types::ServerCapabilities {
         text_document_sync: Some(lsp_types::TextDocumentSyncCapability::Kind(
             lsp_types::TextDocumentSyncKind::FULL,
         )),
+        definition_provider: Some(lsp_types::OneOf::Left(true)),
         ..Default::default()
     }
 }
@@ -80,6 +83,15 @@ impl FileState {
 struct GlobalState {
     host: AnalysisHost,
     files: HashMap<lsp_types::Uri, FileState>,
+    /// The other direction: what URI a salsa handle came from, for turning a
+    /// navigation target back into something the client can open.
+    ///
+    /// One entry per distinct document, minted with its input and never
+    /// removed — a closed file keeps its handle (see [`FileState::Closed`]),
+    /// so the mapping stays true through any number of open/close cycles and
+    /// re-opening finds the entry already there. Nothing here says whether the
+    /// document is open; `files` is the single answer to that.
+    uris: HashMap<SourceFile, lsp_types::Uri>,
     sender: crossbeam_channel::Sender<Message>,
 }
 
@@ -88,6 +100,7 @@ impl GlobalState {
         GlobalState {
             host: AnalysisHost::new(),
             files: HashMap::new(),
+            uris: HashMap::new(),
             sender: connection.sender.clone(),
         }
     }
@@ -99,12 +112,7 @@ impl GlobalState {
                     if connection.handle_shutdown(&req)? {
                         return Ok(());
                     }
-                    tracing::debug!(method = %req.method, "unhandled request");
-                    let resp = Response::new_err(
-                        req.id,
-                        ErrorCode::MethodNotFound as i32,
-                        format!("unhandled method: {}", req.method),
-                    );
+                    let resp = self.handle_request(req);
                     self.sender.send(resp.into())?;
                 }
                 Message::Notification(not) => {
@@ -116,6 +124,52 @@ impl GlobalState {
             }
         }
         Ok(())
+    }
+
+    fn handle_request(&mut self, req: Request) -> Response {
+        match req.method.as_str() {
+            GotoDefinition::METHOD => match serde_json::from_value(req.params) {
+                Ok(params) => Response::new_ok(req.id, self.goto_definition(params)),
+                Err(err) => {
+                    Response::new_err(req.id, ErrorCode::InvalidParams as i32, err.to_string())
+                }
+            },
+            method => {
+                tracing::debug!(%method, "unhandled request");
+                Response::new_err(
+                    req.id,
+                    ErrorCode::MethodNotFound as i32,
+                    format!("unhandled method: {method}"),
+                )
+            }
+        }
+    }
+
+    /// Answers only for documents the client currently has open. A closed
+    /// document has had its text emptied, so the tree behind its handle is
+    /// the parse of `""`: answering from it would not fail, it would quietly
+    /// report that a file full of definitions has none.
+    fn goto_definition(
+        &self,
+        params: lsp_types::GotoDefinitionParams,
+    ) -> Option<lsp_types::GotoDefinitionResponse> {
+        let doc = params.text_document_position_params;
+        let uri = doc.text_document.uri;
+        let Some(FileState::Open(file)) = self.files.get(&uri).copied() else {
+            tracing::warn!(uri = %uri.as_str(), "goto definition for a document that is not open");
+            return None;
+        };
+        let analysis = self.host.snapshot();
+        let line_index = analysis.line_index(file);
+        let offset = from_proto::offset(&line_index, doc.position)?;
+        let nav = analysis.goto_definition(ide::FilePosition { file, offset })?;
+        let target_uri = self.uris.get(&nav.file)?.clone();
+        // Same-file navigation for now, so reuse the line index.
+        let location = lsp_types::Location {
+            uri: target_uri,
+            range: to_proto::range(&line_index, nav.focus_range),
+        };
+        Some(lsp_types::GotoDefinitionResponse::Scalar(location))
     }
 
     fn handle_notification(&mut self, notification: Notification) -> ServerResult<()> {
@@ -183,8 +237,14 @@ impl GlobalState {
                 file
             }
             Entry::Vacant(entry) => {
-                let file = self.host.create_file(entry.key().to_string(), text);
+                let uri = entry.key().clone();
+                let file = self.host.create_file(uri.to_string(), text);
                 entry.insert(FileState::Open(file));
+                // The only place an input is minted is the only place the
+                // reverse map is written: one entry per document, for the life
+                // of the session. The occupied arm above deliberately adds
+                // nothing — it reuses a handle that is already mapped.
+                self.uris.insert(file, uri);
                 file
             }
         }
@@ -296,6 +356,35 @@ mod tests {
                 text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
             },
         );
+    }
+
+    /// Likewise through `handle_request`. Unwraps the response the way a
+    /// client would: a request that answers nothing is an `Ok` response
+    /// carrying `null`, not an error.
+    fn goto(
+        state: &mut GlobalState,
+        uri: &lsp_types::Uri,
+        position: lsp_types::Position,
+    ) -> Option<lsp_types::GotoDefinitionResponse> {
+        let params = lsp_types::GotoDefinitionParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let response = state.handle_request(Request::new(
+            lsp_server::RequestId::from(1),
+            GotoDefinition::METHOD.to_owned(),
+            params,
+        ));
+        assert!(
+            response.error.is_none(),
+            "error response: {:?}",
+            response.error
+        );
+        serde_json::from_value(response.result.unwrap_or_default()).unwrap()
     }
 
     fn change(state: &mut GlobalState, uri: &lsp_types::Uri, text: &str) {
@@ -420,5 +509,58 @@ mod tests {
             "a stray change refilled a buffer the client had given back"
         );
         assert!(client.receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn requests_are_answered_only_while_the_document_is_open() {
+        let (mut state, _client) = server();
+        let doc = uri("file:///def.must");
+        // `b` on line 0, column 15, defined on line 1.
+        let text = "const a = fn { b() };\nstatic b = fn { a() };\n";
+        let cursor = lsp_types::Position::new(0, 15);
+        open(&mut state, &doc, text);
+
+        let found = goto(&mut state, &doc, cursor);
+        assert!(found.is_some(), "goto-definition found nothing to go to");
+
+        close(&mut state, &doc);
+
+        // The document's text is emptied on close, so its handle now parses
+        // as an empty file: answering from it would not fail, it would report
+        // that a file full of definitions has none.
+        assert_eq!(goto(&mut state, &doc, cursor), None);
+
+        open(&mut state, &doc, text);
+        assert_eq!(
+            goto(&mut state, &doc, cursor),
+            found,
+            "reopening did not make the document answerable again"
+        );
+    }
+
+    #[test]
+    fn the_uri_map_gets_one_entry_per_document_and_keeps_it() {
+        let (mut state, _client) = server();
+        let a = uri("file:///a.must");
+        let b = uri("file:///b.must");
+        open(&mut state, &a, BROKEN);
+        open(&mut state, &b, BROKEN);
+        let file_a = state.files[&a].source_file();
+
+        for _ in 0..5 {
+            close(&mut state, &a);
+            open(&mut state, &a, BROKEN);
+        }
+        close(&mut state, &b);
+
+        assert_eq!(
+            state.uris.len(),
+            2,
+            "the reverse map grew with open events instead of with documents"
+        );
+        assert_eq!(state.uris[&file_a], a);
+        // A closed document keeps its entry: the handle is still valid, and a
+        // navigation target that lands on it still has to name a URI.
+        assert_eq!(state.uris[&state.files[&b].source_file()], b);
     }
 }

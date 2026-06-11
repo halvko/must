@@ -3,9 +3,18 @@
 //! This crate speaks `TextSize`/`TextRange` and its own result types; the
 //! LSP layer converts at the boundary. It must never depend on lsp-types.
 
+mod goto_definition;
+
 use base_db::{RootDatabase, SourceFile};
+pub use goto_definition::NavigationTarget;
 pub use line_index::LineIndex;
-use syntax::TextRange;
+use syntax::{TextRange, TextSize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilePosition {
+    pub file: SourceFile,
+    pub offset: TextSize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
@@ -86,15 +95,18 @@ pub struct Analysis {
 
 impl Analysis {
     pub fn diagnostics(&self, file: SourceFile) -> Vec<Diagnostic> {
-        base_db::parse(&self.db, file)
-            .errors()
-            .iter()
-            .map(|err| Diagnostic {
-                range: err.range,
+        hir::file_diagnostics(&self.db, file)
+            .into_iter()
+            .map(|d| Diagnostic {
+                range: d.range,
                 severity: Severity::Error,
-                message: err.message.clone(),
+                message: d.message,
             })
             .collect()
+    }
+
+    pub fn goto_definition(&self, pos: FilePosition) -> Option<NavigationTarget> {
+        goto_definition::goto_definition(&self.db, pos)
     }
 
     pub fn line_index(&self, file: SourceFile) -> LineIndex {
@@ -103,22 +115,4 @@ impl Analysis {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const BROKEN: &str = "static = 1;";
-
-    #[test]
-    fn a_closed_file_analyzes_again_on_the_same_handle() {
-        let mut host = AnalysisHost::new();
-        let file = host.create_file("test.must".to_owned(), BROKEN.to_owned());
-        host.close_file(file);
-        assert_eq!(host.snapshot().diagnostics(file), vec![]);
-
-        host.set_file_text(file, BROKEN.to_owned());
-        assert_eq!(host.snapshot().diagnostics(file).len(), 1);
-
-        host.set_file_text(file, "static a = 1;".to_owned());
-        assert_eq!(host.snapshot().diagnostics(file), vec![]);
-    }
-}
+mod tests;
