@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# The Zed extension builds to wasm via Zed's own toolchain.
+exclude = ["editors/zed"]
 
 [workspace.package]
 version = "0.1.0"

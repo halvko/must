@@ -1,0 +1,15 @@
+# Not part of the root workspace: this crate builds to wasm32-wasi via Zed's
+# own toolchain when installed as a dev extension.
+[workspace]
+
+[package]
+name = "zed_must"
+version = "0.0.1"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"
