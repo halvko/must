@@ -1,0 +1,5 @@
+name = "Must"
+path_suffixes = ["must"]
+line_comments = ["// "]
+# Deliberately no `grammar`: syntax highlighting comes later (would need a
+# tree-sitter grammar); diagnostics/hover/goto-def all come from the LSP.

@@ -1,0 +1,11 @@
+id = "must"
+name = "Must"
+version = "0.0.1"
+schema_version = 1
+authors = ["Erik Funder Carstensen <fundererik@gmail.com>"]
+description = "Must language support (dev)"
+repository = "https://github.com/halvko/must-lsp-server"
+
+[language_servers.must-lsp]
+name = "Must LSP"
+languages = ["Must"]

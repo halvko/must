@@ -1,0 +1,8 @@
+static greeting = fn {
+    let s = "hello";
+    (fn print(s))();
+}
+
+static main: fn() -> () = fn() -> () {
+    greeting();
+}
