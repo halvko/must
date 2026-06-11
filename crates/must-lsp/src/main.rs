@@ -1,24 +1,17 @@
-use lsp_server::Notification;
+use tracing_subscriber::EnvFilter;
 
-fn main() {
-    let (conn, io_threads) = lsp_server::Connection::stdio();
-    conn.sender
-        .send(lsp_server::Message::Notification(Notification {
-            method: "window/logMessage".into(),
-            params: serde_json::json!(lsp_types::LogMessageParams {
-                typ: lsp_types::MessageType::WARNING,
-                message: "hello!".into(),
-            }),
-        }))
-        .unwrap();
-    let (id, result) = conn.initialize_start().unwrap();
-    conn.sender
-        .send(lsp_server::Message::Notification(Notification {
-            method: "window/logMessage".into(),
-            params: serde_json::json!(lsp_types::LogMessageParams {
-                typ: lsp_types::MessageType::WARNING,
-                message: serde_json::to_string(&result).unwrap(),
-            }),
-        }))
-        .unwrap();
+fn main() -> must_lsp::ServerResult<()> {
+    // stdout is the LSP channel; logs go to stderr.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(EnvFilter::from_env("MUST_LSP_LOG"))
+        .with_ansi(false)
+        .init();
+
+    tracing::info!("must-lsp starting");
+    let (connection, io_threads) = lsp_server::Connection::stdio();
+    must_lsp::run(connection)?;
+    io_threads.join()?;
+    tracing::info!("must-lsp exiting");
+    Ok(())
 }

@@ -351,9 +351,11 @@ dependencies = [
  "base-db",
  "crossbeam-channel",
  "ide",
+ "line-index",
  "lsp-server",
  "lsp-types",
  "serde_json",
+ "syntax",
  "tracing",
  "tracing-subscriber",
 ]
