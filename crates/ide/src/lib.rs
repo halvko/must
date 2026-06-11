@@ -4,9 +4,11 @@
 //! LSP layer converts at the boundary. It must never depend on lsp-types.
 
 mod goto_definition;
+mod hover;
 
 use base_db::{RootDatabase, SourceFile};
 pub use goto_definition::NavigationTarget;
+pub use hover::HoverResult;
 pub use line_index::LineIndex;
 use syntax::{TextRange, TextSize};
 
@@ -85,6 +87,10 @@ impl Analysis {
 
     pub fn goto_definition(&self, pos: FilePosition) -> Option<NavigationTarget> {
         goto_definition::goto_definition(&self.db, pos)
+    }
+
+    pub fn hover(&self, pos: FilePosition) -> Option<HoverResult> {
+        hover::hover(&self.db, pos)
     }
 
     pub fn line_index(&self, file: SourceFile) -> LineIndex {

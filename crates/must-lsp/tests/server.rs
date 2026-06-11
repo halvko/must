@@ -120,7 +120,7 @@ fn publishes_parse_errors_on_open_and_change() {
     let file = uri("file:///test.must");
 
     // Broken file: missing `;` terminator on the let.
-    client.open(&file, "static main = fn {\n    let a = 1\n    print(a);\n}\n");
+    client.open(&file, "static main = fn {\n    let a = \"x\"\n    print(a);\n}\n");
     let diags = client.next_diagnostics();
     assert_eq!(diags.uri, file);
     assert_eq!(diags.diagnostics.len(), 1);
@@ -133,7 +133,7 @@ fn publishes_parse_errors_on_open_and_change() {
     client.change(
         &file,
         1,
-        "static main = fn {\n    let a = 1;\n    print(a);\n}\n",
+        "static main = fn {\n    let a = \"x\";\n    print(a);\n}\n",
     );
     let diags = client.next_diagnostics();
     assert_eq!(diags.diagnostics, vec![]);
@@ -166,6 +166,31 @@ fn goto_definition_over_protocol() {
     assert_eq!(location.uri, file);
     assert_eq!(location.range.start, lsp_types::Position::new(1, 7));
     assert_eq!(location.range.end, lsp_types::Position::new(1, 8));
+
+    drop(client);
+}
+
+#[test]
+fn hover_over_protocol() {
+    let mut client = TestClient::start();
+    let file = uri("file:///hover.must");
+
+    client.open(&file, "static main = fn {\n    let s = \"hello\";\n    print(s);\n}\n");
+    client.next_diagnostics();
+
+    // Hover `s` in `print(s)` on line 2.
+    let response = client.request::<lsp_types::request::HoverRequest>(lsp_types::HoverParams {
+        text_document_position_params: lsp_types::TextDocumentPositionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+            position: lsp_types::Position::new(2, 10),
+        },
+        work_done_progress_params: Default::default(),
+    });
+    let hover = response.expect("expected a hover response");
+    let lsp_types::HoverContents::Markup(content) = hover.contents else {
+        panic!("expected markup hover contents");
+    };
+    assert_eq!(content.value, "```must\ns: str\n```");
 
     drop(client);
 }

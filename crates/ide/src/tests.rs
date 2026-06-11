@@ -87,6 +87,47 @@ fn goto_builtin_is_none() {
     check_no_goto(r#"static f = fn { print$0("hi") };"#);
 }
 
+fn check_hover(fixture_text: &str, expected_markup: &str) {
+    let (analysis, _file, pos) = fixture(fixture_text);
+    let hover = analysis.hover(pos).expect("hover returned None");
+    assert_eq!(hover.markup, expected_markup);
+}
+
+#[test]
+fn hover_local_use() {
+    check_hover(
+        r#"static main = fn { let s = "hello"; print(s$0); };"#,
+        "```must\ns: str\n```",
+    );
+}
+
+#[test]
+fn hover_binding_definition() {
+    check_hover(
+        r#"static main = fn { let s$0 = "hello"; print(s); };"#,
+        "```must\ns: str\n```",
+    );
+}
+
+#[test]
+fn hover_item_name_shows_inferred_fn_type() {
+    check_hover(
+        "static ma$0in = fn { print(\"hi\"); };",
+        "```must\nmain: fn()\n```",
+    );
+}
+
+#[test]
+fn hover_static_use_shows_signature() {
+    check_hover(
+        r#"
+static f = fn (n: usize) -> usize n;
+static main = fn { f$0(1); };
+"#,
+        "```must\nf: fn(usize) -> usize\n```",
+    );
+}
+
 #[test]
 fn diagnostics_include_name_errors() {
     let (analysis, file, _pos) = fixture("static f = fn { missing$0() };");

@@ -6,8 +6,10 @@
 //! therefore only reach other items if a *value* on that path changes.
 
 pub mod body;
+pub mod infer;
 pub mod item_tree;
 pub mod scopes;
+pub mod ty;
 
 #[cfg(test)]
 mod tests;
@@ -16,8 +18,10 @@ use base_db::{Db, SourceFile, parse};
 use syntax::TextRange;
 
 pub use body::{Body, BodySourceMap, ExprId, BindingId, body_with_source_map};
+pub use infer::{InferenceDiagnostic, InferenceResult};
 pub use item_tree::{ItemTree, TypeRef, item_source};
 pub use scopes::{Builtin, ExprScopes, Resolution, expr_scopes, file_scope, resolutions};
+pub use ty::{FnTy, Ty, signature};
 
 /// Stable identity of a top-level item: survives edits to other items,
 /// reordering of unrelated code, and any edit inside its own body.
@@ -107,6 +111,42 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     message: format!("unresolved name `{name}`"),
                 });
             }
+        }
+
+        for diag in &infer::infer(db, item).diagnostics {
+            let (expr, message) = match diag {
+                InferenceDiagnostic::TypeMismatch {
+                    expr,
+                    expected,
+                    actual,
+                } => (
+                    *expr,
+                    format!(
+                        "type mismatch: expected `{}`, found `{}`",
+                        expected.display(),
+                        actual.display()
+                    ),
+                ),
+                InferenceDiagnostic::NotCallable { expr, ty } => (
+                    *expr,
+                    format!("expression of type `{}` is not callable", ty.display()),
+                ),
+                InferenceDiagnostic::ArgCountMismatch {
+                    expr,
+                    expected,
+                    found,
+                } => (
+                    *expr,
+                    format!("expected {expected} argument(s), found {found}"),
+                ),
+            };
+            let Some(ptr) = source_map.node_for_expr(expr) else {
+                continue;
+            };
+            diagnostics.push(Diagnostic {
+                range: ptr.text_range(),
+                message,
+            });
         }
     }
 
