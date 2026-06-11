@@ -18,7 +18,7 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{GotoDefinition, Request as _};
+use lsp_types::request::{GotoDefinition, HoverRequest, Request as _};
 
 pub type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -28,6 +28,7 @@ pub fn server_capabilities() -> lsp_types::ServerCapabilities {
             lsp_types::TextDocumentSyncKind::FULL,
         )),
         definition_provider: Some(lsp_types::OneOf::Left(true)),
+        hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
         ..Default::default()
     }
 }
@@ -134,6 +135,14 @@ impl GlobalState {
                     Response::new_err(req.id, ErrorCode::InvalidParams as i32, err.to_string())
                 }
             },
+            HoverRequest::METHOD => match serde_json::from_value(req.params) {
+                Ok(params) => Response::new_ok(req.id, self.hover(params)),
+                Err(err) => Response::new_err(
+                    req.id,
+                    ErrorCode::InvalidParams as i32,
+                    err.to_string(),
+                ),
+            },
             method => {
                 tracing::debug!(%method, "unhandled request");
                 Response::new_err(
@@ -170,6 +179,27 @@ impl GlobalState {
             range: to_proto::range(&line_index, nav.focus_range),
         };
         Some(lsp_types::GotoDefinitionResponse::Scalar(location))
+    }
+
+    fn hover(&self, params: lsp_types::HoverParams) -> Option<lsp_types::Hover> {
+        let doc = params.text_document_position_params;
+        // Answered only while the document is open: a closed file's text is
+        // cleared, so answering from it would describe an empty file.
+        let Some(FileState::Open(file)) = self.files.get(&doc.text_document.uri).copied() else {
+            tracing::warn!(uri = %doc.text_document.uri.as_str(), "hover for a document that is not open");
+            return None;
+        };
+        let analysis = self.host.snapshot();
+        let line_index = analysis.line_index(file);
+        let offset = from_proto::offset(&line_index, doc.position)?;
+        let hover = analysis.hover(ide::FilePosition { file, offset })?;
+        Some(lsp_types::Hover {
+            contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
+                kind: lsp_types::MarkupKind::Markdown,
+                value: hover.markup,
+            }),
+            range: Some(to_proto::range(&line_index, hover.range)),
+        })
     }
 
     fn handle_notification(&mut self, notification: Notification) -> ServerResult<()> {
