@@ -3,9 +3,18 @@
 //! This crate speaks `TextSize`/`TextRange` and its own result types; the
 //! LSP layer converts at the boundary. It must never depend on lsp-types.
 
+mod goto_definition;
+
 use base_db::{RootDatabase, SourceFile};
+pub use goto_definition::NavigationTarget;
 pub use line_index::LineIndex;
-use syntax::TextRange;
+use syntax::{TextRange, TextSize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilePosition {
+    pub file: SourceFile,
+    pub offset: TextSize,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
@@ -64,18 +73,24 @@ pub struct Analysis {
 
 impl Analysis {
     pub fn diagnostics(&self, file: SourceFile) -> Vec<Diagnostic> {
-        base_db::parse(&self.db, file)
-            .errors()
-            .iter()
-            .map(|err| Diagnostic {
-                range: err.range,
+        hir::file_diagnostics(&self.db, file)
+            .into_iter()
+            .map(|d| Diagnostic {
+                range: d.range,
                 severity: Severity::Error,
-                message: err.message.clone(),
+                message: d.message,
             })
             .collect()
+    }
+
+    pub fn goto_definition(&self, pos: FilePosition) -> Option<NavigationTarget> {
+        goto_definition::goto_definition(&self.db, pos)
     }
 
     pub fn line_index(&self, file: SourceFile) -> LineIndex {
         LineIndex::new(file.text(&self.db))
     }
 }
+
+#[cfg(test)]
+mod tests;

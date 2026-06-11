@@ -4,6 +4,7 @@
 //! through [`ide::Analysis`] snapshots so request handling can move to a
 //! worker pool without touching feature code.
 
+mod from_proto;
 mod to_proto;
 
 use std::collections::HashMap;
@@ -11,11 +12,12 @@ use std::error::Error;
 
 use base_db::SourceFile;
 use ide::AnalysisHost;
-use lsp_server::{Connection, ErrorCode, Message, Notification, Response};
+use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
+use lsp_types::request::{GotoDefinition, Request as _};
 
 pub type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -24,6 +26,7 @@ pub fn server_capabilities() -> lsp_types::ServerCapabilities {
         text_document_sync: Some(lsp_types::TextDocumentSyncCapability::Kind(
             lsp_types::TextDocumentSyncKind::FULL,
         )),
+        definition_provider: Some(lsp_types::OneOf::Left(true)),
         ..Default::default()
     }
 }
@@ -38,6 +41,7 @@ pub fn run(connection: Connection) -> ServerResult<()> {
 struct GlobalState {
     host: AnalysisHost,
     files: HashMap<lsp_types::Uri, SourceFile>,
+    uris: HashMap<SourceFile, lsp_types::Uri>,
     sender: crossbeam_channel::Sender<Message>,
 }
 
@@ -46,6 +50,7 @@ impl GlobalState {
         GlobalState {
             host: AnalysisHost::new(),
             files: HashMap::new(),
+            uris: HashMap::new(),
             sender: connection.sender.clone(),
         }
     }
@@ -57,12 +62,7 @@ impl GlobalState {
                     if connection.handle_shutdown(&req)? {
                         return Ok(());
                     }
-                    tracing::debug!(method = %req.method, "unhandled request");
-                    let resp = Response::new_err(
-                        req.id,
-                        ErrorCode::MethodNotFound as i32,
-                        format!("unhandled method: {}", req.method),
-                    );
+                    let resp = self.handle_request(req);
                     self.sender.send(resp.into())?;
                 }
                 Message::Notification(not) => {
@@ -74,6 +74,46 @@ impl GlobalState {
             }
         }
         Ok(())
+    }
+
+    fn handle_request(&mut self, req: Request) -> Response {
+        match req.method.as_str() {
+            GotoDefinition::METHOD => match serde_json::from_value(req.params) {
+                Ok(params) => Response::new_ok(req.id, self.goto_definition(params)),
+                Err(err) => Response::new_err(
+                    req.id,
+                    ErrorCode::InvalidParams as i32,
+                    err.to_string(),
+                ),
+            },
+            method => {
+                tracing::debug!(%method, "unhandled request");
+                Response::new_err(
+                    req.id,
+                    ErrorCode::MethodNotFound as i32,
+                    format!("unhandled method: {method}"),
+                )
+            }
+        }
+    }
+
+    fn goto_definition(
+        &self,
+        params: lsp_types::GotoDefinitionParams,
+    ) -> Option<lsp_types::GotoDefinitionResponse> {
+        let doc = params.text_document_position_params;
+        let &file = self.files.get(&doc.text_document.uri)?;
+        let analysis = self.host.snapshot();
+        let line_index = analysis.line_index(file);
+        let offset = from_proto::offset(&line_index, doc.position)?;
+        let nav = analysis.goto_definition(ide::FilePosition { file, offset })?;
+        let target_uri = self.uris.get(&nav.file)?.clone();
+        // Same-file navigation for now, so reuse the line index.
+        let location = lsp_types::Location {
+            uri: target_uri,
+            range: to_proto::range(&line_index, nav.focus_range),
+        };
+        Some(lsp_types::GotoDefinitionResponse::Scalar(location))
     }
 
     fn handle_notification(&mut self, not: Notification) -> ServerResult<()> {
@@ -117,7 +157,8 @@ impl GlobalState {
             }
             None => {
                 let file = self.host.create_file(uri.to_string(), text);
-                self.files.insert(uri, file);
+                self.files.insert(uri.clone(), file);
+                self.uris.insert(file, uri);
                 file
             }
         }

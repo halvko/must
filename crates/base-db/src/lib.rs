@@ -4,7 +4,7 @@
 //! inputs; the LSP layer mutates inputs (which bumps the revision and cancels
 //! in-flight queries on database clones) and reads queries off clones.
 
-#[salsa::input]
+#[salsa::input(debug)]
 pub struct SourceFile {
     /// Identity/debugging only — the `Uri ↔ SourceFile` map is server state,
     /// not part of the database.

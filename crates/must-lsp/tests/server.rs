@@ -142,6 +142,35 @@ fn publishes_parse_errors_on_open_and_change() {
 }
 
 #[test]
+fn goto_definition_over_protocol() {
+    let mut client = TestClient::start();
+    let file = uri("file:///def.must");
+
+    // `b` on line 0 column 15 refers to the item on line 1.
+    client.open(&file, "const a = fn { b() };\nstatic b = fn { a() };\n");
+    client.next_diagnostics();
+
+    let response = client.request::<lsp_types::request::GotoDefinition>(
+        lsp_types::GotoDefinitionParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+                position: lsp_types::Position::new(0, 15),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    );
+    let Some(lsp_types::GotoDefinitionResponse::Scalar(location)) = response else {
+        panic!("expected scalar definition response, got {response:?}");
+    };
+    assert_eq!(location.uri, file);
+    assert_eq!(location.range.start, lsp_types::Position::new(1, 7));
+    assert_eq!(location.range.end, lsp_types::Position::new(1, 8));
+
+    drop(client);
+}
+
+#[test]
 fn close_clears_diagnostics() {
     let client = TestClient::start();
     let file = uri("file:///broken.must");
