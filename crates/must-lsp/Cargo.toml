@@ -10,6 +10,7 @@ syntax.workspace = true
 line-index.workspace = true
 lsp-server.workspace = true
 lsp-types = { workspace = true, features = ["proposed"] }
+serde = "1"
 serde_json.workspace = true
 crossbeam-channel.workspace = true
 tracing.workspace = true

@@ -1,18 +1,23 @@
 //! The Must language server: a thin LSP transport over the `ide` crate.
 //!
-//! The main loop is single-threaded for now; every feature already goes
-//! through [`ide::Analysis`] snapshots so request handling can move to a
-//! worker pool without touching feature code.
+//! Threading model: the main loop owns the mutable [`AnalysisHost`] and
+//! applies edits; requests and diagnostics run on a small worker pool over
+//! [`Snapshot`]s (database clones). An edit bumps the salsa revision, which
+//! unwinds in-flight queries on snapshots with `salsa::Cancelled`; cancelled
+//! requests answer `ContentModified`, cancelled diagnostics are simply
+//! dropped (the new revision recomputes them).
 
 mod from_proto;
+mod pool;
 mod to_proto;
 
 use std::collections::HashMap;
 use std::error::Error;
+use std::sync::Arc;
 
 use base_db::SourceFile;
 use ide::AnalysisHost;
-use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
+use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
@@ -41,18 +46,38 @@ pub fn run(connection: Connection) -> ServerResult<()> {
 
 struct GlobalState {
     host: AnalysisHost,
-    files: HashMap<lsp_types::Uri, SourceFile>,
-    uris: HashMap<SourceFile, lsp_types::Uri>,
+    /// Shared, replaced wholesale on change: snapshots grab an `Arc` clone.
+    files: Arc<FileMaps>,
     sender: crossbeam_channel::Sender<Message>,
+    pool: pool::TaskPool,
+}
+
+#[derive(Default, Clone)]
+struct FileMaps {
+    by_uri: HashMap<lsp_types::Uri, SourceFile>,
+    by_file: HashMap<SourceFile, lsp_types::Uri>,
+}
+
+/// Everything a request handler needs, detached from the main loop.
+struct Snapshot {
+    analysis: ide::Analysis,
+    files: Arc<FileMaps>,
 }
 
 impl GlobalState {
     fn new(connection: &Connection) -> GlobalState {
         GlobalState {
             host: AnalysisHost::new(),
-            files: HashMap::new(),
-            uris: HashMap::new(),
+            files: Arc::new(FileMaps::default()),
             sender: connection.sender.clone(),
+            pool: pool::TaskPool::new(2),
+        }
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            analysis: self.host.snapshot(),
+            files: Arc::clone(&self.files),
         }
     }
 
@@ -63,8 +88,7 @@ impl GlobalState {
                     if connection.handle_shutdown(&req)? {
                         return Ok(());
                     }
-                    let resp = self.handle_request(req);
-                    self.sender.send(resp.into())?;
+                    self.dispatch_request(req);
                 }
                 Message::Notification(not) => {
                     if let Err(err) = self.handle_notification(not) {
@@ -77,68 +101,55 @@ impl GlobalState {
         Ok(())
     }
 
-    fn handle_request(&mut self, req: Request) -> Response {
+    fn dispatch_request(&mut self, req: Request) {
         match req.method.as_str() {
-            GotoDefinition::METHOD => match serde_json::from_value(req.params) {
-                Ok(params) => Response::new_ok(req.id, self.goto_definition(params)),
-                Err(err) => Response::new_err(
-                    req.id,
-                    ErrorCode::InvalidParams as i32,
-                    err.to_string(),
-                ),
-            },
-            HoverRequest::METHOD => match serde_json::from_value(req.params) {
-                Ok(params) => Response::new_ok(req.id, self.hover(params)),
-                Err(err) => Response::new_err(
-                    req.id,
-                    ErrorCode::InvalidParams as i32,
-                    err.to_string(),
-                ),
-            },
+            GotoDefinition::METHOD => {
+                self.spawn_request(req, |snapshot, params| {
+                    serde_json::to_value(snapshot.goto_definition(params)).ok()
+                });
+            }
+            HoverRequest::METHOD => {
+                self.spawn_request(req, |snapshot, params| {
+                    serde_json::to_value(snapshot.hover(params)).ok()
+                });
+            }
             method => {
                 tracing::debug!(%method, "unhandled request");
-                Response::new_err(
+                let resp = Response::new_err(
                     req.id,
                     ErrorCode::MethodNotFound as i32,
                     format!("unhandled method: {method}"),
-                )
+                );
+                let _ = self.sender.send(resp.into());
             }
         }
     }
 
-    fn goto_definition(
+    /// Parse params on the main thread, run the handler on the pool, and
+    /// answer `ContentModified` if an edit cancels it mid-flight.
+    fn spawn_request<P: serde::de::DeserializeOwned + Send + 'static>(
         &self,
-        params: lsp_types::GotoDefinitionParams,
-    ) -> Option<lsp_types::GotoDefinitionResponse> {
-        let doc = params.text_document_position_params;
-        let &file = self.files.get(&doc.text_document.uri)?;
-        let analysis = self.host.snapshot();
-        let line_index = analysis.line_index(file);
-        let offset = from_proto::offset(&line_index, doc.position)?;
-        let nav = analysis.goto_definition(ide::FilePosition { file, offset })?;
-        let target_uri = self.uris.get(&nav.file)?.clone();
-        // Same-file navigation for now, so reuse the line index.
-        let location = lsp_types::Location {
-            uri: target_uri,
-            range: to_proto::range(&line_index, nav.focus_range),
+        req: Request,
+        handler: fn(&Snapshot, P) -> Option<serde_json::Value>,
+    ) {
+        let id = req.id;
+        let params: P = match serde_json::from_value(req.params) {
+            Ok(params) => params,
+            Err(err) => {
+                let resp = Response::new_err(id, ErrorCode::InvalidParams as i32, err.to_string());
+                let _ = self.sender.send(resp.into());
+                return;
+            }
         };
-        Some(lsp_types::GotoDefinitionResponse::Scalar(location))
-    }
-
-    fn hover(&self, params: lsp_types::HoverParams) -> Option<lsp_types::Hover> {
-        let doc = params.text_document_position_params;
-        let &file = self.files.get(&doc.text_document.uri)?;
-        let analysis = self.host.snapshot();
-        let line_index = analysis.line_index(file);
-        let offset = from_proto::offset(&line_index, doc.position)?;
-        let hover = analysis.hover(ide::FilePosition { file, offset })?;
-        Some(lsp_types::Hover {
-            contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
-                kind: lsp_types::MarkupKind::Markdown,
-                value: hover.markup,
-            }),
-            range: Some(to_proto::range(&line_index, hover.range)),
-        })
+        let snapshot = self.snapshot();
+        let sender = self.sender.clone();
+        self.pool.spawn(move || {
+            let resp = match cancellable(|| handler(&snapshot, params)) {
+                Some(value) => Response::new_ok(id, value),
+                None => content_modified(id),
+            };
+            let _ = sender.send(resp.into());
+        });
     }
 
     fn handle_notification(&mut self, not: Notification) -> ServerResult<()> {
@@ -148,7 +159,7 @@ impl GlobalState {
                     serde_json::from_value(not.params)?;
                 let doc = params.text_document;
                 let file = self.set_file_text(doc.uri.clone(), doc.text);
-                self.publish_diagnostics(doc.uri, file)?;
+                self.publish_diagnostics(doc.uri, file);
             }
             DidChangeTextDocument::METHOD => {
                 let mut params: lsp_types::DidChangeTextDocumentParams =
@@ -159,45 +170,70 @@ impl GlobalState {
                 };
                 let uri = params.text_document.uri;
                 let file = self.set_file_text(uri.clone(), change.text);
-                self.publish_diagnostics(uri, file)?;
+                self.publish_diagnostics(uri, file);
             }
             DidCloseTextDocument::METHOD => {
                 let params: lsp_types::DidCloseTextDocumentParams =
                     serde_json::from_value(not.params)?;
                 // The salsa input stays around (inputs cannot be deleted),
-                // but clear stale squiggles and forget the mapping.
-                self.files.remove(&params.text_document.uri);
-                self.send_diagnostics(params.text_document.uri, Vec::new())?;
+                // but clear stale squiggles and forget the mappings.
+                let uri = params.text_document.uri;
+                let maps = self.files_mut();
+                if let Some(file) = maps.by_uri.remove(&uri) {
+                    maps.by_file.remove(&file);
+                }
+                self.send_diagnostics(uri, Vec::new())?;
             }
             _ => tracing::debug!(method = %not.method, "unhandled notification"),
         }
         Ok(())
     }
 
+    fn files_mut(&mut self) -> &mut FileMaps {
+        // Snapshots hold the old Arc; copy-on-write keeps them consistent.
+        Arc::make_mut(&mut self.files)
+    }
+
     fn set_file_text(&mut self, uri: lsp_types::Uri, text: String) -> SourceFile {
-        match self.files.get(&uri) {
+        match self.files.by_uri.get(&uri) {
             Some(&file) => {
                 self.host.set_file_text(file, text);
                 file
             }
             None => {
                 let file = self.host.create_file(uri.to_string(), text);
-                self.files.insert(uri.clone(), file);
-                self.uris.insert(file, uri);
+                let maps = self.files_mut();
+                maps.by_uri.insert(uri.clone(), file);
+                maps.by_file.insert(file, uri);
                 file
             }
         }
     }
 
-    fn publish_diagnostics(&self, uri: lsp_types::Uri, file: SourceFile) -> ServerResult<()> {
-        let analysis = self.host.snapshot();
-        let line_index = analysis.line_index(file);
-        let diagnostics = analysis
-            .diagnostics(file)
-            .into_iter()
-            .map(|d| to_proto::diagnostic(&line_index, d))
-            .collect();
-        self.send_diagnostics(uri, diagnostics)
+    fn publish_diagnostics(&self, uri: lsp_types::Uri, file: SourceFile) {
+        let snapshot = self.snapshot();
+        let sender = self.sender.clone();
+        self.pool.spawn(move || {
+            let diagnostics = cancellable(|| {
+                let line_index = snapshot.analysis.line_index(file);
+                snapshot
+                    .analysis
+                    .diagnostics(file)
+                    .into_iter()
+                    .map(|d| to_proto::diagnostic(&line_index, d))
+                    .collect::<Vec<_>>()
+            });
+            // Cancelled: a newer revision exists and will publish instead.
+            if let Some(diagnostics) = diagnostics {
+                let params = lsp_types::PublishDiagnosticsParams {
+                    uri,
+                    diagnostics,
+                    version: None,
+                };
+                let _ = sender
+                    .send(Notification::new(PublishDiagnostics::METHOD.to_owned(), params).into());
+            }
+        });
     }
 
     fn send_diagnostics(
@@ -214,4 +250,49 @@ impl GlobalState {
             .send(Notification::new(PublishDiagnostics::METHOD.to_owned(), params).into())?;
         Ok(())
     }
+}
+
+impl Snapshot {
+    fn goto_definition(
+        &self,
+        params: lsp_types::GotoDefinitionParams,
+    ) -> Option<lsp_types::GotoDefinitionResponse> {
+        let doc = params.text_document_position_params;
+        let &file = self.files.by_uri.get(&doc.text_document.uri)?;
+        let line_index = self.analysis.line_index(file);
+        let offset = from_proto::offset(&line_index, doc.position)?;
+        let nav = self.analysis.goto_definition(ide::FilePosition { file, offset })?;
+        let target_uri = self.files.by_file.get(&nav.file)?.clone();
+        // Same-file navigation for now, so reuse the line index.
+        let location = lsp_types::Location {
+            uri: target_uri,
+            range: to_proto::range(&line_index, nav.focus_range),
+        };
+        Some(lsp_types::GotoDefinitionResponse::Scalar(location))
+    }
+
+    fn hover(&self, params: lsp_types::HoverParams) -> Option<lsp_types::Hover> {
+        let doc = params.text_document_position_params;
+        let &file = self.files.by_uri.get(&doc.text_document.uri)?;
+        let line_index = self.analysis.line_index(file);
+        let offset = from_proto::offset(&line_index, doc.position)?;
+        let hover = self.analysis.hover(ide::FilePosition { file, offset })?;
+        Some(lsp_types::Hover {
+            contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
+                kind: lsp_types::MarkupKind::Markdown,
+                value: hover.markup,
+            }),
+            range: Some(to_proto::range(&line_index, hover.range)),
+        })
+    }
+}
+
+use ide::cancellable;
+
+fn content_modified(id: RequestId) -> Response {
+    Response::new_err(
+        id,
+        ErrorCode::ContentModified as i32,
+        "content modified".to_owned(),
+    )
 }

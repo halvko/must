@@ -217,6 +217,57 @@ fn unannotated_param_inferred_from_use() {
     );
 }
 
+/// The incrementality firewall: editing one item's body must not re-run
+/// inference for other items (both annotated, so signatures can't change).
+#[test]
+fn firewall_body_edit_does_not_reinfer_other_items() {
+    use salsa::Setter as _;
+    use std::sync::{Arc, Mutex};
+
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let log_handle = Arc::clone(&log);
+    let mut db = RootDatabase::with_event_callback(Box::new(move |event| {
+        if let salsa::EventKind::WillExecute { database_key } = event.kind {
+            log_handle
+                .lock()
+                .unwrap()
+                .push(format!("{database_key:?}"));
+        }
+    }));
+
+    let text_v1 = "static a: fn() -> usize = fn () -> usize { 1 };\n\
+                   static b: fn() -> usize = fn () -> usize { a() };\n";
+    // Only `a`'s body changes; everything name- and signature-level is
+    // identical.
+    let text_v2 = "static a: fn() -> usize = fn () -> usize { 1 + 1 };\n\
+                   static b: fn() -> usize = fn () -> usize { a() };\n";
+
+    let file = SourceFile::new(&db, "test.must".to_owned(), text_v1.to_owned());
+    for &item in crate::file_item_ids(&db, file) {
+        crate::infer::infer(&db, item);
+    }
+    let executed_infers = |log: &Mutex<Vec<String>>| {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.contains("infer"))
+            .count()
+    };
+    assert_eq!(executed_infers(&log), 2, "both items inferred initially");
+
+    log.lock().unwrap().clear();
+    file.set_text(&mut db).to(text_v2.to_owned());
+    for &item in crate::file_item_ids(&db, file) {
+        crate::infer::infer(&db, item);
+    }
+    let log = log.lock().unwrap();
+    assert_eq!(
+        log.iter().filter(|entry| entry.contains("infer")).count(),
+        1,
+        "only the edited item may re-infer; executed: {log:#?}"
+    );
+}
+
 #[test]
 fn fn_params_scoped_to_their_literal() {
     check_diagnostics(
