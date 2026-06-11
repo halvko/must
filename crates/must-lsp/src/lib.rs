@@ -1,19 +1,25 @@
 //! The Must language server: a thin LSP transport over the `ide` crate.
 //!
-//! The main loop is single-threaded for now; every feature already goes
-//! through [`ide::Analysis`] snapshots so request handling can move to a
-//! worker pool without touching feature code.
+//! Threading model: the main loop owns the mutable [`AnalysisHost`] and
+//! applies edits; requests and diagnostics run on a small worker pool over
+//! [`Snapshot`]s (database clones). An edit bumps the salsa revision, which
+//! unwinds in-flight queries on snapshots with `salsa::Cancelled`; cancelled
+//! requests answer `ContentModified`, cancelled diagnostics are dropped.
+//! Only the edit that did the cancelling republishes, and only for the
+//! document it edited — diagnostics cancelled by another document's edit
+//! stay stale until that document changes again.
 
 mod from_proto;
+mod pool;
 mod to_proto;
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::error::Error;
+use std::sync::Arc;
 
 use base_db::SourceFile;
-use ide::AnalysisHost;
-use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response};
+use ide::{AnalysisHost, cancellable};
+use lsp_server::{Connection, ErrorCode, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
@@ -21,6 +27,10 @@ use lsp_types::notification::{
 use lsp_types::request::{GotoDefinition, HoverRequest, Request as _};
 
 pub type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
+
+/// Enough that one slow request does not hold up the next; the main loop is
+/// never one of them.
+const WORKER_THREADS: usize = 2;
 
 pub fn server_capabilities() -> lsp_types::ServerCapabilities {
     lsp_types::ServerCapabilities {
@@ -42,8 +52,8 @@ pub fn run(connection: Connection) -> ServerResult<()> {
 
 /// What the server knows about one document, and the only place it says so.
 ///
-/// The map below holds one entry per URI and one salsa input per entry, so a
-/// document cannot be open and closed at the same time, cannot be tracked
+/// [`FileMaps::by_uri`] holds one entry per URI and one salsa input per entry,
+/// so a document cannot be open and closed at the same time, cannot be tracked
 /// without an input, and cannot be closed without first having been opened —
 /// none of those states can be written down. The database is deliberately not
 /// a second opinion on any of this: `SourceFile` carries no open flag.
@@ -83,7 +93,20 @@ impl FileState {
 
 struct GlobalState {
     host: AnalysisHost,
-    files: HashMap<lsp_types::Uri, FileState>,
+    /// Shared, and replaced wholesale on every change: a snapshot takes an
+    /// `Arc` clone, so a worker goes on reading the maps as they were when
+    /// its task was handed out. The main loop is the only writer.
+    files: Arc<FileMaps>,
+    sender: crossbeam_channel::Sender<Message>,
+    pool: pool::TaskPool,
+}
+
+/// Both directions of the file table, replaced as one so that no reader can
+/// catch them disagreeing.
+#[derive(Default, Clone)]
+struct FileMaps {
+    /// What the server knows about every document the client has named.
+    by_uri: HashMap<lsp_types::Uri, FileState>,
     /// The other direction: what URI a salsa handle came from, for turning a
     /// navigation target back into something the client can open.
     ///
@@ -91,18 +114,35 @@ struct GlobalState {
     /// removed — a closed file keeps its handle (see [`FileState::Closed`]),
     /// so the mapping stays true through any number of open/close cycles and
     /// re-opening finds the entry already there. Nothing here says whether the
-    /// document is open; `files` is the single answer to that.
-    uris: HashMap<SourceFile, lsp_types::Uri>,
-    sender: crossbeam_channel::Sender<Message>,
+    /// document is open; `by_uri` is the single answer to that.
+    by_file: HashMap<SourceFile, lsp_types::Uri>,
+}
+
+/// Everything a request handler needs, detached from the main loop.
+///
+/// The analysis and the file maps are taken in the same instant, and a handler
+/// answers about that instant: the maps it reads may already be older than the
+/// main loop's, which is what the `Arc` is for rather than a staleness bug. An
+/// edit that would make the answer wrong cancels the query outright.
+struct Snapshot {
+    analysis: ide::Analysis,
+    files: Arc<FileMaps>,
 }
 
 impl GlobalState {
     fn new(connection: &Connection) -> GlobalState {
         GlobalState {
             host: AnalysisHost::new(),
-            files: HashMap::new(),
-            uris: HashMap::new(),
+            files: Arc::new(FileMaps::default()),
             sender: connection.sender.clone(),
+            pool: pool::TaskPool::new(WORKER_THREADS),
+        }
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            analysis: self.host.snapshot(),
+            files: Arc::clone(&self.files),
         }
     }
 
@@ -111,10 +151,14 @@ impl GlobalState {
             match msg {
                 Message::Request(req) => {
                     if connection.handle_shutdown(&req)? {
+                        // Pool tasks still in flight are not drained: a
+                        // request dispatched just before shutdown may go
+                        // unanswered. The server is exiting either way, and
+                        // the closed connection tells the client its pending
+                        // answers are gone.
                         return Ok(());
                     }
-                    let resp = self.handle_request(req);
-                    self.sender.send(resp.into())?;
+                    self.dispatch_request(req);
                 }
                 Message::Notification(not) => {
                     if let Err(err) = self.handle_notification(not) {
@@ -127,79 +171,55 @@ impl GlobalState {
         Ok(())
     }
 
-    fn handle_request(&mut self, req: Request) -> Response {
+    fn dispatch_request(&mut self, req: Request) {
         match req.method.as_str() {
-            GotoDefinition::METHOD => match serde_json::from_value(req.params) {
-                Ok(params) => Response::new_ok(req.id, self.goto_definition(params)),
-                Err(err) => {
-                    Response::new_err(req.id, ErrorCode::InvalidParams as i32, err.to_string())
-                }
-            },
-            HoverRequest::METHOD => match serde_json::from_value(req.params) {
-                Ok(params) => Response::new_ok(req.id, self.hover(params)),
-                Err(err) => Response::new_err(
-                    req.id,
-                    ErrorCode::InvalidParams as i32,
-                    err.to_string(),
-                ),
-            },
+            GotoDefinition::METHOD => {
+                self.spawn_request(req, |snapshot, params| {
+                    serde_json::to_value(snapshot.goto_definition(params)).ok()
+                });
+            }
+            HoverRequest::METHOD => {
+                self.spawn_request(req, |snapshot, params| {
+                    serde_json::to_value(snapshot.hover(params)).ok()
+                });
+            }
             method => {
                 tracing::debug!(%method, "unhandled request");
-                Response::new_err(
+                let resp = Response::new_err(
                     req.id,
                     ErrorCode::MethodNotFound as i32,
                     format!("unhandled method: {method}"),
-                )
+                );
+                let _ = self.sender.send(resp.into());
             }
         }
     }
 
-    /// Answers only for documents the client currently has open. A closed
-    /// document has had its text emptied, so the tree behind its handle is
-    /// the parse of `""`: answering from it would not fail, it would quietly
-    /// report that a file full of definitions has none.
-    fn goto_definition(
+    /// Parse params on the main thread, run the handler on the pool, and
+    /// answer `ContentModified` if an edit cancels it mid-flight.
+    fn spawn_request<P: serde::de::DeserializeOwned + Send + 'static>(
         &self,
-        params: lsp_types::GotoDefinitionParams,
-    ) -> Option<lsp_types::GotoDefinitionResponse> {
-        let doc = params.text_document_position_params;
-        let uri = doc.text_document.uri;
-        let Some(FileState::Open(file)) = self.files.get(&uri).copied() else {
-            tracing::warn!(uri = %uri.as_str(), "goto definition for a document that is not open");
-            return None;
+        req: Request,
+        handler: fn(&Snapshot, P) -> Option<serde_json::Value>,
+    ) {
+        let id = req.id;
+        let params: P = match serde_json::from_value(req.params) {
+            Ok(params) => params,
+            Err(err) => {
+                let resp = Response::new_err(id, ErrorCode::InvalidParams as i32, err.to_string());
+                let _ = self.sender.send(resp.into());
+                return;
+            }
         };
-        let analysis = self.host.snapshot();
-        let line_index = analysis.line_index(file);
-        let offset = from_proto::offset(&line_index, doc.position)?;
-        let nav = analysis.goto_definition(ide::FilePosition { file, offset })?;
-        let target_uri = self.uris.get(&nav.file)?.clone();
-        // Same-file navigation for now, so reuse the line index.
-        let location = lsp_types::Location {
-            uri: target_uri,
-            range: to_proto::range(&line_index, nav.focus_range),
-        };
-        Some(lsp_types::GotoDefinitionResponse::Scalar(location))
-    }
-
-    fn hover(&self, params: lsp_types::HoverParams) -> Option<lsp_types::Hover> {
-        let doc = params.text_document_position_params;
-        // Answered only while the document is open: a closed file's text is
-        // cleared, so answering from it would describe an empty file.
-        let Some(FileState::Open(file)) = self.files.get(&doc.text_document.uri).copied() else {
-            tracing::warn!(uri = %doc.text_document.uri.as_str(), "hover for a document that is not open");
-            return None;
-        };
-        let analysis = self.host.snapshot();
-        let line_index = analysis.line_index(file);
-        let offset = from_proto::offset(&line_index, doc.position)?;
-        let hover = analysis.hover(ide::FilePosition { file, offset })?;
-        Some(lsp_types::Hover {
-            contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
-                kind: lsp_types::MarkupKind::Markdown,
-                value: hover.markup,
-            }),
-            range: Some(to_proto::range(&line_index, hover.range)),
-        })
+        let snapshot = self.snapshot();
+        let sender = self.sender.clone();
+        self.pool.spawn(move || {
+            let resp = match cancellable(|| handler(&snapshot, params)) {
+                Some(value) => Response::new_ok(id, value),
+                None => content_modified(id),
+            };
+            let _ = sender.send(resp.into());
+        });
     }
 
     fn handle_notification(&mut self, notification: Notification) -> ServerResult<()> {
@@ -209,7 +229,7 @@ impl GlobalState {
                     serde_json::from_value(notification.params)?;
                 let doc = params.text_document;
                 let file = self.open_file(doc.uri.clone(), doc.text);
-                self.publish_diagnostics(doc.uri, file, doc.version)?;
+                self.publish_diagnostics(doc.uri, file, doc.version);
             }
             DidChangeTextDocument::METHOD => {
                 let mut params: lsp_types::DidChangeTextDocumentParams =
@@ -224,12 +244,12 @@ impl GlobalState {
                 // client bug. Applying it anyway would publish diagnostics for
                 // a document the client does not consider open, and would
                 // refill a buffer the client has given back.
-                let Some(FileState::Open(file)) = self.files.get(&uri).copied() else {
+                let Some(FileState::Open(file)) = self.files.by_uri.get(&uri).copied() else {
                     tracing::warn!(uri = %uri.as_str(), "didChange for a document that is not open");
                     return Ok(());
                 };
                 self.host.set_file_text(file, change.text);
-                self.publish_diagnostics(uri, file, version)?;
+                self.publish_diagnostics(uri, file, version);
             }
             DidCloseTextDocument::METHOD => {
                 let params: lsp_types::DidCloseTextDocumentParams =
@@ -248,6 +268,12 @@ impl GlobalState {
         Ok(())
     }
 
+    /// The one way to write the file maps: snapshots hold the old `Arc`, so
+    /// copy-on-write leaves what they already handed out alone.
+    fn files_mut(&mut self) -> &mut FileMaps {
+        Arc::make_mut(&mut self.files)
+    }
+
     /// Takes ownership of `uri`'s buffer: mints its salsa input the first time
     /// the document is opened, and revives the parked handle on every reopen,
     /// so a session's inputs are bounded by the documents it has touched
@@ -257,24 +283,24 @@ impl GlobalState {
     /// most useful reading of it is a full-text reset, which is what reusing
     /// this path does.
     fn open_file(&mut self, uri: lsp_types::Uri, text: String) -> SourceFile {
-        match self.files.entry(uri) {
-            Entry::Occupied(mut entry) => {
+        match self.files.by_uri.get(&uri).copied() {
+            Some(state) => {
                 // Fill the input first, then record the state, so this reads
                 // the same way round as `close_file` below.
-                let file = entry.get().source_file();
+                let file = state.source_file();
                 self.host.set_file_text(file, text);
-                entry.insert(FileState::Open(file));
+                self.files_mut().by_uri.insert(uri, FileState::Open(file));
                 file
             }
-            Entry::Vacant(entry) => {
-                let uri = entry.key().clone();
+            None => {
                 let file = self.host.create_file(uri.to_string(), text);
-                entry.insert(FileState::Open(file));
+                let maps = self.files_mut();
+                maps.by_uri.insert(uri.clone(), FileState::Open(file));
                 // The only place an input is minted is the only place the
                 // reverse map is written: one entry per document, for the life
-                // of the session. The occupied arm above deliberately adds
+                // of the session. The reopen arm above deliberately adds
                 // nothing — it reuses a handle that is already mapped.
-                self.uris.insert(file, uri);
+                maps.by_file.insert(file, uri);
                 file
             }
         }
@@ -283,17 +309,23 @@ impl GlobalState {
     /// Gives the buffer back: empties the document's text and parks its
     /// handle. Returns whether this is a document the server tracks, which is
     /// what decides if the client hears about it.
+    ///
+    /// Neither map loses an entry here. `by_uri` keeps the parked handle for
+    /// the next open, and `by_file` keeps the name a navigation target would
+    /// have to be reported under.
     fn close_file(&mut self, uri: &lsp_types::Uri) -> bool {
-        match self.files.get_mut(uri) {
-            Some(state) => {
-                if let FileState::Open(file) = *state {
-                    self.host.close_file(file);
-                    *state = FileState::Closed(file);
-                } else {
-                    // Closing twice: there is nothing left to empty, but the
-                    // client still gets its cleared diagnostics.
-                    tracing::warn!(uri = %uri.as_str(), "didClose for a document that is not open");
-                }
+        match self.files.by_uri.get(uri).copied() {
+            Some(FileState::Open(file)) => {
+                self.host.close_file(file);
+                self.files_mut()
+                    .by_uri
+                    .insert(uri.clone(), FileState::Closed(file));
+                true
+            }
+            Some(FileState::Closed(_)) => {
+                // Closing twice: there is nothing left to empty, but the
+                // client still gets its cleared diagnostics.
+                tracing::warn!(uri = %uri.as_str(), "didClose for a document that is not open");
                 true
             }
             None => {
@@ -303,20 +335,33 @@ impl GlobalState {
         }
     }
 
-    fn publish_diagnostics(
-        &self,
-        uri: lsp_types::Uri,
-        file: SourceFile,
-        version: i32,
-    ) -> ServerResult<()> {
-        let analysis = self.host.snapshot();
-        let line_index = analysis.line_index(file);
-        let diagnostics = analysis
-            .diagnostics(file)
-            .into_iter()
-            .map(|d| to_proto::diagnostic(&line_index, d))
-            .collect();
-        self.send_diagnostics(uri, diagnostics, Some(version))
+    /// Computes this document's diagnostics on the pool.
+    ///
+    /// `version` rides along with the task and is published with the result:
+    /// off the main loop the answer can land after the client has typed on,
+    /// and the version is what lets the client drop squiggles computed for
+    /// text it no longer has.
+    fn publish_diagnostics(&self, uri: lsp_types::Uri, file: SourceFile, version: i32) {
+        let snapshot = self.snapshot();
+        let sender = self.sender.clone();
+        self.pool.spawn(move || {
+            let diagnostics = cancellable(|| {
+                let line_index = snapshot.analysis.line_index(file);
+                snapshot
+                    .analysis
+                    .diagnostics(file)
+                    .into_iter()
+                    .map(|d| to_proto::diagnostic(&line_index, d))
+                    .collect::<Vec<_>>()
+            });
+            // Cancelled: some edit bumped the revision. Only the edited
+            // document gets republished, so if the edit was to another
+            // document these diagnostics stay stale until it changes again.
+            if let Some(diagnostics) = diagnostics {
+                let _ =
+                    sender.send(diagnostics_notification(uri, diagnostics, Some(version)).into());
+            }
+        });
     }
 
     fn send_diagnostics(
@@ -325,19 +370,88 @@ impl GlobalState {
         diagnostics: Vec<lsp_types::Diagnostic>,
         version: Option<i32>,
     ) -> ServerResult<()> {
-        let params = lsp_types::PublishDiagnosticsParams {
-            uri,
-            diagnostics,
-            version,
-        };
         self.sender
-            .send(Notification::new(PublishDiagnostics::METHOD.to_owned(), params).into())?;
+            .send(diagnostics_notification(uri, diagnostics, version).into())?;
         Ok(())
     }
 }
 
+impl Snapshot {
+    /// Answers only for documents the client had open when this snapshot was
+    /// taken. A closed document has had its text emptied, so the tree behind
+    /// its handle is the parse of `""`: answering from it would not fail, it
+    /// would quietly report that a file full of definitions has none.
+    fn goto_definition(
+        &self,
+        params: lsp_types::GotoDefinitionParams,
+    ) -> Option<lsp_types::GotoDefinitionResponse> {
+        let doc = params.text_document_position_params;
+        let uri = doc.text_document.uri;
+        let Some(FileState::Open(file)) = self.files.by_uri.get(&uri).copied() else {
+            tracing::warn!(uri = %uri.as_str(), "goto definition for a document that is not open");
+            return None;
+        };
+        let line_index = self.analysis.line_index(file);
+        let offset = from_proto::offset(&line_index, doc.position)?;
+        let nav = self
+            .analysis
+            .goto_definition(ide::FilePosition { file, offset })?;
+        let target_uri = self.files.by_file.get(&nav.file)?.clone();
+        // Same-file navigation for now, so reuse the line index.
+        let location = lsp_types::Location {
+            uri: target_uri,
+            range: to_proto::range(&line_index, nav.focus_range),
+        };
+        Some(lsp_types::GotoDefinitionResponse::Scalar(location))
+    }
+
+    fn hover(&self, params: lsp_types::HoverParams) -> Option<lsp_types::Hover> {
+        let doc = params.text_document_position_params;
+        // Answered only while the document is open: a closed file's text is
+        // cleared, so answering from it would describe an empty file.
+        let Some(FileState::Open(file)) = self.files.by_uri.get(&doc.text_document.uri).copied()
+        else {
+            tracing::warn!(uri = %doc.text_document.uri.as_str(), "hover for a document that is not open");
+            return None;
+        };
+        let line_index = self.analysis.line_index(file);
+        let offset = from_proto::offset(&line_index, doc.position)?;
+        let hover = self.analysis.hover(ide::FilePosition { file, offset })?;
+        Some(lsp_types::Hover {
+            contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
+                kind: lsp_types::MarkupKind::Markdown,
+                value: hover.markup,
+            }),
+            range: Some(to_proto::range(&line_index, hover.range)),
+        })
+    }
+}
+
+fn diagnostics_notification(
+    uri: lsp_types::Uri,
+    diagnostics: Vec<lsp_types::Diagnostic>,
+    version: Option<i32>,
+) -> Notification {
+    let params = lsp_types::PublishDiagnosticsParams {
+        uri,
+        diagnostics,
+        version,
+    };
+    Notification::new(PublishDiagnostics::METHOD.to_owned(), params)
+}
+
+fn content_modified(id: RequestId) -> Response {
+    Response::new_err(
+        id,
+        ErrorCode::ContentModified as i32,
+        "content modified".to_owned(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     const BROKEN: &str = "static = 1;";
@@ -346,12 +460,40 @@ mod tests {
         s.parse().unwrap()
     }
 
-    /// A server state wired to a channel the test holds but mostly ignores;
-    /// these tests are about the file table, not the wire. The `Connection`
-    /// comes back so the receiving end stays alive.
+    /// A server state wired to a channel the test holds; these tests are about
+    /// the file table, not the wire, but answers now come back over it from
+    /// the pool. The `Connection` comes back so the receiving end stays alive.
     fn server() -> (GlobalState, Connection) {
         let (server, client) = Connection::memory();
         (GlobalState::new(&server), client)
+    }
+
+    /// Waits until everything queued on the pool has run, which is what lets a
+    /// test tell "nothing was published" from "nothing has been published
+    /// *yet*": a worker only reaches the barrier once it is out of tasks that
+    /// were queued ahead of this one, and the barrier only opens once every
+    /// worker is there.
+    fn quiesce(state: &GlobalState) {
+        let barrier = Arc::new(std::sync::Barrier::new(WORKER_THREADS + 1));
+        for _ in 0..WORKER_THREADS {
+            let barrier = Arc::clone(&barrier);
+            state.pool.spawn(move || {
+                barrier.wait();
+            });
+        }
+        barrier.wait();
+    }
+
+    /// Everything the server has to say by now, dropped.
+    fn drain(state: &GlobalState, client: &Connection) {
+        quiesce(state);
+        while client.receiver.try_recv().is_ok() {}
+    }
+
+    /// Whether the server has sent the client anything at all.
+    fn published(state: &GlobalState, client: &Connection) -> bool {
+        quiesce(state);
+        client.receiver.try_recv().is_ok()
     }
 
     /// Everything below goes through `handle_notification`, so what is under
@@ -388,35 +530,6 @@ mod tests {
         );
     }
 
-    /// Likewise through `handle_request`. Unwraps the response the way a
-    /// client would: a request that answers nothing is an `Ok` response
-    /// carrying `null`, not an error.
-    fn goto(
-        state: &mut GlobalState,
-        uri: &lsp_types::Uri,
-        position: lsp_types::Position,
-    ) -> Option<lsp_types::GotoDefinitionResponse> {
-        let params = lsp_types::GotoDefinitionParams {
-            text_document_position_params: lsp_types::TextDocumentPositionParams {
-                text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
-                position,
-            },
-            work_done_progress_params: Default::default(),
-            partial_result_params: Default::default(),
-        };
-        let response = state.handle_request(Request::new(
-            lsp_server::RequestId::from(1),
-            GotoDefinition::METHOD.to_owned(),
-            params,
-        ));
-        assert!(
-            response.error.is_none(),
-            "error response: {:?}",
-            response.error
-        );
-        serde_json::from_value(response.result.unwrap_or_default()).unwrap()
-    }
-
     fn change(state: &mut GlobalState, uri: &lsp_types::Uri, text: &str) {
         notify::<DidChangeTextDocument>(
             state,
@@ -434,24 +547,79 @@ mod tests {
         );
     }
 
+    fn goto_params(
+        uri: &lsp_types::Uri,
+        position: lsp_types::Position,
+    ) -> lsp_types::GotoDefinitionParams {
+        lsp_types::GotoDefinitionParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        }
+    }
+
+    /// The answer to `id`, skipping whatever diagnostics the pool published on
+    /// the way.
+    fn response(client: &Connection, id: &RequestId) -> Response {
+        loop {
+            let msg = client
+                .receiver
+                .recv_timeout(Duration::from_secs(10))
+                .expect("no response within 10s");
+            if let Message::Response(resp) = msg
+                && resp.id == *id
+            {
+                return resp;
+            }
+        }
+    }
+
+    /// Likewise through `dispatch_request`, which hands the work to the pool,
+    /// so the answer arrives over the wire. Unwrapped the way a client would:
+    /// a request that answers nothing is an `Ok` response carrying `null`, not
+    /// an error.
+    fn goto(
+        state: &mut GlobalState,
+        client: &Connection,
+        uri: &lsp_types::Uri,
+        position: lsp_types::Position,
+    ) -> Option<lsp_types::GotoDefinitionResponse> {
+        let id = RequestId::from(1);
+        state.dispatch_request(Request::new(
+            id.clone(),
+            GotoDefinition::METHOD.to_owned(),
+            goto_params(uri, position),
+        ));
+        let response = response(client, &id);
+        assert!(
+            response.error.is_none(),
+            "error response: {:?}",
+            response.error
+        );
+        serde_json::from_value(response.result.unwrap_or_default()).unwrap()
+    }
+
     #[test]
     fn closing_parks_the_handle_in_place() {
         let (mut state, _client) = server();
         let doc = uri("file:///a.must");
         open(&mut state, &doc, BROKEN);
-        let file = state.files[&doc].source_file();
-        assert!(matches!(state.files[&doc], FileState::Open(_)));
+        let file = state.files.by_uri[&doc].source_file();
+        assert!(matches!(state.files.by_uri[&doc], FileState::Open(_)));
 
         close(&mut state, &doc);
 
         assert_eq!(
-            state.files.len(),
+            state.files.by_uri.len(),
             1,
             "the entry is what keeps the input reusable"
         );
-        assert!(matches!(state.files[&doc], FileState::Closed(_)));
+        assert!(matches!(state.files.by_uri[&doc], FileState::Closed(_)));
         assert!(
-            state.files[&doc].source_file() == file,
+            state.files.by_uri[&doc].source_file() == file,
             "closing swapped the salsa input"
         );
     }
@@ -461,14 +629,14 @@ mod tests {
         let (mut state, _client) = server();
         let doc = uri("file:///a.must");
         open(&mut state, &doc, BROKEN);
-        let file = state.files[&doc].source_file();
+        let file = state.files.by_uri[&doc].source_file();
         close(&mut state, &doc);
 
         open(&mut state, &doc, BROKEN);
 
-        assert!(matches!(state.files[&doc], FileState::Open(_)));
+        assert!(matches!(state.files.by_uri[&doc], FileState::Open(_)));
         assert!(
-            state.files[&doc].source_file() == file,
+            state.files.by_uri[&doc].source_file() == file,
             "reopening minted a second input for the same document"
         );
         assert_eq!(state.host.snapshot().diagnostics(file).len(), 1);
@@ -479,16 +647,16 @@ mod tests {
         let (mut state, _client) = server();
         let doc = uri("file:///churn.must");
         open(&mut state, &doc, BROKEN);
-        let file = state.files[&doc].source_file();
+        let file = state.files.by_uri[&doc].source_file();
 
         for _ in 0..50 {
             close(&mut state, &doc);
             open(&mut state, &doc, BROKEN);
         }
 
-        assert_eq!(state.files.len(), 1);
+        assert_eq!(state.files.by_uri.len(), 1);
         assert!(
-            state.files[&doc].source_file() == file,
+            state.files.by_uri[&doc].source_file() == file,
             "a cycle minted a new salsa input; memory would grow per open event"
         );
     }
@@ -499,9 +667,9 @@ mod tests {
         let doc = uri("file:///phantom.must");
 
         close(&mut state, &doc);
-        assert!(state.files.is_empty(), "a close created a document");
+        assert!(state.files.by_uri.is_empty(), "a close created a document");
         assert!(
-            client.receiver.try_recv().is_err(),
+            !published(&state, &client),
             "published diagnostics for a document the client never opened"
         );
 
@@ -509,10 +677,10 @@ mod tests {
         // cleared, even when the close is a repeat.
         open(&mut state, &doc, BROKEN);
         close(&mut state, &doc);
-        while client.receiver.try_recv().is_ok() {}
+        drain(&state, &client);
         close(&mut state, &doc);
         assert!(
-            client.receiver.try_recv().is_ok(),
+            published(&state, &client),
             "a repeated close left the client's squiggles in place"
         );
     }
@@ -523,48 +691,86 @@ mod tests {
         let doc = uri("file:///stray.must");
 
         change(&mut state, &doc, BROKEN);
-        assert!(state.files.is_empty(), "a change created a document");
+        assert!(state.files.by_uri.is_empty(), "a change created a document");
         assert!(
-            client.receiver.try_recv().is_err(),
+            !published(&state, &client),
             "published diagnostics for a document the client never opened"
         );
 
         open(&mut state, &doc, BROKEN);
         close(&mut state, &doc);
-        while client.receiver.try_recv().is_ok() {}
+        drain(&state, &client);
 
         change(&mut state, &doc, BROKEN);
         assert!(
-            matches!(state.files[&doc], FileState::Closed(_)),
+            matches!(state.files.by_uri[&doc], FileState::Closed(_)),
             "a stray change refilled a buffer the client had given back"
         );
-        assert!(client.receiver.try_recv().is_err());
+        assert!(!published(&state, &client));
     }
 
     #[test]
     fn requests_are_answered_only_while_the_document_is_open() {
-        let (mut state, _client) = server();
+        let (mut state, client) = server();
         let doc = uri("file:///def.must");
         // `b` on line 0, column 15, defined on line 1.
         let text = "const a = fn { b() };\nstatic b = fn { a() };\n";
         let cursor = lsp_types::Position::new(0, 15);
         open(&mut state, &doc, text);
 
-        let found = goto(&mut state, &doc, cursor);
+        let found = goto(&mut state, &client, &doc, cursor);
         assert!(found.is_some(), "goto-definition found nothing to go to");
 
         close(&mut state, &doc);
 
         // The document's text is emptied on close, so its handle now parses
         // as an empty file: answering from it would not fail, it would report
-        // that a file full of definitions has none.
-        assert_eq!(goto(&mut state, &doc, cursor), None);
+        // that a file full of definitions has none. The worker reads the
+        // state out of the snapshot's maps, so a request that races the close
+        // is answered against whichever side of it the snapshot fell on.
+        assert_eq!(goto(&mut state, &client, &doc, cursor), None);
 
         open(&mut state, &doc, text);
         assert_eq!(
-            goto(&mut state, &doc, cursor),
+            goto(&mut state, &client, &doc, cursor),
             found,
             "reopening did not make the document answerable again"
+        );
+    }
+
+    #[test]
+    fn an_edit_during_a_request_is_answered_and_leaves_the_pool_alive() {
+        let (mut state, client) = server();
+        let doc = uri("file:///race.must");
+        let text = "const a = fn { b() };\nstatic b = fn { a() };\n";
+        let cursor = lsp_types::Position::new(0, 15);
+        open(&mut state, &doc, text);
+
+        for i in 0..20i32 {
+            let id = RequestId::from(i);
+            state.dispatch_request(Request::new(
+                id.clone(),
+                GotoDefinition::METHOD.to_owned(),
+                goto_params(&doc, cursor),
+            ));
+            // Straight into the request's back: either the handler finishes
+            // first, or the edit unwinds it with `salsa::Cancelled`, which the
+            // worker has to catch rather than die of.
+            change(&mut state, &doc, text);
+            let response = response(&client, &id);
+            if let Some(err) = &response.error {
+                assert_eq!(
+                    err.code,
+                    ErrorCode::ContentModified as i32,
+                    "unexpected error response: {err:?}"
+                );
+            }
+        }
+
+        drain(&state, &client);
+        assert!(
+            goto(&mut state, &client, &doc, cursor).is_some(),
+            "the pool stopped answering after the races"
         );
     }
 
@@ -575,7 +781,7 @@ mod tests {
         let b = uri("file:///b.must");
         open(&mut state, &a, BROKEN);
         open(&mut state, &b, BROKEN);
-        let file_a = state.files[&a].source_file();
+        let file_a = state.files.by_uri[&a].source_file();
 
         for _ in 0..5 {
             close(&mut state, &a);
@@ -584,13 +790,16 @@ mod tests {
         close(&mut state, &b);
 
         assert_eq!(
-            state.uris.len(),
+            state.files.by_file.len(),
             2,
             "the reverse map grew with open events instead of with documents"
         );
-        assert_eq!(state.uris[&file_a], a);
+        assert_eq!(state.files.by_file[&file_a], a);
         // A closed document keeps its entry: the handle is still valid, and a
         // navigation target that lands on it still has to name a URI.
-        assert_eq!(state.uris[&state.files[&b].source_file()], b);
+        assert_eq!(
+            state.files.by_file[&state.files.by_uri[&b].source_file()],
+            b
+        );
     }
 }

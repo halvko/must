@@ -120,5 +120,11 @@ impl Analysis {
     }
 }
 
+/// Run `f`, turning a salsa cancellation unwind (an edit invalidated this
+/// snapshot) into `None`. Any other panic propagates.
+pub fn cancellable<T>(f: impl FnOnce() -> T) -> Option<T> {
+    salsa::Cancelled::catch(std::panic::AssertUnwindSafe(f)).ok()
+}
+
 #[cfg(test)]
 mod tests;
