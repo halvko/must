@@ -6,6 +6,8 @@ edition.workspace = true
 [dependencies]
 ide.workspace = true
 base-db.workspace = true
+syntax.workspace = true
+line-index.workspace = true
 lsp-server.workspace = true
 lsp-types = { workspace = true, features = ["proposed"] }
 serde_json.workspace = true

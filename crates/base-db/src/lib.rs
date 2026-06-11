@@ -4,6 +4,13 @@
 //! inputs; the LSP layer mutates inputs (which bumps the revision and cancels
 //! in-flight queries on database clones) and reads queries off clones.
 
+/// A file the compiler knows about, identified by its salsa handle.
+///
+/// Only what the *program* is made of belongs here. Whether an editor
+/// currently holds the buffer open does not: `parse` must produce the same
+/// tree either way, a query that read such a flag would recompute on focus
+/// changes rather than on code changes, and the server already tracks
+/// openness next to its `Uri` map — a second copy here could disagree with it.
 #[salsa::input]
 pub struct SourceFile {
     /// Display/debug only — the `Uri ↔ SourceFile` map is server state,

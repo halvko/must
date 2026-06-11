@@ -11,7 +11,12 @@
   shape even where it is not legal, and is refused by a later check rather than by the
   parser, so granting it later deletes a diagnostic and moves no grammar. ERROR nodes are
   for genuinely malformed syntax only.
+- **X16** Diagnostics have no stable codes. A severity word, free text and a caret are the
+  whole contract.
 
 ## Discarded
 
 ## Re-evaluate when
+
+- **Diagnostic codes get a customer** — a way to suppress a lint, or a way to reword without
+  breaking anyone matching output. Message text is load-bearing today. **X16**
