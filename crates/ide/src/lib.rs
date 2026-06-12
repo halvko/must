@@ -114,7 +114,42 @@ impl Analysis {
                 });
             }
         }
+        // Const-eval failures. `Trap` errors are skipped: a trap *is* an
+        // already-reported diagnostic that execution ran into.
+        for &item in hir::file_item_ids(&self.db, file) {
+            let Err(err) = eval::const_value(&self.db, item) else {
+                continue;
+            };
+            let message = match err.kind {
+                eval::EvalErrorKind::Trap => continue,
+                eval::EvalErrorKind::Panic => {
+                    format!("constant evaluation panicked: {}", err.message)
+                }
+                eval::EvalErrorKind::Runtime | eval::EvalErrorKind::NotConst => {
+                    format!("constant evaluation failed: {}", err.message)
+                }
+            };
+            // Report at the error's origin (which may be inside another
+            // item, e.g. the partner of a cycle — still this file today).
+            let Some(range) = err.origin.and_then(|(loc, expr)| {
+                let origin_item = loc.to_id(&self.db)?;
+                let (_, source_map) = hir::body_with_source_map(&self.db, origin_item);
+                Some(source_map.node_for_expr(expr)?.text_range())
+            }) else {
+                continue;
+            };
+            diagnostics.push(Diagnostic {
+                range,
+                severity: Severity::Error,
+                message,
+                fix: None,
+                related: Vec::new(),
+            });
+        }
         diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
+        // Every item that (transitively) uses a failing constant propagates
+        // the same error with the same origin; report it once.
+        diagnostics.dedup_by(|a, b| a.range == b.range && a.message == b.message);
         diagnostics
     }
 

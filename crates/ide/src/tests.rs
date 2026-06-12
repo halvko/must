@@ -264,6 +264,41 @@ fn diagnostics_include_mir_findings() {
 }
 
 #[test]
+fn hover_item_shows_const_value() {
+    check_hover(
+        "static exa$0mple = 4 + 5;",
+        "```must\nexample: usize = 9\n```",
+    );
+}
+
+#[test]
+fn hover_use_shows_const_value_of_the_target() {
+    check_hover(
+        r#"
+static greeting = "hi";
+static main = fn { print(gree$0ting); };
+"#,
+        "```must\ngreeting: str = \"hi\"\n```",
+    );
+}
+
+#[test]
+fn diagnostics_include_const_eval_failures() {
+    let (analysis, file, _pos) =
+        fixture("static bad: usize = 1 / 0;$0\nstatic also: usize = bad;");
+    let diagnostics = analysis.diagnostics(file);
+    // Reported once at the origin, not re-reported by the propagating user.
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics[0].message,
+        "constant evaluation failed: attempt to divide by zero"
+    );
+    // On `1 / 0`.
+    assert_eq!(u32::from(diagnostics[0].range.start()), 20);
+    assert_eq!(u32::from(diagnostics[0].range.end()), 25);
+}
+
+#[test]
 fn diagnostics_include_name_errors() {
     let (analysis, file, _pos) = fixture("static f = fn { missing$0() };");
     let diagnostics = analysis.diagnostics(file);

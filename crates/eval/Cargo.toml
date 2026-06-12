@@ -1,5 +1,5 @@
 [package]
-name = "ide"
+name = "eval"
 version.workspace = true
 edition.workspace = true
 
@@ -7,10 +7,9 @@ edition.workspace = true
 base-db.workspace = true
 hir.workspace = true
 mir.workspace = true
-eval.workspace = true
-syntax.workspace = true
 salsa.workspace = true
-line-index.workspace = true
+la-arena.workspace = true
+rustc-hash.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true

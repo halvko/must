@@ -30,14 +30,21 @@ pub(crate) fn hover(
             .position(|n| n == item_node)
     };
 
-    let (name, ty, range) = if let Some(name_ref) = ast::NameRef::cast(parent.clone()) {
+    let (name, ty, range, value) = if let Some(name_ref) = ast::NameRef::cast(parent.clone()) {
         // A use: the type of the expression.
         let path_expr = name_ref.syntax().parent().and_then(ast::PathExpr::cast)?;
         let item = *hir::file_item_ids(db, file).get(item_index(path_expr.syntax())?)?;
         let (_, source_map) = hir::body_with_source_map(db, item);
         let expr = source_map.expr_for_node(SyntaxNodePtr::new(path_expr.syntax()))?;
         let ty = hir::infer::infer(db, item).type_of_expr.get(expr)?.clone();
-        (name_ref.text(), ty, name_ref.syntax().text_range())
+        // A use of another item also shows that item's const value.
+        let value = match hir::resolutions(db, item).get(expr) {
+            Some(&hir::Resolution::Item(loc)) => {
+                loc.to_id(db).and_then(|target| const_display(db, target))
+            }
+            _ => None,
+        };
+        (name_ref.text(), ty, name_ref.syntax().text_range(), value)
     } else if let Some(name) = ast::Name::cast(parent) {
         let item = *hir::file_item_ids(db, file).get(item_index(name.syntax())?)?;
         if name.syntax().parent().is_some_and(|p| p.kind() == SyntaxKind::STATIC_ITEM) {
@@ -48,20 +55,32 @@ pub(crate) fn hover(
                 .root
                 .and_then(|root| hir::infer::infer(db, item).type_of_expr.get(root).cloned())
                 .unwrap_or(hir::Ty::Error);
-            (name.text(), ty, name.syntax().text_range())
+            let value = const_display(db, item);
+            (name.text(), ty, name.syntax().text_range(), value)
         } else {
             // A local binding (let or parameter).
             let (_, source_map) = hir::body_with_source_map(db, item);
             let binding = source_map.binding_for_node(SyntaxNodePtr::new(name.syntax()))?;
             let ty = hir::infer::infer(db, item).type_of_binding.get(binding)?.clone();
-            (name.text(), ty, name.syntax().text_range())
+            (name.text(), ty, name.syntax().text_range(), None)
         }
     } else {
         return None;
     };
 
+    let value = value.map(|v| format!(" = {v}")).unwrap_or_default();
     Some(HoverResult {
-        markup: format!("```must\n{name}: {}\n```", ty.display()),
+        markup: format!("```must\n{name}: {}{value}\n```", ty.display()),
         range,
     })
+}
+
+/// The item's const value, when it adds information beyond the type: a `fn`
+/// value is fully described by its signature, and a failed evaluation has
+/// its own diagnostic.
+fn const_display(db: &RootDatabase, item: hir::ItemId<'_>) -> Option<String> {
+    match eval::const_value(db, item) {
+        Ok(eval::Value::Fn(_) | eval::Value::Builtin(_)) | Err(_) => None,
+        Ok(value) => Some(value.display()),
+    }
 }
