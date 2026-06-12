@@ -14,7 +14,7 @@ fn check_mir(text: &str, expect: Expect) {
             if name.is_empty() { "<unnamed>" } else { name }
         ));
         let lowered = crate::mir_lowered(&db, item);
-        rendered.push_str(&crate::pretty::render(&db, lowered));
+        rendered.push_str(&crate::pretty::render(lowered));
         let (_, source_map) = hir::body_with_source_map(&db, item);
         for diag in &lowered.diagnostics {
             if let Some(ptr) = source_map.node_for_expr(diag.expr()) {

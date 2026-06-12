@@ -3,23 +3,20 @@
 
 use std::fmt::Write as _;
 
-use base_db::Db;
-use hir::ItemLoc;
-
 use crate::{
     BlockId, BodyId, Const, LocalId, MirBody, MirLowered, Operand, Rvalue, StatementKind,
     TerminatorKind,
 };
 
-pub fn render(db: &dyn Db, lowered: &MirLowered) -> String {
+pub fn render(lowered: &MirLowered) -> String {
     let mut out = String::new();
     for (id, body) in lowered.bodies.iter() {
-        render_body(db, id, body, &mut out);
+        render_body(id, body, &mut out);
     }
     out
 }
 
-fn render_body(db: &dyn Db, id: BodyId, body: &MirBody, out: &mut String) {
+fn render_body(id: BodyId, body: &MirBody, out: &mut String) {
     let ret = body.return_local();
     let params = body
         .params
@@ -50,23 +47,23 @@ fn render_body(db: &dyn Db, id: BodyId, body: &MirBody, out: &mut String) {
         let _ = writeln!(out, "  {}:", block(id));
         for stmt in &data.statements {
             let StatementKind::Assign { dest, rvalue } = &stmt.kind;
-            let _ = writeln!(out, "    {} = {}", local(*dest), render_rvalue(db, rvalue));
+            let _ = writeln!(out, "    {} = {}", local(*dest), render_rvalue(rvalue));
         }
-        let _ = writeln!(out, "    {}", render_terminator(db, &data.terminator.kind));
+        let _ = writeln!(out, "    {}", render_terminator(&data.terminator.kind));
     }
     let _ = writeln!(out, "}}");
 }
 
-fn render_rvalue(db: &dyn Db, rvalue: &Rvalue) -> String {
+fn render_rvalue(rvalue: &Rvalue) -> String {
     match rvalue {
-        Rvalue::Use(op) => operand(db, op),
+        Rvalue::Use(op) => operand(op),
         Rvalue::BinaryOp(bin_op, l, r) => {
-            format!("{bin_op:?}({}, {})", operand(db, l), operand(db, r))
+            format!("{bin_op:?}({}, {})", operand(l), operand(r))
         }
     }
 }
 
-fn render_terminator(db: &dyn Db, kind: &TerminatorKind) -> String {
+fn render_terminator(kind: &TerminatorKind) -> String {
     match kind {
         TerminatorKind::Goto { target } => format!("goto -> {}", block(*target)),
         TerminatorKind::SwitchBool {
@@ -75,7 +72,7 @@ fn render_terminator(db: &dyn Db, kind: &TerminatorKind) -> String {
             else_block,
         } => format!(
             "if {} -> [then: {}, else: {}]",
-            operand(db, discr),
+            operand(discr),
             block(*then_block),
             block(*else_block)
         ),
@@ -87,7 +84,7 @@ fn render_terminator(db: &dyn Db, kind: &TerminatorKind) -> String {
         } => {
             let args = args
                 .iter()
-                .map(|a| operand(db, a))
+                .map(|a| operand(a))
                 .collect::<Vec<_>>()
                 .join(", ");
             let target = match target {
@@ -97,7 +94,7 @@ fn render_terminator(db: &dyn Db, kind: &TerminatorKind) -> String {
             format!(
                 "{} = call {}({args}) -> {target}",
                 local(*dest),
-                operand(db, callee)
+                operand(callee)
             )
         }
         TerminatorKind::Return => "return".to_owned(),
@@ -110,7 +107,7 @@ fn render_terminator(db: &dyn Db, kind: &TerminatorKind) -> String {
     }
 }
 
-fn operand(db: &dyn Db, op: &Operand) -> String {
+fn operand(op: &Operand) -> String {
     match op {
         Operand::Copy(l) => local(*l),
         Operand::Const(c) => match c {
