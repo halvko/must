@@ -58,15 +58,22 @@ evaluated at compile time (`static x = 4 + 5` is an implicit `const { … }`),
 so `print` inside an initializer is an error while `print` in code you run
 is fine.
 
-### Running from Zed
+### Debugging in Zed
 
-The extension also registers a debug adapter (the same binary in `dap`
-mode — the adapter *is* the interpreter, nothing to attach to). After
+The extension registers a debug adapter (the same binary in `dap` mode —
+the adapter *is* the interpreter, nothing to attach to). After
 (re)installing the dev extension, hit F4 (`debugger: start`) and pick a
 scenario from `.zed/debug.json`: `program` is the file, `entry` is the
-expression to evaluate (default `main()`). `print` output and crashes land
-in Zed's debug console. Breakpoints and stepping aren't wired up yet —
-they're the next milestone.
+expression to evaluate (default `main()`), `"stopOnEntry": true` pauses at
+the first line.
+
+Breakpoints, stepping (over/in/out), the call stack, and a Locals panel
+all work; `print` output streams to the debug console, where you can also
+evaluate — a bare name reads a local from the selected frame, anything
+else runs as an expression in the file's scope (it's a repl: calls
+included). When a broken program reaches its error, it *stops there* like
+a breakpoint, stack and locals inspectable, with the same message the
+editor shows as a diagnostic; resuming ends the run.
 
 ### Debugging the server
 

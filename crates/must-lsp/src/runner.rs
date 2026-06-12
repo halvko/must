@@ -39,37 +39,37 @@ pub fn run(path: &str, expr: &str) -> i32 {
     }
 }
 
-/// Evaluate `expr` in `text`'s file scope, writing `print` output to `out`.
-/// `Ok(Some(_))` is a non-unit result rendered for display; errors come back
-/// rendered with a `path:line:col` location when one is known.
-pub fn evaluate(
-    text: String,
-    path: &str,
-    expr: &str,
-    out: impl Write,
-) -> Result<Option<String>, String> {
-    let db = RootDatabase::default();
+/// An entry expression injected into a file, ready to execute.
+pub struct Prepared {
+    pub file: SourceFile,
+    pub entry: hir::ItemLoc,
+    pub original_len: usize,
+}
+
+/// Inject `expr` as the entry item of `text` and validate the injection.
+/// Errors come back fully rendered for the user.
+pub fn prepare(db: &RootDatabase, text: &str, path: &str, expr: &str) -> Result<Prepared, String> {
     let original_len = text.len();
     let full = format!("{text}\nstatic {ENTRY_NAME} = ({expr});\n");
-    let file = SourceFile::new(&db, path.to_owned(), full);
+    let file = SourceFile::new(db, path.to_owned(), full);
 
     // The injected item must be the last one — if it isn't, the end of the
     // user's file ate it (an unterminated string swallows everything after
     // it), and the honest report is the file's own syntax error, not a
     // complaint about the entry expression.
-    let entry = hir::file_item_ids(&db, file)
+    let entry = hir::file_item_ids(db, file)
         .last()
         .copied()
-        .filter(|item| item.name(&db) == ENTRY_NAME);
+        .filter(|item| item.name(db) == ENTRY_NAME);
     let Some(entry) = entry else {
-        let parse = base_db::parse(&db, file);
+        let parse = base_db::parse(db, file);
         if let Some(err) = parse
             .errors()
             .iter()
             .rev()
             .find(|err| usize::from(err.range.start()) <= original_len)
         {
-            let line_col = LineIndex::new(file.text(&db)).line_col(err.range.start());
+            let line_col = LineIndex::new(file.text(db)).line_col(err.range.start());
             return Err(format!(
                 "error: cannot evaluate the entry expression: \
                  the file has a syntax error that swallows the end of the file\n  \
@@ -84,7 +84,7 @@ pub fn evaluate(
 
     // The program may be arbitrarily broken — that's the point — but the
     // *entry expression* must at least parse, or running it means nothing.
-    if let Some(err) = base_db::parse(&db, file)
+    if let Some(err) = base_db::parse(db, file)
         .errors()
         .iter()
         .find(|err| usize::from(err.range.start()) > original_len)
@@ -92,8 +92,49 @@ pub fn evaluate(
         return Err(format!("error: invalid entry expression: {}", err.message));
     }
 
+    Ok(Prepared {
+        file,
+        entry: hir::item_loc(db, entry),
+        original_len,
+    })
+}
+
+/// Map an eval origin to a 1-based (line, column) in the user's part of the
+/// file. `None` for synthetic (injected-entry) or unmappable positions.
+pub fn source_position(
+    db: &RootDatabase,
+    file: SourceFile,
+    original_len: usize,
+    origin: &(hir::ItemLoc, hir::ExprId),
+) -> Option<(u32, u32)> {
+    let (loc, expr) = origin;
+    let (_, source_map) = hir::body_with_source_map(db, loc.to_id(db));
+    let range = source_map.node_for_expr(*expr)?.text_range();
+    if usize::from(range.start()) > original_len {
+        return None;
+    }
+    let line_col = LineIndex::new(file.text(db)).line_col(range.start());
+    Some((line_col.line + 1, line_col.col + 1))
+}
+
+/// Evaluate `expr` in `text`'s file scope, writing `print` output to `out`.
+/// `Ok(Some(_))` is a non-unit result rendered for display; errors come back
+/// rendered with a `path:line:col` location when one is known.
+pub fn evaluate(
+    text: String,
+    path: &str,
+    expr: &str,
+    out: impl Write,
+) -> Result<Option<String>, String> {
+    let db = RootDatabase::default();
+    let Prepared {
+        file,
+        entry,
+        original_len,
+    } = prepare(&db, &text, path, expr)?;
+
     let mut machine = Machine::new(&db, RunMode { out });
-    match machine.eval_root(&hir::item_loc(&db, entry)) {
+    match machine.eval_root(&entry) {
         Ok(Value::Unit) => Ok(None),
         Ok(value) => Ok(Some(value.display())),
         Err(err) => {

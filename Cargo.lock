@@ -384,6 +384,7 @@ dependencies = [
  "line-index",
  "lsp-server",
  "lsp-types",
+ "mir",
  "serde",
  "serde_json",
  "syntax",

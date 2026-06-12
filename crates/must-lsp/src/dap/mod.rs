@@ -1,21 +1,24 @@
 //! `must-lsp dap`: a Debug Adapter Protocol session where the adapter *is*
 //! the runtime — Zed spawns this binary, and the program runs in-process on
-//! the same MIR interpreter the editor's const eval uses. M9 scope: launch
-//! and run (output streamed to the debug console, deferred errors crash with
-//! their diagnostic); breakpoints and stepping land with the debugger
-//! milestone.
+//! the same MIR interpreter the editor's const eval uses. Supports launch,
+//! breakpoints, stepping, stack/variables inspection, console evaluation,
+//! and stop-on-trap: a deferred error pauses at the crash site with the
+//! editor's diagnostic instead of just dying.
 
+mod debuggee;
 mod transport;
 #[cfg(test)]
 mod tests;
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 use std::rc::Rc;
 
 use serde_json::{Value, json};
 
 use crate::ServerResult;
+use debuggee::{Debuggee, Outcome, ResumeMode};
 use transport::Incoming;
 
 pub fn run(mut reader: impl BufRead, writer: impl Write) -> ServerResult<()> {
@@ -24,6 +27,8 @@ pub fn run(mut reader: impl BufRead, writer: impl Write) -> ServerResult<()> {
         seq: Rc::new(Cell::new(0)),
         configured: false,
         pending_launch: None,
+        debuggee: None,
+        requested_breakpoints: HashMap::new(),
         next_breakpoint_id: 0,
     };
     while let Some(message) = transport::read_message(&mut reader)? {
@@ -45,10 +50,12 @@ struct Session<W: Write> {
     /// `launch` conventionally arrives before the breakpoint configuration
     /// is finished; the debuggee must not start until `configurationDone`.
     pending_launch: Option<Incoming>,
-    /// Breakpoint ids handed out so far. Zed *silently discards* the
-    /// verification state of any response breakpoint without an `id`
-    /// (`dap_bp.id?` in its session bookkeeping), so every reported
-    /// breakpoint gets a unique one.
+    debuggee: Option<Debuggee<ConsoleWriter<W>>>,
+    /// Latest client breakpoint state (line → id); transferred to the
+    /// debuggee when it exists.
+    requested_breakpoints: HashMap<u32, i64>,
+    /// Zed *silently discards* the verification state of any response
+    /// breakpoint without an `id`, so every reported breakpoint gets one.
     next_breakpoint_id: i64,
 }
 
@@ -63,15 +70,20 @@ impl<W: Write> Session<W> {
                 )?;
                 self.event("initialized", json!({}))?;
             }
-            "launch" => {
-                if self.configured {
-                    self.respond(&request, json!({}))?;
-                    let arguments = request.arguments;
-                    self.execute(&arguments)?;
-                } else {
-                    self.pending_launch = Some(request);
+            "launch" => match self.prepare_debuggee(&request.arguments) {
+                Err(message) => {
+                    self.output("stderr", &format!("{message}\n"))?;
+                    self.respond_err(&request, &message)?;
                 }
-            }
+                Ok(()) => {
+                    if self.configured {
+                        self.respond(&request, json!({}))?;
+                        self.begin(&request.arguments)?;
+                    } else {
+                        self.pending_launch = Some(request);
+                    }
+                }
+            },
             "configurationDone" => {
                 self.configured = true;
                 self.respond(&request, json!({}))?;
@@ -79,28 +91,40 @@ impl<W: Write> Session<W> {
                     // The launch response is an acknowledgement; the run
                     // itself reports through events.
                     self.respond(&launch, json!({}))?;
-                    self.execute(&launch.arguments)?;
+                    self.begin(&launch.arguments)?;
                 }
             }
-            // Accepted but inert until the debugger milestone: reported
-            // unverified (greyed + warning in Zed — though only visible
-            // while a session is stopped at a frame, which M9 sessions
-            // never are).
             "setBreakpoints" => {
-                let count = request.arguments["breakpoints"]
+                let lines: Vec<u32> = request.arguments["breakpoints"]
                     .as_array()
-                    .map(Vec::len)
-                    .unwrap_or(0);
-                let breakpoints: Vec<Value> = (0..count)
-                    .map(|_| {
+                    .map(|bps| {
+                        bps.iter()
+                            .filter_map(|bp| bp["line"].as_u64().map(|l| l as u32))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut accepted = HashMap::new();
+                let breakpoints: Vec<Value> = lines
+                    .into_iter()
+                    .map(|line| {
                         self.next_breakpoint_id += 1;
-                        json!({
-                            "id": self.next_breakpoint_id,
-                            "verified": false,
-                            "message": "breakpoints are not supported yet",
-                        })
+                        let id = self.next_breakpoint_id;
+                        accepted.insert(line, id);
+                        let verified = self
+                            .debuggee
+                            .as_ref()
+                            .is_some_and(|d| d.can_break_at(line));
+                        let mut bp = json!({ "id": id, "verified": verified, "line": line });
+                        if !verified {
+                            bp["message"] = json!("no executable code on this line");
+                        }
+                        bp
                     })
                     .collect();
+                self.requested_breakpoints = accepted.clone();
+                if let Some(debuggee) = self.debuggee.as_mut() {
+                    debuggee.breakpoints = accepted;
+                }
                 self.respond(&request, json!({ "breakpoints": breakpoints }))?;
             }
             "setExceptionBreakpoints" => {
@@ -111,6 +135,106 @@ impl<W: Write> Session<W> {
                     &request,
                     json!({ "threads": [{ "id": 1, "name": "main" }] }),
                 )?;
+            }
+            "continue" | "next" | "stepIn" | "stepOut" => {
+                if self.debuggee.is_none() {
+                    self.respond_err(&request, "no program is running")?;
+                    return Ok(true);
+                }
+                let body = if request.command == "continue" {
+                    json!({ "allThreadsContinued": true })
+                } else {
+                    json!({})
+                };
+                self.respond(&request, body)?;
+                if self.debuggee.as_ref().is_some_and(|d| d.crashed.is_some()) {
+                    // Resuming a crashed program: it's over.
+                    self.event("exited", json!({ "exitCode": 1 }))?;
+                    self.event("terminated", json!({}))?;
+                    self.debuggee = None;
+                    return Ok(true);
+                }
+                let mode = match request.command.as_str() {
+                    "next" => ResumeMode::StepOver,
+                    "stepIn" => ResumeMode::StepIn,
+                    "stepOut" => ResumeMode::StepOut,
+                    _ => ResumeMode::Continue,
+                };
+                let outcome = self.debuggee.as_mut().expect("checked above").resume(mode);
+                self.report(outcome)?;
+            }
+            "stackTrace" => {
+                let Some(debuggee) = self.debuggee.as_ref() else {
+                    self.respond_err(&request, "no program is running")?;
+                    return Ok(true);
+                };
+                let path = debuggee.path().to_owned();
+                let file_name = path.rsplit('/').next().unwrap_or(&path).to_owned();
+                let frames: Vec<Value> = debuggee
+                    .stack_frames()
+                    .iter()
+                    .map(|frame| {
+                        json!({
+                            "id": frame.id,
+                            "name": frame.name,
+                            "line": frame.line,
+                            "column": frame.column,
+                            "source": { "name": file_name, "path": path },
+                        })
+                    })
+                    .collect();
+                let total = frames.len();
+                self.respond(
+                    &request,
+                    json!({ "stackFrames": frames, "totalFrames": total }),
+                )?;
+            }
+            "scopes" => {
+                let frame_id = request.arguments["frameId"].as_i64().unwrap_or(0);
+                self.respond(
+                    &request,
+                    json!({ "scopes": [{
+                        "name": "Locals",
+                        "variablesReference": frame_id,
+                        "expensive": false,
+                    }] }),
+                )?;
+            }
+            "variables" => {
+                let reference = request.arguments["variablesReference"]
+                    .as_i64()
+                    .unwrap_or(0);
+                let variables: Vec<Value> = self
+                    .debuggee
+                    .as_ref()
+                    .map(|d| d.locals(reference))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(name, value)| {
+                        json!({
+                            "name": name,
+                            "value": value.display(),
+                            "variablesReference": 0,
+                        })
+                    })
+                    .collect();
+                self.respond(&request, json!({ "variables": variables }))?;
+            }
+            "evaluate" => {
+                let console = self.console();
+                let Some(debuggee) = self.debuggee.as_mut() else {
+                    self.respond_err(&request, "no program is running")?;
+                    return Ok(true);
+                };
+                let expression = request.arguments["expression"].as_str().unwrap_or("");
+                let frame_id = request.arguments["frameId"].as_i64();
+                match debuggee.evaluate(expression, frame_id, console) {
+                    Ok(result) => self.respond(
+                        &request,
+                        json!({ "result": result, "variablesReference": 0 }),
+                    )?,
+                    Err(message) => self.respond_err(&request, &message)?,
+                }
             }
             "disconnect" => {
                 self.respond(&request, json!({}))?;
@@ -124,42 +248,93 @@ impl<W: Write> Session<W> {
         Ok(true)
     }
 
-    /// Run the launch configuration to completion, streaming output events.
-    fn execute(&mut self, arguments: &Value) -> ServerResult<()> {
+    fn prepare_debuggee(&mut self, arguments: &Value) -> Result<(), String> {
+        let path = arguments["program"]
+            .as_str()
+            .ok_or("launch configuration needs a `program` path")?;
         let entry = arguments["entry"].as_str().unwrap_or("main()");
-        let exit_code = match arguments["program"].as_str() {
-            None => {
-                self.output("stderr", "launch configuration needs a `program` path\n")?;
-                2
-            }
-            Some(path) => match std::fs::read_to_string(path) {
-                Err(err) => {
-                    self.output("stderr", &format!("error: cannot read `{path}`: {err}\n"))?;
-                    2
-                }
-                Ok(text) => {
-                    let console = ConsoleWriter {
-                        out: Rc::clone(&self.out),
-                        seq: Rc::clone(&self.seq),
-                        buffer: Vec::new(),
-                    };
-                    match crate::runner::evaluate(text, path, entry, console) {
-                        Ok(Some(value)) => {
-                            self.output("console", &format!("{value}\n"))?;
-                            0
-                        }
-                        Ok(None) => 0,
-                        Err(rendered) => {
-                            self.output("stderr", &format!("{rendered}\n"))?;
-                            1
-                        }
-                    }
-                }
-            },
-        };
-        self.event("exited", json!({ "exitCode": exit_code }))?;
-        self.event("terminated", json!({}))?;
+        let mut debuggee = Debuggee::new(path, entry, self.console())?;
+        debuggee.breakpoints = self.requested_breakpoints.clone();
+        self.debuggee = Some(debuggee);
         Ok(())
+    }
+
+    /// Start the prepared debuggee running.
+    fn begin(&mut self, arguments: &Value) -> ServerResult<()> {
+        let no_debug = arguments["noDebug"].as_bool().unwrap_or(false);
+        let stop_on_entry = arguments["stopOnEntry"].as_bool().unwrap_or(false);
+        let Some(debuggee) = self.debuggee.as_mut() else {
+            return Ok(());
+        };
+        if no_debug {
+            debuggee.breakpoints.clear();
+        }
+        let mode = if stop_on_entry && !no_debug {
+            ResumeMode::Entry
+        } else {
+            ResumeMode::Continue
+        };
+        let outcome = debuggee.resume(mode);
+        self.report(outcome)
+    }
+
+    fn report(&mut self, outcome: Outcome) -> ServerResult<()> {
+        match outcome {
+            Outcome::Stopped {
+                reason,
+                hit_breakpoint,
+            } => {
+                let mut body = json!({
+                    "reason": reason,
+                    "threadId": 1,
+                    "allThreadsStopped": true,
+                });
+                if let Some(id) = hit_breakpoint {
+                    body["hitBreakpointIds"] = json!([id]);
+                }
+                self.event("stopped", body)?;
+            }
+            Outcome::Done(value) => {
+                if !matches!(value, eval::Value::Unit) {
+                    self.output("console", &format!("{}\n", value.display()))?;
+                }
+                self.event("exited", json!({ "exitCode": 0 }))?;
+                self.event("terminated", json!({}))?;
+                self.debuggee = None;
+            }
+            // Stop-on-trap: the program is dead, but its frames stay
+            // inspectable until the user resumes.
+            Outcome::Crashed(err) => {
+                let rendered = self
+                    .debuggee
+                    .as_ref()
+                    .map(|d| d.render_error(&err))
+                    .unwrap_or_else(|| err.message.clone());
+                self.output("stderr", &format!("{rendered}\n"))?;
+                self.event(
+                    "stopped",
+                    json!({
+                        "reason": "exception",
+                        "threadId": 1,
+                        "allThreadsStopped": true,
+                        "description": err.message,
+                        "text": err.message,
+                    }),
+                )?;
+                if let Some(debuggee) = self.debuggee.as_mut() {
+                    debuggee.crashed = Some(err);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn console(&self) -> ConsoleWriter<W> {
+        ConsoleWriter {
+            out: Rc::clone(&self.out),
+            seq: Rc::clone(&self.seq),
+            buffer: Vec::new(),
+        }
     }
 
     fn next_seq(&self) -> i64 {
@@ -190,7 +365,7 @@ impl<W: Write> Session<W> {
 
 /// An `io::Write` that turns each completed line of program output into a
 /// DAP `output` event — `print` streams to the debug console as it runs.
-struct ConsoleWriter<W: Write> {
+pub(crate) struct ConsoleWriter<W: Write> {
     out: Rc<RefCell<W>>,
     seq: Rc<Cell<i64>>,
     buffer: Vec<u8>,
