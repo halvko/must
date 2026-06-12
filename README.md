@@ -19,12 +19,14 @@ Then install the editor extension once:
    `editors/zed/` from this repo.
 2. Open this repo in Zed and edit `examples/hello.must` — diagnostics, hover,
    goto-definition, and quick fixes come from your local build.
-3. For syntax highlighting, enable LSP semantic tokens in your Zed
-   `settings.json` (Must has no tree-sitter grammar; the server is the only
-   coloring source):
+3. For syntax highlighting and the ▶ run buttons, enable LSP semantic
+   tokens and code lenses in your Zed `settings.json` (Must has no
+   tree-sitter grammar; the server is the only coloring source — and code
+   lenses are off by default in Zed):
 
    ```json
-   "languages": { "Must": { "semantic_tokens": "full" } }
+   "languages": { "Must": { "semantic_tokens": "full" } },
+   "code_lens": "on"
    ```
 
 The extension finds the server by looking for `must-lsp` on PATH first, then
@@ -42,6 +44,12 @@ cargo install --path crates/must-lsp
 fallback.)
 
 ## Running programs
+
+With code lenses enabled, every zero-parameter function gets a `▶ run`
+lens in the editor: it evaluates the *current buffer* (not the saved
+file) on the in-process interpreter and reports output and result in a
+message. Functions with parameters need arguments, so they run through
+the debugger's entry expression (F4) or the CLI instead.
 
 The same binary runs Must code (the LSP's analysis, MIR, and interpreter —
 no separate toolchain):
