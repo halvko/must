@@ -2,9 +2,6 @@ use zed_extension_api as zed;
 
 struct MustExtension;
 
-const DEV_SERVER_PATH: &str =
-    "/Users/erikfc/code/github.com/halvko/must-lsp-server/target/debug/must-lsp";
-
 impl zed::Extension for MustExtension {
     fn new() -> Self {
         MustExtension
@@ -15,9 +12,12 @@ impl zed::Extension for MustExtension {
         _language_server_id: &zed::LanguageServerId,
         worktree: &zed::Worktree,
     ) -> zed::Result<zed::Command> {
-        let command = worktree
-            .which("must-lsp")
-            .unwrap_or_else(|| DEV_SERVER_PATH.to_owned());
+        // A `must-lsp` on PATH (e.g. `cargo install --path crates/must-lsp`)
+        // wins; otherwise assume the worktree is this repo and use its build
+        // output, so dogfooding works from a plain clone + `cargo build`.
+        let command = worktree.which("must-lsp").unwrap_or_else(|| {
+            format!("{}/target/debug/must-lsp", worktree.root_path())
+        });
         Ok(zed::Command {
             command,
             args: Vec::new(),
