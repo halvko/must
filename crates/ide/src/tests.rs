@@ -247,6 +247,23 @@ fn highlights_split_multiline_strings_per_line() {
 }
 
 #[test]
+fn diagnostics_include_mir_findings() {
+    // Captures are invisible to name resolution and inference — only MIR
+    // lowering notices the binding lives in an enclosing function.
+    let (analysis, file, _pos) = fixture(
+        "static f = fn () -> usize { let a = 1; let g = fn () -> usize { a$0 }; g() };",
+    );
+    let diagnostics = analysis.diagnostics(file);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics[0].message,
+        "`a` is a local of an enclosing function; captures are not supported yet"
+    );
+    // On the `a` inside the nested fn literal.
+    assert_eq!(u32::from(diagnostics[0].range.start()), 64);
+}
+
+#[test]
 fn diagnostics_include_name_errors() {
     let (analysis, file, _pos) = fixture("static f = fn { missing$0() };");
     let diagnostics = analysis.diagnostics(file);

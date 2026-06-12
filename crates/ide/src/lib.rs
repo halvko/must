@@ -81,7 +81,7 @@ pub struct Analysis {
 
 impl Analysis {
     pub fn diagnostics(&self, file: SourceFile) -> Vec<Diagnostic> {
-        hir::file_diagnostics(&self.db, file)
+        let mut diagnostics: Vec<Diagnostic> = hir::file_diagnostics(&self.db, file)
             .into_iter()
             .map(|d| Diagnostic {
                 range: d.range,
@@ -90,7 +90,32 @@ impl Analysis {
                 fix: d.fix,
                 related: d.related,
             })
-            .collect()
+            .collect();
+        // MIR is a diagnostic producer like any other analysis (it finds
+        // what only the CFG can see — today: unsupported captures). Same
+        // aggregator pattern: findings travel with the query value, only
+        // ranges attach here. Lives above hir because hir can't see mir.
+        for &item in hir::file_item_ids(&self.db, file) {
+            let lowered = mir::mir_lowered(&self.db, item);
+            if lowered.diagnostics.is_empty() {
+                continue;
+            }
+            let (_, source_map) = hir::body_with_source_map(&self.db, item);
+            for diag in &lowered.diagnostics {
+                let Some(ptr) = source_map.node_for_expr(diag.expr()) else {
+                    continue;
+                };
+                diagnostics.push(Diagnostic {
+                    range: ptr.text_range(),
+                    severity: Severity::Error,
+                    message: diag.message(),
+                    fix: None,
+                    related: Vec::new(),
+                });
+            }
+        }
+        diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
+        diagnostics
     }
 
     pub fn goto_definition(&self, pos: FilePosition) -> Option<NavigationTarget> {

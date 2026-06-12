@@ -55,6 +55,51 @@ pub enum InferenceDiagnostic {
     },
 }
 
+impl InferenceDiagnostic {
+    /// The expression the diagnostic is reported on.
+    pub fn expr(&self) -> ExprId {
+        match self {
+            InferenceDiagnostic::TypeMismatch { expr, .. }
+            | InferenceDiagnostic::NotCallable { expr, .. }
+            | InferenceDiagnostic::ArgCountMismatch { expr, .. }
+            | InferenceDiagnostic::NeedsAnnotation { expr, .. } => *expr,
+        }
+    }
+
+    /// The human-readable message. Shared between editor diagnostics and MIR
+    /// trap terminators, so a deferred error crashes at runtime with exactly
+    /// the text the squiggle showed.
+    pub fn message(&self, db: &dyn Db) -> String {
+        match self {
+            InferenceDiagnostic::TypeMismatch {
+                expected, actual, ..
+            } => format!(
+                "type mismatch: expected `{}`, found `{}`",
+                expected.display(),
+                actual.display()
+            ),
+            InferenceDiagnostic::NotCallable { ty, .. } => {
+                format!("expression of type `{}` is not callable", ty.display())
+            }
+            InferenceDiagnostic::ArgCountMismatch {
+                expected, found, ..
+            } => format!("expected {expected} argument(s), found {found}"),
+            InferenceDiagnostic::NeedsAnnotation { item, .. } => {
+                let display = item_tree(db, item.file)
+                    .items
+                    .get(item.index as usize)
+                    .map(|it| it.name.clone())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| "this item".to_owned());
+                format!(
+                    "cannot infer the type of `{display}` across items; \
+                     add a type annotation to its definition"
+                )
+            }
+        }
+    }
+}
+
 #[salsa::tracked(returns(ref))]
 pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
     let body = body(db, item);
