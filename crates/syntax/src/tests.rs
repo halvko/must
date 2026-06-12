@@ -734,6 +734,36 @@ static name = fn {
 }
 
 #[test]
+fn unclosed_block_reports_brace_not_semicolon() {
+    // The "expected `}`" anchors on the `{`; the item-level missing-`;`
+    // lands on the same already-errored token and is suppressed.
+    check(
+        r#"
+static name = fn {
+"#,
+        expect![[r#"
+            SOURCE_FILE@0..20
+              WHITESPACE@0..1 "\n"
+              STATIC_ITEM@1..19
+                STATIC_KW@1..7 "static"
+                WHITESPACE@7..8 " "
+                NAME@8..12
+                  IDENT@8..12 "name"
+                WHITESPACE@12..13 " "
+                EQ@13..14 "="
+                WHITESPACE@14..15 " "
+                FN_LITERAL@15..19
+                  FN_KW@15..17 "fn"
+                  WHITESPACE@17..18 " "
+                  BLOCK_EXPR@18..19
+                    L_BRACE@18..19 "{"
+              WHITESPACE@19..20 "\n"
+            error 18..19: expected `}`
+        "#]],
+    );
+}
+
+#[test]
 fn item_missing_name_and_body() {
     check(
         "static = fn {",
@@ -750,7 +780,7 @@ fn item_missing_name_and_body() {
                   BLOCK_EXPR@12..13
                     L_BRACE@12..13 "{"
             error 7..8: expected a name for the item
-            error 13..13: expected `}`
+            error 12..13: expected `}`
         "#]],
     );
 }
@@ -1001,7 +1031,7 @@ static b = fn {};
                     R_BRACE@49..50 "}"
                 SEMICOLON@50..51 ";"
               WHITESPACE@51..52 "\n"
-            error 34..40: expected `}`
+            error 32..33: expected `}`
         "#]],
     );
 }

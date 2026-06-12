@@ -40,7 +40,7 @@ fn item(p: &mut Parser<'_>) {
         if matches!(p.prev(), Some(R_BRACE | SEMICOLON)) {
             p.eat(SEMICOLON);
         } else {
-            p.expect_semicolon();
+            p.expect_after_prev(SEMICOLON, ";");
         }
     } else {
         p.error("expected `=` followed by the item's value");
@@ -115,7 +115,7 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
             let m = p.start();
             p.bump(L_PAREN);
             expr(p);
-            p.expect(R_PAREN, "`)`");
+            p.expect_after_prev(R_PAREN, ")");
             m.complete(p, PAREN_EXPR)
         }
         L_BRACE => block_expr(p),
@@ -169,7 +169,7 @@ fn param_list(p: &mut Parser<'_>) {
             break;
         }
     }
-    p.expect(R_PAREN, "`)`");
+    p.expect_after_prev(R_PAREN, ")");
     m.complete(p, PARAM_LIST);
 }
 
@@ -201,7 +201,7 @@ fn arg_list(p: &mut Parser<'_>) {
             break;
         }
     }
-    p.expect(R_PAREN, "`)`");
+    p.expect_after_prev(R_PAREN, ")");
     m.complete(p, ARG_LIST);
 }
 
@@ -224,7 +224,7 @@ fn block_expr(p: &mut Parser<'_>) -> CompletedMarker {
             }
         }
     }
-    p.expect(R_BRACE, "`}`");
+    p.expect_after_prev(R_BRACE, "}");
     m.complete(p, BLOCK_EXPR)
 }
 
@@ -236,7 +236,7 @@ fn expr_stmt_or_tail(p: &mut Parser<'_>) {
         return;
     }
     if parsed.is_some() && !p.at(R_BRACE) && !p.at(EOF) {
-        p.error_missing_semicolon();
+        p.error_after_prev(";");
         m.complete(p, EXPR_STMT);
         return;
     }
@@ -256,7 +256,7 @@ fn let_stmt(p: &mut Parser<'_>) {
     } else {
         p.error("expected `=` followed by an initializer");
     }
-    p.expect_semicolon();
+    p.expect_after_prev(SEMICOLON, ";");
     m.complete(p, LET_STMT);
 }
 

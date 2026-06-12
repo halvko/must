@@ -103,21 +103,23 @@ impl<'t> Parser<'t> {
         });
     }
 
-    /// Expect a `;`. A missing one is reported right after the previous
-    /// token — where it should be typed — with an insert fix.
-    pub(crate) fn expect_semicolon(&mut self) -> bool {
-        if self.eat(SEMICOLON) {
+    /// Expect a closing or separator token (`;`, `}`, `)`). A missing one
+    /// is reported right after the previous token — where it should be
+    /// typed — with an insert fix, and suppressed when that token already
+    /// carries an error.
+    pub(crate) fn expect_after_prev(&mut self, kind: SyntaxKind, insert: &str) -> bool {
+        if self.eat(kind) {
             return true;
         }
-        self.error_missing_semicolon();
+        self.error_after_prev(insert);
         false
     }
 
-    pub(crate) fn error_missing_semicolon(&mut self) {
+    pub(crate) fn error_after_prev(&mut self, insert: &str) {
         self.events.push(Event::Error {
-            msg: "expected `;`".to_owned(),
+            msg: format!("expected `{insert}`"),
             after_prev: true,
-            fix_insert: Some(";".to_owned()),
+            fix_insert: Some(insert.to_owned()),
         });
     }
 
