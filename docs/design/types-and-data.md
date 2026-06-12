@@ -4,6 +4,10 @@
 
 - **T09** `==`/`!=` are builtin and permitted on any type; the checker only requires the
   operands to agree.
+- **T11** Inference is interprocedural: items that constrain each other form a binding
+  group solved in one unification context, so a signature is never peeked at before its
+  body is checked; an undetermined or contradictory member erases to `{error}`. There is
+  no cross-file inference.
 
 ## Discarded
 
