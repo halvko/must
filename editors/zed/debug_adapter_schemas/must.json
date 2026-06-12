@@ -1,0 +1,20 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "request": {
+      "type": "string",
+      "enum": ["launch"],
+      "description": "Must programs are always launched (the adapter is the runtime; there is nothing to attach to)."
+    },
+    "program": {
+      "type": "string",
+      "description": "Path to the .must file to run."
+    },
+    "entry": {
+      "type": "string",
+      "description": "Expression evaluated in the file's scope as the program entry. Defaults to main()."
+    }
+  },
+  "required": ["request", "program"]
+}
