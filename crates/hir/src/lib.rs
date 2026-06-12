@@ -6,6 +6,7 @@
 //! therefore only reach other items if a *value* on that path changes.
 
 pub mod body;
+pub mod diag;
 pub mod infer;
 pub mod item_tree;
 pub mod scopes;
@@ -135,7 +136,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             .unwrap_or_default();
         diagnostics.push(Diagnostic {
             range: second.syntax().text_range(),
-            message: format!("`{}` is defined multiple times", second.text()),
+            message: diag::defined_multiple_times(&second.text()),
             fix: None,
             related,
         });
@@ -167,12 +168,12 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         for (expr, data) in body.exprs.iter() {
             let message = match data {
                 body::ExprData::NameRef(name) if resolutions.get(expr).is_none() => {
-                    format!("unresolved name `{name}`")
+                    diag::unresolved_name(name)
                 }
                 // Without this, an overflowing literal would be a value MIR
                 // can only trap on with no diagnostic to borrow.
                 body::ExprData::Literal(body::LiteralData::Int(None)) => {
-                    "integer literal is too large".to_owned()
+                    diag::INT_LITERAL_TOO_LARGE.to_owned()
                 }
                 _ => continue,
             };

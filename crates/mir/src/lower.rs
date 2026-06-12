@@ -137,9 +137,9 @@ impl LowerCtx<'_> {
             // Justified by the parse errors of the broken source.
             ExprData::Missing => self.trap(b, expr, "syntax error: missing expression".to_owned()),
             ExprData::Literal(LiteralData::Int(Some(value))) => Operand::Const(Const::Int(*value)),
-            // Justified by the "integer literal is too large" diagnostic.
+            // Justified by the equally-worded literal diagnostic.
             ExprData::Literal(LiteralData::Int(None)) => {
-                self.trap(b, expr, "integer literal is too large".to_owned())
+                self.trap(b, expr, hir::diag::INT_LITERAL_TOO_LARGE.to_owned())
             }
             ExprData::Literal(LiteralData::Str(s)) => Operand::Const(Const::Str(s.clone())),
             ExprData::Literal(LiteralData::Bool(v)) => Operand::Const(Const::Bool(*v)),
@@ -305,11 +305,11 @@ impl LowerCtx<'_> {
             }
             // Justified by the duplicate-definition diagnostics.
             Some(&Resolution::Ambiguous(_)) => {
-                self.trap(b, expr, format!("`{name}` is defined multiple times"))
+                self.trap(b, expr, hir::diag::defined_multiple_times(name))
             }
             Some(&Resolution::Builtin(builtin)) => Operand::Const(Const::Builtin(builtin)),
             // Justified by the unresolved-name diagnostic.
-            None => self.trap(b, expr, format!("unresolved name `{name}`")),
+            None => self.trap(b, expr, hir::diag::unresolved_name(name)),
         }
     }
 
