@@ -70,10 +70,21 @@ the first line.
 Breakpoints, stepping (over/in/out), the call stack, and a Locals panel
 all work; `print` output streams to the debug console, where you can also
 evaluate — a bare name reads a local from the selected frame, anything
-else runs as an expression in the file's scope (it's a repl: calls
-included). When a broken program reaches its error, it *stops there* like
-a breakpoint, stack and locals inspectable, with the same message the
-editor shows as a diagnostic; resuming ends the run.
+else runs as an expression against that frame's locals (it's a repl:
+calls included). When a broken program reaches its error, it *stops
+there* like a breakpoint, stack and locals inspectable, with the same
+message the editor shows as a diagnostic; resuming ends the run.
+
+To step *within* a line (multiple calls on one line are distinct stops),
+set Zed's global granularity:
+
+```json
+"debugger": { "stepping_granularity": "statement" }
+```
+
+(The adapter also supports column breakpoints and `breakpointLocations`
+per the DAP spec, but Zed's UI is line-only today — those light up in
+clients with an inline-breakpoint picker.)
 
 ### Debugging the server
 

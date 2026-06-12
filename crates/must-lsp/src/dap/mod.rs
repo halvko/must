@@ -18,7 +18,7 @@ use std::rc::Rc;
 use serde_json::{Value, json};
 
 use crate::ServerResult;
-use debuggee::{Debuggee, Outcome, ResumeMode};
+use debuggee::{BreakpointSpec, Debuggee, Outcome, ResumeMode};
 use transport::Incoming;
 
 pub fn run(mut reader: impl BufRead, writer: impl Write) -> ServerResult<()> {
@@ -28,7 +28,7 @@ pub fn run(mut reader: impl BufRead, writer: impl Write) -> ServerResult<()> {
         configured: false,
         pending_launch: None,
         debuggee: None,
-        requested_breakpoints: HashMap::new(),
+        requested_breakpoints: Vec::new(),
         next_breakpoint_id: 0,
     };
     while let Some(message) = transport::read_message(&mut reader)? {
@@ -51,9 +51,9 @@ struct Session<W: Write> {
     /// is finished; the debuggee must not start until `configurationDone`.
     pending_launch: Option<Incoming>,
     debuggee: Option<Debuggee<ConsoleWriter<W>>>,
-    /// Latest client breakpoint state (line → id); transferred to the
-    /// debuggee when it exists.
-    requested_breakpoints: HashMap<u32, i64>,
+    /// Latest client breakpoint state; transferred to the debuggee when
+    /// it exists.
+    requested_breakpoints: Vec<BreakpointSpec>,
     /// Zed *silently discards* the verification state of any response
     /// breakpoint without an `id`, so every reported breakpoint gets one.
     next_breakpoint_id: i64,
@@ -66,7 +66,13 @@ impl<W: Write> Session<W> {
             "initialize" => {
                 self.respond(
                     &request,
-                    json!({ "supportsConfigurationDoneRequest": true }),
+                    json!({
+                        "supportsConfigurationDoneRequest": true,
+                        // Multiple calls on one line are distinct stops:
+                        // inline (column) breakpoints and statement steps.
+                        "supportsBreakpointLocationsRequest": true,
+                        "supportsSteppingGranularity": true,
+                    }),
                 )?;
                 self.event("initialized", json!({}))?;
             }
@@ -95,28 +101,35 @@ impl<W: Write> Session<W> {
                 }
             }
             "setBreakpoints" => {
-                let lines: Vec<u32> = request.arguments["breakpoints"]
+                let requested: Vec<(u32, Option<u32>)> = request.arguments["breakpoints"]
                     .as_array()
                     .map(|bps| {
                         bps.iter()
-                            .filter_map(|bp| bp["line"].as_u64().map(|l| l as u32))
+                            .filter_map(|bp| {
+                                let line = bp["line"].as_u64()? as u32;
+                                let column = bp["column"].as_u64().map(|c| c as u32);
+                                Some((line, column))
+                            })
                             .collect()
                     })
                     .unwrap_or_default();
-                let mut accepted = HashMap::new();
-                let breakpoints: Vec<Value> = lines
+                let mut accepted = Vec::new();
+                let breakpoints: Vec<Value> = requested
                     .into_iter()
-                    .map(|line| {
+                    .map(|(line, column)| {
                         self.next_breakpoint_id += 1;
                         let id = self.next_breakpoint_id;
-                        accepted.insert(line, id);
+                        accepted.push(BreakpointSpec { line, column, id });
                         let verified = self
                             .debuggee
                             .as_ref()
-                            .is_some_and(|d| d.can_break_at(line));
+                            .is_some_and(|d| d.can_break_at(line, column));
                         let mut bp = json!({ "id": id, "verified": verified, "line": line });
+                        if let Some(column) = column {
+                            bp["column"] = json!(column);
+                        }
                         if !verified {
-                            bp["message"] = json!("no executable code on this line");
+                            bp["message"] = json!("no executable code at this position");
                         }
                         bp
                     })
@@ -126,6 +139,23 @@ impl<W: Write> Session<W> {
                     debuggee.breakpoints = accepted;
                 }
                 self.respond(&request, json!({ "breakpoints": breakpoints }))?;
+            }
+            "breakpointLocations" => {
+                let Some(debuggee) = self.debuggee.as_ref() else {
+                    self.respond(&request, json!({ "breakpoints": [] }))?;
+                    return Ok(true);
+                };
+                let line = request.arguments["line"].as_u64().unwrap_or(0) as u32;
+                let end_line = request.arguments["endLine"]
+                    .as_u64()
+                    .map(|l| l as u32)
+                    .unwrap_or(line);
+                let locations: Vec<Value> = debuggee
+                    .breakpoint_locations(line, end_line)
+                    .into_iter()
+                    .map(|(line, column)| json!({ "line": line, "column": column }))
+                    .collect();
+                self.respond(&request, json!({ "breakpoints": locations }))?;
             }
             "setExceptionBreakpoints" => {
                 self.respond(&request, json!({ "breakpoints": [] }))?;
@@ -160,7 +190,16 @@ impl<W: Write> Session<W> {
                     "stepOut" => ResumeMode::StepOut,
                     _ => ResumeMode::Continue,
                 };
-                let outcome = self.debuggee.as_mut().expect("checked above").resume(mode);
+                // MIR statements are our "instructions".
+                let statement = matches!(
+                    request.arguments["granularity"].as_str(),
+                    Some("statement" | "instruction")
+                );
+                let outcome = self
+                    .debuggee
+                    .as_mut()
+                    .expect("checked above")
+                    .resume(mode, statement);
                 self.report(outcome)?;
             }
             "stackTrace" => {
@@ -274,7 +313,7 @@ impl<W: Write> Session<W> {
         } else {
             ResumeMode::Continue
         };
-        let outcome = debuggee.resume(mode);
+        let outcome = debuggee.resume(mode, false);
         self.report(outcome)
     }
 

@@ -259,6 +259,64 @@ fn breakpoint_hit_inspect_and_resume() {
 }
 
 #[test]
+fn column_breakpoints_distinguish_calls_on_one_line() {
+    let program = fixture(
+        "cols",
+        "static f = fn (n: usize) -> usize { n + 1 }\nstatic main = fn {\n    let x = f(1) + f(2);\n    print(\"done\");\n};\n",
+    );
+    // Line 3 columns: 13 = `f(1)` (also where the `+` and the let-init
+    // anchor), 20 = `f(2)`.
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        ("launch", json!({ "program": program.to_str().unwrap() })),
+        ("breakpointLocations", json!({ "source": {}, "line": 3 })),
+        (
+            "setBreakpoints",
+            json!({ "breakpoints": [{ "line": 3, "column": 20 }] }),
+        ),
+        ("configurationDone", json!({})),
+        ("stackTrace", json!({ "threadId": 1 })),
+        (
+            "next",
+            json!({ "threadId": 1, "granularity": "statement" }),
+        ),
+        ("stackTrace", json!({ "threadId": 1 })),
+        ("continue", json!({ "threadId": 1 })),
+        ("disconnect", json!({})),
+    ]);
+
+    // The picker gets both call positions on the line.
+    let locations = &responses_for(&messages, "breakpointLocations")[0]["body"]["breakpoints"];
+    assert_eq!(locations[0], json!({ "line": 3, "column": 13 }));
+    assert_eq!(locations[1], json!({ "line": 3, "column": 20 }));
+
+    // The column breakpoint verifies, with its column echoed.
+    let bp = &responses_for(&messages, "setBreakpoints")[0]["body"]["breakpoints"][0];
+    assert_eq!(bp["verified"], true);
+    assert_eq!(bp["column"], 20);
+
+    // f(1) runs through unbroken; we stop exactly before f(2).
+    let stopped = events(&messages, "stopped");
+    assert_eq!(stopped[0]["body"]["reason"], "breakpoint");
+    let stack = &responses_for(&messages, "stackTrace")[0]["body"]["stackFrames"];
+    assert_eq!(stack[0]["name"], "main");
+    assert_eq!(stack[0]["line"], 3);
+    assert_eq!(stack[0]["column"], 20);
+
+    // A statement-granular step-over stays on the line: after f(2)
+    // returns, the addition (anchored at column 13) is next.
+    assert_eq!(stopped[1]["body"]["reason"], "step");
+    let stack = &responses_for(&messages, "stackTrace")[1]["body"]["stackFrames"];
+    assert_eq!(stack[0]["line"], 3);
+    assert_eq!(stack[0]["column"], 13);
+
+    // And the rest runs out clean.
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
 fn stop_on_entry_stops_at_the_first_user_line() {
     let program = fixture(
         "entry",

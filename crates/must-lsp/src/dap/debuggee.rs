@@ -3,7 +3,7 @@
 //! no loops: every `continue` terminates (runaway recursion hits the frame
 //! limit), so the session never needs to interrupt a running program.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::io::Write;
 
 use base_db::{RootDatabase, SourceFile};
@@ -19,6 +19,15 @@ pub(crate) enum ResumeMode {
     StepOver,
     StepIn,
     StepOut,
+}
+
+/// A client breakpoint: a line, optionally narrowed to a column (an
+/// "inline" breakpoint distinguishing multiple calls on one line).
+#[derive(Clone)]
+pub(crate) struct BreakpointSpec {
+    pub(crate) line: u32,
+    pub(crate) column: Option<u32>,
+    pub(crate) id: i64,
 }
 
 pub(crate) enum Outcome {
@@ -49,11 +58,11 @@ pub(crate) struct Debuggee<W: Write> {
     text: String,
     original_len: usize,
     machine: Machine<'static, RunMode<W>>,
-    /// Source line (1-based) → breakpoint id.
-    pub(crate) breakpoints: HashMap<u32, i64>,
-    /// Lines some MIR statement or terminator maps to: where a breakpoint
-    /// can verify.
-    executable_lines: HashSet<u32>,
+    pub(crate) breakpoints: Vec<BreakpointSpec>,
+    /// Positions some MIR statement or terminator maps to (line → start
+    /// columns): where breakpoints can verify, and the candidates the
+    /// client's inline-breakpoint picker gets.
+    executable_positions: HashMap<u32, BTreeSet<u32>>,
     /// Set when execution crashed: frames stay inspectable; the next resume
     /// terminates the session.
     pub(crate) crashed: Option<EvalError>,
@@ -71,7 +80,8 @@ impl<W: Write> Debuggee<W> {
         machine
             .start(&prepared.entry)
             .map_err(|err| format!("error: {}", err.message))?;
-        let executable_lines = executable_lines(db, prepared.file, prepared.original_len);
+        let executable_positions =
+            executable_positions(db, prepared.file, prepared.original_len);
         Ok(Debuggee {
             db,
             file: prepared.file,
@@ -79,8 +89,8 @@ impl<W: Write> Debuggee<W> {
             text,
             original_len: prepared.original_len,
             machine,
-            breakpoints: HashMap::new(),
-            executable_lines,
+            breakpoints: Vec::new(),
+            executable_positions,
             crashed: None,
         })
     }
@@ -89,48 +99,79 @@ impl<W: Write> Debuggee<W> {
         &self.path
     }
 
-    pub(crate) fn can_break_at(&self, line: u32) -> bool {
-        self.executable_lines.contains(&line)
+    pub(crate) fn can_break_at(&self, line: u32, column: Option<u32>) -> bool {
+        match (self.executable_positions.get(&line), column) {
+            (Some(_), None) => true,
+            (Some(columns), Some(column)) => columns.contains(&column),
+            (None, _) => false,
+        }
     }
 
-    /// (stack depth, current source line of the top frame).
-    fn position(&self) -> (usize, Option<u32>) {
+    /// All breakpointable (line, column) positions in a line range — the
+    /// candidates an inline-breakpoint picker offers.
+    pub(crate) fn breakpoint_locations(&self, line: u32, end_line: u32) -> Vec<(u32, u32)> {
+        let mut locations = Vec::new();
+        for line in line..=end_line {
+            if let Some(columns) = self.executable_positions.get(&line) {
+                locations.extend(columns.iter().map(|&column| (line, column)));
+            }
+        }
+        locations
+    }
+
+    /// (stack depth, current (line, column) of the top frame).
+    fn position(&self) -> (usize, Option<(u32, u32)>) {
         let depth = self.machine.frames().len();
-        let line = depth
+        let position = depth
             .checked_sub(1)
             .and_then(|top| self.machine.frame_origin(top))
             .and_then(|origin| {
                 runner::source_position(self.db, self.file, self.original_len, &origin)
-            })
-            .map(|(line, _)| line);
-        (depth, line)
+            });
+        (depth, position)
     }
 
-    pub(crate) fn resume(&mut self, mode: ResumeMode) -> Outcome {
+    pub(crate) fn resume(&mut self, mode: ResumeMode, statement_granularity: bool) -> Outcome {
         let start = self.position();
+        // Line-level view of a position: what "somewhere new" means at line
+        // granularity (multiple statements on one line don't re-stop).
+        let line_of =
+            |p: &(usize, Option<(u32, u32)>)| (p.0, p.1.map(|(line, _)| line));
         loop {
             let here = self.position();
-            let (depth, line) = here;
+            let (depth, position) = here;
             if depth > 0 {
-                if let Some(line) = line {
+                if let Some((line, column)) = position {
                     // Breakpoints apply in every mode — but not at the spot
-                    // we're resuming from.
-                    if here != start {
-                        if let Some(&id) = self.breakpoints.get(&line) {
+                    // we're resuming from, judged at the breakpoint's own
+                    // granularity.
+                    for bp in &self.breakpoints {
+                        if bp.line != line {
+                            continue;
+                        }
+                        let (matches, moved) = match bp.column {
+                            Some(c) => (c == column, here != start),
+                            None => (true, line_of(&here) != line_of(&start)),
+                        };
+                        if matches && moved {
                             return Outcome::Stopped {
                                 reason: "breakpoint",
-                                hit_breakpoint: Some(id),
+                                hit_breakpoint: Some(bp.id),
                             };
                         }
                     }
+                    let moved = if statement_granularity {
+                        here != start
+                    } else {
+                        line_of(&here) != line_of(&start)
+                    };
                     let (stop, reason) = match mode {
                         ResumeMode::Entry => (true, "entry"),
                         ResumeMode::Continue => (false, ""),
-                        ResumeMode::StepOver => (
-                            depth < start.0 || (depth == start.0 && here != start),
-                            "step",
-                        ),
-                        ResumeMode::StepIn => (here != start, "step"),
+                        ResumeMode::StepOver => {
+                            (depth < start.0 || (depth == start.0 && moved), "step")
+                        }
+                        ResumeMode::StepIn => (moved || depth != start.0, "step"),
                         ResumeMode::StepOut => (depth < start.0, "step"),
                     };
                     if stop {
@@ -139,9 +180,6 @@ impl<W: Write> Debuggee<W> {
                             hit_breakpoint: None,
                         };
                     }
-                } else if matches!(mode, ResumeMode::StepOut) && depth < start.0 {
-                    // Stepped out into synthetic code (the entry frame):
-                    // keep going until something user-visible or the end.
                 }
             }
             match self.machine.step() {
@@ -281,9 +319,14 @@ fn is_name(text: &str) -> bool {
         && chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
-/// Every user-file line some MIR statement or terminator maps to.
-fn executable_lines(db: &RootDatabase, file: SourceFile, original_len: usize) -> HashSet<u32> {
-    let mut lines = HashSet::new();
+/// Every user-file (line → start columns) some MIR statement or terminator
+/// maps to.
+fn executable_positions(
+    db: &RootDatabase,
+    file: SourceFile,
+    original_len: usize,
+) -> HashMap<u32, BTreeSet<u32>> {
+    let mut positions: HashMap<u32, BTreeSet<u32>> = HashMap::new();
     for &item in hir::file_item_ids(db, file) {
         let loc = hir::item_loc(db, item);
         let lowered = mir::mir_lowered(db, item);
@@ -295,17 +338,17 @@ fn executable_lines(db: &RootDatabase, file: SourceFile, original_len: usize) ->
                     .map(|s| s.origin)
                     .chain([block.terminator.origin]);
                 for origin in origins {
-                    if let Some((line, _)) = runner::source_position(
+                    if let Some((line, column)) = runner::source_position(
                         db,
                         file,
                         original_len,
                         &(loc.clone(), origin),
                     ) {
-                        lines.insert(line);
+                        positions.entry(line).or_default().insert(column);
                     }
                 }
             }
         }
     }
-    lines
+    positions
 }
