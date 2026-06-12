@@ -5,10 +5,12 @@
 
 mod goto_definition;
 mod hover;
+mod syntax_highlighting;
 
 use base_db::{RootDatabase, SourceFile};
 pub use goto_definition::NavigationTarget;
 pub use hover::HoverResult;
+pub use syntax_highlighting::{HlMods, HlRange, HlTag};
 pub use line_index::LineIndex;
 pub use syntax::{Fix, TextEdit};
 use syntax::{TextRange, TextSize};
@@ -94,6 +96,11 @@ impl Analysis {
 
     pub fn hover(&self, pos: FilePosition) -> Option<HoverResult> {
         hover::hover(&self.db, pos)
+    }
+
+    /// Semantic highlighting for the whole file.
+    pub fn highlight(&self, file: SourceFile) -> Vec<HlRange> {
+        syntax_highlighting::highlight(&self.db, file)
     }
 
     pub fn line_index(&self, file: SourceFile) -> LineIndex {

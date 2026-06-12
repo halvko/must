@@ -240,6 +240,51 @@ fn quick_fix_wraps_fn_body_in_braces() {
 }
 
 #[test]
+fn semantic_tokens_over_protocol() {
+    let mut client = TestClient::start();
+    let file = uri("file:///tokens.must");
+
+    client.open(&file, "static x = 1;");
+    client.next_diagnostics();
+
+    let response = client.request::<lsp_types::request::SemanticTokensFullRequest>(
+        lsp_types::SemanticTokensParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    );
+    let Some(lsp_types::SemanticTokensResult::Tokens(tokens)) = response else {
+        panic!("expected full semantic tokens, got {response:?}");
+    };
+    // Legend order: keyword = 3, operator = 4, variable = 6, number = 2;
+    // modifiers: declaration = 1, static = 2.
+    let expected = [
+        // delta_line, delta_start, length, token_type, modifiers
+        (0, 0, 6, 3, 0),  // `static`
+        (0, 7, 1, 6, 3),  // `x`: variable, declaration|static
+        (0, 2, 1, 4, 0),  // `=`
+        (0, 2, 1, 2, 0),  // `1`
+    ];
+    let actual: Vec<_> = tokens
+        .data
+        .iter()
+        .map(|t| {
+            (
+                t.delta_line,
+                t.delta_start,
+                t.length,
+                t.token_type,
+                t.token_modifiers_bitset,
+            )
+        })
+        .collect();
+    assert_eq!(actual, expected);
+
+    drop(client);
+}
+
+#[test]
 fn close_clears_diagnostics() {
     let client = TestClient::start();
     let file = uri("file:///broken.must");

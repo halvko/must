@@ -167,6 +167,85 @@ static name = fn {
     assert_eq!(fix.edits[0].range.start(), diagnostics[0].range.end());
 }
 
+/// Renders each highlight as `start..end text tag[.mods]`, one per line.
+fn check_highlights(text: &str, expect: expect_test::Expect) {
+    let mut host = AnalysisHost::new();
+    let file = host.create_file("test.must".to_owned(), text.to_owned());
+    let analysis = host.snapshot();
+    let mut rendered = String::new();
+    for hl in analysis.highlight(file) {
+        let (start, end) = (u32::from(hl.range.start()), u32::from(hl.range.end()));
+        rendered.push_str(&format!(
+            "{start}..{end} {:?} {:?}",
+            &text[start as usize..end as usize],
+            hl.tag
+        ));
+        for (flag, name) in [
+            (crate::HlMods::DECLARATION, "declaration"),
+            (crate::HlMods::STATIC, "static"),
+            (crate::HlMods::DEFAULT_LIBRARY, "defaultLibrary"),
+        ] {
+            if hl.mods.contains(flag) {
+                rendered.push('.');
+                rendered.push_str(name);
+            }
+        }
+        rendered.push('\n');
+    }
+    expect.assert_eq(&rendered);
+}
+
+#[test]
+fn highlights_classify_names_semantically() {
+    check_highlights(
+        r#"// the entry point
+static greeting: str = "hi";
+static main = fn (count: usize) {
+    let next = count - 1;
+    print(greeting);
+    main(next);
+};"#,
+        expect_test::expect![[r#"
+            0..18 "// the entry point" Comment
+            19..25 "static" Keyword
+            26..34 "greeting" Variable.declaration.static
+            36..39 "str" Type.defaultLibrary
+            40..41 "=" Operator
+            42..46 "\"hi\"" String
+            48..54 "static" Keyword
+            55..59 "main" Function.declaration.static
+            60..61 "=" Operator
+            62..64 "fn" Keyword
+            66..71 "count" Parameter.declaration
+            73..78 "usize" Type.defaultLibrary
+            86..89 "let" Keyword
+            90..94 "next" Variable.declaration
+            95..96 "=" Operator
+            97..102 "count" Parameter
+            103..104 "-" Operator
+            105..106 "1" Number
+            112..117 "print" Function.defaultLibrary
+            118..126 "greeting" Variable.static
+            133..137 "main" Function.static
+            138..142 "next" Variable
+        "#]],
+    );
+}
+
+#[test]
+fn highlights_split_multiline_strings_per_line() {
+    check_highlights(
+        "static s = \"one\ntwo\";",
+        expect_test::expect![[r#"
+            0..6 "static" Keyword
+            7..8 "s" Variable.declaration.static
+            9..10 "=" Operator
+            11..15 "\"one" String
+            16..20 "two\"" String
+        "#]],
+    );
+}
+
 #[test]
 fn diagnostics_include_name_errors() {
     let (analysis, file, _pos) = fixture("static f = fn { missing$0() };");
