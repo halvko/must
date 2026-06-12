@@ -991,7 +991,7 @@ static empty_params = fn () { 1 }
                     WHITESPACE@32..33 " "
                     R_BRACE@33..34 "}"
               WHITESPACE@34..35 "\n"
-              STATIC_ITEM@35..65
+              STATIC_ITEM@35..69
                 STATIC_KW@35..41 "static"
                 WHITESPACE@41..42 " "
                 NAME@42..60
@@ -999,12 +999,11 @@ static empty_params = fn () { 1 }
                 WHITESPACE@60..61 " "
                 EQ@61..62 "="
                 WHITESPACE@62..63 " "
-                FN_LITERAL@63..65
+                FN_LITERAL@63..68
                   FN_KW@63..65 "fn"
-              WHITESPACE@65..66 " "
-              ERROR@66..68
-                INT_NUMBER@66..68 "42"
-              ERROR@68..69
+                  WHITESPACE@65..66 " "
+                  LITERAL@66..68
+                    INT_NUMBER@66..68 "42"
                 SEMICOLON@68..69 ";"
               WHITESPACE@69..70 "\n"
               STATIC_ITEM@70..103
@@ -1030,10 +1029,29 @@ static empty_params = fn () { 1 }
                     WHITESPACE@101..102 " "
                     R_BRACE@102..103 "}"
               WHITESPACE@103..104 "\n"
-            error 66..68: expected `{`: function bodies are blocks
-            error 66..68: expected `;`
-            error 66..68: expected an item (`static` or `const`)
-            error 68..69: expected an item (`static` or `const`)
+            error 66..68: function bodies are blocks; wrap this expression in `{ }`
+        "#]],
+    );
+}
+
+#[test]
+fn fn_body_recovery_semicolon() {
+    check(
+        "static f = fn;",
+        expect![[r#"
+            SOURCE_FILE@0..14
+              STATIC_ITEM@0..14
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..13
+                  FN_KW@11..13 "fn"
+                SEMICOLON@13..14 ";"
+            error 13..14: expected `{`: function bodies are blocks
         "#]],
     );
 }

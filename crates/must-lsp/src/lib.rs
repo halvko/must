@@ -24,7 +24,7 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{GotoDefinition, HoverRequest, Request as _};
+use lsp_types::request::{CodeActionRequest, GotoDefinition, HoverRequest, Request as _};
 
 pub type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -39,6 +39,7 @@ pub fn server_capabilities() -> lsp_types::ServerCapabilities {
         )),
         definition_provider: Some(lsp_types::OneOf::Left(true)),
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
+        code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
         ..Default::default()
     }
 }
@@ -181,6 +182,11 @@ impl GlobalState {
             HoverRequest::METHOD => {
                 self.spawn_request(req, |snapshot, params| {
                     serde_json::to_value(snapshot.hover(params)).ok()
+                });
+            }
+            CodeActionRequest::METHOD => {
+                self.spawn_request(req, |snapshot, params| {
+                    serde_json::to_value(snapshot.code_actions(params)).ok()
                 });
             }
             method => {
@@ -403,6 +409,58 @@ impl Snapshot {
             range: to_proto::range(&line_index, nav.focus_range),
         };
         Some(lsp_types::GotoDefinitionResponse::Scalar(location))
+    }
+
+    fn code_actions(
+        &self,
+        params: lsp_types::CodeActionParams,
+    ) -> Option<Vec<lsp_types::CodeActionOrCommand>> {
+        let uri = params.text_document.uri;
+        let Some(FileState::Open(file)) = self.files.by_uri.get(&uri).copied() else {
+            tracing::warn!(uri = %uri.as_str(), "code action for a document that is not open");
+            return None;
+        };
+        // Every fix this server offers is a quick fix, so a client that
+        // asked for other kinds gets nothing.
+        if let Some(only) = &params.context.only {
+            if !only.iter().any(|kind| kind == &lsp_types::CodeActionKind::QUICKFIX) {
+                return Some(Vec::new());
+            }
+        }
+        let line_index = self.analysis.line_index(file);
+        let start = from_proto::offset(&line_index, params.range.start)?;
+        let end = from_proto::offset(&line_index, params.range.end)?;
+        let query = syntax::TextRange::new(start, end);
+
+        let mut actions = Vec::new();
+        for diagnostic in self.analysis.diagnostics(file) {
+            let Some(fix) = diagnostic.fix.clone() else {
+                continue;
+            };
+            if diagnostic.range.intersect(query).is_none() {
+                continue;
+            }
+            let edits = fix
+                .edits
+                .iter()
+                .map(|edit| to_proto::text_edit(&line_index, edit))
+                .collect();
+            let mut changes = HashMap::new();
+            changes.insert(uri.clone(), edits);
+            actions.push(lsp_types::CodeActionOrCommand::CodeAction(
+                lsp_types::CodeAction {
+                    title: fix.label,
+                    kind: Some(lsp_types::CodeActionKind::QUICKFIX),
+                    diagnostics: Some(vec![to_proto::diagnostic(&line_index, diagnostic)]),
+                    edit: Some(lsp_types::WorkspaceEdit {
+                        changes: Some(changes),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            ));
+        }
+        Some(actions)
     }
 
     fn hover(&self, params: lsp_types::HoverParams) -> Option<lsp_types::Hover> {

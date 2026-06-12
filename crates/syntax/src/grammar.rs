@@ -2,6 +2,7 @@
 //! the parser never bails; unexpected tokens end up wrapped in `ERROR` nodes;
 //! sub-parsers refuse to consume tokens their caller can recover on.
 
+use crate::BRACE_RULE;
 use crate::SyntaxKind::*;
 use crate::parser::{CompletedMarker, Parser};
 
@@ -133,8 +134,8 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
 fn fn_literal(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(FN_KW);
-    // Bodies are always blocks, so `(` after `fn` can only be parameters —
-    // no lookahead needed anywhere in here.
+    // In valid code bodies are blocks, so `(` after `fn` can only be
+    // parameters — no lookahead needed anywhere in here.
     if p.at(L_PAREN) {
         param_list(p);
     }
@@ -143,8 +144,13 @@ fn fn_literal(p: &mut Parser<'_>) -> CompletedMarker {
     }
     if p.at(L_BRACE) {
         block_expr(p);
+    } else if at_expr_recovery(p) {
+        p.error(&format!("expected `{{`: {BRACE_RULE}"));
     } else {
-        p.error("expected `{`: function bodies are blocks");
+        // Superset parsing: take any expression as the body so the tree
+        // keeps the user's intent (inference and hover still work);
+        // validation rejects it with a wrap-in-braces fix.
+        expr(p);
     }
     m.complete(p, FN_LITERAL)
 }

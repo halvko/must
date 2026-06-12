@@ -21,6 +21,13 @@ pub(crate) fn range(line_index: &LineIndex, range: TextRange) -> lsp_types::Rang
     )
 }
 
+pub(crate) fn text_edit(line_index: &LineIndex, edit: &ide::TextEdit) -> lsp_types::TextEdit {
+    lsp_types::TextEdit {
+        range: range(line_index, edit.range),
+        new_text: edit.insert.clone(),
+    }
+}
+
 pub(crate) fn diagnostic(line_index: &LineIndex, d: ide::Diagnostic) -> lsp_types::Diagnostic {
     lsp_types::Diagnostic {
         range: range(line_index, d.range),

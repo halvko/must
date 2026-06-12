@@ -220,6 +220,25 @@ fn unannotated_param_inferred_from_use() {
     );
 }
 
+#[test]
+fn non_block_fn_body_one_diagnostic_and_inference_still_works() {
+    // Superset parsing: exactly one error (with a fix), no cascade…
+    check_diagnostics(
+        "static f = fn 42;",
+        expect![[r#"
+            14..16: function bodies are blocks; wrap this expression in `{ }`
+        "#]],
+    );
+    // …and the tree keeps the intent: types are still inferred inside.
+    check_infer(
+        "static f = fn 42;",
+        expect![[r#"
+            11..16 'fn 42': fn() -> usize
+            14..16 '42': usize
+        "#]],
+    );
+}
+
 /// The incrementality firewall: editing one item's body must not re-run
 /// inference for other items (both annotated, so signatures can't change).
 #[test]

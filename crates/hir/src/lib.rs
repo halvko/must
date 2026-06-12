@@ -81,6 +81,7 @@ pub fn file_item_ids<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemId<'db>>
 pub struct Diagnostic {
     pub range: TextRange,
     pub message: String,
+    pub fix: Option<syntax::Fix>,
 }
 
 /// All semantic diagnostics for a file. This is the one place that converts
@@ -92,6 +93,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         .map(|err| Diagnostic {
             range: err.range,
             message: err.message.clone(),
+            fix: err.fix.clone(),
         })
         .collect();
 
@@ -109,6 +111,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 diagnostics.push(Diagnostic {
                     range: ptr.text_range(),
                     message: format!("unresolved name `{name}`"),
+                    fix: None,
                 });
             }
         }
@@ -146,6 +149,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             diagnostics.push(Diagnostic {
                 range: ptr.text_range(),
                 message,
+                fix: None,
             });
         }
     }

@@ -23,7 +23,11 @@ pub fn tokenize(text: &str) -> (Vec<Token>, Vec<SyntaxError>) {
         if let Some(message) = error {
             let start = TextSize::new(pos as u32);
             let range = TextRange::at(start, TextSize::new(len as u32));
-            errors.push(SyntaxError { message, range });
+            errors.push(SyntaxError {
+                message,
+                range,
+                fix: None,
+            });
         }
         tokens.push(Token {
             kind,
