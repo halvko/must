@@ -129,7 +129,7 @@ static r: usize = rec();
 "#,
         expect![[r#"
             rec = fn
-            r = error[NotConst]: stack overflow: recursion exceeded 128 frames
+            r = error[NotConst]: stack overflow: recursion exceeded 10000 frames
         "#]],
     );
 }
@@ -156,7 +156,7 @@ static rec = fn (n: usize) -> usize { rec(n + 1) }
 "#,
         "rec(0)",
         expect![[r#"
-            error[Runtime]: stack overflow: recursion exceeded 128 frames
+            error[Runtime]: stack overflow: recursion exceeded 10000 frames
         "#]],
     );
 }

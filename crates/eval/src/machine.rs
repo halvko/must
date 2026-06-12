@@ -1,7 +1,9 @@
-//! The evaluation core. Executes MIR bodies; parameterized by a [`Mode`]
-//! that decides what impure builtins do. Const-ness is tracked by the
-//! machine itself (`const_depth`): any item being forced is a const context
-//! regardless of the driving mode.
+//! The evaluation core. Executes MIR bodies on an explicit, heap-allocated
+//! frame stack — one [`Machine::step`] call advances a single statement or
+//! terminator, which is what lets a debugger pause between any two of them
+//! and walk the stack. Parameterized by a [`Mode`] that decides what impure
+//! builtins do; const-ness is tracked by the machine itself (`const_depth`):
+//! any item being forced is a const context regardless of the driving mode.
 
 use base_db::Db;
 use hir::{Builtin, ExprId, ItemLoc};
@@ -30,7 +32,7 @@ impl Mode for ConstMode {
     }
 }
 
-/// Run mode for the CLI (and later the debugger): `print` writes a line.
+/// Run mode for the CLI and the debug adapter: `print` writes a line.
 pub struct RunMode<W: std::io::Write> {
     pub out: W,
 }
@@ -45,20 +47,42 @@ impl<W: std::io::Write> Mode for RunMode<W> {
     }
 }
 
-/// Keep well under Rust's own stack — each Must frame costs several
-/// recursive Rust frames, and test threads get only 2 MiB (512 overflowed
-/// there). Enough for toy programs; the debugger milestone moves frames to
-/// the heap (DAP's `stackTrace` wants them explicit) and can raise this.
-const MAX_FRAMES: usize = 128;
+/// Frames live on the heap, so this guards against runaway recursion, not
+/// against Rust stack overflow (stepping is iterative; only nested const
+/// forcing recurses, bounded by the cycle check).
+const MAX_FRAMES: usize = 10_000;
 
-/// Statement/block-transition budget for const contexts: a salsa query must
+/// Statement/terminator budget for const contexts: a salsa query must
 /// terminate even on adversarial input. Run-mode code outside initializers
 /// is not fueled — a long-running program is the user's business.
 const CONST_FUEL: u64 = 1_000_000;
 
+/// One Must call frame.
+pub struct Frame {
+    pub loc: ItemLoc,
+    pub body: BodyId,
+    block: mir::BlockId,
+    /// Index of the next statement to execute in `block`; past the end
+    /// means the terminator is next.
+    statement: usize,
+    locals: ArenaMap<LocalId, Value>,
+    /// Caller linkage: the local the return value lands in, and the block
+    /// the caller resumes at (`None` = the callee's type promised to
+    /// diverge). `None` overall marks the bottom frame of an execution.
+    return_to: Option<(LocalId, Option<mir::BlockId>)>,
+}
+
+/// What one [`Machine::step`] did.
+pub enum StepEvent {
+    Progress,
+    /// The bottom frame returned: the execution's result.
+    Done(Value),
+}
+
 pub struct Machine<'db, M> {
     db: &'db dyn Db,
     pub mode: M,
+    frames: Vec<Frame>,
     /// Items currently being forced (cycle detection), innermost last.
     forcing: Vec<ItemLoc>,
     /// Memoized const values — failures too, or a failing item would be
@@ -67,7 +91,6 @@ pub struct Machine<'db, M> {
     /// > 0 while inside a static initializer: the const context marker.
     const_depth: usize,
     const_fuel: u64,
-    frames: usize,
 }
 
 impl<'db> Machine<'db, ConstMode> {
@@ -84,11 +107,11 @@ impl<'db, M: Mode> Machine<'db, M> {
         Machine {
             db,
             mode,
+            frames: Vec::new(),
             forcing: Vec::new(),
             forced: FxHashMap::default(),
             const_depth: 0,
             const_fuel: CONST_FUEL,
-            frames: 0,
         }
     }
 
@@ -101,33 +124,49 @@ impl<'db, M: Mode> Machine<'db, M> {
         if self.forcing.contains(&loc) {
             return Err(EvalError {
                 kind: EvalErrorKind::NotConst,
-                message: format!(
-                    "cycle detected while evaluating `{}`",
-                    loc.display_name()
-                ),
+                message: format!("cycle detected while evaluating `{}`", loc.display_name()),
                 origin: root_origin(self.db, &loc),
             });
         }
         self.forcing.push(loc.clone());
         self.const_depth += 1;
-        // Each item gets its own fuel budget: `const_value(B)` must give the
-        // same answer whether B is queried directly or forced from inside
-        // another item's evaluation (and the editor and the runner must
-        // agree). Total work stays bounded: items × CONST_FUEL.
-        let outer_fuel = std::mem::replace(&mut self.const_fuel, CONST_FUEL);
+        // Forcing runs on its own (swapped-in) frame stack — a paused
+        // debugger never sees compile-time frames — and gets its own fuel
+        // budget: `const_value(B)` must give the same answer whether B is
+        // queried directly or forced from inside another item's evaluation.
+        let saved_frames = std::mem::take(&mut self.frames);
+        let saved_fuel = std::mem::replace(&mut self.const_fuel, CONST_FUEL);
         let result = self.eval_root(&loc);
-        self.const_fuel = outer_fuel;
+        self.frames = saved_frames;
+        self.const_fuel = saved_fuel;
         self.const_depth -= 1;
         self.forcing.pop();
         self.forced.insert(loc, result.clone());
         result
     }
 
-    /// Execute an item's root body — for [`Self::force_item`], and for the
-    /// runner's entry item (at `const_depth` 0, where `print` is legal).
+    /// Execute an item's root body to completion — for [`Self::force_item`],
+    /// and for the runner's entry item (at `const_depth` 0, where `print`
+    /// is legal).
     pub fn eval_root(&mut self, loc: &ItemLoc) -> Result<Value, EvalError> {
-        let lowered = self.lowered(loc);
-        let Some(root) = lowered.root else {
+        self.start(loc)?;
+        loop {
+            match self.step() {
+                Ok(StepEvent::Progress) => {}
+                Ok(StepEvent::Done(value)) => return Ok(value),
+                Err(err) => {
+                    // Run-to-completion callers don't inspect crash state.
+                    self.frames.clear();
+                    return Err(err);
+                }
+            }
+        }
+    }
+
+    /// Push the bottom frame of an execution without running it — the
+    /// debugger's entry, paired with [`Self::step`].
+    pub fn start(&mut self, loc: &ItemLoc) -> Result<(), EvalError> {
+        let Some(root) = self.lowered(loc).root else {
             // Broken source; the parse errors carry the diagnostic.
             return Err(EvalError {
                 kind: EvalErrorKind::Trap,
@@ -135,35 +174,59 @@ impl<'db, M: Mode> Machine<'db, M> {
                 origin: None,
             });
         };
-        self.eval_body(loc, root, Vec::new())
+        self.push_frame(loc.clone(), root, Vec::new(), None)
+    }
+
+    /// The live call stack, bottom first. On an `Err` from [`Self::step`]
+    /// the frames stay put, so a debugger can inspect the crash site.
+    pub fn frames(&self) -> &[Frame] {
+        &self.frames
+    }
+
+    /// Provenance of what `frames()[index]` executes next (its statement or
+    /// terminator) — the debugger's "current line" for that frame.
+    pub fn frame_origin(&self, index: usize) -> Option<(ItemLoc, ExprId)> {
+        let frame = self.frames.get(index)?;
+        let body = &self.lowered(&frame.loc).bodies[frame.body];
+        let block = &body.blocks[frame.block];
+        let origin = match block.statements.get(frame.statement) {
+            Some(statement) => statement.origin,
+            None => block.terminator.origin,
+        };
+        Some((frame.loc.clone(), origin))
+    }
+
+    /// The user-named locals of a frame that currently hold values, in
+    /// declaration order.
+    pub fn frame_named_locals(&self, index: usize) -> Vec<(String, Value)> {
+        let Some(frame) = self.frames.get(index) else {
+            return Vec::new();
+        };
+        let body = &self.lowered(&frame.loc).bodies[frame.body];
+        body.locals
+            .iter()
+            .filter_map(|(id, data)| {
+                let name = data.name.clone()?;
+                let value = frame.locals.get(id)?.clone();
+                Some((name, value))
+            })
+            .collect()
     }
 
     fn lowered(&self, loc: &ItemLoc) -> &'db MirLowered {
         mir::mir_lowered(self.db, loc.to_id(self.db))
     }
 
-    fn eval_body(
+    fn push_frame(
         &mut self,
-        loc: &ItemLoc,
+        loc: ItemLoc,
         body_id: BodyId,
         args: Vec<Value>,
-    ) -> Result<Value, EvalError> {
-        self.frames += 1;
-        let result = self.eval_body_inner(loc, body_id, args);
-        self.frames -= 1;
-        result
-    }
-
-    fn eval_body_inner(
-        &mut self,
-        loc: &ItemLoc,
-        body_id: BodyId,
-        args: Vec<Value>,
-    ) -> Result<Value, EvalError> {
-        if self.frames > MAX_FRAMES {
+        return_to: Option<(LocalId, Option<mir::BlockId>)>,
+    ) -> Result<(), EvalError> {
+        if self.frames.len() >= MAX_FRAMES {
             // In a const context this is a const error; in run-mode code
-            // it's an ordinary stack overflow, not the program's fault for
-            // being non-const.
+            // it's an ordinary stack overflow.
             return Err(EvalError {
                 kind: if self.const_depth > 0 {
                     EvalErrorKind::NotConst
@@ -171,10 +234,10 @@ impl<'db, M: Mode> Machine<'db, M> {
                     EvalErrorKind::Runtime
                 },
                 message: format!("stack overflow: recursion exceeded {MAX_FRAMES} frames"),
-                origin: root_origin(self.db, loc),
+                origin: root_origin(self.db, &loc),
             });
         }
-        let body = &self.lowered(loc).bodies[body_id];
+        let body = &self.lowered(&loc).bodies[body_id];
         if args.len() != body.params.len() {
             return Err(self.internal_error(
                 format!(
@@ -189,97 +252,165 @@ impl<'db, M: Mode> Machine<'db, M> {
         for (&param, arg) in body.params.iter().zip(args) {
             locals.insert(param, arg);
         }
+        self.frames.push(Frame {
+            loc,
+            body: body_id,
+            block: body.entry,
+            statement: 0,
+            locals,
+            return_to,
+        });
+        Ok(())
+    }
 
-        let mut block = body.entry;
-        loop {
-            self.spend_fuel(loc)?;
-            let data = &body.blocks[block];
-            for stmt in &data.statements {
-                self.spend_fuel(loc)?;
-                let StatementKind::Assign { dest, rvalue } = &stmt.kind;
-                let value = self.eval_rvalue(loc, body, &locals, rvalue, stmt.origin)?;
-                locals.insert(*dest, value);
+    /// Execute exactly one statement or terminator of the topmost frame.
+    /// On `Err`, the frame stack is left intact for inspection.
+    pub fn step(&mut self) -> Result<StepEvent, EvalError> {
+        let Some(frame) = self.frames.last() else {
+            return Err(self.internal_error("step with no live frames".to_owned(), None));
+        };
+        let loc = frame.loc.clone();
+        let (body_id, block_id, statement) = (frame.body, frame.block, frame.statement);
+        self.spend_fuel(&loc)?;
+        let body = &self.lowered(&loc).bodies[body_id];
+        let block = &body.blocks[block_id];
+
+        if let Some(stmt) = block.statements.get(statement) {
+            let StatementKind::Assign { dest, rvalue } = &stmt.kind;
+            let value = self.eval_rvalue(&loc, body, rvalue, stmt.origin)?;
+            let frame = self.frames.last_mut().expect("frame still live");
+            frame.locals.insert(*dest, value);
+            frame.statement += 1;
+            return Ok(StepEvent::Progress);
+        }
+
+        let origin = block.terminator.origin;
+        match &block.terminator.kind {
+            TerminatorKind::Goto { target } => {
+                self.jump(*target);
             }
-            let origin = data.terminator.origin;
-            match &data.terminator.kind {
-                TerminatorKind::Goto { target } => block = *target,
-                TerminatorKind::SwitchBool {
-                    discr,
-                    then_block,
-                    else_block,
-                } => {
-                    let discr = self.eval_operand(loc, body, &locals, discr, origin)?;
-                    block = match discr {
-                        Value::Bool(true) => *then_block,
-                        Value::Bool(false) => *else_block,
-                        other => {
-                            return Err(self.ill_typed("a `bool` condition", &other, loc, origin));
-                        }
-                    };
-                }
-                TerminatorKind::Call {
-                    callee,
-                    args,
-                    dest,
-                    target,
-                } => {
-                    let callee = self.eval_operand(loc, body, &locals, callee, origin)?;
-                    let args = args
-                        .iter()
-                        .map(|arg| self.eval_operand(loc, body, &locals, arg, origin))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let result = self.call(callee, args, loc, origin)?;
-                    match target {
-                        Some(target) => {
-                            locals.insert(*dest, result);
-                            block = *target;
-                        }
-                        None => {
-                            return Err(self.internal_error(
-                                "a diverging call returned".to_owned(),
-                                Some((loc.clone(), origin)),
-                            ));
+            TerminatorKind::SwitchBool {
+                discr,
+                then_block,
+                else_block,
+            } => {
+                let discr = self.eval_operand(&loc, body, discr, origin)?;
+                let target = match discr {
+                    Value::Bool(true) => *then_block,
+                    Value::Bool(false) => *else_block,
+                    other => {
+                        return Err(self.ill_typed("a `bool` condition", &other, &loc, origin));
+                    }
+                };
+                self.jump(target);
+            }
+            TerminatorKind::Call {
+                callee,
+                args,
+                dest,
+                target,
+            } => {
+                let callee = self.eval_operand(&loc, body, callee, origin)?;
+                let args = args
+                    .iter()
+                    .map(|arg| self.eval_operand(&loc, body, arg, origin))
+                    .collect::<Result<Vec<_>, _>>()?;
+                match callee {
+                    Value::Fn(f) => {
+                        self.push_frame(f.item, f.body, args, Some((*dest, *target)))?;
+                    }
+                    Value::Builtin(builtin) => {
+                        let result = self.builtin_call(builtin, args, &loc, origin)?;
+                        match target {
+                            Some(target) => {
+                                let frame = self.frames.last_mut().expect("frame still live");
+                                frame.locals.insert(*dest, result);
+                                let target = *target;
+                                self.jump(target);
+                            }
+                            None => {
+                                return Err(self.internal_error(
+                                    "a diverging call returned".to_owned(),
+                                    Some((loc, origin)),
+                                ));
+                            }
                         }
                     }
-                }
-                TerminatorKind::Return => {
-                    return Ok(locals
-                        .get(body.return_local())
-                        .cloned()
-                        .unwrap_or(Value::Unit));
-                }
-                // Deferred error: the editor already shows this exact
-                // message as a diagnostic; execution reached it.
-                TerminatorKind::Trap { message, .. } => {
-                    return Err(EvalError {
-                        kind: EvalErrorKind::Trap,
-                        message: message.clone(),
-                        origin: Some((loc.clone(), origin)),
-                    });
-                }
-                TerminatorKind::Unreachable => {
-                    return Err(self.internal_error(
-                        "entered an unreachable block".to_owned(),
-                        Some((loc.clone(), origin)),
-                    ));
+                    other => {
+                        return Err(self.ill_typed("a callable value", &other, &loc, origin));
+                    }
                 }
             }
+            TerminatorKind::Return => {
+                let frame = self.frames.last().expect("frame still live");
+                let value = frame
+                    .locals
+                    .get(body.return_local())
+                    .cloned()
+                    .unwrap_or(Value::Unit);
+                let finished = self.frames.pop().expect("frame still live");
+                match finished.return_to {
+                    None => return Ok(StepEvent::Done(value)),
+                    Some((dest, Some(target))) => {
+                        let caller = self.frames.last_mut().ok_or_else(|| {
+                            // Can't happen: linked frames always have callers.
+                            EvalError {
+                                kind: EvalErrorKind::Runtime,
+                                message: "internal error: a linked frame had no caller — \
+                                          this is a bug in the Must language server"
+                                    .to_owned(),
+                                origin: None,
+                            }
+                        })?;
+                        caller.locals.insert(dest, value);
+                        caller.block = target;
+                        caller.statement = 0;
+                    }
+                    Some((_, None)) => {
+                        return Err(self.internal_error(
+                            "a diverging call returned".to_owned(),
+                            Some((loc, origin)),
+                        ));
+                    }
+                }
+            }
+            // Deferred error: the editor already shows this exact message
+            // as a diagnostic; execution reached it.
+            TerminatorKind::Trap { message, .. } => {
+                return Err(EvalError {
+                    kind: EvalErrorKind::Trap,
+                    message: message.clone(),
+                    origin: Some((loc, origin)),
+                });
+            }
+            TerminatorKind::Unreachable => {
+                return Err(self.internal_error(
+                    "entered an unreachable block".to_owned(),
+                    Some((loc, origin)),
+                ));
+            }
         }
+        Ok(StepEvent::Progress)
+    }
+
+    fn jump(&mut self, target: mir::BlockId) {
+        let frame = self.frames.last_mut().expect("frame still live");
+        frame.block = target;
+        frame.statement = 0;
     }
 
     fn eval_rvalue(
         &mut self,
         loc: &ItemLoc,
         body: &MirBody,
-        locals: &ArenaMap<LocalId, Value>,
         rvalue: &Rvalue,
         origin: ExprId,
     ) -> Result<Value, EvalError> {
         match rvalue {
-            Rvalue::Use(op) => self.eval_operand(loc, body, locals, op, origin),
+            Rvalue::Use(op) => self.eval_operand(loc, body, op, origin),
             Rvalue::BinaryOp(op, l, r) => {
-                let l = self.eval_operand(loc, body, locals, l, origin)?;
-                let r = self.eval_operand(loc, body, locals, r, origin)?;
+                let l = self.eval_operand(loc, body, l, origin)?;
+                let r = self.eval_operand(loc, body, r, origin)?;
                 self.eval_bin_op(*op, l, r, loc, origin)
             }
         }
@@ -336,17 +467,21 @@ impl<'db, M: Mode> Machine<'db, M> {
         &mut self,
         loc: &ItemLoc,
         body: &MirBody,
-        locals: &ArenaMap<LocalId, Value>,
         op: &Operand,
         origin: ExprId,
     ) -> Result<Value, EvalError> {
         match op {
-            Operand::Copy(local) => locals.get(*local).cloned().ok_or_else(|| {
-                self.internal_error(
-                    format!("read of uninitialized {}", local_name(body, *local)),
-                    Some((loc.clone(), origin)),
-                )
-            }),
+            Operand::Copy(local) => self
+                .frames
+                .last()
+                .and_then(|frame| frame.locals.get(*local))
+                .cloned()
+                .ok_or_else(|| {
+                    self.internal_error(
+                        format!("read of uninitialized {}", local_name(body, *local)),
+                        Some((loc.clone(), origin)),
+                    )
+                }),
             Operand::Const(c) => Ok(match c {
                 Const::Unit => Value::Unit,
                 Const::Int(v) => Value::Int(*v),
@@ -362,43 +497,37 @@ impl<'db, M: Mode> Machine<'db, M> {
         }
     }
 
-    fn call(
+    fn builtin_call(
         &mut self,
-        callee: Value,
+        builtin: Builtin,
         args: Vec<Value>,
         loc: &ItemLoc,
         origin: ExprId,
     ) -> Result<Value, EvalError> {
-        match callee {
-            Value::Fn(f) => self.eval_body(&f.item, f.body, args),
-            Value::Builtin(builtin) => {
-                let [arg] = args.as_slice() else {
-                    return Err(self.internal_error(
-                        format!("builtin `{}` takes 1 argument", builtin.name()),
-                        Some((loc.clone(), origin)),
-                    ));
-                };
-                let Value::Str(text) = arg else {
-                    return Err(self.ill_typed("a `str` argument", arg, loc, origin));
-                };
-                match builtin {
-                    Builtin::Panic => Err(EvalError {
-                        kind: EvalErrorKind::Panic,
-                        message: text.clone(),
-                        origin: Some((loc.clone(), origin)),
-                    }),
-                    Builtin::Print if self.const_depth > 0 => Err(EvalError {
-                        kind: EvalErrorKind::NotConst,
-                        message: "cannot call `print` at compile time".to_owned(),
-                        origin: Some((loc.clone(), origin)),
-                    }),
-                    Builtin::Print => {
-                        self.mode.print(text)?;
-                        Ok(Value::Unit)
-                    }
-                }
+        let [arg] = args.as_slice() else {
+            return Err(self.internal_error(
+                format!("builtin `{}` takes 1 argument", builtin.name()),
+                Some((loc.clone(), origin)),
+            ));
+        };
+        let Value::Str(text) = arg else {
+            return Err(self.ill_typed("a `str` argument", arg, loc, origin));
+        };
+        match builtin {
+            Builtin::Panic => Err(EvalError {
+                kind: EvalErrorKind::Panic,
+                message: text.clone(),
+                origin: Some((loc.clone(), origin)),
+            }),
+            Builtin::Print if self.const_depth > 0 => Err(EvalError {
+                kind: EvalErrorKind::NotConst,
+                message: "cannot call `print` at compile time".to_owned(),
+                origin: Some((loc.clone(), origin)),
+            }),
+            Builtin::Print => {
+                self.mode.print(text)?;
+                Ok(Value::Unit)
             }
-            other => Err(self.ill_typed("a callable value", &other, loc, origin)),
         }
     }
 

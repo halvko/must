@@ -19,7 +19,7 @@ use base_db::Db;
 use hir::{Builtin, ExprId, ItemId, ItemLoc};
 use mir::BodyId;
 
-pub use machine::{ConstMode, Machine, Mode, RunMode};
+pub use machine::{ConstMode, Frame, Machine, Mode, RunMode, StepEvent};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
