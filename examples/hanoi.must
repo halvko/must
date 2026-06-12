@@ -1,0 +1,9 @@
+// Towers of Hanoi, counting moves: moves(n) = 2 * moves(n - 1) + 1,
+// which works out to 2^n - 1.
+//
+// Run: must-lsp run examples/hanoi.must -e 'moves(10)'    (=> 1023)
+// Run: must-lsp run examples/hanoi.must -e 'moves(20)'    (=> 1048575)
+
+static moves: fn(usize) -> usize = fn(n: usize) -> usize {
+    if n == 0 { 0 } else { 2 * moves(n - 1) + 1 }
+}

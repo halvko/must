@@ -1,0 +1,30 @@
+// FizzBuzz, Must style: `classify` selects one of four strings (there is
+// no string concatenation or number formatting, so plain numbers print
+// as "-"). `run_upto` is the recursive stand-in for a for-loop.
+//
+// Run: must-lsp run examples/fizzbuzz.must
+
+static rem: fn(usize, usize) -> usize = fn(a: usize, b: usize) -> usize {
+    a - (a / b) * b
+}
+
+static classify: fn(usize) -> str = fn(n: usize) -> str {
+    if rem(n, 15) == 0 {
+        "fizzbuzz"
+    } else if rem(n, 3) == 0 {
+        "fizz"
+    } else if rem(n, 5) == 0 {
+        "buzz"
+    } else {
+        "-"
+    }
+}
+
+static run_upto: fn(usize, usize) -> () = fn(i: usize, n: usize) -> () {
+    print(classify(i));
+    if i < n { run_upto(i + 1, n) }
+}
+
+static main: fn() -> () = fn() -> () {
+    run_upto(1, 15);
+}

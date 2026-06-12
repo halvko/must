@@ -1,0 +1,13 @@
+// Euclid's algorithm. Must has no `%` operator, so the remainder is
+// derived from integer division: a - (a / b) * b.
+//
+// Run: must-lsp run examples/gcd.must -e 'gcd(1071, 462)'    (=> 21)
+// Run: must-lsp run examples/gcd.must -e 'gcd(35, 64)'       (=> 1)
+
+static rem: fn(usize, usize) -> usize = fn(a: usize, b: usize) -> usize {
+    a - (a / b) * b
+}
+
+static gcd: fn(usize, usize) -> usize = fn(a: usize, b: usize) -> usize {
+    if b == 0 { a } else { gcd(b, rem(a, b)) }
+}

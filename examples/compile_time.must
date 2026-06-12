@@ -1,0 +1,17 @@
+// Statics are evaluated at COMPILE time — hover any of these names in an
+// editor and the LSP shows the computed value (e.g. `seconds_per_day:
+// usize = 86400`). Even the call to `double` runs during compilation.
+//
+// Run: must-lsp run examples/compile_time.must -e 'fortnight_seconds'    (=> 1209600)
+// Run: must-lsp run examples/compile_time.must -e 'is_big'              (=> true)
+
+// Computed initializers used from other items need a type annotation.
+static seconds_per_day: usize = 60 * 60 * 24;
+
+static double: fn(usize) -> usize = fn(n: usize) -> usize {
+    n + n
+}
+
+static fortnight_seconds: usize = double(seconds_per_day) * 7;
+
+static is_big: bool = fortnight_seconds > 1_000_000;
