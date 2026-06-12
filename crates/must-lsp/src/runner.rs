@@ -63,6 +63,43 @@ pub fn evaluate(
     let entry_end = entry_start + entry_item.len();
     let file = SourceFile::new(&db, path.to_owned(), full);
 
+    // The entry is the last item named `ENTRY_NAME` that starts at or after
+    // the injection point; the position test keeps a user static of the
+    // same name from hijacking `-e`. Finding none means the end of the
+    // user's file ate the injected item (an unterminated string swallows
+    // everything after it), and the honest report is the file's own syntax
+    // error, not a complaint about the entry expression.
+    let entry = hir::file_item_ids(&db, file)
+        .iter()
+        .copied()
+        .filter(|item| {
+            item.name(&db) == ENTRY_NAME
+                && hir::item_source(&db, *item).is_some_and(|src| {
+                    usize::from(src.syntax().text_range().start()) >= entry_start
+                })
+        })
+        .last();
+    let Some(entry) = entry else {
+        let parse = base_db::parse(&db, file);
+        if let Some(err) = parse
+            .errors()
+            .iter()
+            .rev()
+            .find(|err| usize::from(err.range.start()) <= original_len)
+        {
+            let line_col = LineIndex::new(file.text(&db)).line_col(err.range.start());
+            return Err(format!(
+                "error: cannot evaluate the entry expression: \
+                 the file has a syntax error that swallows the end of the file\n  \
+                 --> {path}:{}:{}: {}",
+                line_col.line + 1,
+                line_col.col + 1,
+                err.message
+            ));
+        }
+        return Err("error: invalid entry expression".to_owned());
+    };
+
     // The program may be arbitrarily broken — that's the point — but the
     // *entry expression* must at least parse, or running it means nothing.
     if let Some(err) = base_db::parse(&db, file)
@@ -75,17 +112,6 @@ pub fn evaluate(
     {
         return Err(format!("error: invalid entry expression: {}", err.message));
     }
-
-    // The entry is the appended item, picked by position so a user static
-    // that happens to share the name can't hijack `-e`.
-    let Some(&entry) = hir::file_item_ids(&db, file).iter().find(|&&item| {
-        item.name(&db) == ENTRY_NAME
-            && hir::item_source(&db, item).is_some_and(|src| {
-                usize::from(src.syntax().text_range().start()) >= entry_start
-            })
-    }) else {
-        return Err("error: invalid entry expression".to_owned());
-    };
 
     let mut machine = Machine::new(&db, RunMode { out });
     match machine.eval_root(hir::item_loc(&db, entry)) {
@@ -100,7 +126,7 @@ pub fn evaluate(
                 EvalErrorKind::NotConst => "error",
             };
             let mut rendered = format!("{prefix}: {}", err.message);
-            if let Some(location) = locate(&db, file, path, err.origin) {
+            if let Some(location) = locate(&db, file, path, original_len, err.origin) {
                 rendered.push_str(&format!("\n  --> {location}"));
             }
             Err(rendered)
@@ -112,6 +138,7 @@ fn locate(
     db: &RootDatabase,
     file: SourceFile,
     path: &str,
+    original_len: usize,
     origin: Option<(hir::ItemLoc, hir::ExprId)>,
 ) -> Option<String> {
     let (loc, expr) = origin?;
@@ -119,6 +146,11 @@ fn locate(
     let item = loc.to_id(db)?;
     let (_, source_map) = hir::body_with_source_map(db, item);
     let range = source_map.node_for_expr(expr)?.text_range();
+    // The synthetic entry line isn't part of the user's file; a location
+    // there would point past its end.
+    if usize::from(range.start()) > original_len {
+        return Some("entry expression".to_owned());
+    }
     let line_col = LineIndex::new(file.text(db)).line_col(range.start());
     Some(format!(
         "{path}:{}:{}",
@@ -205,6 +237,32 @@ static checked_div = fn (a: usize, b: usize) -> usize {
             expect_test::expect![[r#"
                 panicked: divide by zero
                   --> test.must:3:17
+            "#]],
+        );
+    }
+
+    #[test]
+    fn unterminated_string_is_blamed_not_the_entry_expression() {
+        // The unterminated string swallows the injected entry item; the
+        // report must point at the file's own syntax error.
+        check(
+            "static s = \"oops;\nstatic main = fn { print(s); };",
+            "main()",
+            expect_test::expect![[r#"
+                error: cannot evaluate the entry expression: the file has a syntax error that swallows the end of the file
+                  --> test.must:1:12: unterminated string
+            "#]],
+        );
+    }
+
+    #[test]
+    fn errors_in_the_entry_expression_do_not_get_a_synthetic_location() {
+        check(
+            "static main = fn {};",
+            r#"panic("from the entry")"#,
+            expect_test::expect![[r#"
+                panicked: from the entry
+                  --> entry expression
             "#]],
         );
     }
