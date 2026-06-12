@@ -61,7 +61,9 @@ pub struct Machine<'db, M> {
     pub mode: M,
     /// Items currently being forced (cycle detection), innermost last.
     forcing: Vec<ItemLoc>,
-    forced: FxHashMap<ItemLoc, Value>,
+    /// Memoized const values — failures too, or a failing item would be
+    /// re-evaluated at every use site.
+    forced: FxHashMap<ItemLoc, Result<Value, EvalError>>,
     /// > 0 while inside a static initializer: the const context marker.
     const_depth: usize,
     const_fuel: u64,
@@ -93,8 +95,8 @@ impl<'db, M: Mode> Machine<'db, M> {
     /// The (memoized) const value of a top-level item. Always a const
     /// context, whichever mode drives the machine.
     pub fn force_item(&mut self, loc: ItemLoc) -> Result<Value, EvalError> {
-        if let Some(value) = self.forced.get(&loc) {
-            return Ok(value.clone());
+        if let Some(result) = self.forced.get(&loc) {
+            return result.clone();
         }
         if self.forcing.contains(&loc) {
             return Err(EvalError {
@@ -108,12 +110,16 @@ impl<'db, M: Mode> Machine<'db, M> {
         }
         self.forcing.push(loc);
         self.const_depth += 1;
+        // Each item gets its own fuel budget: `const_value(B)` must give the
+        // same answer whether B is queried directly or forced from inside
+        // another item's evaluation (and the editor and the runner must
+        // agree). Total work stays bounded: items × CONST_FUEL.
+        let outer_fuel = std::mem::replace(&mut self.const_fuel, CONST_FUEL);
         let result = self.eval_root(loc);
+        self.const_fuel = outer_fuel;
         self.const_depth -= 1;
         self.forcing.pop();
-        if let Ok(value) = &result {
-            self.forced.insert(loc, value.clone());
-        }
+        self.forced.insert(loc, result.clone());
         result
     }
 
@@ -159,9 +165,16 @@ impl<'db, M: Mode> Machine<'db, M> {
         args: Vec<Value>,
     ) -> Result<Value, EvalError> {
         if self.frames > MAX_FRAMES {
+            // In a const context this is a const error; in run-mode code
+            // it's an ordinary stack overflow, not the program's fault for
+            // being non-const.
             return Err(EvalError {
-                kind: EvalErrorKind::NotConst,
-                message: format!("recursion exceeded {MAX_FRAMES} frames"),
+                kind: if self.const_depth > 0 {
+                    EvalErrorKind::NotConst
+                } else {
+                    EvalErrorKind::Runtime
+                },
+                message: format!("stack overflow: recursion exceeded {MAX_FRAMES} frames"),
                 origin: root_origin(self.db, loc),
             });
         }

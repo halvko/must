@@ -424,6 +424,46 @@ fn missing_operand_traps() {
 }
 
 #[test]
+fn annotation_recovered_never_does_not_make_a_returning_call_diverge() {
+    // Inference recovers `g()` as `!` (trusting the annotation); the call
+    // must still get a return target — the mismatch is the trap after it.
+    check_mir(
+        r#"
+static g = fn () -> usize { 1 }
+static f: ! = g();
+"#,
+        expect![[r#"
+            item g:
+            fn b0() -> usize {
+              _0: usize  // return
+              bb0:
+                _0 = 1
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item f:
+            fn b0() -> ! {
+              _0: !  // return
+              _1: !
+              _2: !
+              bb0:
+                _1 = call item g() -> bb1
+              bb1:
+                _2 = trap "type mismatch: expected `!`, found `usize`" -> bb2
+              bb2:
+                _0 = _2
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
 fn use_of_unannotated_item_traps_with_the_annotation_message() {
     check_mir(
         r#"

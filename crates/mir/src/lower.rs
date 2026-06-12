@@ -151,9 +151,18 @@ impl LowerCtx<'_> {
                 if let Some(message) = self.call_traps.get(&expr).cloned() {
                     return self.trap(b, expr, message);
                 }
-                let ty = self.ty(expr);
-                let diverges = ty == Ty::Never;
-                let dest = b.temp(ty);
+                // Divergence comes from the *callee's* signature, not the
+                // call expression's type: inference recovers a mismatch with
+                // the expected type ("trust the annotation"), so e.g.
+                // `static f: ! = g();` types the call as `!` even though `g`
+                // returns — emitting `target: None` from that would make a
+                // returning call an internal error at runtime. The value
+                // trap planted after the call handles the mismatch.
+                let diverges = matches!(
+                    self.ty(*callee),
+                    Ty::Fn(f) if f.ret == Ty::Never
+                );
+                let dest = b.temp(self.ty(expr));
                 let next = b.new_block();
                 b.terminate(
                     TerminatorKind::Call {
