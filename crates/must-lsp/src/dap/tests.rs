@@ -194,6 +194,8 @@ fn breakpoint_hit_inspect_and_resume() {
         ("scopes", json!({ "frameId": 3 })),
         ("variables", json!({ "variablesReference": 3 })),
         ("evaluate", json!({ "expression": "n", "frameId": 3 })),
+        ("evaluate", json!({ "expression": "n + 1", "frameId": 3 })),
+        ("evaluate", json!({ "expression": "double(n) == 42", "frameId": 3 })),
         ("evaluate", json!({ "expression": "double(4)" })),
         ("next", json!({ "threadId": 1 })),
         ("variables", json!({ "variablesReference": 3 })),
@@ -225,10 +227,13 @@ fn breakpoint_hit_inspect_and_resume() {
     assert_eq!(vars[0]["name"], "n");
     assert_eq!(vars[0]["value"], "21");
 
-    // Console: a local by name, and a real expression in file scope.
+    // Console: a local by name, compound expressions over frame locals
+    // (the whole point), and a plain file-scope expression.
     let evals = responses_for(&messages, "evaluate");
     assert_eq!(evals[0]["body"]["result"], "21");
-    assert_eq!(evals[1]["body"]["result"], "8");
+    assert_eq!(evals[1]["body"]["result"], "22");
+    assert_eq!(evals[2]["body"]["result"], "true");
+    assert_eq!(evals[3]["body"]["result"], "8");
 
     // After step-over, `twice` exists.
     let vars_after = &responses_for(&messages, "variables")[1]["body"]["variables"];

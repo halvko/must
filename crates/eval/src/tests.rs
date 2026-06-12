@@ -321,7 +321,7 @@ static entrypoint = (main(20));
     assert_eq!(machine.frames().len(), 2);
     assert_eq!(
         machine.frame_named_locals(1),
-        vec![("n".to_owned(), Value::Int(20))]
+        vec![("n".to_owned(), hir::Ty::Int, Value::Int(20))]
     );
     assert_eq!(
         machine.frame_origin(1),
@@ -354,8 +354,8 @@ static entrypoint = (main(20));
     assert_eq!(
         machine.frame_named_locals(1),
         vec![
-            ("n".to_owned(), Value::Int(20)),
-            ("doubled".to_owned(), Value::Int(42))
+            ("n".to_owned(), hir::Ty::Int, Value::Int(20)),
+            ("doubled".to_owned(), hir::Ty::Int, Value::Int(42))
         ]
     );
     assert!(matches!(machine.step(), Ok(StepEvent::Progress))); // ret = doubled
