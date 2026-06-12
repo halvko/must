@@ -16,7 +16,14 @@ impl TaskPool {
                 .name(format!("must-lsp-worker-{i}"))
                 .spawn(move || {
                     while let Ok(task) = receiver.recv() {
-                        task();
+                        // A panicking task must not kill the worker: with a
+                        // fixed pool, dead workers silently shrink it until
+                        // the server stops answering anything. Request
+                        // handlers additionally answer `InternalError`
+                        // themselves (see `spawn_request`).
+                        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)).is_err() {
+                            tracing::error!("worker task panicked");
+                        }
                     }
                 })
                 .expect("failed to spawn worker thread");

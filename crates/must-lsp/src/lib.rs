@@ -14,7 +14,7 @@ mod to_proto;
 
 use std::collections::HashMap;
 use std::error::Error;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use base_db::SourceFile;
 use ide::AnalysisHost;
@@ -63,6 +63,12 @@ struct GlobalState {
     files: Arc<FileMaps>,
     sender: crossbeam_channel::Sender<Message>,
     pool: pool::TaskPool,
+    /// Per-document publish generation. didClose doesn't bump the salsa
+    /// revision, so an in-flight diagnostics task survives it and would
+    /// republish stale squiggles after the close (or after a reopen with
+    /// different text). Each task captures its generation and drops itself
+    /// at send time if a newer one exists.
+    diagnostics_generation: Arc<Mutex<HashMap<lsp_types::Uri, u64>>>,
 }
 
 #[derive(Default, Clone)]
@@ -84,6 +90,7 @@ impl GlobalState {
             files: Arc::new(FileMaps::default()),
             sender: connection.sender.clone(),
             pool: pool::TaskPool::new(2),
+            diagnostics_generation: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -167,9 +174,20 @@ impl GlobalState {
         let snapshot = self.snapshot();
         let sender = self.sender.clone();
         self.pool.spawn(move || {
-            let resp = match cancellable(|| handler(&snapshot, params)) {
-                Some(value) => Response::new_ok(id, value),
-                None => content_modified(id),
+            // Every request id gets exactly one response, panics included —
+            // a swallowed id hangs that request in the client forever.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                cancellable(|| handler(&snapshot, params))
+            }));
+            let resp = match outcome {
+                Ok(Some(value)) => Response::new_ok(id, value),
+                Ok(None) => content_modified(id),
+                Err(_) => Response::new_err(
+                    id,
+                    ErrorCode::InternalError as i32,
+                    "request handler panicked — this is a bug in the Must language server"
+                        .to_owned(),
+                ),
             };
             let _ = sender.send(resp.into());
         });
@@ -182,7 +200,7 @@ impl GlobalState {
                     serde_json::from_value(not.params)?;
                 let doc = params.text_document;
                 let file = self.set_file_text(doc.uri.clone(), doc.text);
-                self.publish_diagnostics(doc.uri, file);
+                self.publish_diagnostics(doc.uri, file, doc.version);
             }
             DidChangeTextDocument::METHOD => {
                 let mut params: lsp_types::DidChangeTextDocumentParams =
@@ -193,7 +211,7 @@ impl GlobalState {
                 };
                 let uri = params.text_document.uri;
                 let file = self.set_file_text(uri.clone(), change.text);
-                self.publish_diagnostics(uri, file);
+                self.publish_diagnostics(uri, file, params.text_document.version);
             }
             DidCloseTextDocument::METHOD => {
                 let params: lsp_types::DidCloseTextDocumentParams =
@@ -205,6 +223,9 @@ impl GlobalState {
                 if let Some(file) = maps.by_uri.remove(&uri) {
                     maps.by_file.remove(&file);
                 }
+                // Invalidate in-flight publishes before clearing, or a slow
+                // task can resurrect squiggles on the closed document.
+                self.bump_generation(&uri);
                 self.send_diagnostics(uri, Vec::new())?;
             }
             _ => tracing::debug!(method = %not.method, "unhandled notification"),
@@ -233,7 +254,16 @@ impl GlobalState {
         }
     }
 
-    fn publish_diagnostics(&self, uri: lsp_types::Uri, file: SourceFile) {
+    fn bump_generation(&self, uri: &lsp_types::Uri) -> u64 {
+        let mut generations = self.diagnostics_generation.lock().unwrap();
+        let generation = generations.entry(uri.clone()).or_insert(0);
+        *generation += 1;
+        *generation
+    }
+
+    fn publish_diagnostics(&self, uri: lsp_types::Uri, file: SourceFile, version: i32) {
+        let generation = self.bump_generation(&uri);
+        let generations = Arc::clone(&self.diagnostics_generation);
         let snapshot = self.snapshot();
         let sender = self.sender.clone();
         self.pool.spawn(move || {
@@ -247,15 +277,23 @@ impl GlobalState {
                     .collect::<Vec<_>>()
             });
             // Cancelled: a newer revision exists and will publish instead.
-            if let Some(diagnostics) = diagnostics {
-                let params = lsp_types::PublishDiagnosticsParams {
-                    uri,
-                    diagnostics,
-                    version: None,
-                };
-                let _ = sender
-                    .send(Notification::new(PublishDiagnostics::METHOD.to_owned(), params).into());
+            let Some(diagnostics) = diagnostics else {
+                return;
+            };
+            // Superseded while computing (close, reopen): drop, don't
+            // resurrect.
+            if generations.lock().unwrap().get(&uri) != Some(&generation) {
+                return;
             }
+            let params = lsp_types::PublishDiagnosticsParams {
+                uri,
+                diagnostics,
+                // The client uses this to discard publishes that arrive
+                // after the document moved on.
+                version: Some(version),
+            };
+            let _ = sender
+                .send(Notification::new(PublishDiagnostics::METHOD.to_owned(), params).into());
         });
     }
 

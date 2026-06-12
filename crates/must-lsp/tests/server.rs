@@ -309,6 +309,56 @@ fn semantic_tokens_over_protocol() {
 }
 
 #[test]
+fn out_of_range_positions_are_clamped_not_fatal() {
+    let mut client = TestClient::start();
+    let file = uri("file:///clamp.must");
+
+    client.open(&file, "static main = fn { print(\"hi\"); };\n");
+    client.next_diagnostics();
+
+    // Columns past the end of the line (and lines past EOF) are legal
+    // client input; the server must answer, not die.
+    for position in [
+        lsp_types::Position::new(0, 9999),
+        lsp_types::Position::new(9999, 0),
+    ] {
+        let _ = client.request::<lsp_types::request::HoverRequest>(lsp_types::HoverParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+                position,
+            },
+            work_done_progress_params: Default::default(),
+        });
+    }
+
+    // And the server is still alive for real work afterwards.
+    let response = client.request::<lsp_types::request::HoverRequest>(lsp_types::HoverParams {
+        text_document_position_params: lsp_types::TextDocumentPositionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+            position: lsp_types::Position::new(0, 7),
+        },
+        work_done_progress_params: Default::default(),
+    });
+    assert!(response.is_some(), "server should still answer hovers");
+
+    drop(client);
+}
+
+#[test]
+fn diagnostics_carry_the_document_version() {
+    let client = TestClient::start();
+    let file = uri("file:///versioned.must");
+
+    client.open(&file, "static = 1;");
+    assert_eq!(client.next_diagnostics().version, Some(0));
+
+    client.change(&file, 7, "static x = 1;");
+    assert_eq!(client.next_diagnostics().version, Some(7));
+
+    drop(client);
+}
+
+#[test]
 fn close_clears_diagnostics() {
     let client = TestClient::start();
     let file = uri("file:///broken.must");
