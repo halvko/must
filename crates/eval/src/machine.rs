@@ -150,17 +150,8 @@ impl<'db, M: Mode> Machine<'db, M> {
     /// is legal).
     pub fn eval_root(&mut self, loc: &ItemLoc) -> Result<Value, EvalError> {
         self.start(loc)?;
-        loop {
-            match self.step() {
-                Ok(StepEvent::Progress) => {}
-                Ok(StepEvent::Done(value)) => return Ok(value),
-                Err(err) => {
-                    // Run-to-completion callers don't inspect crash state.
-                    self.frames.clear();
-                    return Err(err);
-                }
-            }
-        }
+        // Run-to-completion callers don't inspect crash state.
+        self.run_to_done()
     }
 
     /// Push the bottom frame of an execution without running it — the
@@ -196,9 +187,10 @@ impl<'db, M: Mode> Machine<'db, M> {
         Some((frame.loc.clone(), origin))
     }
 
-    /// The user-named locals of a frame that currently hold values, in
-    /// declaration order.
-    pub fn frame_named_locals(&self, index: usize) -> Vec<(String, Value)> {
+    /// The user-named locals of a frame that currently hold values, with
+    /// their declared MIR types, in declaration order (shadowing repeats a
+    /// name; later wins).
+    pub fn frame_named_locals(&self, index: usize) -> Vec<(String, hir::Ty, Value)> {
         let Some(frame) = self.frames.get(index) else {
             return Vec::new();
         };
@@ -208,9 +200,35 @@ impl<'db, M: Mode> Machine<'db, M> {
             .filter_map(|(id, data)| {
                 let name = data.name.clone()?;
                 let value = frame.locals.get(id)?.clone();
-                Some((name, value))
+                Some((name, data.ty.clone(), value))
             })
             .collect()
+    }
+
+    /// Call a function value with already-evaluated arguments, to
+    /// completion, on its own stack — the paused frames are untouched. The
+    /// debug console's evaluate uses this to run expressions against a
+    /// frame's locals.
+    pub fn call_value(&mut self, f: FnValue, args: Vec<Value>) -> Result<Value, EvalError> {
+        let saved = std::mem::take(&mut self.frames);
+        let result = self
+            .push_frame(f.item, f.body, args, None)
+            .and_then(|()| self.run_to_done());
+        self.frames = saved;
+        result
+    }
+
+    fn run_to_done(&mut self) -> Result<Value, EvalError> {
+        loop {
+            match self.step() {
+                Ok(StepEvent::Progress) => {}
+                Ok(StepEvent::Done(value)) => return Ok(value),
+                Err(err) => {
+                    self.frames.clear();
+                    return Err(err);
+                }
+            }
+        }
     }
 
     fn lowered(&self, loc: &ItemLoc) -> &'db MirLowered {

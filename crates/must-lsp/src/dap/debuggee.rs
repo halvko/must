@@ -179,12 +179,24 @@ impl<W: Write> Debuggee<W> {
         let Ok(index) = usize::try_from(frame_id - 1) else {
             return Vec::new();
         };
-        self.machine.frame_named_locals(index)
+        self.machine
+            .frame_named_locals(index)
+            .into_iter()
+            .map(|(name, _, value)| (name, value))
+            .collect()
     }
 
-    /// Console evaluation: a bare name reads the selected frame's locals;
-    /// anything else evaluates as an expression in file scope (side effects
-    /// included — it's a repl).
+    /// Console evaluation, against the selected frame: a bare name reads a
+    /// local directly; any other expression is wrapped in a synthetic fn
+    /// whose parameters are the frame's locals, which the machine then
+    /// calls with the actual runtime values — so `n + 1` works while paused
+    /// inside a frame that has `n`. Side effects included; it's a repl.
+    ///
+    /// This is read-only by construction: the values are *copied in*. When
+    /// the language gains assignment, console mutation (`n = 21`) needs the
+    /// values copied back out — sound as in-place mutation for as long as
+    /// Must values stay value-semantic (no reference identity), after which
+    /// eval frames must genuinely alias the paused frame's slots.
     pub(crate) fn evaluate(
         &mut self,
         expression: &str,
@@ -192,22 +204,48 @@ impl<W: Write> Debuggee<W> {
         console: W,
     ) -> Result<String, String> {
         let expression = expression.trim();
+        let top = self.machine.frames().len() as i64;
+        let frame_index = usize::try_from(frame_id.unwrap_or(top) - 1).unwrap_or(0);
+
+        // Innermost shadow wins, so later occurrences replace earlier ones;
+        // locals whose type can't be written as an annotation (error,
+        // unresolved inference) can't become parameters and are dropped.
+        let mut locals: Vec<(String, hir::Ty, Value)> = Vec::new();
+        for (name, ty, value) in self.machine.frame_named_locals(frame_index) {
+            locals.retain(|(existing, _, _)| existing != &name);
+            if matches!(
+                ty,
+                hir::Ty::Unit | hir::Ty::Int | hir::Ty::Str | hir::Ty::Bool | hir::Ty::Fn(_)
+            ) {
+                locals.push((name, ty, value));
+            }
+        }
+
         if is_name(expression) {
-            let top = self.machine.frames().len() as i64;
-            let frame = frame_id.unwrap_or(top);
-            // Last match wins: declaration order means the innermost shadow.
-            if let Some((_, value)) = self
-                .locals(frame)
-                .into_iter()
-                .rev()
-                .find(|(name, _)| name == expression)
-            {
+            if let Some((_, _, value)) = locals.iter().find(|(name, _, _)| name == expression) {
                 return Ok(value.display());
             }
         }
-        let prepared = runner::prepare(self.db, &self.text, &self.path, expression)?;
+
+        let params = locals
+            .iter()
+            .map(|(name, ty, _)| format!("{name}: {}", ty.display()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let args: Vec<Value> = locals.into_iter().map(|(_, _, value)| value).collect();
+        // The newline keeps a trailing line comment in the expression from
+        // eating the closing brace.
+        let wrapped = format!("fn ({params}) {{ {expression}\n}}");
+        let prepared = runner::prepare(self.db, &self.text, &self.path, &wrapped)?;
+
         let mut machine = Machine::new(self.db, RunMode { out: console });
-        match machine.eval_root(&prepared.entry) {
+        let result = machine
+            .eval_root(&prepared.entry)
+            .and_then(|fn_value| match fn_value {
+                Value::Fn(f) => machine.call_value(f, args),
+                other => Ok(other),
+            });
+        match result {
             Ok(value) => Ok(value.display()),
             Err(err) => Err(self.render_error(&err)),
         }

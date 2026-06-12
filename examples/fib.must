@@ -4,5 +4,9 @@
 // Run: must-lsp run examples/fib.must -e 'fib(20)'    (=> 6765)
 
 static fib: fn(usize) -> usize = fn(n: usize) -> usize {
-    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }
+    if n < 2 {
+        n
+    } else {
+        fib(n - 1) + fib(n - 2)
+    }
 }
