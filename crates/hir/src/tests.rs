@@ -6,7 +6,14 @@ fn check_diagnostics(text: &str, expect: Expect) {
     let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
     let rendered = crate::file_diagnostics(&db, file)
         .into_iter()
-        .map(|d| format!("{:?}: {}\n", d.range, d.message))
+        .map(|d| {
+            let related = d
+                .related
+                .iter()
+                .map(|r| format!(" ({} at {:?})", r.message, r.range))
+                .collect::<String>();
+            format!("{:?}: {}{related}\n", d.range, d.message)
+        })
         .collect::<String>();
     expect.assert_eq(&rendered);
 }
@@ -301,6 +308,41 @@ static f = fn {
 "#,
         expect![[r#"
             65..70: unresolved name `inner`
+        "#]],
+    );
+}
+
+#[test]
+fn duplicate_definition_diagnosed_on_the_later_one() {
+    check_diagnostics(
+        r#"
+static name = 42 + 52;
+
+static name = fn {
+    let v = name;
+}
+"#,
+        expect![[r#"
+            32..36: `name` is defined multiple times (first defined here at 8..12)
+        "#]],
+    );
+}
+
+#[test]
+fn uses_of_a_duplicated_name_infer_as_error() {
+    check_infer(
+        r#"
+static name = 1;
+static name = fn {
+    let v = name;
+};
+"#,
+        expect![[r#"
+            15..16 '1': usize
+            32..56 'fn {     let v = ...': fn()
+            35..56 '{     let v = nam...': ()
+            45..46 'v': {error}
+            49..53 'name': {error}
         "#]],
     );
 }

@@ -11,7 +11,7 @@ use ena::unify::InPlaceUnificationTable;
 use la_arena::ArenaMap;
 
 use crate::body::{Body, BindingId, ExprData, ExprId, LiteralData, Stmt, body};
-use crate::scopes::{Builtin, Resolution, resolutions};
+use crate::scopes::{Builtin, Resolution, duplicated_names, resolutions};
 use crate::ty::{Ty, TyVar, TyVarValue, lower_type_ref, signature};
 use crate::{ItemId, item_loc};
 use crate::item_tree::item_tree;
@@ -52,6 +52,7 @@ pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
         db,
         body,
         resolutions: resolutions(db, item),
+        duplicated_names: duplicated_names(db, item.file(db)),
         table: InPlaceUnificationTable::new(),
         result: InferenceResult::default(),
     };
@@ -74,6 +75,7 @@ struct InferCtx<'db> {
     db: &'db dyn Db,
     body: &'db Body,
     resolutions: &'db ArenaMap<ExprId, Resolution>,
+    duplicated_names: &'db rustc_hash::FxHashSet<String>,
     table: InPlaceUnificationTable<TyVar>,
     result: InferenceResult,
 }
@@ -115,13 +117,18 @@ impl InferCtx<'_> {
             ExprData::Missing => Ty::Error,
             ExprData::Literal(LiteralData::Int(_)) => Ty::Int,
             ExprData::Literal(LiteralData::Str(_)) => Ty::Str,
-            ExprData::NameRef(_) => match self.resolutions.get(expr) {
+            ExprData::NameRef(name) => match self.resolutions.get(expr) {
                 Some(&Resolution::Local(binding)) => self
                     .result
                     .type_of_binding
                     .get(binding)
                     .cloned()
                     .unwrap_or(Ty::Error),
+                // An ambiguously-defined name has no one signature a use
+                // could take on; the silent error type keeps downstream
+                // checks quiet (the duplicate definition carries the
+                // diagnostic).
+                Some(&Resolution::Item(_)) if self.duplicated_names.contains(name) => Ty::Error,
                 Some(&Resolution::Item(loc)) => match loc.to_id(self.db) {
                     Some(item) => signature(self.db, item),
                     None => Ty::Error,

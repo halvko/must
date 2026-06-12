@@ -16,11 +16,14 @@ mod tests;
 
 use base_db::{Db, SourceFile, parse};
 use syntax::TextRange;
+use syntax::ast::AstNode as _;
 
 pub use body::{Body, BodySourceMap, ExprId, BindingId, body_with_source_map};
 pub use infer::{InferenceDiagnostic, InferenceResult};
 pub use item_tree::{ItemTree, TypeRef, item_source};
-pub use scopes::{Builtin, ExprScopes, Resolution, expr_scopes, file_scope, resolutions};
+pub use scopes::{
+    Builtin, ExprScopes, Resolution, duplicated_names, expr_scopes, file_scope, resolutions,
+};
 pub use ty::{FnTy, Ty, signature};
 
 /// Stable identity of a top-level item: survives edits to other items,
@@ -82,6 +85,15 @@ pub struct Diagnostic {
     pub range: TextRange,
     pub message: String,
     pub fix: Option<syntax::Fix>,
+    /// Other locations that explain this diagnostic (e.g. "first defined
+    /// here" on a duplicate definition). Same file for now.
+    pub related: Vec<RelatedInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelatedInfo {
+    pub range: TextRange,
+    pub message: String,
 }
 
 /// All semantic diagnostics for a file. This is the one place that converts
@@ -94,8 +106,36 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             range: err.range,
             message: err.message.clone(),
             fix: err.fix.clone(),
+            related: Vec::new(),
         })
         .collect();
+
+    // Duplicate definitions: error on every declaration after the first,
+    // pointing back at it. (References to the name resolve first-wins and
+    // infer as `!`; see `duplicated_names`.)
+    let mut first_def: rustc_hash::FxHashMap<String, TextRange> = Default::default();
+    for item in parse(db, file).tree().items() {
+        let Some(name) = item.name() else {
+            continue;
+        };
+        let range = name.syntax().text_range();
+        match first_def.entry(name.text()) {
+            std::collections::hash_map::Entry::Occupied(first) => {
+                diagnostics.push(Diagnostic {
+                    range,
+                    message: format!("`{}` is defined multiple times", first.key()),
+                    fix: None,
+                    related: vec![RelatedInfo {
+                        range: *first.get(),
+                        message: "first defined here".to_owned(),
+                    }],
+                });
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(range);
+            }
+        }
+    }
 
     for &item in file_item_ids(db, file) {
         let (body, source_map) = body_with_source_map(db, item);
@@ -112,6 +152,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     range: ptr.text_range(),
                     message: format!("unresolved name `{name}`"),
                     fix: None,
+                    related: Vec::new(),
                 });
             }
         }
@@ -150,6 +191,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 range: ptr.text_range(),
                 message,
                 fix: None,
+                related: Vec::new(),
             });
         }
     }

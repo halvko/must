@@ -240,6 +240,30 @@ fn quick_fix_wraps_fn_body_in_braces() {
 }
 
 #[test]
+fn duplicate_definition_links_to_the_first_one() {
+    let client = TestClient::start();
+    let file = uri("file:///dup.must");
+
+    client.open(&file, "static name = 1;\nstatic name = 2;\n");
+    let diags = client.next_diagnostics();
+    assert_eq!(diags.diagnostics.len(), 1);
+    let diag = &diags.diagnostics[0];
+    assert_eq!(diag.message, "`name` is defined multiple times");
+    // On the second definition's name...
+    assert_eq!(diag.range.start, lsp_types::Position::new(1, 7));
+    assert_eq!(diag.range.end, lsp_types::Position::new(1, 11));
+    // ...with a clickable pointer back to the first.
+    let related = diag.related_information.as_ref().expect("has related info");
+    assert_eq!(related.len(), 1);
+    assert_eq!(related[0].message, "first defined here");
+    assert_eq!(related[0].location.uri, file);
+    assert_eq!(related[0].location.range.start, lsp_types::Position::new(0, 7));
+    assert_eq!(related[0].location.range.end, lsp_types::Position::new(0, 11));
+
+    drop(client);
+}
+
+#[test]
 fn semantic_tokens_over_protocol() {
     let mut client = TestClient::start();
     let file = uri("file:///tokens.must");

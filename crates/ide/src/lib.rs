@@ -9,6 +9,7 @@ mod syntax_highlighting;
 
 use base_db::{RootDatabase, SourceFile};
 pub use goto_definition::NavigationTarget;
+pub use hir::RelatedInfo;
 pub use hover::HoverResult;
 pub use syntax_highlighting::{HlMods, HlRange, HlTag};
 pub use line_index::LineIndex;
@@ -27,6 +28,7 @@ pub struct Diagnostic {
     pub severity: Severity,
     pub message: String,
     pub fix: Option<Fix>,
+    pub related: Vec<RelatedInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +88,7 @@ impl Analysis {
                 severity: Severity::Error,
                 message: d.message,
                 fix: d.fix,
+                related: d.related,
             })
             .collect()
     }

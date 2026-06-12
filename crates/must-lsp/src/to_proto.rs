@@ -99,7 +99,11 @@ pub(crate) fn semantic_tokens(
     }
 }
 
-pub(crate) fn diagnostic(line_index: &LineIndex, d: ide::Diagnostic) -> lsp_types::Diagnostic {
+pub(crate) fn diagnostic(
+    line_index: &LineIndex,
+    uri: &lsp_types::Uri,
+    d: ide::Diagnostic,
+) -> lsp_types::Diagnostic {
     lsp_types::Diagnostic {
         range: range(line_index, d.range),
         severity: Some(match d.severity {
@@ -108,6 +112,20 @@ pub(crate) fn diagnostic(line_index: &LineIndex, d: ide::Diagnostic) -> lsp_type
         }),
         source: Some("must".to_owned()),
         message: d.message,
+        related_information: (!d.related.is_empty()).then(|| {
+            d.related
+                .iter()
+                .map(|r| lsp_types::DiagnosticRelatedInformation {
+                    // Related locations are same-file for now, so the one
+                    // line index suffices.
+                    location: lsp_types::Location {
+                        uri: uri.clone(),
+                        range: range(line_index, r.range),
+                    },
+                    message: r.message.clone(),
+                })
+                .collect()
+        }),
         ..Default::default()
     }
 }

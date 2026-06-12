@@ -7,7 +7,7 @@
 
 use base_db::{Db, SourceFile};
 use la_arena::{Arena, ArenaMap, Idx};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::body::{Body, BindingId, ExprData, ExprId, Stmt, body};
 use crate::item_tree::item_tree;
@@ -163,6 +163,24 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FxHashMap<String, ItemLoc> {
         }
     }
     scope
+}
+
+/// Names declared by more than one item in `file`. A reference to one still
+/// resolves (first declaration wins, so goto-definition has a target), but
+/// it is ambiguous: inference gives such references the type `!`, and the
+/// extra declarations get a diagnostic. Range-free, so an edit that doesn't
+/// change duplicate-ness backdates.
+#[salsa::tracked(returns(ref))]
+pub fn duplicated_names(db: &dyn Db, file: SourceFile) -> FxHashSet<String> {
+    let tree = item_tree(db, file);
+    let mut seen = FxHashSet::default();
+    let mut duplicated = FxHashSet::default();
+    for data in tree.items.iter() {
+        if !data.name.is_empty() && !seen.insert(data.name.as_str()) {
+            duplicated.insert(data.name.clone());
+        }
+    }
+    duplicated
 }
 
 /// Resolution of every `NameRef` expression in `item`'s body. A `NameRef`
