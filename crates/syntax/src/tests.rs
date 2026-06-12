@@ -604,7 +604,7 @@ static y = 2;
                   INT_NUMBER@46..47 "2"
                 SEMICOLON@47..48 ";"
               WHITESPACE@48..49 "\n"
-            error 13..13: expected `;`
+            error 12..13: expected `;`
         "#]],
     );
 }
@@ -728,7 +728,7 @@ static name = fn {
                     WHITESPACE@49..50 "\n"
                     R_BRACE@50..51 "}"
               WHITESPACE@51..52 "\n"
-            error 41..41: expected `;`
+            error 40..41: expected `;`
         "#]],
     );
 }
@@ -750,6 +750,7 @@ fn item_missing_name_and_body() {
                   BLOCK_EXPR@12..13
                     L_BRACE@12..13 "{"
             error 7..8: expected a name for the item
+            error 12..13: expected `;`
             error 13..13: expected `}`
         "#]],
     );
@@ -772,7 +773,6 @@ fn unterminated_string() {
                 LITERAL@11..18
                   STRING@11..18 "\"hello;"
             error 11..18: unterminated string
-            error 18..18: expected `;`
         "#]],
     );
 }
@@ -956,7 +956,7 @@ static b = fn {};
                     R_BRACE@49..50 "}"
                 SEMICOLON@50..51 ";"
               WHITESPACE@51..52 "\n"
-            error 33..33: expected `;`
+            error 32..33: expected `;`
             error 34..40: expected `}`
         "#]],
     );
@@ -1014,7 +1014,7 @@ static main = fn {
                     WHITESPACE@47..48 "\n"
                     R_BRACE@48..49 "}"
               WHITESPACE@49..50 "\n"
-            error 33..33: expected `;`
+            error 32..33: expected `;`
         "#]],
     );
 }

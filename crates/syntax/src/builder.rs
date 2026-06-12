@@ -20,7 +20,7 @@ pub(crate) fn build(
         tokens,
         raw_pos: 0,
         offset: TextSize::new(0),
-        prev_token_end: TextSize::new(0),
+        prev_token_range: TextRange::empty(TextSize::new(0)),
         depth: 0,
         errors: &mut errors,
     };
@@ -81,9 +81,10 @@ struct Builder<'a> {
     tokens: &'a [Token],
     raw_pos: usize,
     offset: TextSize,
-    /// End of the last non-trivia token emitted; where "missing X after
-    /// this" errors point.
-    prev_token_end: TextSize,
+    /// The last non-trivia token emitted; "missing X after this" errors
+    /// anchor on it (a visible, cursor-targetable range) and insert at its
+    /// end.
+    prev_token_range: TextRange,
     depth: usize,
     errors: &'a mut Vec<SyntaxError>,
 }
@@ -116,8 +117,9 @@ impl Builder<'_> {
 
     fn error(&mut self, message: String, after_prev: bool, fix_insert: Option<String>) {
         let range = if after_prev {
-            // Right where the missing text should be typed.
-            TextRange::empty(self.prev_token_end)
+            // Anchor on the previous token so the diagnostic is visible and
+            // a cursor can sit on it; the fix still inserts after it.
+            self.prev_token_range
         } else {
             // Point at the token the parser was looking at; an empty range
             // at the end of the text if there is none.
@@ -135,9 +137,17 @@ impl Builder<'_> {
                 None => TextRange::empty(TextSize::of(self.text)),
             }
         };
+        let fix_at = if after_prev {
+            TextRange::empty(range.end())
+        } else {
+            range
+        };
         let fix = fix_insert.map(|insert| Fix {
             label: format!("Insert `{insert}`"),
-            edits: vec![TextEdit { range, insert }],
+            edits: vec![TextEdit {
+                range: fix_at,
+                insert,
+            }],
         });
         self.errors.push(SyntaxError {
             message,
@@ -163,7 +173,7 @@ impl Builder<'_> {
         self.offset += token.len;
         self.raw_pos += 1;
         if !token.kind.is_trivia() {
-            self.prev_token_end = self.offset;
+            self.prev_token_range = range;
         }
     }
 }

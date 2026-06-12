@@ -126,9 +126,9 @@ fn publishes_parse_errors_on_open_and_change() {
     assert_eq!(diags.diagnostics.len(), 1);
     let diag = &diags.diagnostics[0];
     assert_eq!(diag.message, "expected `;`");
-    // Points right after `let a = "x"` on line 1 — where the `;` belongs.
-    assert_eq!(diag.range.start, lsp_types::Position::new(1, 15));
-    assert_eq!(diag.range.end, diag.range.start);
+    // Anchored on `"x"`, the token the missing `;` belongs after.
+    assert_eq!(diag.range.start, lsp_types::Position::new(1, 12));
+    assert_eq!(diag.range.end, lsp_types::Position::new(1, 15));
 
     // Fix the file: diagnostics clear.
     client.change(

@@ -156,13 +156,15 @@ static name = fn {
     let diagnostics = analysis.diagnostics(file);
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].message, "expected `;`");
-    // Empty range right after the closing `}` of `fn { 42 }`.
-    assert!(diagnostics[0].range.is_empty());
+    // Anchored on the closing `}` of `fn { 42 }` (a visible, one-token
+    // range a cursor can sit on); the fix inserts right after it.
+    assert_eq!(diagnostics[0].range.len(), syntax::TextSize::new(1));
     let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
     assert_eq!(fix.label, "Insert `;`");
     assert_eq!(fix.edits.len(), 1);
     assert_eq!(fix.edits[0].insert, ";");
-    assert_eq!(fix.edits[0].range, diagnostics[0].range);
+    assert!(fix.edits[0].range.is_empty());
+    assert_eq!(fix.edits[0].range.start(), diagnostics[0].range.end());
 }
 
 #[test]
