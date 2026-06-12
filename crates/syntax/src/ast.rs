@@ -146,7 +146,9 @@ impl FnLiteral {
     pub fn ret_type(&self) -> Option<RetType> {
         child(&self.syntax)
     }
-    pub fn body(&self) -> Option<BlockExpr> {
+    /// The language requires a block, but the parser accepts any expression
+    /// for resilience — validation flags non-block bodies.
+    pub fn body(&self) -> Option<Expr> {
         child(&self.syntax)
     }
 }

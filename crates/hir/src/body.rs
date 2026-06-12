@@ -211,7 +211,7 @@ impl LowerCtx {
                 let ret_type = it
                     .ret_type()
                     .map(|rt| rt.ty().map(TypeRef::from_ast).unwrap_or(TypeRef::Error));
-                let body = self.lower_opt_expr(it.body().map(ast::Expr::BlockExpr));
+                let body = self.lower_opt_expr(it.body());
                 self.alloc_expr(
                     ExprData::FnLiteral {
                         params,

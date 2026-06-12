@@ -10,6 +10,7 @@ use base_db::{RootDatabase, SourceFile};
 pub use goto_definition::NavigationTarget;
 pub use hover::HoverResult;
 pub use line_index::LineIndex;
+pub use syntax::{Fix, TextEdit};
 use syntax::{TextRange, TextSize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +24,7 @@ pub struct Diagnostic {
     pub range: TextRange,
     pub severity: Severity,
     pub message: String,
+    pub fix: Option<Fix>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +83,7 @@ impl Analysis {
                 range: d.range,
                 severity: Severity::Error,
                 message: d.message,
+                fix: d.fix,
             })
             .collect()
     }

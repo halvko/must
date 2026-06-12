@@ -10,6 +10,7 @@ mod grammar;
 mod lexer;
 mod parser;
 mod syntax_kind;
+mod validation;
 
 use std::sync::Arc;
 
@@ -21,6 +22,22 @@ pub use lexer::{Token, tokenize};
 pub struct SyntaxError {
     pub message: String,
     pub range: TextRange,
+    /// A machine-applicable fix, when one is known.
+    pub fix: Option<Fix>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Fix {
+    /// Shown to the user, e.g. as a quick-fix title.
+    pub label: String,
+    pub edits: Vec<TextEdit>,
+}
+
+/// Replace `range` with `insert`; an empty range is a pure insertion.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TextEdit {
+    pub range: TextRange,
+    pub insert: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -83,7 +100,10 @@ pub fn parse(text: &str) -> Parse {
     let mut parser = parser::Parser::new(&kinds);
     grammar::source_file(&mut parser);
     let events = parser.finish();
-    let (green, errors) = builder::build(text, &tokens, events, lex_errors);
+    let (green, mut errors) = builder::build(text, &tokens, events, lex_errors);
+    // Things the grammar accepts (for resilience and fixes) but the
+    // language rejects.
+    errors.extend(validation::validate(&SyntaxNode::new_root(green.clone())));
     Parse {
         green,
         errors: errors.into(),

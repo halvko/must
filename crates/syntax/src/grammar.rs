@@ -143,8 +143,13 @@ fn fn_literal(p: &mut Parser<'_>) -> CompletedMarker {
     }
     if p.at(L_BRACE) {
         block_expr(p);
-    } else {
+    } else if at_expr_recovery(p) {
         p.error("expected `{`: function bodies are blocks");
+    } else {
+        // Superset parsing: take any expression as the body so the tree
+        // keeps the user's intent (inference and hover still work);
+        // validation rejects it with a wrap-in-braces fix.
+        expr(p);
     }
     m.complete(p, FN_LITERAL)
 }

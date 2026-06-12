@@ -988,7 +988,7 @@ static empty_params = fn () { 1 }
                     WHITESPACE@32..33 " "
                     R_BRACE@33..34 "}"
               WHITESPACE@34..35 "\n"
-              STATIC_ITEM@35..65
+              STATIC_ITEM@35..69
                 STATIC_KW@35..41 "static"
                 WHITESPACE@41..42 " "
                 NAME@42..60
@@ -996,12 +996,11 @@ static empty_params = fn () { 1 }
                 WHITESPACE@60..61 " "
                 EQ@61..62 "="
                 WHITESPACE@62..63 " "
-                FN_LITERAL@63..65
+                FN_LITERAL@63..68
                   FN_KW@63..65 "fn"
-              WHITESPACE@65..66 " "
-              ERROR@66..68
-                INT_NUMBER@66..68 "42"
-              ERROR@68..69
+                  WHITESPACE@65..66 " "
+                  LITERAL@66..68
+                    INT_NUMBER@66..68 "42"
                 SEMICOLON@68..69 ";"
               WHITESPACE@69..70 "\n"
               STATIC_ITEM@70..103
@@ -1027,10 +1026,7 @@ static empty_params = fn () { 1 }
                     WHITESPACE@101..102 " "
                     R_BRACE@102..103 "}"
               WHITESPACE@103..104 "\n"
-            error 66..68: expected `{`: function bodies are blocks
-            error 66..68: expected `;`
-            error 66..68: expected an item (`static` or `const`)
-            error 68..69: expected an item (`static` or `const`)
+            error 66..68: function bodies are blocks; wrap this expression in `{ }`
         "#]],
     );
 }

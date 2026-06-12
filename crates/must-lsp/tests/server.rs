@@ -196,6 +196,48 @@ fn hover_over_protocol() {
 }
 
 #[test]
+fn quick_fix_wraps_fn_body_in_braces() {
+    let mut client = TestClient::start();
+    let file = uri("file:///fix.must");
+
+    client.open(&file, "static f = fn 42;");
+    let diags = client.next_diagnostics();
+    assert_eq!(diags.diagnostics.len(), 1);
+    let diag_range = diags.diagnostics[0].range;
+
+    let response = client.request::<lsp_types::request::CodeActionRequest>(
+        lsp_types::CodeActionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+            range: diag_range,
+            context: lsp_types::CodeActionContext::default(),
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    );
+    let actions = response.expect("expected code actions");
+    assert_eq!(actions.len(), 1);
+    let lsp_types::CodeActionOrCommand::CodeAction(action) = &actions[0] else {
+        panic!("expected a code action, got {actions:?}");
+    };
+    assert_eq!(action.title, "Wrap body in `{ }`");
+
+    let changes = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .expect("action has a workspace edit");
+    let edits = &changes[&file];
+    assert_eq!(edits.len(), 2);
+    // `42` spans columns 14..16 on line 0.
+    assert_eq!(edits[0].range.start, lsp_types::Position::new(0, 14));
+    assert_eq!(edits[0].new_text, "{ ");
+    assert_eq!(edits[1].range.start, lsp_types::Position::new(0, 16));
+    assert_eq!(edits[1].new_text, " }");
+
+    drop(client);
+}
+
+#[test]
 fn close_clears_diagnostics() {
     let client = TestClient::start();
     let file = uri("file:///broken.must");

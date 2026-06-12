@@ -122,7 +122,11 @@ impl Builder<'_> {
             Some(token) => TextRange::at(offset, token.len),
             None => TextRange::empty(TextSize::of(self.text)),
         };
-        self.errors.push(SyntaxError { message, range });
+        self.errors.push(SyntaxError {
+            message,
+            range,
+            fix: None,
+        });
     }
 
     fn eat_trivia(&mut self) {
