@@ -34,10 +34,16 @@ fn item(p: &mut Parser<'_>) {
     }
     if p.eat(EQ) {
         expr(p);
+        // Brace rule: items whose value ends in `}` don't need a `;`.
+        if p.prev() == Some(R_BRACE) {
+            p.eat(SEMICOLON);
+        } else {
+            p.expect(SEMICOLON, "`;`");
+        }
     } else {
         p.error("expected `=` followed by the item's value");
+        p.eat(SEMICOLON);
     }
-    p.eat(SEMICOLON);
     m.complete(p, STATIC_ITEM);
 }
 
@@ -127,23 +133,20 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
 fn fn_literal(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(FN_KW);
-    // `fn (` is ambiguous: parameter list, or the `fn expr` shorthand with a
-    // parenthesized body. Parameters win iff the parens look like parameters:
-    // `()`, or an IDENT followed by `:`/`,`/`)`.
-    if p.at(L_PAREN) && looks_like_params(p) {
+    // Bodies are always blocks, so `(` after `fn` can only be parameters —
+    // no lookahead needed anywhere in here.
+    if p.at(L_PAREN) {
         param_list(p);
     }
     if p.at(THIN_ARROW) {
         ret_type(p);
     }
-    // Body: a block is just one kind of expression; anything else is the
-    // `fn expr` shorthand.
-    expr(p);
+    if p.at(L_BRACE) {
+        block_expr(p);
+    } else {
+        p.error("expected `{`: function bodies are blocks");
+    }
     m.complete(p, FN_LITERAL)
-}
-
-fn looks_like_params(p: &Parser<'_>) -> bool {
-    p.nth(1) == R_PAREN || (p.nth(1) == IDENT && matches!(p.nth(2), COLON | COMMA | R_PAREN))
 }
 
 fn param_list(p: &mut Parser<'_>) {
@@ -287,6 +290,8 @@ fn type_(p: &mut Parser<'_>) {
                     }
                 }
                 p.expect(R_PAREN, "`)`");
+            } else {
+                p.error("expected `(`: function types are written `fn(...) -> ...`");
             }
             if p.at(THIN_ARROW) {
                 ret_type(p);

@@ -18,13 +18,13 @@ fn hello_annotated() {
         r#"
 static main: fn() -> () = fn() -> () {
     let s: &'static str = "hello";
-    (fn () -> () print(s))();
+    (fn () -> () { print(s) })();
 }
 "#,
         expect![[r#"
-            SOURCE_FILE@0..107
+            SOURCE_FILE@0..111
               WHITESPACE@0..1 "\n"
-              STATIC_ITEM@1..106
+              STATIC_ITEM@1..110
                 STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..12
@@ -45,7 +45,7 @@ static main: fn() -> () = fn() -> () {
                 WHITESPACE@24..25 " "
                 EQ@25..26 "="
                 WHITESPACE@26..27 " "
-                FN_LITERAL@27..106
+                FN_LITERAL@27..110
                   FN_KW@27..29 "fn"
                   PARAM_LIST@29..31
                     L_PAREN@29..30 "("
@@ -58,7 +58,7 @@ static main: fn() -> () = fn() -> () {
                       L_PAREN@35..36 "("
                       R_PAREN@36..37 ")"
                   WHITESPACE@37..38 " "
-                  BLOCK_EXPR@38..106
+                  BLOCK_EXPR@38..110
                     L_BRACE@38..39 "{"
                     WHITESPACE@39..44 "\n    "
                     LET_STMT@44..74
@@ -82,11 +82,11 @@ static main: fn() -> () = fn() -> () {
                         STRING@66..73 "\"hello\""
                       SEMICOLON@73..74 ";"
                     WHITESPACE@74..79 "\n    "
-                    EXPR_STMT@79..104
-                      CALL_EXPR@79..103
-                        PAREN_EXPR@79..101
+                    EXPR_STMT@79..108
+                      CALL_EXPR@79..107
+                        PAREN_EXPR@79..105
                           L_PAREN@79..80 "("
-                          FN_LITERAL@80..100
+                          FN_LITERAL@80..104
                             FN_KW@80..82 "fn"
                             WHITESPACE@82..83 " "
                             PARAM_LIST@83..85
@@ -100,24 +100,29 @@ static main: fn() -> () = fn() -> () {
                                 L_PAREN@89..90 "("
                                 R_PAREN@90..91 ")"
                             WHITESPACE@91..92 " "
-                            CALL_EXPR@92..100
-                              PATH_EXPR@92..97
-                                NAME_REF@92..97
-                                  IDENT@92..97 "print"
-                              ARG_LIST@97..100
-                                L_PAREN@97..98 "("
-                                PATH_EXPR@98..99
-                                  NAME_REF@98..99
-                                    IDENT@98..99 "s"
-                                R_PAREN@99..100 ")"
-                          R_PAREN@100..101 ")"
-                        ARG_LIST@101..103
-                          L_PAREN@101..102 "("
-                          R_PAREN@102..103 ")"
-                      SEMICOLON@103..104 ";"
-                    WHITESPACE@104..105 "\n"
-                    R_BRACE@105..106 "}"
-              WHITESPACE@106..107 "\n"
+                            BLOCK_EXPR@92..104
+                              L_BRACE@92..93 "{"
+                              WHITESPACE@93..94 " "
+                              CALL_EXPR@94..102
+                                PATH_EXPR@94..99
+                                  NAME_REF@94..99
+                                    IDENT@94..99 "print"
+                                ARG_LIST@99..102
+                                  L_PAREN@99..100 "("
+                                  PATH_EXPR@100..101
+                                    NAME_REF@100..101
+                                      IDENT@100..101 "s"
+                                  R_PAREN@101..102 ")"
+                              WHITESPACE@102..103 " "
+                              R_BRACE@103..104 "}"
+                          R_PAREN@104..105 ")"
+                        ARG_LIST@105..107
+                          L_PAREN@105..106 "("
+                          R_PAREN@106..107 ")"
+                      SEMICOLON@107..108 ";"
+                    WHITESPACE@108..109 "\n"
+                    R_BRACE@109..110 "}"
+              WHITESPACE@110..111 "\n"
         "#]],
     );
 }
@@ -128,13 +133,13 @@ fn hello_minimal() {
         r#"
 static main = fn {
     let s = "hello";
-    (fn print(s))();
+    (fn { print(s) })();
 }
 "#,
         expect![[r#"
-            SOURCE_FILE@0..64
+            SOURCE_FILE@0..68
               WHITESPACE@0..1 "\n"
-              STATIC_ITEM@1..63
+              STATIC_ITEM@1..67
                 STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..12
@@ -142,10 +147,10 @@ static main = fn {
                 WHITESPACE@12..13 " "
                 EQ@13..14 "="
                 WHITESPACE@14..15 " "
-                FN_LITERAL@15..63
+                FN_LITERAL@15..67
                   FN_KW@15..17 "fn"
                   WHITESPACE@17..18 " "
-                  BLOCK_EXPR@18..63
+                  BLOCK_EXPR@18..67
                     L_BRACE@18..19 "{"
                     WHITESPACE@19..24 "\n    "
                     LET_STMT@24..40
@@ -160,31 +165,36 @@ static main = fn {
                         STRING@32..39 "\"hello\""
                       SEMICOLON@39..40 ";"
                     WHITESPACE@40..45 "\n    "
-                    EXPR_STMT@45..61
-                      CALL_EXPR@45..60
-                        PAREN_EXPR@45..58
+                    EXPR_STMT@45..65
+                      CALL_EXPR@45..64
+                        PAREN_EXPR@45..62
                           L_PAREN@45..46 "("
-                          FN_LITERAL@46..57
+                          FN_LITERAL@46..61
                             FN_KW@46..48 "fn"
                             WHITESPACE@48..49 " "
-                            CALL_EXPR@49..57
-                              PATH_EXPR@49..54
-                                NAME_REF@49..54
-                                  IDENT@49..54 "print"
-                              ARG_LIST@54..57
-                                L_PAREN@54..55 "("
-                                PATH_EXPR@55..56
-                                  NAME_REF@55..56
-                                    IDENT@55..56 "s"
-                                R_PAREN@56..57 ")"
-                          R_PAREN@57..58 ")"
-                        ARG_LIST@58..60
-                          L_PAREN@58..59 "("
-                          R_PAREN@59..60 ")"
-                      SEMICOLON@60..61 ";"
-                    WHITESPACE@61..62 "\n"
-                    R_BRACE@62..63 "}"
-              WHITESPACE@63..64 "\n"
+                            BLOCK_EXPR@49..61
+                              L_BRACE@49..50 "{"
+                              WHITESPACE@50..51 " "
+                              CALL_EXPR@51..59
+                                PATH_EXPR@51..56
+                                  NAME_REF@51..56
+                                    IDENT@51..56 "print"
+                                ARG_LIST@56..59
+                                  L_PAREN@56..57 "("
+                                  PATH_EXPR@57..58
+                                    NAME_REF@57..58
+                                      IDENT@57..58 "s"
+                                  R_PAREN@58..59 ")"
+                              WHITESPACE@59..60 " "
+                              R_BRACE@60..61 "}"
+                          R_PAREN@61..62 ")"
+                        ARG_LIST@62..64
+                          L_PAREN@62..63 "("
+                          R_PAREN@63..64 ")"
+                      SEMICOLON@64..65 ";"
+                    WHITESPACE@65..66 "\n"
+                    R_BRACE@66..67 "}"
+              WHITESPACE@67..68 "\n"
         "#]],
     );
 }
@@ -195,13 +205,13 @@ fn curried_bs() {
         r#"
 static main = fn {
     let s = "hello";
-    (fn print)()(s);
+    (fn { print })()(s);
 }
 "#,
         expect![[r#"
-            SOURCE_FILE@0..64
+            SOURCE_FILE@0..68
               WHITESPACE@0..1 "\n"
-              STATIC_ITEM@1..63
+              STATIC_ITEM@1..67
                 STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..12
@@ -209,10 +219,10 @@ static main = fn {
                 WHITESPACE@12..13 " "
                 EQ@13..14 "="
                 WHITESPACE@14..15 " "
-                FN_LITERAL@15..63
+                FN_LITERAL@15..67
                   FN_KW@15..17 "fn"
                   WHITESPACE@17..18 " "
-                  BLOCK_EXPR@18..63
+                  BLOCK_EXPR@18..67
                     L_BRACE@18..19 "{"
                     WHITESPACE@19..24 "\n    "
                     LET_STMT@24..40
@@ -227,51 +237,56 @@ static main = fn {
                         STRING@32..39 "\"hello\""
                       SEMICOLON@39..40 ";"
                     WHITESPACE@40..45 "\n    "
-                    EXPR_STMT@45..61
-                      CALL_EXPR@45..60
-                        CALL_EXPR@45..57
-                          PAREN_EXPR@45..55
+                    EXPR_STMT@45..65
+                      CALL_EXPR@45..64
+                        CALL_EXPR@45..61
+                          PAREN_EXPR@45..59
                             L_PAREN@45..46 "("
-                            FN_LITERAL@46..54
+                            FN_LITERAL@46..58
                               FN_KW@46..48 "fn"
                               WHITESPACE@48..49 " "
-                              PATH_EXPR@49..54
-                                NAME_REF@49..54
-                                  IDENT@49..54 "print"
-                            R_PAREN@54..55 ")"
-                          ARG_LIST@55..57
-                            L_PAREN@55..56 "("
-                            R_PAREN@56..57 ")"
-                        ARG_LIST@57..60
-                          L_PAREN@57..58 "("
-                          PATH_EXPR@58..59
-                            NAME_REF@58..59
-                              IDENT@58..59 "s"
-                          R_PAREN@59..60 ")"
-                      SEMICOLON@60..61 ";"
-                    WHITESPACE@61..62 "\n"
-                    R_BRACE@62..63 "}"
-              WHITESPACE@63..64 "\n"
+                              BLOCK_EXPR@49..58
+                                L_BRACE@49..50 "{"
+                                WHITESPACE@50..51 " "
+                                PATH_EXPR@51..56
+                                  NAME_REF@51..56
+                                    IDENT@51..56 "print"
+                                WHITESPACE@56..57 " "
+                                R_BRACE@57..58 "}"
+                            R_PAREN@58..59 ")"
+                          ARG_LIST@59..61
+                            L_PAREN@59..60 "("
+                            R_PAREN@60..61 ")"
+                        ARG_LIST@61..64
+                          L_PAREN@61..62 "("
+                          PATH_EXPR@62..63
+                            NAME_REF@62..63
+                              IDENT@62..63 "s"
+                          R_PAREN@63..64 ")"
+                      SEMICOLON@64..65 ";"
+                    WHITESPACE@65..66 "\n"
+                    R_BRACE@66..67 "}"
+              WHITESPACE@67..68 "\n"
         "#]],
     );
 }
 
 #[test]
-fn fn_shorthand_as_arg() {
+fn fn_block_as_arg() {
     check(
         r#"
-static example = fn (arg: fn -> usize) {
+static example = fn (arg: fn() -> usize) {
     arg();
 }
 
 static main = fn {
-    example(fn 42 + 69)
+    example(fn { 42 + 69 })
 }
 "#,
         expect![[r#"
-            SOURCE_FILE@0..101
+            SOURCE_FILE@0..107
               WHITESPACE@0..1 "\n"
-              STATIC_ITEM@1..54
+              STATIC_ITEM@1..56
                 STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..15
@@ -279,77 +294,84 @@ static main = fn {
                 WHITESPACE@15..16 " "
                 EQ@16..17 "="
                 WHITESPACE@17..18 " "
-                FN_LITERAL@18..54
+                FN_LITERAL@18..56
                   FN_KW@18..20 "fn"
                   WHITESPACE@20..21 " "
-                  PARAM_LIST@21..39
+                  PARAM_LIST@21..41
                     L_PAREN@21..22 "("
-                    PARAM@22..38
+                    PARAM@22..40
                       NAME@22..25
                         IDENT@22..25 "arg"
                       COLON@25..26 ":"
                       WHITESPACE@26..27 " "
-                      FN_TYPE@27..38
+                      FN_TYPE@27..40
                         FN_KW@27..29 "fn"
-                        WHITESPACE@29..30 " "
-                        RET_TYPE@30..38
-                          THIN_ARROW@30..32 "->"
-                          WHITESPACE@32..33 " "
-                          PATH_TYPE@33..38
-                            NAME_REF@33..38
-                              IDENT@33..38 "usize"
-                    R_PAREN@38..39 ")"
-                  WHITESPACE@39..40 " "
-                  BLOCK_EXPR@40..54
-                    L_BRACE@40..41 "{"
-                    WHITESPACE@41..46 "\n    "
-                    EXPR_STMT@46..52
-                      CALL_EXPR@46..51
-                        PATH_EXPR@46..49
-                          NAME_REF@46..49
-                            IDENT@46..49 "arg"
-                        ARG_LIST@49..51
-                          L_PAREN@49..50 "("
-                          R_PAREN@50..51 ")"
-                      SEMICOLON@51..52 ";"
-                    WHITESPACE@52..53 "\n"
-                    R_BRACE@53..54 "}"
-              WHITESPACE@54..56 "\n\n"
-              STATIC_ITEM@56..100
-                STATIC_KW@56..62 "static"
-                WHITESPACE@62..63 " "
-                NAME@63..67
-                  IDENT@63..67 "main"
-                WHITESPACE@67..68 " "
-                EQ@68..69 "="
+                        L_PAREN@29..30 "("
+                        R_PAREN@30..31 ")"
+                        WHITESPACE@31..32 " "
+                        RET_TYPE@32..40
+                          THIN_ARROW@32..34 "->"
+                          WHITESPACE@34..35 " "
+                          PATH_TYPE@35..40
+                            NAME_REF@35..40
+                              IDENT@35..40 "usize"
+                    R_PAREN@40..41 ")"
+                  WHITESPACE@41..42 " "
+                  BLOCK_EXPR@42..56
+                    L_BRACE@42..43 "{"
+                    WHITESPACE@43..48 "\n    "
+                    EXPR_STMT@48..54
+                      CALL_EXPR@48..53
+                        PATH_EXPR@48..51
+                          NAME_REF@48..51
+                            IDENT@48..51 "arg"
+                        ARG_LIST@51..53
+                          L_PAREN@51..52 "("
+                          R_PAREN@52..53 ")"
+                      SEMICOLON@53..54 ";"
+                    WHITESPACE@54..55 "\n"
+                    R_BRACE@55..56 "}"
+              WHITESPACE@56..58 "\n\n"
+              STATIC_ITEM@58..106
+                STATIC_KW@58..64 "static"
+                WHITESPACE@64..65 " "
+                NAME@65..69
+                  IDENT@65..69 "main"
                 WHITESPACE@69..70 " "
-                FN_LITERAL@70..100
-                  FN_KW@70..72 "fn"
-                  WHITESPACE@72..73 " "
-                  BLOCK_EXPR@73..100
-                    L_BRACE@73..74 "{"
-                    WHITESPACE@74..79 "\n    "
-                    CALL_EXPR@79..98
-                      PATH_EXPR@79..86
-                        NAME_REF@79..86
-                          IDENT@79..86 "example"
-                      ARG_LIST@86..98
-                        L_PAREN@86..87 "("
-                        FN_LITERAL@87..97
-                          FN_KW@87..89 "fn"
-                          WHITESPACE@89..90 " "
-                          BIN_EXPR@90..97
-                            LITERAL@90..92
-                              INT_NUMBER@90..92 "42"
-                            WHITESPACE@92..93 " "
-                            PLUS@93..94 "+"
-                            WHITESPACE@94..95 " "
-                            LITERAL@95..97
-                              INT_NUMBER@95..97 "69"
-                        R_PAREN@97..98 ")"
-                    WHITESPACE@98..99 "\n"
-                    R_BRACE@99..100 "}"
-              WHITESPACE@100..101 "\n"
+                EQ@70..71 "="
+                WHITESPACE@71..72 " "
+                FN_LITERAL@72..106
+                  FN_KW@72..74 "fn"
+                  WHITESPACE@74..75 " "
+                  BLOCK_EXPR@75..106
+                    L_BRACE@75..76 "{"
+                    WHITESPACE@76..81 "\n    "
+                    CALL_EXPR@81..104
+                      PATH_EXPR@81..88
+                        NAME_REF@81..88
+                          IDENT@81..88 "example"
+                      ARG_LIST@88..104
+                        L_PAREN@88..89 "("
+                        FN_LITERAL@89..103
+                          FN_KW@89..91 "fn"
+                          WHITESPACE@91..92 " "
+                          BLOCK_EXPR@92..103
+                            L_BRACE@92..93 "{"
+                            WHITESPACE@93..94 " "
+                            BIN_EXPR@94..101
+                              LITERAL@94..96
+                                INT_NUMBER@94..96 "42"
+                              WHITESPACE@96..97 " "
+                              PLUS@97..98 "+"
+                              WHITESPACE@98..99 " "
+                              LITERAL@99..101
+                                INT_NUMBER@99..101 "69"
+                            WHITESPACE@101..102 " "
+                            R_BRACE@102..103 "}"
+                        R_PAREN@103..104 ")"
+                    WHITESPACE@104..105 "\n"
+                    R_BRACE@105..106 "}"
+              WHITESPACE@106..107 "\n"
         "#]],
     );
 }
@@ -466,10 +488,10 @@ static b = fn { a() };
 #[test]
 fn never_type_annotation() {
     check(
-        "static diverges: fn() -> ! = fn (s: str) -> ! panic(s);",
+        "static diverges: fn() -> ! = fn (s: str) -> ! { panic(s) }",
         expect![[r#"
-            SOURCE_FILE@0..55
-              STATIC_ITEM@0..55
+            SOURCE_FILE@0..58
+              STATIC_ITEM@0..58
                 STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..15
@@ -489,7 +511,7 @@ fn never_type_annotation() {
                 WHITESPACE@26..27 " "
                 EQ@27..28 "="
                 WHITESPACE@28..29 " "
-                FN_LITERAL@29..54
+                FN_LITERAL@29..58
                   FN_KW@29..31 "fn"
                   WHITESPACE@31..32 " "
                   PARAM_LIST@32..40
@@ -510,22 +532,133 @@ fn never_type_annotation() {
                     NEVER_TYPE@44..45
                       BANG@44..45 "!"
                   WHITESPACE@45..46 " "
-                  CALL_EXPR@46..54
-                    PATH_EXPR@46..51
-                      NAME_REF@46..51
-                        IDENT@46..51 "panic"
-                    ARG_LIST@51..54
-                      L_PAREN@51..52 "("
-                      PATH_EXPR@52..53
-                        NAME_REF@52..53
-                          IDENT@52..53 "s"
-                      R_PAREN@53..54 ")"
-                SEMICOLON@54..55 ";"
+                  BLOCK_EXPR@46..58
+                    L_BRACE@46..47 "{"
+                    WHITESPACE@47..48 " "
+                    CALL_EXPR@48..56
+                      PATH_EXPR@48..53
+                        NAME_REF@48..53
+                          IDENT@48..53 "panic"
+                      ARG_LIST@53..56
+                        L_PAREN@53..54 "("
+                        PATH_EXPR@54..55
+                          NAME_REF@54..55
+                            IDENT@54..55 "s"
+                        R_PAREN@55..56 ")"
+                    WHITESPACE@56..57 " "
+                    R_BRACE@57..58 "}"
         "#]],
     );
 }
 
 // ---- error resilience ----
+
+#[test]
+fn item_semicolon_brace_rule() {
+    // `;` required unless the value ends in `}`.
+    check(
+        r#"
+static x = 1
+static main = fn { }
+static y = 2;
+"#,
+        expect![[r#"
+            SOURCE_FILE@0..49
+              WHITESPACE@0..1 "\n"
+              STATIC_ITEM@1..13
+                STATIC_KW@1..7 "static"
+                WHITESPACE@7..8 " "
+                NAME@8..9
+                  IDENT@8..9 "x"
+                WHITESPACE@9..10 " "
+                EQ@10..11 "="
+                WHITESPACE@11..12 " "
+                LITERAL@12..13
+                  INT_NUMBER@12..13 "1"
+              WHITESPACE@13..14 "\n"
+              STATIC_ITEM@14..34
+                STATIC_KW@14..20 "static"
+                WHITESPACE@20..21 " "
+                NAME@21..25
+                  IDENT@21..25 "main"
+                WHITESPACE@25..26 " "
+                EQ@26..27 "="
+                WHITESPACE@27..28 " "
+                FN_LITERAL@28..34
+                  FN_KW@28..30 "fn"
+                  WHITESPACE@30..31 " "
+                  BLOCK_EXPR@31..34
+                    L_BRACE@31..32 "{"
+                    WHITESPACE@32..33 " "
+                    R_BRACE@33..34 "}"
+              WHITESPACE@34..35 "\n"
+              STATIC_ITEM@35..48
+                STATIC_KW@35..41 "static"
+                WHITESPACE@41..42 " "
+                NAME@42..43
+                  IDENT@42..43 "y"
+                WHITESPACE@43..44 " "
+                EQ@44..45 "="
+                WHITESPACE@45..46 " "
+                LITERAL@46..47
+                  INT_NUMBER@46..47 "2"
+                SEMICOLON@47..48 ";"
+              WHITESPACE@48..49 "\n"
+            error 14..20: expected `;`
+        "#]],
+    );
+}
+
+#[test]
+fn fn_type_requires_parens() {
+    check(
+        "static f: fn -> usize = fn () -> usize { 1 }",
+        expect![[r#"
+            SOURCE_FILE@0..44
+              STATIC_ITEM@0..44
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                COLON@8..9 ":"
+                WHITESPACE@9..10 " "
+                FN_TYPE@10..21
+                  FN_KW@10..12 "fn"
+                  WHITESPACE@12..13 " "
+                  RET_TYPE@13..21
+                    THIN_ARROW@13..15 "->"
+                    WHITESPACE@15..16 " "
+                    PATH_TYPE@16..21
+                      NAME_REF@16..21
+                        IDENT@16..21 "usize"
+                WHITESPACE@21..22 " "
+                EQ@22..23 "="
+                WHITESPACE@23..24 " "
+                FN_LITERAL@24..44
+                  FN_KW@24..26 "fn"
+                  WHITESPACE@26..27 " "
+                  PARAM_LIST@27..29
+                    L_PAREN@27..28 "("
+                    R_PAREN@28..29 ")"
+                  WHITESPACE@29..30 " "
+                  RET_TYPE@30..38
+                    THIN_ARROW@30..32 "->"
+                    WHITESPACE@32..33 " "
+                    PATH_TYPE@33..38
+                      NAME_REF@33..38
+                        IDENT@33..38 "usize"
+                  WHITESPACE@38..39 " "
+                  BLOCK_EXPR@39..44
+                    L_BRACE@39..40 "{"
+                    WHITESPACE@40..41 " "
+                    LITERAL@41..42
+                      INT_NUMBER@41..42 "1"
+                    WHITESPACE@42..43 " "
+                    R_BRACE@43..44 "}"
+            error 13..15: expected `(`: function types are written `fn(...) -> ...`
+        "#]],
+    );
+}
 
 #[test]
 fn item_missing_name_and_body() {
@@ -545,6 +678,7 @@ fn item_missing_name_and_body() {
                     L_BRACE@12..13 "{"
             error 7..8: expected a name for the item
             error 13..13: expected `}`
+            error 13..13: expected `;`
         "#]],
     );
 }
@@ -566,6 +700,7 @@ fn unterminated_string() {
                 LITERAL@11..18
                   STRING@11..18 "\"hello;"
             error 11..18: unterminated string
+            error 18..18: expected `;`
         "#]],
     );
 }
@@ -752,6 +887,7 @@ static b = fn {};
                 SEMICOLON@50..51 ";"
               WHITESPACE@51..52 "\n"
             error 34..40: expected `}`
+            error 34..40: expected `;`
         "#]],
     );
 }
@@ -814,18 +950,18 @@ static main = fn {
 }
 
 #[test]
-fn fn_paren_ambiguity() {
-    // `fn (s)` → parameter list; `fn (s + 1)` → shorthand body.
+fn fn_requires_block_body() {
+    // Bodies are always blocks; `(` after `fn` is always a parameter list.
     check(
         r#"
-static takes_param = fn (s) s;
-static paren_body = fn (1 + 2);
-static empty_params = fn () 1;
+static takes_param = fn (s) { s }
+static shorthand_is_error = fn 42;
+static empty_params = fn () { 1 }
 "#,
         expect![[r#"
-            SOURCE_FILE@0..95
+            SOURCE_FILE@0..104
               WHITESPACE@0..1 "\n"
-              STATIC_ITEM@1..31
+              STATIC_ITEM@1..34
                 STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..19
@@ -833,7 +969,7 @@ static empty_params = fn () 1;
                 WHITESPACE@19..20 " "
                 EQ@20..21 "="
                 WHITESPACE@21..22 " "
-                FN_LITERAL@22..30
+                FN_LITERAL@22..34
                   FN_KW@22..24 "fn"
                   WHITESPACE@24..25 " "
                   PARAM_LIST@25..28
@@ -843,54 +979,58 @@ static empty_params = fn () 1;
                         IDENT@26..27 "s"
                     R_PAREN@27..28 ")"
                   WHITESPACE@28..29 " "
-                  PATH_EXPR@29..30
-                    NAME_REF@29..30
-                      IDENT@29..30 "s"
-                SEMICOLON@30..31 ";"
-              WHITESPACE@31..32 "\n"
-              STATIC_ITEM@32..63
-                STATIC_KW@32..38 "static"
-                WHITESPACE@38..39 " "
-                NAME@39..49
-                  IDENT@39..49 "paren_body"
-                WHITESPACE@49..50 " "
-                EQ@50..51 "="
-                WHITESPACE@51..52 " "
-                FN_LITERAL@52..62
-                  FN_KW@52..54 "fn"
-                  WHITESPACE@54..55 " "
-                  PAREN_EXPR@55..62
-                    L_PAREN@55..56 "("
-                    BIN_EXPR@56..61
-                      LITERAL@56..57
-                        INT_NUMBER@56..57 "1"
-                      WHITESPACE@57..58 " "
-                      PLUS@58..59 "+"
-                      WHITESPACE@59..60 " "
-                      LITERAL@60..61
-                        INT_NUMBER@60..61 "2"
-                    R_PAREN@61..62 ")"
-                SEMICOLON@62..63 ";"
-              WHITESPACE@63..64 "\n"
-              STATIC_ITEM@64..94
-                STATIC_KW@64..70 "static"
-                WHITESPACE@70..71 " "
-                NAME@71..83
-                  IDENT@71..83 "empty_params"
-                WHITESPACE@83..84 " "
-                EQ@84..85 "="
-                WHITESPACE@85..86 " "
-                FN_LITERAL@86..93
-                  FN_KW@86..88 "fn"
-                  WHITESPACE@88..89 " "
-                  PARAM_LIST@89..91
-                    L_PAREN@89..90 "("
-                    R_PAREN@90..91 ")"
-                  WHITESPACE@91..92 " "
-                  LITERAL@92..93
-                    INT_NUMBER@92..93 "1"
-                SEMICOLON@93..94 ";"
-              WHITESPACE@94..95 "\n"
+                  BLOCK_EXPR@29..34
+                    L_BRACE@29..30 "{"
+                    WHITESPACE@30..31 " "
+                    PATH_EXPR@31..32
+                      NAME_REF@31..32
+                        IDENT@31..32 "s"
+                    WHITESPACE@32..33 " "
+                    R_BRACE@33..34 "}"
+              WHITESPACE@34..35 "\n"
+              STATIC_ITEM@35..65
+                STATIC_KW@35..41 "static"
+                WHITESPACE@41..42 " "
+                NAME@42..60
+                  IDENT@42..60 "shorthand_is_error"
+                WHITESPACE@60..61 " "
+                EQ@61..62 "="
+                WHITESPACE@62..63 " "
+                FN_LITERAL@63..65
+                  FN_KW@63..65 "fn"
+              WHITESPACE@65..66 " "
+              ERROR@66..68
+                INT_NUMBER@66..68 "42"
+              ERROR@68..69
+                SEMICOLON@68..69 ";"
+              WHITESPACE@69..70 "\n"
+              STATIC_ITEM@70..103
+                STATIC_KW@70..76 "static"
+                WHITESPACE@76..77 " "
+                NAME@77..89
+                  IDENT@77..89 "empty_params"
+                WHITESPACE@89..90 " "
+                EQ@90..91 "="
+                WHITESPACE@91..92 " "
+                FN_LITERAL@92..103
+                  FN_KW@92..94 "fn"
+                  WHITESPACE@94..95 " "
+                  PARAM_LIST@95..97
+                    L_PAREN@95..96 "("
+                    R_PAREN@96..97 ")"
+                  WHITESPACE@97..98 " "
+                  BLOCK_EXPR@98..103
+                    L_BRACE@98..99 "{"
+                    WHITESPACE@99..100 " "
+                    LITERAL@100..101
+                      INT_NUMBER@100..101 "1"
+                    WHITESPACE@101..102 " "
+                    R_BRACE@102..103 "}"
+              WHITESPACE@103..104 "\n"
+            error 66..68: expected `{`: function bodies are blocks
+            error 66..68: expected `;`
+            error 66..68: expected an item (`static` or `const`)
+            error 68..69: expected an item (`static` or `const`)
         "#]],
     );
 }

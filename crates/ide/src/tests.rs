@@ -61,7 +61,7 @@ static f = fn {
 
 #[test]
 fn goto_param() {
-    check_goto("static f = fn (count: usize) count$0 + 1;", "count", 0);
+    check_goto("static f = fn (count: usize) { count$0 + 1 }", "count", 0);
 }
 
 #[test]
@@ -121,7 +121,7 @@ fn hover_item_name_shows_inferred_fn_type() {
 fn hover_static_use_shows_signature() {
     check_hover(
         r#"
-static f = fn (n: usize) -> usize n;
+static f = fn (n: usize) -> usize { n }
 static main = fn { f$0(1); };
 "#,
         "```must\nf: fn(usize) -> usize\n```",

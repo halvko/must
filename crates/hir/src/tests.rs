@@ -85,8 +85,8 @@ fn let_initializer_does_not_see_its_own_binding() {
 fn mutual_recursion_and_self_reference_resolve() {
     check_diagnostics(
         r#"
-const fib1 = fn (n: usize) fib2(n-1) + fib2(n-2);
-static fib2 = fn (n: usize) fib1(n-1) + fib2(n-2);
+const fib1 = fn (n: usize) { fib2(n-1) + fib2(n-2) }
+static fib2 = fn (n: usize) { fib1(n-1) + fib2(n-2) }
 "#,
         expect![[r#""#]],
     );
@@ -125,22 +125,24 @@ static main = fn {
 fn infer_fn_shorthand_arg() {
     check_infer(
         r#"
-static example = fn (arg: fn -> usize) -> usize arg();
-static main = fn { example(fn 42 + 69); }
+static example = fn (arg: fn() -> usize) -> usize { arg() }
+static main = fn { example(fn { 42 + 69 }); }
 "#,
         expect![[r#"
-            18..54 'fn (arg: fn -> us...': fn(fn() -> usize) -> usize
+            18..60 'fn (arg: fn() -> ...': fn(fn() -> usize) -> usize
             22..25 'arg': fn() -> usize
-            49..52 'arg': fn() -> usize
-            49..54 'arg()': usize
-            70..97 'fn { example(fn 4...': fn()
-            73..97 '{ example(fn 42 +...': ()
-            75..82 'example': fn(fn() -> usize) -> usize
-            75..94 'example(fn 42 + 69)': usize
-            83..93 'fn 42 + 69': fn() -> usize
-            86..88 '42': usize
-            86..93 '42 + 69': usize
-            91..93 '69': usize
+            51..60 '{ arg() }': usize
+            53..56 'arg': fn() -> usize
+            53..58 'arg()': usize
+            75..106 'fn { example(fn {...': fn()
+            78..106 '{ example(fn { 42...': ()
+            80..87 'example': fn(fn() -> usize) -> usize
+            80..103 'example(fn { 42 +...': usize
+            88..102 'fn { 42 + 69 }': fn() -> usize
+            91..102 '{ 42 + 69 }': usize
+            93..95 '42': usize
+            93..100 '42 + 69': usize
+            98..100 '69': usize
         "#]],
     );
 }
@@ -180,15 +182,15 @@ fn wrong_arg_count_and_not_callable() {
         // signature `fn(usize) -> {error}`, and Error silences the
         // not-callable diagnostic on `f(1)(2)`.
         r#"
-static f = fn (n: usize) -> usize n;
+static f = fn (n: usize) -> usize { n }
 static main = fn {
     f(1, 2);
     f(1)(2);
 }
 "#,
         expect![[r#"
-            61..68: expected 1 argument(s), found 2
-            74..78: expression of type `usize` is not callable
+            64..71: expected 1 argument(s), found 2
+            77..81: expression of type `usize` is not callable
         "#]],
     );
 }
@@ -206,13 +208,14 @@ fn binexpr_operands_must_be_int() {
 #[test]
 fn unannotated_param_inferred_from_use() {
     check_infer(
-        "static f = fn (s) print(s);",
+        "static f = fn (s) { print(s) }",
         expect![[r#"
-            11..26 'fn (s) print(s)': fn(str)
+            11..30 'fn (s) { print(s) }': fn(str)
             15..16 's': str
-            18..23 'print': fn(str)
-            18..26 'print(s)': ()
-            24..25 's': str
+            18..30 '{ print(s) }': ()
+            20..25 'print': fn(str)
+            20..28 'print(s)': ()
+            26..27 's': str
         "#]],
     );
 }
@@ -273,12 +276,12 @@ fn fn_params_scoped_to_their_literal() {
     check_diagnostics(
         r#"
 static f = fn {
-    (fn (inner: usize) inner)(1);
+    (fn (inner: usize) { inner })(1);
     print(inner);
 }
 "#,
         expect![[r#"
-            61..66: unresolved name `inner`
+            65..70: unresolved name `inner`
         "#]],
     );
 }
