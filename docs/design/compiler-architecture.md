@@ -17,6 +17,10 @@
   consumer so they share one semantics. Lowering is total: an ill-typed body still lowers,
   with traps that borrow a diagnostic an upstream analysis already reported, so flow
   analyses run past errors. MIR is decl-keyed, erased, and not SSA.
+- **X08** One interpreter serves const eval and `run`: same MIR, same machine, same traps.
+- **X09** The interpreter is an oracle, not a spec. A detected-UB stop is a property of the
+  interpreter, never a guarantee of the language; compiled Must may do anything with the same
+  program.
 - **X16** Diagnostics have no stable codes. A severity word, free text and a caret are the
   whole contract.
 
@@ -24,6 +28,8 @@
 
 - **SSA MIR** — user locals are ordinary mutable places. An SSA layer, if it comes, is a
   separate LIR below MIR. **X06**
+- **Interpreter traps as language semantics** — refused in advance, so nobody reads them as
+  behaviour codegen must reproduce. **X09**
 
 ## Re-evaluate when
 

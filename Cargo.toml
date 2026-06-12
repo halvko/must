@@ -14,6 +14,7 @@ syntax = { path = "crates/syntax" }
 base-db = { path = "crates/base-db" }
 hir = { path = "crates/hir" }
 mir = { path = "crates/mir" }
+eval = { path = "crates/eval" }
 ide = { path = "crates/ide" }
 
 # external — salsa pinned: its macro API has churned repeatedly, upgrade deliberately

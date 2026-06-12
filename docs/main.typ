@@ -129,6 +129,21 @@ static match_else_never = fn => {
 }
 ```
 
+== Const functions and const blocks
+
+Every item initializer — `static` and `const` alike — is evaluated at
+compile time. The item keyword is about identity, not about when things
+run: a `static` names one place that every use refers to, a `const` is
+copied into each use.
+
+The const context rules:
+
+- An item initializer is a const context.
+
+Const evaluation has no side effects, with one exception: `panic`. Calling
+`print` in a const context is an error; calling `panic` is allowed —
+failing loudly at compile time is the point of putting code there.
+
 == Statics and consts are accessible in their declarations
 
 ```must

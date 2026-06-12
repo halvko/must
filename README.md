@@ -56,6 +56,7 @@ crates/
   base-db/   salsa database, source inputs, parse query
   hir/       item tree, body lowering, name resolution, type inference
   mir/       control-flow-graph IR, lowered totally (errors become traps)
+  eval/      the MIR interpreter: const eval (salsa query)
   ide/       editor-agnostic analysis API (diagnostics, hover, goto-def)
   must-lsp/  the LSP binary: transport + main loop only
 editors/zed/ Zed extension (separate workspace; compiled to wasm by Zed)

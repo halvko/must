@@ -133,6 +133,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
+name = "eval"
+version = "0.1.0"
+dependencies = [
+ "base-db",
+ "expect-test",
+ "hir",
+ "la-arena",
+ "mir",
+ "rustc-hash 2.1.2",
+ "salsa",
+]
+
+[[package]]
 name = "expect-test"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -210,6 +223,7 @@ name = "ide"
 version = "0.1.0"
 dependencies = [
  "base-db",
+ "eval",
  "expect-test",
  "hir",
  "line-index",
