@@ -58,6 +58,16 @@ evaluated at compile time (`static x = 4 + 5` is an implicit `const { … }`),
 so `print` inside an initializer is an error while `print` in code you run
 is fine.
 
+### Running from Zed
+
+The extension also registers a debug adapter (the same binary in `dap`
+mode — the adapter *is* the interpreter, nothing to attach to). After
+(re)installing the dev extension, hit F4 (`debugger: start`) and pick a
+scenario from `.zed/debug.json`: `program` is the file, `entry` is the
+expression to evaluate (default `main()`). `print` output and crashes land
+in Zed's debug console. Breakpoints and stepping aren't wired up yet —
+they're the next milestone.
+
 ### Debugging the server
 
 Set `MUST_LSP_LOG` (a `tracing` env-filter, e.g. `must_lsp=debug`) in the

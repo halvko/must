@@ -9,3 +9,6 @@ repository = "https://github.com/halvko/must-lsp-server"
 [language_servers.must-lsp]
 name = "Must LSP"
 languages = ["Must"]
+
+# Schema lives at the default path: debug_adapter_schemas/must.json
+[debug_adapters.must]

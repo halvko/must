@@ -7,6 +7,7 @@
 //! requests answer `ContentModified`, cancelled diagnostics are simply
 //! dropped (the new revision recomputes them).
 
+pub mod dap;
 mod from_proto;
 mod pool;
 pub mod runner;
