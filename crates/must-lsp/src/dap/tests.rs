@@ -122,7 +122,7 @@ fn launch_session_runs_the_program() {
 }
 
 #[test]
-fn deferred_errors_crash_with_the_diagnostic() {
+fn deferred_errors_stop_at_the_crash_site_then_terminate_on_resume() {
     let program = fixture(
         "broken",
         "static main = fn {\n    print(\"before\");\n    let v: usize = \"s\";\n};\n",
@@ -131,6 +131,9 @@ fn deferred_errors_crash_with_the_diagnostic() {
         ("initialize", json!({})),
         ("launch", json!({ "program": program.to_str().unwrap() })),
         ("configurationDone", json!({})),
+        // While stopped at the exception: look around.
+        ("stackTrace", json!({ "threadId": 1 })),
+        ("continue", json!({ "threadId": 1 })),
         ("disconnect", json!({})),
     ]);
 
@@ -150,36 +153,130 @@ fn deferred_errors_crash_with_the_diagnostic() {
         stderr.contains("type mismatch: expected `usize`, found `str`"),
         "crash carries the diagnostic: {stderr}"
     );
+
+    // Stop-on-trap: a stopped(exception) carrying the diagnostic...
+    let stopped = events(&messages, "stopped");
+    assert_eq!(stopped[0]["body"]["reason"], "exception");
+    assert!(
+        stopped[0]["body"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("type mismatch"),
+    );
+    // ...with the crash site on the stack (line 3 = the broken let).
+    let stack = &responses_for(&messages, "stackTrace")[0]["body"]["stackFrames"];
+    assert_eq!(stack[0]["name"], "main");
+    assert_eq!(stack[0]["line"], 3);
+
+    // Resuming a dead program ends it.
     assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 1);
+    assert_eq!(events(&messages, "terminated").len(), 1);
 
     let _ = std::fs::remove_file(program);
 }
 
 #[test]
-fn breakpoints_are_reported_unverified_for_now() {
-    let program = fixture("bp", "static main = fn {};\n");
+fn breakpoint_hit_inspect_and_resume() {
+    let program = fixture(
+        "bp",
+        "static double = fn (n: usize) -> usize {\n    let twice = n * 2;\n    twice\n}\nstatic main = fn {\n    print(\"start\");\n    double(21);\n    print(\"end\");\n};\n",
+    );
     let messages = run_session(&[
         ("initialize", json!({})),
         ("launch", json!({ "program": program.to_str().unwrap() })),
         (
             "setBreakpoints",
-            json!({ "breakpoints": [{ "line": 1 }, { "line": 2 }] }),
+            // Line 2 is `let twice = n * 2;` (executable); line 4 is `}`.
+            json!({ "breakpoints": [{ "line": 2 }, { "line": 4 }] }),
         ),
         ("configurationDone", json!({})),
+        ("stackTrace", json!({ "threadId": 1 })),
+        ("scopes", json!({ "frameId": 3 })),
+        ("variables", json!({ "variablesReference": 3 })),
+        ("evaluate", json!({ "expression": "n", "frameId": 3 })),
+        ("evaluate", json!({ "expression": "double(4)" })),
+        ("next", json!({ "threadId": 1 })),
+        ("variables", json!({ "variablesReference": 3 })),
+        ("continue", json!({ "threadId": 1 })),
         ("disconnect", json!({})),
     ]);
-    let response = &responses_for(&messages, "setBreakpoints")[0];
-    let breakpoints = response["body"]["breakpoints"].as_array().unwrap();
-    assert_eq!(breakpoints.len(), 2);
-    assert!(breakpoints.iter().all(|b| b["verified"] == false));
-    // Each gets a unique id: Zed drops the verification state of any
-    // response breakpoint without one.
-    let ids: Vec<i64> = breakpoints
+
+    // Verification: executable line verified, the closing brace not.
+    let bps = &responses_for(&messages, "setBreakpoints")[0]["body"]["breakpoints"];
+    assert_eq!(bps[0]["verified"], true);
+    assert_eq!(bps[0]["line"], 2);
+    let bp_id = bps[0]["id"].as_i64().unwrap();
+
+    // The hit: stopped(breakpoint) naming the id.
+    let stopped = events(&messages, "stopped");
+    assert_eq!(stopped[0]["body"]["reason"], "breakpoint");
+    assert_eq!(stopped[0]["body"]["hitBreakpointIds"], json!([bp_id]));
+
+    // Stack: double() on line 2, called from main on line 7.
+    let stack = &responses_for(&messages, "stackTrace")[0]["body"]["stackFrames"];
+    assert_eq!(stack[0]["name"], "double");
+    assert_eq!(stack[0]["line"], 2);
+    assert_eq!(stack[1]["name"], "main");
+    assert_eq!(stack[1]["line"], 7);
+
+    // Variables before the let executes: just the param.
+    let vars = &responses_for(&messages, "variables")[0]["body"]["variables"];
+    assert_eq!(vars.as_array().unwrap().len(), 1);
+    assert_eq!(vars[0]["name"], "n");
+    assert_eq!(vars[0]["value"], "21");
+
+    // Console: a local by name, and a real expression in file scope.
+    let evals = responses_for(&messages, "evaluate");
+    assert_eq!(evals[0]["body"]["result"], "21");
+    assert_eq!(evals[1]["body"]["result"], "8");
+
+    // After step-over, `twice` exists.
+    let vars_after = &responses_for(&messages, "variables")[1]["body"]["variables"];
+    let names: Vec<&str> = vars_after
+        .as_array()
+        .unwrap()
         .iter()
-        .map(|b| b["id"].as_i64().expect("breakpoint has an id"))
+        .map(|v| v["name"].as_str().unwrap())
         .collect();
-    assert_eq!(ids.len(), 2);
-    assert_ne!(ids[0], ids[1]);
+    assert_eq!(names, ["n", "twice"]);
+    assert_eq!(events(&messages, "stopped")[1]["body"]["reason"], "step");
+
+    // Continue runs to the end: both prints, clean exit.
+    let stdout: String = events(&messages, "output")
+        .iter()
+        .filter(|e| e["body"]["category"] == "stdout")
+        .map(|e| e["body"]["output"].as_str().unwrap())
+        .collect();
+    assert_eq!(stdout, "start\nend\n");
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
+fn stop_on_entry_stops_at_the_first_user_line() {
+    let program = fixture(
+        "entry",
+        "static main = fn {\n    print(\"hi\");\n};\n",
+    );
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        (
+            "launch",
+            json!({ "program": program.to_str().unwrap(), "stopOnEntry": true }),
+        ),
+        ("configurationDone", json!({})),
+        ("stackTrace", json!({ "threadId": 1 })),
+        ("continue", json!({ "threadId": 1 })),
+        ("disconnect", json!({})),
+    ]);
+
+    let stopped = events(&messages, "stopped");
+    assert_eq!(stopped[0]["body"]["reason"], "entry");
+    let stack = &responses_for(&messages, "stackTrace")[0]["body"]["stackFrames"];
+    assert_eq!(stack[0]["name"], "main");
+    assert_eq!(stack[0]["line"], 2);
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
 
     let _ = std::fs::remove_file(program);
 }
