@@ -92,6 +92,10 @@ pub struct Diagnostic {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelatedInfo {
+    /// The file `range` lives in — *not* necessarily the diagnosed file
+    /// (e.g. "first defined here" will cross files once imports exist).
+    /// Consumers must resolve positions through this file's own line index.
+    pub file: SourceFile,
     pub range: TextRange,
     pub message: String,
 }
@@ -123,6 +127,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         let related = item_name(dup.first)
             .map(|first| {
                 vec![RelatedInfo {
+                    file: dup.first.file,
                     range: first.syntax().text_range(),
                     message: "first defined here".to_owned(),
                 }]
@@ -189,6 +194,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 InferenceDiagnostic::NeedsAnnotation { item, .. } => item_name(*item)
                     .map(|n| {
                         vec![RelatedInfo {
+                            file: item.file,
                             range: n.syntax().text_range(),
                             message: "defined here".to_owned(),
                         }]

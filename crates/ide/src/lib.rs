@@ -13,7 +13,7 @@ pub use hir::RelatedInfo;
 pub use hover::HoverResult;
 pub use syntax_highlighting::{HlMods, HlRange, HlTag};
 pub use line_index::LineIndex;
-pub use syntax::{Fix, TextEdit};
+pub use syntax::TextEdit;
 use syntax::{TextRange, TextSize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +29,22 @@ pub struct Diagnostic {
     pub message: String,
     pub fix: Option<Fix>,
     pub related: Vec<RelatedInfo>,
+}
+
+/// A quick fix whose edits each name their target file. The syntax layer's
+/// fixes carry bare ranges (it has no notion of files); the ide layer is
+/// where they get pinned to a file — so the LSP layer *cannot* apply an
+/// edit to the wrong document, the type forces the resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fix {
+    pub label: String,
+    pub edits: Vec<FileEdit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileEdit {
+    pub file: SourceFile,
+    pub edit: TextEdit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +103,15 @@ impl Analysis {
                 range: d.range,
                 severity: Severity::Error,
                 message: d.message,
-                fix: d.fix,
+                // Syntax-level fixes always edit the file they diagnosed.
+                fix: d.fix.map(|fix| Fix {
+                    label: fix.label,
+                    edits: fix
+                        .edits
+                        .into_iter()
+                        .map(|edit| FileEdit { file, edit })
+                        .collect(),
+                }),
                 related: d.related,
             })
             .collect();
@@ -129,9 +153,18 @@ impl Analysis {
                     format!("constant evaluation failed: {}", err.message)
                 }
             };
-            // Report at the error's origin (which may be inside another
-            // item, e.g. the partner of a cycle — still this file today).
-            let Some(range) = err.origin.and_then(|(loc, expr)| {
+            // Report at the error's origin — which may be inside another
+            // item (e.g. the partner of a cycle). A diagnostic of `file`
+            // must never carry a range from a different file, so a foreign
+            // origin falls back to this item's own initializer.
+            let origin_in_file = err
+                .origin
+                .filter(|(loc, _)| loc.file == file)
+                .or_else(|| {
+                    let root = hir::body::body(&self.db, item).root?;
+                    Some((hir::item_loc(&self.db, item), root))
+                });
+            let Some(range) = origin_in_file.and_then(|(loc, expr)| {
                 let origin_item = loc.to_id(&self.db)?;
                 let (_, source_map) = hir::body_with_source_map(&self.db, origin_item);
                 Some(source_map.node_for_expr(expr)?.text_range())

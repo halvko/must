@@ -137,10 +137,10 @@ fn non_block_fn_body_diagnostic_carries_wrap_fix() {
     assert_eq!(fix.label, "Wrap in `{ }`");
     // Insert "{ " before `42` (offset 14) and " }" after it (offset 16).
     assert_eq!(fix.edits.len(), 2);
-    assert_eq!(u32::from(fix.edits[0].range.start()), 14);
-    assert_eq!(fix.edits[0].insert, "{ ");
-    assert_eq!(u32::from(fix.edits[1].range.start()), 16);
-    assert_eq!(fix.edits[1].insert, " }");
+    assert_eq!(u32::from(fix.edits[0].edit.range.start()), 14);
+    assert_eq!(fix.edits[0].edit.insert, "{ ");
+    assert_eq!(u32::from(fix.edits[1].edit.range.start()), 16);
+    assert_eq!(fix.edits[1].edit.insert, " }");
 }
 
 #[test]
@@ -162,9 +162,9 @@ static name = fn {
     let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
     assert_eq!(fix.label, "Insert `;`");
     assert_eq!(fix.edits.len(), 1);
-    assert_eq!(fix.edits[0].insert, ";");
-    assert!(fix.edits[0].range.is_empty());
-    assert_eq!(fix.edits[0].range.start(), diagnostics[0].range.end());
+    assert_eq!(fix.edits[0].edit.insert, ";");
+    assert!(fix.edits[0].edit.range.is_empty());
+    assert_eq!(fix.edits[0].edit.range.start(), diagnostics[0].range.end());
 }
 
 /// Renders each highlight as `start..end text tag[.mods]`, one per line.

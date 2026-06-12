@@ -73,14 +73,22 @@ struct GlobalState {
 
 #[derive(Default, Clone)]
 struct FileMaps {
-    by_uri: HashMap<lsp_types::Uri, SourceFile>,
-    by_file: HashMap<SourceFile, lsp_types::Uri>,
+    pub(crate) by_uri: HashMap<lsp_types::Uri, SourceFile>,
+    pub(crate) by_file: HashMap<SourceFile, lsp_types::Uri>,
 }
 
 /// Everything a request handler needs, detached from the main loop.
 struct Snapshot {
-    analysis: ide::Analysis,
-    files: Arc<FileMaps>,
+    pub(crate) analysis: ide::Analysis,
+    pub(crate) files: Arc<FileMaps>,
+}
+
+impl Snapshot {
+    /// The URI a result file maps to. `None` for files the client no longer
+    /// has open — results pointing there are dropped, not misattributed.
+    pub(crate) fn uri_for(&self, file: SourceFile) -> Option<lsp_types::Uri> {
+        self.files.by_file.get(&file).cloned()
+    }
 }
 
 impl GlobalState {
@@ -273,7 +281,7 @@ impl GlobalState {
                     .analysis
                     .diagnostics(file)
                     .into_iter()
-                    .map(|d| to_proto::diagnostic(&line_index, &uri, d))
+                    .map(|d| to_proto::diagnostic(&snapshot, &line_index, d))
                     .collect::<Vec<_>>()
             });
             // Cancelled: a newer revision exists and will publish instead.
@@ -323,11 +331,12 @@ impl Snapshot {
         let line_index = self.analysis.line_index(file);
         let offset = from_proto::offset(&line_index, doc.position)?;
         let nav = self.analysis.goto_definition(ide::FilePosition { file, offset })?;
-        let target_uri = self.files.by_file.get(&nav.file)?.clone();
-        // Same-file navigation for now, so reuse the line index.
+        // The target's positions resolve through the target's own file.
+        let target_uri = self.uri_for(nav.file)?;
+        let target_index = self.analysis.line_index(nav.file);
         let location = lsp_types::Location {
             uri: target_uri,
-            range: to_proto::range(&line_index, nav.focus_range),
+            range: to_proto::range(&target_index, nav.focus_range),
         };
         Some(lsp_types::GotoDefinitionResponse::Scalar(location))
     }
@@ -351,18 +360,31 @@ impl Snapshot {
             if diagnostic.range.intersect(query).is_none() {
                 continue;
             }
-            let edits = fix
-                .edits
-                .iter()
-                .map(|edit| to_proto::text_edit(&line_index, edit))
-                .collect();
-            let mut changes = HashMap::new();
-            changes.insert(uri.clone(), edits);
+            // Each edit names its target file; resolve every one through
+            // its own URI and line index. An edit whose file the client
+            // doesn't have open drops the whole action — applying half a
+            // fix is worse than offering none.
+            let mut changes: HashMap<lsp_types::Uri, Vec<lsp_types::TextEdit>> = HashMap::new();
+            let mut all_resolved = true;
+            for file_edit in &fix.edits {
+                let Some(target_uri) = self.uri_for(file_edit.file) else {
+                    all_resolved = false;
+                    break;
+                };
+                let target_index = self.analysis.line_index(file_edit.file);
+                changes
+                    .entry(target_uri)
+                    .or_default()
+                    .push(to_proto::text_edit(&target_index, &file_edit.edit));
+            }
+            if !all_resolved {
+                continue;
+            }
             actions.push(lsp_types::CodeActionOrCommand::CodeAction(
                 lsp_types::CodeAction {
                     title: fix.label,
                     kind: Some(lsp_types::CodeActionKind::QUICKFIX),
-                    diagnostics: Some(vec![to_proto::diagnostic(&line_index, &uri, diagnostic)]),
+                    diagnostics: Some(vec![to_proto::diagnostic(self, &line_index, diagnostic)]),
                     edit: Some(lsp_types::WorkspaceEdit {
                         changes: Some(changes),
                         ..Default::default()
