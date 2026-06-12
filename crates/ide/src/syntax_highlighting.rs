@@ -72,8 +72,11 @@ fn classify(
         COMMENT => HlTag::Comment,
         STRING => HlTag::String,
         INT_NUMBER => HlTag::Number,
-        FN_KW | STATIC_KW | CONST_KW | LET_KW => HlTag::Keyword,
-        PLUS | MINUS | STAR | SLASH | EQ | THIN_ARROW | AMP => HlTag::Operator,
+        FN_KW | STATIC_KW | CONST_KW | LET_KW | IF_KW | ELSE_KW | TRUE_KW | FALSE_KW => {
+            HlTag::Keyword
+        }
+        PLUS | MINUS | STAR | SLASH | EQ | THIN_ARROW | AMP | EQ2 | NEQ | L_ANGLE | R_ANGLE
+        | LTEQ | GTEQ => HlTag::Operator,
         // `!` only exists as the never type today.
         BANG => HlTag::Type,
         IDENT => return classify_ident(db, file, root, token),

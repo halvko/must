@@ -126,6 +126,7 @@ impl InferCtx<'_> {
             ExprData::Missing => Ty::Error,
             ExprData::Literal(LiteralData::Int(_)) => Ty::Int,
             ExprData::Literal(LiteralData::Str(_)) => Ty::Str,
+            ExprData::Literal(LiteralData::Bool(_)) => Ty::Bool,
             ExprData::NameRef(_) => match self.resolutions.get(expr) {
                 Some(&Resolution::Local(binding)) => self
                     .result
@@ -203,10 +204,73 @@ impl InferCtx<'_> {
                     }
                 }
             }
-            ExprData::Bin { lhs, rhs, .. } => {
-                self.infer_expr(*lhs, Some(&Ty::Int));
-                self.infer_expr(*rhs, Some(&Ty::Int));
-                Ty::Int
+            ExprData::Bin { op, lhs, rhs } => {
+                use crate::body::BinOp::*;
+                match op {
+                    Some(Add | Sub | Mul | Div) => {
+                        self.infer_expr(*lhs, Some(&Ty::Int));
+                        self.infer_expr(*rhs, Some(&Ty::Int));
+                        Ty::Int
+                    }
+                    Some(Lt | Le | Gt | Ge) => {
+                        self.infer_expr(*lhs, Some(&Ty::Int));
+                        self.infer_expr(*rhs, Some(&Ty::Int));
+                        Ty::Bool
+                    }
+                    // Equality works on any type; the operands just have to
+                    // agree with each other.
+                    Some(Eq | Ne) => {
+                        let lhs_ty = self.infer_expr(*lhs, None);
+                        self.infer_expr(*rhs, Some(&lhs_ty));
+                        Ty::Bool
+                    }
+                    // No operator token means broken source with its own
+                    // parse error.
+                    None => {
+                        self.infer_expr(*lhs, None);
+                        self.infer_expr(*rhs, None);
+                        Ty::Error
+                    }
+                }
+            }
+            ExprData::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                self.infer_expr(*condition, Some(&Ty::Bool));
+                let Some(else_branch) = else_branch else {
+                    // Without an `else`, the value when the condition is
+                    // false is `()`, so the then-branch must be too.
+                    self.infer_expr(*then_branch, Some(&Ty::Unit));
+                    let ty = match expected {
+                        Some(expected) => self.check(expr, Ty::Unit, expected),
+                        None => Ty::Unit,
+                    };
+                    self.result.type_of_expr.insert(expr, ty.clone());
+                    return ty;
+                };
+                // With an outer expectation, check each branch against it
+                // directly so mismatches point at the offending branch (and
+                // skip the re-check at the end).
+                if let Some(expected) = expected {
+                    self.infer_expr(*then_branch, Some(expected));
+                    self.infer_expr(*else_branch, Some(expected));
+                    let ty = expected.clone();
+                    self.result.type_of_expr.insert(expr, ty.clone());
+                    return ty;
+                }
+                let then_ty = self.infer_expr(*then_branch, None);
+                let else_ty = self.infer_expr(*else_branch, None);
+                // A diverging branch takes the other branch's type.
+                if matches!(self.resolve_shallow(&then_ty), Ty::Never) {
+                    else_ty
+                } else if matches!(self.resolve_shallow(&else_ty), Ty::Never) {
+                    then_ty
+                } else {
+                    self.check(*else_branch, else_ty, &then_ty);
+                    then_ty
+                }
             }
             ExprData::Block { stmts, tail } => {
                 for stmt in stmts {
@@ -319,7 +383,8 @@ impl InferCtx<'_> {
             (Ty::Unit, Ty::Unit)
             | (Ty::Never, Ty::Never)
             | (Ty::Int, Ty::Int)
-            | (Ty::Str, Ty::Str) => true,
+            | (Ty::Str, Ty::Str)
+            | (Ty::Bool, Ty::Bool) => true,
             (Ty::Fn(f1), Ty::Fn(f2)) => {
                 f1.params.len() == f2.params.len() && {
                     let params_ok = f1

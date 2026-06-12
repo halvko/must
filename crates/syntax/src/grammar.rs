@@ -11,7 +11,7 @@ use crate::parser::{CompletedMarker, Parser};
 fn at_expr_recovery(p: &Parser<'_>) -> bool {
     matches!(
         p.current(),
-        EOF | R_BRACE | R_PAREN | SEMICOLON | COMMA | STATIC_KW | CONST_KW | LET_KW
+        EOF | R_BRACE | R_PAREN | SEMICOLON | COMMA | STATIC_KW | CONST_KW | LET_KW | ELSE_KW
     )
 }
 
@@ -83,8 +83,9 @@ fn expr_bp(p: &mut Parser<'_>, min_bp: u8) -> Option<CompletedMarker> {
             continue;
         }
         let (l_bp, r_bp) = match p.current() {
-            PLUS | MINUS => (1, 2),
-            STAR | SLASH => (3, 4),
+            EQ2 | NEQ | L_ANGLE | R_ANGLE | LTEQ | GTEQ => (1, 2),
+            PLUS | MINUS => (3, 4),
+            STAR | SLASH => (5, 6),
             _ => break,
         };
         if l_bp < min_bp {
@@ -102,7 +103,7 @@ fn expr_bp(p: &mut Parser<'_>, min_bp: u8) -> Option<CompletedMarker> {
 
 fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
     let m = match p.current() {
-        INT_NUMBER | STRING => {
+        INT_NUMBER | STRING | TRUE_KW | FALSE_KW => {
             let m = p.start();
             p.bump_any();
             m.complete(p, LITERAL)
@@ -121,6 +122,7 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         }
         L_BRACE => block_expr(p),
         FN_KW => fn_literal(p),
+        IF_KW => if_expr(p),
         _ => {
             if at_expr_recovery(p) {
                 p.error("expected an expression");
@@ -155,6 +157,34 @@ fn fn_literal(p: &mut Parser<'_>) -> CompletedMarker {
         expr(p);
     }
     m.complete(p, FN_LITERAL)
+}
+
+fn if_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump(IF_KW);
+    expr(p); // the condition
+    branch(p, "`if` branches");
+    if p.eat(ELSE_KW) {
+        if p.at(IF_KW) {
+            if_expr(p);
+        } else {
+            branch(p, "`else` branches");
+        }
+    }
+    m.complete(p, IF_EXPR)
+}
+
+/// Superset parsing, same deal as `fn` bodies: take any expression so the
+/// tree keeps the user's intent; validation rejects non-blocks with a
+/// wrap-in-braces fix.
+fn branch(p: &mut Parser<'_>, what: &str) {
+    if p.at(L_BRACE) {
+        block_expr(p);
+    } else if at_expr_recovery(p) {
+        p.error(format!("expected `{{`: {what} are blocks"));
+    } else {
+        expr(p);
+    }
 }
 
 fn param_list(p: &mut Parser<'_>) {

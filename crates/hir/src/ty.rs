@@ -20,6 +20,7 @@ pub enum Ty {
     /// `usize` — the only integer type so far.
     Int,
     Str,
+    Bool,
     Fn(Arc<FnTy>),
     /// Type of broken code. Infectious and silent: producing further
     /// diagnostics from an `Error` type would only be noise.
@@ -52,6 +53,7 @@ impl Ty {
             Ty::Never => "!".to_owned(),
             Ty::Int => "usize".to_owned(),
             Ty::Str => "str".to_owned(),
+            Ty::Bool => "bool".to_owned(),
             Ty::Error => "{error}".to_owned(),
             Ty::Fn(f) => {
                 let params = f
@@ -110,6 +112,7 @@ pub fn builtin_type_by_name(name: &str) -> Option<Ty> {
     match name {
         "usize" => Some(Ty::Int),
         "str" | "string" => Some(Ty::Str),
+        "bool" => Some(Ty::Bool),
         _ => None,
     }
 }
@@ -154,6 +157,7 @@ pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
     match &body.exprs[root] {
         ExprData::Literal(LiteralData::Int(_)) => Ty::Int,
         ExprData::Literal(LiteralData::Str(_)) => Ty::Str,
+        ExprData::Literal(LiteralData::Bool(_)) => Ty::Bool,
         ExprData::FnLiteral {
             params,
             ret_type,

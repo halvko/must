@@ -132,35 +132,38 @@ static match_else_never = fn => {
 == Statics and consts are accessible in their declarations
 
 ```must
-static fib = (n: usize) => {
-    match n {
-        0 | 1 => n,
-        _ => fib(n-1) + fib(n-2),
+static fib = fn (n: usize) -> usize {
+    if n < 2 {
+        n
+    } else {
+        fib(n - 1) + fib(n - 2)
     }
 }
 
-const fib2 = (n: usize) => {
-    match n {
-        0 | 1 => n,
-        _ => fib2(n-1) + fib2(n-2),
+const fib2 = fn (n: usize) -> usize {
+    if n < 2 {
+        n
+    } else {
+        fib2(n - 1) + fib2(n - 2)
     }
 }
 ```
 
 == Statics and consts can be mutually recursive
 ```must
-const fib1 = fn (n: usize) => {
-    if (n == 0 || n == 1) {
+const fib1 = fn (n: usize) -> usize {
+    if n < 2 {
         n
     } else {
-        fib2(n-1) + fib2(n-2)
+        fib2(n - 1) + fib2(n - 2)
     }
 }
 
-static fib2 = fn (n: usize) => {
-    match n {
-        0 | 1 => n,
-        _ => fib1(n-1) + fib1(n-2),
+static fib2 = fn (n: usize) -> usize {
+    if n < 2 {
+        n
+    } else {
+        fib1(n - 1) + fib1(n - 2)
     }
 }
 ```

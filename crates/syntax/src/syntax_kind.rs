@@ -23,6 +23,12 @@ pub enum SyntaxKind {
     SEMICOLON,
     COMMA,
     EQ,
+    EQ2,
+    NEQ,
+    L_ANGLE,
+    R_ANGLE,
+    LTEQ,
+    GTEQ,
     THIN_ARROW,
     PLUS,
     MINUS,
@@ -34,6 +40,10 @@ pub enum SyntaxKind {
     STATIC_KW,
     CONST_KW,
     LET_KW,
+    IF_KW,
+    ELSE_KW,
+    TRUE_KW,
+    FALSE_KW,
     ERROR_TOKEN,
 
     // Nodes
@@ -52,6 +62,7 @@ pub enum SyntaxKind {
     ARG_LIST,
     PAREN_EXPR,
     BIN_EXPR,
+    IF_EXPR,
     LITERAL,
     PATH_EXPR,
     FN_TYPE,
@@ -75,6 +86,10 @@ impl SyntaxKind {
             "static" => STATIC_KW,
             "const" => CONST_KW,
             "let" => LET_KW,
+            "if" => IF_KW,
+            "else" => ELSE_KW,
+            "true" => TRUE_KW,
+            "false" => FALSE_KW,
             _ => return None,
         };
         Some(kw)
