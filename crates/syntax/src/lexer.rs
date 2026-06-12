@@ -84,6 +84,10 @@ fn next_token(rest: &str) -> (SyntaxKind, usize, Option<String>) {
     }
 }
 
+// Strings are multiline, Rust-style. An unterminated one swallows the rest
+// of the file — accepting that beats the alternative: ending strings at
+// newlines double-errors the common "closing quote on the next line" case,
+// and editor quote auto-close makes unterminated strings rare in practice.
 fn scan_string(rest: &str) -> (SyntaxKind, usize, Option<String>) {
     let mut chars = rest.char_indices().skip(1);
     while let Some((i, c)) = chars.next() {

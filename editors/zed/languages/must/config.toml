@@ -3,3 +3,9 @@ path_suffixes = ["must"]
 line_comments = ["// "]
 # Deliberately no `grammar`: syntax highlighting comes later (would need a
 # tree-sitter grammar); diagnostics/hover/goto-def all come from the LSP.
+
+brackets = [
+    { start = "{", end = "}", close = true, newline = true },
+    { start = "(", end = ")", close = true, newline = true },
+    { start = "\"", end = "\"", close = true, newline = false, not_in = ["string"] },
+]
