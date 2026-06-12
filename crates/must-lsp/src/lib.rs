@@ -27,6 +27,7 @@ use lsp_types::notification::{
 };
 use lsp_types::request::{
     CodeActionRequest, GotoDefinition, HoverRequest, Request as _, SemanticTokensFullRequest,
+    SemanticTokensRefresh,
 };
 
 pub type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
@@ -58,9 +59,10 @@ pub fn server_capabilities() -> lsp_types::ServerCapabilities {
 
 /// Run the server over `connection` until the client asks it to exit.
 pub fn run(connection: Connection) -> ServerResult<()> {
-    let _params = connection.initialize(serde_json::to_value(server_capabilities())?)?;
+    let init = connection.initialize(serde_json::to_value(server_capabilities())?)?;
+    let init: lsp_types::InitializeParams = serde_json::from_value(init)?;
     tracing::info!("initialized");
-    GlobalState::new(&connection).main_loop(&connection)
+    GlobalState::new(&connection, &init.capabilities).main_loop(&connection)
 }
 
 /// What the server knows about one document, and the only place it says so.
@@ -126,6 +128,10 @@ struct GlobalState {
     /// that could be reissued after that would let a pre-close task pass as
     /// the reopened document's first publish.
     next_generation: u64,
+    /// Client supports `workspace/semanticTokens/refresh`.
+    semantic_tokens_refresh: bool,
+    /// Counter for ids of server→client requests (own namespace).
+    outgoing_requests: i32,
 }
 
 /// Both directions of the file table, replaced as one so that no reader can
@@ -166,7 +172,7 @@ impl Snapshot {
 }
 
 impl GlobalState {
-    fn new(connection: &Connection) -> GlobalState {
+    fn new(connection: &Connection, client: &lsp_types::ClientCapabilities) -> GlobalState {
         GlobalState {
             host: AnalysisHost::new(),
             files: Arc::new(FileMaps::default()),
@@ -174,6 +180,13 @@ impl GlobalState {
             pool: pool::TaskPool::new(WORKER_THREADS),
             diagnostics_generation: Arc::new(Mutex::new(HashMap::new())),
             next_generation: 0,
+            semantic_tokens_refresh: client
+                .workspace
+                .as_ref()
+                .and_then(|w| w.semantic_tokens.as_ref())
+                .and_then(|st| st.refresh_support)
+                .unwrap_or(false),
+            outgoing_requests: 0,
         }
     }
 
@@ -210,6 +223,7 @@ impl GlobalState {
     }
 
     fn dispatch_request(&mut self, req: Request) {
+        tracing::debug!(method = %req.method, id = ?req.id, "request");
         match req.method.as_str() {
             GotoDefinition::METHOD => {
                 self.spawn_request(req, |snapshot, params| {
@@ -227,9 +241,31 @@ impl GlobalState {
                 });
             }
             SemanticTokensFullRequest::METHOD => {
-                self.spawn_request(req, |snapshot, params| {
-                    serde_json::to_value(snapshot.semantic_tokens(params)).ok()
-                });
+                let id = req.id;
+                let params: lsp_types::SemanticTokensParams =
+                    match serde_json::from_value(req.params) {
+                        Ok(params) => params,
+                        Err(err) => {
+                            let resp = Response::new_err(
+                                id,
+                                ErrorCode::InvalidParams as i32,
+                                err.to_string(),
+                            );
+                            let _ = self.sender.send(resp.into());
+                            return;
+                        }
+                    };
+                // The pull raced ahead of the document's `didOpen` (Zed
+                // does this consistently on open). Answer retryably; the
+                // refresh nudge sent on `didOpen` makes the client re-pull
+                // once the document is known.
+                let uri = params.text_document.uri;
+                if !matches!(self.files.by_uri.get(&uri), Some(FileState::Open(_))) {
+                    tracing::debug!(uri = %uri.as_str(), "semantic tokens pull before didOpen");
+                    let _ = self.sender.send(content_modified(id).into());
+                    return;
+                }
+                self.spawn_semantic_tokens(id, uri);
             }
             method => {
                 tracing::debug!(%method, "unhandled request");
@@ -259,6 +295,15 @@ impl GlobalState {
                 return;
             }
         };
+        self.spawn_parsed_request(id, params, handler);
+    }
+
+    fn spawn_parsed_request<P: Send + 'static>(
+        &self,
+        id: RequestId,
+        params: P,
+        handler: fn(&Snapshot, P) -> Option<serde_json::Value>,
+    ) {
         let snapshot = self.snapshot();
         let sender = self.sender.clone();
         self.pool.spawn(move || {
@@ -282,6 +327,7 @@ impl GlobalState {
     }
 
     fn handle_notification(&mut self, notification: Notification) -> ServerResult<()> {
+        tracing::debug!(method = %notification.method, "notification");
         match notification.method.as_str() {
             DidOpenTextDocument::METHOD => {
                 let params: lsp_types::DidOpenTextDocumentParams =
@@ -289,6 +335,13 @@ impl GlobalState {
                 let doc = params.text_document;
                 let file = self.open_file(doc.uri.clone(), doc.text);
                 self.publish_diagnostics(doc.uri, file, doc.version);
+                // The refresh covers both ways the initial pull goes
+                // missing: Zed pulls *before* `didOpen` (answered
+                // `ContentModified` above), and for reopened buffers it
+                // doesn't pull at all until an edit (zed#57651). It
+                // advertises and handles refresh, so nudge it to re-pull
+                // now that the document is known.
+                self.request_semantic_tokens_refresh();
             }
             DidChangeTextDocument::METHOD => {
                 let mut params: lsp_types::DidChangeTextDocumentParams =
@@ -328,9 +381,40 @@ impl GlobalState {
                     self.send_diagnostics(uri, Vec::new(), None)?;
                 }
             }
-            _ => tracing::debug!(method = %notification.method, "unhandled notification"),
+            _ => {}
         }
         Ok(())
+    }
+
+    /// Ask the client to re-pull semantic tokens for visible editors (a
+    /// server→client request; the response is ignored in the main loop).
+    fn request_semantic_tokens_refresh(&mut self) {
+        if !self.semantic_tokens_refresh {
+            tracing::debug!("client lacks semanticTokens refresh support, not requesting");
+            return;
+        }
+        self.outgoing_requests += 1;
+        tracing::debug!(
+            n = self.outgoing_requests,
+            "requesting semantic tokens refresh"
+        );
+        let req = Request::new(
+            RequestId::from(format!("must-lsp/{}", self.outgoing_requests)),
+            SemanticTokensRefresh::METHOD.to_owned(),
+            serde_json::Value::Null,
+        );
+        let _ = self.sender.send(req.into());
+    }
+
+    fn spawn_semantic_tokens(&self, id: RequestId, uri: lsp_types::Uri) {
+        let params = lsp_types::SemanticTokensParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        self.spawn_parsed_request(id, params, |snapshot, params| {
+            serde_json::to_value(snapshot.semantic_tokens(params)).ok()
+        });
     }
 
     /// The one way to write the file maps: snapshots hold the old `Arc`, so
@@ -486,7 +570,9 @@ impl Snapshot {
         };
         let line_index = self.analysis.line_index(file);
         let offset = from_proto::offset(&line_index, doc.position)?;
-        let nav = self.analysis.goto_definition(ide::FilePosition { file, offset })?;
+        let nav = self
+            .analysis
+            .goto_definition(ide::FilePosition { file, offset })?;
         // The target's positions resolve through the target's own file.
         let target_uri = self.uri_for(nav.file)?;
         let target_index = self.analysis.line_index(nav.file);
@@ -573,9 +659,13 @@ impl Snapshot {
         };
         let line_index = self.analysis.line_index(file);
         let highlights = self.analysis.highlight(file);
-        Some(lsp_types::SemanticTokensResult::Tokens(
-            to_proto::semantic_tokens(&line_index, &highlights),
-        ))
+        let tokens = to_proto::semantic_tokens(&line_index, &highlights);
+        tracing::debug!(
+            uri = %uri.as_str(),
+            tokens = tokens.data.len(),
+            "answering semantic tokens"
+        );
+        Some(lsp_types::SemanticTokensResult::Tokens(tokens))
     }
 
     fn hover(&self, params: lsp_types::HoverParams) -> Option<lsp_types::Hover> {
@@ -638,7 +728,8 @@ mod tests {
     /// the pool. The `Connection` comes back so the receiving end stays alive.
     fn server() -> (GlobalState, Connection) {
         let (server, client) = Connection::memory();
-        (GlobalState::new(&server), client)
+        let init = lsp_types::InitializeParams::default();
+        (GlobalState::new(&server, &init.capabilities), client)
     }
 
     /// Waits until everything queued on the pool has run, which is what lets a
