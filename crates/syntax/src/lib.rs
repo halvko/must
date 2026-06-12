@@ -111,7 +111,13 @@ pub fn parse(text: &str) -> Parse {
     errors.extend(validation::validate(&SyntaxNode::new_root(green.clone())));
     // One error per position: errors are reported most-fundamental-first
     // (lexer before parser, "expected a name" before "expected `=`"), and
-    // editors tend to surface only one diagnostic per spot anyway.
+    // editors tend to surface only one diagnostic per spot anyway. The
+    // likelier collision — the missing-`;` hint against an error on the
+    // token it anchors to — is suppressed in the builder before it is ever
+    // pushed (see `Builder::error`), so the dedup here only settles
+    // residual same-range collisions. The sort is stable, so those are
+    // settled by push order: lexer errors seed the vec first, and flipping
+    // that order would flip winners.
     errors.sort_by_key(|err| (err.range.start(), err.range.end()));
     errors.dedup_by(|next, prev| next.range == prev.range);
     Parse {

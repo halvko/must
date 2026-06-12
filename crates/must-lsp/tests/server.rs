@@ -142,9 +142,10 @@ fn publishes_parse_errors_on_open_and_change() {
     assert_eq!(diags.diagnostics.len(), 1);
     let diag = &diags.diagnostics[0];
     assert_eq!(diag.message, "expected `;`");
-    // Points right after `let a = "x"` on line 1 — where the `;` belongs.
-    assert_eq!(diag.range.start, lsp_types::Position::new(1, 15));
-    assert_eq!(diag.range.end, diag.range.start);
+    // Anchored on the last character of `"x"` (the closing quote): visible
+    // and cursor-targetable without implying the whole string is wrong.
+    assert_eq!(diag.range.start, lsp_types::Position::new(1, 14));
+    assert_eq!(diag.range.end, lsp_types::Position::new(1, 15));
 
     // Fix the file: diagnostics clear.
     client.change(
@@ -164,9 +165,10 @@ fn diagnostic_positions_use_utf16_code_units() {
     let client = TestClient::start();
     let file = uri("file:///unicode.must");
 
-    // Missing `;` after the let; the error points right after the string —
-    // where the `;` belongs — whose `é` is 2 bytes / 1 UTF-16 unit and whose
-    // emoji is 4 bytes / 2 UTF-16 units. Byte column 20, UTF-16 column 17.
+    // Missing `;` after the let; the diagnostic anchors on the string's last
+    // character (the closing quote). The string's `é` is 2 bytes / 1 UTF-16
+    // unit and its emoji is 4 bytes / 2 UTF-16 units, so the token ends at
+    // byte column 20 but UTF-16 column 17 — the anchor is 16..17.
     client.open(
         &file,
         "static main = fn {\n    let a = \"é😀\" print(a);\n}\n",
@@ -175,8 +177,8 @@ fn diagnostic_positions_use_utf16_code_units() {
     assert_eq!(diags.diagnostics.len(), 1);
     let diag = &diags.diagnostics[0];
     assert_eq!(diag.message, "expected `;`");
-    assert_eq!(diag.range.start.line, 1);
-    assert_eq!(diag.range.start.character, 17);
+    assert_eq!(diag.range.start, lsp_types::Position::new(1, 16));
+    assert_eq!(diag.range.end, lsp_types::Position::new(1, 17));
 
     drop(client);
 }
@@ -272,6 +274,50 @@ fn quick_fix_wraps_fn_body_in_braces() {
     assert_eq!(edits[0].new_text, "{ ");
     assert_eq!(edits[1].range.start, lsp_types::Position::new(0, 16));
     assert_eq!(edits[1].new_text, " }");
+
+    drop(client);
+}
+
+#[test]
+fn quick_fix_inserts_semicolon_from_cursor_on_anchor() {
+    let mut client = TestClient::start();
+    let file = uri("file:///semicolon.must");
+
+    client.open(&file, "static main = fn {\n    let a = \"x\"\n    print(a);\n}\n");
+    client.next_diagnostics();
+
+    // The diagnostic anchors on the string's last character (columns
+    // 14..15), so the Insert `;` fix is reachable from a cursor there —
+    // no longer from anywhere else on the token. Here the last character.
+    let response = client.request::<lsp_types::request::CodeActionRequest>(
+        lsp_types::CodeActionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+            range: lsp_types::Range::new(
+                lsp_types::Position::new(1, 14),
+                lsp_types::Position::new(1, 14),
+            ),
+            context: lsp_types::CodeActionContext::default(),
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    );
+    let actions = response.expect("expected code actions");
+    assert_eq!(actions.len(), 1);
+    let lsp_types::CodeActionOrCommand::CodeAction(action) = &actions[0] else {
+        panic!("expected a code action, got {actions:?}");
+    };
+    assert_eq!(action.title, "Insert `;`");
+
+    let changes = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .expect("action has a workspace edit");
+    let edits = &changes[&file];
+    assert_eq!(edits.len(), 1);
+    // The `;` still inserts at the token's end.
+    assert_eq!(edits[0].range.start, lsp_types::Position::new(1, 15));
+    assert_eq!(edits[0].new_text, ";");
 
     drop(client);
 }

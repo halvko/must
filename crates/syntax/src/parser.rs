@@ -15,8 +15,9 @@ pub(crate) enum Event {
     Finish,
     Error {
         msg: String,
-        /// Report at the end of the previous token (where something is
-        /// missing) instead of at the token the parser is looking at.
+        /// Anchor on the previous token's last character (a visible,
+        /// cursor-targetable range) instead of the token the parser is
+        /// looking at; a fix inserts at the token's end.
         after_prev: bool,
         /// Text whose insertion at the error position fixes the error;
         /// becomes a quick fix.
@@ -103,8 +104,9 @@ impl<'t> Parser<'t> {
         });
     }
 
-    /// Expect a `;`. A missing one is reported right after the previous
-    /// token — where it should be typed — with an insert fix.
+    /// Expect a `;`. A missing one anchors on the previous token's last
+    /// character — the token the `;` belongs after — with an insert fix at
+    /// the token's end.
     pub(crate) fn expect_semicolon(&mut self) -> bool {
         if self.eat(SEMICOLON) {
             return true;
