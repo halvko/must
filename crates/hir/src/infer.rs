@@ -9,6 +9,7 @@
 use base_db::Db;
 use ena::unify::InPlaceUnificationTable;
 use la_arena::ArenaMap;
+use rustc_hash::FxHashMap;
 
 use crate::body::{Body, BindingId, ExprData, ExprId, LiteralData, Stmt, body};
 use crate::scopes::{Builtin, Resolution, resolutions};
@@ -101,13 +102,9 @@ impl InferenceDiagnostic {
 #[salsa::tracked(returns(ref))]
 pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
     let body = body(db, item);
-    let mut ctx = InferCtx {
-        db,
-        body,
-        resolutions: resolutions(db, item),
-        table: InPlaceUnificationTable::new(),
-        result: InferenceResult::default(),
-    };
+    let mut table = InPlaceUnificationTable::new();
+    let no_group = FxHashMap::default();
+    let mut ctx = InferCtx::new(db, body, resolutions(db, item), &mut table, &no_group);
 
     if let Some(root) = body.root {
         // Check the body against the item's annotation, if any.
@@ -121,33 +118,58 @@ pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
     ctx.finish()
 }
 
-struct InferCtx<'db> {
+pub(crate) struct InferCtx<'a, 'db> {
     db: &'db dyn Db,
     body: &'db Body,
     resolutions: &'db ArenaMap<ExprId, Resolution>,
-    table: InPlaceUnificationTable<TyVar>,
+    table: &'a mut InPlaceUnificationTable<TyVar>,
     result: InferenceResult,
+    /// Signature variables of this item's binding group (interprocedural
+    /// inference): references to these items use the shared variable
+    /// instead of the `signature` query, which would cycle.
+    in_group: &'a FxHashMap<ItemLoc, Ty>,
 }
 
-impl InferCtx<'_> {
+impl<'a, 'db> InferCtx<'a, 'db> {
+    pub(crate) fn new(
+        db: &'db dyn Db,
+        body: &'db Body,
+        resolutions: &'db ArenaMap<ExprId, Resolution>,
+        table: &'a mut InPlaceUnificationTable<TyVar>,
+        in_group: &'a FxHashMap<ItemLoc, Ty>,
+    ) -> InferCtx<'a, 'db> {
+        InferCtx {
+            db,
+            body,
+            resolutions,
+            table,
+            result: InferenceResult::default(),
+            in_group,
+        }
+    }
+
+    pub(crate) fn unify_public(&mut self, a: &Ty, b: &Ty) -> bool {
+        self.unify(a, b)
+    }
+
     fn finish(mut self) -> InferenceResult {
         let mut result = std::mem::take(&mut self.result);
         for (_, ty) in result.type_of_expr.iter_mut() {
-            *ty = resolve_fully(&mut self.table, ty);
+            *ty = resolve_fully(self.table, ty);
         }
         for (_, ty) in result.type_of_binding.iter_mut() {
-            *ty = resolve_fully(&mut self.table, ty);
+            *ty = resolve_fully(self.table, ty);
         }
         for diag in result.diagnostics.iter_mut() {
             match diag {
                 InferenceDiagnostic::TypeMismatch {
                     expected, actual, ..
                 } => {
-                    *expected = resolve_fully(&mut self.table, expected);
-                    *actual = resolve_fully(&mut self.table, actual);
+                    *expected = resolve_fully(self.table, expected);
+                    *actual = resolve_fully(self.table, actual);
                 }
                 InferenceDiagnostic::NotCallable { ty, .. } => {
-                    *ty = resolve_fully(&mut self.table, ty);
+                    *ty = resolve_fully(self.table, ty);
                 }
                 InferenceDiagnostic::ArgCountMismatch { .. }
                 | InferenceDiagnostic::NeedsAnnotation { .. } => {}
@@ -162,7 +184,7 @@ impl InferCtx<'_> {
 
     /// Infer `expr`; if `expected` is given, check against it (recording a
     /// diagnostic on mismatch and recovering with the expected type).
-    fn infer_expr(&mut self, expr: ExprId, expected: Option<&Ty>) -> Ty {
+    pub(crate) fn infer_expr(&mut self, expr: ExprId, expected: Option<&Ty>) -> Ty {
         let ty = match &self.body.exprs[expr] {
             ExprData::Missing => Ty::Error,
             ExprData::Literal(LiteralData::Int(_)) => Ty::Int,
@@ -176,21 +198,28 @@ impl InferCtx<'_> {
                     .cloned()
                     .unwrap_or(Ty::Error),
                 Some(Resolution::Item(loc)) => {
-                    let target = loc.to_id(self.db);
-                    let sig = signature(self.db, target);
-                    // The signature is broken because the definition lacks
-                    // annotations: that's only visible from uses (an unused
-                    // unannotated item is fine), so the diagnostic lives
-                    // here.
-                    if sig.contains_error() && signature_needs_annotation(self.db, target) {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::NeedsAnnotation {
-                                expr,
-                                item: loc.clone(),
-                            });
+                    // A member of this item's own binding group resolves to
+                    // its shared signature variable — that's interprocedural
+                    // inference happening.
+                    if let Some(member_sig) = self.in_group.get(loc) {
+                        member_sig.clone()
+                    } else {
+                        let target = loc.to_id(self.db);
+                        let sig = signature(self.db, target);
+                        // Inference couldn't determine the signature from
+                        // the definition: that's only visible from uses (an
+                        // unused undetermined item is fine), so the
+                        // diagnostic lives here.
+                        if signature_needs_annotation(self.db, target) {
+                            self.result
+                                .diagnostics
+                                .push(InferenceDiagnostic::NeedsAnnotation {
+                                    expr,
+                                    item: loc.clone(),
+                                });
+                        }
+                        sig
                     }
-                    sig
                 }
                 // No one signature a use could take on; the duplicate
                 // definitions carry the diagnostic.
@@ -201,6 +230,18 @@ impl InferCtx<'_> {
             ExprData::Call { callee, args } => {
                 let callee_ty = self.infer_expr(*callee, None);
                 match self.resolve_shallow(&callee_ty) {
+                    // The callee's type is still being inferred (an
+                    // in-group signature, e.g. mutual recursion): calling
+                    // it commits it to a function of this shape.
+                    Ty::Infer(var) => {
+                        let params: Vec<Ty> = args.iter().map(|_| self.fresh_var()).collect();
+                        let ret = self.fresh_var();
+                        self.unify(&Ty::Infer(var), &Ty::fn_type(params.clone(), ret.clone()));
+                        for (i, &arg) in args.iter().enumerate() {
+                            self.infer_expr(arg, Some(&params[i]));
+                        }
+                        ret
+                    }
                     Ty::Fn(f) => {
                         if f.params.len() != args.len() {
                             self.result
@@ -414,7 +455,7 @@ impl InferCtx<'_> {
                 true
             }
             (Ty::Infer(var), ty) | (ty, Ty::Infer(var)) => {
-                if occurs(&mut self.table, var, &ty) {
+                if occurs(self.table, var, &ty) {
                     return false;
                 }
                 self.table.union_value(var, TyVarValue::Known(ty));
@@ -478,7 +519,7 @@ fn occurs(table: &mut InPlaceUnificationTable<TyVar>, var: TyVar, ty: &Ty) -> bo
     }
 }
 
-fn resolve_fully(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty) -> Ty {
+pub(crate) fn resolve_fully(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty) -> Ty {
     match ty {
         Ty::Infer(var) => match table.probe_value(*var) {
             TyVarValue::Known(known) => resolve_fully(table, &known),

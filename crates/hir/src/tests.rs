@@ -397,49 +397,104 @@ static name = fn {
 }
 
 #[test]
-fn cross_item_use_of_unannotated_item_needs_annotation() {
-    // `a`'s signature can't be peeked from `42 + 52` without inference, so
-    // uses in other items error (interim until interprocedural inference).
+fn cross_item_use_of_unannotated_item_infers() {
+    // Interprocedural inference: `a`'s signature comes from its body, so
+    // the use in `b` sees `usize` — and the *real* type error surfaces.
     check_diagnostics(
         r#"
 static a = 42 + 52;
 static b = fn { print(a); };
 "#,
         expect![[r#"
-            43..44: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 8..9)
-        "#]],
-    );
-    // Annotating fixes it (and surfaces the real type error at the use).
-    check_diagnostics(
-        r#"
-static a: usize = 42 + 52;
-static b = fn { print(a); };
-"#,
-        expect![[r#"
-            50..51: type mismatch: expected `str`, found `usize`
+            43..44: type mismatch: expected `str`, found `usize`
         "#]],
     );
 }
 
 #[test]
-fn unannotated_fn_return_needs_annotation_only_when_used() {
-    // Block-without-tail peeks to `()`: fine. A tail expression would need
-    // this item's own inference, so cross-item uses ask for an annotation.
+fn unannotated_items_infer_across_items() {
+    // Tail expressions, unannotated returns, chains through several
+    // unannotated items: all inferred from bodies.
     check_diagnostics(
         r#"
 static f = fn (n: usize) { n + 1 };
-static main = fn { f(2); };
+static g = fn { f(2) };
+static main = fn { print(g()); };
 "#,
         expect![[r#"
-            56..57: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 8..9)
+            86..89: type mismatch: expected `str`, found `usize`
         "#]],
     );
-    // Unused: an unannotated item on its own is fine.
+}
+
+#[test]
+fn unannotated_mutual_recursion_infers_via_binding_groups() {
     check_diagnostics(
         r#"
-static f = fn (n: usize) { n + 1 };
+static is_even = fn (n: usize) -> bool {
+    if n == 0 { true } else { is_odd(n - 1) }
+}
+static is_odd = fn (n: usize) -> bool {
+    if n == 0 { false } else { is_even(n - 1) }
+}
+static main = fn { print(is_even(4)); };
 "#,
-        expect![[r#""#]],
+        expect![[r#"
+            205..215: type mismatch: expected `str`, found `bool`
+        "#]],
+    );
+}
+
+#[test]
+fn unannotated_recursion_with_unannotated_params_infers() {
+    // Even the params and return come out of the body: `n < 2` forces
+    // usize, the call commits `fib` to fn(usize) -> usize.
+    check_infer(
+        r#"
+static fib = fn (n) { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } };
+static use_it: usize = fib(10);
+"#,
+        expect![[r#"
+            14..72 'fn (n) { if n < 2...': fn(usize) -> usize
+            18..19 'n': usize
+            21..72 '{ if n < 2 { n } ...': usize
+            23..70 'if n < 2 { n } el...': usize
+            26..27 'n': usize
+            26..31 'n < 2': bool
+            30..31 '2': usize
+            32..37 '{ n }': usize
+            34..35 'n': usize
+            43..70 '{ fib(n - 1) + fi...': usize
+            45..48 'fib': fn(usize) -> usize
+            45..55 'fib(n - 1)': usize
+            45..68 'fib(n - 1) + fib(...': usize
+            49..50 'n': usize
+            49..54 'n - 1': usize
+            53..54 '1': usize
+            58..61 'fib': fn(usize) -> usize
+            58..68 'fib(n - 2)': usize
+            62..63 'n': usize
+            62..67 'n - 2': usize
+            66..67 '2': usize
+            97..100 'fib': fn(usize) -> usize
+            97..104 'fib(10)': usize
+            101..103 '10': usize
+        "#]],
+    );
+}
+
+#[test]
+fn underdetermined_items_still_need_annotations() {
+    // `id` is never called with anything concrete; monomorphic inference
+    // can't pick a type, so the use-site annotation request remains.
+    check_diagnostics(
+        r#"
+static id = fn (x) { x };
+static main = fn { id; };
+"#,
+        expect![[r#"
+            46..48: cannot infer the type of `id` across items; add a type annotation to its definition (defined here at 8..10)
+        "#]],
     );
 }
 

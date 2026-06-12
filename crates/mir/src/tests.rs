@@ -464,7 +464,9 @@ static f: ! = g();
 }
 
 #[test]
-fn use_of_unannotated_item_traps_with_the_annotation_message() {
+fn unannotated_items_lower_with_inferred_signatures() {
+    // Interprocedural inference: `double` types as fn(usize) -> usize from
+    // its body; the use lowers to a direct call, no trap.
     check_mir(
         r#"
 static double = fn (n) { n * 2 }
@@ -490,13 +492,56 @@ static main = fn { double(2); };
             item main:
             fn b0() -> () {
               _0: ()  // return
-              _1: fn({error}) -> {error}
-              _2: {error}
+              _1: usize
               bb0:
-                _1 = trap "cannot infer the type of `double` across items; add a type annotation to its definition" -> bb1
+                _1 = call item double(2) -> bb1
               bb1:
-                _2 = call _1(2) -> bb2
-              bb2:
+                _0 = ()
+                return
+            }
+            fn b1() -> fn() {
+              _0: fn()  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn use_of_underdetermined_item_traps_with_the_annotation_message() {
+    // `id` is never used concretely, so even interprocedural inference
+    // can't determine it; uses trap with the needs-annotation diagnostic.
+    check_mir(
+        r#"
+static id = fn (x) { x }
+static main = fn { let f = id; };
+"#,
+        expect![[r#"
+            item id:
+            fn b0(_1: _) -> _ {
+              _0: _  // return
+              _1: _  // param x
+              bb0:
+                _0 = _1
+                return
+            }
+            fn b1() -> fn(_) -> _ {
+              _0: fn(_) -> _  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item main:
+            fn b0() -> () {
+              _0: ()  // return
+              _1: fn({error}) -> {error}
+              _2: fn({error}) -> {error}  // f
+              bb0:
+                _1 = trap "cannot infer the type of `id` across items; add a type annotation to its definition" -> bb1
+              bb1:
+                _2 = _1
                 _0 = ()
                 return
             }

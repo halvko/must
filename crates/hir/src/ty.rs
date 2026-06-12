@@ -5,7 +5,7 @@ use std::sync::Arc;
 use base_db::Db;
 use ena::unify::{NoError, UnifyKey, UnifyValue};
 
-use crate::body::{ExprData, LiteralData};
+
 use crate::item_tree::TypeRef;
 use crate::ItemId;
 
@@ -133,90 +133,51 @@ pub fn lower_type_ref(type_ref: &TypeRef) -> Ty {
     }
 }
 
-/// The type other items see for `item`. Reads only annotations (item tree)
-/// plus a shallow, annotation-only peek at the body's root — it NEVER runs
-/// inference of another body, so there are no query cycles, and a body edit
-/// only propagates past this point if the signature value actually changes.
+/// The type other items see for `item`. An annotation is the whole answer
+/// (a hard firewall edge: body edits never reach dependents). Without one,
+/// the signature comes from the item's binding group — its own body,
+/// inferred together with any unannotated items it's mutually recursive
+/// with (see [`crate::groups`]); the firewall is then salsa early-cutoff:
+/// dependents re-run only when the *inferred* signature value changes.
 #[salsa::tracked]
 pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
     if let Some(type_ref) = crate::item_data(db, item).as_ref().and_then(|it| it.type_ref.as_ref()) {
         return lower_type_ref(type_ref);
     }
-
-    // No annotation: peek at the body's root without inferring.
-    let body = crate::body::body(db, item);
-    let Some(root) = body.root else {
+    let Some(index) = crate::item_index(db, item) else {
         return Ty::Error;
     };
-    match &body.exprs[root] {
-        ExprData::Literal(LiteralData::Int(_)) => Ty::Int,
-        ExprData::Literal(LiteralData::Str(_)) => Ty::Str,
-        ExprData::Literal(LiteralData::Bool(_)) => Ty::Bool,
-        ExprData::FnLiteral {
-            params,
-            ret_type,
-            body: fn_body,
-        } => {
-            let ret = match ret_type {
-                Some(type_ref) => lower_type_ref(type_ref),
-                // A block without a tail expression is `()` without needing
-                // inference. Anything else would need this item's own
-                // inference — that's the future interprocedural step
-                // (SCC groups/fixpoint).
-                None => match &body.exprs[*fn_body] {
-                    ExprData::Block { tail: None, .. } => Ty::Unit,
-                    _ => Ty::Error,
-                },
-            };
-            Ty::fn_type(
-                params
-                    .iter()
-                    .map(|&p| {
-                        body.bindings[p]
-                            .type_ref
-                            .as_ref()
-                            .map(lower_type_ref)
-                            .unwrap_or(Ty::Error)
-                    })
-                    .collect(),
-                ret,
-            )
-        }
-        _ => Ty::Error,
-    }
+    let file = item.file(db);
+    let groups = crate::groups::inference_groups(db, file);
+    let Some(Some(group)) = groups.group_of.get(index).copied() else {
+        return Ty::Error;
+    };
+    let members = &groups.groups[group as usize];
+    let Some(position) = members.iter().position(|&member| member == index) else {
+        return Ty::Error;
+    };
+    crate::groups::infer_group(db, crate::groups::GroupId::new(db, file, group))
+        .signatures
+        .get(position)
+        .cloned()
+        .unwrap_or(Ty::Error)
 }
 
-/// Whether `{error}` parts of [`signature`] stem from *absent* annotations —
-/// as opposed to written-but-broken types, which already carry their own
-/// diagnostics at the definition. Mirrors the peek above case by case; uses
-/// of such an item get a "add a type annotation" diagnostic.
+/// Whether uses of `item` should say "add a type annotation": unannotated
+/// AND inference couldn't determine its type from the definition (group
+/// inference erases undetermined leftovers to `{error}`).
 ///
 /// Language decision: exported symbols will *always* require a written
-/// contract, even once interprocedural inference lands — inference then
-/// only relaxes this for non-exported items (there is no visibility notion
-/// yet, so today it applies to everything).
+/// contract, even with interprocedural inference — once a visibility notion
+/// exists, exported items go back to requiring annotations; today every
+/// item counts as private.
 pub fn signature_needs_annotation<'db>(db: &'db dyn Db, item: ItemId<'db>) -> bool {
     if crate::item_data(db, item).as_ref().is_none_or(|it| it.type_ref.is_some()) {
         return false;
     }
-    let body = crate::body::body(db, item);
-    let Some(root) = body.root else {
+    if crate::body::body(db, item).root.is_none() {
         // No value at all: the parse errors cover it.
         return false;
-    };
-    match &body.exprs[root] {
-        ExprData::Literal(_) => false,
-        ExprData::FnLiteral {
-            params,
-            ret_type,
-            body: fn_body,
-        } => {
-            params
-                .iter()
-                .any(|&p| body.bindings[p].type_ref.is_none())
-                || (ret_type.is_none()
-                    && !matches!(body.exprs[*fn_body], ExprData::Block { tail: None, .. }))
-        }
-        _ => true,
     }
+    signature(db, item).contains_error()
 }

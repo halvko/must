@@ -288,6 +288,30 @@ static checked_div = fn (a: usize, b: usize) -> usize {
     }
 
     #[test]
+    fn unannotated_main_with_tail_expression_runs() {
+        // Dogfooding regression: the injected entry is a cross-item use of
+        // `main`; interprocedural inference determines main's signature
+        // from its body, so no annotation is demanded.
+        check(
+            r#"
+static is_even: fn(usize) -> bool = fn(n: usize) -> bool {
+    if n == 0 { true } else { is_odd(n - 1) }
+}
+static is_odd = fn(n: usize) -> bool {
+    if n == 0 { false } else { is_even(n - 1) }
+}
+static main = fn {
+    is_even(11)
+}
+"#,
+            "main()",
+            expect_test::expect![[r#"
+                => false
+            "#]],
+        );
+    }
+
+    #[test]
     fn entry_expression_must_parse() {
         check("static main = fn {};", "main(", expect_test::expect![[r#"
             error: invalid entry expression: expected `)`

@@ -5,13 +5,15 @@
 // Run: must-lsp run examples/compile_time.must -e 'fortnight_seconds'    (=> 1209600)
 // Run: must-lsp run examples/compile_time.must -e 'is_big'              (=> true)
 
-// Computed initializers used from other items need a type annotation.
+// Annotations on statics are optional — unannotated items get their types
+// inferred from their bodies (until visibility lands; exported items will
+// then require written contracts).
 static seconds_per_day: usize = 60 * 60 * 24;
 
 static double: fn(usize) -> usize = fn(n: usize) -> usize {
     n + n
 }
 
-static fortnight_seconds: usize = double(seconds_per_day) * 7;
+static fortnight_seconds = double(seconds_per_day) * 7;
 
 static is_big: bool = fortnight_seconds > 1_000_000;

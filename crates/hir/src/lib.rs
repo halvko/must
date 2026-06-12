@@ -7,6 +7,7 @@
 
 pub mod body;
 pub mod diag;
+pub mod groups;
 pub mod infer;
 pub mod item_tree;
 pub mod scopes;
