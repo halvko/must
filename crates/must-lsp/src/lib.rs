@@ -11,6 +11,7 @@
 
 mod from_proto;
 mod pool;
+pub mod runner;
 mod to_proto;
 
 use std::collections::HashMap;

@@ -377,6 +377,9 @@ version = "0.1.0"
 dependencies = [
  "base-db",
  "crossbeam-channel",
+ "eval",
+ "expect-test",
+ "hir",
  "ide",
  "line-index",
  "lsp-server",

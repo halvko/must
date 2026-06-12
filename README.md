@@ -41,6 +41,24 @@ cargo install --path crates/must-lsp
 (Remember to re-run that after pulling changes — PATH wins over the worktree
 fallback.)
 
+## Running programs
+
+The same binary runs Must code (the LSP's analysis, MIR, and interpreter —
+no separate toolchain):
+
+```sh
+must-lsp run examples/hello.must -e 'print("hello world")'  # capture-free hello
+```
+
+Programs run even when they don't typecheck: execution proceeds until it
+reaches something broken, then crashes with the same message the editor
+shows as a diagnostic, plus a source location. Top-level `static`s are
+evaluated at compile time (`static x = 4 + 5` is an implicit `const { … }`),
+so `print` inside an initializer is an error, while `print` in the `-e`
+expression (or code it calls) is fine. Captures aren't supported by the
+runner yet — `hello.must`'s `greeting` closes over a local, so `main()`
+traps with that diagnostic.
+
 ### Debugging the server
 
 Set `MUST_LSP_LOG` (a `tracing` env-filter, e.g. `must_lsp=debug`) in the
@@ -58,7 +76,7 @@ crates/
   mir/       control-flow-graph IR, lowered totally (errors become traps)
   eval/      the MIR interpreter: const eval (salsa query)
   ide/       editor-agnostic analysis API (diagnostics, hover, goto-def)
-  must-lsp/  the LSP binary: transport + main loop only
+  must-lsp/  the LSP binary: transport + main loop, plus the `run` command and its runner
 editors/zed/ Zed extension (separate workspace; compiled to wasm by Zed)
 ```
 
