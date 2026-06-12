@@ -3,7 +3,8 @@
 ## Conclusions
 
 - **P09** The command surface. `run` exits 0, 1 for a trap or runtime error, or 2 for a
-  usage or file-IO failure. Failure kinds have fixed prefix words.
+  usage or file-IO failure. Failure kinds have fixed prefix words. The frame limit is
+  10,000, and the message quotes the number.
 - **P11** The debugger runs in-process on the const-eval interpreter (X08): same MIR, same
   machine, same traps.
 
