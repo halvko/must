@@ -57,7 +57,8 @@ pub(crate) fn goto_definition(
                 focus_range: name_ptr.text_range(),
             })
         }
-        Resolution::Item(loc) => {
+        // Ambiguous: jump to the first definition — better than going dead.
+        Resolution::Item(loc) | Resolution::Ambiguous(loc) => {
             let target = loc.to_id(db)?;
             let src = hir::item_source(db, target)?;
             let full_range = src.syntax().text_range();

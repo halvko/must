@@ -11,9 +11,9 @@ use ena::unify::InPlaceUnificationTable;
 use la_arena::ArenaMap;
 
 use crate::body::{Body, BindingId, ExprData, ExprId, LiteralData, Stmt, body};
-use crate::scopes::{Builtin, Resolution, duplicated_names, resolutions};
-use crate::ty::{Ty, TyVar, TyVarValue, lower_type_ref, signature};
-use crate::{ItemId, item_loc};
+use crate::scopes::{Builtin, Resolution, resolutions};
+use crate::ty::{Ty, TyVar, TyVarValue, lower_type_ref, signature, signature_needs_annotation};
+use crate::{ItemId, ItemLoc, item_loc};
 use crate::item_tree::item_tree;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -43,6 +43,16 @@ pub enum InferenceDiagnostic {
         expected: usize,
         found: usize,
     },
+    /// A use of an item whose signature can't be determined because its
+    /// definition lacks annotations. Permanent for exported symbols (their
+    /// contract must be written); interprocedural inference will lift it
+    /// for private items. See [`signature_needs_annotation`].
+    NeedsAnnotation {
+        /// The referencing expression.
+        expr: ExprId,
+        /// The unannotated item.
+        item: ItemLoc,
+    },
 }
 
 #[salsa::tracked(returns(ref))]
@@ -52,7 +62,6 @@ pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
         db,
         body,
         resolutions: resolutions(db, item),
-        duplicated_names: duplicated_names(db, item.file(db)),
         table: InPlaceUnificationTable::new(),
         result: InferenceResult::default(),
     };
@@ -75,7 +84,6 @@ struct InferCtx<'db> {
     db: &'db dyn Db,
     body: &'db Body,
     resolutions: &'db ArenaMap<ExprId, Resolution>,
-    duplicated_names: &'db rustc_hash::FxHashSet<String>,
     table: InPlaceUnificationTable<TyVar>,
     result: InferenceResult,
 }
@@ -100,7 +108,8 @@ impl InferCtx<'_> {
                 InferenceDiagnostic::NotCallable { ty, .. } => {
                     *ty = resolve_fully(&mut self.table, ty);
                 }
-                InferenceDiagnostic::ArgCountMismatch { .. } => {}
+                InferenceDiagnostic::ArgCountMismatch { .. }
+                | InferenceDiagnostic::NeedsAnnotation { .. } => {}
             }
         }
         result
@@ -117,22 +126,32 @@ impl InferCtx<'_> {
             ExprData::Missing => Ty::Error,
             ExprData::Literal(LiteralData::Int(_)) => Ty::Int,
             ExprData::Literal(LiteralData::Str(_)) => Ty::Str,
-            ExprData::NameRef(name) => match self.resolutions.get(expr) {
+            ExprData::NameRef(_) => match self.resolutions.get(expr) {
                 Some(&Resolution::Local(binding)) => self
                     .result
                     .type_of_binding
                     .get(binding)
                     .cloned()
                     .unwrap_or(Ty::Error),
-                // An ambiguously-defined name has no one signature a use
-                // could take on; the silent error type keeps downstream
-                // checks quiet (the duplicate definition carries the
-                // diagnostic).
-                Some(&Resolution::Item(_)) if self.duplicated_names.contains(name) => Ty::Error,
                 Some(&Resolution::Item(loc)) => match loc.to_id(self.db) {
-                    Some(item) => signature(self.db, item),
+                    Some(target) => {
+                        let sig = signature(self.db, target);
+                        // The signature is broken because the definition
+                        // lacks annotations: that's only visible from uses
+                        // (an unused unannotated item is fine), so the
+                        // diagnostic lives here.
+                        if sig.contains_error() && signature_needs_annotation(self.db, target) {
+                            self.result
+                                .diagnostics
+                                .push(InferenceDiagnostic::NeedsAnnotation { expr, item: loc });
+                        }
+                        sig
+                    }
                     None => Ty::Error,
                 },
+                // No one signature a use could take on; the duplicate
+                // definitions carry the diagnostic.
+                Some(&Resolution::Ambiguous(_)) => Ty::Error,
                 Some(&Resolution::Builtin(builtin)) => builtin_type(builtin),
                 None => Ty::Error, // unresolved: already diagnosed by name resolution
             },
@@ -155,11 +174,20 @@ impl InferCtx<'_> {
                         }
                         f.ret.clone()
                     }
-                    Ty::Error | Ty::Never => {
+                    Ty::Error => {
                         for &arg in args {
                             self.infer_expr(arg, None);
                         }
                         Ty::Error
+                    }
+                    // Evaluating the callee already diverges, so the call
+                    // diverges; `{error}` here would be an error type with
+                    // no diagnostic to explain it.
+                    Ty::Never => {
+                        for &arg in args {
+                            self.infer_expr(arg, None);
+                        }
+                        Ty::Never
                     }
                     other => {
                         self.result

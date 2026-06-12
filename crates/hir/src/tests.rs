@@ -92,8 +92,8 @@ fn let_initializer_does_not_see_its_own_binding() {
 fn mutual_recursion_and_self_reference_resolve() {
     check_diagnostics(
         r#"
-const fib1 = fn (n: usize) { fib2(n-1) + fib2(n-2) }
-static fib2 = fn (n: usize) { fib1(n-1) + fib2(n-2) }
+const fib1 = fn (n: usize) -> usize { fib2(n-1) + fib2(n-2) }
+static fib2 = fn (n: usize) -> usize { fib1(n-1) + fib2(n-2) }
 "#,
         expect![[r#""#]],
     );
@@ -343,6 +343,91 @@ static name = fn {
             35..56 '{     let v = nam...': ()
             45..46 'v': {error}
             49..53 'name': {error}
+        "#]],
+    );
+}
+
+#[test]
+fn cross_item_use_of_unannotated_item_needs_annotation() {
+    // `a`'s signature can't be peeked from `42 + 52` without inference, so
+    // uses in other items error (interim until interprocedural inference).
+    check_diagnostics(
+        r#"
+static a = 42 + 52;
+static b = fn { print(a); };
+"#,
+        expect![[r#"
+            43..44: cannot infer the type of `a` across items; add a type annotation to its definition (defined here at 8..9)
+        "#]],
+    );
+    // Annotating fixes it (and surfaces the real type error at the use).
+    check_diagnostics(
+        r#"
+static a: usize = 42 + 52;
+static b = fn { print(a); };
+"#,
+        expect![[r#"
+            50..51: type mismatch: expected `str`, found `usize`
+        "#]],
+    );
+}
+
+#[test]
+fn unannotated_fn_return_needs_annotation_only_when_used() {
+    // Block-without-tail peeks to `()`: fine. A tail expression would need
+    // this item's own inference, so cross-item uses ask for an annotation.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) { n + 1 };
+static main = fn { f(2); };
+"#,
+        expect![[r#"
+            56..57: cannot infer the type of `f` across items; add a type annotation to its definition (defined here at 8..9)
+        "#]],
+    );
+    // Unused: an unannotated item on its own is fine.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) { n + 1 };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn unknown_type_name_is_diagnosed() {
+    check_diagnostics(
+        r#"
+static x: foo = 1;
+static f = fn (s: bar) {};
+"#,
+        expect![[r#"
+            11..14: unknown type `foo`
+            38..41: unknown type `bar`
+        "#]],
+    );
+}
+
+#[test]
+fn calling_a_diverging_value_is_never_not_error() {
+    // `{error}` here would be an error type with no diagnostic explaining
+    // it (the tripwire below would catch exactly this).
+    check_infer(
+        r#"
+static f = fn {
+    let x = panic("boom");
+    x();
+};
+"#,
+        expect![[r#"
+            12..54 'fn {     let x = ...': fn()
+            15..54 '{     let x = pan...': ()
+            25..26 'x': !
+            29..34 'panic': fn(str) -> !
+            29..42 'panic("boom")': !
+            35..41 '"boom"': str
+            48..49 'x': !
+            48..51 'x()': !
         "#]],
     );
 }
