@@ -61,6 +61,10 @@ const CONST_FUEL: u64 = 1_000_000;
 pub struct Frame {
     pub loc: ItemLoc,
     pub body: BodyId,
+    /// Unique per frame *instance* within a machine — two calls of the same
+    /// function are distinguishable (the debugger keys breakpoint arrivals
+    /// on this).
+    pub serial: u64,
     block: mir::BlockId,
     /// Index of the next statement to execute in `block`; past the end
     /// means the terminator is next.
@@ -91,6 +95,7 @@ pub struct Machine<'db, M> {
     /// > 0 while inside a static initializer: the const context marker.
     const_depth: usize,
     const_fuel: u64,
+    next_frame_serial: u64,
 }
 
 impl<'db> Machine<'db, ConstMode> {
@@ -112,6 +117,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             forced: FxHashMap::default(),
             const_depth: 0,
             const_fuel: CONST_FUEL,
+            next_frame_serial: 0,
         }
     }
 
@@ -270,9 +276,11 @@ impl<'db, M: Mode> Machine<'db, M> {
         for (&param, arg) in body.params.iter().zip(args) {
             locals.insert(param, arg);
         }
+        self.next_frame_serial += 1;
         self.frames.push(Frame {
             loc,
             body: body_id,
+            serial: self.next_frame_serial,
             block: body.entry,
             statement: 0,
             locals,

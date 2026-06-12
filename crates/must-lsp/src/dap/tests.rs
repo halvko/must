@@ -343,3 +343,116 @@ fn stop_on_entry_stops_at_the_first_user_line() {
 
     let _ = std::fs::remove_file(program);
 }
+
+const COUNTDOWN: &str =
+    "static down = fn (n: usize) -> usize {\n    if n == 0 { 0 } else { down(n - 1) }\n}\n";
+
+#[test]
+fn conditional_breakpoints_stop_only_when_true() {
+    let program = fixture("cond", COUNTDOWN);
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        (
+            "launch",
+            json!({ "program": program.to_str().unwrap(), "entry": "down(5)" }),
+        ),
+        (
+            "setBreakpoints",
+            json!({ "breakpoints": [{ "line": 2, "condition": "n == 2" }] }),
+        ),
+        ("configurationDone", json!({})),
+        ("evaluate", json!({ "expression": "n" })),
+        ("continue", json!({ "threadId": 1 })),
+        ("disconnect", json!({})),
+    ]);
+
+    // Arrivals at n = 5, 4, 3 pass silently; the stop is at n == 2.
+    let stopped = events(&messages, "stopped");
+    assert_eq!(stopped.len(), 1, "exactly one stop: {stopped:?}");
+    assert_eq!(stopped[0]["body"]["reason"], "breakpoint");
+    assert_eq!(responses_for(&messages, "evaluate")[0]["body"]["result"], "2");
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
+fn hit_conditions_skip_arrivals() {
+    let program = fixture("hits", COUNTDOWN);
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        (
+            "launch",
+            json!({ "program": program.to_str().unwrap(), "entry": "down(5)" }),
+        ),
+        (
+            "setBreakpoints",
+            // Stop on the third arrival only: n = 5, 4, then 3.
+            json!({ "breakpoints": [{ "line": 2, "hitCondition": "3" }] }),
+        ),
+        ("configurationDone", json!({})),
+        ("evaluate", json!({ "expression": "n" })),
+        ("continue", json!({ "threadId": 1 })),
+        ("disconnect", json!({})),
+    ]);
+
+    let stopped = events(&messages, "stopped");
+    assert_eq!(stopped.len(), 1, "exactly one stop: {stopped:?}");
+    assert_eq!(responses_for(&messages, "evaluate")[0]["body"]["result"], "3");
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
+fn log_points_emit_without_stopping() {
+    let program = fixture("log", COUNTDOWN);
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        (
+            "launch",
+            json!({ "program": program.to_str().unwrap(), "entry": "down(2)" }),
+        ),
+        (
+            "setBreakpoints",
+            json!({ "breakpoints": [{ "line": 2, "logMessage": "n is {n}, doubled {n * 2}" }] }),
+        ),
+        ("configurationDone", json!({})),
+        ("disconnect", json!({})),
+    ]);
+
+    assert_eq!(events(&messages, "stopped").len(), 0, "log points don't stop");
+    let stdout: String = events(&messages, "output")
+        .iter()
+        .filter(|e| e["body"]["category"] == "stdout")
+        .map(|e| e["body"]["output"].as_str().unwrap())
+        .collect();
+    assert!(stdout.contains("n is 2, doubled 4\n"), "interpolated: {stdout}");
+    assert!(stdout.contains("n is 0, doubled 0\n"), "interpolated: {stdout}");
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
+fn invalid_hit_conditions_unverify_the_breakpoint() {
+    let program = fixture("badhits", COUNTDOWN);
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        (
+            "launch",
+            json!({ "program": program.to_str().unwrap(), "entry": "down(1)" }),
+        ),
+        (
+            "setBreakpoints",
+            json!({ "breakpoints": [{ "line": 2, "hitCondition": "sometimes" }] }),
+        ),
+        ("configurationDone", json!({})),
+        ("disconnect", json!({})),
+    ]);
+    let bp = &responses_for(&messages, "setBreakpoints")[0]["body"]["breakpoints"][0];
+    assert_eq!(bp["verified"], false);
+    assert!(bp["message"].as_str().unwrap().contains("invalid hit condition"));
+
+    let _ = std::fs::remove_file(program);
+}

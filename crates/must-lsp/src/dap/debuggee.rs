@@ -22,12 +22,75 @@ pub(crate) enum ResumeMode {
 }
 
 /// A client breakpoint: a line, optionally narrowed to a column (an
-/// "inline" breakpoint distinguishing multiple calls on one line).
+/// "inline" breakpoint distinguishing multiple calls on one line),
+/// optionally gated by a hit count and/or a condition, optionally a log
+/// point (emit and keep going instead of stopping).
 #[derive(Clone)]
 pub(crate) struct BreakpointSpec {
     pub(crate) line: u32,
     pub(crate) column: Option<u32>,
     pub(crate) id: i64,
+    /// Stop only when this Must expression is true in the stopping frame.
+    pub(crate) condition: Option<String>,
+    pub(crate) hit_condition: Option<HitCondition>,
+    pub(crate) log_message: Option<String>,
+    /// Arrivals so far (resets when the client replaces its breakpoints).
+    pub(crate) hits: u32,
+    /// (frame serial, line, column-or-0) keys already arrived at: one
+    /// arrival per line per frame *instance* — recursion re-arrives (new
+    /// frame), unwinding back into a line does not. NOTE: revisit when the
+    /// language gains loops (same frame, same line, legitimately again).
+    pub(crate) visited: std::collections::HashSet<(u64, u32, u32)>,
+}
+
+/// Parsed hit-count condition. Plain `N` stops on the Nth arrival.
+#[derive(Clone, Copy)]
+pub(crate) enum HitCondition {
+    Eq(u32),
+    Ne(u32),
+    Gt(u32),
+    Ge(u32),
+    Lt(u32),
+    Le(u32),
+    /// `% N`: every Nth arrival.
+    Mod(u32),
+}
+
+impl HitCondition {
+    pub(crate) fn parse(text: &str) -> Option<HitCondition> {
+        let text = text.trim();
+        let (make, rest): (fn(u32) -> HitCondition, &str) = if let Some(r) = text.strip_prefix("==") {
+            (HitCondition::Eq, r)
+        } else if let Some(r) = text.strip_prefix("!=") {
+            (HitCondition::Ne, r)
+        } else if let Some(r) = text.strip_prefix(">=") {
+            (HitCondition::Ge, r)
+        } else if let Some(r) = text.strip_prefix("<=") {
+            (HitCondition::Le, r)
+        } else if let Some(r) = text.strip_prefix('>') {
+            (HitCondition::Gt, r)
+        } else if let Some(r) = text.strip_prefix('<') {
+            (HitCondition::Lt, r)
+        } else if let Some(r) = text.strip_prefix('%') {
+            (HitCondition::Mod, r)
+        } else {
+            (HitCondition::Eq, text)
+        };
+        let n: u32 = rest.trim().parse().ok()?;
+        Some(make(n))
+    }
+
+    fn met(self, hits: u32) -> bool {
+        match self {
+            HitCondition::Eq(n) => hits == n,
+            HitCondition::Ne(n) => hits != n,
+            HitCondition::Gt(n) => hits > n,
+            HitCondition::Ge(n) => hits >= n,
+            HitCondition::Lt(n) => hits < n,
+            HitCondition::Le(n) => hits <= n,
+            HitCondition::Mod(n) => n != 0 && hits % n == 0,
+        }
+    }
 }
 
 pub(crate) enum Outcome {
@@ -46,7 +109,7 @@ pub(crate) struct StackFrame {
     pub(crate) column: u32,
 }
 
-pub(crate) struct Debuggee<W: Write> {
+pub(crate) struct Debuggee<W: Write + Clone> {
     /// The database must outlive the machine borrowing it; a debug session
     /// owns its process (it exits on disconnect), so leaking one database
     /// for the session's lifetime is the simple, honest option.
@@ -58,6 +121,8 @@ pub(crate) struct Debuggee<W: Write> {
     text: String,
     original_len: usize,
     machine: Machine<'static, RunMode<W>>,
+    /// Cloned for sub-evaluations (conditions, log points, the console).
+    console: W,
     pub(crate) breakpoints: Vec<BreakpointSpec>,
     /// Positions some MIR statement or terminator maps to (line → start
     /// columns): where breakpoints can verify, and the candidates the
@@ -68,7 +133,7 @@ pub(crate) struct Debuggee<W: Write> {
     pub(crate) crashed: Option<EvalError>,
 }
 
-impl<W: Write> Debuggee<W> {
+impl<W: Write + Clone> Debuggee<W> {
     /// Read and prepare `path`, ready to run `entry`. Errors are fully
     /// rendered.
     pub(crate) fn new(path: &str, entry: &str, console: W) -> Result<Debuggee<W>, String> {
@@ -76,7 +141,7 @@ impl<W: Write> Debuggee<W> {
             .map_err(|err| format!("error: cannot read `{path}`: {err}"))?;
         let db: &'static RootDatabase = Box::leak(Box::new(RootDatabase::default()));
         let prepared = runner::prepare(db, &text, path, entry)?;
-        let mut machine = Machine::new(db, RunMode { out: console });
+        let mut machine = Machine::new(db, RunMode { out: console.clone() });
         machine
             .start(&prepared.entry)
             .map_err(|err| format!("error: {}", err.message))?;
@@ -89,6 +154,7 @@ impl<W: Write> Debuggee<W> {
             text,
             original_len: prepared.original_len,
             machine,
+            console,
             breakpoints: Vec::new(),
             executable_positions,
             crashed: None,
@@ -119,6 +185,10 @@ impl<W: Write> Debuggee<W> {
         locations
     }
 
+    fn top_serial(&self) -> u64 {
+        self.machine.frames().last().map(|f| f.serial).unwrap_or(0)
+    }
+
     /// (stack depth, current (line, column) of the top frame).
     fn position(&self) -> (usize, Option<(u32, u32)>) {
         let depth = self.machine.frames().len();
@@ -131,55 +201,108 @@ impl<W: Write> Debuggee<W> {
         (depth, position)
     }
 
+    /// The arrival key of a breakpoint at a position: `Some` when the
+    /// breakpoint matches, keyed by frame instance so each frame arrives at
+    /// a line once (unwinding back into the line is not a new arrival;
+    /// a recursive call is).
+    fn arrival_key(
+        bp: &BreakpointSpec,
+        serial: u64,
+        position: Option<(u32, u32)>,
+    ) -> Option<(u64, u32, u32)> {
+        let (line, column) = position?;
+        if bp.line != line {
+            return None;
+        }
+        match bp.column {
+            Some(c) if c != column => None,
+            Some(_) => Some((serial, line, column)),
+            // Line breakpoints don't distinguish columns within the line.
+            None => Some((serial, line, 0)),
+        }
+    }
+
     pub(crate) fn resume(&mut self, mode: ResumeMode, statement_granularity: bool) -> Outcome {
         let start = self.position();
         // Line-level view of a position: what "somewhere new" means at line
         // granularity (multiple statements on one line don't re-stop).
         let line_of =
             |p: &(usize, Option<(u32, u32)>)| (p.0, p.1.map(|(line, _)| line));
+        // Seed the resume point as visited, so resuming from a stop at a
+        // breakpoint (or adding one at the paused line) doesn't re-arrive
+        // without moving.
+        let start_serial = self.top_serial();
+        for bp in &mut self.breakpoints {
+            if let Some(key) = Self::arrival_key(bp, start_serial, start.1) {
+                bp.visited.insert(key);
+            }
+        }
         loop {
             let here = self.position();
             let (depth, position) = here;
-            if depth > 0 {
-                if let Some((line, column)) = position {
-                    // Breakpoints apply in every mode — but not at the spot
-                    // we're resuming from, judged at the breakpoint's own
-                    // granularity.
-                    for bp in &self.breakpoints {
-                        if bp.line != line {
+            if depth > 0 && position.is_some() {
+                let serial = self.top_serial();
+                // Breakpoint arrivals (once per line per frame instance),
+                // in every resume mode.
+                for index in 0..self.breakpoints.len() {
+                    let arrived = Self::arrival_key(&self.breakpoints[index], serial, position)
+                        .is_some_and(|key| self.breakpoints[index].visited.insert(key));
+                    if !arrived {
+                        continue;
+                    }
+                    self.breakpoints[index].hits += 1;
+                    if let Some(hit_condition) = self.breakpoints[index].hit_condition {
+                        if !hit_condition.met(self.breakpoints[index].hits) {
                             continue;
                         }
-                        let (matches, moved) = match bp.column {
-                            Some(c) => (c == column, here != start),
-                            None => (true, line_of(&here) != line_of(&start)),
-                        };
-                        if matches && moved {
-                            return Outcome::Stopped {
-                                reason: "breakpoint",
-                                hit_breakpoint: Some(bp.id),
-                            };
+                    }
+                    if let Some(condition) = self.breakpoints[index].condition.clone() {
+                        let top = self.machine.frames().len() - 1;
+                        match self.eval_in_frame(&condition, top) {
+                            Ok(Value::Bool(true)) => {}
+                            Ok(Value::Bool(false)) => continue,
+                            // A broken condition must be noticed, not
+                            // silently skipped: warn and stop.
+                            Ok(other) => self.console_line(&format!(
+                                "warning: breakpoint condition `{condition}` is not a bool (got {})",
+                                other.display()
+                            )),
+                            Err(message) => self.console_line(&format!(
+                                "warning: breakpoint condition `{condition}` failed: {message}"
+                            )),
                         }
                     }
-                    let moved = if statement_granularity {
-                        here != start
-                    } else {
-                        line_of(&here) != line_of(&start)
-                    };
-                    let (stop, reason) = match mode {
-                        ResumeMode::Entry => (true, "entry"),
-                        ResumeMode::Continue => (false, ""),
-                        ResumeMode::StepOver => {
-                            (depth < start.0 || (depth == start.0 && moved), "step")
-                        }
-                        ResumeMode::StepIn => (moved || depth != start.0, "step"),
-                        ResumeMode::StepOut => (depth < start.0, "step"),
-                    };
-                    if stop {
-                        return Outcome::Stopped {
-                            reason,
-                            hit_breakpoint: None,
-                        };
+                    if let Some(log_message) = self.breakpoints[index].log_message.clone() {
+                        // A log point: emit and keep going.
+                        let top = self.machine.frames().len() - 1;
+                        let text = self.interpolate(&log_message, top);
+                        self.console_line(&text);
+                        continue;
                     }
+                    return Outcome::Stopped {
+                        reason: "breakpoint",
+                        hit_breakpoint: Some(self.breakpoints[index].id),
+                    };
+                }
+                let moved = if statement_granularity {
+                    here != start
+                } else {
+                    line_of(&here) != line_of(&start)
+                };
+                let (stop, reason) = match mode {
+                    ResumeMode::Entry => (true, "entry"),
+                    ResumeMode::Continue => (false, ""),
+                    ResumeMode::StepOver => {
+                        (depth < start.0 || (depth == start.0 && moved), "step")
+                    }
+                    ResumeMode::StepIn => (moved || depth != start.0, "step"),
+                    ResumeMode::StepOut => (depth < start.0, "step"),
+                };
+                if stop {
+                    return Outcome::Stopped {
+                        reason,
+                        hit_breakpoint: None,
+                    };
                 }
             }
             match self.machine.step() {
@@ -188,6 +311,33 @@ impl<W: Write> Debuggee<W> {
                 Err(err) => return Outcome::Crashed(err),
             }
         }
+    }
+
+    /// Substitute `{expr}` pieces of a log point's message with their
+    /// values, evaluated in `frame_index`.
+    fn interpolate(&mut self, template: &str, frame_index: usize) -> String {
+        let mut out = String::new();
+        let mut rest = template;
+        while let Some(open) = rest.find('{') {
+            out.push_str(&rest[..open]);
+            let Some(close) = rest[open..].find('}') else {
+                out.push_str(&rest[open..]);
+                return out;
+            };
+            let expr = &rest[open + 1..open + close];
+            match self.eval_in_frame(expr, frame_index) {
+                Ok(value) => out.push_str(&value.display()),
+                Err(message) => out.push_str(&format!("{{error: {message}}}")),
+            }
+            rest = &rest[open + close + 1..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    fn console_line(&mut self, text: &str) {
+        let mut console = self.console.clone();
+        let _ = writeln!(console, "{text}");
     }
 
     /// The visible stack, top frame first. Frames without a user-source
@@ -239,11 +389,17 @@ impl<W: Write> Debuggee<W> {
         &mut self,
         expression: &str,
         frame_id: Option<i64>,
-        console: W,
     ) -> Result<String, String> {
-        let expression = expression.trim();
         let top = self.machine.frames().len() as i64;
         let frame_index = usize::try_from(frame_id.unwrap_or(top) - 1).unwrap_or(0);
+        self.eval_in_frame(expression, frame_index)
+            .map(|value| value.display())
+    }
+
+    /// The shared engine behind console evaluation, breakpoint conditions,
+    /// and log-point interpolation.
+    fn eval_in_frame(&mut self, expression: &str, frame_index: usize) -> Result<Value, String> {
+        let expression = expression.trim();
 
         // Innermost shadow wins, so later occurrences replace earlier ones;
         // locals whose type can't be written as an annotation (error,
@@ -261,7 +417,7 @@ impl<W: Write> Debuggee<W> {
 
         if is_name(expression) {
             if let Some((_, _, value)) = locals.iter().find(|(name, _, _)| name == expression) {
-                return Ok(value.display());
+                return Ok(value.clone());
             }
         }
 
@@ -276,17 +432,14 @@ impl<W: Write> Debuggee<W> {
         let wrapped = format!("fn ({params}) {{ {expression}\n}}");
         let prepared = runner::prepare(self.db, &self.text, &self.path, &wrapped)?;
 
-        let mut machine = Machine::new(self.db, RunMode { out: console });
-        let result = machine
+        let mut machine = Machine::new(self.db, RunMode { out: self.console.clone() });
+        machine
             .eval_root(&prepared.entry)
             .and_then(|fn_value| match fn_value {
                 Value::Fn(f) => machine.call_value(f, args),
                 other => Ok(other),
-            });
-        match result {
-            Ok(value) => Ok(value.display()),
-            Err(err) => Err(self.render_error(&err)),
-        }
+            })
+            .map_err(|err| self.render_error(&err))
     }
 
     /// Render an eval error the way the CLI runner does: kind prefix,
