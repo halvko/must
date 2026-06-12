@@ -126,8 +126,9 @@ fn publishes_parse_errors_on_open_and_change() {
     assert_eq!(diags.diagnostics.len(), 1);
     let diag = &diags.diagnostics[0];
     assert_eq!(diag.message, "expected `;`");
-    // Anchored on `"x"`, the token the missing `;` belongs after.
-    assert_eq!(diag.range.start, lsp_types::Position::new(1, 12));
+    // Anchored on the last character of `"x"` (the closing quote): visible
+    // and cursor-targetable without implying the whole string is wrong.
+    assert_eq!(diag.range.start, lsp_types::Position::new(1, 14));
     assert_eq!(diag.range.end, lsp_types::Position::new(1, 15));
 
     // Fix the file: diagnostics clear.

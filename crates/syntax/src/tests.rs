@@ -750,7 +750,6 @@ fn item_missing_name_and_body() {
                   BLOCK_EXPR@12..13
                     L_BRACE@12..13 "{"
             error 7..8: expected a name for the item
-            error 12..13: expected `;`
             error 13..13: expected `}`
         "#]],
     );
@@ -1002,7 +1001,6 @@ static b = fn {};
                     R_BRACE@49..50 "}"
                 SEMICOLON@50..51 ";"
               WHITESPACE@51..52 "\n"
-            error 32..33: expected `;`
             error 34..40: expected `}`
         "#]],
     );

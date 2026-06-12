@@ -116,10 +116,21 @@ impl Builder<'_> {
     }
 
     fn error(&mut self, message: String, after_prev: bool, fix_insert: Option<String>) {
+        // "Missing X after this token" is noise when that token is itself
+        // broken (e.g. an unterminated string).
+        if after_prev
+            && self
+                .errors
+                .iter()
+                .any(|e| e.range.intersect(self.prev_token_range).is_some())
+        {
+            return;
+        }
         let range = if after_prev {
-            // Anchor on the previous token so the diagnostic is visible and
-            // a cursor can sit on it; the fix still inserts after it.
-            self.prev_token_range
+            // Anchor on the previous token's *last character*: visible, a
+            // cursor can sit on it, and it doesn't read as "this whole
+            // token is wrong". The fix still inserts after it.
+            last_char_range(self.text, self.prev_token_range)
         } else {
             // Point at the token the parser was looking at; an empty range
             // at the end of the text if there is none.
@@ -138,7 +149,7 @@ impl Builder<'_> {
             }
         };
         let fix_at = if after_prev {
-            TextRange::empty(range.end())
+            TextRange::empty(self.prev_token_range.end())
         } else {
             range
         };
@@ -175,5 +186,13 @@ impl Builder<'_> {
         if !token.kind.is_trivia() {
             self.prev_token_range = range;
         }
+    }
+}
+
+/// The range of the last character (not byte) in `range`.
+fn last_char_range(text: &str, range: TextRange) -> TextRange {
+    match text[range].char_indices().last() {
+        Some((i, _)) => TextRange::new(range.start() + TextSize::new(i as u32), range.end()),
+        None => range,
     }
 }

@@ -35,7 +35,9 @@ fn item(p: &mut Parser<'_>) {
     if p.eat(EQ) {
         expr(p);
         // Brace rule: items whose value ends in `}` don't need a `;`.
-        if p.prev() == Some(R_BRACE) {
+        // A value "ending" in `;` only happens in broken nesting (e.g. an
+        // unclosed block) — demanding another `;` there is pure noise.
+        if matches!(p.prev(), Some(R_BRACE | SEMICOLON)) {
             p.eat(SEMICOLON);
         } else {
             p.expect_semicolon();
