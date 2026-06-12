@@ -778,6 +778,52 @@ fn unterminated_string() {
 }
 
 #[test]
+fn multiline_string_literal() {
+    // Strings are multiline, Rust-style: a closing quote on a later line is
+    // a valid literal, not two unterminated-string errors.
+    check(
+        r#"
+static name = fn {
+    let s = "haha
+    ";
+}
+"#,
+        expect![[r#"
+            SOURCE_FILE@0..47
+              WHITESPACE@0..1 "\n"
+              STATIC_ITEM@1..46
+                STATIC_KW@1..7 "static"
+                WHITESPACE@7..8 " "
+                NAME@8..12
+                  IDENT@8..12 "name"
+                WHITESPACE@12..13 " "
+                EQ@13..14 "="
+                WHITESPACE@14..15 " "
+                FN_LITERAL@15..46
+                  FN_KW@15..17 "fn"
+                  WHITESPACE@17..18 " "
+                  BLOCK_EXPR@18..46
+                    L_BRACE@18..19 "{"
+                    WHITESPACE@19..24 "\n    "
+                    LET_STMT@24..44
+                      LET_KW@24..27 "let"
+                      WHITESPACE@27..28 " "
+                      NAME@28..29
+                        IDENT@28..29 "s"
+                      WHITESPACE@29..30 " "
+                      EQ@30..31 "="
+                      WHITESPACE@31..32 " "
+                      LITERAL@32..43
+                        STRING@32..43 "\"haha\n    \""
+                      SEMICOLON@43..44 ";"
+                    WHITESPACE@44..45 "\n"
+                    R_BRACE@45..46 "}"
+              WHITESPACE@46..47 "\n"
+        "#]],
+    );
+}
+
+#[test]
 fn junk_between_items() {
     check(
         r#"
