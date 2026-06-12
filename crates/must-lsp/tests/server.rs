@@ -449,6 +449,20 @@ fn out_of_range_positions_clamp_into_the_requested_line() {
 }
 
 #[test]
+fn diagnostics_carry_the_document_version() {
+    let client = TestClient::start();
+    let file = uri("file:///versioned.must");
+
+    client.open(&file, "static = 1;");
+    assert_eq!(client.next_diagnostics().version, Some(0));
+
+    client.change(&file, 7, "static x = 1;");
+    assert_eq!(client.next_diagnostics().version, Some(7));
+
+    drop(client);
+}
+
+#[test]
 fn close_clears_diagnostics() {
     let client = TestClient::start();
     let file = uri("file:///broken.must");

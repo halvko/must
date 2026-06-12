@@ -16,7 +16,7 @@ mod to_proto;
 
 use std::collections::HashMap;
 use std::error::Error;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use base_db::SourceFile;
 use ide::{AnalysisHost, cancellable};
@@ -112,6 +112,20 @@ struct GlobalState {
     files: Arc<FileMaps>,
     sender: crossbeam_channel::Sender<Message>,
     pool: pool::TaskPool,
+    /// Per-document publish generation. Cancellation only saves a task that
+    /// is still computing: one that has finished can be beaten to the send by
+    /// the close or reopen it raced, and would then resurrect squiggles on a
+    /// document the client has moved on from. Each task captures its
+    /// generation and re-checks it at send time under this lock, held across
+    /// the send: a close therefore orders strictly before or after an
+    /// in-flight publish, never between its check and its send.
+    diagnostics_generation: Arc<Mutex<HashMap<lsp_types::Uri, u64>>>,
+    /// Issues [`GlobalState::diagnostics_generation`] values, main loop only.
+    /// The counter runs for the whole session, across documents and
+    /// close/reopen cycles: a close drops the document's entry, and a number
+    /// that could be reissued after that would let a pre-close task pass as
+    /// the reopened document's first publish.
+    next_generation: u64,
 }
 
 /// Both directions of the file table, replaced as one so that no reader can
@@ -149,6 +163,8 @@ impl GlobalState {
             files: Arc::new(FileMaps::default()),
             sender: connection.sender.clone(),
             pool: pool::TaskPool::new(WORKER_THREADS),
+            diagnostics_generation: Arc::new(Mutex::new(HashMap::new())),
+            next_generation: 0,
         }
     }
 
@@ -294,6 +310,12 @@ impl GlobalState {
                 // ignores unknown ones: never publish about a document the
                 // client did not tell us to open.
                 if self.close_file(&uri) {
+                    // Invalidate in-flight publishes before clearing, or a
+                    // slow task can resurrect squiggles on the closed
+                    // document. Retiring the entry outright (rather than
+                    // bumping it) also keeps the map bounded by open
+                    // documents.
+                    self.retire_generation(&uri);
                     self.send_diagnostics(uri, Vec::new(), None)?;
                 }
             }
@@ -369,13 +391,31 @@ impl GlobalState {
         }
     }
 
+    /// Stamps `uri`'s next publish with a fresh, session-unique generation.
+    fn bump_generation(&mut self, uri: &lsp_types::Uri) -> u64 {
+        self.next_generation += 1;
+        self.diagnostics_generation
+            .lock()
+            .unwrap()
+            .insert(uri.clone(), self.next_generation);
+        self.next_generation
+    }
+
+    /// Retires a closed document's publish generation: in-flight publishes
+    /// for it drop at send time, and the map stays bounded by open documents.
+    fn retire_generation(&self, uri: &lsp_types::Uri) {
+        self.diagnostics_generation.lock().unwrap().remove(uri);
+    }
+
     /// Computes this document's diagnostics on the pool.
     ///
     /// `version` rides along with the task and is published with the result:
     /// off the main loop the answer can land after the client has typed on,
     /// and the version is what lets the client drop squiggles computed for
     /// text it no longer has.
-    fn publish_diagnostics(&self, uri: lsp_types::Uri, file: SourceFile, version: i32) {
+    fn publish_diagnostics(&mut self, uri: lsp_types::Uri, file: SourceFile, version: i32) {
+        let generation = self.bump_generation(&uri);
+        let generations = Arc::clone(&self.diagnostics_generation);
         let snapshot = self.snapshot();
         let sender = self.sender.clone();
         self.pool.spawn(move || {
@@ -391,10 +431,20 @@ impl GlobalState {
             // Cancelled: some edit bumped the revision. Only the edited
             // document gets republished, so if the edit was to another
             // document these diagnostics stay stale until it changes again.
-            if let Some(diagnostics) = diagnostics {
-                let _ =
-                    sender.send(diagnostics_notification(uri, diagnostics, Some(version)).into());
+            let Some(diagnostics) = diagnostics else {
+                return;
+            };
+            // Superseded since spawn (a newer publish, or a close, which
+            // retired the entry outright): drop, don't resurrect. The lock is
+            // held across the send — an unbounded send never blocks, so
+            // nothing deadlocks — which orders a close's retire strictly
+            // before this send (this drops) or after it (its clear lands
+            // after these diagnostics), never between check and send.
+            let generations = generations.lock().unwrap();
+            if generations.get(&uri) != Some(&generation) {
+                return;
             }
+            let _ = sender.send(diagnostics_notification(uri, diagnostics, Some(version)).into());
         });
     }
 
