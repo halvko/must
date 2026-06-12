@@ -237,9 +237,20 @@ impl GlobalState {
         let snapshot = self.snapshot();
         let sender = self.sender.clone();
         self.pool.spawn(move || {
-            let resp = match cancellable(|| handler(&snapshot, params)) {
-                Some(value) => Response::new_ok(id, value),
-                None => content_modified(id),
+            // Every request id gets exactly one response, panics included —
+            // a swallowed id hangs that request in the client forever.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                cancellable(|| handler(&snapshot, params))
+            }));
+            let resp = match outcome {
+                Ok(Some(value)) => Response::new_ok(id, value),
+                Ok(None) => content_modified(id),
+                Err(_) => Response::new_err(
+                    id,
+                    ErrorCode::InternalError as i32,
+                    "request handler panicked — this is a bug in the Must language server"
+                        .to_owned(),
+                ),
             };
             let _ = sender.send(resp.into());
         });

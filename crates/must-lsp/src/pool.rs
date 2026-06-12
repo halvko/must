@@ -1,6 +1,6 @@
 //! A small fixed-size worker pool for request handling. Workers exit when
 //! the pool (and thus the channel sender) is dropped; a task that panics
-//! takes its worker with it, and the pool runs on shorthanded.
+//! is caught and logged, and its worker goes on to the next task.
 
 type Task = Box<dyn FnOnce() + Send>;
 
@@ -17,7 +17,14 @@ impl TaskPool {
                 .name(format!("must-lsp-worker-{i}"))
                 .spawn(move || {
                     while let Ok(task) = receiver.recv() {
-                        task();
+                        // A panicking task must not kill the worker: with a
+                        // fixed pool, dead workers silently shrink it until
+                        // the server stops answering anything. Request
+                        // handlers additionally answer `InternalError`
+                        // themselves (see `spawn_request`).
+                        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)).is_err() {
+                            tracing::error!("worker task panicked");
+                        }
                     }
                 })
                 .expect("failed to spawn worker thread");
