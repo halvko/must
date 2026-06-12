@@ -146,7 +146,7 @@ impl FnLiteral {
     pub fn ret_type(&self) -> Option<RetType> {
         child(&self.syntax)
     }
-    pub fn body(&self) -> Option<Expr> {
+    pub fn body(&self) -> Option<BlockExpr> {
         child(&self.syntax)
     }
 }

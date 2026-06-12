@@ -1,34 +1,37 @@
 = Must lang
 
 Consistent function/closure syntax:
-```
+```must
 static main: fn() -> () = fn() -> () {
-    let s: &'static str = "hello";
-    (fn () -> () print(s))();
-}
+    let s: str = "hello";
+    (fn (s: str) -> () { print(s) })(s);
+};
 ```
-or with less annotation:
-```
+or with less annotation (an unannotated parameter's type is still inferred,
+from the single call site right here):
+```must
 static main = fn {
     let s = "hello";
-    (fn print(s))();
+    (fn (s) { print(s) })(s);
 }
 ```
-and ofc one could do bs like this:
-```
+and ofc one could do bs like this — return the builtin `print` from a
+nullary fn, then call the result with `s`, sidestepping the no-capture rule
+entirely because nothing is ever captured:
+```must
 static main = fn {
     let s = "hello";
-    (fn print)()(s);
+    (fn { print })()(s);
 }
 ```
 
-```
-static example = fn (arg: fn -> usize) {
-    arg();
+```must
+static example = fn (arg: fn() -> usize) -> usize {
+    arg()
 }
 
 static main = fn {
-    example(fn 42 + 69)
+    example(fn () -> usize { 42 + 69 })
 }
 ```
 

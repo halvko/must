@@ -54,6 +54,11 @@ impl<'t> Parser<'t> {
         self.pos
     }
 
+    /// Kind of the most recently consumed token.
+    pub(crate) fn prev(&self) -> Option<SyntaxKind> {
+        self.pos.checked_sub(1).map(|i| self.tokens[i])
+    }
+
     pub(crate) fn bump_any(&mut self) {
         if !self.at(EOF) {
             self.pos += 1;
