@@ -100,8 +100,8 @@ pub(crate) fn semantic_tokens(
 }
 
 pub(crate) fn diagnostic(
+    snapshot: &crate::Snapshot,
     line_index: &LineIndex,
-    uri: &lsp_types::Uri,
     d: ide::Diagnostic,
 ) -> lsp_types::Diagnostic {
     lsp_types::Diagnostic {
@@ -115,14 +115,19 @@ pub(crate) fn diagnostic(
         related_information: (!d.related.is_empty()).then(|| {
             d.related
                 .iter()
-                .map(|r| lsp_types::DiagnosticRelatedInformation {
-                    // Related locations are same-file for now, so the one
-                    // line index suffices.
-                    location: lsp_types::Location {
-                        uri: uri.clone(),
-                        range: range(line_index, r.range),
-                    },
-                    message: r.message.clone(),
+                .filter_map(|r| {
+                    // Every related location resolves its *own* file's URI
+                    // and line index; positions in one file must never be
+                    // computed with another file's index.
+                    let uri = snapshot.uri_for(r.file)?;
+                    let target_index = snapshot.analysis.line_index(r.file);
+                    Some(lsp_types::DiagnosticRelatedInformation {
+                        location: lsp_types::Location {
+                            uri,
+                            range: range(&target_index, r.range),
+                        },
+                        message: r.message.clone(),
+                    })
                 })
                 .collect()
         }),
