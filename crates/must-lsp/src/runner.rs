@@ -93,7 +93,7 @@ pub fn evaluate(
     }
 
     let mut machine = Machine::new(&db, RunMode { out });
-    match machine.eval_root(hir::item_loc(&db, entry)) {
+    match machine.eval_root(&hir::item_loc(&db, entry)) {
         Ok(Value::Unit) => Ok(None),
         Ok(value) => Ok(Some(value.display())),
         Err(err) => {
@@ -122,7 +122,7 @@ fn locate(
 ) -> Option<String> {
     let (loc, expr) = origin?;
     // Single-file world: the origin's file is the one we run.
-    let item = loc.to_id(db)?;
+    let item = loc.to_id(db);
     let (_, source_map) = hir::body_with_source_map(db, item);
     let range = source_map.node_for_expr(expr)?.text_range();
     // The synthetic entry line isn't part of the user's file; a location

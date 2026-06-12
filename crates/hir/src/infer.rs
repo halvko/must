@@ -13,8 +13,7 @@ use la_arena::ArenaMap;
 use crate::body::{Body, BindingId, ExprData, ExprId, LiteralData, Stmt, body};
 use crate::scopes::{Builtin, Resolution, resolutions};
 use crate::ty::{Ty, TyVar, TyVarValue, lower_type_ref, signature, signature_needs_annotation};
-use crate::{ItemId, ItemLoc, item_loc};
-use crate::item_tree::item_tree;
+use crate::{ItemId, ItemLoc};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InferenceResult {
@@ -69,7 +68,7 @@ impl InferenceDiagnostic {
     /// The human-readable message. Shared between editor diagnostics and MIR
     /// trap terminators, so a deferred error crashes at runtime with exactly
     /// the text the squiggle showed.
-    pub fn message(&self, db: &dyn Db) -> String {
+    pub fn message(&self) -> String {
         match self {
             InferenceDiagnostic::TypeMismatch {
                 expected, actual, ..
@@ -85,12 +84,11 @@ impl InferenceDiagnostic {
                 expected, found, ..
             } => format!("expected {expected} argument(s), found {found}"),
             InferenceDiagnostic::NeedsAnnotation { item, .. } => {
-                let display = item_tree(db, item.file)
-                    .items
-                    .get(item.index as usize)
-                    .map(|it| it.name.clone())
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or_else(|| "this item".to_owned());
+                let display = if item.name.is_empty() {
+                    "this item"
+                } else {
+                    &item.name
+                };
                 format!(
                     "cannot infer the type of `{display}` across items; \
                      add a type annotation to its definition"
@@ -113,10 +111,8 @@ pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
 
     if let Some(root) = body.root {
         // Check the body against the item's annotation, if any.
-        let loc = item_loc(db, item);
-        let expected = item_tree(db, item.file(db))
-            .items
-            .get(loc.index as usize)
+        let expected = crate::item_data(db, item)
+            .as_ref()
             .and_then(|it| it.type_ref.as_ref())
             .map(lower_type_ref);
         ctx.infer_expr(root, expected.as_ref());
@@ -173,32 +169,33 @@ impl InferCtx<'_> {
             ExprData::Literal(LiteralData::Str(_)) => Ty::Str,
             ExprData::Literal(LiteralData::Bool(_)) => Ty::Bool,
             ExprData::NameRef(_) => match self.resolutions.get(expr) {
-                Some(&Resolution::Local(binding)) => self
+                Some(Resolution::Local(binding)) => self
                     .result
                     .type_of_binding
-                    .get(binding)
+                    .get(*binding)
                     .cloned()
                     .unwrap_or(Ty::Error),
-                Some(&Resolution::Item(loc)) => match loc.to_id(self.db) {
-                    Some(target) => {
-                        let sig = signature(self.db, target);
-                        // The signature is broken because the definition
-                        // lacks annotations: that's only visible from uses
-                        // (an unused unannotated item is fine), so the
-                        // diagnostic lives here.
-                        if sig.contains_error() && signature_needs_annotation(self.db, target) {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::NeedsAnnotation { expr, item: loc });
-                        }
-                        sig
+                Some(Resolution::Item(loc)) => {
+                    let target = loc.to_id(self.db);
+                    let sig = signature(self.db, target);
+                    // The signature is broken because the definition lacks
+                    // annotations: that's only visible from uses (an unused
+                    // unannotated item is fine), so the diagnostic lives
+                    // here.
+                    if sig.contains_error() && signature_needs_annotation(self.db, target) {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::NeedsAnnotation {
+                                expr,
+                                item: loc.clone(),
+                            });
                     }
-                    None => Ty::Error,
-                },
+                    sig
+                }
                 // No one signature a use could take on; the duplicate
                 // definitions carry the diagnostic.
-                Some(&Resolution::Ambiguous(_)) => Ty::Error,
-                Some(&Resolution::Builtin(builtin)) => builtin_type(builtin),
+                Some(Resolution::Ambiguous(_)) => Ty::Error,
+                Some(Resolution::Builtin(builtin)) => builtin_type(*builtin),
                 None => Ty::Error, // unresolved: already diagnosed by name resolution
             },
             ExprData::Call { callee, args } => {

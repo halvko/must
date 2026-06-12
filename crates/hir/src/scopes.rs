@@ -128,7 +128,7 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Resolution {
     Local(BindingId),
     Item(ItemLoc),
@@ -175,13 +175,13 @@ pub struct FileScope {
     pub duplicates: Vec<Duplicate>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ScopeEntry {
     loc: ItemLoc,
     ambiguous: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Duplicate {
     pub first: ItemLoc,
     pub second: ItemLoc,
@@ -191,9 +191,9 @@ impl FileScope {
     pub fn resolve(&self, name: &str) -> Option<Resolution> {
         let entry = self.entries.get(name)?;
         Some(if entry.ambiguous {
-            Resolution::Ambiguous(entry.loc)
+            Resolution::Ambiguous(entry.loc.clone())
         } else {
-            Resolution::Item(entry.loc)
+            Resolution::Item(entry.loc.clone())
         })
     }
 }
@@ -204,13 +204,23 @@ impl FileScope {
 pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
     let tree = item_tree(db, file);
     let mut scope = FileScope::default();
-    for (index, data) in tree.items.iter().enumerate() {
+    // Disambiguators count occurrences the same way `file_item_ids` does,
+    // so an `ItemLoc` here and the interned `ItemId` agree on identity.
+    let mut seen: FxHashMap<&str, u32> = FxHashMap::default();
+    for data in tree.items.iter() {
+        let disambiguator = {
+            let counter = seen.entry(data.name.as_str()).or_insert(0);
+            let current = *counter;
+            *counter += 1;
+            current
+        };
         if data.name.is_empty() {
             continue;
         }
         let loc = ItemLoc {
             file,
-            index: index as u32,
+            name: std::sync::Arc::from(data.name.as_str()),
+            disambiguator,
         };
         match scope.entries.entry(data.name.clone()) {
             std::collections::hash_map::Entry::Vacant(slot) => {
@@ -222,7 +232,7 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
             std::collections::hash_map::Entry::Occupied(mut first) => {
                 first.get_mut().ambiguous = true;
                 scope.duplicates.push(Duplicate {
-                    first: first.get().loc,
+                    first: first.get().loc.clone(),
                     second: loc,
                 });
             }

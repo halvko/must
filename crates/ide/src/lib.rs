@@ -159,14 +159,14 @@ impl Analysis {
             // origin falls back to this item's own initializer.
             let origin_in_file = err
                 .origin
+                .clone()
                 .filter(|(loc, _)| loc.file == file)
                 .or_else(|| {
                     let root = hir::body::body(&self.db, item).root?;
                     Some((hir::item_loc(&self.db, item), root))
                 });
             let Some(range) = origin_in_file.and_then(|(loc, expr)| {
-                let origin_item = loc.to_id(&self.db)?;
-                let (_, source_map) = hir::body_with_source_map(&self.db, origin_item);
+                let (_, source_map) = hir::body_with_source_map(&self.db, loc.to_id(&self.db));
                 Some(source_map.node_for_expr(expr)?.text_range())
             }) else {
                 continue;

@@ -42,28 +42,59 @@ pub struct ItemId<'db> {
     pub disambiguator: u32,
 }
 
-/// Lifetime-free reference to an item: its position in [`file_item_ids`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Lifetime-free reference to an item, carrying the same identity as
+/// [`ItemId`] (name + disambiguator, *not* a positional index): inserting an
+/// unrelated item above doesn't change any `ItemLoc`, so query values that
+/// embed one — resolutions, MIR constants, eval origins — backdate across
+/// item reordering.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ItemLoc {
     pub file: SourceFile,
-    pub index: u32,
+    pub name: std::sync::Arc<str>,
+    pub disambiguator: u32,
 }
 
 impl ItemLoc {
-    pub fn to_id<'db>(self, db: &'db dyn Db) -> Option<ItemId<'db>> {
-        file_item_ids(db, self.file)
-            .get(self.index as usize)
-            .copied()
+    /// Always succeeds (interning): an `ItemLoc` held across an edit that
+    /// deleted the item yields an id whose queries all answer the empty/
+    /// error case — total, never a panic.
+    pub fn to_id<'db>(&self, db: &'db dyn Db) -> ItemId<'db> {
+        ItemId::new(db, self.file, self.name.to_string(), self.disambiguator)
+    }
+
+    /// The name for messages; unnamed (broken) items render as `?`.
+    pub fn display_name(&self) -> &str {
+        if self.name.is_empty() { "?" } else { &self.name }
     }
 }
 
 pub fn item_loc(db: &dyn Db, item: ItemId<'_>) -> ItemLoc {
-    let file = item.file(db);
-    let index = file_item_ids(db, file)
+    ItemLoc {
+        file: item.file(db),
+        name: std::sync::Arc::from(item.name(db).as_str()),
+        disambiguator: item.disambiguator(db),
+    }
+}
+
+/// The item's position in its file (= its index in [`item_tree`]). `None`
+/// for a stale `ItemId` held across an edit that removed the item.
+pub fn item_index(db: &dyn Db, item: ItemId<'_>) -> Option<usize> {
+    file_item_ids(db, item.file(db))
         .iter()
         .position(|&it| it == item)
-        .expect("ItemId not produced by file_item_ids") as u32;
-    ItemLoc { file, index }
+}
+
+/// The item-tree entry for `item` (its annotation, constness, name).
+/// Tracked so that consumers (`signature`, `infer`) depend on this item's
+/// *entry* rather than on the whole positional item list — inserting an
+/// unrelated item above re-executes only this cheap lookup, and its
+/// unchanged value backdates everything downstream.
+#[salsa::tracked(returns(ref))]
+pub fn item_data<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<item_tree::ItemData> {
+    item_tree::item_tree(db, item.file(db))
+        .items
+        .get(item_index(db, item)?)
+        .cloned()
 }
 
 #[salsa::tracked(returns(ref))]
@@ -115,17 +146,16 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         })
         .collect();
 
-    let ast_items: Vec<ast::StaticItem> = parse(db, file).tree().items().collect();
-    let item_name = |loc: ItemLoc| ast_items.get(loc.index as usize).and_then(|it| it.name());
+    let item_name = |loc: &ItemLoc| item_source(db, loc.to_id(db)).and_then(|it| it.name());
 
     // Duplicate definitions, discovered by `file_scope` (the analysis that
     // decides first-wins also knows about the losers); only the range
     // attachment happens here.
     for dup in &file_scope(db, file).duplicates {
-        let Some(second) = item_name(dup.second) else {
+        let Some(second) = item_name(&dup.second) else {
             continue;
         };
-        let related = item_name(dup.first)
+        let related = item_name(&dup.first)
             .map(|first| {
                 vec![RelatedInfo {
                     file: dup.first.file,
@@ -192,7 +222,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             // Messages render in `InferenceDiagnostic::message` (shared with
             // MIR's traps); only ranges and related locations attach here.
             let related = match diag {
-                InferenceDiagnostic::NeedsAnnotation { item, .. } => item_name(*item)
+                InferenceDiagnostic::NeedsAnnotation { item, .. } => item_name(item)
                     .map(|n| {
                         vec![RelatedInfo {
                             file: item.file,
@@ -208,7 +238,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             };
             diagnostics.push(Diagnostic {
                 range: ptr.text_range(),
-                message: diag.message(db),
+                message: diag.message(),
                 fix: None,
                 related,
             });

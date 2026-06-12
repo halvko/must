@@ -61,10 +61,10 @@ impl LowerCtx<'_> {
         for diag in &self.infer.diagnostics {
             match diag {
                 InferenceDiagnostic::TypeMismatch { expr, .. } => {
-                    self.value_traps.insert(*expr, diag.message(self.db));
+                    self.value_traps.insert(*expr, diag.message());
                 }
                 InferenceDiagnostic::ArgCountMismatch { expr, .. } => {
-                    self.call_traps.insert(*expr, diag.message(self.db));
+                    self.call_traps.insert(*expr, diag.message());
                 }
                 // Reported on the callee; the unexecutable operation is the
                 // call around it.
@@ -74,7 +74,7 @@ impl LowerCtx<'_> {
                         _ => None,
                     });
                     if let Some(call) = call {
-                        self.call_traps.insert(call, diag.message(self.db));
+                        self.call_traps.insert(call, diag.message());
                     }
                 }
                 // Handled where the name is lowered, which also covers
@@ -271,7 +271,7 @@ impl LowerCtx<'_> {
 
     fn lower_name_ref(&mut self, b: &mut BodyBuilder, expr: ExprId, name: &str) -> Operand {
         match self.resolutions.get(expr) {
-            Some(&Resolution::Local(binding)) => match b.local_for_binding.get(&binding) {
+            Some(Resolution::Local(binding)) => match b.local_for_binding.get(binding) {
                 Some(&local) => Operand::Copy(local),
                 // A local of an enclosing function: a capture. The MIR
                 // diagnostic *is* the upstream diagnostic the trap borrows.
@@ -285,29 +285,31 @@ impl LowerCtx<'_> {
                     self.trap(b, expr, message)
                 }
             },
-            Some(&Resolution::Item(loc)) => {
-                if let Some(target) = loc.to_id(self.db) {
-                    let sig = hir::signature(self.db, target);
-                    if sig.contains_error() {
-                        // Justified by the use-site needs-annotation
-                        // diagnostic, or by the def-site diagnostics on a
-                        // written-but-broken annotation.
-                        let message = if hir::ty::signature_needs_annotation(self.db, target) {
-                            InferenceDiagnostic::NeedsAnnotation { expr, item: loc }
-                                .message(self.db)
-                        } else {
-                            format!("cannot use `{name}`: its type annotation has errors")
-                        };
-                        return self.trap(b, expr, message);
-                    }
+            Some(Resolution::Item(loc)) => {
+                let target = loc.to_id(self.db);
+                let sig = hir::signature(self.db, target);
+                if sig.contains_error() {
+                    // Justified by the use-site needs-annotation
+                    // diagnostic, or by the def-site diagnostics on a
+                    // written-but-broken annotation.
+                    let message = if hir::ty::signature_needs_annotation(self.db, target) {
+                        InferenceDiagnostic::NeedsAnnotation {
+                            expr,
+                            item: loc.clone(),
+                        }
+                        .message()
+                    } else {
+                        format!("cannot use `{name}`: its type annotation has errors")
+                    };
+                    return self.trap(b, expr, message);
                 }
-                Operand::Const(Const::Item(loc))
+                Operand::Const(Const::Item(loc.clone()))
             }
             // Justified by the duplicate-definition diagnostics.
-            Some(&Resolution::Ambiguous(_)) => {
+            Some(Resolution::Ambiguous(_)) => {
                 self.trap(b, expr, hir::diag::defined_multiple_times(name))
             }
-            Some(&Resolution::Builtin(builtin)) => Operand::Const(Const::Builtin(builtin)),
+            Some(Resolution::Builtin(builtin)) => Operand::Const(Const::Builtin(*builtin)),
             // Justified by the unresolved-name diagnostic.
             None => self.trap(b, expr, hir::diag::unresolved_name(name)),
         }

@@ -38,9 +38,9 @@ pub(crate) fn goto_definition(
 
     let (_, source_map) = hir::body_with_source_map(db, item);
     let expr = source_map.expr_for_node(SyntaxNodePtr::new(path_expr.syntax()))?;
-    match *hir::resolutions(db, item).get(expr)? {
+    match hir::resolutions(db, item).get(expr)? {
         Resolution::Local(binding) => {
-            let name_ptr = source_map.node_for_binding(binding)?;
+            let name_ptr = source_map.node_for_binding(*binding)?;
             // The name's node is the focus; its enclosing let/param is the
             // full range.
             let name_node = name_ptr.to_node(&root);
@@ -59,7 +59,7 @@ pub(crate) fn goto_definition(
         }
         // Ambiguous: jump to the first definition — better than going dead.
         Resolution::Item(loc) | Resolution::Ambiguous(loc) => {
-            let target = loc.to_id(db)?;
+            let target = loc.to_id(db);
             let src = hir::item_source(db, target)?;
             let full_range = src.syntax().text_range();
             let focus_range = src

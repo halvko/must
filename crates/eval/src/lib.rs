@@ -33,7 +33,7 @@ pub enum Value {
 
 /// A function value: which item's lowered MIR holds its code, and which of
 /// that item's bodies it is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FnValue {
     pub item: ItemLoc,
     pub body: BodyId,

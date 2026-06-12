@@ -118,20 +118,11 @@ fn operand(db: &dyn Db, op: &Operand) -> String {
             Const::Int(v) => v.to_string(),
             Const::Str(s) => format!("{s:?}"),
             Const::Bool(b) => b.to_string(),
-            Const::Item(loc) => format!("item {}", item_name(db, *loc)),
+            Const::Item(loc) => format!("item {}", loc.display_name()),
             Const::Builtin(b) => format!("builtin {}", b.name()),
             Const::Fn(body) => format!("fn {}", body_name(*body)),
         },
     }
-}
-
-fn item_name(db: &dyn Db, loc: ItemLoc) -> String {
-    hir::item_tree::item_tree(db, loc.file)
-        .items
-        .get(loc.index as usize)
-        .map(|it| it.name.clone())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| format!("#{}", loc.index))
 }
 
 fn local(id: LocalId) -> String {

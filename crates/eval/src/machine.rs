@@ -103,19 +103,19 @@ impl<'db, M: Mode> Machine<'db, M> {
                 kind: EvalErrorKind::NotConst,
                 message: format!(
                     "cycle detected while evaluating `{}`",
-                    item_name(self.db, loc)
+                    loc.display_name()
                 ),
-                origin: root_origin(self.db, loc),
+                origin: root_origin(self.db, &loc),
             });
         }
-        self.forcing.push(loc);
+        self.forcing.push(loc.clone());
         self.const_depth += 1;
         // Each item gets its own fuel budget: `const_value(B)` must give the
         // same answer whether B is queried directly or forced from inside
         // another item's evaluation (and the editor and the runner must
         // agree). Total work stays bounded: items × CONST_FUEL.
         let outer_fuel = std::mem::replace(&mut self.const_fuel, CONST_FUEL);
-        let result = self.eval_root(loc);
+        let result = self.eval_root(&loc);
         self.const_fuel = outer_fuel;
         self.const_depth -= 1;
         self.forcing.pop();
@@ -125,30 +125,26 @@ impl<'db, M: Mode> Machine<'db, M> {
 
     /// Execute an item's root body — for [`Self::force_item`], and for the
     /// runner's entry item (at `const_depth` 0, where `print` is legal).
-    pub fn eval_root(&mut self, loc: ItemLoc) -> Result<Value, EvalError> {
-        let lowered = self.lowered(loc)?;
+    pub fn eval_root(&mut self, loc: &ItemLoc) -> Result<Value, EvalError> {
+        let lowered = self.lowered(loc);
         let Some(root) = lowered.root else {
             // Broken source; the parse errors carry the diagnostic.
             return Err(EvalError {
                 kind: EvalErrorKind::Trap,
-                message: format!("`{}` has no value", item_name(self.db, loc)),
+                message: format!("`{}` has no value", loc.display_name()),
                 origin: None,
             });
         };
         self.eval_body(loc, root, Vec::new())
     }
 
-    fn lowered(&self, loc: ItemLoc) -> Result<&'db MirLowered, EvalError> {
-        let item = loc.to_id(self.db).ok_or_else(|| self.internal_error(
-            format!("dangling item reference #{}", loc.index),
-            None,
-        ))?;
-        Ok(mir::mir_lowered(self.db, item))
+    fn lowered(&self, loc: &ItemLoc) -> &'db MirLowered {
+        mir::mir_lowered(self.db, loc.to_id(self.db))
     }
 
     fn eval_body(
         &mut self,
-        loc: ItemLoc,
+        loc: &ItemLoc,
         body_id: BodyId,
         args: Vec<Value>,
     ) -> Result<Value, EvalError> {
@@ -160,7 +156,7 @@ impl<'db, M: Mode> Machine<'db, M> {
 
     fn eval_body_inner(
         &mut self,
-        loc: ItemLoc,
+        loc: &ItemLoc,
         body_id: BodyId,
         args: Vec<Value>,
     ) -> Result<Value, EvalError> {
@@ -178,7 +174,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 origin: root_origin(self.db, loc),
             });
         }
-        let body = &self.lowered(loc)?.bodies[body_id];
+        let body = &self.lowered(loc).bodies[body_id];
         if args.len() != body.params.len() {
             return Err(self.internal_error(
                 format!(
@@ -241,7 +237,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                         None => {
                             return Err(self.internal_error(
                                 "a diverging call returned".to_owned(),
-                                Some((loc, origin)),
+                                Some((loc.clone(), origin)),
                             ));
                         }
                     }
@@ -258,13 +254,13 @@ impl<'db, M: Mode> Machine<'db, M> {
                     return Err(EvalError {
                         kind: EvalErrorKind::Trap,
                         message: message.clone(),
-                        origin: Some((loc, origin)),
+                        origin: Some((loc.clone(), origin)),
                     });
                 }
                 TerminatorKind::Unreachable => {
                     return Err(self.internal_error(
                         "entered an unreachable block".to_owned(),
-                        Some((loc, origin)),
+                        Some((loc.clone(), origin)),
                     ));
                 }
             }
@@ -273,7 +269,7 @@ impl<'db, M: Mode> Machine<'db, M> {
 
     fn eval_rvalue(
         &mut self,
-        loc: ItemLoc,
+        loc: &ItemLoc,
         body: &MirBody,
         locals: &ArenaMap<LocalId, Value>,
         rvalue: &Rvalue,
@@ -294,7 +290,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         op: hir::body::BinOp,
         l: Value,
         r: Value,
-        loc: ItemLoc,
+        loc: &ItemLoc,
         origin: ExprId,
     ) -> Result<Value, EvalError> {
         use hir::body::BinOp::*;
@@ -308,7 +304,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 let runtime = |message: String| EvalError {
                     kind: EvalErrorKind::Runtime,
                     message,
-                    origin: Some((loc, origin)),
+                    origin: Some((loc.clone(), origin)),
                 };
                 Ok(match op {
                     Add => Value::Int(l.checked_add(r).ok_or_else(|| {
@@ -338,7 +334,7 @@ impl<'db, M: Mode> Machine<'db, M> {
 
     fn eval_operand(
         &mut self,
-        loc: ItemLoc,
+        loc: &ItemLoc,
         body: &MirBody,
         locals: &ArenaMap<LocalId, Value>,
         op: &Operand,
@@ -348,7 +344,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             Operand::Copy(local) => locals.get(*local).cloned().ok_or_else(|| {
                 self.internal_error(
                     format!("read of uninitialized {}", local_name(body, *local)),
-                    Some((loc, origin)),
+                    Some((loc.clone(), origin)),
                 )
             }),
             Operand::Const(c) => Ok(match c {
@@ -357,9 +353,9 @@ impl<'db, M: Mode> Machine<'db, M> {
                 Const::Str(s) => Value::Str(s.clone()),
                 Const::Bool(b) => Value::Bool(*b),
                 Const::Builtin(b) => Value::Builtin(*b),
-                Const::Item(item) => self.force_item(*item)?,
+                Const::Item(item) => self.force_item(item.clone())?,
                 Const::Fn(body) => Value::Fn(FnValue {
-                    item: loc,
+                    item: loc.clone(),
                     body: *body,
                 }),
             }),
@@ -370,16 +366,16 @@ impl<'db, M: Mode> Machine<'db, M> {
         &mut self,
         callee: Value,
         args: Vec<Value>,
-        loc: ItemLoc,
+        loc: &ItemLoc,
         origin: ExprId,
     ) -> Result<Value, EvalError> {
         match callee {
-            Value::Fn(f) => self.eval_body(f.item, f.body, args),
+            Value::Fn(f) => self.eval_body(&f.item, f.body, args),
             Value::Builtin(builtin) => {
                 let [arg] = args.as_slice() else {
                     return Err(self.internal_error(
                         format!("builtin `{}` takes 1 argument", builtin.name()),
-                        Some((loc, origin)),
+                        Some((loc.clone(), origin)),
                     ));
                 };
                 let Value::Str(text) = arg else {
@@ -389,12 +385,12 @@ impl<'db, M: Mode> Machine<'db, M> {
                     Builtin::Panic => Err(EvalError {
                         kind: EvalErrorKind::Panic,
                         message: text.clone(),
-                        origin: Some((loc, origin)),
+                        origin: Some((loc.clone(), origin)),
                     }),
                     Builtin::Print if self.const_depth > 0 => Err(EvalError {
                         kind: EvalErrorKind::NotConst,
                         message: "cannot call `print` at compile time".to_owned(),
-                        origin: Some((loc, origin)),
+                        origin: Some((loc.clone(), origin)),
                     }),
                     Builtin::Print => {
                         self.mode.print(text)?;
@@ -406,7 +402,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         }
     }
 
-    fn spend_fuel(&mut self, loc: ItemLoc) -> Result<(), EvalError> {
+    fn spend_fuel(&mut self, loc: &ItemLoc) -> Result<(), EvalError> {
         if self.const_depth == 0 {
             return Ok(());
         }
@@ -437,23 +433,14 @@ impl<'db, M: Mode> Machine<'db, M> {
         &self,
         expected: &str,
         found: &Value,
-        loc: ItemLoc,
+        loc: &ItemLoc,
         origin: ExprId,
     ) -> EvalError {
         self.internal_error(
             format!("expected {expected}, found `{}`", found.display()),
-            Some((loc, origin)),
+            Some((loc.clone(), origin)),
         )
     }
-}
-
-fn item_name(db: &dyn Db, loc: ItemLoc) -> String {
-    hir::item_tree::item_tree(db, loc.file)
-        .items
-        .get(loc.index as usize)
-        .map(|it| it.name.clone())
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| format!("#{}", loc.index))
 }
 
 fn local_name(body: &MirBody, local: LocalId) -> String {
@@ -467,7 +454,7 @@ fn local_name(body: &MirBody, local: LocalId) -> String {
 
 /// A best-effort origin for errors about an item as a whole (cycles, fuel):
 /// its root expression.
-fn root_origin(db: &dyn Db, loc: ItemLoc) -> Option<(ItemLoc, ExprId)> {
-    let root = loc.to_id(db).and_then(|item| hir::body::body(db, item).root)?;
-    Some((loc, root))
+fn root_origin(db: &dyn Db, loc: &ItemLoc) -> Option<(ItemLoc, ExprId)> {
+    let root = hir::body::body(db, loc.to_id(db)).root?;
+    Some((loc.clone(), root))
 }

@@ -297,6 +297,55 @@ fn firewall_body_edit_does_not_reinfer_other_items() {
     );
 }
 
+/// `ItemLoc` carries name+disambiguator, not a positional index — so
+/// inserting an unrelated item at the top of the file must not re-run
+/// name resolution or inference of the items below it.
+#[test]
+fn firewall_item_insertion_does_not_reinfer_items_below() {
+    use salsa::Setter as _;
+    use std::sync::{Arc, Mutex};
+
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let log_handle = Arc::clone(&log);
+    let mut db = RootDatabase::with_event_callback(Box::new(move |event| {
+        if let salsa::EventKind::WillExecute { database_key } = event.kind {
+            log_handle
+                .lock()
+                .unwrap()
+                .push(format!("{database_key:?}"));
+        }
+    }));
+
+    let text_v1 = "static a: fn() -> usize = fn () -> usize { 1 };\n\
+                   static b: fn() -> usize = fn () -> usize { a() };\n";
+    let text_v2 = "static zzz = 1;\n\
+                   static a: fn() -> usize = fn () -> usize { 1 };\n\
+                   static b: fn() -> usize = fn () -> usize { a() };\n";
+
+    let file = SourceFile::new(&db, "test.must".to_owned(), text_v1.to_owned());
+    for &item in crate::file_item_ids(&db, file) {
+        crate::infer::infer(&db, item);
+    }
+
+    log.lock().unwrap().clear();
+    file.set_text(&mut db).to(text_v2.to_owned());
+    // Re-demand a and b (skip the new first item).
+    for &item in crate::file_item_ids(&db, file).iter().skip(1) {
+        crate::infer::infer(&db, item);
+    }
+    let log = log.lock().unwrap();
+    // `resolutions` does re-run — a new name entered the file scope, which
+    // genuinely could matter — but its *value* is unchanged (ItemLocs are
+    // name-based, not positional), so inference backdates behind it.
+    for query in ["infer", "expr_scopes"] {
+        assert_eq!(
+            log.iter().filter(|entry| entry.contains(query)).count(),
+            0,
+            "`{query}` should backdate across item insertion; executed: {log:#?}"
+        );
+    }
+}
+
 #[test]
 fn fn_params_scoped_to_their_literal() {
     check_diagnostics(
