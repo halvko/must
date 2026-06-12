@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use lsp_server::{Connection, Message, Notification, Request, RequestId};
+use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use lsp_types::notification::Notification as _;
 
 struct TestClient {
@@ -14,6 +14,10 @@ struct TestClient {
 
 impl TestClient {
     fn start() -> TestClient {
+        TestClient::start_with(lsp_types::InitializeParams::default())
+    }
+
+    fn start_with(init: lsp_types::InitializeParams) -> TestClient {
         let (server_conn, client_conn) = Connection::memory();
         let server = std::thread::spawn(move || {
             must_lsp::run(server_conn).expect("server failed");
@@ -23,24 +27,33 @@ impl TestClient {
             server: Some(server),
             next_id: 0,
         };
-        this.request::<lsp_types::request::Initialize>(lsp_types::InitializeParams::default());
+        this.request::<lsp_types::request::Initialize>(init);
         this.notify::<lsp_types::notification::Initialized>(lsp_types::InitializedParams {});
         this
     }
 
     fn request<R: lsp_types::request::Request>(&mut self, params: R::Params) -> R::Result {
+        let id = self.send_request::<R>(params);
+        let resp = self.response_for(id);
+        assert!(resp.error.is_none(), "error response: {:?}", resp.error);
+        serde_json::from_value(resp.result.unwrap_or_default()).unwrap()
+    }
+
+    /// Send a request without waiting for its response.
+    fn send_request<R: lsp_types::request::Request>(&mut self, params: R::Params) -> RequestId {
         self.next_id += 1;
         let id = RequestId::from(self.next_id);
         self.client
             .sender
             .send(Request::new(id.clone(), R::METHOD.to_owned(), params).into())
             .unwrap();
+        id
+    }
+
+    fn response_for(&self, id: RequestId) -> Response {
         loop {
             match self.recv() {
-                Message::Response(resp) if resp.id == id => {
-                    assert!(resp.error.is_none(), "error response: {:?}", resp.error);
-                    return serde_json::from_value(resp.result.unwrap_or_default()).unwrap();
-                }
+                Message::Response(resp) if resp.id == id => return resp,
                 _ => continue,
             }
         }
@@ -372,6 +385,117 @@ fn close_clears_diagnostics() {
         },
     );
     assert_eq!(client.next_diagnostics().diagnostics, vec![]);
+
+    drop(client);
+}
+
+#[test]
+fn early_semantic_tokens_pull_errors_retryably_then_succeeds_after_open() {
+    let mut client = TestClient::start();
+    let file = uri("file:///early.must");
+    let params = lsp_types::SemanticTokensParams {
+        text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+
+    // Zed pulls tokens for a restoring buffer before its `didOpen` reaches
+    // the server. That pull gets `ContentModified` (never a `null`, which
+    // Zed caches as "no highlighting"); the refresh nudge on `didOpen` —
+    // covered below — makes the client pull again, which must succeed.
+    let early =
+        client.send_request::<lsp_types::request::SemanticTokensFullRequest>(params.clone());
+    let resp = client.response_for(early);
+    let err = resp.error.expect("early pull answers an error, not null");
+    assert_eq!(err.code, -32801, "ContentModified, so the client retries");
+
+    client.open(&file, "static x = 1;");
+    client.next_diagnostics();
+
+    let response =
+        client.request::<lsp_types::request::SemanticTokensFullRequest>(params);
+    let Some(lsp_types::SemanticTokensResult::Tokens(tokens)) = response else {
+        panic!("expected full tokens, got {response:?}");
+    };
+    assert!(!tokens.data.is_empty());
+
+    drop(client);
+}
+
+#[test]
+fn semantic_tokens_survive_close_and_reopen() {
+    let mut client = TestClient::start();
+    let file = uri("file:///reopen.must");
+    let params = lsp_types::SemanticTokensParams {
+        text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+    let tokens = |response: Option<lsp_types::SemanticTokensResult>| match response {
+        Some(lsp_types::SemanticTokensResult::Tokens(tokens)) => tokens.data,
+        other => panic!("expected full tokens, got {other:?}"),
+    };
+
+    client.open(&file, "static x = 1;");
+    client.next_diagnostics();
+    let first = tokens(
+        client.request::<lsp_types::request::SemanticTokensFullRequest>(params.clone()),
+    );
+    assert!(!first.is_empty());
+
+    client.notify::<lsp_types::notification::DidCloseTextDocument>(
+        lsp_types::DidCloseTextDocumentParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+        },
+    );
+    client.next_diagnostics();
+
+    client.open(&file, "static x = 1;");
+    client.next_diagnostics();
+    let second = tokens(
+        client.request::<lsp_types::request::SemanticTokensFullRequest>(params),
+    );
+    assert_eq!(first, second);
+
+    drop(client);
+}
+
+
+#[test]
+fn did_open_triggers_semantic_tokens_refresh_when_supported() {
+    let init = lsp_types::InitializeParams {
+        capabilities: lsp_types::ClientCapabilities {
+            workspace: Some(lsp_types::WorkspaceClientCapabilities {
+                semantic_tokens: Some(lsp_types::SemanticTokensWorkspaceClientCapabilities {
+                    refresh_support: Some(true),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let client = TestClient::start_with(init);
+    let file = uri("file:///refresh.must");
+
+    client.open(&file, "static x = 1;");
+
+    // Zed doesn't issue the initial token pull for reopened buffers until
+    // an edit (zed#57651): the server must nudge it to re-pull as soon as
+    // the document is known.
+    loop {
+        match client.recv() {
+            Message::Request(req) if req.method == "workspace/semanticTokens/refresh" => {
+                client
+                    .client
+                    .sender
+                    .send(Response::new_ok(req.id, serde_json::Value::Null).into())
+                    .unwrap();
+                break;
+            }
+            _ => continue,
+        }
+    }
 
     drop(client);
 }
