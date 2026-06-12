@@ -13,10 +13,17 @@
   for genuinely malformed syntax only.
 - **X05** An inferred `{error}` with no diagnostic behind it is an internal error, not a silent
   recovery.
+- **X06** MIR is the CFG: one IR lowered from typed HIR, shared by every downstream
+  consumer so they share one semantics. Lowering is total: an ill-typed body still lowers,
+  with traps that borrow a diagnostic an upstream analysis already reported, so flow
+  analyses run past errors. MIR is decl-keyed, erased, and not SSA.
 - **X16** Diagnostics have no stable codes. A severity word, free text and a caret are the
   whole contract.
 
 ## Discarded
+
+- **SSA MIR** — user locals are ordinary mutable places. An SSA layer, if it comes, is a
+  separate LIR below MIR. **X06**
 
 ## Re-evaluate when
 

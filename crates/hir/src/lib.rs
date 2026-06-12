@@ -160,72 +160,16 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         let (body, source_map) = body_with_source_map(db, item);
         let resolutions = resolutions(db, item);
         for (expr, data) in body.exprs.iter() {
-            let body::ExprData::NameRef(name) = data else {
-                continue;
-            };
-            if resolutions.get(expr).is_none() {
-                let Some(ptr) = source_map.node_for_expr(expr) else {
-                    continue;
-                };
-                diagnostics.push(Diagnostic {
-                    range: ptr.text_range(),
-                    message: format!("unresolved name `{name}`"),
-                    fix: None,
-                    related: Vec::new(),
-                });
-            }
-        }
-
-        for diag in &infer::infer(db, item).diagnostics {
-            let (expr, message, related) = match diag {
-                InferenceDiagnostic::TypeMismatch {
-                    expr,
-                    expected,
-                    actual,
-                } => (
-                    *expr,
-                    format!(
-                        "type mismatch: expected `{}`, found `{}`",
-                        expected.display(),
-                        actual.display()
-                    ),
-                    Vec::new(),
-                ),
-                InferenceDiagnostic::NotCallable { expr, ty } => (
-                    *expr,
-                    format!("expression of type `{}` is not callable", ty.display()),
-                    Vec::new(),
-                ),
-                InferenceDiagnostic::ArgCountMismatch {
-                    expr,
-                    expected,
-                    found,
-                } => (
-                    *expr,
-                    format!("expected {expected} argument(s), found {found}"),
-                    Vec::new(),
-                ),
-                InferenceDiagnostic::NeedsAnnotation { expr, item } => {
-                    let name = item_name(*item);
-                    let display = name
-                        .as_ref()
-                        .map(|n| n.text())
-                        .unwrap_or_else(|| "this item".to_owned());
-                    (
-                        *expr,
-                        format!(
-                            "cannot infer the type of `{display}` across items; \
-                             add a type annotation to its definition"
-                        ),
-                        name.map(|n| {
-                            vec![RelatedInfo {
-                                range: n.syntax().text_range(),
-                                message: "defined here".to_owned(),
-                            }]
-                        })
-                        .unwrap_or_default(),
-                    )
+            let message = match data {
+                body::ExprData::NameRef(name) if resolutions.get(expr).is_none() => {
+                    format!("unresolved name `{name}`")
                 }
+                // Without this, an overflowing literal would be a value MIR
+                // can only trap on with no diagnostic to borrow.
+                body::ExprData::Literal(body::LiteralData::Int(None)) => {
+                    "integer literal is too large".to_owned()
+                }
+                _ => continue,
             };
             let Some(ptr) = source_map.node_for_expr(expr) else {
                 continue;
@@ -233,6 +177,31 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             diagnostics.push(Diagnostic {
                 range: ptr.text_range(),
                 message,
+                fix: None,
+                related: Vec::new(),
+            });
+        }
+
+        for diag in &infer::infer(db, item).diagnostics {
+            // Messages render in `InferenceDiagnostic::message` (shared with
+            // MIR's traps); only ranges and related locations attach here.
+            let related = match diag {
+                InferenceDiagnostic::NeedsAnnotation { item, .. } => item_name(*item)
+                    .map(|n| {
+                        vec![RelatedInfo {
+                            range: n.syntax().text_range(),
+                            message: "defined here".to_owned(),
+                        }]
+                    })
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let Some(ptr) = source_map.node_for_expr(diag.expr()) else {
+                continue;
+            };
+            diagnostics.push(Diagnostic {
+                range: ptr.text_range(),
+                message: diag.message(db),
                 fix: None,
                 related,
             });

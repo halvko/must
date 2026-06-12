@@ -13,6 +13,7 @@ edition = "2024"
 syntax = { path = "crates/syntax" }
 base-db = { path = "crates/base-db" }
 hir = { path = "crates/hir" }
+mir = { path = "crates/mir" }
 ide = { path = "crates/ide" }
 
 # external — salsa pinned: its macro API has churned repeatedly, upgrade deliberately

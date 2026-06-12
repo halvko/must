@@ -55,6 +55,7 @@ crates/
   syntax/    lexer + resilient parser + lossless rowan CST + typed AST
   base-db/   salsa database, source inputs, parse query
   hir/       item tree, body lowering, name resolution, type inference
+  mir/       control-flow-graph IR, lowered totally (errors become traps)
   ide/       editor-agnostic analysis API (diagnostics, hover, goto-def)
   must-lsp/  the LSP binary: transport + main loop only
 editors/zed/ Zed extension (separate workspace; compiled to wasm by Zed)
