@@ -134,7 +134,7 @@ fn non_block_fn_body_diagnostic_carries_wrap_fix() {
     let diagnostics = analysis.diagnostics(file);
     assert_eq!(diagnostics.len(), 1);
     let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
-    assert_eq!(fix.label, "Wrap body in `{ }`");
+    assert_eq!(fix.label, "Wrap in `{ }`");
     // Insert "{ " before `42` (offset 14) and " }" after it (offset 16).
     assert_eq!(fix.edits.len(), 2);
     assert_eq!(u32::from(fix.edits[0].range.start()), 14);

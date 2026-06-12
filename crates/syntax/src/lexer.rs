@@ -62,6 +62,12 @@ fn next_token(rest: &str) -> (SyntaxKind, usize, Option<String>) {
             (INT_NUMBER, len, None)
         }
         '-' if rest.as_bytes().get(1) == Some(&b'>') => (THIN_ARROW, 2, None),
+        '=' if rest.as_bytes().get(1) == Some(&b'=') => (EQ2, 2, None),
+        '!' if rest.as_bytes().get(1) == Some(&b'=') => (NEQ, 2, None),
+        '<' if rest.as_bytes().get(1) == Some(&b'=') => (LTEQ, 2, None),
+        '>' if rest.as_bytes().get(1) == Some(&b'=') => (GTEQ, 2, None),
+        '<' => (L_ANGLE, 1, None),
+        '>' => (R_ANGLE, 1, None),
         '(' => (L_PAREN, 1, None),
         ')' => (R_PAREN, 1, None),
         '{' => (L_BRACE, 1, None),

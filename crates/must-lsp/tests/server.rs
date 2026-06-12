@@ -221,7 +221,7 @@ fn quick_fix_wraps_fn_body_in_braces() {
     let lsp_types::CodeActionOrCommand::CodeAction(action) = &actions[0] else {
         panic!("expected a code action, got {actions:?}");
     };
-    assert_eq!(action.title, "Wrap body in `{ }`");
+    assert_eq!(action.title, "Wrap in `{ }`");
 
     let changes = action
         .edit

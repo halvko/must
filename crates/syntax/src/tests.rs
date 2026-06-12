@@ -1174,3 +1174,194 @@ static empty_params = fn () { 1 }
         "#]],
     );
 }
+
+#[test]
+fn if_else_chain() {
+    check(
+        "static x = if a { 1 } else if b { 2 } else { 3 };",
+        expect![[r#"
+            SOURCE_FILE@0..49
+              STATIC_ITEM@0..49
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                IF_EXPR@11..48
+                  IF_KW@11..13 "if"
+                  WHITESPACE@13..14 " "
+                  PATH_EXPR@14..15
+                    NAME_REF@14..15
+                      IDENT@14..15 "a"
+                  WHITESPACE@15..16 " "
+                  BLOCK_EXPR@16..21
+                    L_BRACE@16..17 "{"
+                    WHITESPACE@17..18 " "
+                    LITERAL@18..19
+                      INT_NUMBER@18..19 "1"
+                    WHITESPACE@19..20 " "
+                    R_BRACE@20..21 "}"
+                  WHITESPACE@21..22 " "
+                  ELSE_KW@22..26 "else"
+                  WHITESPACE@26..27 " "
+                  IF_EXPR@27..48
+                    IF_KW@27..29 "if"
+                    WHITESPACE@29..30 " "
+                    PATH_EXPR@30..31
+                      NAME_REF@30..31
+                        IDENT@30..31 "b"
+                    WHITESPACE@31..32 " "
+                    BLOCK_EXPR@32..37
+                      L_BRACE@32..33 "{"
+                      WHITESPACE@33..34 " "
+                      LITERAL@34..35
+                        INT_NUMBER@34..35 "2"
+                      WHITESPACE@35..36 " "
+                      R_BRACE@36..37 "}"
+                    WHITESPACE@37..38 " "
+                    ELSE_KW@38..42 "else"
+                    WHITESPACE@42..43 " "
+                    BLOCK_EXPR@43..48
+                      L_BRACE@43..44 "{"
+                      WHITESPACE@44..45 " "
+                      LITERAL@45..46
+                        INT_NUMBER@45..46 "3"
+                      WHITESPACE@46..47 " "
+                      R_BRACE@47..48 "}"
+                SEMICOLON@48..49 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn comparisons_bind_looser_than_arithmetic() {
+    check("static x = 1 + 2 == 3 * 4;", expect![[r#"
+        SOURCE_FILE@0..26
+          STATIC_ITEM@0..26
+            STATIC_KW@0..6 "static"
+            WHITESPACE@6..7 " "
+            NAME@7..8
+              IDENT@7..8 "x"
+            WHITESPACE@8..9 " "
+            EQ@9..10 "="
+            WHITESPACE@10..11 " "
+            BIN_EXPR@11..25
+              BIN_EXPR@11..16
+                LITERAL@11..12
+                  INT_NUMBER@11..12 "1"
+                WHITESPACE@12..13 " "
+                PLUS@13..14 "+"
+                WHITESPACE@14..15 " "
+                LITERAL@15..16
+                  INT_NUMBER@15..16 "2"
+              WHITESPACE@16..17 " "
+              EQ2@17..19 "=="
+              WHITESPACE@19..20 " "
+              BIN_EXPR@20..25
+                LITERAL@20..21
+                  INT_NUMBER@20..21 "3"
+                WHITESPACE@21..22 " "
+                STAR@22..23 "*"
+                WHITESPACE@23..24 " "
+                LITERAL@24..25
+                  INT_NUMBER@24..25 "4"
+            SEMICOLON@25..26 ";"
+    "#]]);
+}
+
+#[test]
+fn bool_literals() {
+    check("static x = true; static y = false;", expect![[r#"
+        SOURCE_FILE@0..34
+          STATIC_ITEM@0..16
+            STATIC_KW@0..6 "static"
+            WHITESPACE@6..7 " "
+            NAME@7..8
+              IDENT@7..8 "x"
+            WHITESPACE@8..9 " "
+            EQ@9..10 "="
+            WHITESPACE@10..11 " "
+            LITERAL@11..15
+              TRUE_KW@11..15 "true"
+            SEMICOLON@15..16 ";"
+          WHITESPACE@16..17 " "
+          STATIC_ITEM@17..34
+            STATIC_KW@17..23 "static"
+            WHITESPACE@23..24 " "
+            NAME@24..25
+              IDENT@24..25 "y"
+            WHITESPACE@25..26 " "
+            EQ@26..27 "="
+            WHITESPACE@27..28 " "
+            LITERAL@28..33
+              FALSE_KW@28..33 "false"
+            SEMICOLON@33..34 ";"
+    "#]]);
+}
+
+#[test]
+fn if_branches_require_blocks_with_wrap_fix() {
+    check("static x = if c 1 else 2;", expect![[r#"
+        SOURCE_FILE@0..25
+          STATIC_ITEM@0..25
+            STATIC_KW@0..6 "static"
+            WHITESPACE@6..7 " "
+            NAME@7..8
+              IDENT@7..8 "x"
+            WHITESPACE@8..9 " "
+            EQ@9..10 "="
+            WHITESPACE@10..11 " "
+            IF_EXPR@11..24
+              IF_KW@11..13 "if"
+              WHITESPACE@13..14 " "
+              PATH_EXPR@14..15
+                NAME_REF@14..15
+                  IDENT@14..15 "c"
+              WHITESPACE@15..16 " "
+              LITERAL@16..17
+                INT_NUMBER@16..17 "1"
+              WHITESPACE@17..18 " "
+              ELSE_KW@18..22 "else"
+              WHITESPACE@22..23 " "
+              LITERAL@23..24
+                INT_NUMBER@23..24 "2"
+            SEMICOLON@24..25 ";"
+        error 16..17: `if` branches are blocks; wrap this expression in `{ }`
+        error 23..24: `else` branches are blocks; wrap this expression in `{ }`
+    "#]]);
+}
+
+#[test]
+fn if_with_missing_then_block_before_else_recovers() {
+    check("static x = if c else { 2 };", expect![[r#"
+        SOURCE_FILE@0..27
+          STATIC_ITEM@0..27
+            STATIC_KW@0..6 "static"
+            WHITESPACE@6..7 " "
+            NAME@7..8
+              IDENT@7..8 "x"
+            WHITESPACE@8..9 " "
+            EQ@9..10 "="
+            WHITESPACE@10..11 " "
+            IF_EXPR@11..26
+              IF_KW@11..13 "if"
+              WHITESPACE@13..14 " "
+              PATH_EXPR@14..15
+                NAME_REF@14..15
+                  IDENT@14..15 "c"
+              WHITESPACE@15..16 " "
+              ELSE_KW@16..20 "else"
+              WHITESPACE@20..21 " "
+              BLOCK_EXPR@21..26
+                L_BRACE@21..22 "{"
+                WHITESPACE@22..23 " "
+                LITERAL@23..24
+                  INT_NUMBER@23..24 "2"
+                WHITESPACE@24..25 " "
+                R_BRACE@25..26 "}"
+            SEMICOLON@26..27 ";"
+        error 16..20: expected `{`: `if` branches are blocks
+    "#]]);
+}

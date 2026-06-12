@@ -11,28 +11,39 @@ use text_size::TextRange;
 pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
     let mut errors = Vec::new();
     for node in root.descendants() {
-        if let Some(fn_literal) = ast::FnLiteral::cast(node) {
-            validate_fn_body(&fn_literal, &mut errors);
+        if let Some(fn_literal) = ast::FnLiteral::cast(node.clone()) {
+            // The parser reports "expected `{`" itself when the body is
+            // absent entirely.
+            if let Some(body) = fn_literal.body() {
+                require_block(&body, "function bodies", &mut errors);
+            }
+        } else if let Some(if_expr) = ast::IfExpr::cast(node) {
+            if let Some(then) = if_expr.then_branch() {
+                require_block(&then, "`if` branches", &mut errors);
+            }
+            // `else if` chains: the nested IfExpr validates itself.
+            if let Some(els) = if_expr.else_branch() {
+                if !matches!(els, ast::Expr::IfExpr(_)) {
+                    require_block(&els, "`else` branches", &mut errors);
+                }
+            }
         }
     }
     errors
 }
 
-/// The grammar parses any expression as a `fn` body; the language requires
-/// a block.
-fn validate_fn_body(fn_literal: &ast::FnLiteral, errors: &mut Vec<SyntaxError>) {
-    let Some(body) = fn_literal.body() else {
-        return; // the parser already reported "expected `{`"
-    };
-    if matches!(body, ast::Expr::BlockExpr(_)) {
+/// The grammar parses any expression where the language requires a block;
+/// reject the superset with a wrap-in-braces fix.
+fn require_block(expr: &ast::Expr, what: &str, errors: &mut Vec<SyntaxError>) {
+    if matches!(expr, ast::Expr::BlockExpr(_)) {
         return;
     }
-    let range = body.syntax().text_range();
+    let range = expr.syntax().text_range();
     errors.push(SyntaxError {
-        message: "function bodies are blocks; wrap this expression in `{ }`".to_owned(),
+        message: format!("{what} are blocks; wrap this expression in `{{ }}`"),
         range,
         fix: Some(Fix {
-            label: "Wrap body in `{ }`".to_owned(),
+            label: "Wrap in `{ }`".to_owned(),
             edits: vec![
                 TextEdit {
                     range: TextRange::empty(range.start()),

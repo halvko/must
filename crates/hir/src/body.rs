@@ -48,6 +48,12 @@ pub enum ExprData {
         lhs: ExprId,
         rhs: ExprId,
     },
+    If {
+        condition: ExprId,
+        then_branch: ExprId,
+        /// `None` for `if` without `else`; `else if` chains nest here.
+        else_branch: Option<ExprId>,
+    },
     Block {
         stmts: Vec<Stmt>,
         tail: Option<ExprId>,
@@ -64,6 +70,7 @@ pub enum LiteralData {
     /// `None` if the literal doesn't fit in u128.
     Int(Option<u128>),
     Str(String),
+    Bool(bool),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +169,7 @@ impl LowerCtx {
                     Some(ast::LiteralKind::Str(token)) => {
                         LiteralData::Str(unescape(token.text()))
                     }
+                    Some(ast::LiteralKind::Bool(value)) => LiteralData::Bool(value),
                     None => return self.missing_expr(),
                 };
                 self.alloc_expr(ExprData::Literal(data), it.syntax())
@@ -194,6 +202,19 @@ impl LowerCtx {
                     .expr_map
                     .insert(SyntaxNodePtr::new(it.syntax()), inner);
                 inner
+            }
+            ast::Expr::IfExpr(it) => {
+                let condition = self.lower_opt_expr(it.condition());
+                let then_branch = self.lower_opt_expr(it.then_branch());
+                let else_branch = it.else_branch().map(|e| self.lower_expr(e));
+                self.alloc_expr(
+                    ExprData::If {
+                        condition,
+                        then_branch,
+                        else_branch,
+                    },
+                    it.syntax(),
+                )
             }
             ast::Expr::BlockExpr(it) => self.lower_block(it),
             ast::Expr::FnLiteral(it) => {

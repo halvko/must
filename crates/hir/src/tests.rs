@@ -431,3 +431,109 @@ static f = fn {
         "#]],
     );
 }
+
+#[test]
+fn if_is_an_expression_and_branches_must_agree() {
+    check_infer(
+        r#"
+static f = fn (n: usize) -> usize {
+    let big = if n > 100 { true } else { false };
+    if big { n / 2 } else { n * 2 }
+}
+"#,
+        expect![[r#"
+            12..124 'fn (n: usize) -> ...': fn(usize) -> usize
+            16..17 'n': usize
+            35..124 '{     let big = i...': usize
+            45..48 'big': bool
+            51..85 'if n > 100 { true...': bool
+            54..55 'n': usize
+            54..61 'n > 100': bool
+            58..61 '100': usize
+            62..70 '{ true }': bool
+            64..68 'true': bool
+            76..85 '{ false }': bool
+            78..83 'false': bool
+            91..122 'if big { n / 2 } ...': usize
+            94..97 'big': bool
+            98..107 '{ n / 2 }': usize
+            100..101 'n': usize
+            100..105 'n / 2': usize
+            104..105 '2': usize
+            113..122 '{ n * 2 }': usize
+            115..116 'n': usize
+            115..120 'n * 2': usize
+            119..120 '2': usize
+        "#]],
+    );
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> () {
+    let x = if n == 0 { 1 } else { "one" };
+    print("done");
+}
+"#,
+        expect![[r#"
+            67..76: type mismatch: expected `usize`, found `str`
+        "#]],
+    );
+}
+
+#[test]
+fn if_condition_must_be_bool() {
+    check_diagnostics(
+        r#"static f = fn (n: usize) -> () { if n { print("hi"); } };"#,
+        expect![[r#"
+            36..37: type mismatch: expected `bool`, found `usize`
+        "#]],
+    );
+}
+
+#[test]
+fn if_without_else_is_unit() {
+    check_diagnostics(
+        r#"static f = fn (n: usize) -> usize { if n > 0 { n } };"#,
+        expect![[r#"
+            36..50: type mismatch: expected `usize`, found `()`
+            47..48: type mismatch: expected `()`, found `usize`
+        "#]],
+    );
+}
+
+#[test]
+fn diverging_if_branch_takes_the_other_branches_type() {
+    check_diagnostics(
+        r#"static f = fn (n: usize) -> usize { if n == 0 { panic("zero") } else { n } };"#,
+        expect![[r#""#]],
+    );
+    check_infer(
+        r#"static f = fn (n: usize) -> usize { if n == 0 { panic("a") } else { panic("b") } };"#,
+        expect![[r#"
+            11..82 'fn (n: usize) -> ...': fn(usize) -> usize
+            15..16 'n': usize
+            34..82 '{ if n == 0 { pan...': usize
+            36..80 'if n == 0 { panic...': usize
+            39..40 'n': usize
+            39..45 'n == 0': bool
+            44..45 '0': usize
+            46..60 '{ panic("a") }': usize
+            48..53 'panic': fn(str) -> !
+            48..58 'panic("a")': usize
+            54..57 '"a"': str
+            66..80 '{ panic("b") }': usize
+            68..73 'panic': fn(str) -> !
+            68..78 'panic("b")': usize
+            74..77 '"b"': str
+        "#]],
+    );
+}
+
+#[test]
+fn equality_operands_must_agree() {
+    check_diagnostics(
+        r#"static x: bool = 1 == "one";"#,
+        expect![[r#"
+            22..27: type mismatch: expected `usize`, found `str`
+        "#]],
+    );
+}

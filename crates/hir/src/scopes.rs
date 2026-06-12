@@ -113,6 +113,17 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
             compute_expr_scopes(body, scopes, *lhs, scope);
             compute_expr_scopes(body, scopes, *rhs, scope);
         }
+        ExprData::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            compute_expr_scopes(body, scopes, *condition, scope);
+            compute_expr_scopes(body, scopes, *then_branch, scope);
+            if let Some(else_branch) = else_branch {
+                compute_expr_scopes(body, scopes, *else_branch, scope);
+            }
+        }
         ExprData::Missing | ExprData::Literal(_) | ExprData::NameRef(_) => {}
     }
 }

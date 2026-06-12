@@ -90,6 +90,7 @@ ast_node!(CallExpr: CALL_EXPR);
 ast_node!(ArgList: ARG_LIST);
 ast_node!(ParenExpr: PAREN_EXPR);
 ast_node!(BinExpr: BIN_EXPR);
+ast_node!(IfExpr: IF_EXPR);
 ast_node!(Literal: LITERAL);
 ast_node!(PathExpr: PATH_EXPR);
 ast_node!(FnType: FN_TYPE);
@@ -98,7 +99,7 @@ ast_node!(NeverType: NEVER_TYPE);
 ast_node!(PathType: PATH_TYPE);
 ast_node!(RefType: REF_TYPE);
 
-ast_enum!(Expr: FnLiteral, CallExpr, PathExpr, Literal, BlockExpr, ParenExpr, BinExpr);
+ast_enum!(Expr: FnLiteral, CallExpr, PathExpr, Literal, BlockExpr, ParenExpr, BinExpr, IfExpr);
 ast_enum!(Type: FnType, UnitType, NeverType, PathType, RefType);
 ast_enum!(Stmt: LetStmt, ExprStmt);
 
@@ -223,12 +224,51 @@ impl ParenExpr {
     }
 }
 
+impl IfExpr {
+    pub fn condition(&self) -> Option<Expr> {
+        self.branches(false).next()
+    }
+    /// The language requires a block, but the parser accepts any expression
+    /// for resilience — validation flags non-block branches.
+    pub fn then_branch(&self) -> Option<Expr> {
+        self.branches(false).nth(1)
+    }
+    /// A block, or another `IfExpr` for `else if` chains.
+    pub fn else_branch(&self) -> Option<Expr> {
+        self.branches(true).next()
+    }
+
+    /// Direct child expressions before (`false`) or after (`true`) the
+    /// `else` keyword.
+    fn branches(&self, after_else: bool) -> impl Iterator<Item = Expr> + use<> {
+        let mut seen_else = false;
+        self.syntax
+            .children_with_tokens()
+            .filter_map(move |element| match element {
+                rowan::NodeOrToken::Token(token) => {
+                    if token.kind() == ELSE_KW {
+                        seen_else = true;
+                    }
+                    None
+                }
+                rowan::NodeOrToken::Node(node) if seen_else == after_else => Expr::cast(node),
+                rowan::NodeOrToken::Node(_) => None,
+            })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     Add,
     Sub,
     Mul,
     Div,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 impl BinExpr {
@@ -248,6 +288,12 @@ impl BinExpr {
                     MINUS => BinOp::Sub,
                     STAR => BinOp::Mul,
                     SLASH => BinOp::Div,
+                    EQ2 => BinOp::Eq,
+                    NEQ => BinOp::Ne,
+                    L_ANGLE => BinOp::Lt,
+                    LTEQ => BinOp::Le,
+                    R_ANGLE => BinOp::Gt,
+                    GTEQ => BinOp::Ge,
                     _ => return None,
                 };
                 Some(op)
@@ -259,6 +305,7 @@ impl BinExpr {
 pub enum LiteralKind {
     Int(SyntaxToken),
     Str(SyntaxToken),
+    Bool(bool),
 }
 
 impl Literal {
@@ -269,6 +316,8 @@ impl Literal {
             .find_map(|it| match it.kind() {
                 INT_NUMBER => Some(LiteralKind::Int(it)),
                 STRING => Some(LiteralKind::Str(it)),
+                TRUE_KW => Some(LiteralKind::Bool(true)),
+                FALSE_KW => Some(LiteralKind::Bool(false)),
                 _ => None,
             })
     }
