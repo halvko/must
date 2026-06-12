@@ -1,0 +1,13 @@
+// Mutual recursion: items are visible everywhere in the file, so is_even
+// can call is_odd with no forward declaration.
+//
+// Run: must-lsp run examples/even_odd.must -e 'is_even(76)'    (=> true)
+// Run: must-lsp run examples/even_odd.must -e 'is_odd(76)'     (=> false)
+
+static is_even: fn(usize) -> bool = fn(n: usize) -> bool {
+    if n == 0 { true } else { is_odd(n - 1) }
+}
+
+static is_odd: fn(usize) -> bool = fn(n: usize) -> bool {
+    if n == 0 { false } else { is_even(n - 1) }
+}

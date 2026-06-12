@@ -56,8 +56,7 @@ shows as a diagnostic, plus a source location. Top-level `static`s are
 evaluated at compile time (`static x = 4 + 5` is an implicit `const { … }`),
 so `print` inside an initializer is an error, while `print` in the `-e`
 expression (or code it calls) is fine. Captures aren't supported by the
-runner yet — `hello.must`'s `greeting` closes over a local, so `main()`
-traps with that diagnostic.
+runner yet: a program that captures traps with that diagnostic.
 
 ### Debugging the server
 

@@ -1,0 +1,24 @@
+// Primality by trial division. The loop over candidate divisors becomes a
+// recursive helper that stops once d * d > n, so recursion depth is only
+// about sqrt(n): is_prime(97) recurses ~8 deep, is_prime(9973) ~98.
+//
+// Run: must-lsp run examples/primes.must -e 'is_prime(97)'    (=> true)
+// Run: must-lsp run examples/primes.must -e 'is_prime(91)'    (=> false, 7 * 13)
+
+static rem: fn(usize, usize) -> usize = fn(a: usize, b: usize) -> usize {
+    a - (a / b) * b
+}
+
+static has_divisor: fn(usize, usize) -> bool = fn(n: usize, d: usize) -> bool {
+    if d * d > n {
+        false
+    } else if rem(n, d) == 0 {
+        true
+    } else {
+        has_divisor(n, d + 1)
+    }
+}
+
+static is_prime: fn(usize) -> bool = fn(n: usize) -> bool {
+    if n < 2 { false } else { has_divisor(n, 2) == false }
+}

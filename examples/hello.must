@@ -1,8 +1,20 @@
+// Hello, world — plus a multiline string banner.
+// Fn literals are first-class values, but they cannot capture locals of an
+// enclosing function. `fn { print }` works around that: it is a function
+// *returning* the builtin `print`, which we then call with `s`.
+//
+// Run: must-lsp run examples/hello.must
+
+static banner = "+----------------+
+|  Hello, Must!  |
++----------------+";
+
 static greeting = fn {
     let s = "hello";
-    (fn { print(s) })();
+    fn { print }()(s);
 }
 
 static main: fn() -> () = fn() -> () {
     greeting();
+    print(banner);
 }
