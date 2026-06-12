@@ -37,6 +37,14 @@ impl Ty {
         Ty::Fn(Arc::new(FnTy { params, ret }))
     }
 
+    pub fn contains_error(&self) -> bool {
+        match self {
+            Ty::Error => true,
+            Ty::Fn(f) => f.ret.contains_error() || f.params.iter().any(Ty::contains_error),
+            _ => false,
+        }
+    }
+
     pub fn display(&self) -> String {
         match self {
             Ty::Infer(_) => "_".to_owned(),
@@ -96,6 +104,16 @@ impl UnifyValue for TyVarValue {
     }
 }
 
+/// The nameable builtin types. Also the authority for "is this type name
+/// known?" — diagnostics use `is_none` to report unknown type names.
+pub fn builtin_type_by_name(name: &str) -> Option<Ty> {
+    match name {
+        "usize" => Some(Ty::Int),
+        "str" | "string" => Some(Ty::Str),
+        _ => None,
+    }
+}
+
 /// Lower a syntactic type annotation. References are transparent for now
 /// (`&'static str` and `str` are the same type to inference).
 pub fn lower_type_ref(type_ref: &TypeRef) -> Ty {
@@ -107,11 +125,7 @@ pub fn lower_type_ref(type_ref: &TypeRef) -> Ty {
             params.iter().map(lower_type_ref).collect(),
             ret.as_deref().map(lower_type_ref).unwrap_or(Ty::Unit),
         ),
-        TypeRef::Path(name) => match name.as_str() {
-            "usize" => Ty::Int,
-            "str" | "string" => Ty::Str,
-            _ => Ty::Error,
-        },
+        TypeRef::Path(name) => builtin_type_by_name(name).unwrap_or(Ty::Error),
         TypeRef::Error => Ty::Error,
     }
 }
@@ -171,5 +185,46 @@ pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
             )
         }
         _ => Ty::Error,
+    }
+}
+
+/// Whether `{error}` parts of [`signature`] stem from *absent* annotations —
+/// as opposed to written-but-broken types, which already carry their own
+/// diagnostics at the definition. Mirrors the peek above case by case; uses
+/// of such an item get a "add a type annotation" diagnostic.
+///
+/// Language decision: exported symbols will *always* require a written
+/// contract, even once interprocedural inference lands — inference then
+/// only relaxes this for non-exported items (there is no visibility notion
+/// yet, so today it applies to everything).
+pub fn signature_needs_annotation<'db>(db: &'db dyn Db, item: ItemId<'db>) -> bool {
+    let loc = item_loc(db, item);
+    let tree = item_tree(db, item.file(db));
+    if tree
+        .items
+        .get(loc.index as usize)
+        .is_none_or(|it| it.type_ref.is_some())
+    {
+        return false;
+    }
+    let body = crate::body::body(db, item);
+    let Some(root) = body.root else {
+        // No value at all: the parse errors cover it.
+        return false;
+    };
+    match &body.exprs[root] {
+        ExprData::Literal(_) => false,
+        ExprData::FnLiteral {
+            params,
+            ret_type,
+            body: fn_body,
+        } => {
+            params
+                .iter()
+                .any(|&p| body.bindings[p].type_ref.is_none())
+                || (ret_type.is_none()
+                    && !matches!(body.exprs[*fn_body], ExprData::Block { tail: None, .. }))
+        }
+        _ => true,
     }
 }

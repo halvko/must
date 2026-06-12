@@ -136,6 +136,26 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         });
     }
 
+    // Unknown type names, in any annotation position. Without this, a
+    // typo'd type lowers to a silent `{error}`.
+    for path_type in parse(db, file)
+        .syntax_node()
+        .descendants()
+        .filter_map(ast::PathType::cast)
+    {
+        let Some(name_ref) = path_type.name_ref() else {
+            continue;
+        };
+        if ty::builtin_type_by_name(&name_ref.text()).is_none() {
+            diagnostics.push(Diagnostic {
+                range: path_type.syntax().text_range(),
+                message: format!("unknown type `{}`", name_ref.text()),
+                fix: None,
+                related: Vec::new(),
+            });
+        }
+    }
+
     for &item in file_item_ids(db, file) {
         let (body, source_map) = body_with_source_map(db, item);
         let resolutions = resolutions(db, item);
@@ -157,7 +177,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
 
         for diag in &infer::infer(db, item).diagnostics {
-            let (expr, message) = match diag {
+            let (expr, message, related) = match diag {
                 InferenceDiagnostic::TypeMismatch {
                     expr,
                     expected,
@@ -169,10 +189,12 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                         expected.display(),
                         actual.display()
                     ),
+                    Vec::new(),
                 ),
                 InferenceDiagnostic::NotCallable { expr, ty } => (
                     *expr,
                     format!("expression of type `{}` is not callable", ty.display()),
+                    Vec::new(),
                 ),
                 InferenceDiagnostic::ArgCountMismatch {
                     expr,
@@ -181,7 +203,29 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 } => (
                     *expr,
                     format!("expected {expected} argument(s), found {found}"),
+                    Vec::new(),
                 ),
+                InferenceDiagnostic::NeedsAnnotation { expr, item } => {
+                    let name = item_name(*item);
+                    let display = name
+                        .as_ref()
+                        .map(|n| n.text())
+                        .unwrap_or_else(|| "this item".to_owned());
+                    (
+                        *expr,
+                        format!(
+                            "cannot infer the type of `{display}` across items; \
+                             add a type annotation to its definition"
+                        ),
+                        name.map(|n| {
+                            vec![RelatedInfo {
+                                range: n.syntax().text_range(),
+                                message: "defined here".to_owned(),
+                            }]
+                        })
+                        .unwrap_or_default(),
+                    )
+                }
             };
             let Some(ptr) = source_map.node_for_expr(expr) else {
                 continue;
@@ -190,8 +234,36 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 range: ptr.text_range(),
                 message,
                 fix: None,
-                related: Vec::new(),
+                related,
             });
+        }
+    }
+
+    // Tripwire (rustc's "delayed bug" pattern): the invariant is that every
+    // `{error}` in the file is downstream of at least one diagnostic above —
+    // that's what makes "no diagnostics" mean "lowerable". If types are
+    // broken but the file looks clean, a diagnostic is missing somewhere;
+    // say so loudly instead of leaving hover-only weirdness.
+    if diagnostics.is_empty() {
+        'items: for &item in file_item_ids(db, file) {
+            let (_, source_map) = body_with_source_map(db, item);
+            for (expr, ty) in infer::infer(db, item).type_of_expr.iter() {
+                if !ty.contains_error() {
+                    continue;
+                }
+                let Some(ptr) = source_map.node_for_expr(expr) else {
+                    continue;
+                };
+                diagnostics.push(Diagnostic {
+                    range: ptr.text_range(),
+                    message: "internal error: this expression has type `{error}` but no \
+                              error was reported — this is a bug in the Must language server"
+                        .to_owned(),
+                    fix: None,
+                    related: Vec::new(),
+                });
+                break 'items;
+            }
         }
     }
 

@@ -11,6 +11,8 @@
   shape even where it is not legal, and is refused by a later check rather than by the
   parser, so granting it later deletes a diagnostic and moves no grammar. ERROR nodes are
   for genuinely malformed syntax only.
+- **X05** An inferred `{error}` with no diagnostic behind it is an internal error, not a silent
+  recovery.
 - **X16** Diagnostics have no stable codes. A severity word, free text and a caret are the
   whole contract.
 
