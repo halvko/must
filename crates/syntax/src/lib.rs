@@ -104,6 +104,11 @@ pub fn parse(text: &str) -> Parse {
     // Things the grammar accepts (for resilience and fixes) but the
     // language rejects.
     errors.extend(validation::validate(&SyntaxNode::new_root(green.clone())));
+    // One error per position: errors are reported most-fundamental-first
+    // (lexer before parser, "expected a name" before "expected `=`"), and
+    // editors tend to surface only one diagnostic per spot anyway.
+    errors.sort_by_key(|err| (err.range.start(), err.range.end()));
+    errors.dedup_by(|next, prev| next.range == prev.range);
     Parse {
         green,
         errors: errors.into(),

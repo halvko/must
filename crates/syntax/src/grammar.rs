@@ -38,7 +38,7 @@ fn item(p: &mut Parser<'_>) {
         if p.prev() == Some(R_BRACE) {
             p.eat(SEMICOLON);
         } else {
-            p.expect(SEMICOLON, "`;`");
+            p.expect_semicolon();
         }
     } else {
         p.error("expected `=` followed by the item's value");
@@ -234,7 +234,7 @@ fn expr_stmt_or_tail(p: &mut Parser<'_>) {
         return;
     }
     if parsed.is_some() && !p.at(R_BRACE) && !p.at(EOF) {
-        p.error("expected `;`");
+        p.error_missing_semicolon();
         m.complete(p, EXPR_STMT);
         return;
     }
@@ -254,7 +254,7 @@ fn let_stmt(p: &mut Parser<'_>) {
     } else {
         p.error("expected `=` followed by an initializer");
     }
-    p.expect(SEMICOLON, "`;`");
+    p.expect_semicolon();
     m.complete(p, LET_STMT);
 }
 

@@ -604,7 +604,7 @@ static y = 2;
                   INT_NUMBER@46..47 "2"
                 SEMICOLON@47..48 ";"
               WHITESPACE@48..49 "\n"
-            error 14..20: expected `;`
+            error 13..13: expected `;`
         "#]],
     );
 }
@@ -661,6 +661,79 @@ fn fn_type_requires_parens() {
 }
 
 #[test]
+fn bare_static_reports_one_error() {
+    // "expected a name" and "expected `=`" both land at the same spot;
+    // only the first (most fundamental) survives.
+    check("static ", expect![[r#"
+        SOURCE_FILE@0..7
+          STATIC_ITEM@0..6
+            STATIC_KW@0..6 "static"
+          WHITESPACE@6..7 " "
+        error 7..7: expected a name for the item
+    "#]]);
+}
+
+#[test]
+fn missing_semicolon_reported_after_previous_token() {
+    check(
+        r#"
+static name = fn {
+    let f = fn { 42 }
+    f()
+}
+"#,
+        expect![[r#"
+            SOURCE_FILE@0..52
+              WHITESPACE@0..1 "\n"
+              STATIC_ITEM@1..51
+                STATIC_KW@1..7 "static"
+                WHITESPACE@7..8 " "
+                NAME@8..12
+                  IDENT@8..12 "name"
+                WHITESPACE@12..13 " "
+                EQ@13..14 "="
+                WHITESPACE@14..15 " "
+                FN_LITERAL@15..51
+                  FN_KW@15..17 "fn"
+                  WHITESPACE@17..18 " "
+                  BLOCK_EXPR@18..51
+                    L_BRACE@18..19 "{"
+                    WHITESPACE@19..24 "\n    "
+                    LET_STMT@24..41
+                      LET_KW@24..27 "let"
+                      WHITESPACE@27..28 " "
+                      NAME@28..29
+                        IDENT@28..29 "f"
+                      WHITESPACE@29..30 " "
+                      EQ@30..31 "="
+                      WHITESPACE@31..32 " "
+                      FN_LITERAL@32..41
+                        FN_KW@32..34 "fn"
+                        WHITESPACE@34..35 " "
+                        BLOCK_EXPR@35..41
+                          L_BRACE@35..36 "{"
+                          WHITESPACE@36..37 " "
+                          LITERAL@37..39
+                            INT_NUMBER@37..39 "42"
+                          WHITESPACE@39..40 " "
+                          R_BRACE@40..41 "}"
+                    WHITESPACE@41..46 "\n    "
+                    CALL_EXPR@46..49
+                      PATH_EXPR@46..47
+                        NAME_REF@46..47
+                          IDENT@46..47 "f"
+                      ARG_LIST@47..49
+                        L_PAREN@47..48 "("
+                        R_PAREN@48..49 ")"
+                    WHITESPACE@49..50 "\n"
+                    R_BRACE@50..51 "}"
+              WHITESPACE@51..52 "\n"
+            error 41..41: expected `;`
+        "#]],
+    );
+}
+
+#[test]
 fn item_missing_name_and_body() {
     check(
         "static = fn {",
@@ -678,7 +751,6 @@ fn item_missing_name_and_body() {
                     L_BRACE@12..13 "{"
             error 7..8: expected a name for the item
             error 13..13: expected `}`
-            error 13..13: expected `;`
         "#]],
     );
 }
@@ -759,8 +831,6 @@ static b = fn {};
               WHITESPACE@45..46 "\n"
             error 19..20: unexpected character `@`
             error 21..22: unexpected character `%`
-            error 19..20: expected an item (`static` or `const`)
-            error 21..22: expected an item (`static` or `const`)
             error 23..27: expected an item (`static` or `const`)
         "#]],
     );
@@ -886,8 +956,8 @@ static b = fn {};
                     R_BRACE@49..50 "}"
                 SEMICOLON@50..51 ";"
               WHITESPACE@51..52 "\n"
+            error 33..33: expected `;`
             error 34..40: expected `}`
-            error 34..40: expected `;`
         "#]],
     );
 }
@@ -944,7 +1014,7 @@ static main = fn {
                     WHITESPACE@47..48 "\n"
                     R_BRACE@48..49 "}"
               WHITESPACE@49..50 "\n"
-            error 38..43: expected `;`
+            error 33..33: expected `;`
         "#]],
     );
 }

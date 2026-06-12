@@ -144,6 +144,28 @@ fn non_block_fn_body_diagnostic_carries_wrap_fix() {
 }
 
 #[test]
+fn missing_semicolon_diagnostic_carries_insert_fix() {
+    let (analysis, file, _pos) = fixture(
+        r#"
+static name = fn {
+    let f = fn { 42 }$0
+    f()
+}
+"#,
+    );
+    let diagnostics = analysis.diagnostics(file);
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].message, "expected `;`");
+    // Empty range right after the closing `}` of `fn { 42 }`.
+    assert!(diagnostics[0].range.is_empty());
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Insert `;`");
+    assert_eq!(fix.edits.len(), 1);
+    assert_eq!(fix.edits[0].insert, ";");
+    assert_eq!(fix.edits[0].range, diagnostics[0].range);
+}
+
+#[test]
 fn diagnostics_include_name_errors() {
     let (analysis, file, _pos) = fixture("static f = fn { missing$0() };");
     let diagnostics = analysis.diagnostics(file);

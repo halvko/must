@@ -15,6 +15,12 @@ pub(crate) enum Event {
     Finish,
     Error {
         msg: String,
+        /// Report at the end of the previous token (where something is
+        /// missing) instead of at the token the parser is looking at.
+        after_prev: bool,
+        /// Text whose insertion at the error position fixes the error;
+        /// becomes a quick fix.
+        fix_insert: Option<String>,
     },
 }
 
@@ -90,7 +96,29 @@ impl<'t> Parser<'t> {
 
     /// Report an error at the current token without consuming anything.
     pub(crate) fn error(&mut self, msg: impl Into<String>) {
-        self.events.push(Event::Error { msg: msg.into() });
+        self.events.push(Event::Error {
+            msg: msg.into(),
+            after_prev: false,
+            fix_insert: None,
+        });
+    }
+
+    /// Expect a `;`. A missing one is reported right after the previous
+    /// token — where it should be typed — with an insert fix.
+    pub(crate) fn expect_semicolon(&mut self) -> bool {
+        if self.eat(SEMICOLON) {
+            return true;
+        }
+        self.error_missing_semicolon();
+        false
+    }
+
+    pub(crate) fn error_missing_semicolon(&mut self) {
+        self.events.push(Event::Error {
+            msg: "expected `;`".to_owned(),
+            after_prev: true,
+            fix_insert: Some(";".to_owned()),
+        });
     }
 
     /// Report an error and wrap the offending token in an `ERROR` node.

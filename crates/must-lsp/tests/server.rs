@@ -126,8 +126,9 @@ fn publishes_parse_errors_on_open_and_change() {
     assert_eq!(diags.diagnostics.len(), 1);
     let diag = &diags.diagnostics[0];
     assert_eq!(diag.message, "expected `;`");
-    // Points at `print` on line 2.
-    assert_eq!(diag.range.start.line, 2);
+    // Points right after `let a = "x"` on line 1 — where the `;` belongs.
+    assert_eq!(diag.range.start, lsp_types::Position::new(1, 15));
+    assert_eq!(diag.range.end, diag.range.start);
 
     // Fix the file: diagnostics clear.
     client.change(

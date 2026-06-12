@@ -4,7 +4,7 @@
 use crate::SyntaxKind::{self, *};
 use crate::lexer::Token;
 use crate::parser::Event;
-use crate::SyntaxError;
+use crate::{Fix, SyntaxError, TextEdit};
 use rowan::{GreenNode, GreenNodeBuilder};
 use text_size::{TextRange, TextSize};
 
@@ -20,6 +20,7 @@ pub(crate) fn build(
         tokens,
         raw_pos: 0,
         offset: TextSize::new(0),
+        prev_token_end: TextSize::new(0),
         depth: 0,
         errors: &mut errors,
     };
@@ -63,7 +64,11 @@ pub(crate) fn build(
             }
             Event::Token => builder.token(),
             Event::Finish => builder.finish_node(),
-            Event::Error { msg } => builder.error(msg),
+            Event::Error {
+                msg,
+                after_prev,
+                fix_insert,
+            } => builder.error(msg, after_prev, fix_insert),
         }
     }
 
@@ -76,6 +81,9 @@ struct Builder<'a> {
     tokens: &'a [Token],
     raw_pos: usize,
     offset: TextSize,
+    /// End of the last non-trivia token emitted; where "missing X after
+    /// this" errors point.
+    prev_token_end: TextSize,
     depth: usize,
     errors: &'a mut Vec<SyntaxError>,
 }
@@ -106,26 +114,35 @@ impl Builder<'_> {
         self.do_token();
     }
 
-    fn error(&mut self, message: String) {
-        // Point at the token the parser was looking at; an empty range at the
-        // end of the text if there is none.
-        let mut pos = self.raw_pos;
-        let mut offset = self.offset;
-        while let Some(token) = self.tokens.get(pos) {
-            if !token.kind.is_trivia() {
-                break;
+    fn error(&mut self, message: String, after_prev: bool, fix_insert: Option<String>) {
+        let range = if after_prev {
+            // Right where the missing text should be typed.
+            TextRange::empty(self.prev_token_end)
+        } else {
+            // Point at the token the parser was looking at; an empty range
+            // at the end of the text if there is none.
+            let mut pos = self.raw_pos;
+            let mut offset = self.offset;
+            while let Some(token) = self.tokens.get(pos) {
+                if !token.kind.is_trivia() {
+                    break;
+                }
+                offset += token.len;
+                pos += 1;
             }
-            offset += token.len;
-            pos += 1;
-        }
-        let range = match self.tokens.get(pos) {
-            Some(token) => TextRange::at(offset, token.len),
-            None => TextRange::empty(TextSize::of(self.text)),
+            match self.tokens.get(pos) {
+                Some(token) => TextRange::at(offset, token.len),
+                None => TextRange::empty(TextSize::of(self.text)),
+            }
         };
+        let fix = fix_insert.map(|insert| Fix {
+            label: format!("Insert `{insert}`"),
+            edits: vec![TextEdit { range, insert }],
+        });
         self.errors.push(SyntaxError {
             message,
             range,
-            fix: None,
+            fix,
         });
     }
 
@@ -145,5 +162,8 @@ impl Builder<'_> {
             .token(token.kind.into(), &self.text[range]);
         self.offset += token.len;
         self.raw_pos += 1;
+        if !token.kind.is_trivia() {
+            self.prev_token_end = self.offset;
+        }
     }
 }
