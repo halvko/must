@@ -142,8 +142,9 @@ fn publishes_parse_errors_on_open_and_change() {
     assert_eq!(diags.diagnostics.len(), 1);
     let diag = &diags.diagnostics[0];
     assert_eq!(diag.message, "expected `;`");
-    // Points at `print` on line 2.
-    assert_eq!(diag.range.start.line, 2);
+    // Points right after `let a = "x"` on line 1 — where the `;` belongs.
+    assert_eq!(diag.range.start, lsp_types::Position::new(1, 15));
+    assert_eq!(diag.range.end, diag.range.start);
 
     // Fix the file: diagnostics clear.
     client.change(
@@ -163,9 +164,9 @@ fn diagnostic_positions_use_utf16_code_units() {
     let client = TestClient::start();
     let file = uri("file:///unicode.must");
 
-    // Missing `;` after the let; the error points at `print`, which sits
-    // after a string whose `é` is 2 bytes / 1 UTF-16 unit and whose emoji
-    // is 4 bytes / 2 UTF-16 units. Byte column 21, UTF-16 column 18.
+    // Missing `;` after the let; the error points right after the string —
+    // where the `;` belongs — whose `é` is 2 bytes / 1 UTF-16 unit and whose
+    // emoji is 4 bytes / 2 UTF-16 units. Byte column 20, UTF-16 column 17.
     client.open(
         &file,
         "static main = fn {\n    let a = \"é😀\" print(a);\n}\n",
@@ -175,7 +176,7 @@ fn diagnostic_positions_use_utf16_code_units() {
     let diag = &diags.diagnostics[0];
     assert_eq!(diag.message, "expected `;`");
     assert_eq!(diag.range.start.line, 1);
-    assert_eq!(diag.range.start.character, 18);
+    assert_eq!(diag.range.start.character, 17);
 
     drop(client);
 }
