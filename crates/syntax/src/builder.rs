@@ -117,11 +117,13 @@ impl Builder<'_> {
 
     fn error(&mut self, message: String, after_prev: bool, fix_insert: Option<String>) {
         // "Missing X after this token" is noise when that token is itself
-        // broken (e.g. an unterminated string). Touching counts too: an
-        // empty range at the token's end (the "expected `}`" at EOF after
-        // an unclosed `{`) intersects it, which is what drops the bogus
-        // "expected `;`" for `static = fn {`. The range-equal dedup in
-        // `parse` only settles what this leaves behind.
+        // broken (e.g. an unterminated string). A prior after-prev error on
+        // the same token intersects it directly, which is what drops the
+        // bogus "expected `;`" for `static = fn {` (the "expected `}`" is
+        // anchored on the `{`'s last character). Touching still counts for
+        // the remaining EOF cases, where a plain error's empty range sits
+        // at the token's end. The range-equal dedup in `parse` only
+        // settles what this leaves behind.
         if after_prev
             && self
                 .errors

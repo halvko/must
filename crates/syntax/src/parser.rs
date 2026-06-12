@@ -104,22 +104,29 @@ impl<'t> Parser<'t> {
         });
     }
 
-    /// Expect a `;`. A missing one anchors on the previous token's last
-    /// character — the token the `;` belongs after — with an insert fix at
-    /// the token's end.
-    pub(crate) fn expect_semicolon(&mut self) -> bool {
-        if self.eat(SEMICOLON) {
+    /// Expect a closing or separator token (`;`, `}`, `)`). A missing one
+    /// anchors on the previous token's last character — the token it
+    /// belongs after — with an insert fix at the token's end, and is
+    /// suppressed when that token already carries an error.
+    pub(crate) fn expect_after_prev(&mut self, kind: SyntaxKind) -> bool {
+        if self.eat(kind) {
             return true;
         }
-        self.error_missing_semicolon();
+        self.error_after_prev(kind);
         false
     }
 
-    pub(crate) fn error_missing_semicolon(&mut self) {
+    pub(crate) fn error_after_prev(&mut self, kind: SyntaxKind) {
+        let insert = match kind {
+            SEMICOLON => ";",
+            R_PAREN => ")",
+            R_BRACE => "}",
+            _ => unreachable!("{kind:?} is not a closer"),
+        };
         self.events.push(Event::Error {
-            msg: "expected `;`".to_owned(),
+            msg: format!("expected `{insert}`"),
             after_prev: true,
-            fix_insert: Some(";".to_owned()),
+            fix_insert: Some(insert.to_owned()),
         });
     }
 
