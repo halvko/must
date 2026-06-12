@@ -10,7 +10,7 @@ use std::io::Write;
 
 use base_db::{RootDatabase, SourceFile};
 use eval::{EvalErrorKind, Machine, RunMode, Value};
-use line_index::LineIndex;
+use line_index::{LineIndex, WideEncoding};
 use syntax::ast::AstNode;
 
 /// The entry expression is wrapped in a synthetic item appended to the file:
@@ -121,7 +121,8 @@ pub fn prepare(db: &RootDatabase, text: &str, path: &str, expr: &str) -> Result<
 }
 
 /// Map an eval origin to a 1-based (line, column) in the user's part of the
-/// file. `None` for synthetic (injected-entry) or unmappable positions.
+/// file, columns in UTF-16 code units — the DAP's units. `None` for
+/// synthetic (injected-entry) or unmappable positions.
 pub fn source_position(
     db: &RootDatabase,
     file: SourceFile,
@@ -134,8 +135,12 @@ pub fn source_position(
     if usize::from(range.start()) > original_len {
         return None;
     }
-    let line_col = LineIndex::new(file.text(db)).line_col(range.start());
-    Some((line_col.line + 1, line_col.col + 1))
+    let line_index = LineIndex::new(file.text(db));
+    let line_col = line_index.line_col(range.start());
+    let wide = line_index
+        .to_wide(WideEncoding::Utf16, line_col)
+        .expect("a valid byte offset must convert to a UTF-16 position");
+    Some((wide.line + 1, wide.col + 1))
 }
 
 /// Evaluate `expr` in `text`'s file scope, writing `print` output to `out`.

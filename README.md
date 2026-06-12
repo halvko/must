@@ -75,6 +75,17 @@ calls included). When a broken program reaches its error, it *stops
 there* like a breakpoint, stack and locals inspectable, with the same
 message the editor shows as a diagnostic; resuming ends the run.
 
+To step *within* a line (multiple calls on one line are distinct stops),
+set Zed's global granularity:
+
+```json
+"debugger": { "stepping_granularity": "statement" }
+```
+
+(The adapter also supports column breakpoints and `breakpointLocations`
+per the DAP spec, but Zed's UI is line-only today — those light up in
+clients with an inline-breakpoint picker.)
+
 ### Debugging the server
 
 Set `MUST_LSP_LOG` (a `tracing` env-filter, e.g. `must_lsp=debug`) in the

@@ -204,6 +204,16 @@ impl<'db, M: Mode> Machine<'db, M> {
         Some((frame.loc.clone(), origin))
     }
 
+    /// What `frames()[index]` executes next, at machine granularity: the
+    /// block and the statement index (past the end = the terminator) its
+    /// next [`Self::step`] advances. Distinct MIR statements can share a
+    /// source position; a debugger tells them — and whether execution
+    /// moved — apart by this, not by positions.
+    pub fn frame_step_point(&self, index: usize) -> Option<(mir::BlockId, usize)> {
+        let frame = self.frames.get(index)?;
+        Some((frame.block, frame.statement))
+    }
+
     /// The user-named locals of a frame that currently hold values, with
     /// their declared MIR types, in declaration order (shadowing repeats a
     /// name; later wins).

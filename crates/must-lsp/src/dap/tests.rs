@@ -259,6 +259,180 @@ fn breakpoint_hit_inspect_and_resume() {
 }
 
 #[test]
+fn column_breakpoints_distinguish_calls_on_one_line() {
+    let program = fixture(
+        "cols",
+        "static f = fn (n: usize) -> usize { n + 1 }\nstatic main = fn {\n    let x = f(1) + f(2);\n    print(\"done\");\n};\n",
+    );
+    // Line 3 columns: 13 = `f(1)` (also where the `+` and the let-init
+    // anchor), 20 = `f(2)`.
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        ("launch", json!({ "program": program.to_str().unwrap() })),
+        ("breakpointLocations", json!({ "source": {}, "line": 3 })),
+        (
+            "setBreakpoints",
+            json!({ "breakpoints": [{ "line": 3, "column": 20 }] }),
+        ),
+        ("configurationDone", json!({})),
+        ("stackTrace", json!({ "threadId": 1 })),
+        (
+            "next",
+            json!({ "threadId": 1, "granularity": "statement" }),
+        ),
+        ("stackTrace", json!({ "threadId": 1 })),
+        ("continue", json!({ "threadId": 1 })),
+        ("disconnect", json!({})),
+    ]);
+
+    // The picker gets both call positions on the line.
+    let locations = &responses_for(&messages, "breakpointLocations")[0]["body"]["breakpoints"];
+    assert_eq!(locations[0], json!({ "line": 3, "column": 13 }));
+    assert_eq!(locations[1], json!({ "line": 3, "column": 20 }));
+
+    // The column breakpoint verifies, with its column echoed.
+    let bp = &responses_for(&messages, "setBreakpoints")[0]["body"]["breakpoints"][0];
+    assert_eq!(bp["verified"], true);
+    assert_eq!(bp["column"], 20);
+
+    // f(1) runs through unbroken; we stop exactly before f(2).
+    let stopped = events(&messages, "stopped");
+    assert_eq!(stopped[0]["body"]["reason"], "breakpoint");
+    let stack = &responses_for(&messages, "stackTrace")[0]["body"]["stackFrames"];
+    assert_eq!(stack[0]["name"], "main");
+    assert_eq!(stack[0]["line"], 3);
+    assert_eq!(stack[0]["column"], 20);
+
+    // A statement-granular step-over stays on the line: after f(2)
+    // returns, the addition (anchored at column 13) is next.
+    assert_eq!(stopped[1]["body"]["reason"], "step");
+    let stack = &responses_for(&messages, "stackTrace")[1]["body"]["stackFrames"];
+    assert_eq!(stack[0]["line"], 3);
+    assert_eq!(stack[0]["column"], 13);
+
+    // And the rest runs out clean.
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
+fn breakpoint_columns_are_utf16_code_units() {
+    // The breakpoint line carries non-ASCII *before* the breakpoint
+    // columns, so UTF-8 byte columns and DAP's UTF-16 code units differ:
+    // `λ` is one unit (two bytes), `😀` two units (four bytes).
+    let program = fixture(
+        "utf16",
+        "static f = fn (n: usize) -> usize { n + 1 }\nstatic main = fn {\n    let s = \"λ😀\"; print(s); f(2);\n};\n",
+    );
+    // Line 3 columns in UTF-16: 13 = the string literal (the let-init's
+    // origin), 20 = `print`, 30 = `f(2)`. In bytes those last two would
+    // be 23 and 33.
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        ("launch", json!({ "program": program.to_str().unwrap() })),
+        ("breakpointLocations", json!({ "source": {}, "line": 3 })),
+        (
+            "setBreakpoints",
+            json!({ "breakpoints": [{ "line": 3, "column": 30 }] }),
+        ),
+        ("configurationDone", json!({})),
+        ("stackTrace", json!({ "threadId": 1 })),
+        ("continue", json!({ "threadId": 1 })),
+        ("disconnect", json!({})),
+    ]);
+
+    // The picker's columns are UTF-16 code units.
+    let locations = &responses_for(&messages, "breakpointLocations")[0]["body"]["breakpoints"];
+    assert_eq!(locations[0], json!({ "line": 3, "column": 13 }));
+    assert_eq!(locations[1], json!({ "line": 3, "column": 20 }));
+    assert_eq!(locations[2], json!({ "line": 3, "column": 30 }));
+
+    // A column echoed from the picker verifies: the client's UTF-16
+    // column is matched against UTF-16 positions.
+    let bp = &responses_for(&messages, "setBreakpoints")[0]["body"]["breakpoints"][0];
+    assert_eq!(bp["verified"], true);
+    assert_eq!(bp["column"], 30);
+
+    // The hit reports the UTF-16 column too.
+    let stopped = events(&messages, "stopped");
+    assert_eq!(stopped[0]["body"]["reason"], "breakpoint");
+    let stack = &responses_for(&messages, "stackTrace")[0]["body"]["stackFrames"];
+    assert_eq!(stack[0]["name"], "main");
+    assert_eq!(stack[0]["line"], 3);
+    assert_eq!(stack[0]["column"], 30);
+
+    // The multibyte string round-trips through the console.
+    let stdout: String = events(&messages, "output")
+        .iter()
+        .filter(|e| e["body"]["category"] == "stdout")
+        .map(|e| e["body"]["output"].as_str().unwrap())
+        .collect();
+    assert_eq!(stdout, "λ😀\n");
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
+fn statement_steps_distinguish_statements_sharing_a_column() {
+    // `let x = f(1) + f(2);` lowers to an addition statement and the
+    // let-init statement, both anchored at column 13 (the shared origin
+    // expression's start). Position equality would merge them into one
+    // stop; step identity keeps them apart.
+    let program = fixture(
+        "shared-col",
+        "static f = fn (n: usize) -> usize { n + 1 }\nstatic main = fn {\n    let x = f(1) + f(2);\n    print(\"done\");\n};\n",
+    );
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        ("launch", json!({ "program": program.to_str().unwrap() })),
+        (
+            "setBreakpoints",
+            json!({ "breakpoints": [{ "line": 3, "column": 20 }] }),
+        ),
+        ("configurationDone", json!({})),
+        ("stackTrace", json!({ "threadId": 1 })),
+        ("next", json!({ "threadId": 1, "granularity": "statement" })),
+        ("stackTrace", json!({ "threadId": 1 })),
+        ("next", json!({ "threadId": 1, "granularity": "statement" })),
+        ("stackTrace", json!({ "threadId": 1 })),
+        ("next", json!({ "threadId": 1, "granularity": "statement" })),
+        ("stackTrace", json!({ "threadId": 1 })),
+        ("continue", json!({ "threadId": 1 })),
+        ("disconnect", json!({})),
+    ]);
+
+    // Stop 1: the column breakpoint, before f(2).
+    let stack = |i: usize| {
+        responses_for(&messages, "stackTrace")[i]["body"]["stackFrames"][0].clone()
+    };
+    assert_eq!(events(&messages, "stopped")[0]["body"]["reason"], "breakpoint");
+    assert_eq!(stack(0)["line"], 3);
+    assert_eq!(stack(0)["column"], 20);
+
+    // Stop 2: statement-granular step to the addition (col 13).
+    assert_eq!(events(&messages, "stopped")[1]["body"]["reason"], "step");
+    assert_eq!(stack(1)["line"], 3);
+    assert_eq!(stack(1)["column"], 13);
+
+    // Stop 3: the *next* statement, the let-init — same (line, column)
+    // as the addition, yet a distinct stop.
+    assert_eq!(events(&messages, "stopped")[2]["body"]["reason"], "step");
+    assert_eq!(stack(2)["line"], 3);
+    assert_eq!(stack(2)["column"], 13);
+
+    // Stop 4: then on to the print on the next line.
+    assert_eq!(events(&messages, "stopped")[3]["body"]["reason"], "step");
+    assert_eq!(stack(3)["line"], 4);
+    assert_eq!(stack(3)["column"], 5);
+
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
 fn stop_on_entry_stops_at_the_first_user_line() {
     let program = fixture(
         "entry",
