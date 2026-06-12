@@ -392,6 +392,63 @@ fn semantic_tokens_over_protocol() {
 }
 
 #[test]
+fn out_of_range_positions_clamp_into_the_requested_line() {
+    let mut client = TestClient::start();
+    let file = uri("file:///clamp.must");
+
+    // Line 1 carries `delta` and multi-byte characters: a column past line
+    // 0's end, taken literally, lands on line 1's text — inside `delta`, or
+    // mid-character inside the emoji.
+    client.open(&file, "static main = fn {\n    let delta = \"é😀\";\n}\n");
+    client.next_diagnostics();
+
+    fn hover_at(
+        client: &mut TestClient,
+        file: &lsp_types::Uri,
+        position: lsp_types::Position,
+    ) -> Option<lsp_types::Hover> {
+        client.request::<lsp_types::request::HoverRequest>(lsp_types::HoverParams {
+            text_document_position_params: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+                position,
+            },
+            work_done_progress_params: Default::default(),
+        })
+    }
+
+    // Columns past line 0's end (27 would land on `delta`, 40 mid-emoji on
+    // line 1) and lines past EOF must resolve into the requested line: line
+    // 0 ends at `{\n`, a nonexistent line falls back to the last, empty one
+    // — no identifier either way, so no hover, and no error.
+    for position in [
+        lsp_types::Position::new(0, 27),
+        lsp_types::Position::new(0, 9999),
+        lsp_types::Position::new(9999, 0),
+        lsp_types::Position::new(9999, 9999),
+    ] {
+        assert!(
+            hover_at(&mut client, &file, position).is_none(),
+            "position {position:?} leaked out of its requested line"
+        );
+    }
+
+    // The clamping did not break real answers: line 1's `delta` (UTF-16
+    // columns 8..13) and line 0's `main` (7..11) still hover.
+    let response = hover_at(&mut client, &file, lsp_types::Position::new(1, 9))
+        .expect("hover on line 1's `delta` disappeared");
+    let lsp_types::HoverContents::Markup(content) = response.contents else {
+        panic!("expected markup hover contents");
+    };
+    assert_eq!(content.value, "```must\ndelta: str\n```");
+    assert!(
+        hover_at(&mut client, &file, lsp_types::Position::new(0, 7)).is_some(),
+        "hover on line 0's `main` disappeared"
+    );
+
+    drop(client);
+}
+
+#[test]
 fn close_clears_diagnostics() {
     let client = TestClient::start();
     let file = uri("file:///broken.must");
