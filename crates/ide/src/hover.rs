@@ -39,9 +39,7 @@ pub(crate) fn hover(
         let ty = hir::infer::infer(db, item).type_of_expr.get(expr)?.clone();
         // A use of another item also shows that item's const value.
         let value = match hir::resolutions(db, item).get(expr) {
-            Some(&hir::Resolution::Item(loc)) => {
-                loc.to_id(db).and_then(|target| const_display(db, target))
-            }
+            Some(hir::Resolution::Item(loc)) => const_display(db, loc.to_id(db)),
             _ => None,
         };
         (name_ref.text(), ty, name_ref.syntax().text_range(), value)

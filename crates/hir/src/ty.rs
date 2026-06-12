@@ -6,8 +6,8 @@ use base_db::Db;
 use ena::unify::{NoError, UnifyKey, UnifyValue};
 
 use crate::body::{ExprData, LiteralData};
-use crate::item_tree::{TypeRef, item_tree};
-use crate::{ItemId, item_loc};
+use crate::item_tree::TypeRef;
+use crate::ItemId;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
@@ -139,13 +139,7 @@ pub fn lower_type_ref(type_ref: &TypeRef) -> Ty {
 /// only propagates past this point if the signature value actually changes.
 #[salsa::tracked]
 pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
-    let loc = item_loc(db, item);
-    let tree = item_tree(db, item.file(db));
-    if let Some(type_ref) = tree
-        .items
-        .get(loc.index as usize)
-        .and_then(|it| it.type_ref.as_ref())
-    {
+    if let Some(type_ref) = crate::item_data(db, item).as_ref().and_then(|it| it.type_ref.as_ref()) {
         return lower_type_ref(type_ref);
     }
 
@@ -202,13 +196,7 @@ pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
 /// only relaxes this for non-exported items (there is no visibility notion
 /// yet, so today it applies to everything).
 pub fn signature_needs_annotation<'db>(db: &'db dyn Db, item: ItemId<'db>) -> bool {
-    let loc = item_loc(db, item);
-    let tree = item_tree(db, item.file(db));
-    if tree
-        .items
-        .get(loc.index as usize)
-        .is_none_or(|it| it.type_ref.is_some())
-    {
+    if crate::item_data(db, item).as_ref().is_none_or(|it| it.type_ref.is_some()) {
         return false;
     }
     let body = crate::body::body(db, item);

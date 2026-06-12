@@ -11,6 +11,9 @@
   shape even where it is not legal, and is refused by a later check rather than by the
   parser, so granting it later deletes a diagnostic and moves no grammar. ERROR nodes are
   for genuinely malformed syntax only.
+- **X04** Identity is range-free. `ItemLoc` is (file, name, disambiguator), never an arena
+  index, so an edit above an item does not invalidate it. Nothing below the diagnostic boundary
+  carries a range.
 - **X05** An inferred `{error}` with no diagnostic behind it is an internal error, not a silent
   recovery.
 - **X06** MIR is the CFG: one IR lowered from typed HIR, shared by every downstream

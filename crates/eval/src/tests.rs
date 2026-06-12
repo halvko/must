@@ -30,7 +30,7 @@ fn check_run(text: &str, entry: &str, expect: Expect) {
         .find(|&&it| it.name(&db) == "entrypoint")
         .expect("entrypoint item exists");
     let mut machine = Machine::new(&db, RunMode { out: Vec::new() });
-    let result = machine.eval_root(hir::item_loc(&db, entry_item));
+    let result = machine.eval_root(&hir::item_loc(&db, entry_item));
     let mut rendered = String::from_utf8(machine.mode.out).unwrap();
     rendered.push_str(&match result {
         Ok(value) => format!("=> {}\n", value.display()),
