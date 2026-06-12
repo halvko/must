@@ -24,7 +24,9 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{CodeActionRequest, GotoDefinition, HoverRequest, Request as _};
+use lsp_types::request::{
+    CodeActionRequest, GotoDefinition, HoverRequest, Request as _, SemanticTokensFullRequest,
+};
 
 pub type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -40,6 +42,15 @@ pub fn server_capabilities() -> lsp_types::ServerCapabilities {
         definition_provider: Some(lsp_types::OneOf::Left(true)),
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
         code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
+        semantic_tokens_provider: Some(
+            lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(
+                lsp_types::SemanticTokensOptions {
+                    legend: to_proto::semantic_tokens_legend(),
+                    full: Some(lsp_types::SemanticTokensFullOptions::Bool(true)),
+                    ..Default::default()
+                },
+            ),
+        ),
         ..Default::default()
     }
 }
@@ -187,6 +198,11 @@ impl GlobalState {
             CodeActionRequest::METHOD => {
                 self.spawn_request(req, |snapshot, params| {
                     serde_json::to_value(snapshot.code_actions(params)).ok()
+                });
+            }
+            SemanticTokensFullRequest::METHOD => {
+                self.spawn_request(req, |snapshot, params| {
+                    serde_json::to_value(snapshot.semantic_tokens(params)).ok()
                 });
             }
             method => {
@@ -461,6 +477,22 @@ impl Snapshot {
             ));
         }
         Some(actions)
+    }
+
+    fn semantic_tokens(
+        &self,
+        params: lsp_types::SemanticTokensParams,
+    ) -> Option<lsp_types::SemanticTokensResult> {
+        let uri = params.text_document.uri;
+        let Some(FileState::Open(file)) = self.files.by_uri.get(&uri).copied() else {
+            tracing::warn!(uri = %uri.as_str(), "semantic tokens for a document that is not open");
+            return None;
+        };
+        let line_index = self.analysis.line_index(file);
+        let highlights = self.analysis.highlight(file);
+        Some(lsp_types::SemanticTokensResult::Tokens(
+            to_proto::semantic_tokens(&line_index, &highlights),
+        ))
     }
 
     fn hover(&self, params: lsp_types::HoverParams) -> Option<lsp_types::Hover> {

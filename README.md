@@ -19,6 +19,13 @@ Then install the editor extension once:
    `editors/zed/` from this repo.
 2. Open this repo in Zed and edit `examples/hello.must` — diagnostics, hover,
    goto-definition, and quick fixes come from your local build.
+3. For syntax highlighting, enable LSP semantic tokens in your Zed
+   `settings.json` (Must has no tree-sitter grammar; the server is the only
+   coloring source):
+
+   ```json
+   "languages": { "Must": { "semantic_tokens": "full" } }
+   ```
 
 The extension finds the server by looking for `must-lsp` on PATH first, then
 falling back to `<worktree>/target/debug/must-lsp` — so opening this repo
