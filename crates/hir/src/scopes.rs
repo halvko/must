@@ -123,6 +123,11 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
 pub enum Resolution {
     Local(BindingId),
     Item(ItemLoc),
+    /// The name is defined by more than one item. Resolves to the first
+    /// definition so navigation has a target, but no use can be given a
+    /// meaning: inference types these as `{error}`, and the extra
+    /// definitions carry the diagnostic.
+    Ambiguous(ItemLoc),
     Builtin(Builtin),
 }
 
@@ -149,19 +154,69 @@ impl Builtin {
     }
 }
 
-/// Top-level names of a file. Items are visible everywhere, including their
-/// own bodies — mutual recursion needs no special casing.
+/// Top-level names of a file, *including* what's wrong with them: the scope
+/// decides that the first declaration wins, so it is also the analysis that
+/// knows about the losers. Diagnostics travel with the analysis that
+/// discovers them; the aggregator only attaches ranges. Range-free, so body
+/// edits backdate it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FileScope {
+    entries: FxHashMap<String, ScopeEntry>,
+    /// One entry per extra declaration of an already-declared name.
+    pub duplicates: Vec<Duplicate>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScopeEntry {
+    loc: ItemLoc,
+    ambiguous: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Duplicate {
+    pub first: ItemLoc,
+    pub second: ItemLoc,
+}
+
+impl FileScope {
+    pub fn resolve(&self, name: &str) -> Option<Resolution> {
+        let entry = self.entries.get(name)?;
+        Some(if entry.ambiguous {
+            Resolution::Ambiguous(entry.loc)
+        } else {
+            Resolution::Item(entry.loc)
+        })
+    }
+}
+
+/// Items are visible everywhere, including their own bodies — mutual
+/// recursion needs no special casing.
 #[salsa::tracked(returns(ref))]
-pub fn file_scope(db: &dyn Db, file: SourceFile) -> FxHashMap<String, ItemLoc> {
+pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
     let tree = item_tree(db, file);
-    let mut scope = FxHashMap::default();
+    let mut scope = FileScope::default();
     for (index, data) in tree.items.iter().enumerate() {
-        if !data.name.is_empty() {
-            // First declaration wins; duplicates will get a diagnostic later.
-            scope.entry(data.name.clone()).or_insert(ItemLoc {
-                file,
-                index: index as u32,
-            });
+        if data.name.is_empty() {
+            continue;
+        }
+        let loc = ItemLoc {
+            file,
+            index: index as u32,
+        };
+        match scope.entries.entry(data.name.clone()) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(ScopeEntry {
+                    loc,
+                    ambiguous: false,
+                });
+            }
+            std::collections::hash_map::Entry::Occupied(mut first) => {
+                first.get_mut().ambiguous = true;
+                scope.duplicates.push(Duplicate {
+                    first: first.get().loc,
+                    second: loc,
+                });
+            }
         }
     }
     scope
@@ -184,9 +239,7 @@ pub fn resolutions<'db>(db: &'db dyn Db, item: ItemId<'db>) -> ArenaMap<ExprId, 
             .and_then(|scope| scopes.resolve_in_scope(scope, name));
         let resolution = local.map(Resolution::Local).or_else(|| {
             file_scope
-                .get(name)
-                .copied()
-                .map(Resolution::Item)
+                .resolve(name)
                 .or_else(|| Builtin::by_name(name).map(Resolution::Builtin))
         });
         if let Some(resolution) = resolution {

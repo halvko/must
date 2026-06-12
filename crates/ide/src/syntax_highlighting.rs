@@ -122,7 +122,7 @@ fn classify_ident(
                     };
                     Some((tag, HlMods::NONE))
                 }
-                hir::Resolution::Item(_) => {
+                hir::Resolution::Item(_) | hir::Resolution::Ambiguous(_) => {
                     let infer = hir::infer::infer(db, item);
                     let tag = match infer.type_of_expr.get(expr) {
                         Some(hir::Ty::Fn(_)) => HlTag::Function,

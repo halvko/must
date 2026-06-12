@@ -373,7 +373,7 @@ impl GlobalState {
                     .analysis
                     .diagnostics(file)
                     .into_iter()
-                    .map(|d| to_proto::diagnostic(&line_index, d))
+                    .map(|d| to_proto::diagnostic(&line_index, &uri, d))
                     .collect::<Vec<_>>()
             });
             // Cancelled: some edit bumped the revision. Only the edited
@@ -467,7 +467,7 @@ impl Snapshot {
                 lsp_types::CodeAction {
                     title: fix.label,
                     kind: Some(lsp_types::CodeActionKind::QUICKFIX),
-                    diagnostics: Some(vec![to_proto::diagnostic(&line_index, diagnostic)]),
+                    diagnostics: Some(vec![to_proto::diagnostic(&line_index, &uri, diagnostic)]),
                     edit: Some(lsp_types::WorkspaceEdit {
                         changes: Some(changes),
                         ..Default::default()

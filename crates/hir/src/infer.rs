@@ -126,6 +126,9 @@ impl InferCtx<'_> {
                     Some(item) => signature(self.db, item),
                     None => Ty::Error,
                 },
+                // No one signature a use could take on; the duplicate
+                // definitions carry the diagnostic.
+                Some(&Resolution::Ambiguous(_)) => Ty::Error,
                 Some(&Resolution::Builtin(builtin)) => builtin_type(builtin),
                 None => Ty::Error, // unresolved: already diagnosed by name resolution
             },

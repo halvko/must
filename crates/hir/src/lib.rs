@@ -16,11 +16,14 @@ mod tests;
 
 use base_db::{Db, SourceFile, parse};
 use syntax::TextRange;
+use syntax::ast::{self, AstNode as _};
 
 pub use body::{BindingId, Body, BodySourceMap, ExprId, body_with_source_map};
 pub use infer::{InferenceDiagnostic, InferenceResult};
 pub use item_tree::{ItemTree, TypeRef, item_source};
-pub use scopes::{Builtin, ExprScopes, Resolution, expr_scopes, file_scope, resolutions};
+pub use scopes::{
+    Builtin, Duplicate, ExprScopes, FileScope, Resolution, expr_scopes, file_scope, resolutions,
+};
 pub use ty::{FnTy, Ty, signature};
 
 /// Stable identity of a top-level item: survives edits to other items,
@@ -82,6 +85,15 @@ pub struct Diagnostic {
     pub range: TextRange,
     pub message: String,
     pub fix: Option<syntax::Fix>,
+    /// Other locations that explain this diagnostic (e.g. "first defined
+    /// here" on a duplicate definition). Same file for now.
+    pub related: Vec<RelatedInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelatedInfo {
+    pub range: TextRange,
+    pub message: String,
 }
 
 /// All semantic diagnostics for a file. This is the one place that converts
@@ -94,8 +106,35 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             range: err.range,
             message: err.message.clone(),
             fix: err.fix.clone(),
+            related: Vec::new(),
         })
         .collect();
+
+    let ast_items: Vec<ast::StaticItem> = parse(db, file).tree().items().collect();
+    let item_name = |loc: ItemLoc| ast_items.get(loc.index as usize).and_then(|it| it.name());
+
+    // Duplicate definitions, discovered by `file_scope` (the analysis that
+    // decides first-wins also knows about the losers); only the range
+    // attachment happens here.
+    for dup in &file_scope(db, file).duplicates {
+        let Some(second) = item_name(dup.second) else {
+            continue;
+        };
+        let related = item_name(dup.first)
+            .map(|first| {
+                vec![RelatedInfo {
+                    range: first.syntax().text_range(),
+                    message: "first defined here".to_owned(),
+                }]
+            })
+            .unwrap_or_default();
+        diagnostics.push(Diagnostic {
+            range: second.syntax().text_range(),
+            message: format!("`{}` is defined multiple times", second.text()),
+            fix: None,
+            related,
+        });
+    }
 
     for &item in file_item_ids(db, file) {
         let (body, source_map) = body_with_source_map(db, item);
@@ -112,6 +151,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     range: ptr.text_range(),
                     message: format!("unresolved name `{name}`"),
                     fix: None,
+                    related: Vec::new(),
                 });
             }
         }
@@ -150,6 +190,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 range: ptr.text_range(),
                 message,
                 fix: None,
+                related: Vec::new(),
             });
         }
     }
