@@ -129,7 +129,34 @@ static r: usize = rec();
 "#,
         expect![[r#"
             rec = fn
-            r = error[NotConst]: recursion exceeded 128 frames
+            r = error[NotConst]: stack overflow: recursion exceeded 128 frames
+        "#]],
+    );
+}
+
+#[test]
+fn never_annotated_call_traps_with_the_mismatch_not_an_internal_error() {
+    check_const(
+        r#"
+static g = fn () -> usize { 1 }
+static f: ! = g();
+"#,
+        expect![[r#"
+            g = fn
+            f = error[Trap]: type mismatch: expected `!`, found `usize`
+        "#]],
+    );
+}
+
+#[test]
+fn run_mode_recursion_overflow_is_a_runtime_error() {
+    check_run(
+        r#"
+static rec = fn (n: usize) -> usize { rec(n + 1) }
+"#,
+        "rec(0)",
+        expect![[r#"
+            error[Runtime]: stack overflow: recursion exceeded 128 frames
         "#]],
     );
 }

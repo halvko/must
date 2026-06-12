@@ -2,8 +2,8 @@
 
 ## Conclusions
 
-- **C03** Const evaluation runs on a fuel budget, so a runaway static is a diagnostic
-  rather than a hung server; run mode is unfueled.
+- **C03** Const evaluation runs on a fuel budget, per item and with failures memoized, so
+  a runaway item costs its own budget once; run mode is unfueled.
 
 ## Discarded
 
