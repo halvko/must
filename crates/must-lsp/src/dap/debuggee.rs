@@ -3,7 +3,7 @@
 //! no loops: every `continue` terminates (runaway recursion hits the frame
 //! limit), so the session never needs to interrupt a running program.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Write;
 
 use base_db::{RootDatabase, SourceFile};
@@ -22,12 +22,76 @@ pub(crate) enum ResumeMode {
 }
 
 /// A client breakpoint: a line, optionally narrowed to a column (an
-/// "inline" breakpoint distinguishing multiple calls on one line).
+/// "inline" breakpoint distinguishing multiple calls on one line),
+/// optionally gated by a hit count and/or a condition, optionally a log
+/// point (emit and keep going instead of stopping).
 #[derive(Clone)]
 pub(crate) struct BreakpointSpec {
     pub(crate) line: u32,
     pub(crate) column: Option<u32>,
     pub(crate) id: i64,
+    /// Stop only when this Must expression is true in the stopping frame.
+    pub(crate) condition: Option<String>,
+    pub(crate) hit_condition: Option<HitCondition>,
+    pub(crate) log_message: Option<String>,
+    /// Arrivals so far (resets when the client replaces its breakpoints).
+    pub(crate) hits: u32,
+}
+
+/// Parsed hit-count condition. Plain `N` stops on the Nth arrival.
+#[derive(Clone, Copy)]
+pub(crate) enum HitCondition {
+    Eq(u32),
+    Ne(u32),
+    Gt(u32),
+    Ge(u32),
+    Lt(u32),
+    Le(u32),
+    /// `% N`: every Nth arrival.
+    Mod(u32),
+}
+
+impl HitCondition {
+    pub(crate) fn parse(text: &str) -> Option<HitCondition> {
+        let text = text.trim();
+        let (make, rest): (fn(u32) -> HitCondition, &str) = if let Some(r) = text.strip_prefix("==") {
+            (HitCondition::Eq, r)
+        } else if let Some(r) = text.strip_prefix("!=") {
+            (HitCondition::Ne, r)
+        } else if let Some(r) = text.strip_prefix(">=") {
+            (HitCondition::Ge, r)
+        } else if let Some(r) = text.strip_prefix("<=") {
+            (HitCondition::Le, r)
+        } else if let Some(r) = text.strip_prefix('>') {
+            (HitCondition::Gt, r)
+        } else if let Some(r) = text.strip_prefix('<') {
+            (HitCondition::Lt, r)
+        } else if let Some(r) = text.strip_prefix('%') {
+            (HitCondition::Mod, r)
+        } else {
+            (HitCondition::Eq, text)
+        };
+        let n: u32 = rest.trim().parse().ok()?;
+        let condition = make(n);
+        // Arrivals count from 1: `==0` and `%0` can never be met, and a
+        // breakpoint they gate would verify and then silently never stop.
+        if matches!(condition, HitCondition::Eq(0) | HitCondition::Mod(0)) {
+            return None;
+        }
+        Some(condition)
+    }
+
+    fn met(self, hits: u32) -> bool {
+        match self {
+            HitCondition::Eq(n) => hits == n,
+            HitCondition::Ne(n) => hits != n,
+            HitCondition::Gt(n) => hits > n,
+            HitCondition::Ge(n) => hits >= n,
+            HitCondition::Lt(n) => hits < n,
+            HitCondition::Le(n) => hits <= n,
+            HitCondition::Mod(n) => n != 0 && hits % n == 0,
+        }
+    }
 }
 
 pub(crate) enum Outcome {
@@ -52,7 +116,7 @@ pub(crate) struct StackFrame {
 /// movement is judged on this, not on positions.
 type StepPoint = (usize, hir::ItemLoc, mir::BodyId, mir::BlockId, usize);
 
-pub(crate) struct Debuggee<W: Write> {
+pub(crate) struct Debuggee<W: Write + Clone> {
     /// The database must outlive the machine borrowing it; a debug session
     /// owns its process (it exits on disconnect), so leaking one database
     /// for the session's lifetime is the simple, honest option.
@@ -64,7 +128,22 @@ pub(crate) struct Debuggee<W: Write> {
     text: String,
     original_len: usize,
     machine: Machine<'static, RunMode<W>>,
+    /// Cloned for sub-evaluations (conditions, log points, the console).
+    console: W,
     pub(crate) breakpoints: Vec<BreakpointSpec>,
+    /// Where the *live* frames have already been seen, indexed by stack
+    /// depth: `sat_at[i]` is the history of `machine.frames()[i]`. This is
+    /// the whole arrival record — a breakpoint fires the first time its
+    /// frame is seen at its position, whenever it was installed — so a
+    /// breakpoint (re)installed while paused neither re-arrives at the
+    /// paused position without moving nor fires when execution unwinds
+    /// back into a position the frame already arrived at.
+    ///
+    /// Bounded by the live stack, not by session history: a popped frame's
+    /// history goes with it (deeper entries are truncated away, and an
+    /// index a later call reuses is reset when the serial changes), so
+    /// recursion and long stepping sessions don't accumulate.
+    sat_at: Vec<FrameHistory>,
     /// Positions some MIR statement or terminator maps to (line → start
     /// columns): where breakpoints can verify, and the candidates the
     /// client's inline-breakpoint picker gets.
@@ -74,7 +153,7 @@ pub(crate) struct Debuggee<W: Write> {
     pub(crate) crashed: Option<EvalError>,
 }
 
-impl<W: Write> Debuggee<W> {
+impl<W: Write + Clone> Debuggee<W> {
     /// Read and prepare `path`, ready to run `entry`. Errors are fully
     /// rendered.
     pub(crate) fn new(path: &str, entry: &str, console: W) -> Result<Debuggee<W>, String> {
@@ -82,7 +161,7 @@ impl<W: Write> Debuggee<W> {
             .map_err(|err| format!("error: cannot read `{path}`: {err}"))?;
         let db: &'static RootDatabase = Box::leak(Box::new(RootDatabase::default()));
         let prepared = runner::prepare(db, &text, path, entry)?;
-        let mut machine = Machine::new(db, RunMode { out: console });
+        let mut machine = Machine::new(db, RunMode { out: console.clone() });
         machine
             .start(&prepared.entry)
             .map_err(|err| format!("error: {}", err.message))?;
@@ -95,7 +174,9 @@ impl<W: Write> Debuggee<W> {
             text,
             original_len: prepared.original_len,
             machine,
+            console,
             breakpoints: Vec::new(),
+            sat_at: Default::default(),
             executable_positions,
             crashed: None,
         })
@@ -125,6 +206,10 @@ impl<W: Write> Debuggee<W> {
         locations
     }
 
+    fn top_serial(&self) -> u64 {
+        self.machine.frames().last().map(|f| f.serial).unwrap_or(0)
+    }
+
     /// (stack depth, current (line, column) of the top frame, machine-level
     /// identity of the statement it executes next).
     fn position(&self) -> (usize, Option<(u32, u32)>, Option<StepPoint>) {
@@ -143,6 +228,43 @@ impl<W: Write> Debuggee<W> {
         (depth, position, step_point)
     }
 
+    /// Record that the top frame — `serial`, at stack depth `depth` — is
+    /// at `(line, column)`, and report whether that position, and that
+    /// line, is new for this frame *instance*.
+    fn record(&mut self, depth: usize, serial: u64, line: u32, column: u32) -> Arrival {
+        // Frames deeper than the top one have been popped; their history
+        // goes with them. Padding entries (serial 0, which no real frame
+        // has) cover frames that never recorded a position.
+        self.sat_at.resize_with(depth, FrameHistory::default);
+        let history = &mut self.sat_at[depth - 1];
+        // A later call reusing this index is a different frame instance.
+        if history.serial != serial {
+            *history = FrameHistory {
+                serial,
+                ..FrameHistory::default()
+            };
+        }
+        Arrival {
+            position: history.positions.insert((line, column)),
+            line: history.lines.insert(line),
+        }
+    }
+
+    /// Whether a breakpoint arrives at the position just recorded: it has
+    /// to match, and the frame must not have been there before — one
+    /// arrival per line per frame *instance*, so a recursive call
+    /// re-arrives (new frame) and unwinding back into a line does not.
+    /// NOTE: revisit when the language gains loops (same frame, same line,
+    /// legitimately again).
+    fn arrives(bp: &BreakpointSpec, line: u32, column: u32, arrival: Arrival) -> bool {
+        bp.line == line
+            && match bp.column {
+                Some(c) => c == column && arrival.position,
+                // Line breakpoints don't distinguish columns within the line.
+                None => arrival.line,
+            }
+    }
+
     pub(crate) fn resume(&mut self, mode: ResumeMode, statement_granularity: bool) -> Outcome {
         let start = self.position();
         // Line-level view of a position: what "somewhere new" means at line
@@ -153,46 +275,72 @@ impl<W: Write> Debuggee<W> {
         loop {
             let here = self.position();
             let (depth, position) = (here.0, here.1);
-            if depth > 0 {
-                if let Some((line, column)) = position {
-                    // Breakpoints apply in every mode — but not at the spot
-                    // we're resuming from, judged at the breakpoint's own
-                    // granularity.
-                    for bp in &self.breakpoints {
-                        if bp.line != line {
+            // A position is the top frame's, so it implies a live frame.
+            if let Some((line, column)) = position {
+                let serial = self.top_serial();
+                let arrival = self.record(depth, serial, line, column);
+                // Breakpoint arrivals (once per line per frame instance),
+                // in every resume mode. Arrival is a property of the
+                // position, read by each breakpoint: a sibling's false
+                // condition or log-point emission consumes nothing of its
+                // neighbors'.
+                for index in 0..self.breakpoints.len() {
+                    if !Self::arrives(&self.breakpoints[index], line, column, arrival) {
+                        continue;
+                    }
+                    self.breakpoints[index].hits += 1;
+                    if let Some(hit_condition) = self.breakpoints[index].hit_condition {
+                        if !hit_condition.met(self.breakpoints[index].hits) {
                             continue;
                         }
-                        let (matches, moved) = match bp.column {
-                            Some(c) => (c == column, here.2 != start.2),
-                            None => (true, line_of(&here) != line_of(&start)),
-                        };
-                        if matches && moved {
-                            return Outcome::Stopped {
-                                reason: "breakpoint",
-                                hit_breakpoint: Some(bp.id),
-                            };
+                    }
+                    if let Some(condition) = self.breakpoints[index].condition.clone() {
+                        let top = self.machine.frames().len() - 1;
+                        match self.eval_in_frame(&condition, top) {
+                            Ok(Value::Bool(true)) => {}
+                            Ok(Value::Bool(false)) => continue,
+                            // A broken condition must be noticed, not
+                            // silently skipped: warn and stop.
+                            Ok(other) => self.console_line(&format!(
+                                "warning: breakpoint condition `{condition}` is not a bool (got {})",
+                                other.display()
+                            )),
+                            Err(message) => self.console_line(&format!(
+                                "warning: breakpoint condition `{condition}` failed: {message}"
+                            )),
                         }
                     }
-                    let moved = if statement_granularity {
-                        here.2 != start.2
-                    } else {
-                        line_of(&here) != line_of(&start)
-                    };
-                    let (stop, reason) = match mode {
-                        ResumeMode::Entry => (true, "entry"),
-                        ResumeMode::Continue => (false, ""),
-                        ResumeMode::StepOver => {
-                            (depth < start.0 || (depth == start.0 && moved), "step")
-                        }
-                        ResumeMode::StepIn => (moved || depth != start.0, "step"),
-                        ResumeMode::StepOut => (depth < start.0, "step"),
-                    };
-                    if stop {
-                        return Outcome::Stopped {
-                            reason,
-                            hit_breakpoint: None,
-                        };
+                    if let Some(log_message) = self.breakpoints[index].log_message.clone() {
+                        // A log point: emit and keep going.
+                        let top = self.machine.frames().len() - 1;
+                        let text = self.interpolate(&log_message, top);
+                        self.console_line(&text);
+                        continue;
                     }
+                    return Outcome::Stopped {
+                        reason: "breakpoint",
+                        hit_breakpoint: Some(self.breakpoints[index].id),
+                    };
+                }
+                let moved = if statement_granularity {
+                    here.2 != start.2
+                } else {
+                    line_of(&here) != line_of(&start)
+                };
+                let (stop, reason) = match mode {
+                    ResumeMode::Entry => (true, "entry"),
+                    ResumeMode::Continue => (false, ""),
+                    ResumeMode::StepOver => {
+                        (depth < start.0 || (depth == start.0 && moved), "step")
+                    }
+                    ResumeMode::StepIn => (moved || depth != start.0, "step"),
+                    ResumeMode::StepOut => (depth < start.0, "step"),
+                };
+                if stop {
+                    return Outcome::Stopped {
+                        reason,
+                        hit_breakpoint: None,
+                    };
                 }
             }
             match self.machine.step() {
@@ -201,6 +349,33 @@ impl<W: Write> Debuggee<W> {
                 Err(err) => return Outcome::Crashed(err),
             }
         }
+    }
+
+    /// Substitute `{expr}` pieces of a log point's message with their
+    /// values, evaluated in `frame_index`.
+    fn interpolate(&mut self, template: &str, frame_index: usize) -> String {
+        let mut out = String::new();
+        let mut rest = template;
+        while let Some(open) = rest.find('{') {
+            out.push_str(&rest[..open]);
+            let Some(close) = rest[open..].find('}') else {
+                out.push_str(&rest[open..]);
+                return out;
+            };
+            let expr = &rest[open + 1..open + close];
+            match self.eval_in_frame(expr, frame_index) {
+                Ok(value) => out.push_str(&value.display()),
+                Err(message) => out.push_str(&format!("{{error: {message}}}")),
+            }
+            rest = &rest[open + close + 1..];
+        }
+        out.push_str(rest);
+        out
+    }
+
+    fn console_line(&mut self, text: &str) {
+        let mut console = self.console.clone();
+        let _ = writeln!(console, "{text}");
     }
 
     /// The visible stack, top frame first. Frames without a user-source
@@ -252,9 +427,7 @@ impl<W: Write> Debuggee<W> {
         &mut self,
         expression: &str,
         frame_id: Option<i64>,
-        console: W,
     ) -> Result<String, String> {
-        let expression = expression.trim();
         let top = self.machine.frames().len() as i64;
         // Frame ids are machine indices + 1; a stale or malformed id
         // errors rather than silently evaluating against some other
@@ -264,6 +437,14 @@ impl<W: Write> Debuggee<W> {
             Some(id) => return Err(format!("no frame {id}")),
             None => top.saturating_sub(1) as usize,
         };
+        self.eval_in_frame(expression, frame_index)
+            .map(|value| value.display())
+    }
+
+    /// The shared engine behind console evaluation, breakpoint conditions,
+    /// and log-point interpolation.
+    fn eval_in_frame(&mut self, expression: &str, frame_index: usize) -> Result<Value, String> {
+        let expression = expression.trim();
 
         // A bare name reads the value the frame actually holds: innermost
         // shadow wins (later occurrences replace earlier ones), whatever
@@ -289,7 +470,7 @@ impl<W: Write> Debuggee<W> {
 
         if is_name(expression) {
             if let Some((_, _, value)) = locals.iter().find(|(name, _, _)| name == expression) {
-                return Ok(value.display());
+                return Ok(value.clone());
             }
         }
 
@@ -307,17 +488,14 @@ impl<W: Write> Debuggee<W> {
         let wrapped = format!("fn ({params}) {{ {expression}\n}}");
         let prepared = runner::prepare(self.db, &self.text, &self.path, &wrapped)?;
 
-        let mut machine = Machine::new(self.db, RunMode { out: console });
-        let result = machine
+        let mut machine = Machine::new(self.db, RunMode { out: self.console.clone() });
+        machine
             .eval_root(&prepared.entry)
             .and_then(|fn_value| match fn_value {
                 Value::Fn(f) => machine.call_value(f, args),
                 other => Ok(other),
-            });
-        match result {
-            Ok(value) => Ok(value.display()),
-            Err(err) => Err(self.render_error(&err)),
-        }
+            })
+            .map_err(|err| self.render_error(&err))
     }
 
     /// Render an eval error the way the CLI runner does: kind prefix,
@@ -340,6 +518,26 @@ impl<W: Write> Debuggee<W> {
         }
         rendered
     }
+}
+
+/// What one live frame has already been seen at. Positions and lines are
+/// tracked separately because a line breakpoint arrives once per line
+/// while a column breakpoint distinguishes columns within it.
+#[derive(Default)]
+struct FrameHistory {
+    /// Frame serial; 0 is the padding value, which no real frame has
+    /// (the machine's serials start at 1).
+    serial: u64,
+    positions: HashSet<(u32, u32)>,
+    lines: HashSet<u32>,
+}
+
+/// Whether the top frame's current position is new for that frame
+/// instance, at position and at line granularity.
+#[derive(Clone, Copy)]
+struct Arrival {
+    position: bool,
+    line: bool,
 }
 
 fn is_name(text: &str) -> bool {
@@ -382,4 +580,82 @@ fn executable_positions(
         }
     }
     positions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Clone)]
+    struct Sink;
+
+    impl Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Stepping through recursion must not accumulate history: what a
+    /// popped frame sat at is gone, so the bookkeeping tracks the live
+    /// stack instead of the session's own length.
+    #[test]
+    fn position_history_never_outlives_the_frames_it_belongs_to() {
+        let path = std::env::temp_dir().join(format!("must-dap-bound-{}.must", std::process::id()));
+        // Three separate descents: the session walks far more frames than
+        // are ever live at once.
+        std::fs::write(
+            &path,
+            concat!(
+                "static down = fn (n: usize) -> usize {\n",
+                "    if n == 0 { 0 } else { down(n - 1) }\n",
+                "}\n",
+                "static main = fn -> usize {\n",
+                "    down(5) + down(5) + down(5)\n",
+                "};\n",
+            ),
+        )
+        .unwrap();
+        let mut debuggee = Debuggee::new(path.to_str().unwrap(), "main()", Sink).unwrap();
+
+        // The most one frame could ever have sat at: the program's own
+        // executable positions.
+        let program_positions: usize = debuggee
+            .executable_positions
+            .values()
+            .map(|columns| columns.len())
+            .sum();
+        let program_lines = debuggee.executable_positions.len();
+
+        let mut steps = 0;
+        while let Outcome::Stopped { .. } = debuggee.resume(ResumeMode::StepIn, false) {
+            steps += 1;
+            assert!(steps < 1000, "the countdown should have finished by now");
+            let frames = debuggee.machine.frames();
+            assert_eq!(
+                debuggee.sat_at.len(),
+                frames.len(),
+                "one history per live frame, none for popped ones"
+            );
+            for (history, frame) in debuggee.sat_at.iter().zip(frames) {
+                // Serial 0 is the padding a frame that never recorded a
+                // position leaves behind.
+                assert!(
+                    history.serial == 0 || history.serial == frame.serial,
+                    "history {} is not the live frame's ({})",
+                    history.serial,
+                    frame.serial
+                );
+                // Bounded by the program, so the whole record is bounded
+                // by the live stack — never by how long the session ran.
+                assert!(history.positions.len() <= program_positions);
+                assert!(history.lines.len() <= program_lines);
+            }
+        }
+        assert!(steps > 40, "expected a long stepping session, got {steps}");
+
+        let _ = std::fs::remove_file(path);
+    }
 }

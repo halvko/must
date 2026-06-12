@@ -71,6 +71,9 @@ impl<W: Write> Session<W> {
                         // inline (column) breakpoints and statement steps.
                         "supportsBreakpointLocationsRequest": true,
                         "supportsSteppingGranularity": true,
+                        "supportsConditionalBreakpoints": true,
+                        "supportsHitConditionalBreakpoints": true,
+                        "supportsLogPoints": true,
                     }),
                 )?;
                 self.event("initialized", json!({}))?;
@@ -100,37 +103,64 @@ impl<W: Write> Session<W> {
                 }
             }
             "setBreakpoints" => {
-                let requested: Vec<(u32, Option<u32>)> = request.arguments["breakpoints"]
+                let requested: Vec<Value> = request.arguments["breakpoints"]
                     .as_array()
-                    .map(|bps| {
-                        bps.iter()
-                            .filter_map(|bp| {
-                                let line = bp["line"].as_u64()? as u32;
-                                let column = bp["column"].as_u64().map(|c| c as u32);
-                                Some((line, column))
-                            })
-                            .collect()
-                    })
+                    .cloned()
                     .unwrap_or_default();
                 let mut accepted = Vec::new();
                 let breakpoints: Vec<Value> = requested
                     .into_iter()
-                    .map(|(line, column)| {
+                    .filter_map(|raw| {
+                        let line = raw["line"].as_u64()? as u32;
+                        let column = raw["column"].as_u64().map(|c| c as u32);
                         self.next_breakpoint_id += 1;
                         let id = self.next_breakpoint_id;
-                        accepted.push(BreakpointSpec { line, column, id });
-                        let verified = self
+                        let hit_condition_text =
+                            raw["hitCondition"].as_str().filter(|t| !t.trim().is_empty());
+                        let hit_condition = hit_condition_text.map(debuggee::HitCondition::parse);
+                        // A hit condition that doesn't parse would otherwise
+                        // sit in the debuggee armed as an unconditional stop
+                        // while the client shows the breakpoint unverified:
+                        // report it, but never install it.
+                        let invalid_hit_condition = matches!(hit_condition, Some(None));
+                        let mut verified = self
                             .debuggee
                             .as_ref()
                             .is_some_and(|d| d.can_break_at(line, column));
+                        let mut message = (!verified)
+                            .then(|| "no executable code at this position".to_owned());
+                        if invalid_hit_condition {
+                            verified = false;
+                            message = Some(
+                                "invalid hit condition (use a nonzero number, ==N, !=N, >N, >=N, <N, <=N, or %N)"
+                                    .to_owned(),
+                            );
+                        }
+                        if !invalid_hit_condition {
+                            accepted.push(BreakpointSpec {
+                                line,
+                                column,
+                                id,
+                                condition: raw["condition"]
+                                    .as_str()
+                                    .filter(|t| !t.trim().is_empty())
+                                    .map(str::to_owned),
+                                hit_condition: hit_condition.flatten(),
+                                log_message: raw["logMessage"]
+                                    .as_str()
+                                    .filter(|t| !t.trim().is_empty())
+                                    .map(str::to_owned),
+                                hits: 0,
+                            });
+                        }
                         let mut bp = json!({ "id": id, "verified": verified, "line": line });
                         if let Some(column) = column {
                             bp["column"] = json!(column);
                         }
-                        if !verified {
-                            bp["message"] = json!("no executable code at this position");
+                        if let Some(message) = message {
+                            bp["message"] = json!(message);
                         }
-                        bp
+                        Some(bp)
                     })
                     .collect();
                 self.requested_breakpoints = accepted.clone();
@@ -259,14 +289,13 @@ impl<W: Write> Session<W> {
                 self.respond(&request, json!({ "variables": variables }))?;
             }
             "evaluate" => {
-                let console = self.console();
                 let Some(debuggee) = self.debuggee.as_mut() else {
                     self.respond_err(&request, "no program is running")?;
                     return Ok(true);
                 };
                 let expression = request.arguments["expression"].as_str().unwrap_or("");
                 let frame_id = request.arguments["frameId"].as_i64();
-                match debuggee.evaluate(expression, frame_id, console) {
+                match debuggee.evaluate(expression, frame_id) {
                     Ok(result) => self.respond(
                         &request,
                         json!({ "result": result, "variablesReference": 0 }),
@@ -407,6 +436,16 @@ pub(crate) struct ConsoleWriter<W: Write> {
     out: Rc<RefCell<W>>,
     seq: Rc<Cell<i64>>,
     buffer: Vec<u8>,
+}
+
+impl<W: Write> Clone for ConsoleWriter<W> {
+    fn clone(&self) -> Self {
+        ConsoleWriter {
+            out: Rc::clone(&self.out),
+            seq: Rc::clone(&self.seq),
+            buffer: Vec::new(),
+        }
+    }
 }
 
 impl<W: Write> ConsoleWriter<W> {

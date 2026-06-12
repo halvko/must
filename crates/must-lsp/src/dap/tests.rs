@@ -459,3 +459,284 @@ fn stop_on_entry_stops_at_the_first_user_line() {
 
     let _ = std::fs::remove_file(program);
 }
+
+const COUNTDOWN: &str =
+    "static down = fn (n: usize) -> usize {\n    if n == 0 { 0 } else { down(n - 1) }\n}\n";
+
+#[test]
+fn conditional_breakpoints_stop_only_when_true() {
+    let program = fixture("cond", COUNTDOWN);
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        (
+            "launch",
+            json!({ "program": program.to_str().unwrap(), "entry": "down(5)" }),
+        ),
+        (
+            "setBreakpoints",
+            json!({ "breakpoints": [{ "line": 2, "condition": "n == 2" }] }),
+        ),
+        ("configurationDone", json!({})),
+        ("evaluate", json!({ "expression": "n" })),
+        ("continue", json!({ "threadId": 1 })),
+        ("disconnect", json!({})),
+    ]);
+
+    // Arrivals at n = 5, 4, 3 pass silently; the stop is at n == 2.
+    let stopped = events(&messages, "stopped");
+    assert_eq!(stopped.len(), 1, "exactly one stop: {stopped:?}");
+    assert_eq!(stopped[0]["body"]["reason"], "breakpoint");
+    assert_eq!(responses_for(&messages, "evaluate")[0]["body"]["result"], "2");
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
+fn hit_conditions_skip_arrivals() {
+    let program = fixture("hits", COUNTDOWN);
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        (
+            "launch",
+            json!({ "program": program.to_str().unwrap(), "entry": "down(5)" }),
+        ),
+        (
+            "setBreakpoints",
+            // Stop on the third arrival only: n = 5, 4, then 3.
+            json!({ "breakpoints": [{ "line": 2, "hitCondition": "3" }] }),
+        ),
+        ("configurationDone", json!({})),
+        ("evaluate", json!({ "expression": "n" })),
+        ("continue", json!({ "threadId": 1 })),
+        ("disconnect", json!({})),
+    ]);
+
+    let stopped = events(&messages, "stopped");
+    assert_eq!(stopped.len(), 1, "exactly one stop: {stopped:?}");
+    assert_eq!(responses_for(&messages, "evaluate")[0]["body"]["result"], "3");
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
+fn log_points_emit_without_stopping() {
+    let program = fixture("log", COUNTDOWN);
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        (
+            "launch",
+            json!({ "program": program.to_str().unwrap(), "entry": "down(2)" }),
+        ),
+        (
+            "setBreakpoints",
+            json!({ "breakpoints": [{ "line": 2, "logMessage": "n is {n}, doubled {n * 2}" }] }),
+        ),
+        ("configurationDone", json!({})),
+        ("disconnect", json!({})),
+    ]);
+
+    assert_eq!(events(&messages, "stopped").len(), 0, "log points don't stop");
+    let stdout: String = events(&messages, "output")
+        .iter()
+        .filter(|e| e["body"]["category"] == "stdout")
+        .map(|e| e["body"]["output"].as_str().unwrap())
+        .collect();
+    assert!(stdout.contains("n is 2, doubled 4\n"), "interpolated: {stdout}");
+    assert!(stdout.contains("n is 0, doubled 0\n"), "interpolated: {stdout}");
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
+fn invalid_hit_conditions_unverify_the_breakpoint() {
+    let program = fixture("badhits", COUNTDOWN);
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        (
+            "launch",
+            json!({ "program": program.to_str().unwrap(), "entry": "down(1)" }),
+        ),
+        (
+            "setBreakpoints",
+            json!({ "breakpoints": [{ "line": 2, "hitCondition": "sometimes" }] }),
+        ),
+        ("configurationDone", json!({})),
+        ("disconnect", json!({})),
+    ]);
+    let bp = &responses_for(&messages, "setBreakpoints")[0]["body"]["breakpoints"][0];
+    assert_eq!(bp["verified"], false);
+    assert!(bp["message"].as_str().unwrap().contains("invalid hit condition"));
+    // Unverified means unverified: the breakpoint must not sit in the
+    // debuggee armed as an unconditional stop.
+    assert_eq!(events(&messages, "stopped").len(), 0, "not armed: {messages:?}");
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
+fn zero_hit_conditions_are_rejected() {
+    let program = fixture("zerohits", COUNTDOWN);
+    // Arrivals count from 1: `==0` and `%0` can never be met, so they must
+    // not verify — a breakpoint they gate would silently never stop.
+    for hit_condition in ["%0", "==0"] {
+        let messages = run_session(&[
+            ("initialize", json!({})),
+            (
+                "launch",
+                json!({ "program": program.to_str().unwrap(), "entry": "down(1)" }),
+            ),
+            (
+                "setBreakpoints",
+                json!({ "breakpoints": [{ "line": 2, "hitCondition": hit_condition }] }),
+            ),
+            ("configurationDone", json!({})),
+            ("disconnect", json!({})),
+        ]);
+        let bp = &responses_for(&messages, "setBreakpoints")[0]["body"]["breakpoints"][0];
+        assert_eq!(bp["verified"], false, "{hit_condition}: {bp}");
+        assert!(
+            bp["message"].as_str().unwrap().contains("invalid hit condition"),
+            "{hit_condition}: {bp}"
+        );
+        assert_eq!(
+            events(&messages, "stopped").len(),
+            0,
+            "{hit_condition} must not arm the breakpoint"
+        );
+        assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+    }
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
+fn false_condition_sibling_does_not_consume_the_arrival() {
+    let program = fixture("sibling-cond", COUNTDOWN);
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        (
+            "launch",
+            json!({ "program": program.to_str().unwrap(), "entry": "down(0)" }),
+        ),
+        (
+            "setBreakpoints",
+            json!({ "breakpoints": [
+                { "line": 2, "condition": "n == 99" },
+                { "line": 2 },
+            ] }),
+        ),
+        ("configurationDone", json!({})),
+        ("evaluate", json!({ "expression": "n" })),
+        ("continue", json!({ "threadId": 1 })),
+        ("disconnect", json!({})),
+    ]);
+
+    // The false-condition sibling arrives first and passes; the
+    // unconditional sibling still stops on that same arrival.
+    let bps = &responses_for(&messages, "setBreakpoints")[0]["body"]["breakpoints"];
+    let stopped = events(&messages, "stopped");
+    assert_eq!(stopped.len(), 1, "exactly one stop: {stopped:?}");
+    assert_eq!(stopped[0]["body"]["hitBreakpointIds"], json!([bps[1]["id"]]));
+    assert_eq!(responses_for(&messages, "evaluate")[0]["body"]["result"], "0");
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
+fn log_point_sibling_does_not_consume_the_arrival() {
+    let program = fixture("sibling-log", COUNTDOWN);
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        (
+            "launch",
+            json!({ "program": program.to_str().unwrap(), "entry": "down(0)" }),
+        ),
+        (
+            "setBreakpoints",
+            json!({ "breakpoints": [
+                { "line": 2, "logMessage": "n={n}" },
+                { "line": 2 },
+            ] }),
+        ),
+        ("configurationDone", json!({})),
+        ("continue", json!({ "threadId": 1 })),
+        ("disconnect", json!({})),
+    ]);
+
+    // The log point emits on the arrival and keeps going; the
+    // unconditional sibling stops on that same arrival.
+    let bps = &responses_for(&messages, "setBreakpoints")[0]["body"]["breakpoints"];
+    let stopped = events(&messages, "stopped");
+    assert_eq!(stopped.len(), 1, "the unconditional sibling stops: {stopped:?}");
+    assert_eq!(stopped[0]["body"]["hitBreakpointIds"], json!([bps[1]["id"]]));
+    let stdout: String = events(&messages, "output")
+        .iter()
+        .filter(|e| e["body"]["category"] == "stdout")
+        .map(|e| e["body"]["output"].as_str().unwrap())
+        .collect();
+    assert!(stdout.contains("n=0\n"), "log emitted: {stdout}");
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+const CALLS: &str = "static f = fn (n: usize) -> usize { n + 1 }\nstatic main = fn {\n    let x = f(1) + f(2);\n    print(\"done\");\n};\n";
+
+#[test]
+fn breakpoint_on_a_passed_line_does_not_fire_on_unwind_return() {
+    let program = fixture("unwind-seed", CALLS);
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        ("launch", json!({ "program": program.to_str().unwrap() })),
+        // Stop inside f(1): main is already sitting on line 3.
+        ("setBreakpoints", json!({ "breakpoints": [{ "line": 1 }] })),
+        ("configurationDone", json!({})),
+        // Install a breakpoint on line 3 — a line the paused main frame
+        // already arrived at — and resume into the unwind return.
+        ("setBreakpoints", json!({ "breakpoints": [{ "line": 3 }] })),
+        ("continue", json!({ "threadId": 1 })),
+        ("disconnect", json!({})),
+    ]);
+
+    // Unwinding back into line 3 is not a new arrival: no stop, clean exit.
+    let stopped = events(&messages, "stopped");
+    assert_eq!(stopped.len(), 1, "only the f(1) stop: {stopped:?}");
+    assert_eq!(stopped[0]["body"]["reason"], "breakpoint");
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
+fn breakpoint_on_a_future_line_fires_after_unwind() {
+    let program = fixture("unwind-future", CALLS);
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        ("launch", json!({ "program": program.to_str().unwrap() })),
+        ("setBreakpoints", json!({ "breakpoints": [{ "line": 1 }] })),
+        ("configurationDone", json!({})),
+        // Line 4 is a line the paused main frame has not reached yet.
+        ("setBreakpoints", json!({ "breakpoints": [{ "line": 4 }] })),
+        ("continue", json!({ "threadId": 1 })),
+        ("stackTrace", json!({ "threadId": 1 })),
+        ("continue", json!({ "threadId": 1 })),
+        ("disconnect", json!({})),
+    ]);
+
+    // Seeding must not over-suppress: line 4 genuinely arrives after the
+    // unwinds, and the breakpoint fires there.
+    let bps = &responses_for(&messages, "setBreakpoints")[1]["body"]["breakpoints"];
+    let stopped = events(&messages, "stopped");
+    assert_eq!(stopped.len(), 2, "the line-4 breakpoint fires: {stopped:?}");
+    assert_eq!(stopped[1]["body"]["hitBreakpointIds"], json!([bps[0]["id"]]));
+    let stack = &responses_for(&messages, "stackTrace")[0]["body"]["stackFrames"];
+    assert_eq!(stack[0]["line"], 4);
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
