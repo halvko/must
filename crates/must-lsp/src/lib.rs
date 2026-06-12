@@ -25,9 +25,14 @@ use lsp_types::notification::{
     PublishDiagnostics,
 };
 use lsp_types::request::{
-    CodeActionRequest, GotoDefinition, HoverRequest, Request as _, SemanticTokensFullRequest,
-    SemanticTokensRefresh,
+    CodeActionRequest, CodeLensRequest, ExecuteCommand, GotoDefinition, HoverRequest,
+    Request as _, SemanticTokensFullRequest, SemanticTokensRefresh,
 };
+
+/// The workspace command behind the ▶ run code lens: arguments are
+/// `[uri, entry expression]`; the program is the *current buffer*, run on
+/// the interpreter in-process, with the result reported via showMessage.
+pub const RUN_COMMAND: &str = "must.run";
 
 pub type ServerResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -39,6 +44,13 @@ pub fn server_capabilities() -> lsp_types::ServerCapabilities {
         definition_provider: Some(lsp_types::OneOf::Left(true)),
         hover_provider: Some(lsp_types::HoverProviderCapability::Simple(true)),
         code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
+        code_lens_provider: Some(lsp_types::CodeLensOptions {
+            resolve_provider: Some(false),
+        }),
+        execute_command_provider: Some(lsp_types::ExecuteCommandOptions {
+            commands: vec![RUN_COMMAND.to_owned()],
+            ..Default::default()
+        }),
         semantic_tokens_provider: Some(
             lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(
                 lsp_types::SemanticTokensOptions {
@@ -161,6 +173,14 @@ impl GlobalState {
                     serde_json::to_value(snapshot.code_actions(params)).ok()
                 });
             }
+            CodeLensRequest::METHOD => {
+                self.spawn_request(req, |snapshot, params| {
+                    serde_json::to_value(snapshot.code_lenses(params)).ok()
+                });
+            }
+            ExecuteCommand::METHOD => {
+                self.spawn_execute_command(req);
+            }
             SemanticTokensFullRequest::METHOD => {
                 let id = req.id;
                 let params: lsp_types::SemanticTokensParams =
@@ -198,6 +218,38 @@ impl GlobalState {
                 let _ = self.sender.send(resp.into());
             }
         }
+    }
+
+    /// `workspace/executeCommand` for the ▶ run lens: evaluate the entry
+    /// expression against the current buffer and report through
+    /// `window/showMessage` (a lens click has no other output channel).
+    fn spawn_execute_command(&self, req: Request) {
+        let id = req.id;
+        let params: lsp_types::ExecuteCommandParams = match serde_json::from_value(req.params) {
+            Ok(params) => params,
+            Err(err) => {
+                let resp = Response::new_err(id, ErrorCode::InvalidParams as i32, err.to_string());
+                let _ = self.sender.send(resp.into());
+                return;
+            }
+        };
+        let snapshot = self.snapshot();
+        let sender = self.sender.clone();
+        self.pool.spawn(move || {
+            let resp = match cancellable(|| run_command(&snapshot, &params)) {
+                Some(Ok(message)) => {
+                    let _ = sender.send(show_message(lsp_types::MessageType::INFO, message));
+                    Response::new_ok(id, serde_json::Value::Null)
+                }
+                Some(Err(message)) => {
+                    let _ = sender
+                        .send(show_message(lsp_types::MessageType::ERROR, message.clone()));
+                    Response::new_err(id, ErrorCode::RequestFailed as i32, message)
+                }
+                None => content_modified(id),
+            };
+            let _ = sender.send(resp.into());
+        });
     }
 
     /// Parse params on the main thread, run the handler on the pool, and
@@ -513,6 +565,101 @@ impl Snapshot {
             range: Some(to_proto::range(&line_index, hover.range)),
         })
     }
+}
+
+impl Snapshot {
+    fn code_lenses(
+        &self,
+        params: lsp_types::CodeLensParams,
+    ) -> Option<Vec<lsp_types::CodeLens>> {
+        let uri = params.text_document.uri;
+        let &file = self.files.by_uri.get(&uri)?;
+        let line_index = self.analysis.line_index(file);
+        let lenses = self
+            .analysis
+            .run_lenses(file)
+            .into_iter()
+            .map(|lens| {
+                let entry = format!("{}()", lens.name);
+                lsp_types::CodeLens {
+                    range: to_proto::range(&line_index, lens.range),
+                    command: Some(lsp_types::Command {
+                        title: format!("▶ run {entry}"),
+                        command: RUN_COMMAND.to_owned(),
+                        arguments: Some(vec![
+                            serde_json::Value::String(uri.to_string()),
+                            serde_json::Value::String(entry),
+                        ]),
+                    }),
+                    data: None,
+                }
+            })
+            .collect();
+        Some(lenses)
+    }
+}
+
+/// Execute the ▶ run command: `[uri, entry]`. `Ok`/`Err` are both
+/// user-facing message texts.
+fn run_command(
+    snapshot: &Snapshot,
+    params: &lsp_types::ExecuteCommandParams,
+) -> Result<String, String> {
+    if params.command != RUN_COMMAND {
+        return Err(format!("unknown command `{}`", params.command));
+    }
+    let [uri, entry] = params.arguments.as_slice() else {
+        return Err("must.run expects [uri, entry] arguments".to_owned());
+    };
+    let (Some(uri), Some(entry)) = (uri.as_str(), entry.as_str()) else {
+        return Err("must.run expects string arguments".to_owned());
+    };
+    let parsed: lsp_types::Uri = uri
+        .parse()
+        .map_err(|_| format!("invalid uri `{uri}`"))?;
+    let &file = snapshot
+        .files
+        .by_uri
+        .get(&parsed)
+        .ok_or_else(|| format!("`{uri}` is not open"))?;
+    // The *buffer* runs, not the file on disk — what you see is what runs.
+    let text = snapshot.analysis.file_text(file);
+    let mut output = Vec::new();
+    let result = crate::runner::evaluate(text, uri, entry, &mut output);
+    let mut message = format!("{entry}
+");
+    message.push_str(&String::from_utf8_lossy(&output));
+    match result {
+        Ok(Some(value)) => message.push_str(&format!("=> {value}")),
+        Ok(None) => message.push_str("✓"),
+        Err(rendered) => {
+            message.push_str(&rendered);
+            return Err(truncate(message));
+        }
+    }
+    Ok(truncate(message))
+}
+
+/// showMessage is a toast, not a terminal: keep it skimmable.
+fn truncate(mut message: String) -> String {
+    const LIMIT: usize = 600;
+    if message.len() > LIMIT {
+        let mut end = LIMIT;
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        message.truncate(end);
+        message.push_str("…");
+    }
+    message
+}
+
+fn show_message(typ: lsp_types::MessageType, message: String) -> Message {
+    Notification::new(
+        lsp_types::notification::ShowMessage::METHOD.to_owned(),
+        lsp_types::ShowMessageParams { typ, message },
+    )
+    .into()
 }
 
 use ide::cancellable;

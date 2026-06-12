@@ -14,6 +14,7 @@ pub use hover::HoverResult;
 pub use syntax_highlighting::{HlMods, HlRange, HlTag};
 pub use line_index::LineIndex;
 pub use syntax::TextEdit;
+use syntax::ast::AstNode as _;
 use syntax::{TextRange, TextSize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,6 +203,45 @@ impl Analysis {
     pub fn line_index(&self, file: SourceFile) -> LineIndex {
         LineIndex::new(file.text(&self.db))
     }
+
+    pub fn file_text(&self, file: SourceFile) -> String {
+        file.text(&self.db).clone()
+    }
+
+    /// Zero-parameter function items: the candidates for a ▶ run lens.
+    /// (Functions with parameters need arguments — that's the debugger's
+    /// entry-expression flow, which the editor launches, not the server.)
+    pub fn run_lenses(&self, file: SourceFile) -> Vec<RunLens> {
+        let mut lenses = Vec::new();
+        for &item in hir::file_item_ids(&self.db, file) {
+            let name = item.name(&self.db);
+            if name.is_empty() {
+                continue;
+            }
+            let hir::Ty::Fn(f) = hir::signature(&self.db, item) else {
+                continue;
+            };
+            if !f.params.is_empty() {
+                continue;
+            }
+            let Some(name_node) = hir::item_source(&self.db, item).and_then(|it| it.name())
+            else {
+                continue;
+            };
+            lenses.push(RunLens {
+                range: name_node.syntax().text_range(),
+                name: name.clone(),
+            });
+        }
+        lenses
+    }
+}
+
+/// A runnable item: its name and where the lens anchors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunLens {
+    pub range: TextRange,
+    pub name: String,
 }
 
 /// Run `f`, turning a salsa cancellation unwind (an edit invalidated this

@@ -499,3 +499,64 @@ fn did_open_triggers_semantic_tokens_refresh_when_supported() {
 
     drop(client);
 }
+
+#[test]
+fn run_lens_executes_the_buffer() {
+    let mut client = TestClient::start();
+    let file = uri("file:///lens.must");
+
+    client.open(
+        &file,
+        "static main = fn {\n    print(\"lens says hi\");\n};\nstatic with_args = fn (n: usize) -> usize { n }\n",
+    );
+    client.next_diagnostics();
+
+    // One lens: `main` (zero params). `with_args` needs arguments — that's
+    // the debugger's entry-expression flow.
+    let lenses = client
+        .request::<lsp_types::request::CodeLensRequest>(lsp_types::CodeLensParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })
+        .expect("code lenses");
+    assert_eq!(lenses.len(), 1);
+    let command = lenses[0].command.as_ref().expect("lens has a command");
+    assert_eq!(command.title, "▶ run main()");
+    assert_eq!(command.command, "must.run");
+    // Anchored on `main`.
+    assert_eq!(lenses[0].range.start, lsp_types::Position::new(0, 7));
+
+    // Clicking the lens = executeCommand with the lens's arguments. The
+    // showMessage report arrives before the response; collect both.
+    let args = command.arguments.clone().unwrap();
+    let id = client.send_request::<lsp_types::request::ExecuteCommand>(
+        lsp_types::ExecuteCommandParams {
+            command: command.command.clone(),
+            arguments: args,
+            work_done_progress_params: Default::default(),
+        },
+    );
+    let mut shown: Option<lsp_types::ShowMessageParams> = None;
+    loop {
+        match client.recv() {
+            lsp_server::Message::Notification(not) if not.method == "window/showMessage" => {
+                shown = Some(serde_json::from_value(not.params).unwrap());
+            }
+            lsp_server::Message::Response(resp) if resp.id == id => {
+                assert!(resp.error.is_none(), "run failed: {:?}", resp.error);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let message = shown.expect("a showMessage report");
+    assert_eq!(message.typ, lsp_types::MessageType::INFO);
+    assert!(
+        message.message.contains("lens says hi"),
+        "message: {}",
+        message.message
+    );
+
+    drop(client);
+}
