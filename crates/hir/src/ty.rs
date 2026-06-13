@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use base_db::Db;
-use ena::unify::{NoError, UnifyKey, UnifyValue};
+use ena::unify::{InPlaceUnificationTable, NoError, UnifyKey, UnifyValue};
 
 use crate::ItemId;
 use crate::item_tree::TypeRef;
@@ -124,33 +124,67 @@ pub fn builtin_type_by_name(name: &str) -> Option<Ty> {
 
 /// Lower a syntactic type annotation. References are transparent for now
 /// (`&'static str` and `str` are the same type to inference).
-pub fn lower_type_ref(type_ref: &TypeRef) -> Ty {
-    match type_ref {
+pub(crate) fn lower_type_ref(value: &TypeRef, table: &mut InPlaceUnificationTable<TyVar>) -> Ty {
+    match value {
         TypeRef::Unit => Ty::Unit,
         TypeRef::Never => Ty::Never,
-        TypeRef::Ref(inner) => lower_type_ref(inner),
-        TypeRef::Fn { params, ret } => Ty::fn_type(
-            params.iter().map(lower_type_ref).collect(),
-            ret.as_deref().map(lower_type_ref).unwrap_or(Ty::Unit),
-        ),
-        TypeRef::Path(name) => builtin_type_by_name(name).unwrap_or(Ty::Error),
+        TypeRef::Fn { params, ret } => {
+            let params = params
+                .iter()
+                .map(|param_ty| lower_type_ref(param_ty, table))
+                .collect();
+
+            let ret = ret
+                .as_ref()
+                .map(|ret_ty| lower_type_ref(ret_ty, table))
+                .unwrap_or_else(|| Ty::Infer(table.new_key(TyVarValue::Unknown)));
+
+            Ty::fn_type(params, ret)
+        }
+        TypeRef::Ref(type_ref) => {
+            // TODO: once we introduce references this can't discard them any longer
+            lower_type_ref(&**type_ref, table)
+        }
+        TypeRef::Path(path) => builtin_type_by_name(path).unwrap_or(Ty::Error),
+        TypeRef::Hole => Ty::Infer(table.new_key(TyVarValue::Unknown)),
         TypeRef::Error => Ty::Error,
     }
 }
 
-/// The type other items see for `item`. An annotation is the whole answer
-/// (a hard firewall edge: body edits never reach dependents). Without one,
-/// the signature comes from the item's binding group — its own body,
-/// inferred together with any unannotated items it's mutually recursive
-/// with (see [`crate::groups`]); the firewall is then salsa early-cutoff:
-/// dependents re-run only when the *inferred* signature value changes.
+/// Whether the annotation pins down every type it mentions. Holes and
+/// elided fn returns don't: [`lower_type_ref`] lowers both to unconstrained
+/// inference variables, so such an annotation only *constrains* inference —
+/// it can't determine a signature on its own.
+pub(crate) fn is_fully_typed(value: &TypeRef) -> bool {
+    match value {
+        TypeRef::Fn { params, ret } => {
+            params.iter().all(is_fully_typed) && ret.as_deref().is_some_and(is_fully_typed)
+        }
+        TypeRef::Ref(inner) => is_fully_typed(inner),
+        TypeRef::Hole => false,
+        _ => true,
+    }
+}
+
+/// The type other items see for `item`. A fully-typed annotation is the
+/// whole answer (a hard firewall edge: body edits never reach dependents).
+/// Anything less — no annotation, or one with holes — comes from the item's
+/// binding group: its own body, inferred together with any items it's
+/// mutually recursive with (see [`crate::groups`]), where holes join in as
+/// unconstrained variables the bodies fill in. The firewall is then salsa
+/// early-cutoff: dependents re-run only when the *inferred* signature value
+/// changes.
 #[salsa::tracked]
 pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
     if let Some(type_ref) = crate::item_data(db, item)
         .as_ref()
         .and_then(|it| it.type_ref.as_ref())
     {
-        return lower_type_ref(type_ref);
+        if is_fully_typed(type_ref) {
+            // Fully typed: no hole ever creates a variable, so the
+            // lowering table stays empty and is thrown away.
+            return lower_type_ref(type_ref, &mut InPlaceUnificationTable::new());
+        }
     }
     let Some(index) = crate::item_index(db, item) else {
         return Ty::Error;
@@ -171,20 +205,24 @@ pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
         .unwrap_or(Ty::Error)
 }
 
-/// Whether uses of `item` should say "add a type annotation": unannotated
-/// AND inference couldn't determine its type from the definition (group
-/// inference erases undetermined leftovers to `{error}`).
+/// Whether uses of `item` should say "add a type annotation": inference
+/// couldn't determine its type from the definition (group inference erases
+/// undetermined leftovers to `{error}`). A hole-bearing annotation counts
+/// as undetermined when the body couldn't fill the holes — a partial
+/// contract that stays partial publishes no silent `{error}`.
 ///
 /// Language decision: exported symbols will *always* require a written
 /// contract, even with interprocedural inference — once a visibility notion
 /// exists, exported items go back to requiring annotations; today every
 /// item counts as private.
 pub fn signature_needs_annotation<'db>(db: &'db dyn Db, item: ItemId<'db>) -> bool {
-    if crate::item_data(db, item)
+    if let Some(type_ref) = crate::item_data(db, item)
         .as_ref()
-        .is_none_or(|it| it.type_ref.is_some())
+        .and_then(|it| it.type_ref.as_ref())
     {
-        return false;
+        if is_fully_typed(type_ref) {
+            return false;
+        }
     }
     if crate::body::body(db, item).root.is_none() {
         // No value at all: the parse errors cover it.

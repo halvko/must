@@ -32,6 +32,7 @@ pub enum TypeRef {
     },
     Ref(Box<TypeRef>),
     Path(String),
+    Hole,
     Error,
 }
 
@@ -55,6 +56,7 @@ impl TypeRef {
                 Some(name) => TypeRef::Path(name.text()),
                 None => TypeRef::Error,
             },
+            ast::Type::HoleType(_) => TypeRef::Hole,
         }
     }
 

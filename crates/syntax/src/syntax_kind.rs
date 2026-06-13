@@ -12,6 +12,7 @@ pub enum SyntaxKind {
     WHITESPACE,
     COMMENT,
     IDENT,
+    HOLE,
     INT_NUMBER,
     STRING,
     LIFETIME_IDENT,
@@ -70,6 +71,7 @@ pub enum SyntaxKind {
     NEVER_TYPE,
     PATH_TYPE,
     REF_TYPE,
+    HOLE_TYPE,
     ERROR,
 }
 

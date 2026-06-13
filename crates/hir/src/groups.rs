@@ -1,17 +1,19 @@
 //! Interprocedural inference: binding groups.
 //!
-//! Unannotated items get their signatures from their own bodies. Items that
-//! reference each other without annotations must be inferred *together*
-//! (mutual recursion has no starting point), so the unannotated items of a
-//! file are partitioned into strongly connected components of their
-//! reference graph and each group is inferred in one unification context,
-//! with a shared signature variable per member. The SCC condensation is a
-//! DAG, so groups only ever ask for signatures of *other* groups (or of
-//! annotated items — which stay hard firewall edges): no query cycles.
+//! Items whose signatures inference must determine — no annotation at all,
+//! or a hole-bearing one (`_` is a partial contract: unconstrained exactly
+//! where it says `_`) — get their signatures from their own bodies. Items
+//! that reference each other on these terms must be inferred *together*
+//! (mutual recursion has no starting point), so they are partitioned into
+//! strongly connected components of their reference graph and each group is
+//! inferred in one unification context, with a shared signature variable
+//! per member. The SCC condensation is a DAG, so groups only ever ask for
+//! signatures of *other* groups (or of fully-typed items — which stay hard
+//! firewall edges): no query cycles.
 //!
-//! Language decision (recorded): once visibility exists, *exported* items
-//! will require written contracts regardless — inference is for private
-//! items, and today every item counts as private.
+//! Language decision (recorded): items exported at the *library* boundary
+//! will require written contracts regardless — inference is for internal
+//! items. Today every item counts as internal.
 
 use base_db::{Db, SourceFile};
 use ena::unify::InPlaceUnificationTable;
@@ -19,7 +21,7 @@ use rustc_hash::FxHashMap;
 
 use crate::infer::{InferCtx, resolve_fully};
 use crate::item_tree::item_tree;
-use crate::ty::{Ty, TyVar, TyVarValue};
+use crate::ty::{Ty, TyVar, TyVarValue, lower_type_ref};
 use crate::{ItemLoc, file_item_ids, item_loc};
 
 /// One inference group per salsa key.
@@ -29,11 +31,12 @@ pub struct GroupId<'db> {
     pub index: u32,
 }
 
-/// The partition of a file's *unannotated* items into binding groups.
-/// Range-free; only membership changes invalidate it.
+/// The partition of a file's group-inferrable items (no fully-typed
+/// annotation) into binding groups. Range-free; only membership changes
+/// invalidate it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InferenceGroups {
-    /// Item index → group index; `None` for annotated items.
+    /// Item index → group index; `None` for fully-typed items.
     pub group_of: Vec<Option<u32>>,
     /// Group index → member item indices (deterministic order).
     pub groups: Vec<Vec<usize>>,
@@ -43,7 +46,11 @@ pub struct InferenceGroups {
 pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
     let tree = item_tree(db, file);
     let ids = file_item_ids(db, file);
-    let unannotated: Vec<bool> = tree.items.iter().map(|it| it.type_ref.is_none()).collect();
+    let group_inferrable: Vec<bool> = tree
+        .items
+        .iter()
+        .map(|it| !it.type_ref.as_ref().is_some_and(crate::ty::is_fully_typed))
+        .collect();
 
     // Item identity → index, the same (name, disambiguator) scheme ids use.
     let mut index_of: FxHashMap<(&str, u32), usize> = FxHashMap::default();
@@ -54,10 +61,10 @@ pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
         *disambiguator += 1;
     }
 
-    // Reference edges between unannotated items.
+    // Reference edges between group-inferrable items.
     let edges: Vec<Vec<usize>> = (0..tree.items.len())
         .map(|index| {
-            if !unannotated[index] {
+            if !group_inferrable[index] {
                 return Vec::new();
             }
             let mut succ: Vec<usize> = crate::resolutions(db, ids[index])
@@ -67,7 +74,7 @@ pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
                         return None;
                     };
                     let target = *index_of.get(&(&*loc.name, loc.disambiguator))?;
-                    unannotated[target].then_some(target)
+                    group_inferrable[target].then_some(target)
                 })
                 .collect();
             succ.sort_unstable();
@@ -76,10 +83,10 @@ pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
         })
         .collect();
 
-    // Tarjan over the unannotated subgraph.
+    // Tarjan over the group-inferrable subgraph.
     let mut state = Tarjan {
         edges: &edges,
-        include: &unannotated,
+        include: &group_inferrable,
         index: vec![None; edges.len()],
         low: vec![0; edges.len()],
         on_stack: vec![false; edges.len()],
@@ -88,7 +95,7 @@ pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
         groups: Vec::new(),
     };
     for node in 0..edges.len() {
-        if unannotated[node] && state.index[node].is_none() {
+        if group_inferrable[node] && state.index[node].is_none() {
             state.visit(node);
         }
     }
@@ -157,6 +164,10 @@ pub struct GroupSignatures {
 
 #[salsa::tracked(returns(ref))]
 pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures {
+    // TODO: figure out cross file inference - is it worth it? On one hand we don't want to
+    // disincentivize splitting code across files, but on the other we want to give a nice real-time
+    // experience. Maybe we want to support inference but give warnings where we had to do it cross
+    // file such we can add a quick fix to add the type?
     let file = group.file(db);
     let groups = inference_groups(db, file);
     let Some(members) = groups.groups.get(group.index(db) as usize) else {
@@ -188,6 +199,15 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
             ctx.unify_public(&in_group[loc], &Ty::Error);
             continue;
         };
+        // Whatever annotation this member has is hole-bearing (that's why
+        // it's in a group): lower it here as a partial contract — the
+        // written part constrains the body, holes stay unconstrained for
+        // the body to fill.
+        let expected = crate::item_data(db, item)
+            .as_ref()
+            .and_then(|it| it.type_ref.as_ref())
+            .map(|type_ref| lower_type_ref(type_ref, &mut table))
+            .unwrap_or_else(|| Ty::Infer(table.new_key(TyVarValue::Unknown)));
         let mut ctx = InferCtx::new(
             db,
             body,
@@ -195,7 +215,7 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
             &mut table,
             &in_group,
         );
-        let root_ty = ctx.infer_expr(root, None);
+        let root_ty = ctx.infer_expr(root, &expected);
         if !ctx.unify_public(&in_group[loc], &root_ty) {
             // The body contradicts what the group already committed this
             // member to (called as a function in one body, bound to a plain

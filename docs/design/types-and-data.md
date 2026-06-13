@@ -6,8 +6,9 @@
   operands to agree.
 - **T11** Inference is interprocedural: items that constrain each other form a binding
   group solved in one unification context, so a signature is never peeked at before its
-  body is checked; an undetermined or contradictory member erases to `{error}`. There is
-  no cross-file inference.
+  body is checked; an undetermined or contradictory member erases to `{error}`. A
+  signature with no holes is a firewall: it is checked against what it declares, and `_`
+  marks where inference is still asked for. There is no cross-file inference.
 
 ## Discarded
 

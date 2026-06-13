@@ -533,6 +533,115 @@ static x = y;
 }
 
 #[test]
+fn holes_in_let_and_params_infer_from_context() {
+    // `_` lowers to an unconstrained variable: the initializer, the body,
+    // or the surrounding context fills it in.
+    check_infer(
+        r#"
+static f = fn {
+    let x: _ = 5;
+    let y = x + 1;
+}
+static g = fn (p: _) { p + 1 };
+static h = fn (_: _) { 5 };
+"#,
+        expect![[r#"
+            12..55 'fn {     let x: _...': fn()
+            15..55 '{     let x: _ = ...': ()
+            25..26 'x': usize
+            32..33 '5': usize
+            43..44 'y': usize
+            47..48 'x': usize
+            47..52 'x + 1': usize
+            51..52 '1': usize
+            67..86 'fn (p: _) { p + 1 }': fn(usize) -> usize
+            71..72 'p': usize
+            77..86 '{ p + 1 }': usize
+            79..80 'p': usize
+            79..84 'p + 1': usize
+            83..84 '1': usize
+            99..114 'fn (_: _) { 5 }': fn(_) -> usize
+            103..104 '_': _
+            109..114 '{ 5 }': usize
+            111..112 '5': usize
+        "#]],
+    );
+}
+
+#[test]
+fn hole_annotated_item_infers_together_with_its_group() {
+    // `even`'s `_` annotation doesn't bench it from the group: the mutual
+    // recursion pins it to fn(usize) -> bool, the hole filled by the
+    // bodies — so the use in main sees bool, not a silent `{error}`.
+    check_diagnostics(
+        r#"
+static even: _ = fn (n) { if n == 0 { true } else { odd(n - 1) } };
+static odd = fn (n: _) { if n == 0 { false } else { even(n - 1) } };
+static main = fn { print(even(4)); };
+"#,
+        expect![[r#"
+            163..170: type mismatch: expected `str`, found `bool`
+        "#]],
+    );
+}
+
+#[test]
+fn hole_annotated_item_signature_flows_to_dependents() {
+    // `static x: _ = 5;` publishes the group-inferred signature: the use
+    // in main sees `usize` (and only the print mismatch) instead of the
+    // diagnostics being swallowed by a silent `{error}`.
+    check_diagnostics(
+        r#"
+static x: _ = 5;
+static main = fn { print(x); };
+"#,
+        expect![[r#"
+            43..44: type mismatch: expected `str`, found `usize`
+        "#]],
+    );
+}
+
+#[test]
+fn undetermined_hole_annotated_item_needs_annotation() {
+    // A `_` contract the body can't fill stays undetermined: the use site
+    // asks for an annotation instead of a silent `{error}` publish.
+    check_diagnostics(
+        r#"
+static id: _ = fn (x) { x };
+static main = fn { id; };
+"#,
+        expect![[r#"
+            49..51: cannot infer the type of `id` across items; add a type annotation to its definition (defined here at 8..10)
+        "#]],
+    );
+}
+
+#[test]
+fn elided_fn_return_is_a_hole() {
+    // `fn(usize)` without `-> ...` leaves the return unconstrained, like
+    // a hole: the body fills it in and the signature still publishes.
+    check_infer(
+        r#"
+static f: fn(usize) = fn (n) { n };
+static main = fn { f(1) + 1 };
+"#,
+        expect![[r#"
+            23..35 'fn (n) { n }': fn(usize) -> usize
+            27..28 'n': usize
+            30..35 '{ n }': usize
+            32..33 'n': usize
+            51..66 'fn { f(1) + 1 }': fn() -> usize
+            54..66 '{ f(1) + 1 }': usize
+            56..57 'f': fn(usize) -> usize
+            56..60 'f(1)': usize
+            56..64 'f(1) + 1': usize
+            58..59 '1': usize
+            63..64 '1': usize
+        "#]],
+    );
+}
+
+#[test]
 fn unknown_type_name_is_diagnosed() {
     check_diagnostics(
         r#"
@@ -612,7 +721,7 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            67..76: type mismatch: expected `usize`, found `str`
+            69..74: type mismatch: expected `usize`, found `str`
         "#]],
     );
 }

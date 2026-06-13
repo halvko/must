@@ -29,7 +29,7 @@ pub(crate) fn source_file(p: &mut Parser<'_>) {
 fn item(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump_any(); // STATIC_KW | CONST_KW
-    name(p, "expected a name for the item");
+    pattern(p, "expected a name for the item");
     if p.eat(COLON) {
         type_(p);
     }
@@ -50,13 +50,15 @@ fn item(p: &mut Parser<'_>) {
     m.complete(p, STATIC_ITEM);
 }
 
-fn name(p: &mut Parser<'_>, msg: &str) {
-    if p.at(IDENT) {
-        let m = p.start();
-        p.bump(IDENT);
-        m.complete(p, NAME);
-    } else {
-        p.error(msg);
+/// A pattern an assignment is destructured to
+fn pattern(p: &mut Parser<'_>, msg: &str) {
+    match p.current() {
+        IDENT | HOLE => {
+            let m = p.start();
+            p.bump_any();
+            m.complete(p, NAME);
+        }
+        _ => p.error(msg),
     }
 }
 
@@ -206,8 +208,8 @@ fn param_list(p: &mut Parser<'_>) {
 
 fn param(p: &mut Parser<'_>) {
     let m = p.start();
-    if p.at(IDENT) {
-        name(p, "expected a parameter name");
+    if p.at(IDENT) || p.at(HOLE) {
+        pattern(p, "expected a parameter name");
         if p.eat(COLON) {
             type_(p);
         }
@@ -278,7 +280,7 @@ fn expr_stmt_or_tail(p: &mut Parser<'_>) {
 fn let_stmt(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(LET_KW);
-    name(p, "expected a binding name");
+    pattern(p, "expected a binding name");
     if p.eat(COLON) {
         type_(p);
     }
@@ -340,6 +342,11 @@ fn type_(p: &mut Parser<'_>) {
             let m = p.start();
             name_ref(p);
             m.complete(p, PATH_TYPE);
+        }
+        HOLE => {
+            let m = p.start();
+            p.bump(HOLE);
+            m.complete(p, HOLE_TYPE);
         }
         _ => p.error("expected a type"),
     }

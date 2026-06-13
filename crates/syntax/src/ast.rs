@@ -98,9 +98,10 @@ ast_node!(UnitType: UNIT_TYPE);
 ast_node!(NeverType: NEVER_TYPE);
 ast_node!(PathType: PATH_TYPE);
 ast_node!(RefType: REF_TYPE);
+ast_node!(HoleType: HOLE_TYPE);
 
 ast_enum!(Expr: FnLiteral, CallExpr, PathExpr, Literal, BlockExpr, ParenExpr, BinExpr, IfExpr);
-ast_enum!(Type: FnType, UnitType, NeverType, PathType, RefType);
+ast_enum!(Type: FnType, UnitType, NeverType, PathType, RefType, HoleType);
 ast_enum!(Stmt: LetStmt, ExprStmt);
 
 impl SourceFile {
