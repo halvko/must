@@ -31,7 +31,9 @@ fn check_mir(text: &str, expect: Expect) {
 
 #[test]
 fn const_initializer_lowers_to_a_const_body() {
-    check_mir("static example = 4 + 5;", expect![[r#"
+    check_mir(
+        "static example = 4 + 5;",
+        expect![[r#"
         item example:
         fn b0() -> usize {
           _0: usize  // return
@@ -41,12 +43,15 @@ fn const_initializer_lowers_to_a_const_body() {
             _0 = _1
             return
         }
-    "#]]);
+    "#]],
+    );
 }
 
 #[test]
 fn fn_items_lower_root_as_const_fn_value() {
-    check_mir(r#"static main = fn { print("hi"); };"#, expect![[r#"
+    check_mir(
+        r#"static main = fn { print("hi"); };"#,
+        expect![[r#"
         item main:
         fn b0() -> () {
           _0: ()  // return
@@ -63,7 +68,8 @@ fn fn_items_lower_root_as_const_fn_value() {
             _0 = fn b0
             return
         }
-    "#]]);
+    "#]],
+    );
 }
 
 #[test]
@@ -346,7 +352,9 @@ static main = fn { f(1, 2); };
 
 #[test]
 fn not_callable_traps_instead_of_calling() {
-    check_mir("static main = fn { 5(1); };", expect![[r#"
+    check_mir(
+        "static main = fn { 5(1); };",
+        expect![[r#"
         item main:
         fn b0() -> () {
           _0: ()  // return
@@ -363,7 +371,8 @@ fn not_callable_traps_instead_of_calling() {
             _0 = fn b0
             return
         }
-    "#]]);
+    "#]],
+    );
 }
 
 #[test]
@@ -407,7 +416,9 @@ fn capture_is_diagnosed_and_trapped() {
 
 #[test]
 fn missing_operand_traps() {
-    check_mir("static x = 1 + ;", expect![[r#"
+    check_mir(
+        "static x = 1 + ;",
+        expect![[r#"
         item x:
         fn b0() -> usize {
           _0: usize  // return
@@ -420,7 +431,8 @@ fn missing_operand_traps() {
             _0 = _2
             return
         }
-    "#]]);
+    "#]],
+    );
 }
 
 #[test]

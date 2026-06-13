@@ -166,9 +166,7 @@ impl LowerCtx {
                         let text = token.text().replace('_', "");
                         LiteralData::Int(text.parse().ok())
                     }
-                    Some(ast::LiteralKind::Str(token)) => {
-                        LiteralData::Str(unescape(token.text()))
-                    }
+                    Some(ast::LiteralKind::Str(token)) => LiteralData::Str(unescape(token.text())),
                     Some(ast::LiteralKind::Bool(value)) => LiteralData::Bool(value),
                     None => return self.missing_expr(),
                 };

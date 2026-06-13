@@ -26,7 +26,10 @@ pub struct ItemData {
 pub enum TypeRef {
     Unit,
     Never,
-    Fn { params: Vec<TypeRef>, ret: Option<Box<TypeRef>> },
+    Fn {
+        params: Vec<TypeRef>,
+        ret: Option<Box<TypeRef>>,
+    },
     Ref(Box<TypeRef>),
     Path(String),
     Error,

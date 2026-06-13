@@ -179,8 +179,7 @@ impl Builder<'_> {
     fn do_token(&mut self) {
         let token = self.tokens[self.raw_pos];
         let range = TextRange::at(self.offset, token.len);
-        self.inner
-            .token(token.kind.into(), &self.text[range]);
+        self.inner.token(token.kind.into(), &self.text[range]);
         self.offset += token.len;
         self.raw_pos += 1;
         if !token.kind.is_trivia() {

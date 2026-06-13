@@ -9,7 +9,7 @@ use base_db::{Db, SourceFile};
 use la_arena::{Arena, ArenaMap, Idx};
 use rustc_hash::FxHashMap;
 
-use crate::body::{Body, BindingId, ExprData, ExprId, Stmt, body};
+use crate::body::{BindingId, Body, ExprData, ExprId, Stmt, body};
 use crate::item_tree::item_tree;
 use crate::{ItemId, ItemLoc};
 
@@ -93,7 +93,9 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
                 compute_expr_scopes(body, scopes, *tail, scope);
             }
         }
-        ExprData::FnLiteral { params, body: b, .. } => {
+        ExprData::FnLiteral {
+            params, body: b, ..
+        } => {
             let scope = scopes.scopes.alloc(ScopeData {
                 parent: Some(scope),
                 entries: params

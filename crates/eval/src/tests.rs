@@ -73,23 +73,32 @@ static chained = pick + 1;
 
 #[test]
 fn fn_items_are_fn_values() {
-    check_const("static f = fn { print(\"hi\"); };", expect![[r#"
+    check_const(
+        "static f = fn { print(\"hi\"); };",
+        expect![[r#"
         f = fn
-    "#]]);
+    "#]],
+    );
 }
 
 #[test]
 fn print_is_refused_at_compile_time() {
-    check_const(r#"static x = print("hi");"#, expect![[r#"
+    check_const(
+        r#"static x = print("hi");"#,
+        expect![[r#"
         x = error[NotConst]: cannot call `print` at compile time
-    "#]]);
+    "#]],
+    );
 }
 
 #[test]
 fn panic_in_const_is_an_error() {
-    check_const(r#"static x: usize = panic("boom");"#, expect![[r#"
+    check_const(
+        r#"static x: usize = panic("boom");"#,
+        expect![[r#"
         x = error[Panic]: boom
-    "#]]);
+    "#]],
+    );
 }
 
 #[test]
@@ -163,9 +172,12 @@ static rec = fn (n: usize) -> usize { rec(n + 1) }
 
 #[test]
 fn reaching_a_trap_reports_the_borrowed_diagnostic() {
-    check_const("static x = missing;", expect![[r#"
+    check_const(
+        "static x = missing;",
+        expect![[r#"
         x = error[Trap]: unresolved name `missing`
-    "#]]);
+    "#]],
+    );
 }
 
 #[test]

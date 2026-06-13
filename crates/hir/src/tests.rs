@@ -257,10 +257,7 @@ fn firewall_body_edit_does_not_reinfer_other_items() {
     let log_handle = Arc::clone(&log);
     let mut db = RootDatabase::with_event_callback(Box::new(move |event| {
         if let salsa::EventKind::WillExecute { database_key } = event.kind {
-            log_handle
-                .lock()
-                .unwrap()
-                .push(format!("{database_key:?}"));
+            log_handle.lock().unwrap().push(format!("{database_key:?}"));
         }
     }));
 
@@ -309,10 +306,7 @@ fn firewall_item_insertion_does_not_reinfer_items_below() {
     let log_handle = Arc::clone(&log);
     let mut db = RootDatabase::with_event_callback(Box::new(move |event| {
         if let salsa::EventKind::WillExecute { database_key } = event.kind {
-            log_handle
-                .lock()
-                .unwrap()
-                .push(format!("{database_key:?}"));
+            log_handle.lock().unwrap().push(format!("{database_key:?}"));
         }
     }));
 

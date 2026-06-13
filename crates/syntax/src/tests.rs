@@ -7,9 +7,12 @@ fn check(input: &str, expect: Expect) {
 
 #[test]
 fn empty_file() {
-    check("", expect![[r#"
+    check(
+        "",
+        expect![[r#"
         SOURCE_FILE@0..0
-    "#]]);
+    "#]],
+    );
 }
 
 #[test]
@@ -664,13 +667,16 @@ fn fn_type_requires_parens() {
 fn bare_static_reports_one_error() {
     // "expected a name" and "expected `=`" both land at the same spot;
     // only the first (most fundamental) survives.
-    check("static ", expect![[r#"
+    check(
+        "static ",
+        expect![[r#"
         SOURCE_FILE@0..7
           STATIC_ITEM@0..6
             STATIC_KW@0..6 "static"
           WHITESPACE@6..7 " "
         error 7..7: expected a name for the item
-    "#]]);
+    "#]],
+    );
 }
 
 #[test]
@@ -1237,7 +1243,9 @@ fn if_else_chain() {
 
 #[test]
 fn comparisons_bind_looser_than_arithmetic() {
-    check("static x = 1 + 2 == 3 * 4;", expect![[r#"
+    check(
+        "static x = 1 + 2 == 3 * 4;",
+        expect![[r#"
         SOURCE_FILE@0..26
           STATIC_ITEM@0..26
             STATIC_KW@0..6 "static"
@@ -1268,12 +1276,15 @@ fn comparisons_bind_looser_than_arithmetic() {
                 LITERAL@24..25
                   INT_NUMBER@24..25 "4"
             SEMICOLON@25..26 ";"
-    "#]]);
+    "#]],
+    );
 }
 
 #[test]
 fn bool_literals() {
-    check("static x = true; static y = false;", expect![[r#"
+    check(
+        "static x = true; static y = false;",
+        expect![[r#"
         SOURCE_FILE@0..34
           STATIC_ITEM@0..16
             STATIC_KW@0..6 "static"
@@ -1298,12 +1309,15 @@ fn bool_literals() {
             LITERAL@28..33
               FALSE_KW@28..33 "false"
             SEMICOLON@33..34 ";"
-    "#]]);
+    "#]],
+    );
 }
 
 #[test]
 fn if_branches_require_blocks_with_wrap_fix() {
-    check("static x = if c 1 else 2;", expect![[r#"
+    check(
+        "static x = if c 1 else 2;",
+        expect![[r#"
         SOURCE_FILE@0..25
           STATIC_ITEM@0..25
             STATIC_KW@0..6 "static"
@@ -1330,12 +1344,15 @@ fn if_branches_require_blocks_with_wrap_fix() {
             SEMICOLON@24..25 ";"
         error 16..17: `if` branches are blocks; wrap this expression in `{ }`
         error 23..24: `else` branches are blocks; wrap this expression in `{ }`
-    "#]]);
+    "#]],
+    );
 }
 
 #[test]
 fn if_with_missing_then_block_before_else_recovers() {
-    check("static x = if c else { 2 };", expect![[r#"
+    check(
+        "static x = if c else { 2 };",
+        expect![[r#"
         SOURCE_FILE@0..27
           STATIC_ITEM@0..27
             STATIC_KW@0..6 "static"
@@ -1363,5 +1380,6 @@ fn if_with_missing_then_block_before_else_recovers() {
                 R_BRACE@25..26 "}"
             SEMICOLON@26..27 ";"
         error 16..20: expected `{`: `if` branches are blocks
-    "#]]);
+    "#]],
+    );
 }

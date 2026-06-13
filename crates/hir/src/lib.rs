@@ -20,7 +20,7 @@ use base_db::{Db, SourceFile, parse};
 use syntax::TextRange;
 use syntax::ast::{self, AstNode as _};
 
-pub use body::{Body, BodySourceMap, ExprId, BindingId, body_with_source_map};
+pub use body::{BindingId, Body, BodySourceMap, ExprId, body_with_source_map};
 pub use infer::{InferenceDiagnostic, InferenceResult};
 pub use item_tree::{ItemTree, TypeRef, item_source};
 pub use scopes::{
@@ -65,7 +65,11 @@ impl ItemLoc {
 
     /// The name for messages; unnamed (broken) items render as `?`.
     pub fn display_name(&self) -> &str {
-        if self.name.is_empty() { "?" } else { &self.name }
+        if self.name.is_empty() {
+            "?"
+        } else {
+            &self.name
+        }
     }
 }
 

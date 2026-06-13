@@ -11,11 +11,11 @@ use base_db::{RootDatabase, SourceFile};
 pub use goto_definition::NavigationTarget;
 pub use hir::RelatedInfo;
 pub use hover::HoverResult;
-pub use syntax_highlighting::{HlMods, HlRange, HlTag};
 pub use line_index::LineIndex;
 pub use syntax::TextEdit;
 use syntax::ast::AstNode as _;
 use syntax::{TextRange, TextSize};
+pub use syntax_highlighting::{HlMods, HlRange, HlTag};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FilePosition {
@@ -224,8 +224,7 @@ impl Analysis {
             if !f.params.is_empty() {
                 continue;
             }
-            let Some(name_node) = hir::item_source(&self.db, item).and_then(|it| it.name())
-            else {
+            let Some(name_node) = hir::item_source(&self.db, item).and_then(|it| it.name()) else {
                 continue;
             };
             lenses.push(RunLens {

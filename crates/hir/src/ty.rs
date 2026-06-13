@@ -5,9 +5,8 @@ use std::sync::Arc;
 use base_db::Db;
 use ena::unify::{NoError, UnifyKey, UnifyValue};
 
-
-use crate::item_tree::TypeRef;
 use crate::ItemId;
+use crate::item_tree::TypeRef;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
@@ -141,7 +140,10 @@ pub fn lower_type_ref(type_ref: &TypeRef) -> Ty {
 /// dependents re-run only when the *inferred* signature value changes.
 #[salsa::tracked]
 pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
-    if let Some(type_ref) = crate::item_data(db, item).as_ref().and_then(|it| it.type_ref.as_ref()) {
+    if let Some(type_ref) = crate::item_data(db, item)
+        .as_ref()
+        .and_then(|it| it.type_ref.as_ref())
+    {
         return lower_type_ref(type_ref);
     }
     let Some(index) = crate::item_index(db, item) else {
@@ -172,7 +174,10 @@ pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
 /// exists, exported items go back to requiring annotations; today every
 /// item counts as private.
 pub fn signature_needs_annotation<'db>(db: &'db dyn Db, item: ItemId<'db>) -> bool {
-    if crate::item_data(db, item).as_ref().is_none_or(|it| it.type_ref.is_some()) {
+    if crate::item_data(db, item)
+        .as_ref()
+        .is_none_or(|it| it.type_ref.is_some())
+    {
         return false;
     }
     if crate::body::body(db, item).root.is_none() {

@@ -172,11 +172,7 @@ fn locate(
         return Some("entry expression".to_owned());
     }
     let line_col = LineIndex::new(file.text(db)).line_col(range.start());
-    Some(format!(
-        "{path}:{}:{}",
-        line_col.line + 1,
-        line_col.col + 1
-    ))
+    Some(format!("{path}:{}:{}", line_col.line + 1, line_col.col + 1))
 }
 
 #[cfg(test)]
@@ -313,8 +309,12 @@ static main = fn {
 
     #[test]
     fn entry_expression_must_parse() {
-        check("static main = fn {};", "main(", expect_test::expect![[r#"
+        check(
+            "static main = fn {};",
+            "main(",
+            expect_test::expect![[r#"
             error: invalid entry expression: expected `)`
-        "#]]);
+        "#]],
+        );
     }
 }

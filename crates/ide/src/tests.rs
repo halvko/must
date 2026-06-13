@@ -250,9 +250,8 @@ fn highlights_split_multiline_strings_per_line() {
 fn diagnostics_include_mir_findings() {
     // Captures are invisible to name resolution and inference — only MIR
     // lowering notices the binding lives in an enclosing function.
-    let (analysis, file, _pos) = fixture(
-        "static f = fn () -> usize { let a = 1; let g = fn () -> usize { a$0 }; g() };",
-    );
+    let (analysis, file, _pos) =
+        fixture("static f = fn () -> usize { let a = 1; let g = fn () -> usize { a$0 }; g() };");
     let diagnostics = analysis.diagnostics(file);
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(
@@ -284,8 +283,7 @@ static main = fn { print(gree$0ting); };
 
 #[test]
 fn diagnostics_include_const_eval_failures() {
-    let (analysis, file, _pos) =
-        fixture("static bad: usize = 1 / 0;$0\nstatic also: usize = bad;");
+    let (analysis, file, _pos) = fixture("static bad: usize = 1 / 0;$0\nstatic also: usize = bad;");
     let diagnostics = analysis.diagnostics(file);
     // Reported once at the origin, not re-reported by the propagating user.
     assert_eq!(diagnostics.len(), 1);

@@ -464,18 +464,24 @@ impl<'db, M: Mode> Machine<'db, M> {
                     origin: Some((loc.clone(), origin)),
                 };
                 Ok(match op {
-                    Add => Value::Int(l.checked_add(r).ok_or_else(|| {
-                        runtime("attempt to add with overflow".to_owned())
-                    })?),
-                    Sub => Value::Int(l.checked_sub(r).ok_or_else(|| {
-                        runtime("attempt to subtract with overflow".to_owned())
-                    })?),
-                    Mul => Value::Int(l.checked_mul(r).ok_or_else(|| {
-                        runtime("attempt to multiply with overflow".to_owned())
-                    })?),
-                    Div => Value::Int(l.checked_div(r).ok_or_else(|| {
-                        runtime("attempt to divide by zero".to_owned())
-                    })?),
+                    Add => Value::Int(
+                        l.checked_add(r)
+                            .ok_or_else(|| runtime("attempt to add with overflow".to_owned()))?,
+                    ),
+                    Sub => {
+                        Value::Int(l.checked_sub(r).ok_or_else(|| {
+                            runtime("attempt to subtract with overflow".to_owned())
+                        })?)
+                    }
+                    Mul => {
+                        Value::Int(l.checked_mul(r).ok_or_else(|| {
+                            runtime("attempt to multiply with overflow".to_owned())
+                        })?)
+                    }
+                    Div => Value::Int(
+                        l.checked_div(r)
+                            .ok_or_else(|| runtime("attempt to divide by zero".to_owned()))?,
+                    ),
                     Lt => Value::Bool(l < r),
                     Le => Value::Bool(l <= r),
                     Gt => Value::Bool(l > r),
@@ -584,13 +590,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         }
     }
 
-    fn ill_typed(
-        &self,
-        expected: &str,
-        found: &Value,
-        loc: &ItemLoc,
-        origin: ExprId,
-    ) -> EvalError {
+    fn ill_typed(&self, expected: &str, found: &Value, loc: &ItemLoc, origin: ExprId) -> EvalError {
         self.internal_error(
             format!("expected {expected}, found `{}`", found.display()),
             Some((loc.clone(), origin)),

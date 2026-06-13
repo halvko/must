@@ -46,9 +46,7 @@ pub(crate) fn goto_definition(
             let name_node = name_ptr.to_node(&root);
             let full_range = name_node
                 .ancestors()
-                .find(|n| {
-                    matches!(n.kind(), SyntaxKind::LET_STMT | SyntaxKind::PARAM)
-                })
+                .find(|n| matches!(n.kind(), SyntaxKind::LET_STMT | SyntaxKind::PARAM))
                 .map(|n| n.text_range())
                 .unwrap_or_else(|| name_ptr.text_range());
             Some(NavigationTarget {

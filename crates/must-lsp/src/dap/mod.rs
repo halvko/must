@@ -6,9 +6,9 @@
 //! editor's diagnostic instead of just dying.
 
 mod debuggee;
-mod transport;
 #[cfg(test)]
 mod tests;
+mod transport;
 
 use std::cell::{Cell, RefCell};
 use std::io::{BufRead, Write};
@@ -412,7 +412,11 @@ impl<W: Write> Session<W> {
     }
 
     fn respond_err(&self, request: &Incoming, message: &str) -> ServerResult<()> {
-        self.send(&transport::error_response(self.next_seq(), request, message))
+        self.send(&transport::error_response(
+            self.next_seq(),
+            request,
+            message,
+        ))
     }
 
     fn event(&self, name: &str, body: Value) -> ServerResult<()> {

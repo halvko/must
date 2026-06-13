@@ -133,7 +133,10 @@ fn publishes_parse_errors_on_open_and_change() {
     let file = uri("file:///test.must");
 
     // Broken file: missing `;` terminator on the let.
-    client.open(&file, "static main = fn {\n    let a = \"x\"\n    print(a);\n}\n");
+    client.open(
+        &file,
+        "static main = fn {\n    let a = \"x\"\n    print(a);\n}\n",
+    );
     let diags = client.next_diagnostics();
     assert_eq!(diags.uri, file);
     assert_eq!(diags.diagnostics.len(), 1);
@@ -165,16 +168,15 @@ fn goto_definition_over_protocol() {
     client.open(&file, "const a = fn { b() };\nstatic b = fn { a() };\n");
     client.next_diagnostics();
 
-    let response = client.request::<lsp_types::request::GotoDefinition>(
-        lsp_types::GotoDefinitionParams {
+    let response =
+        client.request::<lsp_types::request::GotoDefinition>(lsp_types::GotoDefinitionParams {
             text_document_position_params: lsp_types::TextDocumentPositionParams {
                 text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
                 position: lsp_types::Position::new(0, 15),
             },
             work_done_progress_params: Default::default(),
             partial_result_params: Default::default(),
-        },
-    );
+        });
     let Some(lsp_types::GotoDefinitionResponse::Scalar(location)) = response else {
         panic!("expected scalar definition response, got {response:?}");
     };
@@ -190,7 +192,10 @@ fn hover_over_protocol() {
     let mut client = TestClient::start();
     let file = uri("file:///hover.must");
 
-    client.open(&file, "static main = fn {\n    let s = \"hello\";\n    print(s);\n}\n");
+    client.open(
+        &file,
+        "static main = fn {\n    let s = \"hello\";\n    print(s);\n}\n",
+    );
     client.next_diagnostics();
 
     // Hover `s` in `print(s)` on line 2.
@@ -220,15 +225,14 @@ fn quick_fix_wraps_fn_body_in_braces() {
     assert_eq!(diags.diagnostics.len(), 1);
     let diag_range = diags.diagnostics[0].range;
 
-    let response = client.request::<lsp_types::request::CodeActionRequest>(
-        lsp_types::CodeActionParams {
+    let response =
+        client.request::<lsp_types::request::CodeActionRequest>(lsp_types::CodeActionParams {
             text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
             range: diag_range,
             context: lsp_types::CodeActionContext::default(),
             work_done_progress_params: Default::default(),
             partial_result_params: Default::default(),
-        },
-    );
+        });
     let actions = response.expect("expected code actions");
     assert_eq!(actions.len(), 1);
     let lsp_types::CodeActionOrCommand::CodeAction(action) = &actions[0] else {
@@ -270,8 +274,14 @@ fn duplicate_definition_links_to_the_first_one() {
     assert_eq!(related.len(), 1);
     assert_eq!(related[0].message, "first defined here");
     assert_eq!(related[0].location.uri, file);
-    assert_eq!(related[0].location.range.start, lsp_types::Position::new(0, 7));
-    assert_eq!(related[0].location.range.end, lsp_types::Position::new(0, 11));
+    assert_eq!(
+        related[0].location.range.start,
+        lsp_types::Position::new(0, 7)
+    );
+    assert_eq!(
+        related[0].location.range.end,
+        lsp_types::Position::new(0, 11)
+    );
 
     drop(client);
 }
@@ -298,10 +308,10 @@ fn semantic_tokens_over_protocol() {
     // modifiers: declaration = 1, static = 2.
     let expected = [
         // delta_line, delta_start, length, token_type, modifiers
-        (0, 0, 6, 3, 0),  // `static`
-        (0, 7, 1, 6, 3),  // `x`: variable, declaration|static
-        (0, 2, 1, 4, 0),  // `=`
-        (0, 2, 1, 2, 0),  // `1`
+        (0, 0, 6, 3, 0), // `static`
+        (0, 7, 1, 6, 3), // `x`: variable, declaration|static
+        (0, 2, 1, 4, 0), // `=`
+        (0, 2, 1, 2, 0), // `1`
     ];
     let actual: Vec<_> = tokens
         .data
@@ -412,8 +422,7 @@ fn early_semantic_tokens_pull_errors_retryably_then_succeeds_after_open() {
     client.open(&file, "static x = 1;");
     client.next_diagnostics();
 
-    let response =
-        client.request::<lsp_types::request::SemanticTokensFullRequest>(params);
+    let response = client.request::<lsp_types::request::SemanticTokensFullRequest>(params);
     let Some(lsp_types::SemanticTokensResult::Tokens(tokens)) = response else {
         panic!("expected full tokens, got {response:?}");
     };
@@ -438,9 +447,8 @@ fn semantic_tokens_survive_close_and_reopen() {
 
     client.open(&file, "static x = 1;");
     client.next_diagnostics();
-    let first = tokens(
-        client.request::<lsp_types::request::SemanticTokensFullRequest>(params.clone()),
-    );
+    let first =
+        tokens(client.request::<lsp_types::request::SemanticTokensFullRequest>(params.clone()));
     assert!(!first.is_empty());
 
     client.notify::<lsp_types::notification::DidCloseTextDocument>(
@@ -452,14 +460,11 @@ fn semantic_tokens_survive_close_and_reopen() {
 
     client.open(&file, "static x = 1;");
     client.next_diagnostics();
-    let second = tokens(
-        client.request::<lsp_types::request::SemanticTokensFullRequest>(params),
-    );
+    let second = tokens(client.request::<lsp_types::request::SemanticTokensFullRequest>(params));
     assert_eq!(first, second);
 
     drop(client);
 }
-
 
 #[test]
 fn did_open_triggers_semantic_tokens_refresh_when_supported() {

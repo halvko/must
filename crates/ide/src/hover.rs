@@ -45,7 +45,11 @@ pub(crate) fn hover(
         (name_ref.text(), ty, name_ref.syntax().text_range(), value)
     } else if let Some(name) = ast::Name::cast(parent) {
         let item = *hir::file_item_ids(db, file).get(item_index(name.syntax())?)?;
-        if name.syntax().parent().is_some_and(|p| p.kind() == SyntaxKind::STATIC_ITEM) {
+        if name
+            .syntax()
+            .parent()
+            .is_some_and(|p| p.kind() == SyntaxKind::STATIC_ITEM)
+        {
             // The item's own name: the type of its initializer is more
             // precise than the (possibly shallow) signature.
             let (body, _) = hir::body_with_source_map(db, item);
@@ -59,7 +63,10 @@ pub(crate) fn hover(
             // A local binding (let or parameter).
             let (_, source_map) = hir::body_with_source_map(db, item);
             let binding = source_map.binding_for_node(SyntaxNodePtr::new(name.syntax()))?;
-            let ty = hir::infer::infer(db, item).type_of_binding.get(binding)?.clone();
+            let ty = hir::infer::infer(db, item)
+                .type_of_binding
+                .get(binding)?
+                .clone();
             (name.text(), ty, name.syntax().text_range(), None)
         }
     } else {

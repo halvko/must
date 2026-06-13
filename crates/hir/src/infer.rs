@@ -11,7 +11,7 @@ use ena::unify::InPlaceUnificationTable;
 use la_arena::ArenaMap;
 use rustc_hash::FxHashMap;
 
-use crate::body::{Body, BindingId, ExprData, ExprId, LiteralData, Stmt, body};
+use crate::body::{BindingId, Body, ExprData, ExprId, LiteralData, Stmt, body};
 use crate::scopes::{Builtin, Resolution, resolutions};
 use crate::ty::{Ty, TyVar, TyVarValue, lower_type_ref, signature, signature_needs_annotation};
 use crate::{ItemId, ItemLoc};
@@ -512,9 +512,7 @@ fn occurs(table: &mut InPlaceUnificationTable<TyVar>, var: TyVar, ty: &Ty) -> bo
                 TyVarValue::Unknown => false,
             }
         }
-        Ty::Fn(f) => {
-            f.params.iter().any(|p| occurs(table, var, p)) || occurs(table, var, &f.ret)
-        }
+        Ty::Fn(f) => f.params.iter().any(|p| occurs(table, var, p)) || occurs(table, var, &f.ret),
         _ => false,
     }
 }

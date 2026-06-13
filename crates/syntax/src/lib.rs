@@ -14,9 +14,9 @@ mod validation;
 
 use std::sync::Arc;
 
+pub use lexer::{Token, tokenize};
 pub use rowan::{TextRange, TextSize};
 pub use syntax_kind::SyntaxKind;
-pub use lexer::{Token, tokenize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SyntaxError {

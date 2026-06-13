@@ -59,7 +59,8 @@ pub(crate) enum HitCondition {
 impl HitCondition {
     pub(crate) fn parse(text: &str) -> Option<HitCondition> {
         let text = text.trim();
-        let (make, rest): (fn(u32) -> HitCondition, &str) = if let Some(r) = text.strip_prefix("==") {
+        let (make, rest): (fn(u32) -> HitCondition, &str) = if let Some(r) = text.strip_prefix("==")
+        {
             (HitCondition::Eq, r)
         } else if let Some(r) = text.strip_prefix("!=") {
             (HitCondition::Ne, r)
@@ -141,12 +142,16 @@ impl<W: Write + Clone> Debuggee<W> {
             .map_err(|err| format!("error: cannot read `{path}`: {err}"))?;
         let db: &'static RootDatabase = Box::leak(Box::new(RootDatabase::default()));
         let prepared = runner::prepare(db, &text, path, entry)?;
-        let mut machine = Machine::new(db, RunMode { out: console.clone() });
+        let mut machine = Machine::new(
+            db,
+            RunMode {
+                out: console.clone(),
+            },
+        );
         machine
             .start(&prepared.entry)
             .map_err(|err| format!("error: {}", err.message))?;
-        let executable_positions =
-            executable_positions(db, prepared.file, prepared.original_len);
+        let executable_positions = executable_positions(db, prepared.file, prepared.original_len);
         Ok(Debuggee {
             db,
             file: prepared.file,
@@ -226,8 +231,7 @@ impl<W: Write + Clone> Debuggee<W> {
         let start = self.position();
         // Line-level view of a position: what "somewhere new" means at line
         // granularity (multiple statements on one line don't re-stop).
-        let line_of =
-            |p: &(usize, Option<(u32, u32)>)| (p.0, p.1.map(|(line, _)| line));
+        let line_of = |p: &(usize, Option<(u32, u32)>)| (p.0, p.1.map(|(line, _)| line));
         // Seed the resume point as visited, so resuming from a stop at a
         // breakpoint (or adding one at the paused line) doesn't re-arrive
         // without moving.
@@ -432,7 +436,12 @@ impl<W: Write + Clone> Debuggee<W> {
         let wrapped = format!("fn ({params}) {{ {expression}\n}}");
         let prepared = runner::prepare(self.db, &self.text, &self.path, &wrapped)?;
 
-        let mut machine = Machine::new(self.db, RunMode { out: self.console.clone() });
+        let mut machine = Machine::new(
+            self.db,
+            RunMode {
+                out: self.console.clone(),
+            },
+        );
         machine
             .eval_root(&prepared.entry)
             .and_then(|fn_value| match fn_value {
@@ -466,9 +475,7 @@ impl<W: Write + Clone> Debuggee<W> {
 
 fn is_name(text: &str) -> bool {
     let mut chars = text.chars();
-    chars
-        .next()
-        .is_some_and(|c| c.is_alphabetic() || c == '_')
+    chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
         && chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
@@ -491,12 +498,9 @@ fn executable_positions(
                     .map(|s| s.origin)
                     .chain([block.terminator.origin]);
                 for origin in origins {
-                    if let Some((line, column)) = runner::source_position(
-                        db,
-                        file,
-                        original_len,
-                        &(loc.clone(), origin),
-                    ) {
+                    if let Some((line, column)) =
+                        runner::source_position(db, file, original_len, &(loc.clone(), origin))
+                    {
                         positions.entry(line).or_default().insert(column);
                     }
                 }

@@ -25,8 +25,8 @@ use lsp_types::notification::{
     PublishDiagnostics,
 };
 use lsp_types::request::{
-    CodeActionRequest, CodeLensRequest, ExecuteCommand, GotoDefinition, HoverRequest,
-    Request as _, SemanticTokensFullRequest, SemanticTokensRefresh,
+    CodeActionRequest, CodeLensRequest, ExecuteCommand, GotoDefinition, HoverRequest, Request as _,
+    SemanticTokensFullRequest, SemanticTokensRefresh,
 };
 
 /// The workspace command behind the ▶ run code lens: arguments are
@@ -242,8 +242,8 @@ impl GlobalState {
                     Response::new_ok(id, serde_json::Value::Null)
                 }
                 Some(Err(message)) => {
-                    let _ = sender
-                        .send(show_message(lsp_types::MessageType::ERROR, message.clone()));
+                    let _ =
+                        sender.send(show_message(lsp_types::MessageType::ERROR, message.clone()));
                     Response::new_err(id, ErrorCode::RequestFailed as i32, message)
                 }
                 None => content_modified(id),
@@ -568,10 +568,7 @@ impl Snapshot {
 }
 
 impl Snapshot {
-    fn code_lenses(
-        &self,
-        params: lsp_types::CodeLensParams,
-    ) -> Option<Vec<lsp_types::CodeLens>> {
+    fn code_lenses(&self, params: lsp_types::CodeLensParams) -> Option<Vec<lsp_types::CodeLens>> {
         let uri = params.text_document.uri;
         let &file = self.files.by_uri.get(&uri)?;
         let line_index = self.analysis.line_index(file);
@@ -614,9 +611,7 @@ fn run_command(
     let (Some(uri), Some(entry)) = (uri.as_str(), entry.as_str()) else {
         return Err("must.run expects string arguments".to_owned());
     };
-    let parsed: lsp_types::Uri = uri
-        .parse()
-        .map_err(|_| format!("invalid uri `{uri}`"))?;
+    let parsed: lsp_types::Uri = uri.parse().map_err(|_| format!("invalid uri `{uri}`"))?;
     let &file = snapshot
         .files
         .by_uri
@@ -626,8 +621,10 @@ fn run_command(
     let text = snapshot.analysis.file_text(file);
     let mut output = Vec::new();
     let result = crate::runner::evaluate(text, uri, entry, &mut output);
-    let mut message = format!("{entry}
-");
+    let mut message = format!(
+        "{entry}
+"
+    );
     message.push_str(&String::from_utf8_lossy(&output));
     match result {
         Ok(Some(value)) => message.push_str(&format!("=> {value}")),

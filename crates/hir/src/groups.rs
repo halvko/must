@@ -170,12 +170,7 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
     let member_locs: Vec<ItemLoc> = members.iter().map(|&i| item_loc(db, ids[i])).collect();
     let in_group: FxHashMap<ItemLoc, Ty> = member_locs
         .iter()
-        .map(|loc| {
-            (
-                loc.clone(),
-                Ty::Infer(table.new_key(TyVarValue::Unknown)),
-            )
-        })
+        .map(|loc| (loc.clone(), Ty::Infer(table.new_key(TyVarValue::Unknown))))
         .collect();
 
     for (&member, loc) in members.iter().zip(&member_locs) {
@@ -183,11 +178,23 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
         let body = crate::body::body(db, item);
         let Some(root) = body.root else {
             // No initializer: nothing to infer from (parse errors cover it).
-            let mut ctx = InferCtx::new(db, body, crate::resolutions(db, item), &mut table, &in_group);
+            let mut ctx = InferCtx::new(
+                db,
+                body,
+                crate::resolutions(db, item),
+                &mut table,
+                &in_group,
+            );
             ctx.unify_public(&in_group[loc], &Ty::Error);
             continue;
         };
-        let mut ctx = InferCtx::new(db, body, crate::resolutions(db, item), &mut table, &in_group);
+        let mut ctx = InferCtx::new(
+            db,
+            body,
+            crate::resolutions(db, item),
+            &mut table,
+            &in_group,
+        );
         let root_ty = ctx.infer_expr(root, None);
         ctx.unify_public(&in_group[loc], &root_ty);
         // Per-expression results and diagnostics are the per-item `infer`

@@ -47,7 +47,8 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 fn fixture(name: &str, text: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!("must-dap-test-{name}-{}.must", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("must-dap-test-{name}-{}.must", std::process::id()));
     std::fs::write(&path, text).unwrap();
     path
 }
@@ -68,10 +69,7 @@ fn events<'a>(messages: &'a [Value], name: &str) -> Vec<&'a Value> {
 
 #[test]
 fn launch_session_runs_the_program() {
-    let program = fixture(
-        "hello",
-        r#"static main = fn { print("hello from dap"); };"#,
-    );
+    let program = fixture("hello", r#"static main = fn { print("hello from dap"); };"#);
     let messages = run_session(&[
         ("initialize", json!({ "adapterID": "must" })),
         (
@@ -115,8 +113,14 @@ fn launch_session_runs_the_program() {
     assert_eq!(events(&messages, "terminated").len(), 1);
 
     // seq numbering is strictly increasing.
-    let seqs: Vec<i64> = messages.iter().map(|m| m["seq"].as_i64().unwrap()).collect();
-    assert!(seqs.windows(2).all(|w| w[0] < w[1]), "seqs increase: {seqs:?}");
+    let seqs: Vec<i64> = messages
+        .iter()
+        .map(|m| m["seq"].as_i64().unwrap())
+        .collect();
+    assert!(
+        seqs.windows(2).all(|w| w[0] < w[1]),
+        "seqs increase: {seqs:?}"
+    );
 
     let _ = std::fs::remove_file(program);
 }
@@ -195,7 +199,10 @@ fn breakpoint_hit_inspect_and_resume() {
         ("variables", json!({ "variablesReference": 3 })),
         ("evaluate", json!({ "expression": "n", "frameId": 3 })),
         ("evaluate", json!({ "expression": "n + 1", "frameId": 3 })),
-        ("evaluate", json!({ "expression": "double(n) == 42", "frameId": 3 })),
+        (
+            "evaluate",
+            json!({ "expression": "double(n) == 42", "frameId": 3 }),
+        ),
         ("evaluate", json!({ "expression": "double(4)" })),
         ("next", json!({ "threadId": 1 })),
         ("variables", json!({ "variablesReference": 3 })),
@@ -276,10 +283,7 @@ fn column_breakpoints_distinguish_calls_on_one_line() {
         ),
         ("configurationDone", json!({})),
         ("stackTrace", json!({ "threadId": 1 })),
-        (
-            "next",
-            json!({ "threadId": 1, "granularity": "statement" }),
-        ),
+        ("next", json!({ "threadId": 1, "granularity": "statement" })),
         ("stackTrace", json!({ "threadId": 1 })),
         ("continue", json!({ "threadId": 1 })),
         ("disconnect", json!({})),
@@ -318,10 +322,7 @@ fn column_breakpoints_distinguish_calls_on_one_line() {
 
 #[test]
 fn stop_on_entry_stops_at_the_first_user_line() {
-    let program = fixture(
-        "entry",
-        "static main = fn {\n    print(\"hi\");\n};\n",
-    );
+    let program = fixture("entry", "static main = fn {\n    print(\"hi\");\n};\n");
     let messages = run_session(&[
         ("initialize", json!({})),
         (
@@ -370,7 +371,10 @@ fn conditional_breakpoints_stop_only_when_true() {
     let stopped = events(&messages, "stopped");
     assert_eq!(stopped.len(), 1, "exactly one stop: {stopped:?}");
     assert_eq!(stopped[0]["body"]["reason"], "breakpoint");
-    assert_eq!(responses_for(&messages, "evaluate")[0]["body"]["result"], "2");
+    assert_eq!(
+        responses_for(&messages, "evaluate")[0]["body"]["result"],
+        "2"
+    );
     assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
 
     let _ = std::fs::remove_file(program);
@@ -398,7 +402,10 @@ fn hit_conditions_skip_arrivals() {
 
     let stopped = events(&messages, "stopped");
     assert_eq!(stopped.len(), 1, "exactly one stop: {stopped:?}");
-    assert_eq!(responses_for(&messages, "evaluate")[0]["body"]["result"], "3");
+    assert_eq!(
+        responses_for(&messages, "evaluate")[0]["body"]["result"],
+        "3"
+    );
     assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
 
     let _ = std::fs::remove_file(program);
@@ -421,14 +428,24 @@ fn log_points_emit_without_stopping() {
         ("disconnect", json!({})),
     ]);
 
-    assert_eq!(events(&messages, "stopped").len(), 0, "log points don't stop");
+    assert_eq!(
+        events(&messages, "stopped").len(),
+        0,
+        "log points don't stop"
+    );
     let stdout: String = events(&messages, "output")
         .iter()
         .filter(|e| e["body"]["category"] == "stdout")
         .map(|e| e["body"]["output"].as_str().unwrap())
         .collect();
-    assert!(stdout.contains("n is 2, doubled 4\n"), "interpolated: {stdout}");
-    assert!(stdout.contains("n is 0, doubled 0\n"), "interpolated: {stdout}");
+    assert!(
+        stdout.contains("n is 2, doubled 4\n"),
+        "interpolated: {stdout}"
+    );
+    assert!(
+        stdout.contains("n is 0, doubled 0\n"),
+        "interpolated: {stdout}"
+    );
     assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
 
     let _ = std::fs::remove_file(program);
@@ -452,7 +469,12 @@ fn invalid_hit_conditions_unverify_the_breakpoint() {
     ]);
     let bp = &responses_for(&messages, "setBreakpoints")[0]["body"]["breakpoints"][0];
     assert_eq!(bp["verified"], false);
-    assert!(bp["message"].as_str().unwrap().contains("invalid hit condition"));
+    assert!(
+        bp["message"]
+            .as_str()
+            .unwrap()
+            .contains("invalid hit condition")
+    );
 
     let _ = std::fs::remove_file(program);
 }
