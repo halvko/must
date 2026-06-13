@@ -14,7 +14,7 @@ use rustc_hash::FxHashMap;
 use crate::body::{BindingId, Body, ExprData, ExprId, LiteralData, Stmt, body};
 use crate::scopes::{Builtin, Resolution, resolutions};
 use crate::ty::{Ty, TyVar, TyVarValue, lower_type_ref, signature, signature_needs_annotation};
-use crate::{ItemId, ItemLoc};
+use crate::{ItemId, ItemLoc, TypeRef};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InferenceResult {
@@ -104,15 +104,19 @@ pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
     let body = body(db, item);
     let mut table = InPlaceUnificationTable::new();
     let no_group = FxHashMap::default();
-    let mut ctx = InferCtx::new(db, body, resolutions(db, item), &mut table, &no_group);
+    let mut ctx;
 
     if let Some(root) = body.root {
         // Check the body against the item's annotation, if any.
-        let expected = crate::item_data(db, item)
+        let ty_ref = crate::item_data(db, item)
             .as_ref()
             .and_then(|it| it.type_ref.as_ref())
-            .map(lower_type_ref);
-        ctx.infer_expr(root, expected.as_ref());
+            .unwrap_or(&TypeRef::Hole);
+        let expected = lower_type_ref(ty_ref, &mut table);
+        ctx = InferCtx::new(db, body, resolutions(db, item), &mut table, &no_group);
+        ctx.infer_expr(root, &expected);
+    } else {
+        ctx = InferCtx::new(db, body, resolutions(db, item), &mut table, &no_group);
     }
 
     ctx.finish()
@@ -184,7 +188,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
 
     /// Infer `expr`; if `expected` is given, check against it (recording a
     /// diagnostic on mismatch and recovering with the expected type).
-    pub(crate) fn infer_expr(&mut self, expr: ExprId, expected: Option<&Ty>) -> Ty {
+    pub(crate) fn infer_expr(&mut self, expr: ExprId, expected: &Ty) -> Ty {
         let ty = match &self.body.exprs[expr] {
             ExprData::Missing => Ty::Error,
             ExprData::Literal(LiteralData::Int(_)) => Ty::Int,
@@ -228,7 +232,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 None => Ty::Error, // unresolved: already diagnosed by name resolution
             },
             ExprData::Call { callee, args } => {
-                let callee_ty = self.infer_expr(*callee, None);
+                let fresh = self.fresh_var();
+                let callee_ty = self.infer_expr(*callee, &fresh);
                 match self.resolve_shallow(&callee_ty) {
                     // The callee's type is still being inferred (an
                     // in-group signature, e.g. mutual recursion): calling
@@ -238,7 +243,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         let ret = self.fresh_var();
                         self.unify(&Ty::Infer(var), &Ty::fn_type(params.clone(), ret.clone()));
                         for (i, &arg) in args.iter().enumerate() {
-                            self.infer_expr(arg, Some(&params[i]));
+                            self.infer_expr(arg, &params[i]);
                         }
                         ret
                     }
@@ -253,14 +258,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 });
                         }
                         for (i, &arg) in args.iter().enumerate() {
-                            let param = f.params.get(i).cloned();
-                            self.infer_expr(arg, param.as_ref());
+                            // TODO: will this give a reasonable diagnostic?
+                            let param = f.params.get(i).cloned().unwrap_or(Ty::Error);
+                            self.infer_expr(arg, &param);
                         }
                         f.ret.clone()
                     }
                     Ty::Error => {
                         for &arg in args {
-                            self.infer_expr(arg, None);
+                            let arg_fresh = self.fresh_var();
+                            self.infer_expr(arg, &arg_fresh);
                         }
                         Ty::Error
                     }
@@ -269,7 +276,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     // no diagnostic to explain it.
                     Ty::Never => {
                         for &arg in args {
-                            self.infer_expr(arg, None);
+                            let arg_fresh = self.fresh_var();
+                            // TODO: If we cannot infer the type of something, but we can see it's
+                            // unreachable, it would be ok for it to be a warning rather than an
+                            // error
+                            self.infer_expr(arg, &arg_fresh);
                         }
                         Ty::Never
                     }
@@ -281,7 +292,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 ty: other,
                             });
                         for &arg in args {
-                            self.infer_expr(arg, None);
+                            let fresh_var = self.fresh_var();
+                            self.infer_expr(arg, &fresh_var);
                         }
                         Ty::Error
                     }
@@ -291,27 +303,30 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 use crate::body::BinOp::*;
                 match op {
                     Some(Add | Sub | Mul | Div) => {
-                        self.infer_expr(*lhs, Some(&Ty::Int));
-                        self.infer_expr(*rhs, Some(&Ty::Int));
+                        self.infer_expr(*lhs, &Ty::Int);
+                        self.infer_expr(*rhs, &Ty::Int);
                         Ty::Int
                     }
                     Some(Lt | Le | Gt | Ge) => {
-                        self.infer_expr(*lhs, Some(&Ty::Int));
-                        self.infer_expr(*rhs, Some(&Ty::Int));
+                        self.infer_expr(*lhs, &Ty::Int);
+                        self.infer_expr(*rhs, &Ty::Int);
                         Ty::Bool
                     }
                     // Equality works on any type; the operands just have to
                     // agree with each other.
                     Some(Eq | Ne) => {
-                        let lhs_ty = self.infer_expr(*lhs, None);
-                        self.infer_expr(*rhs, Some(&lhs_ty));
+                        let fresh = self.fresh_var();
+                        self.infer_expr(*lhs, &fresh);
+                        self.infer_expr(*rhs, &fresh);
                         Ty::Bool
                     }
                     // No operator token means broken source with its own
                     // parse error.
                     None => {
-                        self.infer_expr(*lhs, None);
-                        self.infer_expr(*rhs, None);
+                        let lhs_fresh = self.fresh_var();
+                        let rhs_fresh = self.fresh_var();
+                        self.infer_expr(*lhs, &lhs_fresh);
+                        self.infer_expr(*rhs, &rhs_fresh);
                         Ty::Error
                     }
                 }
@@ -321,30 +336,17 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 then_branch,
                 else_branch,
             } => {
-                self.infer_expr(*condition, Some(&Ty::Bool));
+                self.infer_expr(*condition, &Ty::Bool);
                 let Some(else_branch) = else_branch else {
                     // Without an `else`, the value when the condition is
                     // false is `()`, so the then-branch must be too.
-                    self.infer_expr(*then_branch, Some(&Ty::Unit));
-                    let ty = match expected {
-                        Some(expected) => self.check(expr, Ty::Unit, expected),
-                        None => Ty::Unit,
-                    };
+                    self.infer_expr(*then_branch, &Ty::Unit);
+                    let ty = self.check(expr, Ty::Unit, expected);
                     self.result.type_of_expr.insert(expr, ty.clone());
                     return ty;
                 };
-                // With an outer expectation, check each branch against it
-                // directly so mismatches point at the offending branch (and
-                // skip the re-check at the end).
-                if let Some(expected) = expected {
-                    self.infer_expr(*then_branch, Some(expected));
-                    self.infer_expr(*else_branch, Some(expected));
-                    let ty = expected.clone();
-                    self.result.type_of_expr.insert(expr, ty.clone());
-                    return ty;
-                }
-                let then_ty = self.infer_expr(*then_branch, None);
-                let else_ty = self.infer_expr(*else_branch, None);
+                let then_ty = self.infer_expr(*then_branch, expected);
+                let else_ty = self.infer_expr(*else_branch, expected);
                 // A diverging branch takes the other branch's type.
                 if matches!(self.resolve_shallow(&then_ty), Ty::Never) {
                     else_ty
@@ -362,18 +364,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             let declared = self.body.bindings[*binding]
                                 .type_ref
                                 .as_ref()
-                                .map(lower_type_ref);
-                            let ty = match declared {
-                                Some(declared) => {
-                                    self.infer_expr(*init, Some(&declared));
-                                    declared
-                                }
-                                None => self.infer_expr(*init, None),
-                            };
+                                .map(|it| lower_type_ref(it, self.table))
+                                .unwrap_or_else(|| self.fresh_var());
+                            let ty = self.infer_expr(*init, &declared);
                             self.result.type_of_binding.insert(*binding, ty);
                         }
                         Stmt::Expr(e) => {
-                            self.infer_expr(*e, None);
+                            let fresh_var = self.fresh_var();
+                            self.infer_expr(*e, &fresh_var);
                         }
                     }
                 }
@@ -397,7 +395,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     .iter()
                     .map(|&param| {
                         let ty = match &self.body.bindings[param].type_ref {
-                            Some(type_ref) => lower_type_ref(type_ref),
+                            Some(type_ref) => lower_type_ref(type_ref, self.table),
                             None => self.fresh_var(),
                         };
                         self.result.type_of_binding.insert(param, ty.clone());
@@ -405,18 +403,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     })
                     .collect();
                 let ret = match ret_type {
-                    Some(type_ref) => lower_type_ref(type_ref),
+                    Some(type_ref) => lower_type_ref(type_ref, self.table),
                     None => self.fresh_var(),
                 };
-                self.infer_expr(*fn_body, Some(&ret));
+                self.infer_expr(*fn_body, &ret);
                 Ty::fn_type(param_tys, ret)
             }
         };
 
-        let ty = match expected {
-            Some(expected) => self.check(expr, ty, expected),
-            None => ty,
-        };
+        let ty = self.check(expr, ty, expected);
         self.result.type_of_expr.insert(expr, ty.clone());
         ty
     }
@@ -425,10 +420,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// recover with the expected type (trust the annotation).
     fn check(&mut self, expr: ExprId, actual: Ty, expected: &Ty) -> Ty {
         // `!` coerces to anything — but only on the actual side.
-        if matches!(self.resolve_shallow(&actual), Ty::Never)
-            && !matches!(self.resolve_shallow(expected), Ty::Never)
-        {
-            return expected.clone();
+        if matches!(self.resolve_shallow(&actual), Ty::Never) {
+            match self.resolve_shallow(expected) {
+                Ty::Never => {}
+                Ty::Infer(_) => return actual,
+                _ => return expected.clone(),
+            }
         }
         if self.unify(&actual, expected) {
             actual

@@ -157,6 +157,10 @@ pub struct GroupSignatures {
 
 #[salsa::tracked(returns(ref))]
 pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures {
+    // TODO: figure out cross file inference - is it worth it? On one hand we don't want to
+    // disincentivize splitting code across files, but on the other we want to give a nice real-time
+    // experience. Maybe we want to support inference but give warnings where we had to do it cross
+    // file such we can add a quick fix to add the type?
     let file = group.file(db);
     let groups = inference_groups(db, file);
     let Some(members) = groups.groups.get(group.index(db) as usize) else {
@@ -195,7 +199,7 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
             &mut table,
             &in_group,
         );
-        let root_ty = ctx.infer_expr(root, None);
+        let root_ty = ctx.infer_expr(root, &in_group[loc]);
         ctx.unify_public(&in_group[loc], &root_ty);
         // Per-expression results and diagnostics are the per-item `infer`
         // query's business; only the signatures leave this query.

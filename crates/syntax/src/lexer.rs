@@ -54,6 +54,9 @@ fn next_token(rest: &str) -> (SyntaxKind, usize, Option<String>) {
         '\'' => scan_lifetime(rest),
         c if is_ident_start(c) => {
             let len = scan_while(rest, is_ident_continue);
+            if len == 1 && c == '_' {
+                return (HOLE, 1, None);
+            }
             let kind = SyntaxKind::from_keyword(&rest[..len]).unwrap_or(IDENT);
             (kind, len, None)
         }

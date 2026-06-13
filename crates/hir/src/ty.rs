@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use base_db::Db;
-use ena::unify::{NoError, UnifyKey, UnifyValue};
+use ena::unify::{InPlaceUnificationTable, NoError, UnifyKey, UnifyValue};
 
 use crate::ItemId;
 use crate::item_tree::TypeRef;
@@ -118,18 +118,56 @@ pub fn builtin_type_by_name(name: &str) -> Option<Ty> {
 
 /// Lower a syntactic type annotation. References are transparent for now
 /// (`&'static str` and `str` are the same type to inference).
-pub fn lower_type_ref(type_ref: &TypeRef) -> Ty {
-    match type_ref {
+pub(crate) fn lower_type_ref(value: &TypeRef, table: &mut InPlaceUnificationTable<TyVar>) -> Ty {
+    match value {
         TypeRef::Unit => Ty::Unit,
         TypeRef::Never => Ty::Never,
-        TypeRef::Ref(inner) => lower_type_ref(inner),
-        TypeRef::Fn { params, ret } => Ty::fn_type(
-            params.iter().map(lower_type_ref).collect(),
-            ret.as_deref().map(lower_type_ref).unwrap_or(Ty::Unit),
-        ),
-        TypeRef::Path(name) => builtin_type_by_name(name).unwrap_or(Ty::Error),
+        TypeRef::Fn { params, ret } => {
+            let params = params
+                .iter()
+                .map(|param_ty| lower_type_ref(param_ty, table))
+                .collect();
+
+            let ret = ret
+                .as_ref()
+                .map(|ret_ty| lower_type_ref(ret_ty, table))
+                .unwrap_or_else(|| Ty::Infer(table.new_key(TyVarValue::Unknown)));
+
+            Ty::fn_type(params, ret)
+        }
+        TypeRef::Ref(type_ref) => {
+            // TODO: once we introduce references this can't discard them any longer
+            lower_type_ref(&**type_ref, table)
+        }
+        TypeRef::Path(path) => builtin_type_by_name(path).unwrap_or(Ty::Error),
+        TypeRef::Hole => Ty::Infer(table.new_key(TyVarValue::Unknown)),
         TypeRef::Error => Ty::Error,
     }
+}
+
+fn try_lower_fully_typed(value: &TypeRef) -> Option<Ty> {
+    Some(match value {
+        TypeRef::Unit => Ty::Unit,
+        TypeRef::Never => Ty::Never,
+        TypeRef::Fn { params, ret } => {
+            let params = params
+                .iter()
+                .map(|param_ty| try_lower_fully_typed(param_ty))
+                .collect::<Option<Vec<_>>>()?;
+
+            let ret = try_lower_fully_typed(ret.as_ref()?)?;
+
+            Ty::fn_type(params, ret)
+        }
+        TypeRef::Ref(type_ref) => {
+            // TODO: once we introduce references this can't discard them any longer
+            return try_lower_fully_typed(&**type_ref);
+        }
+        TypeRef::Path(path) => builtin_type_by_name(path).unwrap_or(Ty::Error),
+        TypeRef::Hole => return None,
+        // Can happen on invalid syntax, e.g. `fn() -> {}()`
+        TypeRef::Error => Ty::Error,
+    })
 }
 
 /// The type other items see for `item`. An annotation is the whole answer
@@ -140,11 +178,12 @@ pub fn lower_type_ref(type_ref: &TypeRef) -> Ty {
 /// dependents re-run only when the *inferred* signature value changes.
 #[salsa::tracked]
 pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
-    if let Some(type_ref) = crate::item_data(db, item)
+    let lowered_ty = crate::item_data(db, item)
         .as_ref()
         .and_then(|it| it.type_ref.as_ref())
-    {
-        return lower_type_ref(type_ref);
+        .and_then(try_lower_fully_typed);
+    if let Some(lowered_ty) = lowered_ty {
+        return lowered_ty;
     }
     let Some(index) = crate::item_index(db, item) else {
         return Ty::Error;
