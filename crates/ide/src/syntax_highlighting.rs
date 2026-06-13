@@ -116,8 +116,8 @@ fn classify_ident(
             match *hir::resolutions(db, item).get(expr)? {
                 hir::Resolution::Local(binding) => {
                     let def = source_map.node_for_binding(binding)?.to_node(root);
-                    let is_param = def.kind() == PARAM
-                        || def.parent().is_some_and(|p| p.kind() == PARAM);
+                    let is_param =
+                        def.kind() == PARAM || def.parent().is_some_and(|p| p.kind() == PARAM);
                     let tag = if is_param {
                         HlTag::Parameter
                     } else {
@@ -179,7 +179,12 @@ fn push_line_split(acc: &mut Vec<HlRange>, token: &SyntaxToken, tag: HlTag, mods
     let base = token.text_range().start();
     let mut line_start = 0;
     for (newline, _) in text.match_indices('\n') {
-        let line_end = newline - if text[..newline].ends_with('\r') { 1 } else { 0 };
+        let line_end = newline
+            - if text[..newline].ends_with('\r') {
+                1
+            } else {
+                0
+            };
         if line_end > line_start {
             acc.push(HlRange {
                 range: TextRange::new(

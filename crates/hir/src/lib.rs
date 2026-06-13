@@ -65,7 +65,11 @@ impl ItemLoc {
 
     /// The name for messages; unnamed (broken) items render as `?`.
     pub fn display_name(&self) -> &str {
-        if self.name.is_empty() { "?" } else { &self.name }
+        if self.name.is_empty() {
+            "?"
+        } else {
+            &self.name
+        }
     }
 }
 

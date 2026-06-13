@@ -102,14 +102,9 @@ pub fn prepare(db: &RootDatabase, text: &str, path: &str, expr: &str) -> Result<
 
     // The program may be arbitrarily broken — that's the point — but the
     // *entry expression* must at least parse, or running it means nothing.
-    if let Some(err) = base_db::parse(db, file)
-        .errors()
-        .iter()
-        .find(|err| {
-            usize::from(err.range.start()) >= expr_start
-                && usize::from(err.range.end()) <= entry_end
-        })
-    {
+    if let Some(err) = base_db::parse(db, file).errors().iter().find(|err| {
+        usize::from(err.range.start()) >= expr_start && usize::from(err.range.end()) <= entry_end
+    }) {
         return Err(format!("error: invalid entry expression: {}", err.message));
     }
 
@@ -198,11 +193,7 @@ fn locate(
         return Some("entry expression".to_owned());
     }
     let line_col = LineIndex::new(file.text(db)).line_col(range.start());
-    Some(format!(
-        "{path}:{}:{}",
-        line_col.line + 1,
-        line_col.col + 1
-    ))
+    Some(format!("{path}:{}:{}", line_col.line + 1, line_col.col + 1))
 }
 
 #[cfg(test)]
@@ -339,9 +330,13 @@ static main = fn {
 
     #[test]
     fn entry_expression_must_parse() {
-        check("static main = fn {};", "main(", expect_test::expect![[r#"
+        check(
+            "static main = fn {};",
+            "main(",
+            expect_test::expect![[r#"
             error: invalid entry expression: expected `)`
-        "#]]);
+        "#]],
+        );
     }
 
     #[test]

@@ -229,7 +229,10 @@ fn hover_over_protocol() {
     let mut client = TestClient::start();
     let file = uri("file:///hover.must");
 
-    client.open(&file, "static main = fn {\n    let s = \"hello\";\n    print(s);\n}\n");
+    client.open(
+        &file,
+        "static main = fn {\n    let s = \"hello\";\n    print(s);\n}\n",
+    );
     client.next_diagnostics();
 
     // Hover `s` in `print(s)` on line 2.
@@ -259,15 +262,14 @@ fn quick_fix_wraps_fn_body_in_braces() {
     assert_eq!(diags.diagnostics.len(), 1);
     let diag_range = diags.diagnostics[0].range;
 
-    let response = client.request::<lsp_types::request::CodeActionRequest>(
-        lsp_types::CodeActionParams {
+    let response =
+        client.request::<lsp_types::request::CodeActionRequest>(lsp_types::CodeActionParams {
             text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
             range: diag_range,
             context: lsp_types::CodeActionContext::default(),
             work_done_progress_params: Default::default(),
             partial_result_params: Default::default(),
-        },
-    );
+        });
     let actions = response.expect("expected code actions");
     assert_eq!(actions.len(), 1);
     let lsp_types::CodeActionOrCommand::CodeAction(action) = &actions[0] else {
@@ -296,14 +298,17 @@ fn quick_fix_inserts_semicolon_from_cursor_on_anchor() {
     let mut client = TestClient::start();
     let file = uri("file:///semicolon.must");
 
-    client.open(&file, "static main = fn {\n    let a = \"x\"\n    print(a);\n}\n");
+    client.open(
+        &file,
+        "static main = fn {\n    let a = \"x\"\n    print(a);\n}\n",
+    );
     client.next_diagnostics();
 
     // The diagnostic anchors on the string's last character (columns
     // 14..15), so the Insert `;` fix is reachable from a cursor there —
     // no longer from anywhere else on the token. Here the last character.
-    let response = client.request::<lsp_types::request::CodeActionRequest>(
-        lsp_types::CodeActionParams {
+    let response =
+        client.request::<lsp_types::request::CodeActionRequest>(lsp_types::CodeActionParams {
             text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
             range: lsp_types::Range::new(
                 lsp_types::Position::new(1, 14),
@@ -312,8 +317,7 @@ fn quick_fix_inserts_semicolon_from_cursor_on_anchor() {
             context: lsp_types::CodeActionContext::default(),
             work_done_progress_params: Default::default(),
             partial_result_params: Default::default(),
-        },
-    );
+        });
     let actions = response.expect("expected code actions");
     assert_eq!(actions.len(), 1);
     let lsp_types::CodeActionOrCommand::CodeAction(action) = &actions[0] else {
@@ -353,8 +357,14 @@ fn duplicate_definition_links_to_the_first_one() {
     assert_eq!(related.len(), 1);
     assert_eq!(related[0].message, "first defined here");
     assert_eq!(related[0].location.uri, file);
-    assert_eq!(related[0].location.range.start, lsp_types::Position::new(0, 7));
-    assert_eq!(related[0].location.range.end, lsp_types::Position::new(0, 11));
+    assert_eq!(
+        related[0].location.range.start,
+        lsp_types::Position::new(0, 7)
+    );
+    assert_eq!(
+        related[0].location.range.end,
+        lsp_types::Position::new(0, 11)
+    );
 
     drop(client);
 }
@@ -381,10 +391,10 @@ fn semantic_tokens_over_protocol() {
     // modifiers: declaration = 1, static = 2.
     let expected = [
         // delta_line, delta_start, length, token_type, modifiers
-        (0, 0, 6, 3, 0),  // `static`
-        (0, 7, 1, 6, 3),  // `x`: variable, declaration|static
-        (0, 2, 1, 4, 0),  // `=`
-        (0, 2, 1, 2, 0),  // `1`
+        (0, 0, 6, 3, 0), // `static`
+        (0, 7, 1, 6, 3), // `x`: variable, declaration|static
+        (0, 2, 1, 4, 0), // `=`
+        (0, 2, 1, 2, 0), // `1`
     ];
     let actual: Vec<_> = tokens
         .data
@@ -539,8 +549,7 @@ fn early_semantic_tokens_pull_errors_retryably_then_succeeds_after_open() {
     client.open(&file, "static x = 1;");
     client.next_diagnostics();
 
-    let response =
-        client.request::<lsp_types::request::SemanticTokensFullRequest>(params);
+    let response = client.request::<lsp_types::request::SemanticTokensFullRequest>(params);
     let Some(lsp_types::SemanticTokensResult::Tokens(tokens)) = response else {
         panic!("expected full tokens, got {response:?}");
     };
@@ -565,9 +574,8 @@ fn semantic_tokens_survive_close_and_reopen() {
 
     client.open(&file, "static x = 1;");
     client.next_diagnostics();
-    let first = tokens(
-        client.request::<lsp_types::request::SemanticTokensFullRequest>(params.clone()),
-    );
+    let first =
+        tokens(client.request::<lsp_types::request::SemanticTokensFullRequest>(params.clone()));
     assert!(!first.is_empty());
 
     client.notify::<lsp_types::notification::DidCloseTextDocument>(
@@ -579,9 +587,7 @@ fn semantic_tokens_survive_close_and_reopen() {
 
     client.open(&file, "static x = 1;");
     client.next_diagnostics();
-    let second = tokens(
-        client.request::<lsp_types::request::SemanticTokensFullRequest>(params),
-    );
+    let second = tokens(client.request::<lsp_types::request::SemanticTokensFullRequest>(params));
     assert_eq!(first, second);
 
     drop(client);
