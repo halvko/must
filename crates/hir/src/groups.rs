@@ -2,14 +2,23 @@
 //!
 //! Items whose signatures inference must determine — no annotation at all,
 //! or a hole-bearing one (`_` is a partial contract: unconstrained exactly
-//! where it says `_`) — get their signatures from their own bodies. Items
-//! that reference each other on these terms must be inferred *together*
-//! (mutual recursion has no starting point), so they are partitioned into
-//! strongly connected components of their reference graph and each group is
+//! where it says `_`) — get their signatures from their own bodies. A
+//! signature is determined jointly with everything that constrains it — its
+//! own body, mutual recursion, and its callers' concrete uses — so items
+//! are partitioned into connected components of their reference relation,
+//! with every reference edge added in both directions (a caller constrains
+//! the callee as much as the callee constrains the caller). Each group is
 //! inferred in one unification context, with a shared signature variable
-//! per member. The SCC condensation is a DAG, so groups only ever ask for
-//! signatures of *other* groups (or of fully-typed items — which stay hard
-//! firewall edges): no query cycles.
+//! per member. The component condensation is a DAG, so groups only ever ask
+//! for signatures of *other* groups (or of fully-typed items — which stay
+//! hard firewall edges): no query cycles.
+//!
+//! Groups are currently scoped to a single file. Cross-file inference
+//! within a library is desirable (splitting code across files should not
+//! require extra annotations), but the incremental cost is an open
+//! question: cross-file groups would let edits in one file trigger
+//! re-inference in another, and how well salsa early-cutoff contains that
+//! depends on how large those groups grow.
 //!
 //! Language decision (recorded): items exported at the *library* boundary
 //! will require written contracts regardless — inference is for internal
@@ -83,9 +92,25 @@ pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
         })
         .collect();
 
+    // Add reverse edges so callers and callees form the same group. Without
+    // this, a higher-order function like `fn(f, a) { f(a) }` is inferred
+    // alone: its parameter types stay unconstrained and are erased to Error.
+    // With reverse edges the call site and the callee share a unification
+    // context, so the concrete argument types flow back into the callee.
+    let mut biedges = edges.clone();
+    for (from, succs) in edges.iter().enumerate() {
+        for &to in succs {
+            biedges[to].push(from);
+        }
+    }
+    for succs in &mut biedges {
+        succs.sort_unstable();
+        succs.dedup();
+    }
+
     // Tarjan over the group-inferrable subgraph.
     let mut state = Tarjan {
-        edges: &edges,
+        edges: &biedges,
         include: &group_inferrable,
         index: vec![None; edges.len()],
         low: vec![0; edges.len()],
@@ -184,6 +209,11 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
         .map(|loc| (loc.clone(), Ty::Infer(table.new_key(TyVarValue::Unknown))))
         .collect();
 
+    // One pass, in this order, no fixpoint: whichever body is processed
+    // first constrains the shared variables — its signature, another
+    // member's signature via a call, or an annotation hole — and that
+    // commitment wins; later members must agree with it (or poison below).
+    // So this processing order is load-bearing, not incidental.
     for (&member, loc) in members.iter().zip(&member_locs) {
         let item = ids[member];
         let body = crate::body::body(db, item);

@@ -500,6 +500,52 @@ static use_it: usize = fib(10);
 }
 
 #[test]
+fn caller_pins_callee_params() {
+    // Nothing in `apply`'s own body applies `f` or `a` to anything concrete:
+    // the concrete use `apply(double, 2)` pins them, which only works
+    // because the caller joined the callee's group (reverse reference
+    // edges). Forward edges alone would leave `apply`'s params `{error}`
+    // and ask for an annotation at this use. (`apply`'s own literal renders
+    // with `_`s either way: the per-item query never sees group tables.)
+    check_diagnostics(
+        r#"
+static double = fn (n) { n + n };
+static apply = fn (f, a) { f(a) };
+static main = fn { apply(double, 2) };
+"#,
+        expect![[r#""#]],
+    );
+    check_infer(
+        r#"
+static double = fn (n) { n + n };
+static apply = fn (f, a) { f(a) };
+static main = fn { apply(double, 2) };
+"#,
+        expect![[r#"
+            17..33 'fn (n) { n + n }': fn(usize) -> usize
+            21..22 'n': usize
+            24..33 '{ n + n }': usize
+            26..27 'n': usize
+            26..31 'n + n': usize
+            30..31 'n': usize
+            50..68 'fn (f, a) { f(a) }': fn(fn(_) -> _, _) -> _
+            54..55 'f': fn(_) -> _
+            57..58 'a': _
+            60..68 '{ f(a) }': _
+            62..63 'f': fn(_) -> _
+            62..66 'f(a)': _
+            64..65 'a': _
+            84..107 'fn { apply(double...': fn() -> usize
+            87..107 '{ apply(double, 2) }': usize
+            89..94 'apply': fn(fn(usize) -> usize, usize) -> usize
+            89..105 'apply(double, 2)': usize
+            95..101 'double': fn(usize) -> usize
+            103..104 '2': usize
+        "#]],
+    );
+}
+
+#[test]
 fn underdetermined_items_still_need_annotations() {
     // `id` is never called with anything concrete; monomorphic inference
     // can't pick a type, so the use-site annotation request remains.

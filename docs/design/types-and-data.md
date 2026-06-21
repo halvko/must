@@ -4,9 +4,8 @@
 
 - **T09** `==`/`!=` are builtin and permitted on any type; the checker only requires the
   operands to agree.
-- **T11** Inference is interprocedural: items that constrain each other form a binding
-  group solved in one unification context, so a signature is never peeked at before its
-  body is checked; an undetermined or contradictory member erases to `{error}`. A
+- **T11** Inference groups use bidirected edges, not pure SCCs, because higher-order
+  functions need their call sites in the same group to constrain type variables. A
   signature with no holes is a firewall: it is checked against what it declares, and `_`
   marks where inference is still asked for. There is no cross-file inference.
 
