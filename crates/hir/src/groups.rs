@@ -76,9 +76,25 @@ pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
         })
         .collect();
 
+    // Add reverse edges so callers and callees form the same group. Without
+    // this, a higher-order function like `fn(f, a) { f(a) }` is inferred
+    // alone: its parameter types stay unconstrained and are erased to Error.
+    // With reverse edges the call site and the callee share a unification
+    // context, so the concrete argument types flow back into the callee.
+    let mut biedges = edges.clone();
+    for (from, succs) in edges.iter().enumerate() {
+        for &to in succs {
+            biedges[to].push(from);
+        }
+    }
+    for succs in &mut biedges {
+        succs.sort_unstable();
+        succs.dedup();
+    }
+
     // Tarjan over the unannotated subgraph.
     let mut state = Tarjan {
-        edges: &edges,
+        edges: &biedges,
         include: &unannotated,
         index: vec![None; edges.len()],
         low: vec![0; edges.len()],
