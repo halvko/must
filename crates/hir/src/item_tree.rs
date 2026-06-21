@@ -85,10 +85,31 @@ pub fn item_tree(db: &dyn Db, file: SourceFile) -> ItemTree {
         .map(|item| ItemData {
             name: item.name().map(|n| n.text()).unwrap_or_default(),
             is_const: item.is_const(),
-            type_ref: TypeRef::from_opt_ast(item.ty()),
+            type_ref: TypeRef::from_opt_ast(item.ty())
+                .or_else(|| type_ref_from_fn_literal(item.body())),
         })
         .collect();
     ItemTree { items }
+}
+
+/// If `body` is a fn literal with all params typed and an explicit return type,
+/// synthesize a `TypeRef::Fn` so the item acts as a hard inference firewall
+/// without requiring a redundant item-level annotation.
+fn type_ref_from_fn_literal(body: Option<ast::Expr>) -> Option<TypeRef> {
+    let ast::Expr::FnLiteral(fn_lit) = body? else {
+        return None;
+    };
+    let params: Vec<TypeRef> = fn_lit
+        .param_list()?
+        .params()
+        .map(|p| Some(TypeRef::from_ast(p.ty()?)))
+        .collect::<Option<_>>()?;
+    let ret = fn_lit
+        .ret_type()
+        .and_then(|rt| rt.ty())
+        .map(|t| Box::new(TypeRef::from_ast(t)));
+    let type_ref = TypeRef::Fn { params, ret };
+    type_ref.is_fully_typed().then_some(type_ref)
 }
 
 /// The syntax node for `item`, looked up by (name, disambiguator). Range
