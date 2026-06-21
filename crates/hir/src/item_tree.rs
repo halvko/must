@@ -63,6 +63,18 @@ impl TypeRef {
     pub fn from_opt_ast(ty: Option<ast::Type>) -> Option<TypeRef> {
         ty.map(TypeRef::from_ast)
     }
+
+    pub fn is_fully_typed(&self) -> bool {
+        match self {
+            TypeRef::Hole => false,
+            TypeRef::Unit | TypeRef::Never | TypeRef::Path(_) | TypeRef::Error => true,
+            TypeRef::Fn { params, ret } => {
+                params.iter().all(TypeRef::is_fully_typed)
+                    && ret.as_ref().is_some_and(|r| r.is_fully_typed())
+            }
+            TypeRef::Ref(inner) => inner.is_fully_typed(),
+        }
+    }
 }
 
 #[salsa::tracked(returns(ref))]

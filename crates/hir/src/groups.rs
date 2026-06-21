@@ -1,17 +1,20 @@
 //! Interprocedural inference: binding groups.
 //!
-//! Unannotated items get their signatures from their own bodies. Items that
-//! reference each other without annotations must be inferred *together*
-//! (mutual recursion has no starting point), so the unannotated items of a
-//! file are partitioned into strongly connected components of their
-//! reference graph and each group is inferred in one unification context,
-//! with a shared signature variable per member. The SCC condensation is a
-//! DAG, so groups only ever ask for signatures of *other* groups (or of
-//! annotated items — which stay hard firewall edges): no query cycles.
+//! Not fully annotated items get their signatures from their own bodies. Items that reference each
+//! other without annotations must be inferred *together* (mutual recursion has no starting point),
+//! so the unannotated items of a file are partitioned into strongly connected components of their
+//! reference graph and each group is inferred in one unification context, with a shared signature
+//! variable per member. The SCC condensation is a DAG, so groups only ever ask for signatures of
+//! *other* groups (or of annotated items — which stay hard firewall edges): no query cycles.
 //!
-//! Language decision (recorded): once visibility exists, *exported* items
-//! will require written contracts regardless — inference is for private
-//! items, and today every item counts as private.
+//! Groups are currently scoped to a single file. Cross-file inference within a library is
+//! desirable (splitting code across files should not require extra annotations), but the
+//! incremental cost is an open question: cross-file groups would let edits in one file trigger
+//! re-inference in another, and how well salsa early-cutoff contains that depends on how large
+//! those groups grow.
+//!
+//! Language decision (recorded): items exported at the *library* boundary will require written
+//! contracts regardless — inference is for internal items. Today every item counts as internal.
 
 use base_db::{Db, SourceFile};
 use ena::unify::InPlaceUnificationTable;
@@ -43,7 +46,11 @@ pub struct InferenceGroups {
 pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
     let tree = item_tree(db, file);
     let ids = file_item_ids(db, file);
-    let unannotated: Vec<bool> = tree.items.iter().map(|it| it.type_ref.is_none()).collect();
+    let unannotated: Vec<bool> = tree
+        .items
+        .iter()
+        .map(|it| it.type_ref.as_ref().map_or(true, |tr| !tr.is_fully_typed()))
+        .collect();
 
     // Item identity → index, the same (name, disambiguator) scheme ids use.
     let mut index_of: FxHashMap<(&str, u32), usize> = FxHashMap::default();
