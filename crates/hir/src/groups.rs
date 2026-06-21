@@ -1,17 +1,19 @@
 //! Interprocedural inference: binding groups.
 //!
-//! Items whose signatures inference must determine — no annotation at all,
-//! or a hole-bearing one (`_` is a partial contract: unconstrained exactly
-//! where it says `_`) — get their signatures from their own bodies. A
-//! signature is determined jointly with everything that constrains it — its
-//! own body, mutual recursion, and its callers' concrete uses — so items
-//! are partitioned into connected components of their reference relation,
-//! with every reference edge added in both directions (a caller constrains
-//! the callee as much as the callee constrains the caller). Each group is
-//! inferred in one unification context, with a shared signature variable
-//! per member. The component condensation is a DAG, so groups only ever ask
-//! for signatures of *other* groups (or of fully-typed items — which stay
-//! hard firewall edges): no query cycles.
+//! Items whose signatures inference must determine — no contract at all
+//! (neither a written annotation nor one synthesized from a self-sufficient
+//! fn-literal body — see [`crate::item_tree`]), or a hole-bearing one (`_`
+//! is a partial contract: unconstrained exactly where it says `_`) — get
+//! their signatures from their own bodies. A signature is determined
+//! jointly with everything that constrains it — its own body, mutual
+//! recursion, and its callers' concrete uses — so items are partitioned
+//! into connected components of their reference relation, with every
+//! reference edge added in both directions (a caller constrains the callee
+//! as much as the callee constrains the caller). Each group is inferred in
+//! one unification context, with a shared signature variable per member.
+//! The component condensation is a DAG, so groups only ever ask for
+//! signatures of *other* groups (or of fully-typed items — which stay hard
+//! firewall edges): no query cycles.
 //!
 //! Groups are currently scoped to a single file. Cross-file inference
 //! within a library is desirable (splitting code across files should not

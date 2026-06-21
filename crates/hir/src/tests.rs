@@ -294,6 +294,66 @@ fn firewall_body_edit_does_not_reinfer_other_items() {
     );
 }
 
+/// A fn-literal body that fully types itself (every param and an explicit
+/// return) synthesizes the item's contract without a written annotation —
+/// the item is a hard firewall edge and stays out of its caller's binding
+/// group: editing its body must not re-run the shared group inference.
+#[test]
+fn self_sufficient_fn_literal_body_firewalls_its_caller() {
+    use salsa::Setter as _;
+    use std::sync::{Arc, Mutex};
+
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let log_handle = Arc::clone(&log);
+    let mut db = RootDatabase::with_event_callback(Box::new(move |event| {
+        if let salsa::EventKind::WillExecute { database_key } = event.kind {
+            log_handle.lock().unwrap().push(format!("{database_key:?}"));
+        }
+    }));
+
+    let text_v1 = "static a = fn () -> usize { 1 };\n\
+                   static b = fn { a() };\n";
+    // Only `a`'s body changes; the literal's written signature is identical,
+    // so the synthesized contract compares equal and backdates.
+    let text_v2 = "static a = fn () -> usize { 1 + 1 };\n\
+                   static b = fn { a() };\n";
+
+    let file = SourceFile::new(&db, "test.must".to_owned(), text_v1.to_owned());
+    for &item in crate::file_item_ids(&db, file) {
+        crate::infer::infer(&db, item);
+    }
+    let executed_infers = |log: &Mutex<Vec<String>>| {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.contains("infer"))
+            .count()
+    };
+    assert!(
+        executed_infers(&log) >= 2,
+        "both items inferred initially; executed: {:?}",
+        log.lock().unwrap()
+    );
+
+    log.lock().unwrap().clear();
+    file.set_text(&mut db).to(text_v2.to_owned());
+    for &item in crate::file_item_ids(&db, file) {
+        crate::infer::infer(&db, item);
+    }
+    let log = log.lock().unwrap();
+    // Without the synthesized contract, `a` and `b` share a binding group
+    // and editing `a`'s body re-runs `infer_group`.
+    assert!(
+        !log.iter().any(|entry| entry.contains("infer_group")),
+        "a self-sufficient item must not share its caller's group: {log:#?}"
+    );
+    assert_eq!(
+        log.iter().filter(|entry| entry.contains("infer")).count(),
+        1,
+        "only the edited item may re-infer; executed: {log:#?}"
+    );
+}
+
 /// `ItemLoc` carries name+disambiguator, not a positional index — so
 /// inserting an unrelated item at the top of the file must not re-run
 /// name resolution or inference of the items below it.

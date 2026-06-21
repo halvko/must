@@ -5,9 +5,10 @@
 - **T09** `==`/`!=` are builtin and permitted on any type; the checker only requires the
   operands to agree.
 - **T11** Inference groups use bidirected edges, not pure SCCs, because higher-order
-  functions need their call sites in the same group to constrain type variables. A
-  signature with no holes is a firewall: it is checked against what it declares, and `_`
-  marks where inference is still asked for. There is no cross-file inference.
+  functions need their call sites in the same group to constrain type variables.
+  Fully-typed items are firewall items, checked once against their own contract and never
+  joining a group; `_` marks where inference is still asked for. There is no cross-file
+  inference.
 
 ## Discarded
 

@@ -89,7 +89,7 @@ pub fn item_index(db: &dyn Db, item: ItemId<'_>) -> Option<usize> {
         .position(|&it| it == item)
 }
 
-/// The item-tree entry for `item` (its annotation, constness, name).
+/// The item-tree entry for `item` (its contract, constness, name).
 /// Tracked so that consumers (`signature`, `infer`) depend on this item's
 /// *entry* rather than on the whole positional item list — inserting an
 /// unrelated item above re-executes only this cheap lookup, and its

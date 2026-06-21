@@ -166,14 +166,16 @@ pub(crate) fn is_fully_typed(value: &TypeRef) -> bool {
     }
 }
 
-/// The type other items see for `item`. A fully-typed annotation is the
-/// whole answer (a hard firewall edge: body edits never reach dependents).
-/// Anything less — no annotation, or one with holes — comes from the item's
-/// binding group: its own body, inferred together with everything grouped
-/// with it (mutual recursion and callers alike — see [`crate::groups`]),
-/// where holes join in as unconstrained variables the bodies fill in. The
-/// firewall is then salsa early-cutoff: dependents re-run only when the
-/// *inferred* signature value changes.
+/// The type other items see for `item`. A fully-typed contract is the
+/// whole answer (a hard firewall edge: body edits never reach dependents) —
+/// written as an annotation, or synthesized from a self-sufficient
+/// fn-literal body (see [`crate::item_tree`]). Anything less — no contract,
+/// or one with holes — comes from the item's binding group: its own body,
+/// inferred together with everything grouped with it (mutual recursion and
+/// callers alike — see [`crate::groups`]), where holes join in as
+/// unconstrained variables the bodies fill in. The firewall is then salsa
+/// early-cutoff: dependents re-run only when the *inferred* signature value
+/// changes.
 #[salsa::tracked]
 pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
     if let Some(type_ref) = crate::item_data(db, item)
