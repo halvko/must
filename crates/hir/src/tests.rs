@@ -572,7 +572,7 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            67..76: type mismatch: expected `usize`, found `str`
+            69..74: type mismatch: expected `usize`, found `str`
         "#]],
     );
 }

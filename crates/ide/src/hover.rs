@@ -50,13 +50,7 @@ pub(crate) fn hover(
             .parent()
             .is_some_and(|p| p.kind() == SyntaxKind::STATIC_ITEM)
         {
-            // The item's own name: the type of its initializer is more
-            // precise than the (possibly shallow) signature.
-            let (body, _) = hir::body_with_source_map(db, item);
-            let ty = body
-                .root
-                .and_then(|root| hir::infer::infer(db, item).type_of_expr.get(root).cloned())
-                .unwrap_or(hir::Ty::Error);
+            let ty = hir::signature(db, item);
             let value = const_display(db, item);
             (name.text(), ty, name.syntax().text_range(), value)
         } else {

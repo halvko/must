@@ -129,6 +129,46 @@ static main = fn { f$0(1); };
 }
 
 #[test]
+fn hover_higher_order_definition_shows_fully_inferred_type() {
+    check_hover(
+        r#"
+static double = fn(n) {
+    n + n
+}
+
+static high$0er_order = fn(f, a) -> usize {
+    f(a)
+}
+
+static main = fn() {
+    higher_order(double, 10);
+}
+"#,
+        "```must\nhigher_order: fn(fn(usize) -> usize, usize) -> usize\n```",
+    );
+}
+
+#[test]
+fn hover_higher_order_call_shows_fully_inferred_type() {
+    check_hover(
+        r#"
+static double = fn(n) {
+    n + n
+}
+
+static higher_order = fn(f, a) -> usize {
+    f(a)
+}
+
+static main = fn() {
+    high$0er_order(double, 10);
+}
+"#,
+        "```must\nhigher_order: fn(fn(usize) -> usize, usize) -> usize\n```",
+    );
+}
+
+#[test]
 fn non_block_fn_body_diagnostic_carries_wrap_fix() {
     let (analysis, file, _pos) = fixture("static f = fn 42$0;");
     let diagnostics = analysis.diagnostics(file);
