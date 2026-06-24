@@ -43,7 +43,8 @@ pub(crate) fn hover(
             _ => None,
         };
         (name_ref.text(), ty, name_ref.syntax().text_range(), value)
-    } else if let Some(name) = ast::Name::cast(parent) {
+    } else {
+        let name = ast::Name::cast(parent)?;
         let item = *hir::file_item_ids(db, file).get(item_index(name.syntax())?)?;
         if name
             .syntax()
@@ -63,8 +64,6 @@ pub(crate) fn hover(
                 .clone();
             (name.text(), ty, name.syntax().text_range(), None)
         }
-    } else {
-        return None;
     };
 
     let value = value.map(|v| format!(" = {v}")).unwrap_or_default();

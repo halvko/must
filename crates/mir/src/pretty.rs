@@ -82,11 +82,7 @@ fn render_terminator(kind: &TerminatorKind) -> String {
             dest,
             target,
         } => {
-            let args = args
-                .iter()
-                .map(|a| operand(a))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let args = args.iter().map(operand).collect::<Vec<_>>().join(", ");
             let target = match target {
                 Some(target) => block(*target),
                 None => "!".to_owned(),

@@ -159,7 +159,7 @@ fn type_mismatch_on_annotation() {
     check_diagnostics(
         r#"static x: usize = "hello";"#,
         expect![[r#"
-            18..25: type mismatch: expected `usize`, found `str`
+            18..25: type mismatch: expected `usize`, found `str` (expected `usize` because of this annotation at 10..15)
         "#]],
     );
 }
@@ -169,7 +169,7 @@ fn type_mismatch_points_at_block_tail() {
     check_diagnostics(
         r#"static f = fn () -> usize { let s = "x"; s };"#,
         expect![[r#"
-            41..42: type mismatch: expected `usize`, found `str`
+            41..42: type mismatch: expected `usize`, found `str` (expected `usize` because of this return type at 17..25)
         "#]],
     );
 }
@@ -196,7 +196,7 @@ static main = fn {
 }
 "#,
         expect![[r#"
-            64..71: expected 1 argument(s), found 2
+            64..71: expected 1 argument(s), found 2 (`f` is defined here at 8..9)
             77..81: expression of type `usize` is not callable
         "#]],
     );
@@ -207,7 +207,7 @@ fn binexpr_operands_must_be_int() {
     check_diagnostics(
         r#"static x = 1 + "two";"#,
         expect![[r#"
-            15..20: type mismatch: expected `usize`, found `str`
+            15..20: type mismatch: expected `usize`, found `str` (`+` requires `usize` operands at 13..14)
         "#]],
     );
 }
@@ -827,7 +827,166 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            69..74: type mismatch: expected `usize`, found `str`
+            69..74: `if` branches have incompatible types: `usize` vs `str` (this branch has type `usize` at 58..59)
+        "#]],
+    );
+}
+
+#[test]
+fn annotated_let_blames_branch_not_whole_if() {
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> () {
+    let x: str = if n == 0 { 0 } else { "" };
+    print(x);
+}
+"#,
+        expect![[r#"
+            63..64: type mismatch: expected `str`, found `usize` (expected `str` because of this annotation at 45..48)
+        "#]],
+    );
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> () {
+    let x: usize = if n == 0 { 0 } else { "" };
+    print("");
+}
+"#,
+        expect![[r#"
+            76..78: type mismatch: expected `usize`, found `str` (expected `usize` because of this annotation at 45..50)
+        "#]],
+    );
+}
+
+#[test]
+fn if_result_constrained_by_use_blames_branch() {
+    // Then branch is the culprit — squiggle on the literal, hint at print call.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> () {
+    let x = if n == 0 { 0 } else { "" };
+    print(x);
+}
+"#,
+        expect![[r#"
+            58..59: type mismatch: expected `str`, found `usize` (this call requires `str` at 79..84) (this argument needs to be `str` at 85..86)
+        "#]],
+    );
+    // Else branch is the culprit — squiggle on the literal, hint at print call.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> () {
+    let x = if n == 0 { "" } else { 0 };
+    print(x);
+}
+"#,
+        expect![[r#"
+            70..71: type mismatch: expected `str`, found `usize` (this call requires `str` at 79..84) (this argument needs to be `str` at 85..86)
+        "#]],
+    );
+}
+
+#[test]
+fn nested_if_blame_propagates_to_innermost_culprit() {
+    // The wrong `0` is inside a nested if; blame reaches it rather than
+    // stopping at the outer else branch, and the hints cite *every* branch
+    // that voted `str` (inner and outer) plus the call that demanded it.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> () {
+    let x = if n == 0 { "" } else { if n == 0 { "" } else { 0 } };
+    print(x);
+}
+"#,
+        expect![[r#"
+            94..95: type mismatch: expected `str`, found `usize` (this call requires `str` at 105..110) (this argument needs to be `str` at 111..112)
+        "#]],
+    );
+}
+
+#[test]
+fn every_offending_branch_gets_its_own_squiggle_not_the_whole_if() {
+    // Two branches are wrong (`""` in both nesting levels), one is right
+    // (`0`). Each culprit gets its own squiggle; the outer `if` as a whole
+    // stays clean — it isn't wrong, its branches are.
+    check_diagnostics(
+        r#"
+static constrainer = fn (s: str, u: usize) {}
+
+static f = fn (n: usize) -> () {
+    let x = if n == 0 { "" } else { if n == 0 { "" } else { 0 } };
+    constrainer("", x);
+}
+"#,
+        expect![[r#"
+            105..107: type mismatch: expected `usize`, found `str` (this call requires `usize` at 152..163) (this argument needs to be `usize` at 168..169)
+            129..131: type mismatch: expected `usize`, found `str` (this call requires `usize` at 152..163) (this argument needs to be `usize` at 168..169)
+        "#]],
+    );
+}
+
+#[test]
+fn unanimous_branches_against_call_axiom_blame_the_whole_construct() {
+    // Every branch produces `str`, so no single branch is the culprit: the
+    // construct as a whole conflicts with the call's requirement. Hints
+    // point at the call and the argument the requirement travels through.
+    check_diagnostics(
+        r#"
+static constrainer = fn (s: str, u: usize) {}
+
+static f = fn (n: usize) -> () {
+    let x = if n == 0 { "" } else { "" };
+    constrainer("", x);
+}
+"#,
+        expect![[r#"
+            93..121: every branch produces `str`, but `usize` is needed (this call requires `usize` at 127..138) (this argument needs to be `usize` at 143..144)
+        "#]],
+    );
+}
+
+#[test]
+fn plurality_of_branches_decides_without_any_axiom() {
+    // No annotation and no use constrains `x`: the branches vote, the
+    // `str` plurality wins, and the odd one out gets the squiggle with
+    // every winning branch as a hint.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> () {
+    let x = if n == 0 { "" } else { if n == 1 { 1 } else { "" } };
+    print("done");
+}
+"#,
+        expect![[r#"
+            82..83: type mismatch: expected `str`, found `usize` (this branch has type `str` at 93..95) (this branch has type `str` at 58..60)
+        "#]],
+    );
+}
+
+#[test]
+fn agreeing_branches_against_return_annotation_get_one_diagnostic() {
+    // Both branches say str; the return annotation says usize. One
+    // diagnostic on the whole `if`, not a squiggle per branch.
+    check_diagnostics(
+        r#"static f = fn (n: usize) -> usize { if n == 0 { "a" } else { "b" } };"#,
+        expect![[r#"
+            36..66: every branch produces `str`, but `usize` is needed (expected `usize` because of this return type at 25..33)
+        "#]],
+    );
+}
+
+#[test]
+fn group_member_signature_not_overridden_by_use() {
+    // `g` and `main` are unannotated, so they infer as one group. `g`'s
+    // branches unanimously say usize; the `print` in `main` must not flip
+    // `g`'s signature to `str` — the mismatch belongs at the call site.
+    check_diagnostics(
+        r#"
+static g = fn (c: bool) { if c { 1 } else { 2 } };
+static main = fn { print(g(true)); };
+"#,
+        expect![[r#"
+            77..84: type mismatch: expected `str`, found `usize`
         "#]],
     );
 }
@@ -837,7 +996,7 @@ fn if_condition_must_be_bool() {
     check_diagnostics(
         r#"static f = fn (n: usize) -> () { if n { print("hi"); } };"#,
         expect![[r#"
-            36..37: type mismatch: expected `bool`, found `usize`
+            36..37: type mismatch: expected `bool`, found `usize` (this `if` requires a `bool` condition at 33..35)
         "#]],
     );
 }
@@ -847,8 +1006,8 @@ fn if_without_else_is_unit() {
     check_diagnostics(
         r#"static f = fn (n: usize) -> usize { if n > 0 { n } };"#,
         expect![[r#"
-            36..50: type mismatch: expected `usize`, found `()`
-            47..48: type mismatch: expected `()`, found `usize`
+            36..50: type mismatch: expected `usize`, found `()` (expected `usize` because of this return type at 25..33)
+            47..48: type mismatch: expected `()`, found `usize` (this `if` has no `else`, so its value is `()` at 36..38)
         "#]],
     );
 }
@@ -869,13 +1028,13 @@ fn diverging_if_branch_takes_the_other_branches_type() {
             39..40 'n': usize
             39..45 'n == 0': bool
             44..45 '0': usize
-            46..60 '{ panic("a") }': usize
+            46..60 '{ panic("a") }': !
             48..53 'panic': fn(str) -> !
-            48..58 'panic("a")': usize
+            48..58 'panic("a")': !
             54..57 '"a"': str
-            66..80 '{ panic("b") }': usize
+            66..80 '{ panic("b") }': !
             68..73 'panic': fn(str) -> !
-            68..78 'panic("b")': usize
+            68..78 'panic("b")': !
             74..77 '"b"': str
         "#]],
     );
@@ -886,7 +1045,7 @@ fn equality_operands_must_agree() {
     check_diagnostics(
         r#"static x: bool = 1 == "one";"#,
         expect![[r#"
-            22..27: type mismatch: expected `usize`, found `str`
+            22..27: type mismatch: expected `usize`, found `str` (this operand has type `usize` at 17..18)
         "#]],
     );
 }

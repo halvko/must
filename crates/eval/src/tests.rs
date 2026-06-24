@@ -242,6 +242,37 @@ static main = fn {
 }
 
 #[test]
+fn only_the_evaluated_culprit_branch_traps() {
+    // Both string branches carry type-error traps, but the `0` path is
+    // fine: with n != 0 neither wrong branch is reached, so the partial
+    // program runs to completion.
+    let program = r#"
+static constrainer = fn (s: str, u: usize) {}
+
+static f = fn (n: usize) -> () {
+    let x = if n == 0 { "" } else { if n == 0 { "" } else { 0 } };
+    constrainer("", x);
+}
+"#;
+    check_run(
+        program,
+        "f(1)",
+        expect![[r#"
+            => ()
+        "#]],
+    );
+    // With n == 0 the outer wrong branch is evaluated and traps with
+    // exactly the diagnostic the editor shows.
+    check_run(
+        program,
+        "f(0)",
+        expect![[r#"
+            error[Trap]: type mismatch: expected `usize`, found `str`
+        "#]],
+    );
+}
+
+#[test]
 fn run_if_else_chain() {
     check_run(
         r#"

@@ -683,6 +683,9 @@ impl Snapshot {
             // its own URI and line index. An edit whose file the client
             // doesn't have open drops the whole action — applying half a
             // fix is worse than offering none.
+            // Uri-keyed maps are the shape the LSP protocol mandates; the
+            // interior mutability clippy worries about is never exercised.
+            #[allow(clippy::mutable_key_type)]
             let mut changes: HashMap<lsp_types::Uri, Vec<lsp_types::TextEdit>> = HashMap::new();
             let mut all_resolved = true;
             for file_edit in &fix.edits {
@@ -832,7 +835,7 @@ fn run_command(
     message.push_str(&String::from_utf8_lossy(&output));
     match result {
         Ok(Some(value)) => message.push_str(&format!("=> {value}")),
-        Ok(None) => message.push_str("✓"),
+        Ok(None) => message.push('✓'),
         Err(rendered) => {
             message.push_str(&rendered);
             return Err(truncate(message));
@@ -850,7 +853,7 @@ fn truncate(mut message: String) -> String {
             end -= 1;
         }
         message.truncate(end);
-        message.push_str("…");
+        message.push('…');
     }
     message
 }

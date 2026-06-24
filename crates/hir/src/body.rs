@@ -85,6 +85,8 @@ pub struct BodySourceMap {
     expr_map_back: ArenaMap<ExprId, SyntaxNodePtr>,
     binding_map: FxHashMap<SyntaxNodePtr, BindingId>,
     binding_map_back: ArenaMap<BindingId, SyntaxNodePtr>,
+    /// Maps a binding to the syntax node of its type annotation, when present.
+    binding_annotation_back: ArenaMap<BindingId, SyntaxNodePtr>,
 }
 
 impl BodySourceMap {
@@ -99,6 +101,9 @@ impl BodySourceMap {
     }
     pub fn node_for_binding(&self, binding: BindingId) -> Option<SyntaxNodePtr> {
         self.binding_map_back.get(binding).copied()
+    }
+    pub fn annotation_for_binding(&self, binding: BindingId) -> Option<SyntaxNodePtr> {
+        self.binding_annotation_back.get(binding).copied()
     }
 }
 
@@ -245,6 +250,11 @@ impl LowerCtx {
                     let init = self.lower_opt_expr(it.initializer());
                     let type_ref = TypeRef::from_opt_ast(it.ty());
                     let binding = self.alloc_binding(it.name(), type_ref, it.syntax());
+                    if let Some(ty) = it.ty() {
+                        self.source_map
+                            .binding_annotation_back
+                            .insert(binding, SyntaxNodePtr::new(ty.syntax()));
+                    }
                     Stmt::Let { binding, init }
                 }
                 ast::Stmt::ExprStmt(it) => Stmt::Expr(self.lower_opt_expr(it.expr())),

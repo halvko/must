@@ -62,7 +62,8 @@ impl LowerCtx<'_> {
     fn seed_traps(&mut self) {
         for diag in &self.infer.diagnostics {
             match diag {
-                InferenceDiagnostic::TypeMismatch { expr, .. } => {
+                InferenceDiagnostic::TypeMismatch { expr, .. }
+                | InferenceDiagnostic::AllBranchesMismatch { expr, .. } => {
                     self.value_traps.insert(*expr, diag.message());
                 }
                 InferenceDiagnostic::ArgCountMismatch { expr, .. } => {
@@ -78,6 +79,9 @@ impl LowerCtx<'_> {
                     if let Some(call) = call {
                         self.call_traps.insert(call, diag.message());
                     }
+                }
+                InferenceDiagnostic::IfBranchMismatch { else_expr, .. } => {
+                    self.value_traps.insert(*else_expr, diag.message());
                 }
                 // Handled where the name is lowered, which also covers
                 // signatures broken by written-but-wrong annotations.

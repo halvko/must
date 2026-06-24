@@ -366,3 +366,127 @@ fn a_closed_file_analyzes_again_on_the_same_handle() {
     host.set_file_text(file, "static a = 1;".to_owned());
     assert_eq!(host.snapshot().diagnostics(file), vec![]);
 }
+
+#[test]
+fn if_branch_mismatch_hint_points_to_other_branch() {
+    let src = r#"
+static f = fn (n: usize) -> () {
+    let x = if n == 0 { 1 } else { "one" };
+    print("done");
+}
+"#;
+    let (analysis, file, _pos) = fixture(&format!("{src}$0"));
+    let diagnostics = analysis.diagnostics(file);
+    let mismatch = diagnostics
+        .iter()
+        .find(|d| d.severity == crate::Severity::Error && d.message.contains("incompatible types"))
+        .expect("expected an incompatible-types diagnostic");
+    assert_eq!(mismatch.related.len(), 1);
+    assert_eq!(mismatch.related[0].message, "this branch has type `usize`");
+    // The hint points at the value-producing tail expression `1`, not the
+    // whole `{ 1 }` block.
+    let hint_text = &src[mismatch.related[0].range];
+    assert_eq!(hint_text, "1");
+}
+
+#[test]
+fn related_locations_get_companion_hint_diagnostics() {
+    // Every related location also becomes its own hint-severity diagnostic
+    // that spells out the connection and links back to the error — editors
+    // that render related information as bare underlines (Zed) then explain
+    // the underline on hover.
+    let src = r#"
+static f = fn (n: usize) -> () {
+    let x = if n == 0 { 0 } else { "" };
+    print(x);
+}
+"#;
+    let (analysis, file, _pos) = fixture(&format!("{src}$0"));
+    let diagnostics = analysis.diagnostics(file);
+    let error = diagnostics
+        .iter()
+        .find(|d| d.severity == crate::Severity::Error)
+        .expect("expected the type mismatch");
+    assert_eq!(&src[error.range], "0");
+    let hints: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::Severity::Info)
+        .collect();
+    assert_eq!(hints.len(), 2);
+    assert_eq!(&src[hints[0].range], "print");
+    assert_eq!(
+        hints[0].message,
+        "this call requires `str` — causes the error on line 3: \
+         type mismatch: expected `str`, found `usize`"
+    );
+    assert_eq!(&src[hints[1].range], "x");
+    assert_eq!(
+        hints[1].message,
+        "this argument needs to be `str` — causes the error on line 3: \
+         type mismatch: expected `str`, found `usize`"
+    );
+    for hint in hints {
+        assert_eq!(hint.related.len(), 1);
+        assert_eq!(hint.related[0].message, "the error reported here");
+        assert_eq!(hint.related[0].range, error.range);
+    }
+}
+
+#[test]
+fn let_annotation_mismatch_hints_at_annotation() {
+    let src = r#"
+static f = fn (n: usize) -> () {
+    let x: str = 42;
+    print("done");
+}
+"#;
+    let (analysis, file, _pos) = fixture(&format!("{src}$0"));
+    let diagnostics = analysis.diagnostics(file);
+    let mismatch = diagnostics
+        .iter()
+        .find(|d| d.severity == crate::Severity::Error && d.message.contains("type mismatch"))
+        .expect("expected a type mismatch diagnostic");
+    assert_eq!(mismatch.related.len(), 1);
+    assert_eq!(
+        mismatch.related[0].message,
+        "expected `str` because of this annotation"
+    );
+    let hint_text = &src[mismatch.related[0].range];
+    assert_eq!(hint_text, "str");
+}
+
+#[test]
+fn let_annotation_mismatch_on_agreeing_if_branches_blames_annotation_not_then_branch() {
+    // Branches agree (both usize) but the annotation says str. Must produce
+    // exactly one every-branch diagnostic on the if-expression pointing at
+    // the annotation, not a spurious IfBranchMismatch blaming the then-branch.
+    let src = r#"
+static f = fn (n: usize) -> () {
+    let x: str = if n == 0 { 1 } else { 0 };
+    print("done");
+}
+"#;
+    let (analysis, file, _pos) = fixture(&format!("{src}$0"));
+    let diagnostics = analysis.diagnostics(file);
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| !d.message.contains("incompatible types")),
+        "got a spurious IfBranchMismatch: {diagnostics:?}"
+    );
+    let mismatch = diagnostics
+        .iter()
+        .find(|d| d.severity == crate::Severity::Error && d.message.contains("every branch"))
+        .expect("expected an every-branch diagnostic");
+    assert_eq!(
+        mismatch.message,
+        "every branch produces `usize`, but `str` is needed"
+    );
+    assert_eq!(mismatch.related.len(), 1);
+    assert_eq!(
+        mismatch.related[0].message,
+        "expected `str` because of this annotation"
+    );
+    let hint_text = &src[mismatch.related[0].range];
+    assert_eq!(hint_text, "str");
+}

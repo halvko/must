@@ -277,6 +277,8 @@ fn quick_fix_wraps_fn_body_in_braces() {
     };
     assert_eq!(action.title, "Wrap in `{ }`");
 
+    // Uri-keyed maps are the shape the LSP protocol mandates.
+    #[allow(clippy::mutable_key_type)]
     let changes = action
         .edit
         .as_ref()
@@ -346,8 +348,13 @@ fn duplicate_definition_links_to_the_first_one() {
 
     client.open(&file, "static name = 1;\nstatic name = 2;\n");
     let diags = client.next_diagnostics();
-    assert_eq!(diags.diagnostics.len(), 1);
-    let diag = &diags.diagnostics[0];
+    // The error, plus a companion hint at the first definition.
+    assert_eq!(diags.diagnostics.len(), 2);
+    let diag = diags
+        .diagnostics
+        .iter()
+        .find(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
+        .expect("has the error diagnostic");
     assert_eq!(diag.message, "`name` is defined multiple times");
     // On the second definition's name...
     assert_eq!(diag.range.start, lsp_types::Position::new(1, 7));
@@ -365,6 +372,25 @@ fn duplicate_definition_links_to_the_first_one() {
         related[0].location.range.end,
         lsp_types::Position::new(0, 11)
     );
+    // The companion sits at the first definition, explains the connection
+    // in prose, and links back to the error.
+    let companion = diags
+        .diagnostics
+        .iter()
+        .find(|d| d.severity == Some(lsp_types::DiagnosticSeverity::INFORMATION))
+        .expect("has the companion hint");
+    assert_eq!(companion.range.start, lsp_types::Position::new(0, 7));
+    assert_eq!(
+        companion.message,
+        "first defined here — causes the error on line 2: `name` is defined multiple times"
+    );
+    let back = companion
+        .related_information
+        .as_ref()
+        .expect("companion links back");
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].message, "the error reported here");
+    assert_eq!(back[0].location.range.start, lsp_types::Position::new(1, 7));
 
     drop(client);
 }

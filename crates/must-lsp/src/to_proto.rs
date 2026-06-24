@@ -109,6 +109,7 @@ pub(crate) fn diagnostic(
         severity: Some(match d.severity {
             ide::Severity::Error => lsp_types::DiagnosticSeverity::ERROR,
             ide::Severity::Warning => lsp_types::DiagnosticSeverity::WARNING,
+            ide::Severity::Info => lsp_types::DiagnosticSeverity::INFORMATION,
         }),
         source: Some("must".to_owned()),
         message: d.message,

@@ -90,7 +90,7 @@ impl HitCondition {
             HitCondition::Ge(n) => hits >= n,
             HitCondition::Lt(n) => hits < n,
             HitCondition::Le(n) => hits <= n,
-            HitCondition::Mod(n) => n != 0 && hits % n == 0,
+            HitCondition::Mod(n) => n != 0 && hits.is_multiple_of(n),
         }
     }
 }
@@ -293,10 +293,10 @@ impl<W: Write + Clone> Debuggee<W> {
                         continue;
                     }
                     self.breakpoints[index].hits += 1;
-                    if let Some(hit_condition) = self.breakpoints[index].hit_condition {
-                        if !hit_condition.met(self.breakpoints[index].hits) {
-                            continue;
-                        }
+                    if let Some(hit_condition) = self.breakpoints[index].hit_condition
+                        && !hit_condition.met(self.breakpoints[index].hits)
+                    {
+                        continue;
                     }
                     if let Some(condition) = self.breakpoints[index].condition.clone() {
                         let top = self.machine.frames().len() - 1;
@@ -472,10 +472,10 @@ impl<W: Write + Clone> Debuggee<W> {
             }
         }
 
-        if is_name(expression) {
-            if let Some((_, _, value)) = locals.iter().find(|(name, _, _)| name == expression) {
-                return Ok(value.clone());
-            }
+        if is_name(expression)
+            && let Some((_, _, value)) = locals.iter().find(|(name, _, _)| name == expression)
+        {
+            return Ok(value.clone());
         }
 
         let params = wrapper_params

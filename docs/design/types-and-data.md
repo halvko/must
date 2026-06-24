@@ -9,6 +9,9 @@
   Fully-typed items are firewall items, checked once against their own contract and never
   joining a group; `_` marks where inference is still asked for. There is no cross-file
   inference.
+- **T12** An unconstrained join resolves by a plurality vote over concrete branch types:
+  unresolved branches abstain, all-free ties tie together, a tie recovers with the first
+  witness.
 
 ## Discarded
 

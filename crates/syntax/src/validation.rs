@@ -22,10 +22,10 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
                 require_block(&then, "`if` branches are blocks", &mut errors);
             }
             // `else if` chains: the nested IfExpr validates itself.
-            if let Some(els) = if_expr.else_branch() {
-                if !matches!(els, ast::Expr::IfExpr(_)) {
-                    require_block(&els, "`else` branches are blocks", &mut errors);
-                }
+            if let Some(els) = if_expr.else_branch()
+                && !matches!(els, ast::Expr::IfExpr(_))
+            {
+                require_block(&els, "`else` branches are blocks", &mut errors);
             }
         }
     }

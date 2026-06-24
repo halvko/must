@@ -30,7 +30,8 @@ use base_db::{Db, SourceFile};
 use ena::unify::InPlaceUnificationTable;
 use rustc_hash::FxHashMap;
 
-use crate::infer::{InferCtx, resolve_fully};
+use crate::constraint::resolve_fully;
+use crate::infer::InferCtx;
 use crate::item_tree::item_tree;
 use crate::ty::{Ty, TyVar, TyVarValue, lower_type_ref};
 use crate::{ItemLoc, file_item_ids, item_loc};
@@ -60,7 +61,11 @@ pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
     let group_inferrable: Vec<bool> = tree
         .items
         .iter()
-        .map(|it| !it.type_ref.as_ref().is_some_and(crate::ty::is_fully_typed))
+        .map(|it| {
+            it.type_ref
+                .as_ref()
+                .is_none_or(|tr| !crate::ty::is_fully_typed(tr))
+        })
         .collect();
 
     // Item identity → index, the same (name, disambiguator) scheme ids use.
@@ -121,8 +126,8 @@ pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
         next_index: 0,
         groups: Vec::new(),
     };
-    for node in 0..edges.len() {
-        if group_inferrable[node] && state.index[node].is_none() {
+    for (node, &included) in group_inferrable.iter().enumerate() {
+        if included && state.index[node].is_none() {
             state.visit(node);
         }
     }
@@ -228,7 +233,7 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
                 &mut table,
                 &in_group,
             );
-            ctx.unify_public(&in_group[loc], &Ty::Error);
+            ctx.unify(&in_group[loc], &Ty::Error);
             continue;
         };
         // Whatever annotation this member has is hole-bearing (that's why
@@ -248,10 +253,22 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
             &in_group,
         );
         let root_ty = ctx.infer_expr(root, &expected);
-        if !ctx.unify_public(&in_group[loc], &root_ty) {
+        let unified = ctx.unify(&in_group[loc], &root_ty);
+        // Solve this member's deferred joins *before* the next member runs:
+        // a member's signature is decided by its own body (its axioms and
+        // conclusions); later members may only fill variables the body left
+        // genuinely free, never override its conclusions. Without this, a
+        // use like `print(g(..))` in a sibling would set an unannotated
+        // `g`'s return type to `str` while its branches say `usize` — and
+        // the mismatch would be visible from no single item.
+        ctx.solve();
+        if !unified {
             // The body contradicts what the group already committed this
             // member to (called as a function in one body, bound to a plain
             // value in another): no signature is right, so poison it.
+            // Poisoning wins regardless of the solved joins: a poisoned
+            // variable stays poisoned, and poison beats an earlier
+            // commitment.
             poison(&mut table, &in_group[loc]);
         }
         // Per-expression results and diagnostics are the per-item `infer`

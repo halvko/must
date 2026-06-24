@@ -6,6 +6,7 @@
 //! therefore only reach other items if a *value* on that path changes.
 
 pub mod body;
+pub mod constraint;
 pub mod diag;
 pub mod groups;
 pub mod infer;
@@ -21,6 +22,7 @@ use syntax::TextRange;
 use syntax::ast::{self, AstNode as _};
 
 pub use body::{BindingId, Body, BodySourceMap, ExprId, body_with_source_map};
+pub use constraint::Cause;
 pub use infer::{InferenceDiagnostic, InferenceResult};
 pub use item_tree::{ItemTree, TypeRef, item_source};
 pub use scopes::{
@@ -198,6 +200,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
     }
 
+    let syntax_root = parse(db, file).syntax_node();
     for &item in file_item_ids(db, file) {
         let (body, source_map) = body_with_source_map(db, item);
         let resolutions = resolutions(db, item);
@@ -225,9 +228,13 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
 
         for diag in &infer::infer(db, item).diagnostics {
+            let Some(ptr) = source_map.node_for_expr(diag.expr()) else {
+                continue;
+            };
+            let range = ptr.text_range();
             // Messages render in `InferenceDiagnostic::message` (shared with
             // MIR's traps); only ranges and related locations attach here.
-            let related = match diag {
+            let mut related = match diag {
                 InferenceDiagnostic::NeedsAnnotation { item, .. } => item_name(item)
                     .map(|n| {
                         vec![RelatedInfo {
@@ -237,13 +244,201 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                         }]
                     })
                     .unwrap_or_default(),
+                InferenceDiagnostic::TypeMismatch {
+                    reasons, expected, ..
+                }
+                | InferenceDiagnostic::AllBranchesMismatch {
+                    reasons, expected, ..
+                } => {
+                    // Resolve an expression to its AST node for hints that
+                    // point at a sub-element (a return type, an operator
+                    // token) rather than the whole expression.
+                    let ast_for_expr = |expr: body::ExprId| {
+                        Some(source_map.node_for_expr(expr)?.to_node(&syntax_root))
+                    };
+                    let render_reason = |r: &Cause| -> Vec<RelatedInfo> {
+                        match r {
+                            Cause::Binding(binding) => source_map
+                                .annotation_for_binding(*binding)
+                                .map(|ptr| RelatedInfo {
+                                    file,
+                                    range: ptr.text_range(),
+                                    message: format!(
+                                        "expected `{}` because of this annotation",
+                                        expected.display()
+                                    ),
+                                })
+                                .into_iter()
+                                .collect(),
+                            Cause::ItemAnnotation => item_source(db, item)
+                                .and_then(|it| it.ty())
+                                .map(|ty| RelatedInfo {
+                                    file,
+                                    range: ty.syntax().text_range(),
+                                    message: format!(
+                                        "expected `{}` because of this annotation",
+                                        expected.display()
+                                    ),
+                                })
+                                .into_iter()
+                                .collect(),
+                            Cause::ReturnAnnotation(fn_expr) => ast_for_expr(*fn_expr)
+                                .and_then(ast::FnLiteral::cast)
+                                .and_then(|f| f.ret_type())
+                                .map(|ret| RelatedInfo {
+                                    file,
+                                    range: ret.syntax().text_range(),
+                                    message: format!(
+                                        "expected `{}` because of this return type",
+                                        expected.display()
+                                    ),
+                                })
+                                .into_iter()
+                                .collect(),
+                            Cause::Operator(bin_expr) => ast_for_expr(*bin_expr)
+                                .and_then(ast::BinExpr::cast)
+                                .and_then(|bin| bin.op_token())
+                                .map(|op| RelatedInfo {
+                                    file,
+                                    range: op.text_range(),
+                                    message: format!(
+                                        "`{}` requires `{}` operands",
+                                        op.text(),
+                                        expected.display()
+                                    ),
+                                })
+                                .into_iter()
+                                .collect(),
+                            Cause::Condition(if_expr) => ast_for_expr(*if_expr)
+                                .and_then(ast::IfExpr::cast)
+                                .and_then(|it| it.if_token())
+                                .map(|token| RelatedInfo {
+                                    file,
+                                    range: token.text_range(),
+                                    message: "this `if` requires a `bool` condition".to_owned(),
+                                })
+                                .into_iter()
+                                .collect(),
+                            Cause::MissingElse(if_expr) => ast_for_expr(*if_expr)
+                                .and_then(ast::IfExpr::cast)
+                                .and_then(|it| it.if_token())
+                                .map(|token| RelatedInfo {
+                                    file,
+                                    range: token.text_range(),
+                                    message: "this `if` has no `else`, so its value is `()`"
+                                        .to_owned(),
+                                })
+                                .into_iter()
+                                .collect(),
+                            Cause::Operand(operand_expr) => source_map
+                                .node_for_expr(*operand_expr)
+                                .map(|ptr| RelatedInfo {
+                                    file,
+                                    range: ptr.text_range(),
+                                    message: format!(
+                                        "this operand has type `{}`",
+                                        expected.display()
+                                    ),
+                                })
+                                .into_iter()
+                                .collect(),
+                            Cause::Branch(branch_expr) => source_map
+                                .node_for_expr(*branch_expr)
+                                .map(|ptr| RelatedInfo {
+                                    file,
+                                    range: ptr.text_range(),
+                                    message: format!(
+                                        "this branch has type `{}`",
+                                        expected.display()
+                                    ),
+                                })
+                                .into_iter()
+                                .collect(),
+                            Cause::CallSite { call, arg } => {
+                                // Self-evident when the mismatch sits inside
+                                // the call itself; skip the hints then. (The
+                                // generic containment filter below no longer
+                                // catches this once the hints point at the
+                                // callee and argument instead of the whole
+                                // call.)
+                                let Some(call_ptr) = source_map.node_for_expr(*call) else {
+                                    return Vec::new();
+                                };
+                                if call_ptr.text_range().contains_range(range) {
+                                    return Vec::new();
+                                }
+                                // Point at the function name and the argument
+                                // the requirement travels through, not the
+                                // whole call expression.
+                                let callee = match &body.exprs[*call] {
+                                    body::ExprData::Call { callee, .. } => *callee,
+                                    _ => *call,
+                                };
+                                let callee_hint =
+                                    source_map.node_for_expr(callee).map(|ptr| RelatedInfo {
+                                        file,
+                                        range: ptr.text_range(),
+                                        message: format!(
+                                            "this call requires `{}`",
+                                            expected.display()
+                                        ),
+                                    });
+                                let arg_hint =
+                                    source_map.node_for_expr(*arg).map(|ptr| RelatedInfo {
+                                        file,
+                                        range: ptr.text_range(),
+                                        message: format!(
+                                            "this argument needs to be `{}`",
+                                            expected.display()
+                                        ),
+                                    });
+                                callee_hint.into_iter().chain(arg_hint).collect()
+                            }
+                        }
+                    };
+                    reasons.iter().flat_map(render_reason).collect()
+                }
+                InferenceDiagnostic::IfBranchMismatch {
+                    then_expr, then_ty, ..
+                } => source_map
+                    .node_for_expr(*then_expr)
+                    .map(|ptr| {
+                        vec![RelatedInfo {
+                            file,
+                            range: ptr.text_range(),
+                            message: format!("this branch has type `{}`", then_ty.display()),
+                        }]
+                    })
+                    .unwrap_or_default(),
+                InferenceDiagnostic::ArgCountMismatch { expr, .. } => {
+                    // Show where the function is defined, so its parameter
+                    // list is one click away.
+                    let callee_loc = match &body.exprs[*expr] {
+                        body::ExprData::Call { callee, .. } => match resolutions.get(*callee) {
+                            Some(Resolution::Item(loc)) => Some(loc),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    callee_loc
+                        .and_then(|loc| {
+                            let name = item_name(loc)?;
+                            Some(vec![RelatedInfo {
+                                file: loc.file,
+                                range: name.syntax().text_range(),
+                                message: format!("`{}` is defined here", loc.display_name()),
+                            }])
+                        })
+                        .unwrap_or_default()
+                }
                 _ => Vec::new(),
             };
-            let Some(ptr) = source_map.node_for_expr(diag.expr()) else {
-                continue;
-            };
+            // A hint enclosing the squiggle adds nothing — the user is
+            // already looking at it (e.g. "this call requires `str`" on the
+            // very call whose argument carries the mismatch).
+            related.retain(|r| !(r.file == file && r.range.contains_range(range)));
             diagnostics.push(Diagnostic {
-                range: ptr.text_range(),
+                range,
                 message: diag.message(),
                 fix: None,
                 related,

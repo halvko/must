@@ -143,7 +143,7 @@ pub(crate) fn lower_type_ref(value: &TypeRef, table: &mut InPlaceUnificationTabl
         }
         TypeRef::Ref(type_ref) => {
             // TODO: once we introduce references this can't discard them any longer
-            lower_type_ref(&**type_ref, table)
+            lower_type_ref(type_ref, table)
         }
         TypeRef::Path(path) => builtin_type_by_name(path).unwrap_or(Ty::Error),
         TypeRef::Hole => Ty::Infer(table.new_key(TyVarValue::Unknown)),

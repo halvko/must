@@ -52,6 +52,11 @@ pub struct FileEdit {
 pub enum Severity {
     Error,
     Warning,
+    /// Companion diagnostics at locations that explain an error elsewhere
+    /// (see the synthesis in [`Analysis::diagnostics`]). Information rather
+    /// than hint severity: editors render information as a visible (blue)
+    /// underline, while hints are typically not drawn at all (Zed).
+    Info,
 }
 
 /// Owns the mutable database. The LSP main loop applies edits through
@@ -202,6 +207,39 @@ impl Analysis {
                 related: Vec::new(),
             });
         }
+        // Related locations only travel as `DiagnosticRelatedInformation`,
+        // which some editors render as bare underlines with no visible link
+        // back to the error. Give each one a companion information-severity
+        // diagnostic that spells out the connection and points back —
+        // hovering the underline then explains itself.
+        let line_index = self.line_index(file);
+        let companions: Vec<Diagnostic> = diagnostics
+            .iter()
+            .flat_map(|d| {
+                let line = line_index.line_col(d.range.start()).line + 1;
+                d.related
+                    .iter()
+                    // A related location in another file belongs to that
+                    // file's diagnostics; synthesize it there once related
+                    // locations can cross files.
+                    .filter(|r| r.file == file)
+                    .map(move |r| Diagnostic {
+                        range: r.range,
+                        severity: Severity::Info,
+                        message: format!(
+                            "{} — causes the error on line {}: {}",
+                            r.message, line, d.message
+                        ),
+                        fix: None,
+                        related: vec![RelatedInfo {
+                            file,
+                            range: d.range,
+                            message: "the error reported here".to_owned(),
+                        }],
+                    })
+            })
+            .collect();
+        diagnostics.extend(companions);
         diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
         // Every item that (transitively) uses a failing constant propagates
         // the same error with the same origin; report it once.

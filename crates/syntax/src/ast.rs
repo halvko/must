@@ -226,6 +226,9 @@ impl ParenExpr {
 }
 
 impl IfExpr {
+    pub fn if_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, IF_KW)
+    }
     pub fn condition(&self) -> Option<Expr> {
         self.branches(false).next()
     }
@@ -279,26 +282,32 @@ impl BinExpr {
     pub fn rhs(&self) -> Option<Expr> {
         children(&self.syntax).nth(1)
     }
-    pub fn op(&self) -> Option<BinOp> {
+    pub fn op_token(&self) -> Option<SyntaxToken> {
         self.syntax
             .children_with_tokens()
             .filter_map(|it| it.into_token())
-            .find_map(|it| {
-                let op = match it.kind() {
-                    PLUS => BinOp::Add,
-                    MINUS => BinOp::Sub,
-                    STAR => BinOp::Mul,
-                    SLASH => BinOp::Div,
-                    EQ2 => BinOp::Eq,
-                    NEQ => BinOp::Ne,
-                    L_ANGLE => BinOp::Lt,
-                    LTEQ => BinOp::Le,
-                    R_ANGLE => BinOp::Gt,
-                    GTEQ => BinOp::Ge,
-                    _ => return None,
-                };
-                Some(op)
+            .find(|it| {
+                matches!(
+                    it.kind(),
+                    PLUS | MINUS | STAR | SLASH | EQ2 | NEQ | L_ANGLE | LTEQ | R_ANGLE | GTEQ
+                )
             })
+    }
+    pub fn op(&self) -> Option<BinOp> {
+        let op = match self.op_token()?.kind() {
+            PLUS => BinOp::Add,
+            MINUS => BinOp::Sub,
+            STAR => BinOp::Mul,
+            SLASH => BinOp::Div,
+            EQ2 => BinOp::Eq,
+            NEQ => BinOp::Ne,
+            L_ANGLE => BinOp::Lt,
+            LTEQ => BinOp::Le,
+            R_ANGLE => BinOp::Gt,
+            GTEQ => BinOp::Ge,
+            _ => return None,
+        };
+        Some(op)
     }
 }
 
