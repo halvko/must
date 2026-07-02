@@ -17,12 +17,22 @@ pub struct ItemData {
     /// Empty string when the name is missing (broken code); the
     /// disambiguator in [`crate::ItemId`] still keeps identity stable.
     pub name: String,
-    pub is_const: bool,
+    pub constness: Constness,
     /// The item's type contract: a written annotation, or one synthesized
     /// from a self-sufficient fn-literal body. Nothing records which kind
     /// it was — rules that care (e.g. "exported items require *written*
     /// contracts") must not read the synthesized kind as written.
     pub type_ref: Option<TypeRef>,
+}
+
+/// Whether an item is a `static` or a `const` — a direct mapping of the
+/// item's keyword. Const-ness of a *function* is a property of the fn
+/// literal (the upcoming explicit `const fn` marker) and will be a separate
+/// item-tree fact, not encoded here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Constness {
+    Static,
+    Const,
 }
 
 /// Syntax-free representation of a type annotation.
@@ -76,7 +86,11 @@ pub fn item_tree(db: &dyn Db, file: SourceFile) -> ItemTree {
         .items()
         .map(|item| ItemData {
             name: item.name().map(|n| n.text()).unwrap_or_default(),
-            is_const: item.is_const(),
+            constness: if item.is_const() {
+                Constness::Const
+            } else {
+                Constness::Static
+            },
             type_ref: TypeRef::from_opt_ast(item.ty())
                 .or_else(|| type_ref_from_fn_literal(item.body())),
         })

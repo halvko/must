@@ -514,10 +514,24 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     None => Ty::Unit,
                 }
             }
+            // Fully transparent for typing: same expectation and cause flow
+            // straight through to `body`, so a mismatch is reported (and
+            // blamed) exactly as if the `const` wrapper weren't there. This
+            // expression still gets its own entry in `type_of_expr` (the
+            // early return below), so hover on the `const { ... }` itself
+            // shows the right type.
+            ExprData::ConstBlock { body: inner } => {
+                let ty = self.infer_expr_with(*inner, expected, cause);
+                self.result.type_of_expr.insert(expr, ty.clone());
+                return ty;
+            }
             ExprData::FnLiteral {
                 params,
                 ret_type,
                 body: fn_body,
+                // Const-checking is a separate pass (`const_check`);
+                // `is_const` doesn't affect typing here.
+                is_const: _,
             } => {
                 let param_tys: Vec<Ty> = params
                     .iter()
@@ -592,16 +606,19 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     }
 }
 
-/// Dig through block wrappers to the tail expression: the value-producing
-/// sub-expression that should carry a squiggle.
+/// Dig through block and `const` block wrappers to the value-producing
+/// sub-expression that should carry a squiggle — both are transparent, so
+/// blame belongs on whatever is actually inside.
 fn peel_blocks(body: &Body, mut expr: ExprId) -> ExprId {
-    while let ExprData::Block {
-        tail: Some(tail), ..
-    } = &body.exprs[expr]
-    {
-        expr = *tail;
+    loop {
+        expr = match &body.exprs[expr] {
+            ExprData::Block {
+                tail: Some(tail), ..
+            } => *tail,
+            ExprData::ConstBlock { body: inner } => *inner,
+            _ => return expr,
+        };
     }
-    expr
 }
 
 fn builtin_type(builtin: Builtin) -> Ty {

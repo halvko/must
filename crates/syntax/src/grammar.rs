@@ -104,6 +104,17 @@ fn expr_bp(p: &mut Parser<'_>, min_bp: u8) -> Option<CompletedMarker> {
 }
 
 fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
+    // `const` only starts an expression when immediately followed by `fn`
+    // (a const fn literal) or `{` (a const block). Any other `const` is left
+    // for the caller to recover on (see `at_expr_recovery` and the CONST_KW
+    // arm in `block_expr`'s statement loop) — most commonly a misplaced item.
+    if p.at(CONST_KW) {
+        match p.nth(1) {
+            FN_KW => return Some(fn_literal(p)),
+            L_BRACE => return Some(const_block_expr(p)),
+            _ => {}
+        }
+    }
     let m = match p.current() {
         INT_NUMBER | STRING | TRUE_KW | FALSE_KW => {
             let m = p.start();
@@ -139,6 +150,7 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
 
 fn fn_literal(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
+    p.eat(CONST_KW); // optional `const` marker; caller has already checked FN_KW follows
     p.bump(FN_KW);
     // In valid code bodies are blocks, so `(` after `fn` can only be
     // parameters — no lookahead needed anywhere in here.
@@ -208,7 +220,7 @@ fn param_list(p: &mut Parser<'_>) {
 
 fn param(p: &mut Parser<'_>) {
     let m = p.start();
-    if p.at(IDENT) || p.at(HOLE) {
+    if matches!(p.current(), IDENT | HOLE) {
         pattern(p, "expected a parameter name");
         if p.eat(COLON) {
             type_(p);
@@ -245,8 +257,11 @@ fn block_expr(p: &mut Parser<'_>) -> CompletedMarker {
         match p.current() {
             LET_KW => let_stmt(p),
             // Recover at the enclosing item: don't consume, and leave the
-            // "expected `}`" report to the expect below.
-            STATIC_KW | CONST_KW => break,
+            // "expected `}`" report to the expect below. `const fn` and
+            // `const {` are expressions, not a misplaced item, so only bail
+            // here when the one-token lookahead rules those out.
+            STATIC_KW => break,
+            CONST_KW if !matches!(p.nth(1), FN_KW | L_BRACE) => break,
             SEMICOLON => p.bump_any(),
             _ => {
                 let before = p.pos();
@@ -259,6 +274,14 @@ fn block_expr(p: &mut Parser<'_>) -> CompletedMarker {
     }
     p.expect_after_prev(R_BRACE);
     m.complete(p, BLOCK_EXPR)
+}
+
+/// `const { ... }`: caller has already checked `L_BRACE` follows `CONST_KW`.
+fn const_block_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump(CONST_KW);
+    block_expr(p);
+    m.complete(p, CONST_BLOCK_EXPR)
 }
 
 fn expr_stmt_or_tail(p: &mut Parser<'_>) {

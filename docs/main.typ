@@ -136,9 +136,40 @@ compile time. The item keyword is about identity, not about when things
 run: a `static` names one place that every use refers to, a `const` is
 copied into each use.
 
+Function const-ness is its own, explicit marker on the fn literal —
+`const fn` — and is orthogonal to the item keyword:
+
+```must
+static double = const fn (n: usize) -> usize { n * 2 };
+static fortnight = double(1209600); // ok: `double` is a `const fn`
+```
+
 The const context rules:
 
 - An item initializer is a const context.
+- The body of a plain `fn` literal is runtime code — entering it exits the
+  const context, anything goes there. (This is why `static main = fn {
+  print("hi") }` is fine: only the *definition* of the literal happens at
+  compile time.)
+- The body of a `const fn` literal is always a const context: it has to be
+  const-evaluable wherever the literal ends up.
+- `const { ... }` re-enters a const context wherever it appears — its point
+  is getting back to compile time from inside runtime code.
+
+In a const context a call is only allowed when the callee is *visibly* a
+`const fn`: a name resolving to an item whose initializer is a `const fn`
+literal, or a directly-called `const fn` literal. Const-ness is not part of
+function types (yet), so a parameter or a let-bound value is rejected even
+when it is provably bound to a `const fn` — conservative by design, and no
+wrappers are peeled to find a fn literal behind an item's initializer:
+
+```must
+static double = const fn (n: usize) -> usize { n * 2 };
+static f = fn {
+    let d = double;
+    const { d(2) }; // error: whether `d` is a `const fn` is not known
+};
+```
 
 Const evaluation has no side effects, with one exception: `panic`. Calling
 `print` in a const context is an error; calling `panic` is allowed —

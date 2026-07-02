@@ -84,6 +84,10 @@ ast_node!(ParamList: PARAM_LIST);
 ast_node!(Param: PARAM);
 ast_node!(RetType: RET_TYPE);
 ast_node!(BlockExpr: BLOCK_EXPR);
+ast_node!(
+    /// `const { ... }`, a const block in expression position.
+    ConstBlockExpr: CONST_BLOCK_EXPR
+);
 ast_node!(LetStmt: LET_STMT);
 ast_node!(ExprStmt: EXPR_STMT);
 ast_node!(CallExpr: CALL_EXPR);
@@ -100,7 +104,17 @@ ast_node!(PathType: PATH_TYPE);
 ast_node!(RefType: REF_TYPE);
 ast_node!(HoleType: HOLE_TYPE);
 
-ast_enum!(Expr: FnLiteral, CallExpr, PathExpr, Literal, BlockExpr, ParenExpr, BinExpr, IfExpr);
+ast_enum!(
+    Expr: FnLiteral,
+    CallExpr,
+    PathExpr,
+    Literal,
+    BlockExpr,
+    ConstBlockExpr,
+    ParenExpr,
+    BinExpr,
+    IfExpr
+);
 ast_enum!(Type: FnType, UnitType, NeverType, PathType, RefType, HoleType);
 ast_enum!(Stmt: LetStmt, ExprStmt);
 
@@ -120,8 +134,16 @@ impl StaticItem {
     pub fn body(&self) -> Option<Expr> {
         child(&self.syntax)
     }
+    /// Whether the item is introduced by `const` (as opposed to `static`).
+    /// Only the item's own leading keyword counts — a `const` starting the
+    /// initializer (`static f = const fn ...`, `static x = const { ... }`)
+    /// belongs to the fn literal / const block, not to the item.
     pub fn is_const(&self) -> bool {
-        token(&self.syntax, CONST_KW).is_some()
+        self.syntax
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .find(|it| !it.kind().is_trivia())
+            .is_some_and(|it| it.kind() == CONST_KW)
     }
 }
 
@@ -149,6 +171,13 @@ impl NameRef {
 }
 
 impl FnLiteral {
+    /// The `const` marker of a `const fn` literal, if present.
+    pub fn const_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, CONST_KW)
+    }
+    pub fn is_const(&self) -> bool {
+        self.const_token().is_some()
+    }
     pub fn param_list(&self) -> Option<ParamList> {
         child(&self.syntax)
     }
@@ -190,6 +219,15 @@ impl BlockExpr {
     /// The trailing expression, if the block ends without a `;`.
     pub fn tail_expr(&self) -> Option<Expr> {
         children::<Expr>(&self.syntax).last()
+    }
+}
+
+impl ConstBlockExpr {
+    pub fn const_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, CONST_KW)
+    }
+    pub fn block(&self) -> Option<BlockExpr> {
+        child(&self.syntax)
     }
 }
 

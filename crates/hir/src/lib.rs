@@ -6,6 +6,7 @@
 //! therefore only reach other items if a *value* on that path changes.
 
 pub mod body;
+pub mod const_check;
 pub mod constraint;
 pub mod diag;
 pub mod groups;
@@ -22,6 +23,7 @@ use syntax::TextRange;
 use syntax::ast::{self, AstNode as _};
 
 pub use body::{BindingId, Body, BodySourceMap, ExprId, body_with_source_map};
+pub use const_check::ConstCheckDiagnostic;
 pub use constraint::Cause;
 pub use infer::{InferenceDiagnostic, InferenceResult};
 pub use item_tree::{ItemTree, TypeRef, item_source};
@@ -459,6 +461,34 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 related,
             });
         }
+
+        for diag in const_check::const_check(db, item) {
+            let Some(ptr) = source_map.node_for_expr(diag.expr()) else {
+                continue;
+            };
+            // Messages render in `ConstCheckDiagnostic::message` (via
+            // `diag`, shared with MIR's traps); only ranges and related
+            // locations attach here.
+            let related = match diag {
+                ConstCheckDiagnostic::NonConstFnCall { item: target, .. } => item_name(target)
+                    .map(|name| {
+                        vec![RelatedInfo {
+                            file: target.file,
+                            range: name.syntax().text_range(),
+                            message: format!("`{}` is defined here", target.display_name()),
+                        }]
+                    })
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            diagnostics.push(Diagnostic {
+                range: ptr.text_range(),
+                severity: Severity::Error,
+                message: diag.message(),
+                fix: None,
+                related,
+            });
+        }
     }
 
     // Tripwire (rustc's "delayed bug" pattern): the invariant is that every
@@ -493,11 +523,11 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     // Hole-named items (`static _ = ...` / `const _ = ...`) bind nothing, so
     // their value can never be referenced — but they are still evaluated at
     // check time (statics and consts evaluate eagerly; see
-    // `eval::const_value`, driven from `ide`), so a panicking initializer
-    // still reports its own error alongside this warning. A broken item
-    // with no name at all (a parse error, already reported above) gets
-    // nothing: `_` is a real, distinct token from an absent name (see
-    // `ast::Name::is_hole`), so this never fires for it.
+    // `eval::const_value`/`const_block_values`, driven from `ide`), so a
+    // panicking initializer still reports its own error alongside this
+    // warning. A broken item with no name at all (a parse error, already
+    // reported above) gets nothing: `_` is a real, distinct token from an
+    // absent name (see `ast::Name::is_hole`), so this never fires for it.
     // Runs after the tripwire above so a hole item alone never masks it.
     for &item in file_item_ids(db, file) {
         let Some(name) = item_source(db, item).and_then(|it| it.name()) else {

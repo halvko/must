@@ -478,9 +478,11 @@ fn missing_operand_traps() {
 fn annotation_recovered_never_does_not_make_a_returning_call_diverge() {
     // Inference recovers `g()` as `!` (trusting the annotation); the call
     // must still get a return target — the mismatch is the trap after it.
+    // `g` is `const fn` so the call passes const-check and lowers as a
+    // plain call, which is the subject here.
     check_mir(
         r#"
-static g = fn () -> usize { 1 }
+static g = const fn () -> usize { 1 }
 static f: ! = g();
 "#,
         expect![[r#"
@@ -598,6 +600,134 @@ static main = fn { let f = id; };
             }
             fn b1() -> fn() {
               _0: fn()  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn hole_pattern_locals_are_unnamed_but_still_assigned() {
+    // `_` binds nothing (no ` // <name>` comment), but the initializer and
+    // the argument are still lowered and evaluated for their effects.
+    check_mir(
+        r#"static f = fn (_: usize) { let _ = 4 + 5; };"#,
+        expect![[r#"
+            item f:
+            fn b0(_1: usize) -> () {
+              _0: ()  // return
+              _1: usize  // param _
+              _2: usize
+              _3: usize
+              bb0:
+                _2 = Add(4, 5)
+                _3 = _2
+                _0 = ()
+                return
+            }
+            fn b1() -> fn(usize) {
+              _0: fn(usize)  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn const_block_lowers_to_its_own_body() {
+    // The `const { … }` gets a separate zero-parameter body (b0, completed
+    // innermost-first) and the surrounding function references it through a
+    // `const` operand — the machine forces that body at compile time
+    // instead of executing the block inline.
+    check_mir(
+        "static f = fn () -> usize { const { 2 + 3 } };",
+        expect![[r#"
+            item f:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: usize
+              bb0:
+                _1 = Add(2, 3)
+                _0 = _1
+                return
+            }
+            fn b1() -> usize {
+              _0: usize  // return
+              bb0:
+                _0 = const b0
+                return
+            }
+            fn b2() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b1
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn const_check_violations_plant_traps_carrying_the_diagnostic() {
+    // Two shapes, both borrowing the const-check message the editor shows.
+    // At initializer level (`x`) the trap is a *conditional* `const trap`
+    // barrier before the intact call: forcing an item is a const context
+    // (it fires), but the runner's synthetic entry evaluates its
+    // initializer as run-mode code (it falls through and the call runs).
+    // Inside a `const fn` body (`apply`) the code is a const context under
+    // every execution, so the call is *replaced* by an unconditional trap.
+    check_mir(
+        r#"
+static double = fn (n: usize) -> usize { n * 2 }
+static x = double(2);
+static apply = const fn (f: fn() -> usize) -> usize { f() };
+"#,
+        expect![[r#"
+            item double:
+            fn b0(_1: usize) -> usize {
+              _0: usize  // return
+              _1: usize  // param n
+              _2: usize
+              bb0:
+                _2 = Mul(_1, 2)
+                _0 = _2
+                return
+            }
+            fn b1() -> fn(usize) -> usize {
+              _0: fn(usize) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item x:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: usize
+              bb0:
+                const trap "cannot call `double` in a const context; marking it `const fn` would allow this" -> bb1
+              bb1:
+                _1 = call item double(2) -> bb2
+              bb2:
+                _0 = _1
+                return
+            }
+            item apply:
+            fn b0(_1: fn() -> usize) -> usize {
+              _0: usize  // return
+              _1: fn() -> usize  // param f
+              _2: usize
+              bb0:
+                _2 = trap "cannot call a value in a const context; whether it is a `const fn` is not known from its type" -> bb1
+              bb1:
+                _0 = _2
+                return
+            }
+            fn b1() -> fn(fn() -> usize) -> usize {
+              _0: fn(fn() -> usize) -> usize  // return
               bb0:
                 _0 = fn b0
                 return

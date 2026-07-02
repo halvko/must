@@ -95,6 +95,22 @@ fn check_hover(fixture_text: &str, expected_markup: &str) {
     assert_eq!(hover.markup, expected_markup);
 }
 
+fn check_no_hover(fixture_text: &str) {
+    let (analysis, _file, pos) = fixture(fixture_text);
+    assert_eq!(analysis.hover(pos), None);
+}
+
+#[test]
+fn goto_hole_pattern_is_none() {
+    // `_` isn't a name, so there's nothing to jump to — and nothing panics.
+    check_no_goto("static f = fn { let _ = 1; _$0; };");
+}
+
+#[test]
+fn hover_hole_pattern_is_none() {
+    check_no_hover("static f = fn { let _$0 = 1; };");
+}
+
 #[test]
 fn hover_local_use() {
     check_hover(
@@ -275,6 +291,40 @@ static main = fn (count: usize) {
 }
 
 #[test]
+fn highlights_hole_pattern_unstyled() {
+    // `_` isn't an IDENT token, so it's left unclassified (no panic, no
+    // bogus Variable highlight).
+    check_highlights(
+        "static f = fn { let _ = 1; };",
+        expect_test::expect![[r#"
+            0..6 "static" Keyword
+            7..8 "f" Function.declaration.static
+            9..10 "=" Operator
+            11..13 "fn" Keyword
+            16..19 "let" Keyword
+            22..23 "=" Operator
+            24..25 "1" Number
+        "#]],
+    );
+}
+
+#[test]
+fn highlights_const_fn_and_const_block_keywords() {
+    check_highlights(
+        "static f = const fn { const { 1 } };",
+        expect_test::expect![[r#"
+            0..6 "static" Keyword
+            7..8 "f" Function.declaration.static
+            9..10 "=" Operator
+            11..16 "const" Keyword
+            17..19 "fn" Keyword
+            22..27 "const" Keyword
+            30..31 "1" Number
+        "#]],
+    );
+}
+
+#[test]
 fn highlights_split_multiline_strings_per_line() {
     check_highlights(
         "static s = \"one\ntwo\";",
@@ -302,6 +352,105 @@ fn diagnostics_include_mir_findings() {
     );
     // On the `a` inside the nested fn literal.
     assert_eq!(u32::from(diagnostics[0].range.start()), 64);
+}
+
+#[test]
+fn diagnostics_include_const_check_findings() {
+    // Item initializers are const contexts; `double` is a plain `fn`, so
+    // calling it there is rejected — squiggle on the callee.
+    let src = "static double = fn (n: usize) -> usize { n * 2 };\nstatic x: usize = double(2);";
+    let (analysis, file, _pos) = fixture(&format!("{src}$0"));
+    let diagnostics = analysis.diagnostics(file);
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::Severity::Error)
+        .collect();
+    assert_eq!(errors.len(), 1, "diagnostics: {diagnostics:?}");
+    assert_eq!(
+        errors[0].message,
+        "cannot call `double` in a const context; marking it `const fn` would allow this"
+    );
+    // On the callee `double` of the call, not the whole call expression.
+    assert_eq!(&src[errors[0].range], "double");
+    assert!(
+        u32::from(errors[0].range.start()) > 50,
+        "the use, not the definition"
+    );
+    assert_eq!(errors[0].related.len(), 1);
+    assert_eq!(errors[0].related[0].message, "`double` is defined here");
+    assert_eq!(&src[errors[0].related[0].range], "double");
+}
+
+#[test]
+fn const_check_finding_is_not_double_reported_by_const_eval() {
+    // Const-evaluating `x` crashes at the trap MIR planted for the
+    // const-check violation, but that failure is `Trap` — an
+    // already-reported diagnostic execution ran into — so the const-eval
+    // layer must add nothing: one squiggle, no "constant evaluation
+    // failed" companion.
+    let src = "static double = fn (n: usize) -> usize { n * 2 };\nstatic x: usize = double(2);";
+    let (analysis, file, _pos) = fixture(&format!("{src}$0"));
+    let diagnostics = analysis.diagnostics(file);
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::Severity::Error)
+        .collect();
+    assert_eq!(errors.len(), 1, "diagnostics: {diagnostics:?}");
+    assert_eq!(
+        errors[0].message,
+        "cannot call `double` in a const context; marking it `const fn` would allow this"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| !d.message.starts_with("constant evaluation")),
+        "diagnostics: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn diagnostics_include_failing_const_blocks_in_uncalled_fns() {
+    // Nothing ever calls `f`, but its `const { … }` is compile-time code:
+    // the panic is a check-time diagnostic, at the failure inside the block.
+    let src = r#"static f = fn { const { panic("boom") }; };"#;
+    let (analysis, file, _pos) = fixture(&format!("{src}$0"));
+    let diagnostics = analysis.diagnostics(file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    assert_eq!(diagnostics[0].message, "constant evaluation panicked: boom");
+    assert_eq!(&src[diagnostics[0].range], r#"panic("boom")"#);
+}
+
+#[test]
+fn const_block_trap_failure_is_not_double_reported() {
+    // `print` in a `const` block already has a const-check squiggle;
+    // forcing the block runs into the trap MIR planted for that same
+    // violation — a `Trap` failure must add nothing.
+    let src = r#"static f = fn { const { print("hi") }; };"#;
+    let (analysis, file, _pos) = fixture(&format!("{src}$0"));
+    let diagnostics = analysis.diagnostics(file);
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::Severity::Error)
+        .collect();
+    assert_eq!(errors.len(), 1, "diagnostics: {diagnostics:?}");
+    assert_eq!(
+        errors[0].message,
+        "cannot call `print` in a const context; const evaluation cannot have side effects"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| !d.message.starts_with("constant evaluation")),
+        "diagnostics: {diagnostics:?}"
+    );
+}
+
+#[test]
+fn hover_const_block_shows_its_value() {
+    check_hover(
+        "static f = fn () -> usize { con$0st { 2 + 3 } };",
+        "```must\nconst { … }: usize = 5\n```",
+    );
 }
 
 #[test]
@@ -336,6 +485,57 @@ fn diagnostics_include_const_eval_failures() {
     // On `1 / 0`.
     assert_eq!(u32::from(diagnostics[0].range.start()), 20);
     assert_eq!(u32::from(diagnostics[0].range.end()), 25);
+}
+
+#[test]
+fn unused_static_with_panicking_initializer_is_reported_at_check_time() {
+    // Statics are eager, not lazy — every item is evaluated at check
+    // time regardless of whether anything (transitively) calls or uses it.
+    // `x` is never referenced by anything here; its panic must still show up
+    // as a check-time diagnostic. This pins behavior that already falls out
+    // of `Analysis::diagnostics` forcing `eval::const_value` for every item
+    // in the file (not just reachable ones).
+    let (analysis, file, _pos) = fixture(r#"static x = panic("boom");$0"#);
+    let diagnostics = analysis.diagnostics(file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    assert_eq!(diagnostics[0].message, "constant evaluation panicked: boom");
+    assert_eq!(diagnostics[0].severity, crate::Severity::Error);
+}
+
+#[test]
+fn hole_named_item_dead_code_warning_surfaces_through_ide() {
+    let (analysis, file, _pos) = fixture("static _ = 5;$0");
+    let diagnostics = analysis.diagnostics(file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    assert_eq!(
+        diagnostics[0].message,
+        "this item binds nothing and its value cannot be used"
+    );
+    assert_eq!(diagnostics[0].severity, crate::Severity::Warning);
+}
+
+#[test]
+fn hole_named_item_with_panicking_initializer_reports_both_the_warning_and_the_panic() {
+    // A hole-named item's value can never be used (dead-code warning), but
+    // since statics are eager it is still evaluated — a panic is the
+    // one side effect const contexts allow, so it still surfaces as its own
+    // error alongside the warning.
+    let (analysis, file, _pos) = fixture(r#"static _ = panic("x");$0"#);
+    let diagnostics = analysis.diagnostics(file);
+    assert_eq!(diagnostics.len(), 2, "diagnostics: {diagnostics:?}");
+    let warning = diagnostics
+        .iter()
+        .find(|d| d.severity == crate::Severity::Warning)
+        .expect("expected the dead-code warning");
+    assert_eq!(
+        warning.message,
+        "this item binds nothing and its value cannot be used"
+    );
+    let error = diagnostics
+        .iter()
+        .find(|d| d.severity == crate::Severity::Error)
+        .expect("expected the panic error");
+    assert_eq!(error.message, "constant evaluation panicked: x");
 }
 
 #[test]

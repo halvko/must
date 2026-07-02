@@ -93,6 +93,10 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
                 compute_expr_scopes(body, scopes, *tail, scope);
             }
         }
+        // Transparent: no scope of its own, just the parent's.
+        ExprData::ConstBlock { body: b } => {
+            compute_expr_scopes(body, scopes, *b, scope);
+        }
         ExprData::FnLiteral {
             params, body: b, ..
         } => {

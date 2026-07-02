@@ -58,7 +58,17 @@ pub enum ExprData {
         stmts: Vec<Stmt>,
         tail: Option<ExprId>,
     },
+    /// `const { ... }`. Transparent for typing and evaluation — carries the
+    /// same value as `body` — but keeps its own `ExprId` so source-map
+    /// lookups (hover, go-to-def) land on the `const` wrapper too.
+    ConstBlock {
+        body: ExprId,
+    },
     FnLiteral {
+        /// Whether the literal was written `const fn`. Orthogonal to the
+        /// enclosing item's own `static`/`const`; read by the separate
+        /// `const_check` pass, not by typing.
+        is_const: bool,
         params: Vec<BindingId>,
         ret_type: Option<TypeRef>,
         body: ExprId,
@@ -214,7 +224,15 @@ impl LowerCtx {
                 )
             }
             ast::Expr::BlockExpr(it) => self.lower_block(it),
+            ast::Expr::ConstBlockExpr(it) => {
+                let body = match it.block() {
+                    Some(block) => self.lower_block(block),
+                    None => self.missing_expr(),
+                };
+                self.alloc_expr(ExprData::ConstBlock { body }, it.syntax())
+            }
             ast::Expr::FnLiteral(it) => {
+                let is_const = it.is_const();
                 let params = it
                     .param_list()
                     .map(|list| {
@@ -232,6 +250,7 @@ impl LowerCtx {
                 let body = self.lower_opt_expr(it.body());
                 self.alloc_expr(
                     ExprData::FnLiteral {
+                        is_const,
                         params,
                         ret_type,
                         body,

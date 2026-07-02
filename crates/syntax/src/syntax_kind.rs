@@ -57,6 +57,7 @@ pub enum SyntaxKind {
     PARAM,
     RET_TYPE,
     BLOCK_EXPR,
+    CONST_BLOCK_EXPR,
     LET_STMT,
     EXPR_STMT,
     CALL_EXPR,

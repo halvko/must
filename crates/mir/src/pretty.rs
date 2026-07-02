@@ -99,6 +99,9 @@ fn render_terminator(kind: &TerminatorKind) -> String {
             dest,
             target,
         } => format!("{} = trap {message:?} -> {}", local(*dest), block(*target)),
+        TerminatorKind::ConstTrap { message, target } => {
+            format!("const trap {message:?} -> {}", block(*target))
+        }
         TerminatorKind::Unreachable => "unreachable".to_owned(),
     }
 }
@@ -114,6 +117,7 @@ fn operand(op: &Operand) -> String {
             Const::Item(loc) => format!("item {}", loc.display_name()),
             Const::Builtin(b) => format!("builtin {}", b.name()),
             Const::Fn(body) => format!("fn {}", body_name(*body)),
+            Const::ConstBlock(body) => format!("const {}", body_name(*body)),
         },
     }
 }

@@ -86,3 +86,22 @@ pub enum EvalErrorKind {
 pub fn const_value<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Result<Value, EvalError> {
     Machine::for_const(db).force_item(hir::item_loc(db, item))
 }
+
+/// The check-time value of every `const { … }` block in the item's lowered
+/// MIR — including blocks inside functions nothing ever calls: const blocks
+/// are genuinely compile-time, so their failures are diagnostics, not
+/// latent crashes. Inner blocks precede the blocks enclosing them; one
+/// machine serves the whole item, so shared forcings are done once.
+#[salsa::tracked(returns(ref))]
+pub fn const_block_values<'db>(
+    db: &'db dyn Db,
+    item: ItemId<'db>,
+) -> Vec<(ExprId, Result<Value, EvalError>)> {
+    let loc = hir::item_loc(db, item);
+    let mut machine = Machine::for_const(db);
+    mir::mir_lowered(db, item)
+        .const_blocks
+        .iter()
+        .map(|&(expr, body)| (expr, machine.force_const_block(&loc, body)))
+        .collect()
+}

@@ -27,10 +27,13 @@ pub trait Mode {
 pub struct ConstMode;
 
 impl Mode for ConstMode {
+    /// Unreachable in practice: [`Machine::for_const`] starts at
+    /// `const_depth = 1`, so the const fence below answers first. It is the
+    /// last line of the same defense, so it says the same sentence.
     fn print(&mut self, _text: &str) -> Result<(), EvalError> {
         Err(EvalError {
             kind: EvalErrorKind::NotConst,
-            message: "cannot call `print` at compile time".to_owned(),
+            message: hir::diag::side_effect_call_in_const("print"),
             origin: None,
         })
     }
@@ -102,6 +105,16 @@ pub struct Machine<'db, M> {
     /// Memoized const values — failures too, or a failing item would be
     /// re-evaluated at every use site.
     forced: FxHashMap<ItemLoc, Result<Value, EvalError>>,
+    /// `const { … }` blocks currently being forced (cycle detection),
+    /// innermost last — the block-level twin of `forcing`.
+    forcing_blocks: Vec<(ItemLoc, BodyId)>,
+    /// Per-run memo for `const { … }` blocks, keyed by owning item and
+    /// lowered body: a const block inside a hot function evaluates once per
+    /// machine run. Failures memoize too, like `forced`.
+    forced_blocks: FxHashMap<(ItemLoc, BodyId), Result<Value, EvalError>>,
+    /// How many const-block bodies were actually executed (memo misses) —
+    /// observable instrumentation for the memoization guarantee.
+    const_block_evaluations: u64,
     /// > 0 while inside a static initializer: the const context marker.
     const_depth: usize,
     const_fuel: u64,
@@ -125,6 +138,9 @@ impl<'db, M: Mode> Machine<'db, M> {
             frames: Vec::new(),
             forcing: Vec::new(),
             forced: FxHashMap::default(),
+            forcing_blocks: Vec::new(),
+            forced_blocks: FxHashMap::default(),
+            const_block_evaluations: 0,
             const_depth: 0,
             const_fuel: CONST_FUEL,
             next_frame_serial: 0,
@@ -166,6 +182,60 @@ impl<'db, M: Mode> Machine<'db, M> {
         self.forcing.pop();
         self.forced.insert(loc, result.clone());
         result
+    }
+
+    /// The (per-run memoized) value of a `const { … }` block — `body` is one
+    /// of `loc`'s lowered bodies. Like [`Self::force_item`], forcing is
+    /// always a const context, whichever mode drives the machine.
+    pub fn force_const_block(&mut self, loc: &ItemLoc, body: BodyId) -> Result<Value, EvalError> {
+        let key = (loc.clone(), body);
+        if let Some(result) = self.forced_blocks.get(&key) {
+            return result.clone();
+        }
+        if self.forcing_blocks.contains(&key) {
+            return Err(EvalError {
+                kind: EvalErrorKind::NotConst,
+                message: format!(
+                    "cycle detected while evaluating a `const` block in `{}`",
+                    loc.display_name()
+                ),
+                origin: self.const_block_origin(loc, body),
+            });
+        }
+        self.forcing_blocks.push(key.clone());
+        self.const_depth += 1;
+        self.const_block_evaluations += 1;
+        // Same isolation as forcing an item: own (swapped-in) frame stack,
+        // own fuel budget — the block's value must not depend on who forced
+        // it first.
+        let saved_frames = std::mem::take(&mut self.frames);
+        let saved_fuel = std::mem::replace(&mut self.const_fuel, CONST_FUEL);
+        let result = self
+            .push_frame(loc.clone(), body, Vec::new(), None)
+            .and_then(|()| self.run_to_done());
+        self.frames = saved_frames;
+        self.const_fuel = saved_fuel;
+        self.const_depth -= 1;
+        self.forcing_blocks.pop();
+        self.forced_blocks.insert(key, result.clone());
+        result
+    }
+
+    /// How many `const { … }` block bodies this machine actually executed
+    /// (memo misses): the observable face of per-run memoization.
+    pub fn const_block_evaluations(&self) -> u64 {
+        self.const_block_evaluations
+    }
+
+    /// The `const` block expression `body` was lowered from — the origin
+    /// for errors about the block as a whole (cycles).
+    fn const_block_origin(&self, loc: &ItemLoc, body: BodyId) -> Option<(ItemLoc, ExprId)> {
+        let expr = self
+            .lowered(loc)
+            .const_blocks
+            .iter()
+            .find_map(|&(expr, b)| (b == body).then_some(expr))?;
+        Some((loc.clone(), expr))
     }
 
     /// Execute an item's root body to completion — for [`Self::force_item`],
@@ -436,6 +506,24 @@ impl<'db, M: Mode> Machine<'db, M> {
                     origin: Some((loc, origin)),
                 });
             }
+            // A const-check violation at initializer level. Forcing an
+            // item is always a const context, so this fires there with the
+            // editor's exact message; the one fall-through is the runner's
+            // synthetic entry, whose initializer runs as run-mode code at
+            // `const_depth` 0. The guard is a mode check, not a program
+            // point: falling through advances into the guarded block
+            // within the same step, so stepping never pauses on it.
+            TerminatorKind::ConstTrap { message, target } => {
+                if self.const_depth > 0 {
+                    return Err(EvalError {
+                        kind: EvalErrorKind::Trap,
+                        message: message.clone(),
+                        origin: Some((loc, origin)),
+                    });
+                }
+                self.jump(*target);
+                return self.step();
+            }
             TerminatorKind::Unreachable => {
                 return Err(self.internal_error(
                     "entered an unreachable block".to_owned(),
@@ -552,6 +640,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                     item: loc.clone(),
                     body: *body,
                 }),
+                Const::ConstBlock(body) => self.force_const_block(loc, *body)?,
             }),
         }
     }
@@ -578,9 +667,13 @@ impl<'db, M: Mode> Machine<'db, M> {
                 message: text.clone(),
                 origin: Some((loc.clone(), origin)),
             }),
+            // Defense in depth: const-check plants a trap at every `print`
+            // call it can see in a const context, so this refusal is
+            // normally shadowed — it stays as the machine's own guarantee
+            // that const evaluation never performs I/O.
             Builtin::Print if self.const_depth > 0 => Err(EvalError {
                 kind: EvalErrorKind::NotConst,
-                message: "cannot call `print` at compile time".to_owned(),
+                message: hir::diag::side_effect_call_in_const(builtin.name()),
                 origin: Some((loc.clone(), origin)),
             }),
             Builtin::Print => {

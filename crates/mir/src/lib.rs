@@ -45,6 +45,12 @@ pub struct MirLowered {
     /// `static f = fn { … }` root just produces the [`Const::Fn`] value).
     /// `None` when the item has no initializer at all.
     pub root: Option<BodyId>,
+    /// Every explicit `const { … }` block, with the zero-parameter body it
+    /// lowered to — the check-time evaluation surface: const blocks are
+    /// compile-time wherever they sit, even inside functions nothing calls.
+    /// Inner blocks precede the blocks enclosing them (lowering completes
+    /// inside out).
+    pub const_blocks: Vec<(ExprId, BodyId)>,
     /// Findings of lowering itself — MIR is a diagnostic *producer* like any
     /// other analysis; the aggregator attaches ranges.
     pub diagnostics: Vec<MirDiagnostic>,
@@ -121,6 +127,10 @@ pub enum Const {
     Builtin(Builtin),
     /// A `fn` literal; its code is in [`MirLowered::bodies`] of the same item.
     Fn(BodyId),
+    /// A `const { … }` block: the referenced body (in the same item's
+    /// [`MirLowered::bodies`]) is forced at compile time — evaluated once
+    /// per machine run and memoized, never executed as runtime code.
+    ConstBlock(BodyId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +169,19 @@ pub enum TerminatorKind {
     Trap {
         message: String,
         dest: LocalId,
+        target: BlockId,
+    },
+    /// A deferred *const-context* error guarding a call const-check
+    /// rejected at initializer level. An item initializer is a const
+    /// context with exactly one runtime escape: the runner's synthetic
+    /// entry evaluates its initializer as run-mode code (const depth 0).
+    /// So this aborts with `message` when executed in a const context, and
+    /// falls through to `target` (where the guarded call sits) otherwise.
+    /// Violations inside `const fn` bodies and `const` blocks don't use
+    /// this — those are const contexts under every execution, so they get
+    /// unconditional [`TerminatorKind::Trap`]s instead.
+    ConstTrap {
+        message: String,
         target: BlockId,
     },
     /// Never executed; the placeholder terminator of blocks lowering

@@ -1,19 +1,30 @@
 // Statics are evaluated at COMPILE time — hover any of these names in an
 // editor and the LSP shows the computed value (e.g. `seconds_per_day:
-// usize = 86400`). Even the call to `double` runs during compilation.
+// usize = 86400`). Even the call to `double` runs during compilation —
+// which is why its literal carries the `const fn` marker: only `const fn`s
+// may be called in a const context.
 //
 // Run: must-lsp run examples/compile_time.must -e 'fortnight_seconds'    (=> 1209600)
 // Run: must-lsp run examples/compile_time.must -e 'is_big'              (=> true)
+// Run: must-lsp run examples/compile_time.must -e 'greet()'             (=> "computed at compile time, not when greet() runs")
 
 // Annotations on statics are optional — unannotated items get their types
 // inferred from their bodies (until visibility lands; exported items will
 // then require written contracts).
 static seconds_per_day: usize = 60 * 60 * 24;
 
-static double: fn(usize) -> usize = fn(n: usize) -> usize {
+static double: fn(usize) -> usize = const fn(n: usize) -> usize {
     n + n
 }
 
 static fortnight_seconds = double(seconds_per_day) * 7;
 
 static is_big: bool = fortnight_seconds > 1_000_000;
+
+// `const { ... }` re-enters a const context from inside otherwise-runtime
+// code: the body of a plain `fn` is not const (that's why `print` works
+// inside one), but this block still runs at compile time — `greet` has
+// nothing left to compute when it's actually called.
+static greet = fn () -> str {
+    const { "computed at compile time, not when greet() runs" }
+};

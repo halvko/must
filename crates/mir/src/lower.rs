@@ -20,15 +20,20 @@ use crate::{
 pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
     let body = hir::body::body(db, item);
     let infer = hir::infer::infer(db, item);
+    let const_diagnostics = hir::const_check::const_check(db, item);
     let mut ctx = LowerCtx {
         db,
         body,
         infer,
+        const_diagnostics,
         resolutions: hir::resolutions(db, item),
         bodies: Arena::default(),
+        const_blocks: Vec::new(),
         diagnostics: Vec::new(),
         value_traps: FxHashMap::default(),
         call_traps: FxHashMap::default(),
+        const_call_traps: FxHashMap::default(),
+        initializer_context: true,
     };
     ctx.seed_traps();
     let root = body.root.map(|root| {
@@ -38,6 +43,7 @@ pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
     MirLowered {
         bodies: ctx.bodies,
         root,
+        const_blocks: ctx.const_blocks,
         diagnostics: ctx.diagnostics,
     }
 }
@@ -46,8 +52,10 @@ struct LowerCtx<'db> {
     db: &'db dyn Db,
     body: &'db Body,
     infer: &'db InferenceResult,
+    const_diagnostics: &'db [hir::ConstCheckDiagnostic],
     resolutions: &'db ArenaMap<ExprId, Resolution>,
     bodies: Arena<MirBody>,
+    const_blocks: Vec<(ExprId, BodyId)>,
     diagnostics: Vec<MirDiagnostic>,
     /// Expressions whose *value* the context can't accept (type mismatches):
     /// lowered normally for the CFG, then trapped before the value flows on.
@@ -56,6 +64,16 @@ struct LowerCtx<'db> {
     /// callee not callable): callee and arguments lower, the call itself
     /// becomes a trap.
     call_traps: FxHashMap<ExprId, String>,
+    /// Call expressions const-check rejected: illegal in a const context,
+    /// fine as runtime code. How they trap depends on where they lower —
+    /// see the `ExprData::Call` arm.
+    const_call_traps: FxHashMap<ExprId, String>,
+    /// True while lowering the item initializer's own const context: the
+    /// root body outside any `fn` literal and outside any `const` block.
+    /// That is the one const context with a runtime escape (the runner's
+    /// synthetic entry), so its const violations get conditional
+    /// [`TerminatorKind::ConstTrap`]s instead of unconditional traps.
+    initializer_context: bool,
 }
 
 impl LowerCtx<'_> {
@@ -72,11 +90,7 @@ impl LowerCtx<'_> {
                 // Reported on the callee; the unexecutable operation is the
                 // call around it.
                 InferenceDiagnostic::NotCallable { expr: callee, .. } => {
-                    let call = self.body.exprs.iter().find_map(|(id, data)| match data {
-                        ExprData::Call { callee: c, .. } if c == callee => Some(id),
-                        _ => None,
-                    });
-                    if let Some(call) = call {
+                    if let Some(call) = self.call_for_callee(*callee) {
                         self.call_traps.insert(call, diag.message());
                     }
                 }
@@ -88,6 +102,25 @@ impl LowerCtx<'_> {
                 InferenceDiagnostic::NeedsAnnotation { .. } => {}
             }
         }
+        // Const-check diagnostics are reported on the *callee* (the
+        // squiggle sits there), but the operation that must not execute is
+        // the call around it — same reconciliation as `NotCallable` above.
+        for diag in self.const_diagnostics {
+            if let Some(call) = self.call_for_callee(diag.expr()) {
+                self.const_call_traps.insert(call, diag.message());
+            }
+        }
+    }
+
+    /// The call expression whose callee is `callee`, if any — const-check
+    /// and `NotCallable` diagnostics are reported on the callee, but the
+    /// trap belongs on the call: that's the operation that actually fails
+    /// to execute.
+    fn call_for_callee(&self, callee: ExprId) -> Option<ExprId> {
+        self.body.exprs.iter().find_map(|(id, data)| match data {
+            ExprData::Call { callee: c, .. } if *c == callee => Some(id),
+            _ => None,
+        })
     }
 
     fn ty(&self, expr: ExprId) -> Ty {
@@ -154,6 +187,24 @@ impl LowerCtx<'_> {
                 let callee_op = self.lower_expr(b, *callee);
                 let arg_ops: Vec<Operand> =
                     args.iter().map(|&arg| self.lower_expr(b, arg)).collect();
+                // A call const-check rejected. Inside a `const fn` body or
+                // a `const` block the code is a const context under every
+                // execution, so the call is replaced by an unconditional
+                // trap, like the broken calls below. At initializer level
+                // the trap is conditional: forcing an item is always a
+                // const context (the trap fires there), but the runner's
+                // synthetic entry evaluates its initializer as run-mode
+                // code at const depth 0 — the one execution where the call
+                // may proceed.
+                if let Some(message) = self.const_call_traps.get(&expr).cloned() {
+                    if self.initializer_context {
+                        let target = b.new_block();
+                        b.terminate(TerminatorKind::ConstTrap { message, target }, expr);
+                        b.current = target;
+                    } else {
+                        return self.trap(b, expr, message);
+                    }
+                }
                 if let Some(message) = self.call_traps.get(&expr).cloned() {
                     return self.trap(b, expr, message);
                 }
@@ -260,6 +311,20 @@ impl LowerCtx<'_> {
                     None => Operand::Const(Const::Unit),
                 }
             }
+            // A compile-time unit of its own: the inner block lowers to a
+            // separate zero-parameter body (like a `fn` literal's), and the
+            // operand references it — the machine forces that body at
+            // compile time and memoizes the value per run. Not initializer
+            // context inside: a `const` block is a const context under
+            // every execution, so const violations in it trap
+            // unconditionally.
+            ExprData::ConstBlock { body: inner } => {
+                let saved = std::mem::replace(&mut self.initializer_context, false);
+                let body_id = self.lower_fn(&[], *inner, self.ty(expr));
+                self.initializer_context = saved;
+                self.const_blocks.push((expr, body_id));
+                Operand::Const(Const::ConstBlock(body_id))
+            }
             ExprData::FnLiteral {
                 params,
                 body: fn_body,
@@ -269,7 +334,13 @@ impl LowerCtx<'_> {
                     Ty::Fn(f) => f.ret.clone(),
                     _ => Ty::Error,
                 };
+                // A fn body is never the initializer's own const context: a
+                // plain body is runtime code (no const flags outside its
+                // `const` blocks), a `const fn` body is a const context
+                // under every execution.
+                let saved = std::mem::replace(&mut self.initializer_context, false);
                 let body_id = self.lower_fn(params, *fn_body, ret_ty);
+                self.initializer_context = saved;
                 Operand::Const(Const::Fn(body_id))
             }
         }

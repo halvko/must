@@ -175,14 +175,8 @@ impl Analysis {
             let Err(err) = eval::const_value(&self.db, item) else {
                 continue;
             };
-            let message = match err.kind {
-                eval::EvalErrorKind::Trap => continue,
-                eval::EvalErrorKind::Panic => {
-                    format!("constant evaluation panicked: {}", err.message)
-                }
-                eval::EvalErrorKind::Runtime | eval::EvalErrorKind::NotConst => {
-                    format!("constant evaluation failed: {}", err.message)
-                }
+            let Some(message) = const_eval_message(err) else {
+                continue;
             };
             // Report at the error's origin — which may be inside another
             // item (e.g. the partner of a cycle). A diagnostic of `file`
@@ -209,6 +203,41 @@ impl Analysis {
                 fix: None,
                 related: Vec::new(),
             });
+        }
+        // `const { … }` blocks are compile-time wherever they sit —
+        // including inside functions nothing calls. Their check-time
+        // evaluations surface failures here, same shape as the item loop
+        // above. When a block at initializer level fails, `const_value`
+        // reports the identical error at the identical origin; the final
+        // dedup collapses the pair.
+        for &item in hir::file_item_ids(&self.db, file) {
+            for (block_expr, result) in eval::const_block_values(&self.db, item) {
+                let Err(err) = result else {
+                    continue;
+                };
+                let Some(message) = const_eval_message(err) else {
+                    continue;
+                };
+                // A foreign origin (the failure lives in another file's
+                // item) falls back to the const block itself, which is
+                // always in this file.
+                let (loc, expr) = err
+                    .origin
+                    .clone()
+                    .filter(|(loc, _)| loc.file == file)
+                    .unwrap_or_else(|| (hir::item_loc(&self.db, item), *block_expr));
+                let (_, source_map) = hir::body_with_source_map(&self.db, loc.to_id(&self.db));
+                let Some(range) = source_map.node_for_expr(expr).map(|ptr| ptr.text_range()) else {
+                    continue;
+                };
+                diagnostics.push(Diagnostic {
+                    range,
+                    severity: Severity::Error,
+                    message,
+                    fix: None,
+                    related: Vec::new(),
+                });
+            }
         }
         // Related locations only travel as `DiagnosticRelatedInformation`,
         // which some editors render as bare underlines with no visible link
@@ -304,6 +333,21 @@ impl Analysis {
 pub struct RunLens {
     pub range: TextRange,
     pub name: String,
+}
+
+/// The user-facing message for a const-eval failure, or `None` for
+/// [`eval::EvalErrorKind::Trap`]: a trap *is* an already-reported diagnostic
+/// that execution ran into, so the const-eval layer must add nothing.
+fn const_eval_message(err: &eval::EvalError) -> Option<String> {
+    Some(match err.kind {
+        eval::EvalErrorKind::Trap => return None,
+        eval::EvalErrorKind::Panic => {
+            format!("constant evaluation panicked: {}", err.message)
+        }
+        eval::EvalErrorKind::Runtime | eval::EvalErrorKind::NotConst => {
+            format!("constant evaluation failed: {}", err.message)
+        }
+    })
 }
 
 /// Run `f`, turning a salsa cancellation unwind (an edit invalidated this

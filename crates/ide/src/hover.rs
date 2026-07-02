@@ -1,6 +1,6 @@
-use base_db::{RootDatabase, parse};
+use base_db::{RootDatabase, SourceFile, parse};
 use syntax::ast::{self, AstNode};
-use syntax::{SyntaxKind, SyntaxNode, SyntaxNodePtr, TextRange};
+use syntax::{SyntaxKind, SyntaxNode, SyntaxNodePtr, TextRange, TextSize};
 
 use crate::FilePosition;
 
@@ -16,6 +16,9 @@ pub(crate) fn hover(
     FilePosition { file, offset }: FilePosition,
 ) -> Option<HoverResult> {
     let root = parse(db, file).syntax_node();
+    if let Some(result) = const_block_hover(db, file, &root, offset) {
+        return Some(result);
+    }
     let token = root
         .token_at_offset(offset)
         .find(|t| t.kind() == SyntaxKind::IDENT)?;
@@ -70,6 +73,45 @@ pub(crate) fn hover(
     Some(HoverResult {
         markup: format!("```must\n{name}: {}{value}\n```", ty.display()),
         range,
+    })
+}
+
+/// Hovering the `const` keyword of a `const { … }` block shows the block's
+/// computed compile-time value, the way hovering an item shows its const
+/// value. Failures show nothing — they already carry a diagnostic.
+fn const_block_hover(
+    db: &RootDatabase,
+    file: SourceFile,
+    root: &SyntaxNode,
+    offset: TextSize,
+) -> Option<HoverResult> {
+    let token = root
+        .token_at_offset(offset)
+        .find(|t| t.kind() == SyntaxKind::CONST_KW)?;
+    let block = ast::ConstBlockExpr::cast(token.parent()?)?;
+    let item_node = block
+        .syntax()
+        .ancestors()
+        .find(|n| n.kind() == SyntaxKind::STATIC_ITEM)?;
+    let index = root
+        .children()
+        .filter(|n| n.kind() == SyntaxKind::STATIC_ITEM)
+        .position(|n| n == item_node)?;
+    let item = *hir::file_item_ids(db, file).get(index)?;
+    let (_, source_map) = hir::body_with_source_map(db, item);
+    let expr = source_map.expr_for_node(SyntaxNodePtr::new(block.syntax()))?;
+    let ty = hir::infer::infer(db, item).type_of_expr.get(expr)?.clone();
+    let (_, value) = eval::const_block_values(db, item)
+        .iter()
+        .find(|(e, _)| *e == expr)?;
+    let value = value.as_ref().ok()?;
+    Some(HoverResult {
+        markup: format!(
+            "```must\nconst {{ … }}: {} = {}\n```",
+            ty.display(),
+            value.display()
+        ),
+        range: token.text_range(),
     })
 }
 
