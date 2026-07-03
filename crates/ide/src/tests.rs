@@ -478,9 +478,22 @@ fn diagnostics_include_const_check_findings() {
         u32::from(errors[0].range.start()) > 50,
         "the use, not the definition"
     );
-    assert_eq!(errors[0].related.len(), 1);
+    assert_eq!(
+        errors[0].related.len(),
+        2,
+        "related: {:?}",
+        errors[0].related
+    );
     assert_eq!(errors[0].related[0].message, "`double` is defined here");
     assert_eq!(&src[errors[0].related[0].range], "double");
+    // The second hint explains why the call site is a const context at
+    // all: it's directly in `x`'s own initializer, so it cites `x`'s
+    // leading `static` keyword.
+    assert_eq!(
+        errors[0].related[1].message,
+        "this item's initializer is a const context"
+    );
+    assert_eq!(&src[errors[0].related[1].range], "static");
 }
 
 #[test]
@@ -976,6 +989,325 @@ fn type_item_file_evaluates_cleanly() {
     assert_eq!(diagnostics, Vec::new(), "diagnostics: {diagnostics:?}");
 }
 
+// ---- enums and variants ----
+
+#[test]
+fn goto_enum_from_variant_path_base() {
+    check_goto(
+        r#"
+type Shape = enum { Circle(usize) };
+static s = Sha$0pe::Circle(3);
+"#,
+        "Shape",
+        0,
+    );
+}
+
+#[test]
+fn goto_variant_from_variant_path() {
+    // The second segment lands on the variant inside the declaration.
+    check_goto(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static s = Shape::Poi$0nt;
+"#,
+        "Point",
+        0,
+    );
+}
+
+#[test]
+fn goto_variant_from_type_annotation() {
+    check_goto(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static s: Shape::Cir$0cle = Shape::Circle(1);
+"#,
+        "Circle",
+        0,
+    );
+}
+
+#[test]
+fn hover_variant_value_shows_the_variant_type() {
+    check_hover(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn {
+    let c = Shape::Circle(3);
+    c$0;
+};
+"#,
+        "```must\nc: Shape::Circle\n```",
+    );
+}
+
+#[test]
+fn hover_widened_binding_shows_the_enum() {
+    check_hover(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn {
+    let mut s = Shape::Point;
+    s$0;
+};
+"#,
+        "```must\nmut s: Shape\n```",
+    );
+}
+
+#[test]
+fn hover_enum_name_shows_the_declaration() {
+    check_hover(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static s = Sha$0pe::Point;
+"#,
+        "```must\ntype Shape = enum { Circle(usize), Point }\n```",
+    );
+}
+
+#[test]
+fn hover_variant_segment_shows_its_type() {
+    check_hover(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static s = Shape::Poi$0nt;
+"#,
+        "```must\nPoint: Shape::Point\n```",
+    );
+}
+
+#[test]
+fn hover_variant_in_type_position_shows_the_declaration() {
+    check_hover(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static s: Shape::Cir$0cle = Shape::Circle(1);
+"#,
+        "```must\nShape::Circle(usize)\n```",
+    );
+}
+
+#[test]
+fn highlights_enum_declaration_and_variant_paths() {
+    check_highlights(
+        r#"type Shape = enum { Circle(usize), Point };
+static s: Shape::Circle = Shape::Circle(3);"#,
+        expect_test::expect![[r#"
+            0..4 "type" Keyword
+            5..10 "Shape" Type.declaration
+            11..12 "=" Operator
+            13..17 "enum" Keyword
+            20..26 "Circle" EnumMember.declaration
+            27..32 "usize" Type.defaultLibrary
+            35..40 "Point" EnumMember.declaration
+            44..50 "static" Keyword
+            51..52 "s" Variable.declaration.static
+            54..59 "Shape" Type
+            61..67 "Circle" EnumMember
+            68..69 "=" Operator
+            70..75 "Shape" Type
+            77..83 "Circle" EnumMember
+            84..85 "3" Number
+        "#]],
+    );
+}
+
+// ---- match ----
+
+#[test]
+fn goto_variant_from_sigil_pattern() {
+    check_goto(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle$0(r) => r,
+        _ => 0,
+    }
+};
+"#,
+        // Occurrence 0 is the declaration inside the enum literal.
+        "Circle",
+        0,
+    );
+}
+
+#[test]
+fn goto_variant_from_qualified_pattern() {
+    check_goto(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        Shape::Circle$0(r) => r,
+        _ => 0,
+    }
+};
+"#,
+        "Circle",
+        0,
+    );
+}
+
+#[test]
+fn goto_enum_from_qualified_pattern_base() {
+    check_goto(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        Shape$0::Circle(r) => r,
+        _ => 0,
+    }
+};
+"#,
+        // Occurrence 0 of `Shape` is the `type` item's name.
+        "Shape",
+        0,
+    );
+}
+
+#[test]
+fn goto_on_bare_bind_named_like_variant_has_no_target() {
+    // Bare `Point` (no `::`) is just a binding — its own declaration — even
+    // though it spells a variant's name. Goto on it has nothing to jump to.
+    check_no_goto(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        Point$0 => 0,
+        _ => 1,
+    }
+};
+"#,
+    );
+}
+
+#[test]
+fn goto_pattern_binding_use_in_arm_body() {
+    check_goto(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => r$0,
+        _ => 0,
+    }
+};
+"#,
+        // `r` also occurs inside the two `Circle`s; occurrence 2 is the
+        // pattern binding itself.
+        "r",
+        2,
+    );
+}
+
+#[test]
+fn hover_pattern_binding_shows_payload_type() {
+    check_hover(
+        r#"
+type Shape = enum { Pair(usize, str) };
+static f = fn (s: Shape) {
+    match s {
+        ::Pair(n, text$0) => text,
+        _ => "",
+    }
+};
+"#,
+        "```must\ntext: str\n```",
+    );
+}
+
+#[test]
+fn hover_variant_name_in_pattern_shows_the_variant() {
+    check_hover(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle$0(r) => r,
+        _ => 0,
+    }
+};
+"#,
+        "```must\nShape::Circle(usize)\n```",
+    );
+}
+
+#[test]
+fn hover_bind_arm_named_like_variant_shows_whole_scrutinee_type() {
+    // Bare `Point` (no `::`) is a binding of the whole scrutinee, not a
+    // variant match — hover shows the enum type, not the narrowed variant.
+    check_hover(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        Point$0 => 0,
+        _ => 1,
+    }
+};
+"#,
+        "```must\nPoint: Shape\n```",
+    );
+}
+
+#[test]
+fn highlights_match_expression() {
+    check_highlights(
+        // A qualified arm (`Shape::Circle`), an elided sigil arm
+        // (`::Point`, whose sole segment must still color as an enum
+        // member), a bare bind whose name shadows a variant (`Point` —
+        // now a plain `Variable`, never an `EnumMember`), and an ordinary
+        // bind (`other`).
+        r#"type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        Shape::Circle(r) => r,
+        ::Point => 0,
+        Point => 1,
+        other => 2,
+    }
+};"#,
+        expect_test::expect![[r#"
+            0..4 "type" Keyword
+            5..10 "Shape" Type.declaration
+            11..12 "=" Operator
+            13..17 "enum" Keyword
+            20..26 "Circle" EnumMember.declaration
+            27..32 "usize" Type.defaultLibrary
+            35..40 "Point" EnumMember.declaration
+            44..50 "static" Keyword
+            51..52 "f" Function.declaration.static
+            53..54 "=" Operator
+            55..57 "fn" Keyword
+            59..60 "s" Parameter.declaration
+            62..67 "Shape" Type
+            69..71 "->" Operator
+            72..77 "usize" Type.defaultLibrary
+            84..89 "match" Keyword
+            90..91 "s" Parameter
+            102..107 "Shape" Type
+            109..115 "Circle" EnumMember
+            116..117 "r" Variable.declaration
+            119..121 "=>" Operator
+            122..123 "r" Variable
+            135..140 "Point" EnumMember
+            141..143 "=>" Operator
+            144..145 "0" Number
+            155..160 "Point" Variable.declaration
+            161..163 "=>" Operator
+            164..165 "1" Number
+            175..180 "other" Variable.declaration
+            181..183 "=>" Operator
+            184..185 "2" Number
+        "#]],
+    );
+}
+
 #[test]
 fn highlights_loop_break_continue_keywords() {
     check_highlights(
@@ -1025,4 +1357,97 @@ fn hover_on_break_keyword_is_none() {
     assert_eq!(analysis.hover(pos), None);
     let (analysis, _file, pos) = fixture("static f = fn { bre$0ak; };");
     assert_eq!(analysis.hover(pos), None);
+}
+
+// ---- record destructuring — hover and goto-def ----
+
+#[test]
+fn hover_record_destructured_binding_definition() {
+    check_hover(
+        r#"static f = fn { let struct { x$0, y } = struct { x: 1, y: "s" }; };"#,
+        "```must\nx: usize\n```",
+    );
+}
+
+#[test]
+fn hover_record_destructured_binding_use() {
+    check_hover(
+        r#"static f = fn { let struct { x, y } = struct { x: 1, y: "s" }; print(y$0); };"#,
+        "```must\ny: str\n```",
+    );
+}
+
+#[test]
+fn hover_record_destructure_rename_shows_the_new_name() {
+    check_hover(
+        r#"static f = fn { let struct { x as alpha } = struct { x: 1 }; let b = alpha$0; };"#,
+        "```must\nalpha: usize\n```",
+    );
+}
+
+#[test]
+fn hover_mut_field_binding_shows_mut() {
+    check_hover(
+        r#"static f = fn { let struct { mut x$0 } = struct { x: 1 }; x = 2; };"#,
+        "```must\nmut x: usize\n```",
+    );
+}
+
+#[test]
+fn hover_param_record_destructured_binding() {
+    check_hover(
+        "static f = fn (struct { n$0 }: struct { n: usize }) { n };",
+        "```must\nn: usize\n```",
+    );
+}
+
+#[test]
+fn hover_newtype_destructured_binding() {
+    check_hover(
+        r#"
+type Point = struct { x: usize, y: usize };
+static f = fn (p: Point) { let Point(struct { x$0, y }) = p; x };
+"#,
+        "```must\nx: usize\n```",
+    );
+}
+
+#[test]
+fn goto_record_destructured_binding_use() {
+    check_goto(
+        r#"
+static f = fn {
+    let struct { x, y } = struct { x: 1, y: 2 };
+    print(x$0);
+}
+"#,
+        "x",
+        // Occurrence 0 is the field/binding name in the pattern (its
+        // declaration site — where the use inside `print` should jump to);
+        // occurrence 1 is the record literal's field name.
+        0,
+    );
+}
+
+#[test]
+fn goto_record_destructure_rename_use_lands_on_the_rename() {
+    check_goto(
+        r#"
+static f = fn {
+    let struct { x as alpha } = struct { x: 1 };
+    print(alpha$0);
+}
+"#,
+        "alpha",
+        0,
+    );
+}
+
+#[test]
+fn goto_param_record_destructured_binding_use() {
+    check_goto(
+        "static f = fn (struct { num }: struct { num: usize }) { num$0 };",
+        "num",
+        0,
+    );
 }

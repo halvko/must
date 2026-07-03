@@ -72,7 +72,27 @@ fn render_rvalue(rvalue: &Rvalue) -> String {
                 .join(", ");
             format!("{{ {parts} }}")
         }
+        // Tag-free by design, so it renders as a bare tuple — no enum, no
+        // variant, nothing to leak into a snapshot.
+        Rvalue::Aggregate {
+            kind: AggregateKind::VariantPayload,
+            ops,
+        } => {
+            let parts = ops.iter().map(operand).collect::<Vec<_>>().join(", ");
+            format!("payload({parts})")
+        }
         Rvalue::Field { base, index } => format!("{}.{index}", operand(base)),
+        Rvalue::WidenToEnum {
+            op,
+            decl,
+            variant,
+            index: _,
+        } => format!(
+            "widen {} to {}::{}",
+            operand(op),
+            decl.display_name(),
+            variant
+        ),
     }
 }
 
@@ -89,6 +109,24 @@ fn render_terminator(kind: &TerminatorKind) -> String {
             block(*then_block),
             block(*else_block)
         ),
+        TerminatorKind::SwitchVariant {
+            discr,
+            decl,
+            arms,
+            otherwise,
+        } => {
+            let arms = arms
+                .iter()
+                .map(|&(index, target)| format!("{index}: {}", block(target)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "switch {} on {} -> [{arms}, otherwise: {}]",
+                operand(discr),
+                decl.display_name(),
+                block(*otherwise)
+            )
+        }
         TerminatorKind::Call {
             callee,
             args,

@@ -14,19 +14,51 @@ use ena::unify::InPlaceUnificationTable;
 use la_arena::ArenaMap;
 use rustc_hash::FxHashMap;
 
-use crate::body::{BindingId, Body, ExprData, ExprId, LiteralData, Stmt, body};
-use crate::constraint::{self, Cause, Constraints, Join, Witness, resolve_fully};
-use crate::item_tree::Constness;
-use crate::scopes::{Builtin, Resolution, resolutions};
-use crate::ty::{
-    Ty, TyVar, TyVarValue, lower_type_ref, signature, signature_needs_annotation, type_underlying,
+use crate::body::{
+    BindingId, Body, ExprData, ExprId, LiteralData, MatchArm, PatData, PatId, Stmt, body,
 };
-use crate::{ItemId, ItemLoc, TypeRef};
+use crate::constraint::{self, Cause, Constraints, Join, Witness, resolve_fully};
+use crate::item_tree::{Constness, TypeDeclData};
+use crate::scopes::{Builtin, Resolution, resolutions, type_scope};
+use crate::ty::{
+    Ty, TyVar, TyVarValue, VariantTy, builtin_type_by_name, enum_variants, lower_type_ref,
+    signature, signature_needs_annotation, type_underlying, widens_to,
+};
+use crate::{ItemId, ItemLoc, Severity, TypeRef};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InferenceResult {
     pub type_of_expr: ArenaMap<ExprId, Ty>,
     pub type_of_binding: ArenaMap<BindingId, Ty>,
+    /// Where a variant-typed value was accepted by the *widening
+    /// conversion* (variant → its enum): the expression whose value gets
+    /// the tag injected, mapped to the variant it was. MIR plants its
+    /// `WidenToEnum` op exactly at these expressions and nowhere else; the
+    /// expression's own entry in [`Self::type_of_expr`] is the
+    /// post-conversion type where the conversion happened at a direct
+    /// check site, and the precise variant where it happened at a deferred
+    /// join edge.
+    pub widened: ArenaMap<ExprId, VariantTy>,
+    /// Resolution of every `Enum::Variant` path expression that named a
+    /// real variant — the type-directed second-segment resolution (`::`
+    /// paths resolve against the enum's declaration during inference, not
+    /// in `scopes`). Consumed by MIR (construction) and ide (goto-def,
+    /// highlighting).
+    pub variant_of_expr: ArenaMap<ExprId, VariantTy>,
+    /// The pattern-side counterpart of [`Self::variant_of_expr`]: every
+    /// match-arm variant pattern that named a real variant — the qualified
+    /// (`Shape::Circle`) and elided sigil (`::Circle`) spellings, resolved
+    /// type-directed against the scrutinee's enum. Only
+    /// [`crate::body::PatData::Variant`] populates this now; a bare binding
+    /// is never reinterpreted as a
+    /// variant. Consumed by MIR (dispatch) and ide (goto-def, hover,
+    /// highlighting).
+    pub variant_of_pat: ArenaMap<PatId, VariantTy>,
+    /// The type a `let`/parameter pattern destructures — every pattern, not
+    /// just [`crate::body::PatData::Bind`] (which is also mirrored into
+    /// [`Self::type_of_binding`] under its own binding). MIR reads this for
+    /// the synthetic "whole value" local a `Record`/`Newtype` pattern needs.
+    pub type_of_pat: ArenaMap<PatId, Ty>,
     pub diagnostics: Vec<InferenceDiagnostic>,
 }
 
@@ -175,6 +207,149 @@ pub enum InferenceDiagnostic {
         item: ItemLoc,
         found: usize,
     },
+    /// `Shape::Missing` — the enum exists but declares no such variant.
+    /// The squiggle narrows to the variant name; the declaration is the
+    /// related location.
+    NoSuchVariant {
+        /// The variant-path expression.
+        expr: ExprId,
+        /// The enum `type` item.
+        item: ItemLoc,
+        /// The name that resolved to nothing.
+        name: String,
+    },
+    /// A `::` path on a `type` item that declares a struct shape
+    /// (`Point::x` where `Point = struct { ... }`): only enums have
+    /// variants.
+    NoVariantsOnStruct {
+        /// The variant-path expression.
+        expr: ExprId,
+        /// The struct `type` item.
+        item: ItemLoc,
+    },
+    /// A `::` path whose base names a value (a local, a `static`/`const`
+    /// item, or a builtin) instead of a type.
+    VariantPathOnValue {
+        /// The variant-path expression.
+        expr: ExprId,
+        /// The base name, carried so [`Self::message`] renders without the
+        /// body in hand.
+        name: String,
+    },
+    /// A direct construction call on an enum type (`Shape(...)`): an enum
+    /// has no single shape to construct — one of its variants does.
+    EnumCtorIsVariant {
+        /// The call expression.
+        expr: ExprId,
+        /// The enum `type` item.
+        item: ItemLoc,
+    },
+    /// A `match` on an enum-typed scrutinee whose arms don't cover every
+    /// variant. One diagnostic on the `match` keyword naming each uncovered
+    /// variant; MIR's otherwise-arm traps with the identical message.
+    NonExhaustiveMatch {
+        /// The match expression.
+        expr: ExprId,
+        /// Each uncovered variant, `Enum::Variant`-rendered, in
+        /// declaration order.
+        uncovered: Vec<String>,
+    },
+    /// A `match` on a non-enum scrutinee with no `_`/binding arm: those are
+    /// the only patterns that can match it, so one is required.
+    MatchWithoutCatchAll {
+        /// The match expression.
+        expr: ExprId,
+        scrutinee: Ty,
+    },
+    /// A match arm that can never run. Warning-severity: the code is
+    /// well-typed, just dead — MIR lowers the arm as an unreachable block
+    /// and plants no trap.
+    UnreachableArm {
+        /// The enclosing match expression.
+        match_expr: ExprId,
+        /// The arm's pattern (carries the squiggle).
+        pat: PatId,
+        reason: UnreachableReason,
+    },
+    /// A variant pattern on a scrutinee that has no variants (a builtin, a
+    /// struct type, a record, ...): only `_` or a binding can match it.
+    NonEnumScrutineeVariantPat {
+        /// The enclosing match expression (where MIR traps).
+        match_expr: ExprId,
+        /// The pattern (carries the squiggle).
+        pat: PatId,
+        scrutinee: Ty,
+    },
+    /// A variant pattern naming a variant its enum doesn't declare — the
+    /// pattern-side sibling of [`Self::NoSuchVariant`].
+    PatNoSuchVariant {
+        /// The enclosing match expression (where MIR traps).
+        match_expr: ExprId,
+        /// The pattern (carries the squiggle).
+        pat: PatId,
+        /// The enum `type` item.
+        item: ItemLoc,
+        /// The name that resolved to nothing.
+        name: String,
+    },
+    /// A qualified variant pattern of a *different* enum than the
+    /// scrutinee's (`Other::X` in a match on a `Shape`).
+    PatWrongEnum {
+        /// The enclosing match expression (where MIR traps).
+        match_expr: ExprId,
+        /// The pattern (carries the squiggle).
+        pat: PatId,
+        /// The enum the pattern belongs to.
+        item: ItemLoc,
+        /// The pattern's variant name.
+        variant: String,
+        scrutinee: Ty,
+    },
+    /// A binding arm whose name happens to match a variant of the
+    /// scrutinee's enum. Bare binds are never reinterpreted (see
+    /// `check_match_pat`'s `PatData::Bind` arm) — this is almost always a
+    /// migration mistake or confusion, so it's flagged even though the code
+    /// is well-typed (warning severity, like `UnreachableArm`).
+    BindShadowsVariant {
+        /// The enclosing match expression.
+        match_expr: ExprId,
+        /// The binding pattern (carries the squiggle).
+        pat: PatId,
+        /// The enum whose variant the name shadows.
+        item: ItemLoc,
+        name: String,
+    },
+    /// A variant pattern naming the wrong number of payload bindings.
+    PatArity {
+        /// The enclosing match expression (where MIR traps).
+        match_expr: ExprId,
+        /// The pattern (carries the squiggle).
+        pat: PatId,
+        /// The variant's name.
+        variant: String,
+        /// How many payloads the variant declares.
+        payloads: usize,
+        /// How many bindings the pattern names.
+        found: usize,
+    },
+    /// A qualified variant pattern whose first segment doesn't name an
+    /// enum type. The message is rendered at construction (it mirrors the
+    /// type-position wording, which needs the database).
+    PatPathError {
+        /// The enclosing match expression (where MIR traps).
+        match_expr: ExprId,
+        /// The pattern (carries the squiggle).
+        pat: PatId,
+        message: String,
+    },
+    /// A bare variant pattern (`Circle(r)`) on a scrutinee whose type is
+    /// still undetermined: there is no enum to resolve the name against.
+    VariantPatUnknownScrutinee {
+        /// The enclosing match expression (where MIR traps).
+        match_expr: ExprId,
+        /// The pattern (carries the squiggle).
+        pat: PatId,
+    },
     /// A `break` with no enclosing `loop`. Function literals and `const`
     /// blocks reset the loop context — they are units of their own, so a
     /// `break` inside one never exits a loop outside it.
@@ -188,6 +363,63 @@ pub enum InferenceDiagnostic {
         /// The continue expression.
         expr: ExprId,
     },
+    /// A record-destructuring `let`/parameter pattern names a field its
+    /// type doesn't have — the pattern-side sibling of
+    /// [`Self::RecordLitExtraField`].
+    PatUnknownField {
+        pat: PatId,
+        /// Anchor for the IDE range gate / a future MIR trap: the `let`'s
+        /// initializer, or the enclosing `fn` literal's body for a
+        /// parameter pattern (see `InferCtx::check_pat`'s callers).
+        expr: ExprId,
+        name: String,
+        record_ty: Ty,
+    },
+    /// A record-destructuring pattern without `..` doesn't name every field
+    /// of its type — the pattern-side sibling of
+    /// [`Self::RecordLitMissingFields`]. Exact-equality typing of the
+    /// scrutinee still applies; `..` is the only way to leave fields out.
+    PatMissingFields {
+        pat: PatId,
+        expr: ExprId,
+        /// The unmentioned `(name, type)` pairs, sorted by name.
+        fields: Vec<(String, Ty)>,
+    },
+    /// A `let`/parameter pattern destructures a value whose type isn't
+    /// known here (an unannotated bare `struct { ... }` pattern, with
+    /// nothing else pinning the initializer's type down).
+    PatBindingNeedsAnnotation { pat: PatId, expr: ExprId },
+    /// A record-destructuring pattern applied to a non-record, non-`Infer`,
+    /// non-`Error` type.
+    PatNotRecord { pat: PatId, expr: ExprId, ty: Ty },
+    /// `Name(...)` names something other than a declared `type`.
+    PatUnknownType {
+        pat: PatId,
+        expr: ExprId,
+        name: String,
+    },
+    /// `Name(...)` unwraps a *different* named type than the scrutinee
+    /// actually has.
+    PatNamedTypeMismatch {
+        pat: PatId,
+        expr: ExprId,
+        expected: Ty,
+        actual: Ty,
+    },
+}
+
+/// Why an arm can never run — one message per cause, so the fix is named.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnreachableReason {
+    /// The variant is already covered by an earlier arm.
+    VariantCovered(String),
+    /// An earlier `_`/binding arm already matches anything.
+    AfterCatchAll,
+    /// Every variant of the enum is already covered individually.
+    AllVariantsCovered(String),
+    /// The scrutinee is variant-typed; this arm matches a different
+    /// variant of its enum.
+    OtherVariant { scrutinee: Ty },
 }
 
 impl InferenceDiagnostic {
@@ -204,13 +436,68 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::NoSuchField { expr, .. }
             | InferenceDiagnostic::TypeNotValue { expr, .. }
             | InferenceDiagnostic::TypeCtorArgCount { expr, .. }
+            | InferenceDiagnostic::NoSuchVariant { expr, .. }
+            | InferenceDiagnostic::NoVariantsOnStruct { expr, .. }
+            | InferenceDiagnostic::VariantPathOnValue { expr, .. }
+            | InferenceDiagnostic::EnumCtorIsVariant { expr, .. }
+            | InferenceDiagnostic::NonExhaustiveMatch { expr, .. }
+            | InferenceDiagnostic::MatchWithoutCatchAll { expr, .. }
             | InferenceDiagnostic::BreakOutsideLoop { expr }
             | InferenceDiagnostic::ContinueOutsideLoop { expr } => *expr,
+            InferenceDiagnostic::UnreachableArm { match_expr, .. }
+            | InferenceDiagnostic::NonEnumScrutineeVariantPat { match_expr, .. }
+            | InferenceDiagnostic::PatNoSuchVariant { match_expr, .. }
+            | InferenceDiagnostic::PatWrongEnum { match_expr, .. }
+            | InferenceDiagnostic::BindShadowsVariant { match_expr, .. }
+            | InferenceDiagnostic::PatArity { match_expr, .. }
+            | InferenceDiagnostic::PatPathError { match_expr, .. }
+            | InferenceDiagnostic::VariantPatUnknownScrutinee { match_expr, .. } => *match_expr,
             InferenceDiagnostic::FieldOnUnknownType { receiver, .. } => *receiver,
             InferenceDiagnostic::IfBranchMismatch { else_expr, .. } => *else_expr,
             InferenceDiagnostic::AssignToImmutable { target, .. }
             | InferenceDiagnostic::AssignToItem { target, .. }
             | InferenceDiagnostic::AssignToBuiltin { target, .. } => *target,
+            InferenceDiagnostic::PatUnknownField { expr, .. }
+            | InferenceDiagnostic::PatMissingFields { expr, .. }
+            | InferenceDiagnostic::PatBindingNeedsAnnotation { expr, .. }
+            | InferenceDiagnostic::PatNotRecord { expr, .. }
+            | InferenceDiagnostic::PatUnknownType { expr, .. }
+            | InferenceDiagnostic::PatNamedTypeMismatch { expr, .. } => *expr,
+        }
+    }
+
+    /// The pattern the diagnostic squiggles, for the pattern-side
+    /// diagnostics ([`Self::expr`] then carries a resolvable anchor only —
+    /// the enclosing match (where MIR refuses the value) for match-arm
+    /// patterns, the `let`'s initializer or the enclosing `fn` literal's
+    /// body for a `let`/parameter destructuring pattern).
+    pub fn pat(&self) -> Option<PatId> {
+        match self {
+            InferenceDiagnostic::UnreachableArm { pat, .. }
+            | InferenceDiagnostic::NonEnumScrutineeVariantPat { pat, .. }
+            | InferenceDiagnostic::PatNoSuchVariant { pat, .. }
+            | InferenceDiagnostic::PatWrongEnum { pat, .. }
+            | InferenceDiagnostic::BindShadowsVariant { pat, .. }
+            | InferenceDiagnostic::PatArity { pat, .. }
+            | InferenceDiagnostic::PatPathError { pat, .. }
+            | InferenceDiagnostic::VariantPatUnknownScrutinee { pat, .. }
+            | InferenceDiagnostic::PatUnknownField { pat, .. }
+            | InferenceDiagnostic::PatMissingFields { pat, .. }
+            | InferenceDiagnostic::PatBindingNeedsAnnotation { pat, .. }
+            | InferenceDiagnostic::PatNotRecord { pat, .. }
+            | InferenceDiagnostic::PatUnknownType { pat, .. }
+            | InferenceDiagnostic::PatNamedTypeMismatch { pat, .. } => Some(*pat),
+            _ => None,
+        }
+    }
+
+    /// Unreachable arms are dead code, not wrong code — a warning;
+    /// everything else is an error.
+    pub fn severity(&self) -> Severity {
+        match self {
+            InferenceDiagnostic::UnreachableArm { .. }
+            | InferenceDiagnostic::BindShadowsVariant { .. } => Severity::Warning,
+            _ => Severity::Error,
         }
     }
 
@@ -293,12 +580,6 @@ impl InferenceDiagnostic {
                     builtin.name()
                 )
             }
-            InferenceDiagnostic::BreakOutsideLoop { .. } => {
-                "`break` outside of a loop: there is no enclosing `loop` to exit".to_owned()
-            }
-            InferenceDiagnostic::ContinueOutsideLoop { .. } => {
-                "`continue` outside of a loop: there is no enclosing `loop` to restart".to_owned()
-            }
             InferenceDiagnostic::RecordLitMissingFields { fields, .. } => {
                 let list = fields
                     .iter()
@@ -331,6 +612,134 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::TypeCtorArgCount { item, found, .. } => format!(
                 "`{}` takes exactly one argument (its underlying `struct` value), found {found}",
                 item.display_name()
+            ),
+            InferenceDiagnostic::NoSuchVariant { item, name, .. } => {
+                format!("`{}` has no variant `{name}`", item.display_name())
+            }
+            InferenceDiagnostic::NoVariantsOnStruct { item, .. } => {
+                format!(
+                    "`{}` has no variants (it is a `struct` type)",
+                    item.display_name()
+                )
+            }
+            InferenceDiagnostic::VariantPathOnValue { name, .. } => {
+                format!("`{name}` is not a type; only an `enum` type has `::` variants")
+            }
+            InferenceDiagnostic::EnumCtorIsVariant { item, .. } => {
+                let name = item.display_name();
+                format!(
+                    "`{name}` is an `enum`; construct it through one of its variants \
+                     (`{name}::<variant>(...)`)"
+                )
+            }
+            InferenceDiagnostic::NonExhaustiveMatch { uncovered, .. } => {
+                let list = uncovered
+                    .iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("this `match` does not cover {list}")
+            }
+            InferenceDiagnostic::MatchWithoutCatchAll { scrutinee, .. } => format!(
+                "this `match` does not cover every possible `{}`; add a `_` arm",
+                scrutinee.display()
+            ),
+            InferenceDiagnostic::UnreachableArm { reason, .. } => match reason {
+                UnreachableReason::VariantCovered(variant) => {
+                    format!("unreachable arm: `{variant}` is already covered by a previous arm")
+                }
+                UnreachableReason::AfterCatchAll => {
+                    "unreachable arm: a previous arm already matches anything".to_owned()
+                }
+                UnreachableReason::AllVariantsCovered(name) => {
+                    format!("unreachable arm: every variant of `{name}` is already covered")
+                }
+                UnreachableReason::OtherVariant { scrutinee } => format!(
+                    "this arm is unreachable: the scrutinee is a `{}`",
+                    scrutinee.display()
+                ),
+            },
+            InferenceDiagnostic::NonEnumScrutineeVariantPat { scrutinee, .. } => format!(
+                "only `_` or a binding can match a `{}` (for now)",
+                scrutinee.display()
+            ),
+            InferenceDiagnostic::PatNoSuchVariant { item, name, .. } => {
+                format!("`{}` has no variant `{name}`", item.display_name())
+            }
+            InferenceDiagnostic::BindShadowsVariant { item, name, .. } => format!(
+                "`{name}` binds the whole value; write `::{name}` (or `{}::{name}`) to match the variant",
+                item.display_name()
+            ),
+            InferenceDiagnostic::PatWrongEnum {
+                item,
+                variant,
+                scrutinee,
+                ..
+            } => format!(
+                "this pattern matches `{}::{variant}`, but the scrutinee is a `{}`",
+                item.display_name(),
+                scrutinee.display()
+            ),
+            InferenceDiagnostic::PatArity {
+                variant,
+                payloads,
+                found,
+                ..
+            } => {
+                let noun = if *payloads == 1 {
+                    "payload"
+                } else {
+                    "payloads"
+                };
+                format!("`{variant}` has {payloads} {noun}, this pattern names {found}")
+            }
+            InferenceDiagnostic::PatPathError { message, .. } => message.clone(),
+            InferenceDiagnostic::VariantPatUnknownScrutinee { .. } => {
+                "cannot resolve this pattern: the type of the matched value is not known \
+                 here; add a type annotation to the scrutinee"
+                    .to_owned()
+            }
+            InferenceDiagnostic::BreakOutsideLoop { .. } => {
+                "`break` outside of a loop: there is no enclosing `loop` to exit".to_owned()
+            }
+            InferenceDiagnostic::ContinueOutsideLoop { .. } => {
+                "`continue` outside of a loop: there is no enclosing `loop` to restart".to_owned()
+            }
+            InferenceDiagnostic::PatUnknownField {
+                name, record_ty, ..
+            } => {
+                format!("no field `{name}` on `{}`", record_ty.display())
+            }
+            InferenceDiagnostic::PatMissingFields { fields, .. } => {
+                let list = fields
+                    .iter()
+                    .map(|(name, _)| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if fields.len() == 1 {
+                    format!("pattern does not mention field {list}; add `..` to ignore it")
+                } else {
+                    format!("pattern does not mention fields {list}; add `..` to ignore them")
+                }
+            }
+            InferenceDiagnostic::PatBindingNeedsAnnotation { .. } => {
+                "cannot destructure this pattern: its type is not known here; \
+                 add a type annotation"
+                    .to_owned()
+            }
+            InferenceDiagnostic::PatNotRecord { ty, .. } => format!(
+                "this pattern only matches a `struct` value; found `{}`",
+                ty.display()
+            ),
+            InferenceDiagnostic::PatUnknownType { name, .. } => {
+                format!("`{name}` does not name a type")
+            }
+            InferenceDiagnostic::PatNamedTypeMismatch {
+                expected, actual, ..
+            } => format!(
+                "type mismatch: expected `{}`, found `{}`",
+                expected.display(),
+                actual.display()
             ),
         }
     }
@@ -402,7 +811,7 @@ pub(crate) struct InferCtx<'a, 'db> {
 /// `if`/`else` reached in witness position below it contributes its leaf
 /// witnesses here instead of forming a join of its own, so the whole nest
 /// resolves as ONE flat join where its value meets a non-join consumer.
-/// Future joining constructs contribute witnesses through the same
+/// Match arms and loop-break values contribute witnesses through the same
 /// mechanism ([`InferCtx::contribute_witness`]).
 struct JoinSink {
     /// Fresh variable standing for the whole nest's type.
@@ -441,6 +850,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// join-typed signatures to come out concrete.
     pub(crate) fn solve(&mut self) {
         let diagnostics = self.constraints.solve(self.table);
+        // Widenings the join solver accepted land in the result next to
+        // the ones `check` recorded directly — one map, one MIR consumer.
+        for (expr, variant) in self.constraints.take_widenings() {
+            self.result.widened.insert(expr, variant);
+        }
         self.result.diagnostics.extend(diagnostics);
     }
 
@@ -484,6 +898,32 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 InferenceDiagnostic::NoSuchField { receiver_ty, .. } => {
                     *receiver_ty = resolve_fully(self.table, receiver_ty);
                 }
+                InferenceDiagnostic::MatchWithoutCatchAll { scrutinee, .. }
+                | InferenceDiagnostic::NonEnumScrutineeVariantPat { scrutinee, .. }
+                | InferenceDiagnostic::PatWrongEnum { scrutinee, .. }
+                | InferenceDiagnostic::UnreachableArm {
+                    reason: UnreachableReason::OtherVariant { scrutinee },
+                    ..
+                } => {
+                    *scrutinee = resolve_fully(self.table, scrutinee);
+                }
+                InferenceDiagnostic::PatUnknownField { record_ty, .. } => {
+                    *record_ty = resolve_fully(self.table, record_ty);
+                }
+                InferenceDiagnostic::PatMissingFields { fields, .. } => {
+                    for (_, ty) in fields.iter_mut() {
+                        *ty = resolve_fully(self.table, ty);
+                    }
+                }
+                InferenceDiagnostic::PatNotRecord { ty, .. } => {
+                    *ty = resolve_fully(self.table, ty);
+                }
+                InferenceDiagnostic::PatNamedTypeMismatch {
+                    expected, actual, ..
+                } => {
+                    *expected = resolve_fully(self.table, expected);
+                    *actual = resolve_fully(self.table, actual);
+                }
                 InferenceDiagnostic::ArgCountMismatch { .. }
                 | InferenceDiagnostic::NeedsAnnotation { .. }
                 | InferenceDiagnostic::AssignToImmutable { .. }
@@ -492,9 +932,25 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::FieldOnUnknownType { .. }
                 | InferenceDiagnostic::TypeNotValue { .. }
                 | InferenceDiagnostic::TypeCtorArgCount { .. }
+                | InferenceDiagnostic::NoSuchVariant { .. }
+                | InferenceDiagnostic::NoVariantsOnStruct { .. }
+                | InferenceDiagnostic::VariantPathOnValue { .. }
+                | InferenceDiagnostic::EnumCtorIsVariant { .. }
+                | InferenceDiagnostic::NonExhaustiveMatch { .. }
+                | InferenceDiagnostic::UnreachableArm { .. }
+                | InferenceDiagnostic::PatNoSuchVariant { .. }
+                | InferenceDiagnostic::PatArity { .. }
+                | InferenceDiagnostic::PatPathError { .. }
+                | InferenceDiagnostic::VariantPatUnknownScrutinee { .. }
+                | InferenceDiagnostic::BindShadowsVariant { .. }
                 | InferenceDiagnostic::BreakOutsideLoop { .. }
-                | InferenceDiagnostic::ContinueOutsideLoop { .. } => {}
+                | InferenceDiagnostic::ContinueOutsideLoop { .. }
+                | InferenceDiagnostic::PatBindingNeedsAnnotation { .. }
+                | InferenceDiagnostic::PatUnknownType { .. } => {}
             }
+        }
+        for (_, ty) in result.type_of_pat.iter_mut() {
+            *ty = resolve_fully(self.table, ty);
         }
         result
     }
@@ -574,6 +1030,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 Some(Resolution::Builtin(builtin)) => builtin_type(*builtin),
                 None => Ty::Error, // unresolved: already diagnosed by name resolution
             },
+            ExprData::VariantPath { base, variant } => {
+                self.infer_variant_path(expr, *base, variant)
+            }
             ExprData::Call { callee, args } => {
                 // A construction call: the type name used as a plain
                 // constructor function taking the underlying record —
@@ -796,16 +1255,60 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             ExprData::Block { stmts, tail } => {
                 for stmt in stmts {
                     match stmt {
-                        Stmt::Let { binding, init } => {
-                            let has_annotation = self.body.bindings[*binding].type_ref.is_some();
-                            let declared = self.body.bindings[*binding]
-                                .type_ref
-                                .as_ref()
-                                .map(|it| lower_type_ref(self.db, self.file, it, self.table))
-                                .unwrap_or_else(|| self.fresh_var());
-                            let binding_cause = has_annotation.then_some(Cause::Binding(*binding));
-                            let ty = self.infer_expr_with(*init, &declared, binding_cause);
-                            self.result.type_of_binding.insert(*binding, ty);
+                        Stmt::Let {
+                            pat,
+                            type_ref,
+                            init,
+                        } => {
+                            if let PatData::Bind(binding) = self.body.pats[*pat].clone() {
+                                // The common case, unchanged: a bare name's
+                                // own annotation (if any) is the axiom.
+                                let has_annotation = self.body.bindings[binding].type_ref.is_some();
+                                let declared = self.body.bindings[binding]
+                                    .type_ref
+                                    .as_ref()
+                                    .map(|it| lower_type_ref(self.db, self.file, it, self.table))
+                                    .unwrap_or_else(|| self.fresh_var());
+                                let binding_cause =
+                                    has_annotation.then_some(Cause::Binding(binding));
+                                let mut ty = self.infer_expr_with(*init, &declared, binding_cause);
+                                // `let mut` widening: an UNANNOTATED mutable
+                                // binding initialized with a variant-typed value
+                                // widens to the enum at binding time (with the
+                                // conversion on the initializer) — a `mut`
+                                // state variable is meant to be reassigned
+                                // across variants. `let mut x: Shape::Circle`
+                                // keeps precision (the annotation is the
+                                // axiom), and a plain `let` keeps the variant.
+                                // Applies when the initializer's type is
+                                // already known here; a join-typed initializer
+                                // resolves later, driven by the axioms its
+                                // uses provide.
+                                if !has_annotation
+                                    && self.body.bindings[binding].mutable
+                                    && let Ty::Variant(variant) = self.resolve_shallow(&ty)
+                                {
+                                    self.result.widened.insert(*init, variant.clone());
+                                    ty = Ty::Named(variant.decl);
+                                }
+                                self.result.type_of_binding.insert(binding, ty.clone());
+                                self.result.type_of_pat.insert(*pat, ty);
+                            } else {
+                                // A destructuring pattern: its own written
+                                // annotation is the axiom; failing that, a
+                                // `Newtype` pattern names its own type
+                                // outright (mirrors a construction call's
+                                // callee) — a bare `Record` pattern has
+                                // nothing to go on and needs one explicitly.
+                                let declared = match type_ref {
+                                    Some(tr) => lower_type_ref(self.db, self.file, tr, self.table),
+                                    None => self
+                                        .declared_type_for_pat(*pat)
+                                        .unwrap_or_else(|| self.fresh_var()),
+                                };
+                                let ty = self.infer_expr_with(*init, &declared, None);
+                                self.check_pat(*pat, &ty, *init);
+                            }
                         }
                         Stmt::Assign { target, value } => {
                             // The target is an ordinary read for typing
@@ -900,11 +1403,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             ExprData::ConstBlock { body: inner } => {
                 // Transparent for the join sink too, matching
                 // `peel_blocks`: an `if` at a `const` block's core is still
-                // in witness position.
-                // NOT transparent for the loop context: a `const` block is
-                // a compile-time unit of its own (MIR lowers it to a
-                // separate body), so a `break` inside it cannot exit a loop
-                // outside it.
+                // in witness position. NOT transparent for the loop
+                // context: a `const` block is a compile-time unit of its
+                // own (MIR lowers it to a separate body), so a `break`
+                // inside it cannot exit a loop outside it.
                 self.witness_sink = sink;
                 let saved_loops = std::mem::take(&mut self.loop_sinks);
                 let ty = self.infer_expr_with(*inner, expected, cause);
@@ -1019,9 +1521,24 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                         Ty::Error
                                     }
                                 },
-                                // Broken declaration: its own diagnostic
-                                // sits at the declaration site; stay silent.
-                                _ => Ty::Error,
+                                _ => {
+                                    // An enum value has no fields at all
+                                    // (v1 payloads are positional and only
+                                    // reachable through `match`, later); a
+                                    // broken declaration's own diagnostic
+                                    // sits at the declaration site — stay
+                                    // silent for it.
+                                    if enum_variants(self.db, loc.to_id(self.db)).is_some() {
+                                        self.result.diagnostics.push(
+                                            InferenceDiagnostic::NoSuchField {
+                                                expr,
+                                                name: name.clone(),
+                                                receiver_ty: Ty::Named(loc),
+                                            },
+                                        );
+                                    }
+                                    Ty::Error
+                                }
                             }
                         }
                         // Evaluating the receiver already diverges (same
@@ -1065,14 +1582,34 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             } => {
                 let param_tys: Vec<Ty> = params
                     .iter()
-                    .map(|&param| {
-                        let ty = match &self.body.bindings[param].type_ref {
-                            Some(type_ref) => {
-                                lower_type_ref(self.db, self.file, type_ref, self.table)
+                    .map(|param| {
+                        let ty = if let PatData::Bind(binding) = &self.body.pats[param.pat] {
+                            // The common case, unchanged: a bare name's own
+                            // annotation (if any) is the axiom.
+                            match &self.body.bindings[*binding].type_ref {
+                                Some(type_ref) => {
+                                    lower_type_ref(self.db, self.file, type_ref, self.table)
+                                }
+                                None => self.fresh_var(),
                             }
-                            None => self.fresh_var(),
+                        } else {
+                            // A destructuring parameter: its own written
+                            // annotation is the axiom; failing that, a
+                            // `Newtype` pattern names its own type outright
+                            // (`fn (Foo(...))` needs no annotation).
+                            match &param.type_ref {
+                                Some(type_ref) => {
+                                    lower_type_ref(self.db, self.file, type_ref, self.table)
+                                }
+                                None => self
+                                    .declared_type_for_pat(param.pat)
+                                    .unwrap_or_else(|| self.fresh_var()),
+                            }
                         };
-                        self.result.type_of_binding.insert(param, ty.clone());
+                        // A parameter pattern has no per-call site to blame
+                        // a broken destructure on; the whole body is the
+                        // best available anchor (every call runs it).
+                        self.check_pat(param.pat, &ty, *fn_body);
                         ty
                     })
                     .collect();
@@ -1087,10 +1624,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // the sink was not restored for the body, so a function
                 // literal in witness position is one opaque leaf and its
                 // body-tail `if` is a root join of its own (the return type
-                // is the boundary the join resolves against).
-                // The loop context resets the same way: a `break` in the
-                // body never exits a loop enclosing the literal (fns bound
-                // everything).
+                // is the boundary the join resolves against). The loop
+                // context resets the same way: a `break` in the body never
+                // exits a loop enclosing the literal (fns bound everything).
                 self.scope_depth += 1;
                 let saved_loops = std::mem::take(&mut self.loop_sinks);
                 self.infer_expr_with(*fn_body, &ret, ret_cause);
@@ -1098,12 +1634,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 self.scope_depth -= 1;
                 Ty::fn_type(param_tys, ret)
             }
+            ExprData::Match { scrutinee, arms } => {
+                return self.infer_match(expr, *scrutinee, arms, sink, expected, cause);
+            }
             ExprData::Loop { body: loop_body } => {
                 // The BREAK VALUES are the witnesses of one join whose
                 // result is the loop's type. Statement vs. witness
-                // position, exactly as for `if`: a loop in witness position
-                // contributes its break values to the enclosing join,
-                // anywhere else it resolves a join of its own.
+                // position, exactly as for `if`/`match`: a loop in witness
+                // position contributes its break values to the enclosing
+                // join, anywhere else it resolves a join of its own.
                 let (sink_index, is_root) = match sink {
                     Some(index) => (index, false),
                     None => {
@@ -1133,7 +1672,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     self.join_sinks[sink_index].witnesses.len() > witnesses_before;
                 if !is_root {
                     // A nested loop types as the enclosing join's result,
-                    // exactly like a nested `if`.
+                    // exactly like a nested `if`/`match`.
                     if broke_with_value {
                         self.join_sinks[sink_index].result.clone()
                     } else {
@@ -1170,9 +1709,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     match value {
                         Some(value) => {
                             // The value sits in witness position of the
-                            // loop's join: an `if`/`loop` at its core
-                            // flattens its leaves into the same join, so
-                            // blame speaks about the leaves.
+                            // loop's join: an `if`/`match`/`loop` at its
+                            // core flattens its leaves into the same join,
+                            // so blame speaks about the leaves.
                             let fresh = self.fresh_var();
                             self.witness_sink = Some(sink_index);
                             let value_ty = self.infer_expr(*value, &fresh);
@@ -1215,6 +1754,762 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         ty
     }
 
+    /// Resolve `Enum::Variant` in expression position — the type-directed
+    /// second-segment resolution: the base's resolution comes from `scopes`
+    /// like any name, the variant is looked up in the enum's declaration
+    /// right here. A payload-less variant *is* the value (typed
+    /// [`Ty::Variant`]); a variant with payloads is a constructor function
+    /// `fn(payload...) -> Enum::Variant` — first-class, and a direct call
+    /// of it goes through the ordinary `Call` machinery (arity errors are
+    /// plain `ArgCountMismatch`es).
+    ///
+    /// The base is deliberately *not* inferred as an expression: a bare
+    /// type name in expression position is an error (`TypeNotValue`), but
+    /// as a variant path's base it is legal — the same interception idea
+    /// as construction heads.
+    fn infer_variant_path(&mut self, expr: ExprId, base: ExprId, variant: &str) -> Ty {
+        match self.resolutions.get(base) {
+            Some(Resolution::TypeItem(loc)) => {
+                let item = loc.to_id(self.db);
+                let Some(variants) = enum_variants(self.db, item).as_ref() else {
+                    // A struct type has no variants; a broken declaration
+                    // carries its own diagnostics (infectious, silent).
+                    if matches!(
+                        crate::type_decl(self.db, item),
+                        Some(TypeDeclData::Struct { .. })
+                    ) {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::NoVariantsOnStruct {
+                                expr,
+                                item: loc.clone(),
+                            });
+                    }
+                    return Ty::Error;
+                };
+                // `Shape::` — the parse error covers the missing name.
+                if variant.is_empty() {
+                    return Ty::Error;
+                }
+                match variants.iter().position(|(name, _)| name == variant) {
+                    Some(index) => {
+                        let variant_ty = VariantTy {
+                            decl: loc.clone(),
+                            index: index as u32,
+                            name: std::sync::Arc::from(variant),
+                        };
+                        self.result.variant_of_expr.insert(expr, variant_ty.clone());
+                        let payload = &variants[index].1;
+                        if payload.is_empty() {
+                            Ty::Variant(variant_ty)
+                        } else {
+                            Ty::fn_type(payload.clone(), Ty::Variant(variant_ty))
+                        }
+                    }
+                    None => {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::NoSuchVariant {
+                                expr,
+                                item: loc.clone(),
+                                name: variant.to_owned(),
+                            });
+                        Ty::Error
+                    }
+                }
+            }
+            Some(Resolution::Local(_) | Resolution::Item(_) | Resolution::Builtin(_)) => {
+                let name = match &self.body.exprs[base] {
+                    ExprData::NameRef(name) => name.clone(),
+                    _ => String::new(),
+                };
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::VariantPathOnValue { expr, name });
+                Ty::Error
+            }
+            // Duplicate definitions / an unresolved base carry their own
+            // diagnostics (the base is an ordinary `NameRef` to name
+            // resolution).
+            Some(Resolution::Ambiguous(_)) | None => Ty::Error,
+        }
+    }
+
+    /// A `match` expression. The arms are witnesses of ONE join,
+    /// contributed through the same seam as `if`/`else` branches
+    /// ([`InferCtx::contribute_witness`]): in witness position the arms'
+    /// leaves flatten into the enclosing join, anywhere else the match
+    /// opens a join of its own — same-variant arms keep their precision,
+    /// mixed variants of one enum LUB to the enum, blame speaks about the
+    /// arm tails. Patterns are checked against the scrutinee's type
+    /// (variant names resolve type-directed, like `::` paths do), and flat
+    /// set-cover over variant indices decides exhaustiveness.
+    fn infer_match(
+        &mut self,
+        expr: ExprId,
+        scrutinee: ExprId,
+        arms: &[MatchArm],
+        sink: Option<usize>,
+        expected: &Ty,
+        cause: Option<Cause>,
+    ) -> Ty {
+        let scrut_fresh = self.fresh_var();
+        let scrut_ty = self.infer_expr(scrutinee, &scrut_fresh);
+        // A qualified variant pattern can pin a still-unknown scrutinee:
+        // `Shape::Circle(r) =>` says the value dispatches over `Shape`
+        // (patterns are construction's mirror image, so the qualified
+        // spelling carries the same type information construction does).
+        if matches!(self.resolve_shallow(&scrut_ty), Ty::Infer(_)) {
+            for arm in arms {
+                if let PatData::Variant {
+                    enum_name: Some(enum_name),
+                    ..
+                } = &self.body.pats[arm.pat]
+                    && let Some(Resolution::TypeItem(loc)) =
+                        type_scope(self.db, self.file).resolve(enum_name)
+                    && enum_variants(self.db, loc.to_id(self.db)).is_some()
+                {
+                    self.unify(&scrut_ty, &Ty::Named(loc.clone()));
+                    break;
+                }
+            }
+        }
+        let scrut = match self.resolve_shallow(&scrut_ty) {
+            Ty::Named(loc) => {
+                if enum_variants(self.db, loc.to_id(self.db)).is_some() {
+                    Scrutinee::Enum(loc)
+                } else if matches!(
+                    crate::type_decl(self.db, loc.to_id(self.db)),
+                    Some(TypeDeclData::Struct { .. })
+                ) {
+                    Scrutinee::Other(Ty::Named(loc))
+                } else {
+                    // A broken declaration: its own diagnostics sit at the
+                    // declaration site (infectious, silent).
+                    Scrutinee::Error
+                }
+            }
+            Ty::Variant(variant) => Scrutinee::Variant(variant),
+            Ty::Infer(var) => Scrutinee::Unknown(Ty::Infer(var)),
+            // A diverging or broken scrutinee: the arms never run; stay
+            // silent (the scrutinee carries its own story).
+            Ty::Error | Ty::Never => Scrutinee::Error,
+            other => Scrutinee::Other(other),
+        };
+
+        // Statement vs. witness position, exactly as for `if` (see there).
+        let (sink_index, is_root) = match sink {
+            Some(index) => (index, false),
+            None => {
+                let result = self.fresh_var();
+                self.join_sinks.push(JoinSink {
+                    result,
+                    witnesses: Vec::new(),
+                });
+                (self.join_sinks.len() - 1, true)
+            }
+        };
+
+        // Flat set-cover over variant indices: which variants the arms
+        // reach, and whether a catch-all (`_`/binding — or the scrutinee's
+        // own variant on a variant-typed scrutinee) has been seen.
+        let n_variants = match &scrut {
+            Scrutinee::Enum(loc) => enum_variants(self.db, loc.to_id(self.db))
+                .as_ref()
+                .map(Vec::len)
+                .unwrap_or(0),
+            _ => 0,
+        };
+        let mut covered = vec![false; n_variants];
+        let mut catch_all = false;
+        let mut all_diverge = true;
+        for arm in arms {
+            let cover = self.check_match_pat(expr, arm.pat, &scrut);
+            match cover {
+                Cover::Nothing => {}
+                _ if catch_all => {
+                    // Which earlier arm to blame is in `catch_all` already;
+                    // a duplicate *variant* still reads better named.
+                    let reason = match (&cover, self.result.variant_of_pat.get(arm.pat)) {
+                        (Cover::Variant(_), Some(vt)) => {
+                            UnreachableReason::VariantCovered(vt.name.to_string())
+                        }
+                        _ => UnreachableReason::AfterCatchAll,
+                    };
+                    self.push_unreachable(expr, arm.pat, reason);
+                }
+                Cover::Variant(index) => {
+                    let index = index as usize;
+                    if covered[index] {
+                        let name = self
+                            .result
+                            .variant_of_pat
+                            .get(arm.pat)
+                            .map(|vt| vt.name.to_string())
+                            .unwrap_or_default();
+                        self.push_unreachable(
+                            expr,
+                            arm.pat,
+                            UnreachableReason::VariantCovered(name),
+                        );
+                    } else {
+                        covered[index] = true;
+                    }
+                }
+                Cover::All => {
+                    if n_variants > 0 && covered.iter().all(|&c| c) {
+                        let name = match &scrut {
+                            Scrutinee::Enum(loc) => loc.display_name().to_owned(),
+                            _ => String::new(),
+                        };
+                        self.push_unreachable(
+                            expr,
+                            arm.pat,
+                            UnreachableReason::AllVariantsCovered(name),
+                        );
+                    }
+                    // On a variant-typed scrutinee a same-variant arm is
+                    // irrefutable — everything after it is dead, same as a
+                    // wildcard.
+                    catch_all = true;
+                }
+            }
+            let arm_fresh = self.fresh_var();
+            self.witness_sink = Some(sink_index);
+            let arm_ty = self.infer_expr(arm.body, &arm_fresh);
+            self.contribute_witness(sink_index, arm.body, &arm_ty);
+            if !matches!(self.resolve_shallow(&arm_ty), Ty::Never) {
+                all_diverge = false;
+            }
+        }
+
+        // Exhaustiveness. Skipped for unknown/broken scrutinees — there is
+        // no value universe to cover (and the pattern diagnostics above
+        // already said what's wrong).
+        if !catch_all {
+            match &scrut {
+                Scrutinee::Enum(loc) => {
+                    if !covered.iter().all(|&c| c) {
+                        let variants = enum_variants(self.db, loc.to_id(self.db))
+                            .as_ref()
+                            .expect("classified as an enum above");
+                        let uncovered = variants
+                            .iter()
+                            .enumerate()
+                            .filter(|&(i, _)| !covered[i])
+                            .map(|(_, (name, _))| format!("{}::{name}", loc.display_name()))
+                            .collect();
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::NonExhaustiveMatch { expr, uncovered });
+                    }
+                }
+                Scrutinee::Variant(variant) => {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::NonExhaustiveMatch {
+                            expr,
+                            uncovered: vec![format!(
+                                "{}::{}",
+                                variant.decl.display_name(),
+                                variant.name
+                            )],
+                        });
+                }
+                Scrutinee::Other(ty) => {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::MatchWithoutCatchAll {
+                            expr,
+                            scrutinee: ty.clone(),
+                        });
+                }
+                Scrutinee::Unknown(_) | Scrutinee::Error => {}
+            }
+        }
+
+        let ty = if !is_root {
+            // A nested match types as the enclosing join's result, exactly
+            // like a nested `if` (no intermediate verdict of its own).
+            if all_diverge {
+                Ty::Never
+            } else {
+                self.join_sinks[sink_index].result.clone()
+            }
+        } else {
+            let JoinSink { result, witnesses } = self.join_sinks.pop().expect("sink pushed above");
+            match witnesses.len() {
+                // Every arm diverges (or there are none): so does the match.
+                0 => {
+                    self.unify(&result, &Ty::Never);
+                    Ty::Never
+                }
+                1 => {
+                    let ty = witnesses.into_iter().next().unwrap().ty;
+                    self.unify(&result, &ty);
+                    ty
+                }
+                _ => {
+                    self.constraints.push_join(Join {
+                        expr,
+                        depth: self.scope_depth,
+                        result: result.clone(),
+                        witnesses,
+                    });
+                    result
+                }
+            }
+        };
+        let ty = self.check(expr, ty, expected, cause);
+        self.result.type_of_expr.insert(expr, ty.clone());
+        ty
+    }
+
+    fn push_unreachable(&mut self, match_expr: ExprId, pat: PatId, reason: UnreachableReason) {
+        self.result
+            .diagnostics
+            .push(InferenceDiagnostic::UnreachableArm {
+                match_expr,
+                pat,
+                reason,
+            });
+    }
+
+    /// Check one arm's pattern against the scrutinee: resolve variant
+    /// names (type-directed), type the pattern's bindings, and report what
+    /// the pattern covers.
+    fn check_match_pat(&mut self, match_expr: ExprId, pat: PatId, scrut: &Scrutinee) -> Cover {
+        match self.body.pats[pat].clone() {
+            PatData::Missing => Cover::Nothing,
+            PatData::Wildcard => Cover::All,
+            PatData::Bind(binding) => {
+                let name = self.body.bindings[binding].name.clone();
+                // A bare bind always binds the whole scrutinee — patterns
+                // are never reinterpreted as variants (G25: silent
+                // reinterpretation was a footgun — rename/remove a variant
+                // later and an old bare-name arm would silently degrade to
+                // a catch-all). Warn when the name shadows a variant of the
+                // scrutinee's enum: almost always a migration mistake or a
+                // stale rename; write `::Name` (or `Enum::Name`) to
+                // actually match it. This does *not* change the binding's
+                // type or the `Cover::All` outcome — it only warns.
+                let enum_loc = match scrut {
+                    Scrutinee::Enum(loc) => Some(loc.clone()),
+                    Scrutinee::Variant(variant) => Some(variant.decl.clone()),
+                    _ => None,
+                };
+                if let Some(loc) = &enum_loc
+                    && !name.is_empty()
+                    && let Some(variants) = enum_variants(self.db, loc.to_id(self.db)).as_ref()
+                    && variants.iter().any(|(n, _)| *n == name)
+                {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::BindShadowsVariant {
+                            match_expr,
+                            pat,
+                            item: loc.clone(),
+                            name: name.clone(),
+                        });
+                }
+                let ty = match scrut {
+                    Scrutinee::Enum(loc) => Ty::Named(loc.clone()),
+                    Scrutinee::Variant(variant) => Ty::Variant(variant.clone()),
+                    Scrutinee::Other(ty) | Scrutinee::Unknown(ty) => ty.clone(),
+                    Scrutinee::Error => Ty::Error,
+                };
+                self.result.type_of_binding.insert(binding, ty);
+                Cover::All
+            }
+            PatData::Variant {
+                enum_name,
+                variant,
+                bindings,
+                rest,
+            } => {
+                // Which enum the variant name resolves against: the named
+                // one (qualified spelling), or the scrutinee's (bare).
+                let target = match &enum_name {
+                    Some(enum_name) => match self.resolve_pat_enum(match_expr, pat, enum_name) {
+                        Some(loc) => loc,
+                        None => {
+                            self.bind_error(&bindings);
+                            return Cover::Nothing;
+                        }
+                    },
+                    None => match scrut {
+                        Scrutinee::Enum(loc) => loc.clone(),
+                        Scrutinee::Variant(variant) => variant.decl.clone(),
+                        Scrutinee::Other(ty) => {
+                            self.result.diagnostics.push(
+                                InferenceDiagnostic::NonEnumScrutineeVariantPat {
+                                    match_expr,
+                                    pat,
+                                    scrutinee: ty.clone(),
+                                },
+                            );
+                            self.bind_error(&bindings);
+                            return Cover::Nothing;
+                        }
+                        Scrutinee::Unknown(_) => {
+                            self.result.diagnostics.push(
+                                InferenceDiagnostic::VariantPatUnknownScrutinee { match_expr, pat },
+                            );
+                            self.bind_error(&bindings);
+                            return Cover::Nothing;
+                        }
+                        Scrutinee::Error => {
+                            self.bind_error(&bindings);
+                            return Cover::Nothing;
+                        }
+                    },
+                };
+                // `Shape:: =>` — the parse error covers the missing name.
+                if variant.is_empty() {
+                    self.bind_error(&bindings);
+                    return Cover::Nothing;
+                }
+                let Some(variants) = enum_variants(self.db, target.to_id(self.db)).as_ref() else {
+                    // `resolve_pat_enum` only returns enums; a bare
+                    // pattern's scrutinee enum was classified above.
+                    self.bind_error(&bindings);
+                    return Cover::Nothing;
+                };
+                let Some(index) = variants.iter().position(|(n, _)| *n == variant) else {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::PatNoSuchVariant {
+                            match_expr,
+                            pat,
+                            item: target.clone(),
+                            name: variant,
+                        });
+                    self.bind_error(&bindings);
+                    return Cover::Nothing;
+                };
+                let variant_ty = VariantTy {
+                    decl: target.clone(),
+                    index: index as u32,
+                    name: std::sync::Arc::from(variant.as_str()),
+                };
+                self.result.variant_of_pat.insert(pat, variant_ty.clone());
+                // Payload binding types come from the declaration either
+                // way — even a wrong-enum pattern's arm body shouldn't
+                // cascade.
+                let payload = variants[index].1.clone();
+                if !rest && bindings.len() != payload.len() {
+                    self.result.diagnostics.push(InferenceDiagnostic::PatArity {
+                        match_expr,
+                        pat,
+                        variant,
+                        payloads: payload.len(),
+                        found: bindings.len(),
+                    });
+                }
+                for (i, &binding) in bindings.iter().enumerate() {
+                    let ty = payload.get(i).cloned().unwrap_or(Ty::Error);
+                    self.result.type_of_binding.insert(binding, ty);
+                }
+                match scrut {
+                    Scrutinee::Enum(scrut_loc) => {
+                        if *scrut_loc != target {
+                            self.result
+                                .diagnostics
+                                .push(InferenceDiagnostic::PatWrongEnum {
+                                    match_expr,
+                                    pat,
+                                    item: target,
+                                    variant: variant_ty.name.to_string(),
+                                    scrutinee: Ty::Named(scrut_loc.clone()),
+                                });
+                            Cover::Nothing
+                        } else {
+                            Cover::Variant(variant_ty.index)
+                        }
+                    }
+                    Scrutinee::Variant(scrut_variant) => {
+                        if scrut_variant.decl != target {
+                            self.result
+                                .diagnostics
+                                .push(InferenceDiagnostic::PatWrongEnum {
+                                    match_expr,
+                                    pat,
+                                    item: target,
+                                    variant: variant_ty.name.to_string(),
+                                    scrutinee: Ty::Variant(scrut_variant.clone()),
+                                });
+                            Cover::Nothing
+                        } else if scrut_variant.index == variant_ty.index {
+                            // The scrutinee can only be this one variant:
+                            // the pattern is irrefutable, no dispatch.
+                            Cover::All
+                        } else {
+                            self.push_unreachable(
+                                match_expr,
+                                pat,
+                                UnreachableReason::OtherVariant {
+                                    scrutinee: Ty::Variant(scrut_variant.clone()),
+                                },
+                            );
+                            Cover::Nothing
+                        }
+                    }
+                    // A qualified pattern on a non-enum scrutinee: the
+                    // scrutinee is the problem, same as the bare spelling.
+                    Scrutinee::Other(ty) => {
+                        self.result.diagnostics.push(
+                            InferenceDiagnostic::NonEnumScrutineeVariantPat {
+                                match_expr,
+                                pat,
+                                scrutinee: ty.clone(),
+                            },
+                        );
+                        Cover::Nothing
+                    }
+                    // Unknown only when the pre-scan couldn't pin the
+                    // scrutinee (this pattern resolved, so it did) or the
+                    // scrutinee is broken: nothing to cover either way.
+                    Scrutinee::Unknown(_) | Scrutinee::Error => Cover::Nothing,
+                }
+            }
+            // `let`/parameter-only shapes; `match_pattern`'s grammar never
+            // produces them. Defensive fallback.
+            PatData::Record { .. } | PatData::Newtype { .. } => Cover::Nothing,
+        }
+    }
+
+    /// Resolve a qualified variant pattern's first segment to an enum
+    /// `type` item, or report why it isn't one. The message mirrors the
+    /// type-position wording (rendered here — it needs the database).
+    fn resolve_pat_enum(
+        &mut self,
+        match_expr: ExprId,
+        pat: PatId,
+        enum_name: &str,
+    ) -> Option<ItemLoc> {
+        let message = match type_scope(self.db, self.file).resolve(enum_name) {
+            Some(Resolution::TypeItem(loc)) => {
+                if enum_variants(self.db, loc.to_id(self.db)).is_some() {
+                    return Some(loc);
+                }
+                if matches!(
+                    crate::type_decl(self.db, loc.to_id(self.db)),
+                    Some(TypeDeclData::Struct { .. })
+                ) {
+                    format!("`{enum_name}` has no variants (it is a `struct` type)")
+                } else {
+                    // A broken declaration carries its own diagnostics.
+                    return None;
+                }
+            }
+            // The duplicate definitions carry the diagnostics.
+            Some(Resolution::Ambiguous(_)) => return None,
+            _ => {
+                if builtin_type_by_name(enum_name).is_some() {
+                    format!("`{enum_name}` has no variants (it is a builtin type)")
+                } else {
+                    format!("`{enum_name}` does not name an `enum` type")
+                }
+            }
+        };
+        self.result
+            .diagnostics
+            .push(InferenceDiagnostic::PatPathError {
+                match_expr,
+                pat,
+                message,
+            });
+        None
+    }
+
+    fn bind_error(&mut self, bindings: &[BindingId]) {
+        for &binding in bindings {
+            self.result.type_of_binding.insert(binding, Ty::Error);
+        }
+    }
+
+    /// The type a `let`/parameter pattern determines *on its own*, without
+    /// an explicit annotation: only [`PatData::Newtype`] manages this
+    /// (`Foo(...)` names its own type outright, mirroring a construction
+    /// call's callee — see [`Self::infer_construction`]). A bare
+    /// [`PatData::Record`] pattern has no way to know which fields it may
+    /// destructure without either an annotation or a newtype wrapper, so it
+    /// returns `None`; the caller falls back to a fresh variable, and
+    /// [`Self::check_pat`] reports [`InferenceDiagnostic::PatBindingNeedsAnnotation`]
+    /// if nothing else pins the initializer's type down before the pattern
+    /// is checked. An unresolvable name also returns `None` here — checked
+    /// again (and diagnosed) inside `check_pat`, once there is a `ty` to
+    /// blame the mismatch on too.
+    fn declared_type_for_pat(&mut self, pat: PatId) -> Option<Ty> {
+        match &self.body.pats[pat] {
+            PatData::Newtype { type_name, .. } => {
+                match type_scope(self.db, self.file).resolve(type_name) {
+                    Some(Resolution::TypeItem(loc)) => Some(Ty::Named(loc)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Recursively type every binding a pattern introduces as `{error}` —
+    /// the destructuring counterpart of [`Self::bind_error`], for a pattern
+    /// whose scrutinee type is broken or unknown.
+    fn bind_pat_error(&mut self, pat: PatId) {
+        self.result.type_of_pat.insert(pat, Ty::Error);
+        match self.body.pats[pat].clone() {
+            PatData::Missing | PatData::Wildcard => {}
+            PatData::Bind(binding) => {
+                self.result.type_of_binding.insert(binding, Ty::Error);
+            }
+            PatData::Variant { bindings, .. } => self.bind_error(&bindings),
+            PatData::Record { fields, .. } => {
+                for f in &fields {
+                    self.result.type_of_binding.insert(f.binding, Ty::Error);
+                }
+            }
+            PatData::Newtype { inner, .. } => self.bind_pat_error(inner),
+        }
+    }
+
+    /// Check a `let`/parameter pattern against the type it destructures,
+    /// binding every name it introduces. Construction's mirror image: a
+    /// `Record` pattern is checked bidirectionally against `ty` the same
+    /// way [`ExprData::RecordLit`] is checked against an expected type
+    /// (missing/extra fields), and a `Newtype` pattern is checked the same
+    /// way [`Self::infer_construction`] checks a construction call.
+    /// Patterns here are always irrefutable — a `let`/parameter destructure
+    /// either matches or the program doesn't type-check — so unlike
+    /// [`Self::check_match_pat`] there is no `Cover` to compute and no
+    /// dispatch to decide.
+    ///
+    /// `anchor` is the expression [`InferenceDiagnostic::expr`] reports a
+    /// finding on: the `let`'s initializer (whose value fails to destructure
+    /// — the direct reconciliation, same as a bad record literal), or the
+    /// enclosing `fn` literal's body for a parameter pattern (there is no
+    /// per-call expression to blame; every call runs the body). Either way
+    /// [`InferenceDiagnostic::pat`] carries the precise pattern, so the
+    /// rendered squiggle always lands on the pattern itself.
+    fn check_pat(&mut self, pat: PatId, ty: &Ty, anchor: ExprId) {
+        self.result.type_of_pat.insert(pat, ty.clone());
+        match self.body.pats[pat].clone() {
+            PatData::Missing | PatData::Wildcard => {}
+            PatData::Bind(binding) => {
+                self.result.type_of_binding.insert(binding, ty.clone());
+            }
+            // Never produced by `binding_pattern`'s grammar; defensive.
+            PatData::Variant { bindings, .. } => self.bind_error(&bindings),
+            PatData::Record { fields, rest } => match self.resolve_shallow(ty) {
+                Ty::Record(rec) => {
+                    let mut seen: Vec<&str> = Vec::new();
+                    for f in &fields {
+                        match rec.field_ty(&f.field) {
+                            Some(field_ty) => {
+                                self.result
+                                    .type_of_binding
+                                    .insert(f.binding, field_ty.clone());
+                            }
+                            None => {
+                                self.result.diagnostics.push(
+                                    InferenceDiagnostic::PatUnknownField {
+                                        pat,
+                                        expr: anchor,
+                                        name: f.field.clone(),
+                                        record_ty: Ty::Record(rec.clone()),
+                                    },
+                                );
+                                self.result.type_of_binding.insert(f.binding, Ty::Error);
+                            }
+                        }
+                        seen.push(f.field.as_str());
+                    }
+                    if !rest {
+                        let missing: Vec<(String, Ty)> = rec
+                            .fields
+                            .iter()
+                            .filter(|(name, _)| !seen.contains(&name.as_str()))
+                            .cloned()
+                            .collect();
+                        if !missing.is_empty() {
+                            self.result
+                                .diagnostics
+                                .push(InferenceDiagnostic::PatMissingFields {
+                                    pat,
+                                    expr: anchor,
+                                    fields: missing,
+                                });
+                        }
+                    }
+                }
+                Ty::Infer(_) => {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::PatBindingNeedsAnnotation { pat, expr: anchor });
+                    self.bind_error(&fields.iter().map(|f| f.binding).collect::<Vec<_>>());
+                }
+                Ty::Error => {
+                    self.bind_error(&fields.iter().map(|f| f.binding).collect::<Vec<_>>());
+                }
+                other => {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::PatNotRecord {
+                            pat,
+                            expr: anchor,
+                            ty: other,
+                        });
+                    self.bind_error(&fields.iter().map(|f| f.binding).collect::<Vec<_>>());
+                }
+            },
+            PatData::Newtype { type_name, inner } => {
+                let target = match type_scope(self.db, self.file).resolve(&type_name) {
+                    Some(Resolution::TypeItem(loc)) => Some(loc),
+                    _ => None,
+                };
+                let Some(target) = target else {
+                    // An empty name is broken source (the parse error
+                    // covers it); anything else names no type at all.
+                    if !type_name.is_empty() {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::PatUnknownType {
+                                pat,
+                                expr: anchor,
+                                name: type_name.clone(),
+                            });
+                    }
+                    self.bind_pat_error(inner);
+                    return;
+                };
+                match self.resolve_shallow(ty) {
+                    Ty::Named(loc) if loc == target => {
+                        let underlying =
+                            type_underlying(self.db, target.to_id(self.db)).unwrap_or(Ty::Error);
+                        self.check_pat(inner, &underlying, anchor);
+                    }
+                    Ty::Infer(_) => {
+                        self.result.diagnostics.push(
+                            InferenceDiagnostic::PatBindingNeedsAnnotation { pat, expr: anchor },
+                        );
+                        self.bind_pat_error(inner);
+                    }
+                    Ty::Error => self.bind_pat_error(inner),
+                    other => {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::PatNamedTypeMismatch {
+                                pat,
+                                expr: anchor,
+                                expected: Ty::Named(target),
+                                actual: other,
+                            });
+                        self.bind_pat_error(inner);
+                    }
+                }
+            }
+        }
+    }
+
     /// A construction call `Foo(arg)`: type-check the single argument
     /// against the declared underlying record bidirectionally (the declared
     /// field types flow into a literal argument's fields, blame cites the
@@ -1228,6 +2523,25 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         expected: &Ty,
         cause: Option<Cause>,
     ) -> Ty {
+        // An enum type constructs through its variants, never directly:
+        // there is no one shape `Shape(...)` could take. Recover with the
+        // enum type (that's what the user meant to produce) so downstream
+        // code still checks.
+        if enum_variants(self.db, loc.to_id(self.db)).is_some() {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::EnumCtorIsVariant {
+                    expr,
+                    item: loc.clone(),
+                });
+            for &arg in args {
+                let fresh = self.fresh_var();
+                self.infer_expr(arg, &fresh);
+            }
+            let ty = self.check(expr, Ty::Named(loc.clone()), expected, cause);
+            self.result.type_of_expr.insert(expr, ty.clone());
+            return ty;
+        }
         // `None` when the declaration is broken (RHS not a `struct`
         // literal): the declaration site carries the diagnostic, so the
         // argument is checked against `{error}` — infectious and silent.
@@ -1264,14 +2578,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
 
     /// Register the value of a branch as a witness of the join being
     /// assembled in `sink` — the witness-contribution seam every joining
-    /// construct plugs into.
+    /// construct plugs into: `if`/`else` branches, match arms, and
+    /// loop-break values.
     ///
     /// Two kinds of branch contribute nothing: a diverging branch (it
     /// doesn't vote, it widens — the join is decided by the surviving
-    /// leaves alone), and a branch whose tail is itself an `if`/`else` or a
-    /// `loop` (it was inferred with this sink as its witness position, so
-    /// its leaves — a loop's break values — are already in; that's the
-    /// flattening).
+    /// leaves alone), and a branch whose tail is itself an `if`/`else`, a
+    /// `match` or a `loop` (it was inferred with this sink as its witness
+    /// position, so its leaves — a loop's break values — are already in;
+    /// that's the flattening).
     fn contribute_witness(&mut self, sink: usize, branch: ExprId, ty: &Ty) {
         if matches!(self.resolve_shallow(ty), Ty::Never) {
             return;
@@ -1282,7 +2597,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             ExprData::If {
                 else_branch: Some(_),
                 ..
-            } | ExprData::Loop { .. }
+            } | ExprData::Match { .. }
+                | ExprData::Loop { .. }
         ) {
             return;
         }
@@ -1298,8 +2614,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// A successful unification that binds a type variable records `cause`
     /// in the constraint store — that's how the join solver later knows why
     /// an `if`'s result type was decided.
+    ///
+    /// Between unification and the mismatch sits the widening lattice
+    /// ([`widens_to`]): `!` adopts anything (no value to convert), and a
+    /// variant type converts to *its* enum — accepted silently, with the
+    /// conversion recorded in [`InferenceResult::widened`] so MIR injects
+    /// the tag at exactly this expression.
     fn check(&mut self, expr: ExprId, actual: Ty, expected: &Ty, cause: Option<Cause>) -> Ty {
-        // `!` coerces to anything — but only on the actual side.
+        // `!` coerces to anything — but only on the actual side. Its own
+        // early path (rather than `widens_to` below) because `!` also
+        // adopts a still-free expectation, which a conversion can't.
         if matches!(self.resolve_shallow(&actual), Ty::Never) {
             match self.resolve_shallow(expected) {
                 Ty::Never => {}
@@ -1308,18 +2632,27 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             }
         }
         if self.constraints.unify(self.table, &actual, expected, cause) {
-            actual
-        } else {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::TypeMismatch {
-                    expr,
-                    expected: expected.clone(),
-                    actual,
-                    reasons: cause.into_iter().collect(),
-                });
-            expected.clone()
+            return actual;
         }
+        let resolved_actual = self.resolve_shallow(&actual);
+        let resolved_expected = self.resolve_shallow(expected);
+        if widens_to(&resolved_actual, &resolved_expected) {
+            if let Ty::Variant(variant) = resolved_actual {
+                self.result.widened.insert(expr, variant);
+            }
+            // The context's type is what flows on from here — the value is
+            // tagged at this edge, so hover past it shows the enum.
+            return resolved_expected;
+        }
+        self.result
+            .diagnostics
+            .push(InferenceDiagnostic::TypeMismatch {
+                expr,
+                expected: expected.clone(),
+                actual,
+                reasons: cause.into_iter().collect(),
+            });
+        expected.clone()
     }
 
     pub(crate) fn unify(&mut self, a: &Ty, b: &Ty) -> bool {
@@ -1329,6 +2662,34 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     fn resolve_shallow(&mut self, ty: &Ty) -> Ty {
         constraint::resolve_shallow(self.table, ty)
     }
+}
+
+/// What a `match` scrutinee's resolved type says about the value universe
+/// the arms must cover.
+enum Scrutinee {
+    /// Enum-typed (tagged at runtime): the arms dispatch over the
+    /// declaration's variants.
+    Enum(ItemLoc),
+    /// Variant-typed (tag-free at runtime): only this one variant can
+    /// ever show up — no dispatch.
+    Variant(VariantTy),
+    /// Any other concrete type: only `_`/binding arms can match it (v1).
+    Other(Ty),
+    /// Still an inference variable.
+    Unknown(Ty),
+    /// Broken upstream (or diverging): stay silent.
+    Error,
+}
+
+/// What one arm's pattern covers of the scrutinee's value universe.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Cover {
+    /// Matches anything the scrutinee can be.
+    All,
+    /// Exactly one variant, by declaration index.
+    Variant(u32),
+    /// Nothing (broken or rejected pattern, or an unreachable variant).
+    Nothing,
 }
 
 /// Dig through block and `const` block wrappers to the value-producing

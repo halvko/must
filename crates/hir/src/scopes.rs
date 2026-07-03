@@ -77,13 +77,16 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
             let mut scope = scope;
             for stmt in stmts {
                 match stmt {
-                    Stmt::Let { binding, init } => {
-                        // The initializer sees the scope *before* the binding;
-                        // shadowing is just a fresh child scope per `let`.
+                    Stmt::Let { pat, init, .. } => {
+                        // The initializer sees the scope *before* the
+                        // pattern's bindings; shadowing is just a fresh
+                        // child scope per `let`, entered with every binding
+                        // the pattern introduces (one for a bare name, any
+                        // number for a destructuring pattern).
                         compute_expr_scopes(body, scopes, *init, scope);
                         scope = scopes.scopes.alloc(ScopeData {
                             parent: Some(scope),
-                            entries: vec![(body.bindings[*binding].name.clone(), *binding)],
+                            entries: body.pat_bindings(*pat),
                         });
                     }
                     Stmt::Assign { target, value } => {
@@ -108,7 +111,7 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
                 parent: Some(scope),
                 entries: params
                     .iter()
-                    .map(|&p| (body.bindings[p].name.clone(), p))
+                    .flat_map(|p| body.pat_bindings(p.pat))
                     .collect(),
             });
             compute_expr_scopes(body, scopes, *b, scope);
@@ -143,6 +146,26 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
         // receiver is an expression.
         ExprData::Field { receiver, .. } => {
             compute_expr_scopes(body, scopes, *receiver, scope);
+        }
+        // The variant name is resolved against the enum during inference,
+        // not lexically; only the base is a scoped reference.
+        ExprData::VariantPath { base, .. } => {
+            compute_expr_scopes(body, scopes, *base, scope);
+        }
+        ExprData::Match { scrutinee, arms } => {
+            compute_expr_scopes(body, scopes, *scrutinee, scope);
+            for arm in arms {
+                // Each arm's body sees its own pattern's bindings — a fresh
+                // child scope per arm, like a fn literal's params. A bare
+                // binding always binds the whole scrutinee (never
+                // reinterpreted as a variant), so its entry is just an
+                // ordinary local.
+                let arm_scope = scopes.scopes.alloc(ScopeData {
+                    parent: Some(scope),
+                    entries: body.pat_bindings(arm.pat),
+                });
+                compute_expr_scopes(body, scopes, arm.body, arm_scope);
+            }
         }
         // A loop introduces no bindings of its own; its body is a block,
         // which scopes itself.

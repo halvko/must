@@ -1,0 +1,68 @@
+// This file is intentionally broken: every item below trips exactly one
+// diagnostic, meant to be read next to `must-lsp check`'s output.
+//
+// Run: must-lsp check examples/errors.must
+//
+// Each comment quotes the diagnostic's headline (the message text; not the
+// source spans, which shift with the file). The real command prints more
+// than that — a `-->` location, a source snippet, related notes, and for
+// one case a `= help:` quick fix — pasted in full in the accompanying
+// report.
+
+// 1. Type mismatch, with the annotation blamed as the cause.
+//    error: type mismatch: expected `usize`, found `str`
+static bad_annotation: usize = "not a number";
+
+// 2. Const-context violation: every item initializer is a const context,
+//    and `double` is a plain `fn`, not a `const fn`, so calling it here is
+//    rejected — conservatively; being *provably* pure isn't enough, only a
+//    `const fn` literal or a name resolving to one is visibly callable.
+//    error: cannot call `double` in a const context; marking it `const fn` would allow this
+//    quick fix offered: "Mark `double` as `const fn`" (inserts `const `
+//    right before `double`'s `fn` keyword, which is the actual fix here).
+static double = fn (n: usize) -> usize { n * 2 };
+static const_violation = double(21);
+
+type Shape = enum { Circle(usize), Point };
+
+// 3. Non-exhaustive match: `Shape` has two variants, this arm list covers
+//    only one — the `match` keyword itself is squiggled, naming what's left.
+//    error: this `match` does not cover `Shape::Point`
+static describe_shape = fn (s: Shape) -> str {
+    match s {
+        ::Circle(r) => "circle",
+    }
+};
+
+// 4. Assignment to an immutable binding: `let` (no `mut`) means no further
+//    writes.
+//    error: cannot assign to `x`: it is not declared `mut`
+static reassign_immutable = fn () -> usize {
+    let x = 1;
+    x = 2;
+    x
+};
+
+// 5. Missing record field: the annotation demands `y`, the literal never
+//    supplies it.
+//    error: record literal is missing field `y: str`
+static missing_field: struct { x: usize, y: str } = struct { x: 1 };
+
+// 6. Variant demanded, enum given: `wants_circle` is typed to require the
+//    precise `Shape::Circle` variant; a `Shape::Point` doesn't widen the
+//    other way (widening only ever goes variant -> enum).
+//    error: type mismatch: expected `Shape::Circle`, found `Shape::Point`
+static wants_circle = fn (s: Shape::Circle) -> usize { 0 };
+static call_with_wrong_variant = fn () -> usize { wants_circle(Shape::Point) };
+
+// 7. Binding-shadows-variant: a bare name in pattern position always binds
+//    the whole scrutinee, even when it spells a variant's name — well-typed
+//    (a full catch-all), but almost always a migration mistake, so it warns
+//    instead of silently reinterpreting.
+//    warning: `Point` binds the whole value; write `::Point` (or `Shape::Point`) to match the variant
+static shadow_variant = fn (s: Shape) -> str {
+    match s {
+        ::Circle(r) => "circle",
+        Point => "point",
+    }
+};

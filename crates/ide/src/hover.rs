@@ -34,18 +34,45 @@ pub(crate) fn hover(
             .position(|n| n == item_node)
     };
 
-    // A type name in annotation position: show the declaration.
+    // A type name in annotation position: show the declaration. The
+    // variant segment of `p: Shape::Circle` shows the variant instead.
     if let Some(name_ref) = ast::NameRef::cast(parent.clone())
-        && name_ref
-            .syntax()
-            .parent()
-            .is_some_and(|p| p.kind() == SyntaxKind::PATH_TYPE)
+        && let Some(path_type) = name_ref.syntax().parent().and_then(ast::PathType::cast)
     {
-        let hir::Resolution::TypeItem(loc) = hir::file_scope(db, file).resolve(&name_ref.text())?
+        let base = path_type.name_ref()?;
+        let hir::Resolution::TypeItem(loc) = hir::file_scope(db, file).resolve(&base.text())?
         else {
             return None;
         };
+        if path_type.variant_name_ref().is_some_and(|v| v == name_ref) {
+            return variant_hover(db, &loc, &name_ref.text(), name_ref.syntax().text_range());
+        }
         return type_item_hover(db, loc.to_id(db), name_ref.syntax().text_range());
+    }
+
+    // A variant pattern: the variant segment shows the variant as
+    // declared; the qualified spelling's base shows the enum declaration.
+    if let Some(name_ref) = ast::NameRef::cast(parent.clone())
+        && let Some(variant_pat) = name_ref.syntax().parent().and_then(ast::VariantPat::cast)
+    {
+        if variant_pat.enum_name_ref().is_some_and(|n| n == name_ref) {
+            let hir::Resolution::TypeItem(loc) =
+                hir::file_scope(db, file).resolve(&name_ref.text())?
+            else {
+                return None;
+            };
+            return type_item_hover(db, loc.to_id(db), name_ref.syntax().text_range());
+        }
+        let item = *hir::file_item_ids(db, file).get(item_index(variant_pat.syntax())?)?;
+        let (_, source_map) = hir::body_with_source_map(db, item);
+        let pat = source_map.pat_for_node(SyntaxNodePtr::new(variant_pat.syntax()))?;
+        let variant = hir::infer::infer(db, item).variant_of_pat.get(pat)?;
+        return variant_hover(
+            db,
+            &variant.decl,
+            &variant.name,
+            name_ref.syntax().text_range(),
+        );
     }
 
     // The field name of a field access: the type of the whole access — the
@@ -69,15 +96,21 @@ pub(crate) fn hover(
             let path_expr = name_ref.syntax().parent().and_then(ast::PathExpr::cast)?;
             let item = *hir::file_item_ids(db, file).get(item_index(path_expr.syntax())?)?;
             let (body, source_map) = hir::body_with_source_map(db, item);
-            let expr = source_map.expr_for_node(SyntaxNodePtr::new(path_expr.syntax()))?;
-            let ty = hir::infer::infer(db, item).type_of_expr.get(expr)?.clone();
+            // The first segment of `Shape::Circle` has its own expression
+            // on the segment's node; anything else is the whole path.
+            let expr = source_map
+                .expr_for_node(SyntaxNodePtr::new(name_ref.syntax()))
+                .or_else(|| source_map.expr_for_node(SyntaxNodePtr::new(path_expr.syntax())))?;
             let resolution = hir::resolutions(db, item).get(expr).cloned();
-            // A type name in expression position (a construction head, or a
-            // stray use the diagnostics call out): show the declaration,
-            // not the constructor's function type.
+            // A type name in expression position (a construction head, a
+            // variant path's base, or a stray use the diagnostics call
+            // out): show the declaration, not the constructor's function
+            // type. Checked before the expression's type is demanded — a
+            // variant path's base has none.
             if let Some(hir::Resolution::TypeItem(ref loc)) = resolution {
                 return type_item_hover(db, loc.to_id(db), name_ref.syntax().text_range());
             }
+            let ty = hir::infer::infer(db, item).type_of_expr.get(expr)?.clone();
             // A use of another item also shows that item's const value.
             let value = match resolution {
                 Some(hir::Resolution::Item(ref loc)) => const_display(db, loc.to_id(db)),
@@ -134,20 +167,65 @@ pub(crate) fn hover(
 }
 
 /// Hover for a `type` item (on its declaration or any reference): the whole
-/// declaration, with the underlying shape in canonical (sorted) form. A
-/// broken declaration (RHS not a `struct` literal) shows just the head —
-/// its diagnostic explains the rest.
+/// declaration — the underlying record in canonical (sorted) form for a
+/// struct type, the variant list in declaration order for an enum. A broken
+/// declaration shows just the head — its diagnostic explains the rest.
 fn type_item_hover(
     db: &RootDatabase,
     item: hir::ItemId<'_>,
     range: TextRange,
 ) -> Option<HoverResult> {
     let name = item.name(db);
-    let markup = match hir::type_underlying(db, item) {
-        Some(underlying) => format!("```must\ntype {name} = {}\n```", underlying.display()),
-        None => format!("```must\ntype {name}\n```"),
+    let markup = if let Some(underlying) = hir::type_underlying(db, item) {
+        format!("```must\ntype {name} = {}\n```", underlying.display())
+    } else if let Some(variants) = hir::enum_variants(db, item) {
+        format!(
+            "```must\ntype {name} = enum {{ {} }}\n```",
+            variants
+                .iter()
+                .map(|(name, payload)| render_variant(name, payload))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    } else {
+        format!("```must\ntype {name}\n```")
     };
     Some(HoverResult { markup, range })
+}
+
+/// Hover for one variant (the second segment of a `::` path in type
+/// position): the variant as declared, qualified by its enum.
+fn variant_hover(
+    db: &RootDatabase,
+    loc: &hir::ItemLoc,
+    name: &str,
+    range: TextRange,
+) -> Option<HoverResult> {
+    let variants = hir::enum_variants(db, loc.to_id(db)).as_ref()?;
+    let (variant, payload) = variants.iter().find(|(variant, _)| variant == name)?;
+    Some(HoverResult {
+        markup: format!(
+            "```must\n{}::{}\n```",
+            loc.display_name(),
+            render_variant(variant, payload)
+        ),
+        range,
+    })
+}
+
+/// `Circle(usize)` / `Point` — a variant as its declaration writes it.
+fn render_variant(name: &str, payload: &[hir::Ty]) -> String {
+    if payload.is_empty() {
+        return name.to_owned();
+    }
+    format!(
+        "{name}({})",
+        payload
+            .iter()
+            .map(hir::Ty::display)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 /// Hovering the `const` keyword of a `const { … }` block shows the block's

@@ -1041,6 +1041,422 @@ static second = fn (p: Pair) -> usize { p.b };
 }
 
 #[test]
+fn variant_construction_is_tag_free() {
+    // Constructing and passing a variant-typed value produces only the
+    // payload aggregate — no tag, no `widen` op anywhere on this path.
+    check_mir(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static c = Shape::Circle(3);
+static p = Shape::Point;
+"#,
+        expect![[r#"
+            item Shape:
+            item c:
+            fn b0() -> Shape::Circle {
+              _0: Shape::Circle  // return
+              _1: Shape::Circle
+              bb0:
+                _1 = payload(3)
+                _0 = _1
+                return
+            }
+            item p:
+            fn b0() -> Shape::Point {
+              _0: Shape::Point  // return
+              _1: Shape::Point
+              bb0:
+                _1 = payload()
+                _0 = _1
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn widening_happens_exactly_at_the_conversion_edge() {
+    // The enum annotation is the edge: `widen` appears once, on the
+    // initializer; the same-variant `keep` path has none.
+    check_mir(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static widened: Shape = Shape::Point;
+static keep: Shape::Point = Shape::Point;
+"#,
+        expect![[r#"
+            item Shape:
+            item widened:
+            fn b0() -> Shape {
+              _0: Shape  // return
+              _1: Shape
+              _2: Shape
+              bb0:
+                _1 = payload()
+                _2 = widen _1 to Shape::Point
+                _0 = _2
+                return
+            }
+            item keep:
+            fn b0() -> Shape::Point {
+              _0: Shape::Point  // return
+              _1: Shape::Point
+              bb0:
+                _1 = payload()
+                _0 = _1
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn mixed_variant_join_widens_each_edge_only() {
+    check_mir(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (a: bool) -> Shape {
+    if a { Shape::Circle(1) } else { Shape::Point }
+};
+"#,
+        expect![[r#"
+            item Shape:
+            item f:
+            fn b0(_1: bool) -> Shape {
+              _0: Shape  // return
+              _1: bool  // param a
+              _2: Shape
+              _3: Shape::Circle
+              _4: Shape
+              _5: Shape::Point
+              _6: Shape
+              bb0:
+                if _1 -> [then: bb1, else: bb2]
+              bb1:
+                _3 = payload(1)
+                _4 = widen _3 to Shape::Circle
+                _2 = _4
+                goto -> bb3
+              bb2:
+                _5 = payload()
+                _6 = widen _5 to Shape::Point
+                _2 = _6
+                goto -> bb3
+              bb3:
+                _0 = _2
+                return
+            }
+            fn b1() -> fn(bool) -> Shape {
+              _0: fn(bool) -> Shape  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn same_variant_join_has_no_widening() {
+    check_mir(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (a: bool) {
+    if a { Shape::Point } else { Shape::Point }
+};
+"#,
+        expect![[r#"
+            item Shape:
+            item f:
+            fn b0(_1: bool) -> Shape::Point {
+              _0: Shape::Point  // return
+              _1: bool  // param a
+              _2: Shape::Point
+              _3: Shape::Point
+              _4: Shape::Point
+              bb0:
+                if _1 -> [then: bb1, else: bb2]
+              bb1:
+                _3 = payload()
+                _2 = _3
+                goto -> bb3
+              bb2:
+                _4 = payload()
+                _2 = _4
+                goto -> bb3
+              bb3:
+                _0 = _2
+                return
+            }
+            fn b1() -> fn(bool) -> Shape::Point {
+              _0: fn(bool) -> Shape::Point  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn first_class_constructor_synthesizes_a_body() {
+    check_mir(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn {
+    let make = Shape::Circle;
+    make(3)
+};
+"#,
+        expect![[r#"
+            item Shape:
+            item f:
+            fn b0(_1: usize) -> Shape::Circle {
+              _0: Shape::Circle  // return
+              _1: usize  // param _
+              bb0:
+                _0 = payload(_1)
+                return
+            }
+            fn b1() -> Shape::Circle {
+              _0: Shape::Circle  // return
+              _1: fn(usize) -> Shape::Circle  // make
+              _2: Shape::Circle
+              bb0:
+                _1 = fn b0
+                _2 = call _1(3) -> bb1
+              bb1:
+                _0 = _2
+                return
+            }
+            fn b2() -> fn() -> Shape::Circle {
+              _0: fn() -> Shape::Circle  // return
+              bb0:
+                _0 = fn b1
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn unknown_variant_traps_with_the_diagnostic() {
+    check_mir(
+        r#"
+type Shape = enum { Point };
+static s = Shape::Missing;
+"#,
+        expect![[r#"
+            item Shape:
+            item s:
+            fn b0() -> {error} {
+              _0: {error}  // return
+              _1: {error}
+              bb0:
+                _1 = trap "`Shape` has no variant `Missing`" -> bb1
+              bb1:
+                _0 = _1
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn match_on_enum_lowers_to_switch_variant() {
+    check_mir(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => r,
+        ::Point => 0,
+    }
+};
+"#,
+        expect![[r#"
+            item Shape:
+            item f:
+            fn b0(_1: Shape) -> usize {
+              _0: usize  // return
+              _1: Shape  // param s
+              _2: Shape
+              _3: usize
+              _4: usize  // r
+              bb0:
+                _2 = _1
+                switch _2 on Shape -> [0: bb1, 1: bb2, otherwise: bb3]
+              bb1:
+                _4 = _2.0
+                _3 = _4
+                goto -> bb4
+              bb2:
+                _3 = 0
+                goto -> bb4
+              bb3:
+                unreachable
+              bb4:
+                _0 = _3
+                return
+            }
+            fn b1() -> fn(Shape) -> usize {
+              _0: fn(Shape) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn nonexhaustive_match_traps_in_the_otherwise_arm() {
+    check_mir(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => r,
+    }
+};
+"#,
+        expect![[r#"
+            item Shape:
+            item f:
+            fn b0(_1: Shape) -> usize {
+              _0: usize  // return
+              _1: Shape  // param s
+              _2: Shape
+              _3: usize
+              _4: usize  // r
+              bb0:
+                _2 = _1
+                switch _2 on Shape -> [0: bb1, otherwise: bb2]
+              bb1:
+                _4 = _2.0
+                _3 = _4
+                goto -> bb3
+              bb2:
+                _3 = trap "this `match` does not cover `Shape::Point`" -> bb3
+              bb3:
+                _0 = _3
+                return
+            }
+            fn b1() -> fn(Shape) -> usize {
+              _0: fn(Shape) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn variant_typed_scrutinee_match_compiles_to_no_switch() {
+    // The state-machine payoff: the scrutinee can only be `State::Running`,
+    // so the match is a straight-line payload destructure — no switch, no
+    // tag read; the other arms are dead blocks nothing jumps to.
+    check_mir(
+        r#"
+type State = enum { Idle, Running(usize) };
+static step = fn (s: State::Running) -> usize {
+    match s {
+        ::Running(n) => n + 1,
+        ::Idle => 0,
+    }
+};
+"#,
+        expect![[r#"
+            item State:
+            item step:
+            fn b0(_1: State::Running) -> usize {
+              _0: usize  // return
+              _1: State::Running  // param s
+              _2: State::Running
+              _3: usize
+              _4: usize  // n
+              _5: usize
+              bb0:
+                _2 = _1
+                _4 = _2.0
+                _5 = Add(_4, 1)
+                _3 = _5
+                goto -> bb1
+              bb1:
+                _0 = _3
+                return
+              bb2:
+                _3 = 0
+                goto -> bb1
+            }
+            fn b1() -> fn(State::Running) -> usize {
+              _0: fn(State::Running) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn widen_then_match_round_trip() {
+    // Construct a variant (tag-free), widen it into the enum (`let mut`
+    // injects the tag), then match: the tag written by `WidenToEnum` is
+    // exactly what `SwitchVariant` dispatches on.
+    check_mir(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn () -> usize {
+    let mut s = Shape::Circle(3);
+    match s {
+        ::Circle(r) => r,
+        ::Point => 0,
+    }
+};
+"#,
+        expect![[r#"
+            item Shape:
+            item f:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: Shape::Circle
+              _2: Shape
+              _3: Shape  // s
+              _4: Shape
+              _5: usize
+              _6: usize  // r
+              bb0:
+                _1 = payload(3)
+                _2 = widen _1 to Shape::Circle
+                _3 = _2
+                _4 = _3
+                switch _4 on Shape -> [0: bb1, 1: bb2, otherwise: bb3]
+              bb1:
+                _6 = _4.0
+                _5 = _6
+                goto -> bb4
+              bb2:
+                _5 = 0
+                goto -> bb4
+              bb3:
+                unreachable
+              bb4:
+                _0 = _5
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
 fn accumulator_loop_lowers_with_a_back_edge() {
     // The first cyclic CFG: bb-header re-entered by the back edge at the
     // body's end, break edges to the exit carrying the loop's value in a

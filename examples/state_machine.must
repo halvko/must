@@ -1,0 +1,50 @@
+// Enums (`type Light = enum { Red, Yellow, Green };`), variant types, and
+// the tag-free state-machine pattern: a function can demand one specific
+// variant as its parameter type, so callers must already hold that exact
+// state, and the enum's tag never gets materialized for code that stays on
+// one variant.
+//
+// Run: must-lsp run examples/state_machine.must -e 'cycle_once'          (=> ())
+// Run: must-lsp run examples/state_machine.must -e 'describe(cycle_once)' (=> "stop")
+// Run: must-lsp run examples/state_machine.must -e 'run_lights()'        (=> "go")
+
+type Light = enum { Red, Yellow, Green };
+
+// Each transition demands the variant it starts from and promises the
+// variant it lands on — `Light::Red` is a value of type `Light::Red`, not
+// `Light`, so these compile to a direct value in, value out; no tag is ever
+// read or written. Construction and these transitions are pure, so they are
+// legal in a const context (hence `const fn`, since every item initializer
+// is one).
+static advance_red = const fn (l: Light::Red) -> Light::Green { Light::Green };
+static advance_green = const fn (l: Light::Green) -> Light::Yellow { Light::Yellow };
+static advance_yellow = const fn (l: Light::Yellow) -> Light::Red { Light::Red };
+
+// Chained entirely at compile time: Red -> Green -> Yellow -> Red. The
+// result's precise type is `Light::Red` — a payload-less variant, tag-free,
+// which is why it displays as `()`.
+static cycle_once = advance_yellow(advance_green(advance_red(Light::Red)));
+
+// `describe` takes the full *enum*, not one variant, so passing it a
+// `Light::Red` (as above) triggers the widening conversion at the call
+// argument: real work injecting the tag, done implicitly because the
+// parameter type demands it. Matching the tagged enum needs the tag, so
+// `match` here does real dispatch — unlike a `match` over a variant-typed
+// scrutinee, which compiles away entirely (see the `::Circle`-style
+// examples in the docs).
+static describe = fn (l: Light) -> str {
+    match l {
+        ::Red => "stop",
+        ::Yellow => "caution",
+        ::Green => "go",
+    }
+};
+
+// An unannotated `let mut` initialized from a variant widens to the enum at
+// binding time — a mutable state variable is meant to range over every
+// variant, so it starts out already tagged.
+static run_lights = fn () -> str {
+    let mut l = Light::Red;
+    l = Light::Green;
+    describe(l)
+};

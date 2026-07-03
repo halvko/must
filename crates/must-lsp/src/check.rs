@@ -199,7 +199,9 @@ static f = fn (n: usize) -> () {
                   |
                 2 | static x: usize = double(2);
                   |                   ^^^^^^
+                   = help: Mark `double` as `const fn`
                    = note: `double` is defined here (test.must:1:8)
+                   = note: this item's initializer is a const context (test.must:2:1)
 
             "#]],
         );

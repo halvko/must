@@ -78,6 +78,82 @@ fn pattern(p: &mut Parser<'_>, msg: &str) {
     }
 }
 
+/// A `let`/parameter pattern — construction's mirror image. A bare name or
+/// `_` (`BIND_PAT`/wrapped `NAME`, holes included — same shape a `let`/param
+/// name has always had, just now nested one level so it can sit alongside
+/// the richer forms below), a `struct { ... }` record destructure
+/// (`RECORD_PAT`), or `Name(pattern)` unwrapping a newtype (`NEWTYPE_PAT`).
+/// Unlike [`match_pattern`] there is no bare `_`-as-whole-pattern distinct
+/// node and no top-level `..` — those stay reserved for `match`.
+fn binding_pattern(p: &mut Parser<'_>, msg: &str) {
+    match p.current() {
+        IDENT if p.nth(1) == L_PAREN => {
+            newtype_pat(p);
+        }
+        IDENT | HOLE => {
+            let m = p.start();
+            pattern(p, msg);
+            m.complete(p, BIND_PAT);
+        }
+        STRUCT_KW if p.nth(1) == L_BRACE => {
+            record_pat(p);
+        }
+        _ => p.error(msg),
+    }
+}
+
+/// `struct { x, y as z, mut w, .. }` — a record-destructuring pattern. The
+/// caller has already confirmed `p.at(STRUCT_KW) && p.nth(1) == L_BRACE`.
+fn record_pat(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump(STRUCT_KW);
+    p.bump(L_BRACE);
+    while !p.at(R_BRACE) && !p.at(EOF) {
+        let before = p.pos();
+        if p.at(DOT2) {
+            let rest = p.start();
+            p.bump(DOT2);
+            rest.complete(p, REST_PAT);
+        } else {
+            record_pat_field(p);
+        }
+        if !p.at(R_BRACE) {
+            p.expect(COMMA, "`,`");
+        }
+        if p.pos() == before {
+            break;
+        }
+    }
+    p.expect_after_prev(R_BRACE);
+    m.complete(p, RECORD_PAT)
+}
+
+/// One field of a record pattern: `mut? name (as rename)?`. The field
+/// name is wrapped in `NAME` (a declaration, not a reference) because the
+/// shorthand spelling — no `as` — reuses the same token as the bound name's
+/// declaration site, exactly like a bare `BIND_PAT` does.
+fn record_pat_field(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.eat(MUT_KW);
+    pattern(p, "expected a field name");
+    if p.eat(AS_KW) {
+        pattern(p, "expected a binding name");
+    }
+    m.complete(p, RECORD_PAT_FIELD);
+}
+
+/// `Name(pattern)` — unwraps a newtype and destructures its underlying
+/// shape. The caller has already confirmed `p.at(IDENT) && p.nth(1) ==
+/// L_PAREN`.
+fn newtype_pat(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    name_ref(p);
+    p.bump(L_PAREN);
+    binding_pattern(p, "expected a pattern");
+    p.expect_after_prev(R_PAREN);
+    m.complete(p, NEWTYPE_PAT)
+}
+
 fn name_ref(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(IDENT);
@@ -154,6 +230,12 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
     if p.at(STRUCT_KW) && p.nth(1) == L_BRACE {
         return Some(record_expr(p));
     }
+    // `enum { ... }` — same dispatch scheme as `struct`. Grammar-wise it is
+    // an expression (a `type` item's RHS parses with `expr`); validation
+    // rejects it everywhere but as a `type` declaration's value.
+    if p.at(ENUM_KW) && p.nth(1) == L_BRACE {
+        return Some(enum_expr(p));
+    }
     let m = match p.current() {
         INT_NUMBER | STRING | TRUE_KW | FALSE_KW => {
             let m = p.start();
@@ -163,6 +245,17 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         IDENT => {
             let m = p.start();
             name_ref(p);
+            // `Shape::Circle` — a two-segment variant path. Exactly two
+            // segments for now: a further `::` is left for the caller to
+            // stumble over (there is nothing deeper to name yet).
+            if p.at(COLON2) {
+                p.bump(COLON2);
+                if p.at(IDENT) {
+                    name_ref(p);
+                } else {
+                    p.error("expected a variant name after `::`");
+                }
+            }
             m.complete(p, PATH_EXPR)
         }
         L_PAREN => {
@@ -177,6 +270,7 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         L_BRACE => block_expr(p),
         FN_KW => fn_literal(p),
         IF_KW => if_expr(p),
+        MATCH_KW => match_expr(p),
         LOOP_KW => loop_expr(p),
         BREAK_KW => break_expr(p),
         CONTINUE_KW => continue_expr(p),
@@ -232,6 +326,200 @@ fn if_expr(p: &mut Parser<'_>) -> CompletedMarker {
     m.complete(p, IF_EXPR)
 }
 
+/// `match scrutinee { arms }` — the basic braced form (the docs sketch
+/// further forms: `match x => pat;`, `if match`, `match ... else`; those
+/// land later as one coherent pattern-language feature).
+fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump(MATCH_KW);
+    // The scrutinee. `{` is not a postfix operator, so the expression
+    // parser stops exactly at the arm list.
+    expr(p);
+    if p.at(L_BRACE) {
+        p.bump(L_BRACE);
+        while !p.at(R_BRACE) && !p.at(EOF) {
+            // Recover at the enclosing item, same as block statements:
+            // an item keyword inside an arm list means the `}` is missing.
+            if matches!(p.current(), STATIC_KW | TYPE_KW)
+                || (p.at(CONST_KW) && !matches!(p.nth(1), FN_KW | L_BRACE))
+            {
+                break;
+            }
+            let before = p.pos();
+            match_arm(p);
+            if p.pos() == before {
+                p.err_and_bump("expected a match arm");
+            }
+        }
+        p.expect_after_prev(R_BRACE);
+    } else {
+        p.error("expected `{` followed by the match arms");
+    }
+    m.complete(p, MATCH_EXPR)
+}
+
+fn match_arm(p: &mut Parser<'_>) {
+    let m = p.start();
+    let before = p.pos();
+    match_pattern(p);
+    if p.pos() == before {
+        // The pattern read nothing, so there is no arm here. Reading a
+        // body anyway would judge it against the match's RESULT type and
+        // invent a second error naming a type the user never wrote, so
+        // take what is left of the arm as ERROR and recover at the next
+        // one.
+        let e = p.start();
+        skip_arm_body(p);
+        e.complete(p, ERROR);
+        p.eat(COMMA);
+        m.complete(p, MATCH_ARM);
+        return;
+    }
+    p.expect(FAT_ARROW, "`=>`");
+    expr(p);
+    // Brace rule, as for items: an arm whose body ends in `}` doesn't need
+    // the `,`. A trailing comma before the closing `}` is fine.
+    if !p.at(R_BRACE) {
+        if matches!(p.prev(), Some(R_BRACE)) {
+            p.eat(COMMA);
+        } else {
+            p.expect(COMMA, "`,`");
+        }
+    }
+    m.complete(p, MATCH_ARM);
+}
+
+/// Skip what is left of an arm whose pattern read nothing, up to the next
+/// arm or the end of the list. NESTING-AWARE: an arm body is an ordinary
+/// expression, so its own `,` and `}` (`{ a, b }`, `g(x, y)`) are not the
+/// arm list's separators. Counting bracket depth is what keeps a bodied
+/// arm at the one pattern error — stopping at the body's own `}` would
+/// close the arm list on it and cascade through everything after.
+fn skip_arm_body(p: &mut Parser<'_>) {
+    let mut depth = 0u32;
+    loop {
+        match p.current() {
+            EOF => return,
+            L_BRACE | L_PAREN => depth += 1,
+            R_BRACE | R_PAREN if depth == 0 => return,
+            R_BRACE | R_PAREN => depth -= 1,
+            // At depth 0 these end the arm (or the item that swallowed
+            // it); nested, they are the body's own.
+            COMMA | SEMICOLON | STATIC_KW | CONST_KW | TYPE_KW | LET_KW if depth == 0 => return,
+            _ => {}
+        }
+        p.bump_any();
+    }
+}
+
+/// A match-arm pattern — deliberately flat in v1: `_`, a plain binding
+/// name, and a variant pattern in one of three spellings — qualified
+/// `Enum::Variant(bindings...)`, elided `::Variant(bindings...)` (the
+/// scrutinee's enum, enum segment dropped), and the retired unqualified
+/// `Name(bindings...)` (still parsed as a `VARIANT_PAT` so `validation`
+/// can hand back an honest "write `::Name(...)`" error — patterns have no
+/// calls). Plus the *reserved* `..` (parses, validation rejects it). A
+/// bare name with no `::` and no parens is *always* a binding now — never
+/// reinterpreted type-directed as a variant (see `infer.rs`'s
+/// `check_match_pat` `PatData::Bind` arm). No nesting, or-patterns, guards
+/// or literal patterns yet.
+fn match_pattern(p: &mut Parser<'_>) {
+    match p.current() {
+        HOLE => {
+            let m = p.start();
+            p.bump(HOLE);
+            m.complete(p, WILDCARD_PAT);
+        }
+        // Reserved for record patterns (`Foo(struct { x, .. })` and
+        // friends): the token parses wherever a pattern does, validation
+        // rejects it for now.
+        DOT2 => {
+            let m = p.start();
+            p.bump(DOT2);
+            m.complete(p, REST_PAT);
+        }
+        // The elided sigil spelling `::Variant(...)`: a variant of the
+        // scrutinee's enum with the enum segment dropped. Exactly one
+        // `NameRef` child (the variant), with the `COLON2` *before* it.
+        COLON2 => {
+            let m = p.start();
+            p.bump(COLON2);
+            if p.at(IDENT) {
+                name_ref(p);
+            } else {
+                p.error("expected a variant name after `::`");
+            }
+            if p.at(L_PAREN) {
+                pattern_binding_list(p);
+            }
+            m.complete(p, VARIANT_PAT);
+        }
+        IDENT => {
+            // `Name::…` (qualified) or the retired `Name(...)` shape parse
+            // as a variant pattern; a bare name alone is *always* a binding
+            // now (no type-directed reinterpretation). The retired
+            // `Name(...)` shape is kept parseable only so `validation` can
+            // report an honest "write `::Name(...)`" error.
+            if matches!(p.nth(1), COLON2 | L_PAREN) {
+                let m = p.start();
+                name_ref(p);
+                if p.eat(COLON2) {
+                    if p.at(IDENT) {
+                        name_ref(p);
+                    } else {
+                        p.error("expected a variant name after `::`");
+                    }
+                }
+                if p.at(L_PAREN) {
+                    pattern_binding_list(p);
+                }
+                m.complete(p, VARIANT_PAT);
+            } else {
+                let m = p.start();
+                let nm = p.start();
+                p.bump(IDENT);
+                nm.complete(p, NAME);
+                m.complete(p, BIND_PAT);
+            }
+        }
+        _ => p.error("expected a pattern"),
+    }
+}
+
+/// The positional bindings of a variant pattern: names, `_` holes, and the
+/// reserved `..` rest marker.
+fn pattern_binding_list(p: &mut Parser<'_>) {
+    p.bump(L_PAREN);
+    while !p.at(R_PAREN) && !p.at(EOF) {
+        let before = p.pos();
+        match p.current() {
+            IDENT | HOLE => pattern(p, "expected a binding name"),
+            DOT2 => {
+                let m = p.start();
+                p.bump(DOT2);
+                m.complete(p, REST_PAT);
+            }
+            FAT_ARROW => {
+                // The arm's own arrow: the `)` is missing — don't eat it.
+                p.error("expected a binding name");
+                break;
+            }
+            _ if at_expr_recovery(p) => {
+                p.error("expected a binding name");
+                break;
+            }
+            _ => p.err_and_bump("expected a binding name"),
+        }
+        if !p.at(R_PAREN) && !p.at(FAT_ARROW) {
+            p.expect(COMMA, "`,`");
+        }
+        if p.pos() == before {
+            break;
+        }
+    }
+    p.expect_after_prev(R_PAREN);
+}
+
 /// `loop { ... }` — an infinite loop; `break`/`continue` steer it. The body
 /// parses with `block_expr` directly (bare braces stay blocks, no
 /// lookahead); like `if` branches, any other expression superset-parses and
@@ -265,14 +553,14 @@ fn continue_expr(p: &mut Parser<'_>) -> CompletedMarker {
 }
 
 /// Whether the current token can start an expression — the dispatch set of
-/// `primary_expr`, including its one-token-lookahead `const`/`struct`
+/// `primary_expr`, including its one-token-lookahead `const`/`struct`/`enum`
 /// cases. Used where an expression is *optional* (a `break` value).
 fn at_expr_start(p: &Parser<'_>) -> bool {
     match p.current() {
         INT_NUMBER | STRING | TRUE_KW | FALSE_KW | IDENT | L_PAREN | L_BRACE | FN_KW | IF_KW
-        | LOOP_KW | BREAK_KW | CONTINUE_KW => true,
+        | MATCH_KW | LOOP_KW | BREAK_KW | CONTINUE_KW => true,
         CONST_KW => matches!(p.nth(1), FN_KW | L_BRACE),
-        STRUCT_KW => p.nth(1) == L_BRACE,
+        STRUCT_KW | ENUM_KW => p.nth(1) == L_BRACE,
         _ => false,
     }
 }
@@ -309,9 +597,9 @@ fn param_list(p: &mut Parser<'_>) {
 
 fn param(p: &mut Parser<'_>) {
     let m = p.start();
-    if matches!(p.current(), IDENT | HOLE | MUT_KW) {
+    if matches!(p.current(), IDENT | HOLE | MUT_KW) || (p.at(STRUCT_KW) && p.nth(1) == L_BRACE) {
         p.eat(MUT_KW);
-        pattern(p, "expected a parameter name");
+        binding_pattern(p, "expected a parameter name");
         if p.eat(COLON) {
             type_(p);
         }
@@ -365,9 +653,63 @@ fn record_expr(p: &mut Parser<'_>) -> CompletedMarker {
     m.complete(p, RECORD_EXPR)
 }
 
+/// `enum { Variant(Type, ...), Variant, ... }` — an enum literal (only
+/// meaningful as a `type` declaration's RHS). The caller has already
+/// confirmed `p.at(ENUM_KW) && p.nth(1) == L_BRACE`.
+fn enum_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump(ENUM_KW);
+    p.bump(L_BRACE);
+    while !p.at(R_BRACE) && !p.at(EOF) {
+        let before = p.pos();
+        enum_variant(p);
+        if !p.at(R_BRACE) {
+            p.expect(COMMA, "`,`");
+        }
+        if p.pos() == before {
+            break;
+        }
+    }
+    p.expect_after_prev(R_BRACE);
+    m.complete(p, ENUM_EXPR)
+}
+
+/// One variant of an enum literal: a name (a declaration, so `NAME` like
+/// record-type fields) with an optional parenthesized list of positional
+/// payload *types* — payloads are type syntax, not expressions.
+fn enum_variant(p: &mut Parser<'_>) {
+    let m = p.start();
+    if p.at(IDENT) {
+        let nm = p.start();
+        p.bump(IDENT);
+        nm.complete(p, NAME);
+    } else {
+        p.error("expected a variant name");
+    }
+    if p.at(L_PAREN) {
+        p.bump(L_PAREN);
+        while !p.at(R_PAREN) && !p.at(EOF) {
+            let before = p.pos();
+            type_(p);
+            if !p.at(R_PAREN) {
+                p.expect(COMMA, "`,`");
+            }
+            if p.pos() == before {
+                break;
+            }
+        }
+        p.expect_after_prev(R_PAREN);
+    }
+    m.complete(p, ENUM_VARIANT);
+}
+
 /// A record-literal field: `name` (shorthand for `name: name`) or `name: expr`.
+/// `pub` superset-parses here too (a `type` declaration's shape is written
+/// as a `struct` literal — see [`enum_variant`]'s sibling in `item_tree`);
+/// validation rejects it everywhere fields appear.
 fn record_expr_field(p: &mut Parser<'_>) {
     let m = p.start();
+    p.eat(PUB_KW);
     if p.at(IDENT) {
         let nm = p.start();
         p.bump(IDENT);
@@ -448,7 +790,7 @@ fn let_stmt(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(LET_KW);
     p.eat(MUT_KW);
-    pattern(p, "expected a binding name");
+    binding_pattern(p, "expected a binding name");
     if p.eat(COLON) {
         type_(p);
     }
@@ -509,6 +851,15 @@ fn type_(p: &mut Parser<'_>) {
         IDENT => {
             let m = p.start();
             name_ref(p);
+            // `Shape::Circle` in type position: a variant type.
+            if p.at(COLON2) {
+                p.bump(COLON2);
+                if p.at(IDENT) {
+                    name_ref(p);
+                } else {
+                    p.error("expected a variant name after `::`");
+                }
+            }
             m.complete(p, PATH_TYPE);
         }
         HOLE => {
@@ -549,9 +900,11 @@ fn record_type(p: &mut Parser<'_>) {
 }
 
 /// A record-type field: `name: Type`. The name is a declaration, so it is
-/// wrapped in `NAME` (like `param`/`pattern`), not `NAME_REF`.
+/// wrapped in `NAME` (like `param`/`pattern`), not `NAME_REF`. `pub`
+/// superset-parses (reserved: field visibility isn't supported yet).
 fn record_type_field(p: &mut Parser<'_>) {
     let m = p.start();
+    p.eat(PUB_KW);
     if p.at(IDENT) {
         let nm = p.start();
         p.bump(IDENT);

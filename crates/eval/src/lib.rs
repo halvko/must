@@ -41,6 +41,27 @@ pub enum Value {
     Record {
         fields: Vec<(String, Value)>,
     },
+    /// A *variant-typed* value: the bare payload tuple, in declaration
+    /// order. This is the uniform carrier for every payload arity —
+    /// `Shape::Point` is `Tuple([])`, `Shape::Circle(3)` is
+    /// `Tuple([Int(3)])`, `Shape::Pair(1, "a")` is `Tuple([Int(1),
+    /// Str("a")])`. Deliberately tag-free: no enum, no variant index —
+    /// for code that stays on one variant (the state-machine case) the
+    /// enum is fully erased at runtime. The static variant type is the
+    /// only thing that says what this is.
+    Tuple(Vec<Value>),
+    /// An *enum-typed* (tagged) value: which declaration, which variant,
+    /// plus the payload. Only ever produced by the widening conversion
+    /// (`mir::Rvalue::WidenToEnum`) — the tag exists exactly from that
+    /// edge on. `name` duplicates what `(decl, index)` already determine,
+    /// carried so display needs no database; derived equality is
+    /// therefore still identity-plus-payload.
+    Variant {
+        decl: ItemLoc,
+        index: u32,
+        name: String,
+        payload: Vec<Value>,
+    },
 }
 
 /// A function value: which item's lowered MIR holds its code, and which of
@@ -70,6 +91,35 @@ impl Value {
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("{{ {parts} }}")
+            }
+            // A payload-less variant-typed value renders like unit — all
+            // the runtime has (its *type* names the variant; the debugger
+            // shows it alongside).
+            Value::Tuple(values) => {
+                let parts = values
+                    .iter()
+                    .map(Value::display)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("({parts})")
+            }
+            Value::Variant {
+                decl,
+                name,
+                payload,
+                ..
+            } => {
+                let head = format!("{}::{name}", decl.display_name());
+                if payload.is_empty() {
+                    head
+                } else {
+                    let parts = payload
+                        .iter()
+                        .map(Value::display)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{head}({parts})")
+                }
             }
         }
     }

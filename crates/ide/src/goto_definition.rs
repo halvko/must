@@ -22,41 +22,68 @@ pub(crate) fn goto_definition(
     let token = root
         .token_at_offset(offset)
         .find(|t| t.kind() == SyntaxKind::IDENT)?;
+
     let name_ref = token.parent().and_then(ast::NameRef::cast)?;
 
-    // A name in *type* position (`p: Foo`) resolves through the file scope
-    // directly — annotations aren't body expressions, so there is no
-    // resolution entry to look up.
-    if name_ref
-        .syntax()
-        .parent()
-        .is_some_and(|p| p.kind() == SyntaxKind::PATH_TYPE)
-    {
-        let resolution = hir::file_scope(db, file).resolve(&name_ref.text())?;
+    // A variant pattern (`::Circle(r)` / `Shape::Circle(r)`): the variant
+    // segment resolved type-directed during inference; the qualified
+    // spelling's base is the enum `type` item. A bare binding is just its
+    // own declaration — nothing to jump to (it falls through to `None`).
+    if let Some(variant_pat) = name_ref.syntax().parent().and_then(ast::VariantPat::cast) {
+        if variant_pat.enum_name_ref().is_some_and(|n| n == name_ref) {
+            let Resolution::TypeItem(loc) = hir::file_scope(db, file).resolve(&name_ref.text())?
+            else {
+                return None;
+            };
+            return nav_to_item(db, &loc);
+        }
+        let item = item_at(db, file, &root, variant_pat.syntax())?;
+        let (_, source_map) = hir::body_with_source_map(db, item);
+        let pat = source_map.pat_for_node(SyntaxNodePtr::new(variant_pat.syntax()))?;
+        let variant = hir::infer::infer(db, item).variant_of_pat.get(pat)?;
+        return nav_to_variant(db, variant);
+    }
+
+    // A name in *type* position (`p: Foo`, `p: Shape::Circle`) resolves
+    // through the file scope directly — annotations aren't body
+    // expressions, so there is no resolution entry to look up. The second
+    // segment of a variant path resolves type-directed against the enum's
+    // declaration, landing on the variant inside the `type` item.
+    if let Some(path_type) = name_ref.syntax().parent().and_then(ast::PathType::cast) {
+        let base = path_type.name_ref()?;
+        let resolution = hir::file_scope(db, file).resolve(&base.text())?;
         let Resolution::TypeItem(loc) = resolution else {
             // Builtin types have no source; a value item in type position
             // is not a definition to jump to (a diagnostic already says
             // it's not a type).
             return None;
         };
+        if path_type.variant_name_ref().is_some_and(|v| v == name_ref) {
+            return nav_to_variant_by_name(db, &loc, &name_ref.text());
+        }
         return nav_to_item(db, &loc);
     }
 
     let path_expr = name_ref.syntax().parent().and_then(ast::PathExpr::cast)?;
 
     // Which item are we inside?
-    let item_node = path_expr
-        .syntax()
-        .ancestors()
-        .find(|n| ast::Item::can_cast(n.kind()))?;
-    let item_index = root
-        .children()
-        .filter(|n| ast::Item::can_cast(n.kind()))
-        .position(|n| n == item_node)?;
-    let item = *hir::file_item_ids(db, file).get(item_index)?;
+    let item = item_at(db, file, &root, path_expr.syntax())?;
 
     let (_, source_map) = hir::body_with_source_map(db, item);
-    let expr = source_map.expr_for_node(SyntaxNodePtr::new(path_expr.syntax()))?;
+
+    // The second segment of `Shape::Circle`: inference resolved it against
+    // the enum's declaration; jump to the variant inside the `type` item.
+    if path_expr.variant_name_ref().is_some_and(|v| v == name_ref) {
+        let path = source_map.expr_for_node(SyntaxNodePtr::new(path_expr.syntax()))?;
+        let variant = hir::infer::infer(db, item).variant_of_expr.get(path)?;
+        return nav_to_variant(db, variant);
+    }
+    // The first segment of `Shape::Circle` lowers as its own `NameRef`
+    // expression on the segment's node; a single-segment path sits on the
+    // whole path node.
+    let expr = source_map
+        .expr_for_node(SyntaxNodePtr::new(name_ref.syntax()))
+        .or_else(|| source_map.expr_for_node(SyntaxNodePtr::new(path_expr.syntax())))?;
     match hir::resolutions(db, item).get(expr)? {
         Resolution::Local(binding) => {
             let name_ptr = source_map.node_for_binding(*binding)?;
@@ -83,6 +110,65 @@ pub(crate) fn goto_definition(
         // Builtins have no source to jump to.
         Resolution::Builtin(_) => None,
     }
+}
+
+/// The item whose body contains `node`, by position.
+fn item_at<'db>(
+    db: &'db RootDatabase,
+    file: SourceFile,
+    root: &syntax::SyntaxNode,
+    node: &syntax::SyntaxNode,
+) -> Option<hir::ItemId<'db>> {
+    let item_node = node.ancestors().find(|n| ast::Item::can_cast(n.kind()))?;
+    let item_index = root
+        .children()
+        .filter(|n| ast::Item::can_cast(n.kind()))
+        .position(|n| n == item_node)?;
+    hir::file_item_ids(db, file).get(item_index).copied()
+}
+
+/// Navigate to a variant's declaration inside its enum's `type` item: the
+/// variant node is the full range, its name the focus.
+fn nav_to_variant(db: &RootDatabase, variant: &hir::VariantTy) -> Option<NavigationTarget> {
+    let ast::Item::TypeItem(decl) = hir::item_source(db, variant.decl.to_id(db))? else {
+        return None;
+    };
+    let ast::Expr::EnumExpr(en) = decl.body()? else {
+        return None;
+    };
+    let variant_node = en.variants().nth(variant.index as usize)?;
+    let full_range = variant_node.syntax().text_range();
+    let focus_range = variant_node
+        .name()
+        .map(|n| n.syntax().text_range())
+        .unwrap_or(full_range);
+    Some(NavigationTarget {
+        file: variant.decl.file,
+        full_range,
+        focus_range,
+    })
+}
+
+/// As [`nav_to_variant`], from a *type-position* path (`p: Shape::Circle`),
+/// where no inference result carries the resolution: look the name up in
+/// the declaration directly.
+fn nav_to_variant_by_name(
+    db: &RootDatabase,
+    loc: &hir::ItemLoc,
+    name: &str,
+) -> Option<NavigationTarget> {
+    let index = hir::enum_variants(db, loc.to_id(db))
+        .as_ref()?
+        .iter()
+        .position(|(variant, _)| variant == name)?;
+    nav_to_variant(
+        db,
+        &hir::VariantTy {
+            decl: loc.clone(),
+            index: index as u32,
+            name: name.into(),
+        },
+    )
 }
 
 fn nav_to_item(db: &RootDatabase, loc: &hir::ItemLoc) -> Option<NavigationTarget> {

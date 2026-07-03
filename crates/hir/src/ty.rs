@@ -33,8 +33,16 @@ pub enum Ty {
     /// never unifies with the structurally-identical bare record — no
     /// implicit nominal↔structural coercion in either direction. The
     /// declared shape is *not* carried here; it is projected on demand
-    /// through [`type_underlying`] (field access, construction).
+    /// through [`type_underlying`] (field access, construction) and
+    /// [`enum_variants`].
     Named(ItemLoc),
+    /// `Shape::Circle`: the type of one variant of an enum, a first-class
+    /// type of its own. It does *not* unify with its enum — a variant-typed
+    /// value is tag-free at runtime, an enum-typed value is tagged, so
+    /// going variant → enum is a real conversion ([`widens_to`]), never
+    /// equality. Payload types are not carried here (identity only, like
+    /// [`Ty::Named`]); they are projected through [`enum_variants`].
+    Variant(VariantTy),
     /// Type of broken code. Infectious and silent: producing further
     /// diagnostics from an `Error` type would only be noise.
     Error,
@@ -44,6 +52,34 @@ pub enum Ty {
 pub struct FnTy {
     pub params: Vec<Ty>,
     pub ret: Ty,
+}
+
+/// Identity of a variant type: the enum declaration plus the variant's
+/// position in it. The name is carried for display (and for the runtime
+/// value's DAP rendering); it is determined by `(decl, index)`, so including
+/// it in equality is harmless.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct VariantTy {
+    /// The declaring `type ... = enum { ... };` item.
+    pub decl: ItemLoc,
+    /// Position in the declaration's source-order variant list.
+    pub index: u32,
+    pub name: std::sync::Arc<str>,
+}
+
+/// The implicit-conversion lattice, checked where unification fails at a
+/// check site (an annotation, a call argument, a join edge): `!` widens to
+/// everything (divergence produces no value to convert), and a variant type
+/// widens to *its* enum — that one is a real runtime conversion (the tag is
+/// injected; see `mir`'s `WidenToEnum`). Nothing else widens, and only
+/// shallowly: no variance through `fn` types or record fields. Unification
+/// itself stays equational — `unify(Variant, Named)` is false.
+pub fn widens_to(actual: &Ty, expected: &Ty) -> bool {
+    match (actual, expected) {
+        (Ty::Never, _) => true,
+        (Ty::Variant(variant), Ty::Named(loc)) => variant.decl == *loc,
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -85,7 +121,7 @@ impl Ty {
             // Identity only: a broken *declaration* carries its own
             // diagnostics at the declaration site; uses of the name must
             // not cascade.
-            Ty::Named(_) => false,
+            Ty::Named(_) | Ty::Variant(_) => false,
             _ => false,
         }
     }
@@ -124,6 +160,9 @@ impl Ty {
                 format!("struct {{ {fields} }}")
             }
             Ty::Named(loc) => loc.display_name().to_owned(),
+            Ty::Variant(variant) => {
+                format!("{}::{}", variant.decl.display_name(), variant.name)
+            }
         }
     }
 }
@@ -199,6 +238,28 @@ fn lower_type_path(db: &dyn Db, file: SourceFile, name: &str) -> Ty {
     }
 }
 
+/// Resolve `Enum::Variant` in *type* position to a [`Ty::Variant`]. Every
+/// `Ty::Error` case (base not an enum type, unknown variant) has a matching
+/// diagnostic in [`crate::file_diagnostics`]'s `PathType` pass — same
+/// mirror contract as [`lower_type_path`].
+fn lower_variant_type_path(db: &dyn Db, file: SourceFile, enum_name: &str, variant: &str) -> Ty {
+    let Some(Resolution::TypeItem(loc)) = type_scope(db, file).resolve(enum_name) else {
+        return Ty::Error;
+    };
+    let Some(variants) = enum_variants(db, loc.to_id(db)).as_ref() else {
+        // A struct `type` item, or a broken declaration.
+        return Ty::Error;
+    };
+    match variants.iter().position(|(name, _)| name == variant) {
+        Some(index) => Ty::Variant(VariantTy {
+            decl: loc,
+            index: index as u32,
+            name: std::sync::Arc::from(variant),
+        }),
+        None => Ty::Error,
+    }
+}
+
 /// Lower a syntactic type annotation. References are transparent for now
 /// (`&'static str` and `str` are the same type to inference).
 pub(crate) fn lower_type_ref(
@@ -228,6 +289,9 @@ pub(crate) fn lower_type_ref(
             lower_type_ref(db, file, type_ref, table)
         }
         TypeRef::Path(path) => lower_type_path(db, file, path),
+        TypeRef::Variant { enum_name, variant } => {
+            lower_variant_type_path(db, file, enum_name, variant)
+        }
         TypeRef::Hole => Ty::Infer(table.new_key(TyVarValue::Unknown)),
         TypeRef::Record(fields) => Ty::record(
             fields
@@ -267,15 +331,69 @@ pub(crate) fn is_fully_typed(value: &TypeRef) -> bool {
 /// lowering a path stops at [`Ty::Named`] — nothing expands.
 #[salsa::tracked]
 pub fn type_underlying<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<Ty> {
-    let decl = type_decl(db, item).as_ref()?;
+    let crate::item_tree::TypeDeclData::Struct { fields } = type_decl(db, item).as_ref()? else {
+        return None;
+    };
     let file = item.file(db);
     let mut table = InPlaceUnificationTable::new();
     Some(Ty::record(
-        decl.fields
+        fields
             .iter()
             .map(|(name, ty)| (name.clone(), lower_type_ref(db, file, ty, &mut table)))
             .collect(),
     ))
+}
+
+/// The variants an enum `type` item declares — `(name, payload types)` in
+/// source order (a variant's index is its identity) — or `None` when the
+/// item declares a struct shape or is broken. The enum-side counterpart of
+/// [`type_underlying`], and the same incrementality firewall.
+///
+/// Payload `TypeRef`s come from real type syntax, so they *can* contain
+/// holes (`_`) or `fn` types without a return — positions that would mint
+/// inference variables. A declaration has no inference context to fill
+/// them, so any variable-typed leftover is erased to `Ty::Error` here;
+/// [`crate::file_diagnostics`] rejects those payloads with a diagnostic.
+#[salsa::tracked(returns(ref))]
+pub fn enum_variants<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<Vec<(String, Vec<Ty>)>> {
+    let crate::item_tree::TypeDeclData::Enum { variants } = type_decl(db, item).as_ref()? else {
+        return None;
+    };
+    let file = item.file(db);
+    let mut table = InPlaceUnificationTable::new();
+    Some(
+        variants
+            .iter()
+            .map(|(name, payload)| {
+                (
+                    name.clone(),
+                    payload
+                        .iter()
+                        .map(|ty| erase_infer(&lower_type_ref(db, file, ty, &mut table)))
+                        .collect(),
+                )
+            })
+            .collect(),
+    )
+}
+
+/// Erase dangling inference variables to `Ty::Error` — for lowering done
+/// outside any inference context (declarations).
+fn erase_infer(ty: &Ty) -> Ty {
+    match ty {
+        Ty::Infer(_) => Ty::Error,
+        Ty::Fn(f) => Ty::fn_type(
+            f.params.iter().map(erase_infer).collect(),
+            erase_infer(&f.ret),
+        ),
+        Ty::Record(rec) => Ty::record(
+            rec.fields
+                .iter()
+                .map(|(name, ty)| (name.clone(), erase_infer(ty)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 /// The type other items see for `item`. A fully-typed contract is the

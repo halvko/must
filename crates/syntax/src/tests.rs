@@ -67,8 +67,9 @@ static main: fn() -> () = fn() -> () {
                     LET_STMT@44..74
                       LET_KW@44..47 "let"
                       WHITESPACE@47..48 " "
-                      NAME@48..49
-                        IDENT@48..49 "s"
+                      BIND_PAT@48..49
+                        NAME@48..49
+                          IDENT@48..49 "s"
                       COLON@49..50 ":"
                       WHITESPACE@50..51 " "
                       REF_TYPE@51..63
@@ -159,8 +160,9 @@ static main = fn {
                     LET_STMT@24..40
                       LET_KW@24..27 "let"
                       WHITESPACE@27..28 " "
-                      NAME@28..29
-                        IDENT@28..29 "s"
+                      BIND_PAT@28..29
+                        NAME@28..29
+                          IDENT@28..29 "s"
                       WHITESPACE@29..30 " "
                       EQ@30..31 "="
                       WHITESPACE@31..32 " "
@@ -231,8 +233,9 @@ static main = fn {
                     LET_STMT@24..40
                       LET_KW@24..27 "let"
                       WHITESPACE@27..28 " "
-                      NAME@28..29
-                        IDENT@28..29 "s"
+                      BIND_PAT@28..29
+                        NAME@28..29
+                          IDENT@28..29 "s"
                       WHITESPACE@29..30 " "
                       EQ@30..31 "="
                       WHITESPACE@31..32 " "
@@ -303,8 +306,9 @@ static main = fn {
                   PARAM_LIST@21..41
                     L_PAREN@21..22 "("
                     PARAM@22..40
-                      NAME@22..25
-                        IDENT@22..25 "arg"
+                      BIND_PAT@22..25
+                        NAME@22..25
+                          IDENT@22..25 "arg"
                       COLON@25..26 ":"
                       WHITESPACE@26..27 " "
                       FN_TYPE@27..40
@@ -520,8 +524,9 @@ fn never_type_annotation() {
                   PARAM_LIST@32..40
                     L_PAREN@32..33 "("
                     PARAM@33..39
-                      NAME@33..34
-                        IDENT@33..34 "s"
+                      BIND_PAT@33..34
+                        NAME@33..34
+                          IDENT@33..34 "s"
                       COLON@34..35 ":"
                       WHITESPACE@35..36 " "
                       PATH_TYPE@36..39
@@ -708,8 +713,9 @@ static name = fn {
                     LET_STMT@24..41
                       LET_KW@24..27 "let"
                       WHITESPACE@27..28 " "
-                      NAME@28..29
-                        IDENT@28..29 "f"
+                      BIND_PAT@28..29
+                        NAME@28..29
+                          IDENT@28..29 "f"
                       WHITESPACE@29..30 " "
                       EQ@30..31 "="
                       WHITESPACE@31..32 " "
@@ -843,8 +849,9 @@ static name = fn {
                     LET_STMT@24..44
                       LET_KW@24..27 "let"
                       WHITESPACE@27..28 " "
-                      NAME@28..29
-                        IDENT@28..29 "s"
+                      BIND_PAT@28..29
+                        NAME@28..29
+                          IDENT@28..29 "s"
                       WHITESPACE@29..30 " "
                       EQ@30..31 "="
                       WHITESPACE@31..32 " "
@@ -956,8 +963,9 @@ static main = fn {
                     LET_STMT@43..53
                       LET_KW@43..46 "let"
                       WHITESPACE@46..47 " "
-                      NAME@47..49
-                        IDENT@47..49 "s2"
+                      BIND_PAT@47..49
+                        NAME@47..49
+                          IDENT@47..49 "s2"
                       WHITESPACE@49..50 " "
                       EQ@50..51 "="
                       WHITESPACE@51..52 " "
@@ -1012,8 +1020,9 @@ static b = fn {};
                     LET_STMT@21..33
                       LET_KW@21..24 "let"
                       WHITESPACE@24..25 " "
-                      NAME@25..26
-                        IDENT@25..26 "s"
+                      BIND_PAT@25..26
+                        NAME@25..26
+                          IDENT@25..26 "s"
                       WHITESPACE@26..27 " "
                       EQ@27..28 "="
                       WHITESPACE@28..29 " "
@@ -1071,8 +1080,9 @@ static main = fn {
                     LET_STMT@24..33
                       LET_KW@24..27 "let"
                       WHITESPACE@27..28 " "
-                      NAME@28..29
-                        IDENT@28..29 "a"
+                      BIND_PAT@28..29
+                        NAME@28..29
+                          IDENT@28..29 "a"
                       WHITESPACE@29..30 " "
                       EQ@30..31 "="
                       WHITESPACE@31..32 " "
@@ -1125,8 +1135,9 @@ static empty_params = fn () { 1 }
                   PARAM_LIST@25..28
                     L_PAREN@25..26 "("
                     PARAM@26..27
-                      NAME@26..27
-                        IDENT@26..27 "s"
+                      BIND_PAT@26..27
+                        NAME@26..27
+                          IDENT@26..27 "s"
                     R_PAREN@27..28 ")"
                   WHITESPACE@28..29 " "
                   BLOCK_EXPR@29..34
@@ -1428,8 +1439,9 @@ fn let_hole_pattern() {
                     LET_STMT@16..26
                       LET_KW@16..19 "let"
                       WHITESPACE@19..20 " "
-                      NAME@20..21
-                        HOLE@20..21 "_"
+                      BIND_PAT@20..21
+                        NAME@20..21
+                          HOLE@20..21 "_"
                       WHITESPACE@21..22 " "
                       EQ@22..23 "="
                       WHITESPACE@23..24 " "
@@ -1463,8 +1475,9 @@ fn param_hole_pattern() {
                   PARAM_LIST@14..24
                     L_PAREN@14..15 "("
                     PARAM@15..23
-                      NAME@15..16
-                        HOLE@15..16 "_"
+                      BIND_PAT@15..16
+                        NAME@15..16
+                          HOLE@15..16 "_"
                       COLON@16..17 ":"
                       WHITESPACE@17..18 " "
                       PATH_TYPE@18..23
@@ -1503,8 +1516,9 @@ fn const_fn_literal_with_params_and_ret_type() {
                   PARAM_LIST@20..30
                     L_PAREN@20..21 "("
                     PARAM@21..29
-                      NAME@21..22
-                        IDENT@21..22 "n"
+                      BIND_PAT@21..22
+                        NAME@21..22
+                          IDENT@21..22 "n"
                       COLON@22..23 ":"
                       WHITESPACE@23..24 " "
                       PATH_TYPE@24..29
@@ -1603,48 +1617,49 @@ fn const_block_nested_in_fn_body() {
     check(
         "static f = fn { let y = const { 2 }; y };",
         expect![[r#"
-        SOURCE_FILE@0..41
-          STATIC_ITEM@0..41
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "f"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FN_LITERAL@11..40
-              FN_KW@11..13 "fn"
-              WHITESPACE@13..14 " "
-              BLOCK_EXPR@14..40
-                L_BRACE@14..15 "{"
-                WHITESPACE@15..16 " "
-                LET_STMT@16..36
-                  LET_KW@16..19 "let"
-                  WHITESPACE@19..20 " "
-                  NAME@20..21
-                    IDENT@20..21 "y"
-                  WHITESPACE@21..22 " "
-                  EQ@22..23 "="
-                  WHITESPACE@23..24 " "
-                  CONST_BLOCK_EXPR@24..35
-                    CONST_KW@24..29 "const"
-                    WHITESPACE@29..30 " "
-                    BLOCK_EXPR@30..35
-                      L_BRACE@30..31 "{"
-                      WHITESPACE@31..32 " "
-                      LITERAL@32..33
-                        INT_NUMBER@32..33 "2"
-                      WHITESPACE@33..34 " "
-                      R_BRACE@34..35 "}"
-                  SEMICOLON@35..36 ";"
-                WHITESPACE@36..37 " "
-                PATH_EXPR@37..38
-                  NAME_REF@37..38
-                    IDENT@37..38 "y"
-                WHITESPACE@38..39 " "
-                R_BRACE@39..40 "}"
-            SEMICOLON@40..41 ";"
-    "#]],
+            SOURCE_FILE@0..41
+              STATIC_ITEM@0..41
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..40
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..40
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..36
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      BIND_PAT@20..21
+                        NAME@20..21
+                          IDENT@20..21 "y"
+                      WHITESPACE@21..22 " "
+                      EQ@22..23 "="
+                      WHITESPACE@23..24 " "
+                      CONST_BLOCK_EXPR@24..35
+                        CONST_KW@24..29 "const"
+                        WHITESPACE@29..30 " "
+                        BLOCK_EXPR@30..35
+                          L_BRACE@30..31 "{"
+                          WHITESPACE@31..32 " "
+                          LITERAL@32..33
+                            INT_NUMBER@32..33 "2"
+                          WHITESPACE@33..34 " "
+                          R_BRACE@34..35 "}"
+                      SEMICOLON@35..36 ";"
+                    WHITESPACE@36..37 " "
+                    PATH_EXPR@37..38
+                      NAME_REF@37..38
+                        IDENT@37..38 "y"
+                    WHITESPACE@38..39 " "
+                    R_BRACE@39..40 "}"
+                SEMICOLON@40..41 ";"
+        "#]],
     );
 }
 
@@ -1671,8 +1686,9 @@ fn const_fn_as_expression_inside_block() {
                     LET_STMT@16..39
                       LET_KW@16..19 "let"
                       WHITESPACE@19..20 " "
-                      NAME@20..21
-                        IDENT@20..21 "g"
+                      BIND_PAT@20..21
+                        NAME@20..21
+                          IDENT@20..21 "g"
                       WHITESPACE@21..22 " "
                       EQ@22..23 "="
                       WHITESPACE@23..24 " "
@@ -1786,38 +1802,39 @@ fn let_mut() {
     check(
         "static f = fn { let mut x = 1; };",
         expect![[r#"
-        SOURCE_FILE@0..33
-          STATIC_ITEM@0..33
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "f"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FN_LITERAL@11..32
-              FN_KW@11..13 "fn"
-              WHITESPACE@13..14 " "
-              BLOCK_EXPR@14..32
-                L_BRACE@14..15 "{"
-                WHITESPACE@15..16 " "
-                LET_STMT@16..30
-                  LET_KW@16..19 "let"
-                  WHITESPACE@19..20 " "
-                  MUT_KW@20..23 "mut"
-                  WHITESPACE@23..24 " "
-                  NAME@24..25
-                    IDENT@24..25 "x"
-                  WHITESPACE@25..26 " "
-                  EQ@26..27 "="
-                  WHITESPACE@27..28 " "
-                  LITERAL@28..29
-                    INT_NUMBER@28..29 "1"
-                  SEMICOLON@29..30 ";"
-                WHITESPACE@30..31 " "
-                R_BRACE@31..32 "}"
-            SEMICOLON@32..33 ";"
-    "#]],
+            SOURCE_FILE@0..33
+              STATIC_ITEM@0..33
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..32
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..32
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..30
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      MUT_KW@20..23 "mut"
+                      WHITESPACE@23..24 " "
+                      BIND_PAT@24..25
+                        NAME@24..25
+                          IDENT@24..25 "x"
+                      WHITESPACE@25..26 " "
+                      EQ@26..27 "="
+                      WHITESPACE@27..28 " "
+                      LITERAL@28..29
+                        INT_NUMBER@28..29 "1"
+                      SEMICOLON@29..30 ";"
+                    WHITESPACE@30..31 " "
+                    R_BRACE@31..32 "}"
+                SEMICOLON@32..33 ";"
+        "#]],
     );
 }
 
@@ -1826,38 +1843,39 @@ fn mut_param() {
     check(
         "static f = fn (mut n: usize) { };",
         expect![[r#"
-        SOURCE_FILE@0..33
-          STATIC_ITEM@0..33
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "f"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FN_LITERAL@11..32
-              FN_KW@11..13 "fn"
-              WHITESPACE@13..14 " "
-              PARAM_LIST@14..28
-                L_PAREN@14..15 "("
-                PARAM@15..27
-                  MUT_KW@15..18 "mut"
-                  WHITESPACE@18..19 " "
-                  NAME@19..20
-                    IDENT@19..20 "n"
-                  COLON@20..21 ":"
-                  WHITESPACE@21..22 " "
-                  PATH_TYPE@22..27
-                    NAME_REF@22..27
-                      IDENT@22..27 "usize"
-                R_PAREN@27..28 ")"
-              WHITESPACE@28..29 " "
-              BLOCK_EXPR@29..32
-                L_BRACE@29..30 "{"
-                WHITESPACE@30..31 " "
-                R_BRACE@31..32 "}"
-            SEMICOLON@32..33 ";"
-    "#]],
+            SOURCE_FILE@0..33
+              STATIC_ITEM@0..33
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..32
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  PARAM_LIST@14..28
+                    L_PAREN@14..15 "("
+                    PARAM@15..27
+                      MUT_KW@15..18 "mut"
+                      WHITESPACE@18..19 " "
+                      BIND_PAT@19..20
+                        NAME@19..20
+                          IDENT@19..20 "n"
+                      COLON@20..21 ":"
+                      WHITESPACE@21..22 " "
+                      PATH_TYPE@22..27
+                        NAME_REF@22..27
+                          IDENT@22..27 "usize"
+                    R_PAREN@27..28 ")"
+                  WHITESPACE@28..29 " "
+                  BLOCK_EXPR@29..32
+                    L_BRACE@29..30 "{"
+                    WHITESPACE@30..31 " "
+                    R_BRACE@31..32 "}"
+                SEMICOLON@32..33 ";"
+        "#]],
     );
 }
 
@@ -1866,49 +1884,50 @@ fn simple_assignment() {
     check(
         "static f = fn { let mut x = 1; x = 2; };",
         expect![[r#"
-        SOURCE_FILE@0..40
-          STATIC_ITEM@0..40
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "f"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FN_LITERAL@11..39
-              FN_KW@11..13 "fn"
-              WHITESPACE@13..14 " "
-              BLOCK_EXPR@14..39
-                L_BRACE@14..15 "{"
-                WHITESPACE@15..16 " "
-                LET_STMT@16..30
-                  LET_KW@16..19 "let"
-                  WHITESPACE@19..20 " "
-                  MUT_KW@20..23 "mut"
-                  WHITESPACE@23..24 " "
-                  NAME@24..25
-                    IDENT@24..25 "x"
-                  WHITESPACE@25..26 " "
-                  EQ@26..27 "="
-                  WHITESPACE@27..28 " "
-                  LITERAL@28..29
-                    INT_NUMBER@28..29 "1"
-                  SEMICOLON@29..30 ";"
-                WHITESPACE@30..31 " "
-                ASSIGN_STMT@31..37
-                  PATH_EXPR@31..32
-                    NAME_REF@31..32
-                      IDENT@31..32 "x"
-                  WHITESPACE@32..33 " "
-                  EQ@33..34 "="
-                  WHITESPACE@34..35 " "
-                  LITERAL@35..36
-                    INT_NUMBER@35..36 "2"
-                  SEMICOLON@36..37 ";"
-                WHITESPACE@37..38 " "
-                R_BRACE@38..39 "}"
-            SEMICOLON@39..40 ";"
-    "#]],
+            SOURCE_FILE@0..40
+              STATIC_ITEM@0..40
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..39
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..39
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..30
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      MUT_KW@20..23 "mut"
+                      WHITESPACE@23..24 " "
+                      BIND_PAT@24..25
+                        NAME@24..25
+                          IDENT@24..25 "x"
+                      WHITESPACE@25..26 " "
+                      EQ@26..27 "="
+                      WHITESPACE@27..28 " "
+                      LITERAL@28..29
+                        INT_NUMBER@28..29 "1"
+                      SEMICOLON@29..30 ";"
+                    WHITESPACE@30..31 " "
+                    ASSIGN_STMT@31..37
+                      PATH_EXPR@31..32
+                        NAME_REF@31..32
+                          IDENT@31..32 "x"
+                      WHITESPACE@32..33 " "
+                      EQ@33..34 "="
+                      WHITESPACE@34..35 " "
+                      LITERAL@35..36
+                        INT_NUMBER@35..36 "2"
+                      SEMICOLON@36..37 ";"
+                    WHITESPACE@37..38 " "
+                    R_BRACE@38..39 "}"
+                SEMICOLON@39..40 ";"
+        "#]],
     );
 }
 
@@ -1937,8 +1956,9 @@ fn assignment_with_complex_rhs() {
                       WHITESPACE@19..20 " "
                       MUT_KW@20..23 "mut"
                       WHITESPACE@23..24 " "
-                      NAME@24..25
-                        IDENT@24..25 "x"
+                      BIND_PAT@24..25
+                        NAME@24..25
+                          IDENT@24..25 "x"
                       WHITESPACE@25..26 " "
                       EQ@26..27 "="
                       WHITESPACE@27..28 " "
@@ -2016,8 +2036,9 @@ fn assignment_to_non_name_is_rejected() {
                       WHITESPACE@19..20 " "
                       MUT_KW@20..23 "mut"
                       WHITESPACE@23..24 " "
-                      NAME@24..25
-                        IDENT@24..25 "x"
+                      BIND_PAT@24..25
+                        NAME@24..25
+                          IDENT@24..25 "x"
                       WHITESPACE@25..26 " "
                       EQ@26..27 "="
                       WHITESPACE@27..28 " "
@@ -2074,8 +2095,9 @@ fn chained_assignment_is_rejected() {
                       WHITESPACE@19..20 " "
                       MUT_KW@20..23 "mut"
                       WHITESPACE@23..24 " "
-                      NAME@24..25
-                        IDENT@24..25 "x"
+                      BIND_PAT@24..25
+                        NAME@24..25
+                          IDENT@24..25 "x"
                       WHITESPACE@25..26 " "
                       EQ@26..27 "="
                       WHITESPACE@27..28 " "
@@ -2088,8 +2110,9 @@ fn chained_assignment_is_rejected() {
                       WHITESPACE@34..35 " "
                       MUT_KW@35..38 "mut"
                       WHITESPACE@38..39 " "
-                      NAME@39..40
-                        IDENT@39..40 "y"
+                      BIND_PAT@39..40
+                        NAME@39..40
+                          IDENT@39..40 "y"
                       WHITESPACE@40..41 " "
                       EQ@41..42 "="
                       WHITESPACE@42..43 " "
@@ -2102,8 +2125,9 @@ fn chained_assignment_is_rejected() {
                       WHITESPACE@49..50 " "
                       MUT_KW@50..53 "mut"
                       WHITESPACE@53..54 " "
-                      NAME@54..55
-                        IDENT@54..55 "z"
+                      BIND_PAT@54..55
+                        NAME@54..55
+                          IDENT@54..55 "z"
                       WHITESPACE@55..56 " "
                       EQ@56..57 "="
                       WHITESPACE@57..58 " "
@@ -2144,39 +2168,40 @@ fn let_mut_hole_pattern_is_rejected() {
     check(
         "static f = fn { let mut _ = 1; };",
         expect![[r#"
-        SOURCE_FILE@0..33
-          STATIC_ITEM@0..33
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "f"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FN_LITERAL@11..32
-              FN_KW@11..13 "fn"
-              WHITESPACE@13..14 " "
-              BLOCK_EXPR@14..32
-                L_BRACE@14..15 "{"
-                WHITESPACE@15..16 " "
-                LET_STMT@16..30
-                  LET_KW@16..19 "let"
-                  WHITESPACE@19..20 " "
-                  MUT_KW@20..23 "mut"
-                  WHITESPACE@23..24 " "
-                  NAME@24..25
-                    HOLE@24..25 "_"
-                  WHITESPACE@25..26 " "
-                  EQ@26..27 "="
-                  WHITESPACE@27..28 " "
-                  LITERAL@28..29
-                    INT_NUMBER@28..29 "1"
-                  SEMICOLON@29..30 ";"
-                WHITESPACE@30..31 " "
-                R_BRACE@31..32 "}"
-            SEMICOLON@32..33 ";"
-        error 20..25: `mut` has no effect on `_`: a hole can never be assigned
-    "#]],
+            SOURCE_FILE@0..33
+              STATIC_ITEM@0..33
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..32
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..32
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..30
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      MUT_KW@20..23 "mut"
+                      WHITESPACE@23..24 " "
+                      BIND_PAT@24..25
+                        NAME@24..25
+                          HOLE@24..25 "_"
+                      WHITESPACE@25..26 " "
+                      EQ@26..27 "="
+                      WHITESPACE@27..28 " "
+                      LITERAL@28..29
+                        INT_NUMBER@28..29 "1"
+                      SEMICOLON@29..30 ";"
+                    WHITESPACE@30..31 " "
+                    R_BRACE@31..32 "}"
+                SEMICOLON@32..33 ";"
+            error 20..25: `mut` has no effect on `_`: a hole can never be assigned
+        "#]],
     );
 }
 
@@ -2185,39 +2210,40 @@ fn mut_hole_param_is_rejected() {
     check(
         "static f = fn (mut _: usize) { };",
         expect![[r#"
-        SOURCE_FILE@0..33
-          STATIC_ITEM@0..33
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "f"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FN_LITERAL@11..32
-              FN_KW@11..13 "fn"
-              WHITESPACE@13..14 " "
-              PARAM_LIST@14..28
-                L_PAREN@14..15 "("
-                PARAM@15..27
-                  MUT_KW@15..18 "mut"
-                  WHITESPACE@18..19 " "
-                  NAME@19..20
-                    HOLE@19..20 "_"
-                  COLON@20..21 ":"
-                  WHITESPACE@21..22 " "
-                  PATH_TYPE@22..27
-                    NAME_REF@22..27
-                      IDENT@22..27 "usize"
-                R_PAREN@27..28 ")"
-              WHITESPACE@28..29 " "
-              BLOCK_EXPR@29..32
-                L_BRACE@29..30 "{"
-                WHITESPACE@30..31 " "
-                R_BRACE@31..32 "}"
-            SEMICOLON@32..33 ";"
-        error 15..20: `mut` has no effect on `_`: a hole can never be assigned
-    "#]],
+            SOURCE_FILE@0..33
+              STATIC_ITEM@0..33
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..32
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  PARAM_LIST@14..28
+                    L_PAREN@14..15 "("
+                    PARAM@15..27
+                      MUT_KW@15..18 "mut"
+                      WHITESPACE@18..19 " "
+                      BIND_PAT@19..20
+                        NAME@19..20
+                          HOLE@19..20 "_"
+                      COLON@20..21 ":"
+                      WHITESPACE@21..22 " "
+                      PATH_TYPE@22..27
+                        NAME_REF@22..27
+                          IDENT@22..27 "usize"
+                    R_PAREN@27..28 ")"
+                  WHITESPACE@28..29 " "
+                  BLOCK_EXPR@29..32
+                    L_BRACE@29..30 "{"
+                    WHITESPACE@30..31 " "
+                    R_BRACE@31..32 "}"
+                SEMICOLON@32..33 ";"
+            error 15..20: `mut` has no effect on `_`: a hole can never be assigned
+        "#]],
     );
 }
 
@@ -2227,48 +2253,49 @@ fn equality_comparison_is_still_an_expr_stmt() {
     check(
         "static f = fn { let x = 1; x == 2; };",
         expect![[r#"
-        SOURCE_FILE@0..37
-          STATIC_ITEM@0..37
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "f"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FN_LITERAL@11..36
-              FN_KW@11..13 "fn"
-              WHITESPACE@13..14 " "
-              BLOCK_EXPR@14..36
-                L_BRACE@14..15 "{"
-                WHITESPACE@15..16 " "
-                LET_STMT@16..26
-                  LET_KW@16..19 "let"
-                  WHITESPACE@19..20 " "
-                  NAME@20..21
-                    IDENT@20..21 "x"
-                  WHITESPACE@21..22 " "
-                  EQ@22..23 "="
-                  WHITESPACE@23..24 " "
-                  LITERAL@24..25
-                    INT_NUMBER@24..25 "1"
-                  SEMICOLON@25..26 ";"
-                WHITESPACE@26..27 " "
-                EXPR_STMT@27..34
-                  BIN_EXPR@27..33
-                    PATH_EXPR@27..28
-                      NAME_REF@27..28
-                        IDENT@27..28 "x"
-                    WHITESPACE@28..29 " "
-                    EQ2@29..31 "=="
-                    WHITESPACE@31..32 " "
-                    LITERAL@32..33
-                      INT_NUMBER@32..33 "2"
-                  SEMICOLON@33..34 ";"
-                WHITESPACE@34..35 " "
-                R_BRACE@35..36 "}"
-            SEMICOLON@36..37 ";"
-    "#]],
+            SOURCE_FILE@0..37
+              STATIC_ITEM@0..37
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..36
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..36
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..26
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      BIND_PAT@20..21
+                        NAME@20..21
+                          IDENT@20..21 "x"
+                      WHITESPACE@21..22 " "
+                      EQ@22..23 "="
+                      WHITESPACE@23..24 " "
+                      LITERAL@24..25
+                        INT_NUMBER@24..25 "1"
+                      SEMICOLON@25..26 ";"
+                    WHITESPACE@26..27 " "
+                    EXPR_STMT@27..34
+                      BIN_EXPR@27..33
+                        PATH_EXPR@27..28
+                          NAME_REF@27..28
+                            IDENT@27..28 "x"
+                        WHITESPACE@28..29 " "
+                        EQ2@29..31 "=="
+                        WHITESPACE@31..32 " "
+                        LITERAL@32..33
+                          INT_NUMBER@32..33 "2"
+                      SEMICOLON@33..34 ";"
+                    WHITESPACE@34..35 " "
+                    R_BRACE@35..36 "}"
+                SEMICOLON@36..37 ";"
+        "#]],
     );
 }
 
@@ -3191,6 +3218,1054 @@ fn type_item_annotation_rejected() {
 }
 
 #[test]
+fn enum_type_declaration() {
+    check(
+        "type Shape = enum { Circle(usize), Pair(usize, str), Point };",
+        expect![[r#"
+            SOURCE_FILE@0..61
+              TYPE_ITEM@0..61
+                TYPE_KW@0..4 "type"
+                WHITESPACE@4..5 " "
+                NAME@5..10
+                  IDENT@5..10 "Shape"
+                WHITESPACE@10..11 " "
+                EQ@11..12 "="
+                WHITESPACE@12..13 " "
+                ENUM_EXPR@13..60
+                  ENUM_KW@13..17 "enum"
+                  WHITESPACE@17..18 " "
+                  L_BRACE@18..19 "{"
+                  WHITESPACE@19..20 " "
+                  ENUM_VARIANT@20..33
+                    NAME@20..26
+                      IDENT@20..26 "Circle"
+                    L_PAREN@26..27 "("
+                    PATH_TYPE@27..32
+                      NAME_REF@27..32
+                        IDENT@27..32 "usize"
+                    R_PAREN@32..33 ")"
+                  COMMA@33..34 ","
+                  WHITESPACE@34..35 " "
+                  ENUM_VARIANT@35..51
+                    NAME@35..39
+                      IDENT@35..39 "Pair"
+                    L_PAREN@39..40 "("
+                    PATH_TYPE@40..45
+                      NAME_REF@40..45
+                        IDENT@40..45 "usize"
+                    COMMA@45..46 ","
+                    WHITESPACE@46..47 " "
+                    PATH_TYPE@47..50
+                      NAME_REF@47..50
+                        IDENT@47..50 "str"
+                    R_PAREN@50..51 ")"
+                  COMMA@51..52 ","
+                  WHITESPACE@52..53 " "
+                  ENUM_VARIANT@53..58
+                    NAME@53..58
+                      IDENT@53..58 "Point"
+                  WHITESPACE@58..59 " "
+                  R_BRACE@59..60 "}"
+                SEMICOLON@60..61 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn enum_literal_outside_type_declaration_is_rejected() {
+    check(
+        "static x = enum { A };",
+        expect![[r#"
+        SOURCE_FILE@0..22
+          STATIC_ITEM@0..22
+            STATIC_KW@0..6 "static"
+            WHITESPACE@6..7 " "
+            NAME@7..8
+              IDENT@7..8 "x"
+            WHITESPACE@8..9 " "
+            EQ@9..10 "="
+            WHITESPACE@10..11 " "
+            ENUM_EXPR@11..21
+              ENUM_KW@11..15 "enum"
+              WHITESPACE@15..16 " "
+              L_BRACE@16..17 "{"
+              WHITESPACE@17..18 " "
+              ENUM_VARIANT@18..19
+                NAME@18..19
+                  IDENT@18..19 "A"
+              WHITESPACE@19..20 " "
+              R_BRACE@20..21 "}"
+            SEMICOLON@21..22 ";"
+        error 11..21: an `enum` literal can only appear as a `type` declaration's value
+    "#]],
+    );
+}
+
+#[test]
+fn duplicate_enum_variants_are_rejected() {
+    check(
+        "type Shape = enum { A, A };",
+        expect![[r#"
+        SOURCE_FILE@0..27
+          TYPE_ITEM@0..27
+            TYPE_KW@0..4 "type"
+            WHITESPACE@4..5 " "
+            NAME@5..10
+              IDENT@5..10 "Shape"
+            WHITESPACE@10..11 " "
+            EQ@11..12 "="
+            WHITESPACE@12..13 " "
+            ENUM_EXPR@13..26
+              ENUM_KW@13..17 "enum"
+              WHITESPACE@17..18 " "
+              L_BRACE@18..19 "{"
+              WHITESPACE@19..20 " "
+              ENUM_VARIANT@20..21
+                NAME@20..21
+                  IDENT@20..21 "A"
+              COMMA@21..22 ","
+              WHITESPACE@22..23 " "
+              ENUM_VARIANT@23..24
+                NAME@23..24
+                  IDENT@23..24 "A"
+              WHITESPACE@24..25 " "
+              R_BRACE@25..26 "}"
+            SEMICOLON@26..27 ";"
+        error 23..24: duplicate variant `A`
+    "#]],
+    );
+}
+
+#[test]
+fn variant_path_expression() {
+    check(
+        "static s = Shape::Circle(3);",
+        expect![[r#"
+        SOURCE_FILE@0..28
+          STATIC_ITEM@0..28
+            STATIC_KW@0..6 "static"
+            WHITESPACE@6..7 " "
+            NAME@7..8
+              IDENT@7..8 "s"
+            WHITESPACE@8..9 " "
+            EQ@9..10 "="
+            WHITESPACE@10..11 " "
+            CALL_EXPR@11..27
+              PATH_EXPR@11..24
+                NAME_REF@11..16
+                  IDENT@11..16 "Shape"
+                COLON2@16..18 "::"
+                NAME_REF@18..24
+                  IDENT@18..24 "Circle"
+              ARG_LIST@24..27
+                L_PAREN@24..25 "("
+                LITERAL@25..26
+                  INT_NUMBER@25..26 "3"
+                R_PAREN@26..27 ")"
+            SEMICOLON@27..28 ";"
+    "#]],
+    );
+}
+
+#[test]
+fn variant_path_type_annotation() {
+    check(
+        "static s: Shape::Circle = c;",
+        expect![[r#"
+        SOURCE_FILE@0..28
+          STATIC_ITEM@0..28
+            STATIC_KW@0..6 "static"
+            WHITESPACE@6..7 " "
+            NAME@7..8
+              IDENT@7..8 "s"
+            COLON@8..9 ":"
+            WHITESPACE@9..10 " "
+            PATH_TYPE@10..23
+              NAME_REF@10..15
+                IDENT@10..15 "Shape"
+              COLON2@15..17 "::"
+              NAME_REF@17..23
+                IDENT@17..23 "Circle"
+            WHITESPACE@23..24 " "
+            EQ@24..25 "="
+            WHITESPACE@25..26 " "
+            PATH_EXPR@26..27
+              NAME_REF@26..27
+                IDENT@26..27 "c"
+            SEMICOLON@27..28 ";"
+    "#]],
+    );
+}
+
+#[test]
+fn variant_path_missing_second_segment() {
+    check(
+        "static s = Shape::;",
+        expect![[r#"
+        SOURCE_FILE@0..19
+          STATIC_ITEM@0..19
+            STATIC_KW@0..6 "static"
+            WHITESPACE@6..7 " "
+            NAME@7..8
+              IDENT@7..8 "s"
+            WHITESPACE@8..9 " "
+            EQ@9..10 "="
+            WHITESPACE@10..11 " "
+            PATH_EXPR@11..18
+              NAME_REF@11..16
+                IDENT@11..16 "Shape"
+              COLON2@16..18 "::"
+            SEMICOLON@18..19 ";"
+        error 18..19: expected a variant name after `::`
+    "#]],
+    );
+}
+
+#[test]
+fn match_expr_all_pattern_kinds() {
+    check(
+        r#"
+static f = fn (s: Shape) -> usize {
+    match s {
+        Shape::Circle(r) => r,
+        ::Pair(a, _) => a,
+        Point => 0,
+        other => 1,
+        _ => 2,
+    }
+}
+"#,
+        expect![[r#"
+            SOURCE_FILE@0..173
+              WHITESPACE@0..1 "\n"
+              STATIC_ITEM@1..172
+                STATIC_KW@1..7 "static"
+                WHITESPACE@7..8 " "
+                NAME@8..9
+                  IDENT@8..9 "f"
+                WHITESPACE@9..10 " "
+                EQ@10..11 "="
+                WHITESPACE@11..12 " "
+                FN_LITERAL@12..172
+                  FN_KW@12..14 "fn"
+                  WHITESPACE@14..15 " "
+                  PARAM_LIST@15..25
+                    L_PAREN@15..16 "("
+                    PARAM@16..24
+                      BIND_PAT@16..17
+                        NAME@16..17
+                          IDENT@16..17 "s"
+                      COLON@17..18 ":"
+                      WHITESPACE@18..19 " "
+                      PATH_TYPE@19..24
+                        NAME_REF@19..24
+                          IDENT@19..24 "Shape"
+                    R_PAREN@24..25 ")"
+                  WHITESPACE@25..26 " "
+                  RET_TYPE@26..34
+                    THIN_ARROW@26..28 "->"
+                    WHITESPACE@28..29 " "
+                    PATH_TYPE@29..34
+                      NAME_REF@29..34
+                        IDENT@29..34 "usize"
+                  WHITESPACE@34..35 " "
+                  BLOCK_EXPR@35..172
+                    L_BRACE@35..36 "{"
+                    WHITESPACE@36..41 "\n    "
+                    MATCH_EXPR@41..170
+                      MATCH_KW@41..46 "match"
+                      WHITESPACE@46..47 " "
+                      PATH_EXPR@47..48
+                        NAME_REF@47..48
+                          IDENT@47..48 "s"
+                      WHITESPACE@48..49 " "
+                      L_BRACE@49..50 "{"
+                      WHITESPACE@50..59 "\n        "
+                      MATCH_ARM@59..81
+                        VARIANT_PAT@59..75
+                          NAME_REF@59..64
+                            IDENT@59..64 "Shape"
+                          COLON2@64..66 "::"
+                          NAME_REF@66..72
+                            IDENT@66..72 "Circle"
+                          L_PAREN@72..73 "("
+                          NAME@73..74
+                            IDENT@73..74 "r"
+                          R_PAREN@74..75 ")"
+                        WHITESPACE@75..76 " "
+                        FAT_ARROW@76..78 "=>"
+                        WHITESPACE@78..79 " "
+                        PATH_EXPR@79..80
+                          NAME_REF@79..80
+                            IDENT@79..80 "r"
+                        COMMA@80..81 ","
+                      WHITESPACE@81..90 "\n        "
+                      MATCH_ARM@90..108
+                        VARIANT_PAT@90..102
+                          COLON2@90..92 "::"
+                          NAME_REF@92..96
+                            IDENT@92..96 "Pair"
+                          L_PAREN@96..97 "("
+                          NAME@97..98
+                            IDENT@97..98 "a"
+                          COMMA@98..99 ","
+                          WHITESPACE@99..100 " "
+                          NAME@100..101
+                            HOLE@100..101 "_"
+                          R_PAREN@101..102 ")"
+                        WHITESPACE@102..103 " "
+                        FAT_ARROW@103..105 "=>"
+                        WHITESPACE@105..106 " "
+                        PATH_EXPR@106..107
+                          NAME_REF@106..107
+                            IDENT@106..107 "a"
+                        COMMA@107..108 ","
+                      WHITESPACE@108..117 "\n        "
+                      MATCH_ARM@117..128
+                        BIND_PAT@117..122
+                          NAME@117..122
+                            IDENT@117..122 "Point"
+                        WHITESPACE@122..123 " "
+                        FAT_ARROW@123..125 "=>"
+                        WHITESPACE@125..126 " "
+                        LITERAL@126..127
+                          INT_NUMBER@126..127 "0"
+                        COMMA@127..128 ","
+                      WHITESPACE@128..137 "\n        "
+                      MATCH_ARM@137..148
+                        BIND_PAT@137..142
+                          NAME@137..142
+                            IDENT@137..142 "other"
+                        WHITESPACE@142..143 " "
+                        FAT_ARROW@143..145 "=>"
+                        WHITESPACE@145..146 " "
+                        LITERAL@146..147
+                          INT_NUMBER@146..147 "1"
+                        COMMA@147..148 ","
+                      WHITESPACE@148..157 "\n        "
+                      MATCH_ARM@157..164
+                        WILDCARD_PAT@157..158
+                          HOLE@157..158 "_"
+                        WHITESPACE@158..159 " "
+                        FAT_ARROW@159..161 "=>"
+                        WHITESPACE@161..162 " "
+                        LITERAL@162..163
+                          INT_NUMBER@162..163 "2"
+                        COMMA@163..164 ","
+                      WHITESPACE@164..169 "\n    "
+                      R_BRACE@169..170 "}"
+                    WHITESPACE@170..171 "\n"
+                    R_BRACE@171..172 "}"
+              WHITESPACE@172..173 "\n"
+        "#]],
+    );
+}
+
+#[test]
+fn match_arm_brace_rule_and_trailing_comma() {
+    // An arm body ending in `}` needs no comma; a trailing comma before
+    // the closing brace is fine.
+    check(
+        r#"
+static f = fn (s: Shape) -> usize {
+    match s {
+        Point => { 0 }
+        _ => 2,
+    }
+}
+"#,
+        expect![[r#"
+            SOURCE_FILE@0..98
+              WHITESPACE@0..1 "\n"
+              STATIC_ITEM@1..97
+                STATIC_KW@1..7 "static"
+                WHITESPACE@7..8 " "
+                NAME@8..9
+                  IDENT@8..9 "f"
+                WHITESPACE@9..10 " "
+                EQ@10..11 "="
+                WHITESPACE@11..12 " "
+                FN_LITERAL@12..97
+                  FN_KW@12..14 "fn"
+                  WHITESPACE@14..15 " "
+                  PARAM_LIST@15..25
+                    L_PAREN@15..16 "("
+                    PARAM@16..24
+                      BIND_PAT@16..17
+                        NAME@16..17
+                          IDENT@16..17 "s"
+                      COLON@17..18 ":"
+                      WHITESPACE@18..19 " "
+                      PATH_TYPE@19..24
+                        NAME_REF@19..24
+                          IDENT@19..24 "Shape"
+                    R_PAREN@24..25 ")"
+                  WHITESPACE@25..26 " "
+                  RET_TYPE@26..34
+                    THIN_ARROW@26..28 "->"
+                    WHITESPACE@28..29 " "
+                    PATH_TYPE@29..34
+                      NAME_REF@29..34
+                        IDENT@29..34 "usize"
+                  WHITESPACE@34..35 " "
+                  BLOCK_EXPR@35..97
+                    L_BRACE@35..36 "{"
+                    WHITESPACE@36..41 "\n    "
+                    MATCH_EXPR@41..95
+                      MATCH_KW@41..46 "match"
+                      WHITESPACE@46..47 " "
+                      PATH_EXPR@47..48
+                        NAME_REF@47..48
+                          IDENT@47..48 "s"
+                      WHITESPACE@48..49 " "
+                      L_BRACE@49..50 "{"
+                      WHITESPACE@50..59 "\n        "
+                      MATCH_ARM@59..73
+                        BIND_PAT@59..64
+                          NAME@59..64
+                            IDENT@59..64 "Point"
+                        WHITESPACE@64..65 " "
+                        FAT_ARROW@65..67 "=>"
+                        WHITESPACE@67..68 " "
+                        BLOCK_EXPR@68..73
+                          L_BRACE@68..69 "{"
+                          WHITESPACE@69..70 " "
+                          LITERAL@70..71
+                            INT_NUMBER@70..71 "0"
+                          WHITESPACE@71..72 " "
+                          R_BRACE@72..73 "}"
+                      WHITESPACE@73..82 "\n        "
+                      MATCH_ARM@82..89
+                        WILDCARD_PAT@82..83
+                          HOLE@82..83 "_"
+                        WHITESPACE@83..84 " "
+                        FAT_ARROW@84..86 "=>"
+                        WHITESPACE@86..87 " "
+                        LITERAL@87..88
+                          INT_NUMBER@87..88 "2"
+                        COMMA@88..89 ","
+                      WHITESPACE@89..94 "\n    "
+                      R_BRACE@94..95 "}"
+                    WHITESPACE@95..96 "\n"
+                    R_BRACE@96..97 "}"
+              WHITESPACE@97..98 "\n"
+        "#]],
+    );
+}
+
+#[test]
+fn match_rest_pattern_parses_and_is_rejected() {
+    check(
+        r#"
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r, ..) => r,
+        .. => 0,
+    }
+}
+"#,
+        expect![[r#"
+            SOURCE_FILE@0..106
+              WHITESPACE@0..1 "\n"
+              STATIC_ITEM@1..105
+                STATIC_KW@1..7 "static"
+                WHITESPACE@7..8 " "
+                NAME@8..9
+                  IDENT@8..9 "f"
+                WHITESPACE@9..10 " "
+                EQ@10..11 "="
+                WHITESPACE@11..12 " "
+                FN_LITERAL@12..105
+                  FN_KW@12..14 "fn"
+                  WHITESPACE@14..15 " "
+                  PARAM_LIST@15..25
+                    L_PAREN@15..16 "("
+                    PARAM@16..24
+                      BIND_PAT@16..17
+                        NAME@16..17
+                          IDENT@16..17 "s"
+                      COLON@17..18 ":"
+                      WHITESPACE@18..19 " "
+                      PATH_TYPE@19..24
+                        NAME_REF@19..24
+                          IDENT@19..24 "Shape"
+                    R_PAREN@24..25 ")"
+                  WHITESPACE@25..26 " "
+                  RET_TYPE@26..34
+                    THIN_ARROW@26..28 "->"
+                    WHITESPACE@28..29 " "
+                    PATH_TYPE@29..34
+                      NAME_REF@29..34
+                        IDENT@29..34 "usize"
+                  WHITESPACE@34..35 " "
+                  BLOCK_EXPR@35..105
+                    L_BRACE@35..36 "{"
+                    WHITESPACE@36..41 "\n    "
+                    MATCH_EXPR@41..103
+                      MATCH_KW@41..46 "match"
+                      WHITESPACE@46..47 " "
+                      PATH_EXPR@47..48
+                        NAME_REF@47..48
+                          IDENT@47..48 "s"
+                      WHITESPACE@48..49 " "
+                      L_BRACE@49..50 "{"
+                      WHITESPACE@50..59 "\n        "
+                      MATCH_ARM@59..80
+                        VARIANT_PAT@59..74
+                          COLON2@59..61 "::"
+                          NAME_REF@61..67
+                            IDENT@61..67 "Circle"
+                          L_PAREN@67..68 "("
+                          NAME@68..69
+                            IDENT@68..69 "r"
+                          COMMA@69..70 ","
+                          WHITESPACE@70..71 " "
+                          REST_PAT@71..73
+                            DOT2@71..73 ".."
+                          R_PAREN@73..74 ")"
+                        WHITESPACE@74..75 " "
+                        FAT_ARROW@75..77 "=>"
+                        WHITESPACE@77..78 " "
+                        PATH_EXPR@78..79
+                          NAME_REF@78..79
+                            IDENT@78..79 "r"
+                        COMMA@79..80 ","
+                      WHITESPACE@80..89 "\n        "
+                      MATCH_ARM@89..97
+                        REST_PAT@89..91
+                          DOT2@89..91 ".."
+                        WHITESPACE@91..92 " "
+                        FAT_ARROW@92..94 "=>"
+                        WHITESPACE@94..95 " "
+                        LITERAL@95..96
+                          INT_NUMBER@95..96 "0"
+                        COMMA@96..97 ","
+                      WHITESPACE@97..102 "\n    "
+                      R_BRACE@102..103 "}"
+                    WHITESPACE@103..104 "\n"
+                    R_BRACE@104..105 "}"
+              WHITESPACE@105..106 "\n"
+            error 71..73: `..` in patterns is not supported yet
+            error 89..91: `..` in patterns is not supported yet
+        "#]],
+    );
+}
+
+#[test]
+fn match_retired_bare_variant_pat_still_parses() {
+    // `Circle(r)` (no `::`, no qualifying enum) is the retired v1
+    // shorthand. It still parses as a `VARIANT_PAT` with no `COLON2` (the
+    // tree keeps the user's intent), and validation reports the honest
+    // "write `::Circle(...)`" error.
+    check(
+        r#"
+static f = fn (s: Shape) -> usize {
+    match s {
+        Circle(r) => r,
+        _ => 0,
+    }
+}
+"#,
+        expect![[r#"
+            SOURCE_FILE@0..99
+              WHITESPACE@0..1 "\n"
+              STATIC_ITEM@1..98
+                STATIC_KW@1..7 "static"
+                WHITESPACE@7..8 " "
+                NAME@8..9
+                  IDENT@8..9 "f"
+                WHITESPACE@9..10 " "
+                EQ@10..11 "="
+                WHITESPACE@11..12 " "
+                FN_LITERAL@12..98
+                  FN_KW@12..14 "fn"
+                  WHITESPACE@14..15 " "
+                  PARAM_LIST@15..25
+                    L_PAREN@15..16 "("
+                    PARAM@16..24
+                      BIND_PAT@16..17
+                        NAME@16..17
+                          IDENT@16..17 "s"
+                      COLON@17..18 ":"
+                      WHITESPACE@18..19 " "
+                      PATH_TYPE@19..24
+                        NAME_REF@19..24
+                          IDENT@19..24 "Shape"
+                    R_PAREN@24..25 ")"
+                  WHITESPACE@25..26 " "
+                  RET_TYPE@26..34
+                    THIN_ARROW@26..28 "->"
+                    WHITESPACE@28..29 " "
+                    PATH_TYPE@29..34
+                      NAME_REF@29..34
+                        IDENT@29..34 "usize"
+                  WHITESPACE@34..35 " "
+                  BLOCK_EXPR@35..98
+                    L_BRACE@35..36 "{"
+                    WHITESPACE@36..41 "\n    "
+                    MATCH_EXPR@41..96
+                      MATCH_KW@41..46 "match"
+                      WHITESPACE@46..47 " "
+                      PATH_EXPR@47..48
+                        NAME_REF@47..48
+                          IDENT@47..48 "s"
+                      WHITESPACE@48..49 " "
+                      L_BRACE@49..50 "{"
+                      WHITESPACE@50..59 "\n        "
+                      MATCH_ARM@59..74
+                        VARIANT_PAT@59..68
+                          NAME_REF@59..65
+                            IDENT@59..65 "Circle"
+                          L_PAREN@65..66 "("
+                          NAME@66..67
+                            IDENT@66..67 "r"
+                          R_PAREN@67..68 ")"
+                        WHITESPACE@68..69 " "
+                        FAT_ARROW@69..71 "=>"
+                        WHITESPACE@71..72 " "
+                        PATH_EXPR@72..73
+                          NAME_REF@72..73
+                            IDENT@72..73 "r"
+                        COMMA@73..74 ","
+                      WHITESPACE@74..83 "\n        "
+                      MATCH_ARM@83..90
+                        WILDCARD_PAT@83..84
+                          HOLE@83..84 "_"
+                        WHITESPACE@84..85 " "
+                        FAT_ARROW@85..87 "=>"
+                        WHITESPACE@87..88 " "
+                        LITERAL@88..89
+                          INT_NUMBER@88..89 "0"
+                        COMMA@89..90 ","
+                      WHITESPACE@90..95 "\n    "
+                      R_BRACE@95..96 "}"
+                    WHITESPACE@96..97 "\n"
+                    R_BRACE@97..98 "}"
+              WHITESPACE@98..99 "\n"
+            error 59..68: write `::Circle(...)` to match a variant, or remove `(...)` to bind
+        "#]],
+    );
+}
+
+#[test]
+fn match_retired_bare_variant_pat_fix_inserts_colon2() {
+    // The retired `Circle(r)` shape's fix inserts `::` right before the
+    // variant name, turning it into the elided sigil spelling.
+    let parse = crate::parse(
+        r#"
+static f = fn (s: Shape) -> usize {
+    match s {
+        Circle(r) => r,
+        _ => 0,
+    }
+}
+"#,
+    );
+    let err = parse
+        .errors()
+        .iter()
+        .find(|e| e.message.starts_with("write `::Circle"))
+        .expect("expected the retired-bare-variant error");
+    let fix = err.fix.as_ref().expect("expected a fix");
+    assert_eq!(fix.label, "Insert `::`");
+    assert_eq!(fix.edits.len(), 1);
+    let edit = &fix.edits[0];
+    assert!(edit.range.is_empty(), "the fix is a pure insertion");
+    assert_eq!(edit.insert, "::");
+}
+
+#[test]
+fn match_recovery_missing_fat_arrow() {
+    check(
+        r#"
+static f = fn (s: Shape) -> usize {
+    match s {
+        Point 0,
+        _ => 1,
+    }
+}
+"#,
+        expect![[r#"
+            SOURCE_FILE@0..92
+              WHITESPACE@0..1 "\n"
+              STATIC_ITEM@1..91
+                STATIC_KW@1..7 "static"
+                WHITESPACE@7..8 " "
+                NAME@8..9
+                  IDENT@8..9 "f"
+                WHITESPACE@9..10 " "
+                EQ@10..11 "="
+                WHITESPACE@11..12 " "
+                FN_LITERAL@12..91
+                  FN_KW@12..14 "fn"
+                  WHITESPACE@14..15 " "
+                  PARAM_LIST@15..25
+                    L_PAREN@15..16 "("
+                    PARAM@16..24
+                      BIND_PAT@16..17
+                        NAME@16..17
+                          IDENT@16..17 "s"
+                      COLON@17..18 ":"
+                      WHITESPACE@18..19 " "
+                      PATH_TYPE@19..24
+                        NAME_REF@19..24
+                          IDENT@19..24 "Shape"
+                    R_PAREN@24..25 ")"
+                  WHITESPACE@25..26 " "
+                  RET_TYPE@26..34
+                    THIN_ARROW@26..28 "->"
+                    WHITESPACE@28..29 " "
+                    PATH_TYPE@29..34
+                      NAME_REF@29..34
+                        IDENT@29..34 "usize"
+                  WHITESPACE@34..35 " "
+                  BLOCK_EXPR@35..91
+                    L_BRACE@35..36 "{"
+                    WHITESPACE@36..41 "\n    "
+                    MATCH_EXPR@41..89
+                      MATCH_KW@41..46 "match"
+                      WHITESPACE@46..47 " "
+                      PATH_EXPR@47..48
+                        NAME_REF@47..48
+                          IDENT@47..48 "s"
+                      WHITESPACE@48..49 " "
+                      L_BRACE@49..50 "{"
+                      WHITESPACE@50..59 "\n        "
+                      MATCH_ARM@59..67
+                        BIND_PAT@59..64
+                          NAME@59..64
+                            IDENT@59..64 "Point"
+                        WHITESPACE@64..65 " "
+                        LITERAL@65..66
+                          INT_NUMBER@65..66 "0"
+                        COMMA@66..67 ","
+                      WHITESPACE@67..76 "\n        "
+                      MATCH_ARM@76..83
+                        WILDCARD_PAT@76..77
+                          HOLE@76..77 "_"
+                        WHITESPACE@77..78 " "
+                        FAT_ARROW@78..80 "=>"
+                        WHITESPACE@80..81 " "
+                        LITERAL@81..82
+                          INT_NUMBER@81..82 "1"
+                        COMMA@82..83 ","
+                      WHITESPACE@83..88 "\n    "
+                      R_BRACE@88..89 "}"
+                    WHITESPACE@89..90 "\n"
+                    R_BRACE@90..91 "}"
+              WHITESPACE@91..92 "\n"
+            error 65..66: expected `=>`
+        "#]],
+    );
+}
+
+#[test]
+fn match_arm_whose_pattern_reads_nothing_skips_its_body() {
+    // `-1` is not a pattern (a negative literal is an operator applied to
+    // a literal, reserved with the rest of the pattern language), and the
+    // refusal consumes nothing. Reading a body after it would take `1` as
+    // the arm's value and judge it against the match's RESULT type — a
+    // second error about a type the user never wrote — so the rest of the
+    // arm is ERROR and the next arm is where parsing resumes.
+    check(
+        r#"
+static f = fn (n: usize) -> usize {
+    match n {
+        -1 => 1,
+        _ => 0,
+    }
+}
+"#,
+        expect![[r#"
+            SOURCE_FILE@0..92
+              WHITESPACE@0..1 "\n"
+              STATIC_ITEM@1..91
+                STATIC_KW@1..7 "static"
+                WHITESPACE@7..8 " "
+                NAME@8..9
+                  IDENT@8..9 "f"
+                WHITESPACE@9..10 " "
+                EQ@10..11 "="
+                WHITESPACE@11..12 " "
+                FN_LITERAL@12..91
+                  FN_KW@12..14 "fn"
+                  WHITESPACE@14..15 " "
+                  PARAM_LIST@15..25
+                    L_PAREN@15..16 "("
+                    PARAM@16..24
+                      BIND_PAT@16..17
+                        NAME@16..17
+                          IDENT@16..17 "n"
+                      COLON@17..18 ":"
+                      WHITESPACE@18..19 " "
+                      PATH_TYPE@19..24
+                        NAME_REF@19..24
+                          IDENT@19..24 "usize"
+                    R_PAREN@24..25 ")"
+                  WHITESPACE@25..26 " "
+                  RET_TYPE@26..34
+                    THIN_ARROW@26..28 "->"
+                    WHITESPACE@28..29 " "
+                    PATH_TYPE@29..34
+                      NAME_REF@29..34
+                        IDENT@29..34 "usize"
+                  WHITESPACE@34..35 " "
+                  BLOCK_EXPR@35..91
+                    L_BRACE@35..36 "{"
+                    WHITESPACE@36..41 "\n    "
+                    MATCH_EXPR@41..89
+                      MATCH_KW@41..46 "match"
+                      WHITESPACE@46..47 " "
+                      PATH_EXPR@47..48
+                        NAME_REF@47..48
+                          IDENT@47..48 "n"
+                      WHITESPACE@48..49 " "
+                      L_BRACE@49..50 "{"
+                      WHITESPACE@50..59 "\n        "
+                      MATCH_ARM@59..67
+                        ERROR@59..66
+                          MINUS@59..60 "-"
+                          INT_NUMBER@60..61 "1"
+                          WHITESPACE@61..62 " "
+                          FAT_ARROW@62..64 "=>"
+                          WHITESPACE@64..65 " "
+                          INT_NUMBER@65..66 "1"
+                        COMMA@66..67 ","
+                      WHITESPACE@67..76 "\n        "
+                      MATCH_ARM@76..83
+                        WILDCARD_PAT@76..77
+                          HOLE@76..77 "_"
+                        WHITESPACE@77..78 " "
+                        FAT_ARROW@78..80 "=>"
+                        WHITESPACE@80..81 " "
+                        LITERAL@81..82
+                          INT_NUMBER@81..82 "0"
+                        COMMA@82..83 ","
+                      WHITESPACE@83..88 "\n    "
+                      R_BRACE@88..89 "}"
+                    WHITESPACE@89..90 "\n"
+                    R_BRACE@90..91 "}"
+              WHITESPACE@91..92 "\n"
+            error 59..60: expected a pattern
+        "#]],
+    );
+}
+
+#[test]
+fn a_skipped_arm_body_does_not_close_the_arm_list_on_its_own_brace() {
+    // The skip counts bracket depth: the body's `}` and its `,` belong to
+    // the body, not to the arm list. Stopping at the first `}` would end
+    // the match on the body's brace and cascade every token after it
+    // through the item parser — worse than the diagnostic the skip exists
+    // to remove. One error here, and `_ => 0` is still an arm.
+    check(
+        r#"
+static f = fn (n: usize) -> usize {
+    match n {
+        -1 => { 1 },
+        _ => 0,
+    }
+}
+"#,
+        expect![[r#"
+            SOURCE_FILE@0..96
+              WHITESPACE@0..1 "\n"
+              STATIC_ITEM@1..95
+                STATIC_KW@1..7 "static"
+                WHITESPACE@7..8 " "
+                NAME@8..9
+                  IDENT@8..9 "f"
+                WHITESPACE@9..10 " "
+                EQ@10..11 "="
+                WHITESPACE@11..12 " "
+                FN_LITERAL@12..95
+                  FN_KW@12..14 "fn"
+                  WHITESPACE@14..15 " "
+                  PARAM_LIST@15..25
+                    L_PAREN@15..16 "("
+                    PARAM@16..24
+                      BIND_PAT@16..17
+                        NAME@16..17
+                          IDENT@16..17 "n"
+                      COLON@17..18 ":"
+                      WHITESPACE@18..19 " "
+                      PATH_TYPE@19..24
+                        NAME_REF@19..24
+                          IDENT@19..24 "usize"
+                    R_PAREN@24..25 ")"
+                  WHITESPACE@25..26 " "
+                  RET_TYPE@26..34
+                    THIN_ARROW@26..28 "->"
+                    WHITESPACE@28..29 " "
+                    PATH_TYPE@29..34
+                      NAME_REF@29..34
+                        IDENT@29..34 "usize"
+                  WHITESPACE@34..35 " "
+                  BLOCK_EXPR@35..95
+                    L_BRACE@35..36 "{"
+                    WHITESPACE@36..41 "\n    "
+                    MATCH_EXPR@41..93
+                      MATCH_KW@41..46 "match"
+                      WHITESPACE@46..47 " "
+                      PATH_EXPR@47..48
+                        NAME_REF@47..48
+                          IDENT@47..48 "n"
+                      WHITESPACE@48..49 " "
+                      L_BRACE@49..50 "{"
+                      WHITESPACE@50..59 "\n        "
+                      MATCH_ARM@59..71
+                        ERROR@59..70
+                          MINUS@59..60 "-"
+                          INT_NUMBER@60..61 "1"
+                          WHITESPACE@61..62 " "
+                          FAT_ARROW@62..64 "=>"
+                          WHITESPACE@64..65 " "
+                          L_BRACE@65..66 "{"
+                          WHITESPACE@66..67 " "
+                          INT_NUMBER@67..68 "1"
+                          WHITESPACE@68..69 " "
+                          R_BRACE@69..70 "}"
+                        COMMA@70..71 ","
+                      WHITESPACE@71..80 "\n        "
+                      MATCH_ARM@80..87
+                        WILDCARD_PAT@80..81
+                          HOLE@80..81 "_"
+                        WHITESPACE@81..82 " "
+                        FAT_ARROW@82..84 "=>"
+                        WHITESPACE@84..85 " "
+                        LITERAL@85..86
+                          INT_NUMBER@85..86 "0"
+                        COMMA@86..87 ","
+                      WHITESPACE@87..92 "\n    "
+                      R_BRACE@92..93 "}"
+                    WHITESPACE@93..94 "\n"
+                    R_BRACE@94..95 "}"
+              WHITESPACE@95..96 "\n"
+            error 59..60: expected a pattern
+        "#]],
+    );
+}
+
+#[test]
+fn match_recovery_missing_arm_list() {
+    check(
+        "static f = fn (s: Shape) -> usize { match s }",
+        expect![[r#"
+            SOURCE_FILE@0..45
+              STATIC_ITEM@0..45
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..45
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  PARAM_LIST@14..24
+                    L_PAREN@14..15 "("
+                    PARAM@15..23
+                      BIND_PAT@15..16
+                        NAME@15..16
+                          IDENT@15..16 "s"
+                      COLON@16..17 ":"
+                      WHITESPACE@17..18 " "
+                      PATH_TYPE@18..23
+                        NAME_REF@18..23
+                          IDENT@18..23 "Shape"
+                    R_PAREN@23..24 ")"
+                  WHITESPACE@24..25 " "
+                  RET_TYPE@25..33
+                    THIN_ARROW@25..27 "->"
+                    WHITESPACE@27..28 " "
+                    PATH_TYPE@28..33
+                      NAME_REF@28..33
+                        IDENT@28..33 "usize"
+                  WHITESPACE@33..34 " "
+                  BLOCK_EXPR@34..45
+                    L_BRACE@34..35 "{"
+                    WHITESPACE@35..36 " "
+                    MATCH_EXPR@36..43
+                      MATCH_KW@36..41 "match"
+                      WHITESPACE@41..42 " "
+                      PATH_EXPR@42..43
+                        NAME_REF@42..43
+                          IDENT@42..43 "s"
+                    WHITESPACE@43..44 " "
+                    R_BRACE@44..45 "}"
+            error 44..45: expected `{` followed by the match arms
+        "#]],
+    );
+}
+
+#[test]
+fn match_recovery_unclosed_before_item() {
+    // An item keyword inside the arm list means the `}` is missing: the
+    // parser stops the match and lets the item parse.
+    check(
+        r#"
+static f = fn (s: Shape) { match s {
+static g = 1;
+"#,
+        expect![[r#"
+            SOURCE_FILE@0..52
+              WHITESPACE@0..1 "\n"
+              STATIC_ITEM@1..37
+                STATIC_KW@1..7 "static"
+                WHITESPACE@7..8 " "
+                NAME@8..9
+                  IDENT@8..9 "f"
+                WHITESPACE@9..10 " "
+                EQ@10..11 "="
+                WHITESPACE@11..12 " "
+                FN_LITERAL@12..37
+                  FN_KW@12..14 "fn"
+                  WHITESPACE@14..15 " "
+                  PARAM_LIST@15..25
+                    L_PAREN@15..16 "("
+                    PARAM@16..24
+                      BIND_PAT@16..17
+                        NAME@16..17
+                          IDENT@16..17 "s"
+                      COLON@17..18 ":"
+                      WHITESPACE@18..19 " "
+                      PATH_TYPE@19..24
+                        NAME_REF@19..24
+                          IDENT@19..24 "Shape"
+                    R_PAREN@24..25 ")"
+                  WHITESPACE@25..26 " "
+                  BLOCK_EXPR@26..37
+                    L_BRACE@26..27 "{"
+                    WHITESPACE@27..28 " "
+                    EXPR_STMT@28..37
+                      MATCH_EXPR@28..37
+                        MATCH_KW@28..33 "match"
+                        WHITESPACE@33..34 " "
+                        PATH_EXPR@34..35
+                          NAME_REF@34..35
+                            IDENT@34..35 "s"
+                        WHITESPACE@35..36 " "
+                        L_BRACE@36..37 "{"
+              WHITESPACE@37..38 "\n"
+              STATIC_ITEM@38..51
+                STATIC_KW@38..44 "static"
+                WHITESPACE@44..45 " "
+                NAME@45..46
+                  IDENT@45..46 "g"
+                WHITESPACE@46..47 " "
+                EQ@47..48 "="
+                WHITESPACE@48..49 " "
+                LITERAL@49..50
+                  INT_NUMBER@49..50 "1"
+                SEMICOLON@50..51 ";"
+              WHITESPACE@51..52 "\n"
+            error 36..37: expected `}`
+        "#]],
+    );
+}
+
+#[test]
 fn loop_with_break_and_continue_parses() {
     check(
         r#"
@@ -3416,5 +4491,679 @@ fn loop_body_must_be_a_block() {
                 R_BRACE@23..24 "}"
         error 21..22: `loop` bodies are blocks; wrap this expression in `{ }`
     "#]],
+    );
+}
+
+// ---- record destructuring, `pub` reservation, field assignment ----
+
+#[test]
+fn let_record_destructure() {
+    check(
+        "static f = fn { let struct { x, y } = p; };",
+        expect![[r#"
+            SOURCE_FILE@0..43
+              STATIC_ITEM@0..43
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..42
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..42
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..40
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      RECORD_PAT@20..35
+                        STRUCT_KW@20..26 "struct"
+                        WHITESPACE@26..27 " "
+                        L_BRACE@27..28 "{"
+                        WHITESPACE@28..29 " "
+                        RECORD_PAT_FIELD@29..30
+                          NAME@29..30
+                            IDENT@29..30 "x"
+                        COMMA@30..31 ","
+                        WHITESPACE@31..32 " "
+                        RECORD_PAT_FIELD@32..33
+                          NAME@32..33
+                            IDENT@32..33 "y"
+                        WHITESPACE@33..34 " "
+                        R_BRACE@34..35 "}"
+                      WHITESPACE@35..36 " "
+                      EQ@36..37 "="
+                      WHITESPACE@37..38 " "
+                      PATH_EXPR@38..39
+                        NAME_REF@38..39
+                          IDENT@38..39 "p"
+                      SEMICOLON@39..40 ";"
+                    WHITESPACE@40..41 " "
+                    R_BRACE@41..42 "}"
+                SEMICOLON@42..43 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn let_record_destructure_rename() {
+    check(
+        "static f = fn { let struct { x as a, y } = p; };",
+        expect![[r#"
+            SOURCE_FILE@0..48
+              STATIC_ITEM@0..48
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..47
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..47
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..45
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      RECORD_PAT@20..40
+                        STRUCT_KW@20..26 "struct"
+                        WHITESPACE@26..27 " "
+                        L_BRACE@27..28 "{"
+                        WHITESPACE@28..29 " "
+                        RECORD_PAT_FIELD@29..35
+                          NAME@29..30
+                            IDENT@29..30 "x"
+                          WHITESPACE@30..31 " "
+                          AS_KW@31..33 "as"
+                          WHITESPACE@33..34 " "
+                          NAME@34..35
+                            IDENT@34..35 "a"
+                        COMMA@35..36 ","
+                        WHITESPACE@36..37 " "
+                        RECORD_PAT_FIELD@37..38
+                          NAME@37..38
+                            IDENT@37..38 "y"
+                        WHITESPACE@38..39 " "
+                        R_BRACE@39..40 "}"
+                      WHITESPACE@40..41 " "
+                      EQ@41..42 "="
+                      WHITESPACE@42..43 " "
+                      PATH_EXPR@43..44
+                        NAME_REF@43..44
+                          IDENT@43..44 "p"
+                      SEMICOLON@44..45 ";"
+                    WHITESPACE@45..46 " "
+                    R_BRACE@46..47 "}"
+                SEMICOLON@47..48 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn let_record_destructure_rest() {
+    check(
+        "static f = fn { let struct { x, .. } = p; };",
+        expect![[r#"
+            SOURCE_FILE@0..44
+              STATIC_ITEM@0..44
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..43
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..43
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..41
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      RECORD_PAT@20..36
+                        STRUCT_KW@20..26 "struct"
+                        WHITESPACE@26..27 " "
+                        L_BRACE@27..28 "{"
+                        WHITESPACE@28..29 " "
+                        RECORD_PAT_FIELD@29..30
+                          NAME@29..30
+                            IDENT@29..30 "x"
+                        COMMA@30..31 ","
+                        WHITESPACE@31..32 " "
+                        REST_PAT@32..34
+                          DOT2@32..34 ".."
+                        WHITESPACE@34..35 " "
+                        R_BRACE@35..36 "}"
+                      WHITESPACE@36..37 " "
+                      EQ@37..38 "="
+                      WHITESPACE@38..39 " "
+                      PATH_EXPR@39..40
+                        NAME_REF@39..40
+                          IDENT@39..40 "p"
+                      SEMICOLON@40..41 ";"
+                    WHITESPACE@41..42 " "
+                    R_BRACE@42..43 "}"
+                SEMICOLON@43..44 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn let_record_destructure_per_binding_mut() {
+    check(
+        "static f = fn { let struct { mut x, y } = p; };",
+        expect![[r#"
+            SOURCE_FILE@0..47
+              STATIC_ITEM@0..47
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..46
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..46
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..44
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      RECORD_PAT@20..39
+                        STRUCT_KW@20..26 "struct"
+                        WHITESPACE@26..27 " "
+                        L_BRACE@27..28 "{"
+                        WHITESPACE@28..29 " "
+                        RECORD_PAT_FIELD@29..34
+                          MUT_KW@29..32 "mut"
+                          WHITESPACE@32..33 " "
+                          NAME@33..34
+                            IDENT@33..34 "x"
+                        COMMA@34..35 ","
+                        WHITESPACE@35..36 " "
+                        RECORD_PAT_FIELD@36..37
+                          NAME@36..37
+                            IDENT@36..37 "y"
+                        WHITESPACE@37..38 " "
+                        R_BRACE@38..39 "}"
+                      WHITESPACE@39..40 " "
+                      EQ@40..41 "="
+                      WHITESPACE@41..42 " "
+                      PATH_EXPR@42..43
+                        NAME_REF@42..43
+                          IDENT@42..43 "p"
+                      SEMICOLON@43..44 ";"
+                    WHITESPACE@44..45 " "
+                    R_BRACE@45..46 "}"
+                SEMICOLON@46..47 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn let_mut_on_destructuring_pattern_is_rejected() {
+    check(
+        "static f = fn { let mut struct { x } = p; };",
+        expect![[r#"
+            SOURCE_FILE@0..44
+              STATIC_ITEM@0..44
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..43
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..43
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..41
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      MUT_KW@20..23 "mut"
+                      WHITESPACE@23..24 " "
+                      RECORD_PAT@24..36
+                        STRUCT_KW@24..30 "struct"
+                        WHITESPACE@30..31 " "
+                        L_BRACE@31..32 "{"
+                        WHITESPACE@32..33 " "
+                        RECORD_PAT_FIELD@33..34
+                          NAME@33..34
+                            IDENT@33..34 "x"
+                        WHITESPACE@34..35 " "
+                        R_BRACE@35..36 "}"
+                      WHITESPACE@36..37 " "
+                      EQ@37..38 "="
+                      WHITESPACE@38..39 " "
+                      PATH_EXPR@39..40
+                        NAME_REF@39..40
+                          IDENT@39..40 "p"
+                      SEMICOLON@40..41 ";"
+                    WHITESPACE@41..42 " "
+                    R_BRACE@42..43 "}"
+                SEMICOLON@43..44 ";"
+            error 20..36: `mut` applies to individual bindings in a destructuring pattern
+        "#]],
+    );
+}
+
+#[test]
+fn param_record_destructure() {
+    check(
+        "static f = fn (struct { x, y }: struct { x: usize, y: usize }) { };",
+        expect![[r#"
+            SOURCE_FILE@0..67
+              STATIC_ITEM@0..67
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..66
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  PARAM_LIST@14..62
+                    L_PAREN@14..15 "("
+                    PARAM@15..61
+                      RECORD_PAT@15..30
+                        STRUCT_KW@15..21 "struct"
+                        WHITESPACE@21..22 " "
+                        L_BRACE@22..23 "{"
+                        WHITESPACE@23..24 " "
+                        RECORD_PAT_FIELD@24..25
+                          NAME@24..25
+                            IDENT@24..25 "x"
+                        COMMA@25..26 ","
+                        WHITESPACE@26..27 " "
+                        RECORD_PAT_FIELD@27..28
+                          NAME@27..28
+                            IDENT@27..28 "y"
+                        WHITESPACE@28..29 " "
+                        R_BRACE@29..30 "}"
+                      COLON@30..31 ":"
+                      WHITESPACE@31..32 " "
+                      RECORD_TYPE@32..61
+                        STRUCT_KW@32..38 "struct"
+                        WHITESPACE@38..39 " "
+                        L_BRACE@39..40 "{"
+                        WHITESPACE@40..41 " "
+                        RECORD_TYPE_FIELD@41..49
+                          NAME@41..42
+                            IDENT@41..42 "x"
+                          COLON@42..43 ":"
+                          WHITESPACE@43..44 " "
+                          PATH_TYPE@44..49
+                            NAME_REF@44..49
+                              IDENT@44..49 "usize"
+                        COMMA@49..50 ","
+                        WHITESPACE@50..51 " "
+                        RECORD_TYPE_FIELD@51..59
+                          NAME@51..52
+                            IDENT@51..52 "y"
+                          COLON@52..53 ":"
+                          WHITESPACE@53..54 " "
+                          PATH_TYPE@54..59
+                            NAME_REF@54..59
+                              IDENT@54..59 "usize"
+                        WHITESPACE@59..60 " "
+                        R_BRACE@60..61 "}"
+                    R_PAREN@61..62 ")"
+                  WHITESPACE@62..63 " "
+                  BLOCK_EXPR@63..66
+                    L_BRACE@63..64 "{"
+                    WHITESPACE@64..65 " "
+                    R_BRACE@65..66 "}"
+                SEMICOLON@66..67 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn let_newtype_destructure() {
+    check(
+        "static f = fn { let Foo(struct { x, y }) = p; };",
+        expect![[r#"
+            SOURCE_FILE@0..48
+              STATIC_ITEM@0..48
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..47
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..47
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..45
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      NEWTYPE_PAT@20..40
+                        NAME_REF@20..23
+                          IDENT@20..23 "Foo"
+                        L_PAREN@23..24 "("
+                        RECORD_PAT@24..39
+                          STRUCT_KW@24..30 "struct"
+                          WHITESPACE@30..31 " "
+                          L_BRACE@31..32 "{"
+                          WHITESPACE@32..33 " "
+                          RECORD_PAT_FIELD@33..34
+                            NAME@33..34
+                              IDENT@33..34 "x"
+                          COMMA@34..35 ","
+                          WHITESPACE@35..36 " "
+                          RECORD_PAT_FIELD@36..37
+                            NAME@36..37
+                              IDENT@36..37 "y"
+                          WHITESPACE@37..38 " "
+                          R_BRACE@38..39 "}"
+                        R_PAREN@39..40 ")"
+                      WHITESPACE@40..41 " "
+                      EQ@41..42 "="
+                      WHITESPACE@42..43 " "
+                      PATH_EXPR@43..44
+                        NAME_REF@43..44
+                          IDENT@43..44 "p"
+                      SEMICOLON@44..45 ";"
+                    WHITESPACE@45..46 " "
+                    R_BRACE@46..47 "}"
+                SEMICOLON@47..48 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn param_newtype_destructure() {
+    check(
+        "static f = fn (Foo(struct { x, y })) { };",
+        expect![[r#"
+            SOURCE_FILE@0..41
+              STATIC_ITEM@0..41
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..40
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  PARAM_LIST@14..36
+                    L_PAREN@14..15 "("
+                    PARAM@15..35
+                      NEWTYPE_PAT@15..35
+                        NAME_REF@15..18
+                          IDENT@15..18 "Foo"
+                        L_PAREN@18..19 "("
+                        RECORD_PAT@19..34
+                          STRUCT_KW@19..25 "struct"
+                          WHITESPACE@25..26 " "
+                          L_BRACE@26..27 "{"
+                          WHITESPACE@27..28 " "
+                          RECORD_PAT_FIELD@28..29
+                            NAME@28..29
+                              IDENT@28..29 "x"
+                          COMMA@29..30 ","
+                          WHITESPACE@30..31 " "
+                          RECORD_PAT_FIELD@31..32
+                            NAME@31..32
+                              IDENT@31..32 "y"
+                          WHITESPACE@32..33 " "
+                          R_BRACE@33..34 "}"
+                        R_PAREN@34..35 ")"
+                    R_PAREN@35..36 ")"
+                  WHITESPACE@36..37 " "
+                  BLOCK_EXPR@37..40
+                    L_BRACE@37..38 "{"
+                    WHITESPACE@38..39 " "
+                    R_BRACE@39..40 "}"
+                SEMICOLON@40..41 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn newtype_destructure_bare_bind_inner() {
+    check(
+        "static f = fn { let Foo(inner) = p; };",
+        expect![[r#"
+            SOURCE_FILE@0..38
+              STATIC_ITEM@0..38
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..37
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..37
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..35
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      NEWTYPE_PAT@20..30
+                        NAME_REF@20..23
+                          IDENT@20..23 "Foo"
+                        L_PAREN@23..24 "("
+                        BIND_PAT@24..29
+                          NAME@24..29
+                            IDENT@24..29 "inner"
+                        R_PAREN@29..30 ")"
+                      WHITESPACE@30..31 " "
+                      EQ@31..32 "="
+                      WHITESPACE@32..33 " "
+                      PATH_EXPR@33..34
+                        NAME_REF@33..34
+                          IDENT@33..34 "p"
+                      SEMICOLON@34..35 ";"
+                    WHITESPACE@35..36 " "
+                    R_BRACE@36..37 "}"
+                SEMICOLON@37..38 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn pub_reserved_on_record_type_field() {
+    check(
+        "static f: struct { pub x: usize } = p;",
+        expect![[r#"
+            SOURCE_FILE@0..38
+              STATIC_ITEM@0..38
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                COLON@8..9 ":"
+                WHITESPACE@9..10 " "
+                RECORD_TYPE@10..33
+                  STRUCT_KW@10..16 "struct"
+                  WHITESPACE@16..17 " "
+                  L_BRACE@17..18 "{"
+                  WHITESPACE@18..19 " "
+                  RECORD_TYPE_FIELD@19..31
+                    PUB_KW@19..22 "pub"
+                    WHITESPACE@22..23 " "
+                    NAME@23..24
+                      IDENT@23..24 "x"
+                    COLON@24..25 ":"
+                    WHITESPACE@25..26 " "
+                    PATH_TYPE@26..31
+                      NAME_REF@26..31
+                        IDENT@26..31 "usize"
+                  WHITESPACE@31..32 " "
+                  R_BRACE@32..33 "}"
+                WHITESPACE@33..34 " "
+                EQ@34..35 "="
+                WHITESPACE@35..36 " "
+                PATH_EXPR@36..37
+                  NAME_REF@36..37
+                    IDENT@36..37 "p"
+                SEMICOLON@37..38 ";"
+            error 19..22: field visibility is not supported yet
+        "#]],
+    );
+}
+
+#[test]
+fn pub_reserved_on_type_decl_field() {
+    check(
+        "type Foo = struct { pub bar: usize };",
+        expect![[r#"
+            SOURCE_FILE@0..37
+              TYPE_ITEM@0..37
+                TYPE_KW@0..4 "type"
+                WHITESPACE@4..5 " "
+                NAME@5..8
+                  IDENT@5..8 "Foo"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                RECORD_EXPR@11..36
+                  STRUCT_KW@11..17 "struct"
+                  WHITESPACE@17..18 " "
+                  L_BRACE@18..19 "{"
+                  WHITESPACE@19..20 " "
+                  RECORD_EXPR_FIELD@20..34
+                    PUB_KW@20..23 "pub"
+                    WHITESPACE@23..24 " "
+                    NAME_REF@24..27
+                      IDENT@24..27 "bar"
+                    COLON@27..28 ":"
+                    WHITESPACE@28..29 " "
+                    PATH_EXPR@29..34
+                      NAME_REF@29..34
+                        IDENT@29..34 "usize"
+                  WHITESPACE@34..35 " "
+                  R_BRACE@35..36 "}"
+                SEMICOLON@36..37 ";"
+            error 20..23: field visibility is not supported yet
+        "#]],
+    );
+}
+
+#[test]
+fn pub_rejected_on_record_literal_field() {
+    check(
+        "static f = struct { pub x: 1 };",
+        expect![[r#"
+            SOURCE_FILE@0..31
+              STATIC_ITEM@0..31
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                RECORD_EXPR@11..30
+                  STRUCT_KW@11..17 "struct"
+                  WHITESPACE@17..18 " "
+                  L_BRACE@18..19 "{"
+                  WHITESPACE@19..20 " "
+                  RECORD_EXPR_FIELD@20..28
+                    PUB_KW@20..23 "pub"
+                    WHITESPACE@23..24 " "
+                    NAME_REF@24..25
+                      IDENT@24..25 "x"
+                    COLON@25..26 ":"
+                    WHITESPACE@26..27 " "
+                    LITERAL@27..28
+                      INT_NUMBER@27..28 "1"
+                  WHITESPACE@28..29 " "
+                  R_BRACE@29..30 "}"
+                SEMICOLON@30..31 ";"
+            error 20..23: field visibility is not supported yet
+        "#]],
+    );
+}
+
+#[test]
+fn field_assignment_gets_its_own_message() {
+    check(
+        "static f = fn (p: struct { x: usize }) { p.x = 1; };",
+        expect![[r#"
+            SOURCE_FILE@0..52
+              STATIC_ITEM@0..52
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..51
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  PARAM_LIST@14..38
+                    L_PAREN@14..15 "("
+                    PARAM@15..37
+                      BIND_PAT@15..16
+                        NAME@15..16
+                          IDENT@15..16 "p"
+                      COLON@16..17 ":"
+                      WHITESPACE@17..18 " "
+                      RECORD_TYPE@18..37
+                        STRUCT_KW@18..24 "struct"
+                        WHITESPACE@24..25 " "
+                        L_BRACE@25..26 "{"
+                        WHITESPACE@26..27 " "
+                        RECORD_TYPE_FIELD@27..35
+                          NAME@27..28
+                            IDENT@27..28 "x"
+                          COLON@28..29 ":"
+                          WHITESPACE@29..30 " "
+                          PATH_TYPE@30..35
+                            NAME_REF@30..35
+                              IDENT@30..35 "usize"
+                        WHITESPACE@35..36 " "
+                        R_BRACE@36..37 "}"
+                    R_PAREN@37..38 ")"
+                  WHITESPACE@38..39 " "
+                  BLOCK_EXPR@39..51
+                    L_BRACE@39..40 "{"
+                    WHITESPACE@40..41 " "
+                    ASSIGN_STMT@41..49
+                      FIELD_EXPR@41..44
+                        PATH_EXPR@41..42
+                          NAME_REF@41..42
+                            IDENT@41..42 "p"
+                        DOT@42..43 "."
+                        NAME_REF@43..44
+                          IDENT@43..44 "x"
+                      WHITESPACE@44..45 " "
+                      EQ@45..46 "="
+                      WHITESPACE@46..47 " "
+                      LITERAL@47..48
+                        INT_NUMBER@47..48 "1"
+                      SEMICOLON@48..49 ";"
+                    WHITESPACE@49..50 " "
+                    R_BRACE@50..51 "}"
+                SEMICOLON@51..52 ";"
+            error 41..44: assigning to a field is not supported yet
+        "#]],
     );
 }

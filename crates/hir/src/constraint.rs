@@ -24,9 +24,10 @@
 use ena::unify::InPlaceUnificationTable;
 use rustc_hash::FxHashMap;
 
+use crate::ItemLoc;
 use crate::body::{BindingId, ExprId};
 use crate::infer::InferenceDiagnostic;
-use crate::ty::{Ty, TyVar, TyVarValue};
+use crate::ty::{Ty, TyVar, TyVarValue, VariantTy, widens_to};
 
 /// Why a type was required or concluded. Attached to
 /// [`InferenceDiagnostic::TypeMismatch`] to render "because of this" hints;
@@ -129,11 +130,21 @@ pub(crate) struct Constraints {
     joins: Vec<Join>,
     /// Canonical root var → the causes that decided its concrete type.
     causes: FxHashMap<TyVar, Vec<Cause>>,
+    /// Join witnesses the solver accepted by *widening* (variant → enum
+    /// conversion) rather than by unification: `(leaf expression, the
+    /// variant it was)`. Drained into `InferenceResult::widened` by
+    /// `InferCtx::solve`, so MIR plants the conversion exactly at these
+    /// edges.
+    widenings: Vec<(ExprId, VariantTy)>,
 }
 
 impl Constraints {
     pub(crate) fn push_join(&mut self, join: Join) {
         self.joins.push(join);
+    }
+
+    pub(crate) fn take_widenings(&mut self) -> Vec<(ExprId, VariantTy)> {
+        std::mem::take(&mut self.widenings)
     }
 
     /// The one unification entry point. Binding a variable to a concrete
@@ -200,6 +211,12 @@ impl Constraints {
             // nominal↔structural coercion) — that case falls through to the
             // catch-all `false` below.
             (Ty::Named(a), Ty::Named(b)) => a == b,
+            // A variant type unifies only with itself. Variant vs. its enum
+            // is deliberately FALSE here: unification is equational, and
+            // variant → enum is a runtime conversion (`widens_to`), applied
+            // only at check sites — never inferred backwards through a
+            // unification variable.
+            (Ty::Variant(a), Ty::Variant(b)) => a == b,
             // Structural, exact field-set equality: same names (both sides
             // are canonically sorted, so zipping compares the sets), then
             // the field types unify pairwise. No subtyping.
@@ -259,21 +276,28 @@ impl Constraints {
             // No axiom constrained the result: the witnesses — the leaf
             // branches of the whole (possibly nested) construct — vote, so
             // a plurality of leaves wins regardless of the nesting shape
-            // they arrived in.
+            // they arrived in. Voting is *family-aware*: a Variant or
+            // Named-enum leaf votes for its enum declaration (the family
+            // root), any other leaf for its own type. The winning family
+            // then resolves to its least upper bound — every leaf the same
+            // variant keeps that variant (precision survives, zero
+            // conversions); mixed variants of one enum widen to the enum
+            // (each variant leaf gets its conversion in the loop below).
             Ty::Infer(_) => {
                 let leaves: Vec<(ExprId, Ty)> = join
                     .witnesses
                     .iter()
                     .map(|witness| (witness.blame, resolve_fully(table, &witness.ty)))
                     .collect();
-                let mut tally: Vec<(Ty, usize)> = Vec::new();
+                let mut tally: Vec<(Family, usize)> = Vec::new();
                 for (_, ty) in &leaves {
                     if matches!(ty, Ty::Infer(_) | Ty::Error) {
                         continue;
                     }
-                    match tally.iter_mut().find(|(t, _)| t == ty) {
+                    let family = family_of(ty);
+                    match tally.iter_mut().find(|(f, _)| *f == family) {
                         Some((_, n)) => *n += 1,
-                        None => tally.push((ty.clone(), 1)),
+                        None => tally.push((family, 1)),
                     }
                 }
                 let Some(max) = tally.iter().map(|&(_, n)| n).max() else {
@@ -292,12 +316,28 @@ impl Constraints {
                     self.unify(table, &join.result, &join.witnesses[0].ty, None);
                     return;
                 }
-                let winner = tally.iter().find(|&(_, n)| *n == max).unwrap().0.clone();
+                let family = tally.iter().find(|&&(_, n)| n == max).unwrap().0.clone();
+                let members: Vec<&Ty> = leaves
+                    .iter()
+                    .filter(|(_, ty)| family_of(ty) == family)
+                    .map(|(_, ty)| ty)
+                    .collect();
+                // Least upper bound within the family: identical leaves
+                // keep their exact type; anything mixed is only possible in
+                // an enum family, whose LUB is the enum itself.
+                let winner = if members.iter().all(|&ty| ty == members[0]) {
+                    members[0].clone()
+                } else {
+                    let Family::Enum(loc) = &family else {
+                        unreachable!("only enum families hold more than one type")
+                    };
+                    Ty::Named(loc.clone())
+                };
                 // The winning leaves are the causes: "this branch has type
                 // …" hints, wherever in the nesting those leaves sit.
                 let voters = leaves
                     .iter()
-                    .filter(|(_, ty)| *ty == winner)
+                    .filter(|(_, ty)| family_of(ty) == family)
                     .map(|&(blame, _)| Cause::Branch(blame))
                     .collect();
                 (winner, voters)
@@ -316,8 +356,11 @@ impl Constraints {
         };
 
         // Witnesses that agree become "this branch has type …" hints; free
-        // variables adopt the type; the rest are culprits.
+        // variables adopt the type; witnesses whose variant type widens to
+        // an expected enum pass with a conversion at their edge; the rest
+        // are culprits.
         let mut siblings: Vec<Cause> = Vec::new();
+        let mut widened = 0usize;
         let mut culprits: Vec<(&Witness, Ty)> = Vec::new();
         for witness in &join.witnesses {
             match resolve_shallow(table, &witness.ty) {
@@ -332,6 +375,16 @@ impl Constraints {
                         // Hint on the tail sub-expression that produced the
                         // type, not the whole branch.
                         siblings.push(Cause::Branch(witness.blame));
+                    } else if widens_to(&actual, &expected) {
+                        // Not unified (the leaf keeps its precise variant
+                        // type) — the conversion op lands on this edge. Not
+                        // a sibling either: a "this branch has type
+                        // `Shape`" hint on a `Shape::Circle` leaf would
+                        // lie.
+                        if let Ty::Variant(variant) = actual {
+                            self.widenings.push((witness.blame, variant));
+                        }
+                        widened += 1;
                     } else {
                         culprits.push((witness, actual));
                     }
@@ -347,8 +400,9 @@ impl Constraints {
             // from a witness), so a unanimous conflict always has an axiom
             // behind `expected` — though not necessarily a recorded cause
             // yet.
-            let unanimous =
-                siblings.is_empty() && culprits.iter().all(|(_, ty)| *ty == culprits[0].1);
+            let unanimous = siblings.is_empty()
+                && widened == 0
+                && culprits.iter().all(|(_, ty)| *ty == culprits[0].1);
             if unanimous {
                 // The leaves agree with each other and only contradict the
                 // context: one diagnostic on the whole (flattened)
@@ -371,6 +425,27 @@ impl Constraints {
             }
         }
         self.unify(table, &join.result, &expected, None);
+    }
+}
+
+/// Which "family" a join leaf votes for. Variant-typed and enum-typed
+/// leaves of one enum are votes for the *same* outcome family (their least
+/// upper bound is decided after the vote); every other type is a family of
+/// its own. Keyed by declaration, not by asking the database whether a
+/// `Named` is an enum: a struct's `Named` gets a declaration key too, but
+/// no `Variant` can share it (variants are only minted from enum
+/// declarations), so its family LUB degenerates to plain equality.
+#[derive(Clone, PartialEq)]
+enum Family {
+    Enum(ItemLoc),
+    Shape(Ty),
+}
+
+fn family_of(ty: &Ty) -> Family {
+    match ty {
+        Ty::Variant(variant) => Family::Enum(variant.decl.clone()),
+        Ty::Named(loc) => Family::Enum(loc.clone()),
+        other => Family::Shape(other.clone()),
     }
 }
 

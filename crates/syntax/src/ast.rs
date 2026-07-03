@@ -128,7 +128,61 @@ ast_node!(
     /// `receiver.field`, a field access.
     FieldExpr: FIELD_EXPR
 );
-
+ast_node!(
+    /// `enum { Circle(usize), Point }`, an enum literal. Grammar-wise an
+    /// expression; validation restricts it to a `type` declaration's RHS.
+    EnumExpr: ENUM_EXPR
+);
+ast_node!(
+    /// One variant of an enum literal: a name plus zero or more positional
+    /// payload types.
+    EnumVariant: ENUM_VARIANT
+);
+ast_node!(
+    /// `match scrutinee { arms }`.
+    MatchExpr: MATCH_EXPR
+);
+ast_node!(
+    /// One arm: `pattern => expr` with an optional trailing `,`.
+    MatchArm: MATCH_ARM
+);
+ast_node!(
+    /// `Circle(r)` / `Shape::Circle(r)` / bare `Shape::Circle` — a variant
+    /// pattern. The variant names are references (they resolve against an
+    /// enum declaration); the payload bindings are declarations.
+    VariantPat: VARIANT_PAT
+);
+ast_node!(
+    /// `_` as a whole pattern.
+    WildcardPat: WILDCARD_PAT
+);
+ast_node!(
+    /// A bare name as a whole pattern: a binding — unless hir reinterprets
+    /// it as a payload-less variant of the scrutinee's enum.
+    BindPat: BIND_PAT
+);
+ast_node!(
+    /// `..` in pattern position — legal inside a [`RecordPat`] ("don't bind
+    /// the rest"); reserved (validation rejects it) everywhere else a
+    /// pattern can appear.
+    RestPat: REST_PAT
+);
+ast_node!(
+    /// `struct { x, y as z, mut w, .. }` — a record-destructuring pattern,
+    /// construction's mirror image. Only legal as a whole `let`/parameter
+    /// pattern (or nested one level inside a [`NewtypePat`]) — not inside a
+    /// variant pattern's payload.
+    RecordPat: RECORD_PAT
+);
+ast_node!(
+    /// One field of a [`RecordPat`]: `mut? name (as name)?`.
+    RecordPatField: RECORD_PAT_FIELD
+);
+ast_node!(
+    /// `Name(pattern)` — unwraps a newtype and destructures its underlying
+    /// shape, construction's mirror image (`Name(struct { ... })`).
+    NewtypePat: NEWTYPE_PAT
+);
 ast_node!(
     /// `loop { ... }` — an infinite loop; its value is carried by `break`.
     LoopExpr: LOOP_EXPR
@@ -154,9 +208,24 @@ ast_enum!(
     IfExpr,
     RecordExpr,
     FieldExpr,
+    EnumExpr,
+    MatchExpr,
     LoopExpr,
     BreakExpr,
     ContinueExpr
+);
+ast_enum!(
+    /// A pattern: a match-arm pattern (`VariantPat`/`WildcardPat`/`RestPat`)
+    /// or a `let`/parameter binding pattern (`BindPat`/`RecordPat`/
+    /// `NewtypePat`) — the grammar keeps the two vocabularies mostly
+    /// disjoint (see `crate::grammar`'s `match_pattern` vs
+    /// `binding_pattern`), but both lower through the same `Pat` arena.
+    Pat: VariantPat,
+    WildcardPat,
+    BindPat,
+    RestPat,
+    RecordPat,
+    NewtypePat
 );
 ast_enum!(
     Type: FnType,
@@ -296,7 +365,7 @@ impl Param {
     pub fn is_mut(&self) -> bool {
         self.mut_token().is_some()
     }
-    pub fn name(&self) -> Option<Name> {
+    pub fn pat(&self) -> Option<Pat> {
         child(&self.syntax)
     }
     pub fn ty(&self) -> Option<Type> {
@@ -336,7 +405,7 @@ impl LetStmt {
     pub fn is_mut(&self) -> bool {
         self.mut_token().is_some()
     }
-    pub fn name(&self) -> Option<Name> {
+    pub fn pat(&self) -> Option<Pat> {
         child(&self.syntax)
     }
     pub fn ty(&self) -> Option<Type> {
@@ -492,8 +561,188 @@ impl Literal {
 }
 
 impl PathExpr {
+    /// The first (or only) segment.
     pub fn name_ref(&self) -> Option<NameRef> {
         child(&self.syntax)
+    }
+    /// The second segment of a `::` path (`Circle` in `Shape::Circle`), when
+    /// present.
+    pub fn variant_name_ref(&self) -> Option<NameRef> {
+        children::<NameRef>(&self.syntax).nth(1)
+    }
+    pub fn colon2_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, COLON2)
+    }
+}
+
+impl MatchExpr {
+    pub fn match_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, MATCH_KW)
+    }
+    /// The scrutinee. Arm bodies live inside `MATCH_ARM` nodes, so the only
+    /// direct child expression is the scrutinee.
+    pub fn scrutinee(&self) -> Option<Expr> {
+        child(&self.syntax)
+    }
+    pub fn arms(&self) -> impl Iterator<Item = MatchArm> + use<> {
+        children(&self.syntax)
+    }
+}
+
+impl MatchArm {
+    pub fn pat(&self) -> Option<Pat> {
+        child(&self.syntax)
+    }
+    pub fn fat_arrow_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, FAT_ARROW)
+    }
+    pub fn body(&self) -> Option<Expr> {
+        child(&self.syntax)
+    }
+}
+
+impl LoopExpr {
+    pub fn loop_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, LOOP_KW)
+    }
+    /// The language requires a block, but the parser accepts any expression
+    /// for resilience — validation flags non-block bodies.
+    pub fn body(&self) -> Option<Expr> {
+        child(&self.syntax)
+    }
+}
+
+impl BreakExpr {
+    pub fn break_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, BREAK_KW)
+    }
+    /// The carried value; `None` for a bare `break` (which carries `()`).
+    pub fn expr(&self) -> Option<Expr> {
+        child(&self.syntax)
+    }
+}
+
+impl ContinueExpr {
+    pub fn continue_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, CONTINUE_KW)
+    }
+}
+
+impl VariantPat {
+    /// The qualifying enum segment (`Shape` in `Shape::Circle(r)`) — only
+    /// the fully-qualified spelling has one. `None` for the elided sigil
+    /// spelling (`::Circle(r)`) and for the retired unqualified `Circle(r)`
+    /// shape (still parses — validation.rs rejects it).
+    ///
+    /// Decides by token order, not fixed position: the sigil spelling has
+    /// its single `NameRef` *after* the `COLON2`, the qualified spelling
+    /// has one *before* it.
+    pub fn enum_name_ref(&self) -> Option<NameRef> {
+        let colon2 = self.colon2_token()?;
+        let first = children::<NameRef>(&self.syntax).next()?;
+        (first.syntax().text_range().end() <= colon2.text_range().start()).then_some(first)
+    }
+    /// The variant name segment: the second segment when qualified, the
+    /// only one otherwise (elided `::Variant`, or the retired bare
+    /// `Variant(...)` shape).
+    pub fn variant_name_ref(&self) -> Option<NameRef> {
+        if self.enum_name_ref().is_some() {
+            children::<NameRef>(&self.syntax).nth(1)
+        } else {
+            children::<NameRef>(&self.syntax).next()
+        }
+    }
+    pub fn colon2_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, COLON2)
+    }
+    /// The positional payload bindings (holes included), in source order.
+    pub fn bindings(&self) -> impl Iterator<Item = Name> + use<> {
+        children(&self.syntax)
+    }
+    /// The reserved `..` rest marker, if written.
+    pub fn rest_pat(&self) -> Option<RestPat> {
+        child(&self.syntax)
+    }
+}
+
+impl BindPat {
+    pub fn name(&self) -> Option<Name> {
+        child(&self.syntax)
+    }
+}
+
+impl RecordPat {
+    /// The leading `struct` keyword.
+    pub fn struct_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, STRUCT_KW)
+    }
+    pub fn fields(&self) -> impl Iterator<Item = RecordPatField> + use<> {
+        children(&self.syntax)
+    }
+    /// The `..` rest marker, if written — "don't bind the remaining
+    /// fields" (the scrutinee must still name every field structurally;
+    /// `..` only means the pattern doesn't bind them).
+    pub fn rest_pat(&self) -> Option<RestPat> {
+        child(&self.syntax)
+    }
+}
+
+impl RecordPatField {
+    pub fn mut_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, MUT_KW)
+    }
+    pub fn is_mut(&self) -> bool {
+        self.mut_token().is_some()
+    }
+    /// The field being destructured — the first `NAME` child. Doubles as
+    /// the binding's own declaration site in the shorthand spelling (no
+    /// `as`): the same token both selects the field and names the local.
+    pub fn field_name(&self) -> Option<Name> {
+        children::<Name>(&self.syntax).next()
+    }
+    pub fn as_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, AS_KW)
+    }
+    /// The renamed binding (`z` in `y as z`), when written.
+    pub fn rename(&self) -> Option<Name> {
+        children::<Name>(&self.syntax).nth(1)
+    }
+    /// The name actually bound: the rename if present, else the field name
+    /// itself.
+    pub fn bound_name(&self) -> Option<Name> {
+        self.rename().or_else(|| self.field_name())
+    }
+}
+
+impl NewtypePat {
+    /// The newtype's name.
+    pub fn name_ref(&self) -> Option<NameRef> {
+        child(&self.syntax)
+    }
+    /// The pattern destructuring the newtype's underlying shape.
+    pub fn pat(&self) -> Option<Pat> {
+        child(&self.syntax)
+    }
+}
+
+impl EnumExpr {
+    pub fn variants(&self) -> impl Iterator<Item = EnumVariant> + use<> {
+        children(&self.syntax)
+    }
+    /// The leading `enum` keyword.
+    pub fn enum_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, ENUM_KW)
+    }
+}
+
+impl EnumVariant {
+    pub fn name(&self) -> Option<Name> {
+        child(&self.syntax)
+    }
+    /// The positional payload types, in source order. Empty for a
+    /// payload-less variant (`Point` or `Point()` alike).
+    pub fn payload_types(&self) -> impl Iterator<Item = Type> + use<> {
+        children(&self.syntax)
     }
 }
 
@@ -507,8 +756,14 @@ impl FnType {
 }
 
 impl PathType {
+    /// The first (or only) segment.
     pub fn name_ref(&self) -> Option<NameRef> {
         child(&self.syntax)
+    }
+    /// The second segment of a `::` path (`Circle` in `Shape::Circle`), when
+    /// present.
+    pub fn variant_name_ref(&self) -> Option<NameRef> {
+        children::<NameRef>(&self.syntax).nth(1)
     }
 }
 
@@ -538,6 +793,11 @@ impl RecordTypeField {
     }
     pub fn ty(&self) -> Option<Type> {
         child(&self.syntax)
+    }
+    /// The reserved `pub` marker, if written — field visibility is not
+    /// supported yet; validation rejects it.
+    pub fn pub_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, PUB_KW)
     }
 }
 
@@ -569,6 +829,11 @@ impl RecordExprField {
     pub fn is_shorthand(&self) -> bool {
         self.colon_token().is_none()
     }
+    /// The reserved `pub` marker, if written — field visibility is not
+    /// supported yet; validation rejects it.
+    pub fn pub_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, PUB_KW)
+    }
 }
 
 impl FieldExpr {
@@ -579,32 +844,5 @@ impl FieldExpr {
     /// The field being accessed.
     pub fn name_ref(&self) -> Option<NameRef> {
         child(&self.syntax)
-    }
-}
-
-impl LoopExpr {
-    pub fn loop_token(&self) -> Option<SyntaxToken> {
-        token(&self.syntax, LOOP_KW)
-    }
-    /// The language requires a block, but the parser accepts any expression
-    /// for resilience — validation flags non-block bodies.
-    pub fn body(&self) -> Option<Expr> {
-        child(&self.syntax)
-    }
-}
-
-impl BreakExpr {
-    pub fn break_token(&self) -> Option<SyntaxToken> {
-        token(&self.syntax, BREAK_KW)
-    }
-    /// The carried value; `None` for a bare `break` (which carries `()`).
-    pub fn expr(&self) -> Option<Expr> {
-        child(&self.syntax)
-    }
-}
-
-impl ContinueExpr {
-    pub fn continue_token(&self) -> Option<SyntaxToken> {
-        token(&self.syntax, CONTINUE_KW)
     }
 }

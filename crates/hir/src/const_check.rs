@@ -114,6 +114,9 @@ impl CheckCtx<'_> {
     fn check_expr(&mut self, expr: ExprId, in_const: bool) {
         match &self.body.exprs[expr] {
             ExprData::Missing | ExprData::Literal(_) | ExprData::NameRef(_) => {}
+            // A variant path is a name (or a pure constructor value) —
+            // nothing to reject; its base is a bare `NameRef`.
+            ExprData::VariantPath { .. } => {}
             ExprData::Call { callee, args } => {
                 if in_const {
                     self.check_callee(*callee);
@@ -152,6 +155,14 @@ impl CheckCtx<'_> {
                 }
             }
             ExprData::Continue => {}
+            // `match` is pure control flow (patterns only destructure) —
+            // const-legal; scrutinee and arm bodies sit in the same context.
+            ExprData::Match { scrutinee, arms } => {
+                self.check_expr(*scrutinee, in_const);
+                for arm in arms {
+                    self.check_expr(arm.body, in_const);
+                }
+            }
             ExprData::Block { stmts, tail } => {
                 for stmt in stmts {
                     match stmt {
@@ -206,6 +217,9 @@ impl CheckCtx<'_> {
                 self.diagnostics
                     .push(ConstCheckDiagnostic::NonConstFnLiteralCall { callee });
             }
+            // A directly-called variant constructor (`Shape::Circle(3)`):
+            // pure construction, like `Foo(...)` — always const-legal.
+            ExprData::VariantPath { .. } => {}
             ExprData::NameRef(_) => match self.resolutions.get(callee) {
                 Some(Resolution::Item(loc)) => {
                     match root_fn_is_const(self.db, loc.to_id(self.db)) {

@@ -715,7 +715,7 @@ static x = y;
 "#,
         expect![[r#"
             47..48: cannot infer the type of `x` across items; add a type annotation to its definition (defined here at 62..63)
-            47..48: cannot call a value in a const context; whether it is a `const fn` is not known from its type
+            47..48: cannot call a value in a const context; whether it is a `const fn` is not known from its type (this item's initializer is a const context at 18..24)
         "#]],
     );
 }
@@ -1503,7 +1503,7 @@ static double = fn (n: usize) -> usize { n * 2 };
 static x = double(2);
 "#,
         expect![[r#"
-            62..68: cannot call `double` in a const context; marking it `const fn` would allow this (`double` is defined here at 8..14)
+            62..68: cannot call `double` in a const context; marking it `const fn` would allow this (`double` is defined here at 8..14) (this item's initializer is a const context at 51..57)
         "#]],
     );
 }
@@ -1513,7 +1513,7 @@ fn directly_called_plain_fn_literal_in_const_context_is_rejected() {
     check_diagnostics(
         "static x = (fn (n: usize) -> usize { n })(1);",
         expect![[r#"
-            12..40: cannot call this `fn` literal in a const context; marking it `const fn` would allow this
+            12..40: cannot call this `fn` literal in a const context; marking it `const fn` would allow this (this item's initializer is a const context at 0..6)
         "#]],
     );
 }
@@ -1523,7 +1523,7 @@ fn print_in_a_const_block_is_rejected() {
     check_diagnostics(
         r#"static x = const { print("hi") };"#,
         expect![[r#"
-            19..24: cannot call `print` in a const context; const evaluation cannot have side effects
+            19..24: cannot call `print` in a const context; const evaluation cannot have side effects (this `const` block is a const context at 11..16)
         "#]],
     );
 }
@@ -1540,7 +1540,7 @@ static main = fn {
 }
 "#,
         expect![[r#"
-            62..67: cannot call `print` in a const context; const evaluation cannot have side effects
+            62..67: cannot call `print` in a const context; const evaluation cannot have side effects (this `const` block is a const context at 54..59)
         "#]],
     );
 }
@@ -1552,7 +1552,7 @@ fn calling_a_parameter_in_a_const_fn_body_is_rejected() {
     check_diagnostics(
         "static apply = const fn (f: fn() -> usize) -> usize { f() };",
         expect![[r#"
-            54..55: cannot call a value in a const context; whether it is a `const fn` is not known from its type
+            54..55: cannot call a value in a const context; whether it is a `const fn` is not known from its type (this `const fn` is always a const context at 15..20)
         "#]],
     );
 }
@@ -1570,7 +1570,7 @@ static f = fn {
 }
 "#,
         expect![[r#"
-            105..106: cannot call a value in a const context; whether it is a `const fn` is not known from its type
+            105..106: cannot call a value in a const context; whether it is a `const fn` is not known from its type (this `const` block is a const context at 97..102)
         "#]],
     );
 }
@@ -1586,7 +1586,7 @@ static wrapped = const { const fn (n: usize) -> usize { n } };
 static x = wrapped(1);
 "#,
         expect![[r#"
-            75..82: cannot call a value in a const context; whether it is a `const fn` is not known from its type
+            75..82: cannot call a value in a const context; whether it is a `const fn` is not known from its type (this item's initializer is a const context at 64..70)
         "#]],
     );
 }
@@ -1613,8 +1613,8 @@ static f = fn (n: ()) -> usize { 1 };
 static x = f(print("hi"));
 "#,
         expect![[r#"
-            50..51: cannot call `f` in a const context; marking it `const fn` would allow this (`f` is defined here at 8..9)
-            52..57: cannot call `print` in a const context; const evaluation cannot have side effects
+            50..51: cannot call `f` in a const context; marking it `const fn` would allow this (`f` is defined here at 8..9) (this item's initializer is a const context at 39..45)
+            52..57: cannot call `print` in a const context; const evaluation cannot have side effects (this item's initializer is a const context at 39..45)
         "#]],
     );
 }
@@ -2115,7 +2115,7 @@ fn type_rhs_must_be_a_struct_literal() {
     check_diagnostics(
         "type Foo = 5;",
         expect![[r#"
-            11..12: only a `struct` literal can declare a type (for now)
+            11..12: only a `struct` or `enum` literal can declare a type
         "#]],
     );
 }
@@ -2361,6 +2361,857 @@ static f = fn { let p = Foo(struct { x: 1 }); p.x };
     );
 }
 
+// ---- enums and variant types ----
+
+#[test]
+fn variant_construction_infers_the_variant_type() {
+    // Precise types survive: a constructed value is `Shape::Circle`, not
+    // `Shape`; a payload-less variant path IS the value.
+    check_infer(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static c = Shape::Circle(3);
+static p = Shape::Point;
+"#,
+        expect![[r#"
+            56..69 'Shape::Circle': fn(usize) -> Shape::Circle
+            56..72 'Shape::Circle(3)': Shape::Circle
+            70..71 '3': usize
+            85..97 'Shape::Point': Shape::Point
+        "#]],
+    );
+}
+
+#[test]
+fn variant_constructor_is_a_first_class_function() {
+    check_infer(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn {
+    let make = Shape::Circle;
+    make(3)
+};
+"#,
+        expect![[r#"
+            56..104 'fn {     let make...': fn() -> Shape::Circle
+            59..104 '{     let make = ...': Shape::Circle
+            69..73 'make': fn(usize) -> Shape::Circle
+            76..89 'Shape::Circle': fn(usize) -> Shape::Circle
+            95..99 'make': fn(usize) -> Shape::Circle
+            95..102 'make(3)': Shape::Circle
+            100..101 '3': usize
+        "#]],
+    );
+}
+
+#[test]
+fn same_variant_nested_join_keeps_precision() {
+    // A whole nest of `if`s whose leaves agree on one variant: the join
+    // (flattened by J1) resolves to that variant — no widening anywhere.
+    check_infer(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (a: bool, b: bool) {
+    let s = if a { Shape::Circle(1) } else if b { Shape::Circle(2) } else { Shape::Circle(3) };
+    s
+};
+"#,
+        expect![[r#"
+            56..183 'fn (a: bool, b: b...': fn(bool, bool) -> Shape::Circle
+            60..61 'a': bool
+            69..70 'b': bool
+            78..183 '{     let s = if ...': Shape::Circle
+            88..89 's': Shape::Circle
+            92..174 'if a { Shape::Cir...': Shape::Circle
+            95..96 'a': bool
+            97..117 '{ Shape::Circle(1) }': Shape::Circle
+            99..112 'Shape::Circle': fn(usize) -> Shape::Circle
+            99..115 'Shape::Circle(1)': Shape::Circle
+            113..114 '1': usize
+            123..174 'if b { Shape::Cir...': Shape::Circle
+            126..127 'b': bool
+            128..148 '{ Shape::Circle(2) }': Shape::Circle
+            130..143 'Shape::Circle': fn(usize) -> Shape::Circle
+            130..146 'Shape::Circle(2)': Shape::Circle
+            144..145 '2': usize
+            154..174 '{ Shape::Circle(3) }': Shape::Circle
+            156..169 'Shape::Circle': fn(usize) -> Shape::Circle
+            156..172 'Shape::Circle(3)': Shape::Circle
+            170..171 '3': usize
+            180..181 's': Shape::Circle
+        "#]],
+    );
+}
+
+#[test]
+fn mixed_variant_join_widens_to_the_enum() {
+    // Family-aware voting: Circle and Point are one family (Shape); the
+    // LUB within the family is the enum, with a conversion at each edge.
+    check_infer(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (a: bool) {
+    let s = if a { Shape::Circle(1) } else { Shape::Point };
+    s
+};
+"#,
+        expect![[r#"
+            56..139 'fn (a: bool) {   ...': fn(bool) -> Shape
+            60..61 'a': bool
+            69..139 '{     let s = if ...': Shape
+            79..80 's': Shape
+            83..130 'if a { Shape::Cir...': Shape
+            86..87 'a': bool
+            88..108 '{ Shape::Circle(1) }': Shape::Circle
+            90..103 'Shape::Circle': fn(usize) -> Shape::Circle
+            90..106 'Shape::Circle(1)': Shape::Circle
+            104..105 '1': usize
+            114..130 '{ Shape::Point }': Shape::Point
+            116..128 'Shape::Point': Shape::Point
+            136..137 's': Shape
+        "#]],
+    );
+}
+
+#[test]
+fn cross_enum_join_is_still_incompatible() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize) };
+type Color = enum { Red };
+static f = fn (a: bool) {
+    let s = if a { Shape::Circle(1) } else { Color::Red };
+    s
+};
+"#,
+        expect![[r#"
+            136..146: `if` branches have incompatible types: `Shape::Circle` vs `Color::Red`; add a type annotation to decide between them (this branch has type `Shape::Circle` at 110..126)
+        "#]],
+    );
+}
+
+#[test]
+fn enum_annotation_accepts_any_variant() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static s: Shape = Shape::Circle(3);
+static p: Shape = Shape::Point;
+static f = fn (a: bool) -> Shape {
+    if a { Shape::Circle(1) } else { Shape::Point }
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn variant_annotation_rejects_other_variants() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static s: Shape::Circle = Shape::Point;
+"#,
+        expect![[r#"
+            71..83: type mismatch: expected `Shape::Circle`, found `Shape::Point` (expected `Shape::Circle` because of this annotation at 55..68)
+        "#]],
+    );
+}
+
+#[test]
+fn fn_demanding_a_variant_rejects_another_variant() {
+    // The state-machine case: an API that demands one specific state.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static wants_circle = fn (s: Shape::Circle) {};
+static f = fn { wants_circle(Shape::Point); };
+"#,
+        expect![[r#"
+            122..134: type mismatch: expected `Shape::Circle`, found `Shape::Point`
+        "#]],
+    );
+}
+
+#[test]
+fn let_mut_widens_but_plain_let_keeps_the_variant() {
+    check_infer(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn {
+    let p = Shape::Point;
+    let mut s = Shape::Point;
+    s = Shape::Circle(1);
+};
+"#,
+        expect![[r#"
+            56..144 'fn {     let p = ...': fn()
+            59..144 '{     let p = Sha...': ()
+            69..70 'p': Shape::Point
+            73..85 'Shape::Point': Shape::Point
+            99..100 's': Shape
+            103..115 'Shape::Point': Shape::Point
+            121..122 's': Shape
+            125..138 'Shape::Circle': fn(usize) -> Shape::Circle
+            125..141 'Shape::Circle(1)': Shape
+            139..140 '1': usize
+        "#]],
+    );
+}
+
+#[test]
+fn annotated_let_mut_keeps_precision() {
+    // `let mut s: Shape::Circle` is an axiom: no widening, and another
+    // variant is rejected on assignment.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn {
+    let mut s: Shape::Circle = Shape::Circle(1);
+    s = Shape::Point;
+};
+"#,
+        expect![[r#"
+            118..130: type mismatch: expected `Shape::Circle`, found `Shape::Point` (expected `Shape::Circle` because of this annotation at 76..89)
+        "#]],
+    );
+}
+
+#[test]
+fn unknown_variant_is_reported_with_the_declaration() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static s = Shape::Missing;
+"#,
+        expect![[r#"
+            63..70: `Shape` has no variant `Missing` (`Shape` is defined here at 6..11)
+        "#]],
+    );
+}
+
+#[test]
+fn variant_path_on_a_struct_type_item() {
+    check_diagnostics(
+        r#"
+type Point = struct { x: usize };
+static p = Point::x;
+"#,
+        expect![[r#"
+            46..54: `Point` has no variants (it is a `struct` type) (`Point` is defined here at 6..11)
+        "#]],
+    );
+}
+
+#[test]
+fn variant_path_on_a_value_base() {
+    check_diagnostics(
+        r#"
+static five = 5;
+static x = five::Circle;
+"#,
+        expect![[r#"
+            29..41: `five` is not a type; only an `enum` type has `::` variants
+        "#]],
+    );
+}
+
+#[test]
+fn bare_enum_name_is_a_type_not_a_value() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize) };
+static s = Shape;
+"#,
+        expect![[r#"
+            49..54: `Shape` is a type, not a value
+        "#]],
+    );
+}
+
+#[test]
+fn enum_cannot_be_constructed_directly() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize) };
+static s = Shape(3);
+"#,
+        expect![[r#"
+            49..57: `Shape` is an `enum`; construct it through one of its variants (`Shape::<variant>(...)`) (`Shape` is defined here at 6..11)
+        "#]],
+    );
+}
+
+#[test]
+fn variant_constructor_arity_is_checked() {
+    // Constructors are plain functions: wrong arity is the ordinary
+    // ArgCountMismatch, wrong payload type the ordinary call-site mismatch.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static a = Shape::Circle(1, 2);
+static b = Shape::Circle("no");
+"#,
+        expect![[r#"
+            56..75: expected 1 argument(s), found 2
+            102..106: type mismatch: expected `usize`, found `str`
+        "#]],
+    );
+}
+
+#[test]
+fn payload_less_variant_is_not_callable() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Point };
+static p = Shape::Point();
+"#,
+        expect![[r#"
+            41..53: expression of type `Shape::Point` is not callable
+        "#]],
+    );
+}
+
+#[test]
+fn variant_type_annotation_errors_mirror_lowering() {
+    // Every silent `Ty::Error` from variant-path lowering has a diagnostic:
+    // unknown variant, struct base, builtin base.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize) };
+type Point = struct { x: usize };
+static a: Shape::Missing = 1;
+static b: Point::Circle = 2;
+static c: usize::Circle = 3;
+"#,
+        expect![[r#"
+            82..96: `Shape` has no variant `Missing`
+            112..125: `Point` has no variants (it is a `struct` type)
+            141..154: `usize` has no variants (it is a builtin type)
+        "#]],
+    );
+}
+
+#[test]
+fn enum_payloads_must_be_fully_written() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(_) };
+"#,
+        expect![[r#"
+            28..29: a variant payload must be a fully written type; a declaration has nothing to infer `_` from
+        "#]],
+    );
+}
+
+#[test]
+fn field_access_on_an_enum_value_is_an_error() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize) };
+static f = fn (s: Shape) { s.x };
+"#,
+        expect![[r#"
+            67..68: no field `x` on `Shape` (`Shape` is an `enum`, declared here — it has variants, not fields at 14..36)
+        "#]],
+    );
+}
+
+#[test]
+fn let_mut_widening_explains_a_later_mismatch() {
+    // When the widened binding bites later, the mismatch carries the
+    // binding hint ("inferred from its initializer") — which the ide layer
+    // surfaces as an info-severity companion at the `let mut`.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn {
+    let mut s = Shape::Point;
+    s = 5;
+};
+"#,
+        expect![[r#"
+            99..100: type mismatch: expected `Shape`, found `usize` (`s` was inferred to have type `Shape` from its initializer at 73..74)
+        "#]],
+    );
+}
+
+// ---- match ----
+
+#[test]
+fn match_arms_same_variant_keep_precision() {
+    // Every arm produces the same variant: the match keeps the precise
+    // variant type — no widening, no conversions (the join's family vote LUBs
+    // identical leaves to themselves).
+    check_infer(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) {
+    let t = match s {
+        ::Circle(r) => Shape::Circle(r + 1),
+        ::Point => Shape::Circle(0),
+    };
+    t
+};
+"#,
+        expect![[r#"
+            56..190 'fn (s: Shape) {  ...': fn(Shape) -> Shape::Circle
+            60..61 's': Shape
+            70..190 '{     let t = mat...': Shape::Circle
+            80..81 't': Shape::Circle
+            84..181 'match s {        ...': Shape::Circle
+            90..91 's': Shape
+            111..112 'r': usize
+            117..130 'Shape::Circle': fn(usize) -> Shape::Circle
+            117..137 'Shape::Circle(r + 1)': Shape::Circle
+            131..132 'r': usize
+            131..136 'r + 1': usize
+            135..136 '1': usize
+            158..171 'Shape::Circle': fn(usize) -> Shape::Circle
+            158..174 'Shape::Circle(0)': Shape::Circle
+            172..173 '0': usize
+            187..188 't': Shape::Circle
+        "#]],
+    );
+}
+
+#[test]
+fn match_arms_mixed_variants_lub_to_enum() {
+    // Arms produce different variants of one enum: the family LUB is the
+    // enum, with the conversion on each arm edge.
+    check_infer(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) {
+    let t = match s {
+        ::Circle(r) => Shape::Circle(r + 1),
+        ::Point => Shape::Point,
+    };
+    t
+};
+"#,
+        expect![[r#"
+            56..186 'fn (s: Shape) {  ...': fn(Shape) -> Shape
+            60..61 's': Shape
+            70..186 '{     let t = mat...': Shape
+            80..81 't': Shape
+            84..177 'match s {        ...': Shape
+            90..91 's': Shape
+            111..112 'r': usize
+            117..130 'Shape::Circle': fn(usize) -> Shape::Circle
+            117..137 'Shape::Circle(r + 1)': Shape::Circle
+            131..132 'r': usize
+            131..136 'r + 1': usize
+            135..136 '1': usize
+            158..170 'Shape::Point': Shape::Point
+            183..184 't': Shape
+        "#]],
+    );
+}
+
+#[test]
+fn match_nested_in_if_flattens_into_one_join() {
+    // A match in an if's branch tail contributes its arms' leaves to the
+    // enclosing join (J1 through match): the culprit squiggle lands on the
+    // one disagreeing *arm tail*, and the sibling hints name leaves from
+    // both constructs.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape, c: bool) {
+    let x = if c {
+        match s {
+            ::Circle(r) => r,
+            ::Point => "no",
+        }
+    } else {
+        2
+    };
+    x
+};
+"#,
+        expect![[r#"
+            171..175: type mismatch: expected `usize`, found `str` (this branch has type `usize` at 145..146) (this branch has type `usize` at 208..209)
+        "#]],
+    );
+}
+
+#[test]
+fn match_nonexhaustive_missing_one_variant() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => r,
+    }
+};
+"#,
+        expect![[r#"
+            85..90: this `match` does not cover `Shape::Point`
+        "#]],
+    );
+}
+
+#[test]
+fn match_nonexhaustive_missing_several_variants() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Pair(usize, str), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => r,
+    }
+};
+"#,
+        expect![[r#"
+            103..108: this `match` does not cover `Shape::Pair`, `Shape::Point`
+        "#]],
+    );
+}
+
+#[test]
+fn match_wildcard_covers_everything() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => r,
+        _ => 0,
+    }
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn match_arm_after_wildcard_is_unreachable() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        _ => 0,
+        ::Circle(r) => r,
+    }
+};
+"#,
+        expect![[r#"
+            119..130: unreachable arm: `Circle` is already covered by a previous arm
+        "#]],
+    );
+}
+
+#[test]
+fn match_duplicate_variant_arm_is_unreachable() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => r,
+        ::Circle(d) => d + d,
+        ::Point => 0,
+    }
+};
+"#,
+        expect![[r#"
+            129..140: unreachable arm: `Circle` is already covered by a previous arm
+        "#]],
+    );
+}
+
+#[test]
+fn match_on_variant_typed_scrutinee_other_variant_is_unreachable() {
+    // The scrutinee can only be a `State::Running`; the `Idle` arm is dead
+    // (warning), the same-variant arm covers, and no wildcard is needed.
+    check_diagnostics(
+        r#"
+type State = enum { Idle, Running(usize) };
+static f = fn (s: State::Running) -> usize {
+    match s {
+        ::Idle => 0,
+        ::Running(n) => n,
+    }
+};
+"#,
+        expect![[r#"
+            112..118: this arm is unreachable: the scrutinee is a `State::Running`
+        "#]],
+    );
+}
+
+#[test]
+fn match_binding_arm_binds_scrutinee_type() {
+    check_infer(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        whole => 1,
+    }
+};
+"#,
+        expect![[r#"
+            56..122 'fn (s: Shape) -> ...': fn(Shape) -> usize
+            60..61 's': Shape
+            79..122 '{     match s {  ...': usize
+            85..120 'match s {        ...': usize
+            91..92 's': Shape
+            103..108 'whole': Shape
+            112..113 '1': usize
+        "#]],
+    );
+}
+
+#[test]
+fn match_payload_binding_types_come_from_the_declaration() {
+    check_infer(
+        r#"
+type Shape = enum { Pair(usize, str) };
+static f = fn (s: Shape) {
+    match s {
+        ::Pair(n, text) => { print(text); n },
+        _ => 0,
+    }
+};
+"#,
+        expect![[r#"
+            52..152 'fn (s: Shape) {  ...': fn(Shape) -> usize
+            56..57 's': Shape
+            66..152 '{     match s {  ...': usize
+            72..150 'match s {        ...': usize
+            78..79 's': Shape
+            97..98 'n': usize
+            100..104 'text': str
+            109..127 '{ print(text); n }': usize
+            111..116 'print': fn(str)
+            111..122 'print(text)': ()
+            117..121 'text': str
+            124..125 'n': usize
+            142..143 '0': usize
+        "#]],
+    );
+}
+
+#[test]
+fn match_pattern_arity_mismatch() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r, extra) => r,
+        ::Point => 0,
+    }
+};
+"#,
+        expect![[r#"
+            103..121: `Circle` has 1 payload, this pattern names 2
+        "#]],
+    );
+}
+
+#[test]
+fn match_sigil_variant_missing_payloads_needs_them() {
+    // `::Circle` names a payload-carrying variant with no payload list: a
+    // variant pattern must name (or hole) its payloads, so this is an
+    // arity error — the direct successor of the retired bare-`Circle`
+    // reinterpretation case.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle => 1,
+        ::Point => 0,
+    }
+};
+"#,
+        expect![[r#"
+            103..111: `Circle` has 1 payload, this pattern names 0
+        "#]],
+    );
+}
+
+#[test]
+fn match_sigil_and_qualified_patterns_resolve_identically() {
+    // Both spellings of both variants — elided `::Variant` and fully
+    // qualified `Shape::Variant` — resolve against the scrutinee's enum:
+    // fully covered, no diagnostics, and the payload binding types line up.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        Shape::Circle(r) => r,
+        Shape::Point => 0,
+    }
+};
+static g = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => r,
+        ::Point => 0,
+    }
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn match_bind_arm_named_like_variant_binds_and_warns() {
+    // `Point` (bare, no `::`) is a binding, not a variant match — but its
+    // name shadows the `Point` variant, almost always a migration mistake.
+    // It stays well-typed (a full catch-all binding the whole value), so
+    // this is only a warning pointing at the `::Point` spelling.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => r,
+        Point => 0,
+    }
+};
+"#,
+        expect![[r#"
+            129..134: `Point` binds the whole value; write `::Point` (or `Shape::Point`) to match the variant (`Shape` is defined here at 6..11)
+        "#]],
+    );
+}
+
+#[test]
+fn match_bind_arm_named_like_variant_is_still_a_catch_all() {
+    // A bind named like a variant is a *full* catch-all (never narrowed),
+    // so a trailing `_` arm after it is unreachable — proof the reinterpretation
+    // is gone. Two diagnostics: the shadow-name warning and the dead arm.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => r,
+        Point => 0,
+        _ => 1,
+    }
+};
+"#,
+        expect![[r#"
+            129..134: `Point` binds the whole value; write `::Point` (or `Shape::Point`) to match the variant (`Shape` is defined here at 6..11)
+            149..150: unreachable arm: a previous arm already matches anything
+        "#]],
+    );
+}
+
+#[test]
+fn match_bind_arm_named_like_payload_variant_is_not_an_error() {
+    // G25's motivating scenario: a bare bind named like a
+    // *payload-carrying* variant used to require a `PatArity` error under
+    // reinterpretation. Now it just binds the whole value — no error, only
+    // the shadow-name warning.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        Circle => 0,
+    }
+};
+"#,
+        expect![[r#"
+            103..109: `Circle` binds the whole value; write `::Circle` (or `Shape::Circle`) to match the variant (`Shape` is defined here at 6..11)
+        "#]],
+    );
+}
+
+#[test]
+fn match_wrong_enum_pattern_is_rejected() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+type State = enum { Idle, Running(usize) };
+static f = fn (s: Shape) -> usize {
+    match s {
+        State::Idle => 0,
+        _ => 1,
+    }
+};
+"#,
+        expect![[r#"
+            147..158: this pattern matches `State::Idle`, but the scrutinee is a `Shape` (`State` is defined here at 50..55)
+        "#]],
+    );
+}
+
+#[test]
+fn match_pattern_no_such_variant() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        Shape::Square(x) => x,
+        _ => 0,
+    }
+};
+"#,
+        expect![[r#"
+            103..119: `Shape` has no variant `Square` (`Shape` is defined here at 6..11)
+        "#]],
+    );
+}
+
+#[test]
+fn match_non_enum_scrutinee_rejects_variant_patterns() {
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> usize {
+    match n {
+        ::Circle(r) => r,
+        _ => 0,
+    }
+};
+"#,
+        expect![[r#"
+            59..70: only `_` or a binding can match a `usize` (for now)
+        "#]],
+    );
+}
+
+#[test]
+fn match_non_enum_scrutinee_needs_a_catch_all() {
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> usize {
+    match n { }
+};
+"#,
+        expect![[r#"
+            41..46: this `match` does not cover every possible `usize`; add a `_` arm
+        "#]],
+    );
+}
+
+#[test]
+fn match_in_const_fn_is_clean() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static area_ish = const fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => r * r,
+        ::Point => 0,
+    }
+};
+static x = area_ish(Shape::Circle(3));
+"#,
+        expect![[r#""#]],
+    );
+}
+
 #[test]
 fn loop_types_as_its_break_value() {
     // The owner's motivating accumulator: break values are the witnesses of
@@ -2429,6 +3280,47 @@ fn bare_break_is_a_unit_witness() {
             16..31 'loop { break; }': ()
             21..31 '{ break; }': ()
             23..28 'break': !
+        "#]],
+    );
+}
+
+#[test]
+fn loop_break_values_join_widens_variants() {
+    // Break values go through the same join seam as `if` branches and
+    // `match` arms: mixed variants of one enum LUB to the enum.
+    check_infer(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (stop: bool) {
+    let s = loop {
+        if stop { break Shape::Circle(1); };
+        break Point_or(stop);
+    };
+};
+static Point_or = fn (b: bool) -> Shape::Point { Shape::Point };
+"#,
+        expect![[r#"
+            56..176 'fn (stop: bool) {...': fn(bool)
+            60..64 'stop': bool
+            72..176 '{     let s = loo...': ()
+            82..83 's': Shape
+            86..173 'loop {         if...': Shape
+            91..173 '{         if stop...': ()
+            101..136 'if stop { break S...': ()
+            104..108 'stop': bool
+            109..136 '{ break Shape::Ci...': ()
+            111..133 'break Shape::Circ...': !
+            117..130 'Shape::Circle': fn(usize) -> Shape::Circle
+            117..133 'Shape::Circle(1)': Shape::Circle
+            131..132 '1': usize
+            146..166 'break Point_or(stop)': !
+            152..160 'Point_or': fn(bool) -> Shape::Point
+            152..166 'Point_or(stop)': Shape::Point
+            161..165 'stop': bool
+            196..241 'fn (b: bool) -> S...': fn(bool) -> Shape::Point
+            200..201 'b': bool
+            225..241 '{ Shape::Point }': Shape::Point
+            227..239 'Shape::Point': Shape::Point
         "#]],
     );
 }
@@ -2562,4 +3454,276 @@ static x = sum();
 "#,
         expect![[r#""#]],
     );
+}
+
+// ---- record destructuring, `pub` reservation, field assignment ----
+
+#[test]
+fn let_record_destructure_binds_correct_types() {
+    check_infer(
+        r#"static f = fn { let struct { x, y } = struct { x: 1, y: "s" }; };"#,
+        expect![[r#"
+            11..64 'fn { let struct {...': fn()
+            14..64 '{ let struct { x,...': ()
+            29..30 'x': usize
+            32..33 'y': str
+            38..61 'struct { x: 1, y:...': struct { x: usize, y: str }
+            50..51 '1': usize
+            56..59 '"s"': str
+        "#]],
+    );
+}
+
+#[test]
+fn let_record_destructure_rename_binds_only_the_new_name() {
+    // `x` is not bound under its own name; only the rename `a` is.
+    check_diagnostics(
+        r#"static f = fn { let struct { x as a } = struct { x: 1 }; let b = a; let c = x; };"#,
+        expect![[r#"
+            76..77: unresolved name `x`
+        "#]],
+    );
+}
+
+#[test]
+fn let_record_destructure_missing_field_without_rest_errors() {
+    check_diagnostics(
+        r#"static f = fn { let struct { x } = struct { x: 1, y: 2 }; };"#,
+        expect![[r#"
+            20..32: pattern does not mention field `y`; add `..` to ignore it
+        "#]],
+    );
+}
+
+#[test]
+fn let_record_destructure_missing_several_fields_without_rest_errors() {
+    check_diagnostics(
+        r#"static f = fn { let struct { x } = struct { x: 1, y: 2, z: 3 }; };"#,
+        expect![[r#"
+            20..32: pattern does not mention fields `y`, `z`; add `..` to ignore them
+        "#]],
+    );
+}
+
+#[test]
+fn let_record_destructure_with_rest_ignores_missing_fields() {
+    check_diagnostics(
+        r#"static f = fn { let struct { x, .. } = struct { x: 1, y: 2 }; };"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn let_record_destructure_unknown_field_errors() {
+    check_diagnostics(
+        r#"static f = fn { let struct { x, z } = struct { x: 1, y: 2 }; };"#,
+        expect![[r#"
+            20..35: no field `z` on `struct { x: usize, y: usize }`
+            20..35: pattern does not mention field `y`; add `..` to ignore it
+        "#]],
+    );
+}
+
+#[test]
+fn let_bare_record_pattern_needs_annotation_without_one() {
+    // No annotation and no newtype wrapper: nothing pins the initializer's
+    // type down before the pattern must be checked against it.
+    check_diagnostics(
+        r#"static f = fn (mk: fn() -> struct { x: usize }) { let struct { x } = mk(); };"#,
+        expect![[r#""#]],
+    );
+    // `x` is a free parameter of `f` itself (no call site anywhere pins its
+    // type — unlike a group-inferred callee, nothing forces it concrete),
+    // so it is still genuinely undetermined when the pattern is checked.
+    check_diagnostics(
+        r#"static f = fn (x) { let struct { y } = x; };"#,
+        expect![[r#"
+            24..36: cannot destructure this pattern: its type is not known here; add a type annotation
+        "#]],
+    );
+}
+
+#[test]
+fn param_record_destructure_binds_correct_types() {
+    check_infer(
+        r#"static f = fn (struct { x, y }: struct { x: usize, y: str }) { x }; "#,
+        expect![[r#"
+            11..66 'fn (struct { x, y...': fn(struct { x: usize, y: str }) -> usize
+            24..25 'x': usize
+            27..28 'y': str
+            61..66 '{ x }': usize
+            63..64 'x': usize
+        "#]],
+    );
+}
+
+#[test]
+fn param_bare_record_destructure_needs_annotation() {
+    check_diagnostics(
+        r#"static f = fn (struct { x }) { x };"#,
+        expect![[r#"
+            15..27: cannot destructure this pattern: its type is not known here; add a type annotation
+        "#]],
+    );
+}
+
+#[test]
+fn let_newtype_destructure_binds_underlying_fields() {
+    check_infer(
+        r#"
+type Foo = struct { x: usize, y: str };
+static f = fn (v: Foo) { let Foo(struct { x, y }) = v; x };
+"#,
+        expect![[r#"
+            52..99 'fn (v: Foo) { let...': fn(Foo) -> usize
+            56..57 'v': Foo
+            64..99 '{ let Foo(struct ...': usize
+            83..84 'x': usize
+            86..87 'y': str
+            93..94 'v': Foo
+            96..97 'x': usize
+        "#]],
+    );
+}
+
+#[test]
+fn param_newtype_destructure_infers_param_type_without_annotation() {
+    // `Foo(...)` names its own type — no annotation needed, mirroring
+    // construction's callee.
+    check_infer(
+        r#"
+type Foo = struct { x: usize };
+static f = fn (Foo(struct { x })) { x };
+"#,
+        expect![[r#"
+            44..72 'fn (Foo(struct { ...': fn(Foo) -> usize
+            61..62 'x': usize
+            67..72 '{ x }': usize
+            69..70 'x': usize
+        "#]],
+    );
+}
+
+#[test]
+fn newtype_destructure_wrong_named_type_errors() {
+    check_diagnostics(
+        r#"
+type Foo = struct { x: usize };
+type Bar = struct { x: usize };
+static f = fn (v: Bar) { let Foo(struct { x }) = v; };
+"#,
+        expect![[r#"
+            114..115: type mismatch: expected `Foo`, found `Bar`
+        "#]],
+    );
+}
+
+#[test]
+fn newtype_destructure_unknown_type_errors() {
+    check_diagnostics(
+        r#"static f = fn { let Bogus(struct { x }) = 1; };"#,
+        expect![[r#"
+            20..39: `Bogus` does not name a type
+        "#]],
+    );
+}
+
+#[test]
+fn record_destructure_unknown_field_still_types_it_as_error_not_cascading() {
+    // The unknown field's binding recovers as `{error}` (infectious and
+    // silent) rather than blocking the rest of the pattern from checking.
+    check_diagnostics(
+        r#"static f = fn { let struct { x, z, .. } = struct { x: 1 }; let n: usize = z; };"#,
+        expect![[r#"
+            20..39: no field `z` on `struct { x: usize }`
+        "#]],
+    );
+}
+
+#[test]
+fn per_binding_mut_in_record_pattern_allows_assignment() {
+    check_diagnostics(
+        r#"static f = fn { let struct { mut x, y } = struct { x: 1, y: 2 }; x = 3; };"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn record_pattern_binding_without_mut_is_immutable() {
+    check_diagnostics(
+        r#"static f = fn { let struct { x, y } = struct { x: 1, y: 2 }; x = 3; };"#,
+        expect![[r#"
+            61..62: cannot assign to `x`: it is not declared `mut` (`x` is declared without `mut` here at 29..30)
+        "#]],
+    );
+}
+
+#[test]
+fn let_mut_on_a_destructuring_pattern_is_a_syntax_error() {
+    check_diagnostics(
+        r#"static f = fn { let mut struct { x } = struct { x: 1 }; };"#,
+        expect![[r#"
+            20..36: `mut` applies to individual bindings in a destructuring pattern
+        "#]],
+    );
+}
+
+#[test]
+fn field_assignment_reports_the_dedicated_message() {
+    check_diagnostics(
+        r#"static f = fn (p: struct { x: usize }) { p.x = 1; };"#,
+        expect![[r#"
+            41..44: assigning to a field is not supported yet
+        "#]],
+    );
+}
+
+#[test]
+fn pub_field_on_type_decl_is_reserved() {
+    check_diagnostics(
+        r#"type Foo = struct { pub x: usize };"#,
+        expect![[r#"
+            20..23: field visibility is not supported yet
+        "#]],
+    );
+}
+
+#[test]
+fn non_const_fn_call_offers_a_mark_const_fn_fix() {
+    // The callee's initializer is a plain `fn` literal in the same file:
+    // the fix inserts `const ` right before it.
+    let text = "static f = fn (n: usize) -> usize { n };\nstatic x = f(1);";
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Mark `f` as `const fn`");
+    assert_eq!(fix.edits.len(), 1);
+    assert_eq!(fix.edits[0].insert, "const ");
+    assert!(fix.edits[0].range.is_empty());
+    // Right before `f`'s own `fn` keyword (offset 11): applying it yields
+    // `static f = const fn (n: usize) -> usize { n };`.
+    assert_eq!(u32::from(fix.edits[0].range.start()), 11);
+}
+
+#[test]
+fn non_const_fn_literal_call_offers_no_fix() {
+    // A directly-called plain `fn` literal has no named declaration to
+    // edit — nothing to offer.
+    check_diagnostics(
+        "static f = const { (fn { 1 })() };",
+        expect![[r#"
+            20..28: cannot call this `fn` literal in a const context; marking it `const fn` would allow this (this `const` block is a const context at 11..16)
+        "#]],
+    );
+    let db = RootDatabase::default();
+    let file = SourceFile::new(
+        &db,
+        "test.must".to_owned(),
+        "static f = const { (fn { 1 })() };".to_owned(),
+    );
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1);
+    assert!(diagnostics[0].fix.is_none());
 }

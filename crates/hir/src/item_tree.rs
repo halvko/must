@@ -71,6 +71,13 @@ pub enum TypeRef {
     },
     Ref(Box<TypeRef>),
     Path(String),
+    /// `Shape::Circle` — a variant type, named through its enum. The names
+    /// stay syntactic here (like [`TypeRef::Path`]); resolution happens in
+    /// lowering, against the enum's [`type_decl`].
+    Variant {
+        enum_name: String,
+        variant: String,
+    },
     Hole,
     /// `{ x: T, y: U }` — a structural record type. Fields are sorted by
     /// name (field order is irrelevant to the type, so the canonical order
@@ -95,9 +102,13 @@ impl TypeRef {
                 Some(inner) => TypeRef::Ref(Box::new(TypeRef::from_ast(inner))),
                 None => TypeRef::Error,
             },
-            ast::Type::PathType(it) => match it.name_ref() {
-                Some(name) => TypeRef::Path(name.text()),
-                None => TypeRef::Error,
+            ast::Type::PathType(it) => match (it.name_ref(), it.variant_name_ref()) {
+                (Some(enum_name), Some(variant)) => TypeRef::Variant {
+                    enum_name: enum_name.text(),
+                    variant: variant.text(),
+                },
+                (Some(name), None) => TypeRef::Path(name.text()),
+                (None, _) => TypeRef::Error,
             },
             ast::Type::HoleType(_) => TypeRef::Hole,
             ast::Type::RecordType(it) => {
@@ -125,6 +136,22 @@ impl TypeRef {
 
     pub fn from_opt_ast(ty: Option<ast::Type>) -> Option<TypeRef> {
         ty.map(TypeRef::from_ast)
+    }
+    pub fn is_fully_typed(&self) -> bool {
+        match self {
+            TypeRef::Hole => false,
+            TypeRef::Unit
+            | TypeRef::Never
+            | TypeRef::Path(_)
+            | TypeRef::Variant { .. }
+            | TypeRef::Error => true,
+            TypeRef::Fn { params, ret } => {
+                params.iter().all(TypeRef::is_fully_typed)
+                    && ret.as_ref().is_some_and(|r| r.is_fully_typed())
+            }
+            TypeRef::Ref(inner) => inner.is_fully_typed(),
+            TypeRef::Record(fields) => fields.iter().all(|(_, ty)| ty.is_fully_typed()),
+        }
     }
 }
 
@@ -158,19 +185,31 @@ pub fn item_tree(db: &dyn Db, file: SourceFile) -> ItemTree {
     ItemTree { items }
 }
 
-/// The declared shape of a `type` item: its `struct` literal's fields read
-/// *syntactically* as types — one `TypeRef` per field, sorted by name,
+/// The declared shape of a `type` item, read *syntactically* — `TypeRef`s,
 /// range-free. This is the incrementality firewall for named types: users of
 /// a `type Foo` depend on this value (and never on const eval), so an edit
 /// elsewhere in the declaring file backdates here and stops.
 ///
-/// `None` when the RHS is not a `struct` literal (diagnosed in
-/// [`crate::file_diagnostics`]) or the item is not a `type` item at all.
-/// When `enum` literals land, they become the second accepted RHS here.
+/// `None` when the RHS is neither a `struct` nor an `enum` literal
+/// (diagnosed in [`crate::file_diagnostics`]) or the item is not a `type`
+/// item at all.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct TypeDeclData {
-    /// Sorted by field name (same canonicalization as [`TypeRef::Record`]).
-    pub fields: Vec<(String, TypeRef)>,
+pub enum TypeDeclData {
+    /// `type Foo = struct { ... };` — a newtype over a record shape.
+    Struct {
+        /// Sorted by field name (same canonicalization as
+        /// [`TypeRef::Record`]).
+        fields: Vec<(String, TypeRef)>,
+    },
+    /// `type Shape = enum { ... };` — an enum with positional-payload
+    /// variants.
+    Enum {
+        /// In *source* order — a variant's index is its identity at the
+        /// type and value level, so no canonicalization happens here.
+        /// Duplicate names stay (validation errors on them); lookups by
+        /// name find the first.
+        variants: Vec<(String, Vec<TypeRef>)>,
+    },
 }
 
 #[salsa::tracked(returns(ref))]
@@ -178,12 +217,24 @@ pub fn type_decl<'db>(db: &'db dyn Db, item: crate::ItemId<'db>) -> Option<TypeD
     let ast::Item::TypeItem(decl) = item_source(db, item)? else {
         return None;
     };
-    let ast::Expr::RecordExpr(record) = decl.body()? else {
-        return None;
-    };
-    Some(TypeDeclData {
-        fields: record_expr_fields_as_types(&record),
-    })
+    match decl.body()? {
+        ast::Expr::RecordExpr(record) => Some(TypeDeclData::Struct {
+            fields: record_expr_fields_as_types(&record),
+        }),
+        ast::Expr::EnumExpr(en) => Some(TypeDeclData::Enum {
+            variants: en
+                .variants()
+                .filter_map(|variant| {
+                    // A variant without a name is broken source (the parse
+                    // error covers it); nothing meaningful to keep.
+                    let name = variant.name()?.text();
+                    let payload = variant.payload_types().map(TypeRef::from_ast).collect();
+                    Some((name, payload))
+                })
+                .collect(),
+        }),
+        _ => None,
+    }
 }
 
 /// The fields of a `struct` literal used as a type declaration, each value
@@ -215,9 +266,13 @@ fn record_expr_fields_as_types(record: &ast::RecordExpr) -> Vec<(String, TypeRef
 /// [`crate::file_diagnostics`] reports it.
 fn expr_as_type_ref(expr: ast::Expr) -> TypeRef {
     match expr {
-        ast::Expr::PathExpr(it) => match it.name_ref() {
-            Some(name) => TypeRef::Path(name.text()),
-            None => TypeRef::Error,
+        ast::Expr::PathExpr(it) => match (it.name_ref(), it.variant_name_ref()) {
+            (Some(enum_name), Some(variant)) => TypeRef::Variant {
+                enum_name: enum_name.text(),
+                variant: variant.text(),
+            },
+            (Some(name), None) => TypeRef::Path(name.text()),
+            (None, _) => TypeRef::Error,
         },
         ast::Expr::RecordExpr(it) => TypeRef::Record(record_expr_fields_as_types(&it)),
         _ => TypeRef::Error,

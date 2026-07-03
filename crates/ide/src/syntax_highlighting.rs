@@ -28,6 +28,9 @@ pub enum HlTag {
     Variable,
     Parameter,
     Type,
+    /// An enum variant: its declaration inside an `enum` literal, and the
+    /// second segment of a `Shape::Circle` path.
+    EnumMember,
 }
 
 /// Modifier bitset. Bit positions are public API: the LSP legend lists its
@@ -73,10 +76,12 @@ fn classify(
         COMMENT => HlTag::Comment,
         STRING => HlTag::String,
         INT_NUMBER => HlTag::Number,
-        FN_KW | STATIC_KW | CONST_KW | TYPE_KW | STRUCT_KW | LET_KW | MUT_KW | IF_KW | ELSE_KW
-        | LOOP_KW | BREAK_KW | CONTINUE_KW | TRUE_KW | FALSE_KW => HlTag::Keyword,
-        PLUS | MINUS | STAR | SLASH | EQ | THIN_ARROW | AMP | EQ2 | NEQ | L_ANGLE | R_ANGLE
-        | LTEQ | GTEQ => HlTag::Operator,
+        FN_KW | STATIC_KW | CONST_KW | TYPE_KW | STRUCT_KW | ENUM_KW | LET_KW | MUT_KW | IF_KW
+        | ELSE_KW | MATCH_KW | LOOP_KW | BREAK_KW | CONTINUE_KW | TRUE_KW | FALSE_KW => {
+            HlTag::Keyword
+        }
+        PLUS | MINUS | STAR | SLASH | EQ | THIN_ARROW | FAT_ARROW | AMP | EQ2 | NEQ | L_ANGLE
+        | R_ANGLE | LTEQ | GTEQ => HlTag::Operator,
         // `!` only exists as the never type today.
         BANG => HlTag::Type,
         IDENT => return classify_ident(db, file, root, token),
@@ -93,6 +98,7 @@ fn classify_ident(
     token: &SyntaxToken,
 ) -> Option<(HlTag, HlMods)> {
     use SyntaxKind::*;
+    use syntax::ast::{self, AstNode};
     let parent = token.parent()?;
     let owner = parent.parent()?;
     match (parent.kind(), owner.kind()) {
@@ -107,26 +113,70 @@ fn classify_ident(
         }
         // A `type` item's name declaration is a type, through and through.
         (NAME, TYPE_ITEM) => Some((HlTag::Type, HlMods(HlMods::DECLARATION))),
-        (NAME, PARAM) | (NAME, LET_STMT) => {
+        // A variant declared inside an `enum` literal.
+        (NAME, ENUM_VARIANT) => Some((HlTag::EnumMember, HlMods(HlMods::DECLARATION))),
+        // A payload binding in a variant pattern declares a plain local.
+        (NAME, VARIANT_PAT) => Some((HlTag::Variable, HlMods(HlMods::DECLARATION))),
+        // A binding declared by a `let`/parameter pattern: a bare name
+        // (`BIND_PAT`, nested under `PARAM`/`LET_STMT` directly, inside a
+        // `NEWTYPE_PAT`, or as a match-arm pattern) or one field of a
+        // record-destructuring pattern (`RECORD_PAT_FIELD` — the shorthand
+        // field name doubles as its own binding's declaration; a rename's
+        // field-name token is a second `NAME` child that is *not* bound,
+        // and falls out of `binding_for_node` returning `None` for it).
+        // Colors as a parameter when a `PARAM` sits somewhere above the
+        // pattern, a plain local otherwise. A bare `BIND_PAT` name is
+        // always a binding now (never reinterpreted as a variant), so it
+        // always falls through to the binding/parameter coloring.
+        (NAME, BIND_PAT) | (NAME, RECORD_PAT_FIELD) => {
             let item = item_of(db, file, root, &owner)?;
             let (body, source_map) = hir::body_with_source_map(db, item);
+            let binding = source_map.binding_for_node(SyntaxNodePtr::new(&parent))?;
             let mut mods = HlMods::DECLARATION;
-            if let Some(binding) = source_map.binding_for_node(SyntaxNodePtr::new(&parent))
-                && body.bindings[binding].mutable
-            {
+            if body.bindings[binding].mutable {
                 mods |= HlMods::MUTABLE;
             }
-            let tag = if owner.kind() == PARAM {
+            let tag = if parent.ancestors().any(|n| n.kind() == PARAM) {
                 HlTag::Parameter
             } else {
                 HlTag::Variable
             };
             Some((tag, HlMods(mods)))
         }
+        // `Foo` in a newtype-unwrapping pattern (`let Foo(x) = ...`):
+        // exactly the type name a construction call's callee is.
+        (NAME_REF, NEWTYPE_PAT) => Some(classify_type_name(db, file, token.text())),
+        // A variant pattern's path: the variant segment is an enum member
+        // (the position says so, resolved or not); the qualified spelling's
+        // enum segment is a type name. Decided via the `ast::VariantPat`
+        // helpers rather than position-counting, so the elided sigil shape
+        // (`::Circle`, one `NameRef` after the `COLON2`) classifies its
+        // sole segment as the variant, not as a qualifying type.
+        (NAME_REF, VARIANT_PAT) => {
+            let variant_pat = ast::VariantPat::cast(owner.clone())?;
+            if variant_pat
+                .variant_name_ref()
+                .is_some_and(|v| v.syntax() == &parent)
+            {
+                return Some((HlTag::EnumMember, HlMods::NONE));
+            }
+            Some(classify_type_name(db, file, token.text()))
+        }
         // Type position: user-declared types render as plain types, the
-        // builtins (`usize`, `str`, ...) keep their library modifier.
-        (NAME_REF, PATH_TYPE) => Some(classify_type_name(db, file, token.text())),
+        // builtins (`usize`, `str`, ...) keep their library modifier. The
+        // variant segment of `Shape::Circle` is an enum member — the
+        // position alone says so, resolved or not (diagnostics carry the
+        // news, same stance as unknown type names).
+        (NAME_REF, PATH_TYPE) => {
+            if is_variant_segment(&parent) {
+                return Some((HlTag::EnumMember, HlMods::NONE));
+            }
+            Some(classify_type_name(db, file, token.text()))
+        }
         (NAME_REF, PATH_EXPR) => {
+            if is_variant_segment(&parent) {
+                return Some((HlTag::EnumMember, HlMods::NONE));
+            }
             // Inside a `type` declaration's RHS every "expression" is
             // really type syntax (`type Foo = struct { x: usize };`), so
             // names there classify as type names, not values.
@@ -135,12 +185,15 @@ fn classify_ident(
             }
             let item = item_of(db, file, root, &owner)?;
             let (body, source_map) = hir::body_with_source_map(db, item);
-            let expr = source_map.expr_for_node(SyntaxNodePtr::new(&owner))?;
+            // The base of a `::` path has its own expression on the
+            // segment's node; a plain path sits on the whole path node.
+            let expr = source_map
+                .expr_for_node(SyntaxNodePtr::new(&parent))
+                .or_else(|| source_map.expr_for_node(SyntaxNodePtr::new(&owner)))?;
             match *hir::resolutions(db, item).get(expr)? {
                 hir::Resolution::Local(binding) => {
                     let def = source_map.node_for_binding(binding)?.to_node(root);
-                    let is_param =
-                        def.kind() == PARAM || def.parent().is_some_and(|p| p.kind() == PARAM);
+                    let is_param = def.ancestors().any(|n| n.kind() == PARAM);
                     let tag = if is_param {
                         HlTag::Parameter
                     } else {
@@ -173,6 +226,19 @@ fn classify_ident(
         // Unresolved or junk: leave it plain; diagnostics carry the news.
         _ => None,
     }
+}
+
+/// Whether `name_ref` is the *second* segment of a two-segment `::` path
+/// (`Circle` in `Shape::Circle`), in expression or type position.
+fn is_variant_segment(name_ref: &SyntaxNode) -> bool {
+    let Some(parent) = name_ref.parent() else {
+        return false;
+    };
+    parent
+        .children()
+        .filter(|n| n.kind() == SyntaxKind::NAME_REF)
+        .nth(1)
+        .is_some_and(|second| second == *name_ref)
 }
 
 /// Whether the item's value is function-typed (its name then colors as a

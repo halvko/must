@@ -4,12 +4,19 @@ use expect_test::{Expect, expect};
 use crate::machine::{Machine, RunMode, StepEvent};
 use crate::{EvalErrorKind, Value};
 
-/// Renders `const_value` for every item in the fixture.
+/// Renders `const_value` for every *value* item in the fixture (`type`
+/// items declare no value — nothing to render).
 fn check_const(text: &str, expect: Expect) {
     let db = RootDatabase::default();
     let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
     let mut rendered = String::new();
     for &item in hir::file_item_ids(&db, file) {
+        if hir::item_data(&db, item)
+            .as_ref()
+            .is_some_and(|data| matches!(data.kind, hir::ItemKind::Type))
+        {
+            continue;
+        }
         let name = item.name(&db);
         rendered.push_str(&match crate::const_value(&db, item) {
             Ok(value) => format!("{name} = {}\n", value.display()),
@@ -518,25 +525,36 @@ static entrypoint = (main());
 
 /// A chain of *distinct* items forcing each other is not a cycle: it is the
 /// forcing-depth cap that stops it (each level recurses on the Rust stack).
+/// Runs on a dedicated thread sized like the server's pool workers (8 MiB,
+/// see `must-lsp`'s `pool.rs`): the test asserts that the *cap* fires, and
+/// the per-level frames (origin tracking, variant values) need more
+/// headroom than libtest's default thread gives.
 #[test]
 fn distinct_item_chains_hit_the_forcing_depth_cap() {
-    let db = RootDatabase::default();
-    // Annotated so hir's cross-item inference (which gives up earlier) does
-    // not trap first; the chain below is pure const forcing.
-    let mut text = String::from("static s0: usize = 1;\n");
-    for i in 1..130 {
-        text.push_str(&format!("static s{i}: usize = s{};\n", i - 1));
-    }
-    let file = SourceFile::new(&db, "test.must".to_owned(), text);
-    let top = item(&db, file, "s129");
-    let Err(err) = crate::const_value(&db, top) else {
-        panic!("a 130-item chain must not const-evaluate");
-    };
-    assert_eq!(err.kind, EvalErrorKind::NotConst);
-    assert_eq!(
-        err.message.as_str(),
-        "constant evaluation exceeded 128 nested items"
-    );
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            let db = RootDatabase::default();
+            // Annotated so hir's cross-item inference (which gives up earlier) does
+            // not trap first; the chain below is pure const forcing.
+            let mut text = String::from("static s0: usize = 1;\n");
+            for i in 1..130 {
+                text.push_str(&format!("static s{i}: usize = s{};\n", i - 1));
+            }
+            let file = SourceFile::new(&db, "test.must".to_owned(), text);
+            let top = item(&db, file, "s129");
+            let Err(err) = crate::const_value(&db, top) else {
+                panic!("a 130-item chain must not const-evaluate");
+            };
+            assert_eq!(err.kind, EvalErrorKind::NotConst);
+            assert_eq!(
+                err.message.as_str(),
+                "constant evaluation exceeded 128 nested items"
+            );
+        })
+        .unwrap()
+        .join()
+        .unwrap()
 }
 
 #[test]
@@ -847,7 +865,6 @@ static p = Foo(struct { x: 1, y: "s" });
 static x = p.x;
 "#,
         expect![[r#"
-            Foo = error[Trap]: `Foo` has no value
             p = { x: 1, y: "s" }
             x = 1
         "#]],
@@ -874,6 +891,293 @@ fn named_type_inequality_observes_field_values() {
         r#"(Foo(struct { x: 1 }) == Foo(struct { x: 2 }))"#,
         expect![[r#"
             => false
+        "#]],
+    );
+}
+
+#[test]
+fn variant_values_are_tag_free_payloads() {
+    // Round-trip through a fn demanding the variant: the value stays the
+    // bare payload tuple (equal to a freshly constructed one — no hidden
+    // tag could sneak in), and the run's result renders with no enum, no
+    // variant, no tag in sight.
+    check_run(
+        r#"
+type Shape = enum { Circle(usize), Pair(usize, str), Point };
+static through = fn (c: Shape::Circle) -> Shape::Circle { c };
+static main = fn -> Shape::Pair {
+    if through(Shape::Circle(3)) == Shape::Circle(3) {
+        print("round-tripped intact");
+    };
+    Shape::Pair(1, "a")
+};
+"#,
+        "main()",
+        expect![[r#"
+            round-tripped intact
+            => (1, "a")
+        "#]],
+    );
+}
+
+#[test]
+fn variant_and_widened_values_const_evaluate() {
+    // Tag-free carriers for every arity, and the tag appearing exactly at
+    // the widening edge (the `Shape` annotations).
+    check_const(
+        r#"
+type Shape = enum { Circle(usize), Pair(usize, str), Point };
+static circle = Shape::Circle(3);
+static pair = Shape::Pair(1, "a");
+static point = Shape::Point;
+static widened_circle: Shape = Shape::Circle(3);
+static widened_point: Shape = Shape::Point;
+"#,
+        expect![[r#"
+            circle = (3)
+            pair = (1, "a")
+            point = ()
+            widened_circle = Shape::Circle(3)
+            widened_point = Shape::Point
+        "#]],
+    );
+}
+
+#[test]
+fn widened_values_compare_by_tag_and_payload() {
+    check_const(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static a: Shape = Shape::Point;
+static b: Shape = Shape::Point;
+static c: Shape = Shape::Circle(1);
+static same = a == b;
+static different = a == c;
+"#,
+        expect![[r#"
+            a = Shape::Point
+            b = Shape::Point
+            c = Shape::Circle(1)
+            same = true
+            different = false
+        "#]],
+    );
+}
+
+#[test]
+fn first_class_constructor_runs() {
+    // Called at runtime: a first-class constructor is an ordinary fn
+    // *value*, so const contexts reject calling it (the conservative
+    // value-call rule, same as any fn value).
+    check_run(
+        r#"
+type Shape = enum { Circle(usize) };
+static make: fn(usize) -> Shape::Circle = Shape::Circle;
+static main = fn -> bool { make(3) == Shape::Circle(3) };
+"#,
+        "main()",
+        expect![[r#"
+            => true
+        "#]],
+    );
+}
+
+#[test]
+fn const_context_construction_and_widening() {
+    // Constructors are const-legal; the widening conversion is too.
+    check_const_blocks(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn {
+    let a = const { Shape::Circle(2) };
+    let b: Shape = const { Shape::Point };
+};
+"#,
+        expect![[r#"
+            f#0 = (2)
+            f#1 = Shape::Point
+        "#]],
+    );
+}
+
+#[test]
+fn match_dispatches_on_each_variant() {
+    check_run(
+        r#"
+type Shape = enum { Circle(usize), Pair(usize, str), Point };
+static describe = fn (s: Shape) -> str {
+    match s {
+        ::Circle(r) => "circle",
+        ::Pair(n, text) => text,
+        ::Point => "point",
+    }
+};
+static main = fn {
+    print(describe(Shape::Circle(3)));
+    print(describe(Shape::Pair(1, "pair")));
+    print(describe(Shape::Point));
+};
+"#,
+        "main()",
+        expect![[r#"
+            circle
+            pair
+            point
+            => ()
+        "#]],
+    );
+}
+
+#[test]
+fn match_extracts_payloads_positionally() {
+    check_run(
+        r#"
+type Shape = enum { Pair(usize, usize) };
+static sum = fn (s: Shape) -> usize {
+    match s {
+        ::Pair(a, b) => a + b,
+    }
+};
+"#,
+        "sum(Shape::Pair(30, 12))",
+        expect![[r#"
+            => 42
+        "#]],
+    );
+}
+
+#[test]
+fn nonexhaustive_match_traps_with_the_diagnostic_message() {
+    // Reaching the uncovered variant crashes with exactly the text the
+    // squiggle shows; the covered variant still runs fine.
+    check_run(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => r,
+    }
+};
+static main = fn {
+    print("covered arm runs");
+    f(Shape::Circle(1));
+    f(Shape::Point);
+};
+"#,
+        "main()",
+        expect![[r#"
+            covered arm runs
+            error[Trap]: this `match` does not cover `Shape::Point`
+        "#]],
+    );
+}
+
+#[test]
+fn match_on_widened_value_round_trips() {
+    // Construct tag-free, widen at the `let mut`, dispatch on the injected
+    // tag — the full round trip.
+    check_run(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn () -> usize {
+    let mut s = Shape::Point;
+    s = Shape::Circle(42);
+    match s {
+        ::Circle(r) => r,
+        ::Point => 0,
+    }
+};
+"#,
+        "f()",
+        expect![[r#"
+            => 42
+        "#]],
+    );
+}
+
+#[test]
+fn match_in_const_context_evaluates() {
+    check_const(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static pick = const fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => r,
+        ::Point => 7,
+    }
+};
+static a = pick(Shape::Circle(3));
+static b = pick(Shape::Point);
+static c = const { match Shape::Circle(9) { ::Circle(r) => r, ::Point => 0 } };
+"#,
+        expect![[r#"
+            pick = fn
+            a = 3
+            b = 7
+            c = 9
+        "#]],
+    );
+}
+
+#[test]
+fn variant_typed_match_runs_the_state_machine_end_to_end() {
+    // Construct `Running(5)`, pass it to a function taking the *variant*
+    // type, match inside (no dispatch — see the MIR snapshot), extract the
+    // payload.
+    check_run(
+        r#"
+type State = enum { Idle, Running(usize) };
+static tick = fn (s: State::Running) -> usize {
+    match s {
+        ::Running(n) => n + 1,
+        ::Idle => 0,
+    }
+};
+"#,
+        "tick(State::Running(5))",
+        expect![[r#"
+            => 6
+        "#]],
+    );
+}
+
+#[test]
+fn match_binding_arm_receives_the_whole_scrutinee() {
+    check_run(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> Shape {
+    match s {
+        whole => whole,
+    }
+};
+"#,
+        "f(Shape::Circle(8))",
+        expect![[r#"
+            => Shape::Circle(8)
+        "#]],
+    );
+}
+
+#[test]
+fn bind_arm_named_like_payload_variant_binds_the_whole_value() {
+    // G25's motivating scenario, end to end: `Circle` (bare, no `::`) is a
+    // binding named like a payload-carrying variant. It used to require a
+    // `PatArity` error under reinterpretation; now it just binds the whole
+    // tagged value — no error, no payload extraction — and the value
+    // round-trips as the original variant instance.
+    check_run(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> Shape {
+    match s {
+        Circle => Circle,
+    }
+};
+"#,
+        "f(Shape::Circle(8))",
+        expect![[r#"
+            => Shape::Circle(8)
         "#]],
     );
 }
@@ -1032,6 +1336,94 @@ fn infinite_loop_in_a_const_block_runs_out_of_fuel() {
         "static f = fn { const { loop { } } };",
         expect![[r#"
             f#0 = error[NotConst]: constant evaluation ran out of fuel
+        "#]],
+    );
+}
+
+// ---- record destructuring end to end ----
+
+#[test]
+fn let_record_destructure_evaluates() {
+    check_run(
+        "",
+        r#"(fn { let struct { x, y } = struct { x: 1, y: 2 }; x + y })()"#,
+        expect![[r#"
+            => 3
+        "#]],
+    );
+}
+
+#[test]
+fn let_record_destructure_rename_evaluates() {
+    check_run(
+        "",
+        r#"(fn { let struct { x as a, y as b } = struct { x: 1, y: 2 }; a + b })()"#,
+        expect![[r#"
+            => 3
+        "#]],
+    );
+}
+
+#[test]
+fn let_record_destructure_rest_evaluates() {
+    check_run(
+        "",
+        r#"(fn { let struct { x, .. } = struct { x: 1, y: 2, z: 3 }; x })()"#,
+        expect![[r#"
+            => 1
+        "#]],
+    );
+}
+
+#[test]
+fn param_record_destructure_evaluates() {
+    check_run(
+        "static add = fn (struct { x, y }: struct { x: usize, y: usize }) -> usize { x + y };",
+        "add(struct { x: 4, y: 5 })",
+        expect![[r#"
+            => 9
+        "#]],
+    );
+}
+
+#[test]
+fn newtype_destructure_evaluates() {
+    check_run(
+        r#"
+type Point = struct { x: usize, y: usize };
+static add = fn (Point(struct { x, y })) -> usize { x + y };
+"#,
+        "add(Point(struct { x: 4, y: 5 }))",
+        expect![[r#"
+            => 9
+        "#]],
+    );
+}
+
+#[test]
+fn record_destructure_in_const_context_evaluates() {
+    check_const(
+        r#"
+static p = struct { x: 3, y: 4 };
+static sum = const fn () -> usize {
+    let struct { x, y } = p;
+    x + y
+}();
+"#,
+        expect![[r#"
+            p = { x: 3, y: 4 }
+            sum = 7
+        "#]],
+    );
+}
+
+#[test]
+fn per_binding_mut_record_destructure_evaluates() {
+    check_run(
+        "",
+        r#"(fn { let struct { mut x, y } = struct { x: 1, y: 2 }; x = x + y; x })()"#,
+        expect![[r#"
+            => 3
         "#]],
     );
 }

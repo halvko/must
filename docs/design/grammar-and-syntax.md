@@ -11,9 +11,18 @@
 - **G24** Evaluation order is left-to-right source order everywhere.
 - **G12** Record literals construct with `=`: `struct { x = 1 }`. Colon means has-type,
   everywhere. Shorthand `struct { x }` is `struct { x = x }`.
+- **G25** A bare pattern name never reinterprets as a variant: it binds fresh with a
+  shadowing warning, and `::Circle` is the variant spelling in a pattern. In expression
+  position the qualified `Shape::Circle` is the spelling.
 
 ## Discarded
 
 - **`x: 1` record construction** — colon is has-type. **G12**
+- **Silent reinterpretation of a bare pattern name as a variant** — footgun. **G25**
 
 ## Re-evaluate when
+
+- **Parked gaps**, none ruled: `&&`/`||`; comparison chaining (parses, then type-errors, where
+  non-associativity would be clearer); loop labels; compound assignment;
+  assignment-as-expression; record rest; match-arm record patterns; a line-continuation
+  string escape.

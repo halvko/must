@@ -427,6 +427,40 @@ impl<'db, M: Mode> Machine<'db, M> {
                 };
                 self.jump(target);
             }
+            // Tagged dispatch: read the widening-injected tag, jump to the
+            // arm for that variant index (or `otherwise`). Only ever
+            // executed on enum-typed values — a variant-typed scrutinee's
+            // match compiled to no switch at all.
+            TerminatorKind::SwitchVariant {
+                discr,
+                decl,
+                arms,
+                otherwise,
+            } => {
+                let value = self.eval_operand(&loc, body, discr, origin)?;
+                let Value::Variant {
+                    decl: value_decl,
+                    index,
+                    ..
+                } = &value
+                else {
+                    return Err(self.ill_typed("a tagged enum value", &value, &loc, origin));
+                };
+                if value_decl != decl {
+                    return Err(self.ill_typed(
+                        &format!("a `{}` value", decl.display_name()),
+                        &value,
+                        &loc,
+                        origin,
+                    ));
+                }
+                let target = arms
+                    .iter()
+                    .find(|(arm_index, _)| arm_index == index)
+                    .map(|&(_, target)| target)
+                    .unwrap_or(*otherwise);
+                self.jump(target);
+            }
             TerminatorKind::Call {
                 callee,
                 args,
@@ -565,24 +599,72 @@ impl<'db, M: Mode> Machine<'db, M> {
                 }
                 Ok(Value::Record { fields })
             }
+            Rvalue::Aggregate {
+                kind: AggregateKind::VariantPayload,
+                ops,
+            } => {
+                let values = ops
+                    .iter()
+                    .map(|op| self.eval_operand(loc, body, op, origin))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Value::Tuple(values))
+            }
+            // The widening conversion: the one place a tag comes into
+            // existence — the tag-free payload carrier becomes a tagged
+            // enum value.
+            Rvalue::WidenToEnum {
+                op,
+                decl,
+                index,
+                variant,
+            } => {
+                let value = self.eval_operand(loc, body, op, origin)?;
+                let Value::Tuple(payload) = value else {
+                    return Err(self.ill_typed("a variant payload", &value, loc, origin));
+                };
+                Ok(Value::Variant {
+                    decl: decl.clone(),
+                    index: *index,
+                    name: variant.clone(),
+                    payload,
+                })
+            }
             Rvalue::Field { base, index } => {
                 let base = self.eval_operand(loc, body, base, origin)?;
+                let index = *index as usize;
+                let out_of_range = |this: &Self, what: &str, len: usize| {
+                    this.internal_error(
+                        format!("{what} index {index} out of range ({len} elements)"),
+                        Some((loc.clone(), origin)),
+                    )
+                };
                 match base {
                     Value::Record { mut fields } => {
-                        let index = *index as usize;
                         if index < fields.len() {
                             Ok(fields.swap_remove(index).1)
                         } else {
-                            Err(self.internal_error(
-                                format!(
-                                    "record field index {index} out of range ({} fields)",
-                                    fields.len()
-                                ),
-                                Some((loc.clone(), origin)),
-                            ))
+                            Err(out_of_range(self, "record field", fields.len()))
                         }
                     }
-                    other => Err(self.ill_typed("a record value", &other, loc, origin)),
+                    // Positional payload extraction, both carriers: the
+                    // tag-free variant-typed value and the tagged enum
+                    // value (a match arm reads payloads out of whichever
+                    // its scrutinee is).
+                    Value::Tuple(mut values) => {
+                        if index < values.len() {
+                            Ok(values.swap_remove(index))
+                        } else {
+                            Err(out_of_range(self, "payload", values.len()))
+                        }
+                    }
+                    Value::Variant { mut payload, .. } => {
+                        if index < payload.len() {
+                            Ok(payload.swap_remove(index))
+                        } else {
+                            Err(out_of_range(self, "payload", payload.len()))
+                        }
+                    }
+                    other => Err(self.ill_typed("a record or payload value", &other, loc, origin)),
                 }
             }
         }

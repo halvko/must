@@ -22,7 +22,7 @@ use base_db::{Db, SourceFile, parse};
 use syntax::TextRange;
 use syntax::ast::{self, AstNode as _};
 
-pub use body::{BindingId, Body, BodySourceMap, ExprId, body_with_source_map};
+pub use body::{BindingId, Body, BodySourceMap, ExprId, PatId, body_with_source_map};
 pub use const_check::ConstCheckDiagnostic;
 pub use constraint::Cause;
 pub use infer::{InferenceDiagnostic, InferenceResult};
@@ -31,7 +31,7 @@ pub use scopes::{
     Builtin, Duplicate, ExprScopes, FileScope, Resolution, TypeScope, expr_scopes, file_scope,
     resolutions, type_scope,
 };
-pub use ty::{FnTy, Ty, signature, type_underlying};
+pub use ty::{FnTy, Ty, VariantTy, enum_variants, signature, type_underlying, widens_to};
 
 /// Stable identity of a top-level item: survives edits to other items,
 /// reordering of unrelated code, and any edit inside its own body.
@@ -195,8 +195,9 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         });
     }
 
-    // Bad type names, in any annotation position: unknown, or naming a
-    // value item. Without this, a typo'd type lowers to a silent `{error}`.
+    // Bad type names, in any annotation position: unknown, naming a value
+    // item, or a `::` path that names no variant. Without this, a typo'd
+    // type lowers to a silent `{error}`.
     for path_type in parse(db, file)
         .syntax_node()
         .descendants()
@@ -205,7 +206,11 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         let Some(name_ref) = path_type.name_ref() else {
             continue;
         };
-        if let Some(message) = type_position_error(db, file, &name_ref.text()) {
+        let message = match path_type.variant_name_ref() {
+            Some(variant) => variant_position_error(db, file, &name_ref.text(), &variant.text()),
+            None => type_position_error(db, file, &name_ref.text()),
+        };
+        if let Some(message) = message {
             diagnostics.push(Diagnostic {
                 range: path_type.syntax().text_range(),
                 severity: Severity::Error,
@@ -216,9 +221,10 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
     }
 
-    // `type` declarations: the RHS must be a `struct` literal whose field
-    // values are types. `type_decl` reads the same shape syntactically;
-    // every `TypeRef::Error` it can produce has a diagnostic from here.
+    // `type` declarations: the RHS must be a `struct` or `enum` literal
+    // whose field values / variant payloads are types. `type_decl` reads
+    // the same shape syntactically; every `TypeRef::Error` (and every
+    // erased inference variable) it can produce has a diagnostic from here.
     for &item in file_item_ids(db, file) {
         let Some(ast::Item::TypeItem(decl)) = item_source(db, item) else {
             continue;
@@ -231,13 +237,13 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             ast::Expr::RecordExpr(record) => {
                 type_decl_field_diagnostics(db, file, &record, &mut diagnostics);
             }
+            ast::Expr::EnumExpr(en) => {
+                enum_decl_payload_diagnostics(&en, &mut diagnostics);
+            }
             other => diagnostics.push(Diagnostic {
                 range: other.syntax().text_range(),
                 severity: Severity::Error,
-                // When `enum` literals land they become the second accepted
-                // RHS here; until they even parse, the message doesn't
-                // promise them.
-                message: "only a `struct` literal can declare a type (for now)".to_owned(),
+                message: "only a `struct` or `enum` literal can declare a type".to_owned(),
                 fix: None,
                 related: Vec::new(),
             }),
@@ -297,7 +303,30 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     .and_then(|f| f.name_ref())
                     .map(|n| n.syntax().text_range())
                     .unwrap_or(range),
+                // The variant name is the wrong part, not the (correct)
+                // enum name in front of it.
+                InferenceDiagnostic::NoSuchVariant { .. } => {
+                    ast::PathExpr::cast(ptr.to_node(&syntax_root))
+                        .and_then(|it| it.variant_name_ref())
+                        .map(|n| n.syntax().text_range())
+                        .unwrap_or(range)
+                }
+                // Reported on the `match` keyword: the construct as a whole
+                // is what fails to cover — no single arm is the culprit.
+                InferenceDiagnostic::NonExhaustiveMatch { .. }
+                | InferenceDiagnostic::MatchWithoutCatchAll { .. } => {
+                    ast::MatchExpr::cast(ptr.to_node(&syntax_root))
+                        .and_then(|it| it.match_token())
+                        .map(|t| t.text_range())
+                        .unwrap_or(range)
+                }
                 _ => range,
+            };
+            // Pattern diagnostics squiggle the pattern; `diag.expr()` (the
+            // enclosing match, where MIR traps) is only the fallback.
+            let range = match diag.pat().and_then(|pat| source_map.node_for_pat(pat)) {
+                Some(pat_ptr) => pat_ptr.text_range(),
+                None => range,
             };
             // Messages render in `InferenceDiagnostic::message` (shared with
             // MIR's traps); only ranges and related locations attach here.
@@ -606,21 +635,43 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                         }]
                     })
                     .unwrap_or_default(),
-                // The message names the nominal type only; where its fields
-                // are declared is the hint.
+                // The declaration explains what variants (or fields) do
+                // exist — one click away.
+                InferenceDiagnostic::NoSuchVariant { item: target, .. }
+                | InferenceDiagnostic::NoVariantsOnStruct { item: target, .. }
+                | InferenceDiagnostic::EnumCtorIsVariant { item: target, .. }
+                | InferenceDiagnostic::PatNoSuchVariant { item: target, .. }
+                | InferenceDiagnostic::PatWrongEnum { item: target, .. }
+                | InferenceDiagnostic::BindShadowsVariant { item: target, .. } => item_name(target)
+                    .map(|name| {
+                        vec![RelatedInfo {
+                            file: target.file,
+                            range: name.syntax().text_range(),
+                            message: format!("`{}` is defined here", target.display_name()),
+                        }]
+                    })
+                    .unwrap_or_default(),
+                // The message names the nominal type only; where its shape
+                // is declared is the hint (an enum has variants, not
+                // fields — say so instead of promising fields).
                 InferenceDiagnostic::NoSuchField {
                     receiver_ty: Ty::Named(loc),
                     ..
                 } => item_source(db, loc.to_id(db))
                     .and_then(|it| it.body())
                     .map(|decl_body| {
+                        let message = if ty::enum_variants(db, loc.to_id(db)).is_some() {
+                            format!(
+                                "`{}` is an `enum`, declared here — it has variants, not fields",
+                                loc.display_name()
+                            )
+                        } else {
+                            format!("the fields of `{}` are declared here", loc.display_name())
+                        };
                         vec![RelatedInfo {
                             file: loc.file,
                             range: decl_body.syntax().text_range(),
-                            message: format!(
-                                "the fields of `{}` are declared here",
-                                loc.display_name()
-                            ),
+                            message,
                         }]
                     })
                     .unwrap_or_default(),
@@ -652,7 +703,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             };
             diagnostics.push(Diagnostic {
                 range,
-                severity: Severity::Error,
+                severity: diag.severity(),
                 message: diag.message(),
                 fix,
                 related,
@@ -666,7 +717,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             // Messages render in `ConstCheckDiagnostic::message` (via
             // `diag`, shared with MIR's traps); only ranges and related
             // locations attach here.
-            let related = match diag {
+            let mut related = match diag {
                 ConstCheckDiagnostic::NonConstFnCall { item: target, .. } => item_name(target)
                     .map(|name| {
                         vec![RelatedInfo {
@@ -678,11 +729,48 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     .unwrap_or_default(),
                 _ => Vec::new(),
             };
+            // Every const-check finding fires *at* a call inside a const
+            // context; a second hint explains *why* that location is one —
+            // the enclosing `const { ... }` block's keyword, the enclosing
+            // `const fn`'s marker, or (neither found climbing from the
+            // callee) the item's own initializer.
+            related.extend(const_context_reason(
+                db,
+                item,
+                file,
+                ptr.to_node(&syntax_root),
+            ));
+            // `NonConstFnCall` names exactly the fix: the callee item's
+            // initializer is (by construction of the diagnostic — see
+            // `root_fn_is_const`) a plain `fn` literal; inserting `const `
+            // right before it is always well-typed. Offered only when the
+            // declaration is edited in the same file as the fix's range
+            // (`Fix`/`TextEdit` carry no file of their own).
+            let fix = match diag {
+                ConstCheckDiagnostic::NonConstFnCall { item: target, .. }
+                    if target.file == file =>
+                {
+                    item_source(db, target.to_id(db))
+                        .and_then(|it| it.body())
+                        .and_then(|body| match body {
+                            ast::Expr::FnLiteral(fn_lit) if !fn_lit.is_const() => Some(fn_lit),
+                            _ => None,
+                        })
+                        .map(|fn_lit| syntax::Fix {
+                            label: format!("Mark `{}` as `const fn`", target.display_name()),
+                            edits: vec![syntax::TextEdit {
+                                range: TextRange::empty(fn_lit.syntax().text_range().start()),
+                                insert: "const ".to_owned(),
+                            }],
+                        })
+                }
+                _ => None,
+            };
             diagnostics.push(Diagnostic {
                 range: ptr.text_range(),
                 severity: Severity::Error,
                 message: diag.message(),
-                fix: None,
+                fix,
                 related,
             });
         }
@@ -692,8 +780,9 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     // `{error}` in the file is downstream of at least one diagnostic above —
     // that's what makes "no diagnostics" mean "lowerable". If types are
     // broken but the file looks clean, a diagnostic is missing somewhere;
-    // say so loudly instead of leaving hover-only weirdness.
-    if diagnostics.is_empty() {
+    // say so loudly instead of leaving hover-only weirdness. Warnings
+    // (unreachable arms) don't justify an `{error}`, so they don't disarm it.
+    if !diagnostics.iter().any(|d| d.severity == Severity::Error) {
         'items: for &item in file_item_ids(db, file) {
             let (_, source_map) = body_with_source_map(db, item);
             for (expr, ty) in infer::infer(db, item).type_of_expr.iter() {
@@ -752,6 +841,57 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 /// `Ty::Error` the lowering produces has a diagnostic from here. (Only the
 /// *message choice* consults the full [`file_scope`]; this function runs in
 /// the diagnostics aggregator, outside the inference firewall.)
+/// Why `callee_node` sits in a const context, for a const-check finding's
+/// second [`RelatedInfo`]: climbing from the callee, the nearest enclosing
+/// `const { ... }` block or `const fn` literal, or — climbing all the way
+/// out without finding either — the item's own initializer (every
+/// `static`/`const` item's value is a const context to begin with). A
+/// plain (non-`const`) `fn` literal exits the const context, so climbing
+/// stops there without a match (const-checking itself never marks
+/// anything inside one `in_const`, so a finding can't be *inside* a plain
+/// fn's body without also being inside one of the two reasons above,
+/// nested within it).
+fn const_context_reason(
+    db: &dyn Db,
+    item: ItemId<'_>,
+    file: SourceFile,
+    callee_node: syntax::SyntaxNode,
+) -> Option<RelatedInfo> {
+    // `ancestors()` yields the node itself first; skip it — a directly
+    // *called* plain `fn` literal is itself the finding (never the const
+    // context's boundary: that reasoning only applies to an *enclosing*
+    // literal the callee sits inside of).
+    for ancestor in callee_node.ancestors().skip(1) {
+        if let Some(block) = ast::ConstBlockExpr::cast(ancestor.clone()) {
+            let token = block.const_token()?;
+            return Some(RelatedInfo {
+                file,
+                range: token.text_range(),
+                message: "this `const` block is a const context".to_owned(),
+            });
+        }
+        if let Some(fn_lit) = ast::FnLiteral::cast(ancestor.clone()) {
+            if fn_lit.is_const() {
+                let token = fn_lit.const_token()?;
+                return Some(RelatedInfo {
+                    file,
+                    range: token.text_range(),
+                    message: "this `const fn` is always a const context".to_owned(),
+                });
+            }
+            // A plain `fn` literal boundary: nothing further out is the
+            // reason for a callee actually inside it.
+            break;
+        }
+    }
+    let token = item_source(db, item)?.syntax().first_token()?;
+    Some(RelatedInfo {
+        file,
+        range: token.text_range(),
+        message: "this item's initializer is a const context".to_owned(),
+    })
+}
+
 fn type_position_error(db: &dyn Db, file: SourceFile, name: &str) -> Option<String> {
     match type_scope(db, file).resolve(name) {
         // A type item; or a duplicate name, whose definitions already
@@ -767,6 +907,87 @@ fn type_position_error(db: &dyn Db, file: SourceFile, name: &str) -> Option<Stri
                 Some(_) => Some(format!("`{name}` is not a type")),
                 None => Some(format!("unknown type `{name}`")),
             }
+        }
+    }
+}
+
+/// The error for `Enum::Variant` in *type* position, if any. Mirrors
+/// [`ty::lower_variant_type_path`] exactly (the same silent-`Ty::Error`
+/// contract as [`type_position_error`]): the base must name an enum `type`
+/// item and the variant must exist in it. An unknown or ambiguous base is
+/// covered by [`type_position_error`]-style reporting here too, so a
+/// two-segment path never needs a second pass over its first segment.
+fn variant_position_error(
+    db: &dyn Db,
+    file: SourceFile,
+    base: &str,
+    variant: &str,
+) -> Option<String> {
+    match type_scope(db, file).resolve(base) {
+        Some(Resolution::TypeItem(loc)) => {
+            let item = loc.to_id(db);
+            match ty::enum_variants(db, item) {
+                Some(variants) => {
+                    if variant.is_empty() {
+                        // `Shape::` — the parse error covers it.
+                        return None;
+                    }
+                    if variants.iter().any(|(name, _)| name == variant) {
+                        None
+                    } else {
+                        Some(format!(
+                            "`{}` has no variant `{variant}`",
+                            loc.display_name()
+                        ))
+                    }
+                }
+                None => {
+                    if matches!(type_decl(db, item), Some(TypeDeclData::Struct { .. })) {
+                        Some(format!(
+                            "`{}` has no variants (it is a `struct` type)",
+                            loc.display_name()
+                        ))
+                    } else {
+                        // A broken declaration carries its own diagnostics.
+                        None
+                    }
+                }
+            }
+        }
+        // The duplicate definitions carry the diagnostics.
+        Some(_) => None,
+        None => {
+            if ty::builtin_type_by_name(base).is_some() {
+                return Some(format!("`{base}` has no variants (it is a builtin type)"));
+            }
+            // Reuse the single-segment wording for a base that is no type
+            // at all ("unknown type" / "is not a type").
+            type_position_error(db, file, base)
+        }
+    }
+}
+
+/// Check the variant payloads of an `enum` literal used as a type
+/// declaration: payload positions are real type syntax, so unknown names
+/// are covered by the file-wide `PathType` pass — but a payload written
+/// with a hole (`_`, or an `fn` type without a return) would silently
+/// lower to an erased inference variable ([`ty::enum_variants`] erases it
+/// to `Ty::Error`); this is that error's diagnostic.
+fn enum_decl_payload_diagnostics(en: &ast::EnumExpr, diagnostics: &mut Vec<Diagnostic>) {
+    for variant in en.variants() {
+        for payload in variant.payload_types() {
+            if TypeRef::from_ast(payload.clone()).is_fully_typed() {
+                continue;
+            }
+            diagnostics.push(Diagnostic {
+                range: payload.syntax().text_range(),
+                severity: Severity::Error,
+                message: "a variant payload must be a fully written type; \
+                          a declaration has nothing to infer `_` from"
+                    .to_owned(),
+                fix: None,
+                related: Vec::new(),
+            });
         }
     }
 }
@@ -804,7 +1025,15 @@ fn type_decl_field_diagnostics(
                 let Some(type_name) = path.name_ref() else {
                     continue;
                 };
-                if let Some(message) = type_position_error(db, file, &type_name.text()) {
+                let message = match path.variant_name_ref() {
+                    // `x: Shape::Circle` as a field's type: same checks as
+                    // annotation position.
+                    Some(variant) => {
+                        variant_position_error(db, file, &type_name.text(), &variant.text())
+                    }
+                    None => type_position_error(db, file, &type_name.text()),
+                };
+                if let Some(message) = message {
                     diagnostics.push(simple_error(path.syntax().text_range(), message));
                 }
             }

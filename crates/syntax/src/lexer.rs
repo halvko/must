@@ -65,6 +65,7 @@ fn next_token(rest: &str) -> (SyntaxKind, usize, Option<String>) {
             (INT_NUMBER, len, None)
         }
         '-' if rest.as_bytes().get(1) == Some(&b'>') => (THIN_ARROW, 2, None),
+        '=' if rest.as_bytes().get(1) == Some(&b'>') => (FAT_ARROW, 2, None),
         '=' if rest.as_bytes().get(1) == Some(&b'=') => (EQ2, 2, None),
         '!' if rest.as_bytes().get(1) == Some(&b'=') => (NEQ, 2, None),
         '<' if rest.as_bytes().get(1) == Some(&b'=') => (LTEQ, 2, None),
@@ -75,13 +76,15 @@ fn next_token(rest: &str) -> (SyntaxKind, usize, Option<String>) {
         ')' => (R_PAREN, 1, None),
         '{' => (L_BRACE, 1, None),
         '}' => (R_BRACE, 1, None),
+        ':' if rest.as_bytes().get(1) == Some(&b':') => (COLON2, 2, None),
         ':' => (COLON, 1, None),
         ';' => (SEMICOLON, 1, None),
         ',' => (COMMA, 1, None),
-        // `...` is one token; a lone or double `.` falls out as `DOT`(s).
+        // `...` and `..` are single tokens; a lone `.` falls out as `DOT`.
         '.' if rest.as_bytes().get(1) == Some(&b'.') && rest.as_bytes().get(2) == Some(&b'.') => {
             (DOT3, 3, None)
         }
+        '.' if rest.as_bytes().get(1) == Some(&b'.') => (DOT2, 2, None),
         '.' => (DOT, 1, None),
         '=' => (EQ, 1, None),
         '+' => (PLUS, 1, None),

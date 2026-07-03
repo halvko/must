@@ -44,6 +44,7 @@ pub(crate) fn semantic_tokens_legend() -> lsp_types::SemanticTokensLegend {
             SemanticTokenType::VARIABLE,
             SemanticTokenType::PARAMETER,
             SemanticTokenType::TYPE,
+            SemanticTokenType::ENUM_MEMBER,
         ],
         token_modifiers: vec![
             SemanticTokenModifier::DECLARATION,
@@ -65,6 +66,7 @@ fn token_type_index(tag: ide::HlTag) -> u32 {
         ide::HlTag::Variable => 6,
         ide::HlTag::Parameter => 7,
         ide::HlTag::Type => 8,
+        ide::HlTag::EnumMember => 9,
     }
 }
 
