@@ -26,7 +26,7 @@ pub use body::{BindingId, Body, BodySourceMap, ExprId, body_with_source_map};
 pub use const_check::ConstCheckDiagnostic;
 pub use constraint::Cause;
 pub use infer::{InferenceDiagnostic, InferenceResult};
-pub use item_tree::{ItemTree, TypeRef, item_source};
+pub use item_tree::{Constness, ItemTree, TypeRef, item_source};
 pub use scopes::{
     Builtin, Duplicate, ExprScopes, FileScope, Resolution, expr_scopes, file_scope, resolutions,
 };
@@ -284,6 +284,24 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                                         expected.display()
                                     ),
                                 })
+                                .or_else(|| {
+                                    // No annotation to point at: the type
+                                    // was inferred, so blame the binding's
+                                    // name — that's where the decision
+                                    // became attached.
+                                    source_map
+                                        .node_for_binding(*binding)
+                                        .map(|ptr| RelatedInfo {
+                                            file,
+                                            range: ptr.text_range(),
+                                            message: format!(
+                                                "`{}` was inferred to have type `{}` \
+                                             from its initializer",
+                                                body.bindings[*binding].name,
+                                                expected.display()
+                                            ),
+                                        })
+                                })
                                 .into_iter()
                                 .collect(),
                             Cause::ItemAnnotation => item_source(db, item)
@@ -447,17 +465,60 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                         })
                         .unwrap_or_default()
                 }
+                InferenceDiagnostic::AssignToImmutable { binding, name, .. } => {
+                    // Where `mut` is missing — also the anchor for the
+                    // upcoming insert-`mut` quick fix.
+                    source_map
+                        .node_for_binding(*binding)
+                        .map(|ptr| {
+                            vec![RelatedInfo {
+                                file,
+                                range: ptr.text_range(),
+                                message: format!("`{name}` is declared without `mut` here"),
+                            }]
+                        })
+                        .unwrap_or_default()
+                }
+                InferenceDiagnostic::AssignToItem { item: target, .. } => item_name(target)
+                    .map(|name| {
+                        vec![RelatedInfo {
+                            file: target.file,
+                            range: name.syntax().text_range(),
+                            message: format!("`{}` is defined here", target.display_name()),
+                        }]
+                    })
+                    .unwrap_or_default(),
                 _ => Vec::new(),
             };
             // A hint enclosing the squiggle adds nothing — the user is
             // already looking at it (e.g. "this call requires `str`" on the
             // very call whose argument carries the mismatch).
             related.retain(|r| !(r.file == file && r.range.contains_range(range)));
+            let fix = match diag {
+                // Insert `mut ` right before the binding's name, whether it
+                // came from a `let` or a parameter — both render the fixed
+                // source as `let mut x = …` / `fn (mut n: usize)`. A hole
+                // (`_`) never resolves as an assignment target, so this
+                // shouldn't fire for one; skip defensively rather than offer
+                // a nonsensical `mut _`.
+                InferenceDiagnostic::AssignToImmutable { binding, name, .. } if name != "_" => {
+                    source_map
+                        .node_for_binding(*binding)
+                        .map(|ptr| syntax::Fix {
+                            label: format!("Make `{name}` mutable"),
+                            edits: vec![syntax::TextEdit {
+                                range: TextRange::empty(ptr.text_range().start()),
+                                insert: "mut ".to_owned(),
+                            }],
+                        })
+                }
+                _ => None,
+            };
             diagnostics.push(Diagnostic {
                 range,
                 severity: Severity::Error,
                 message: diag.message(),
-                fix: None,
+                fix,
                 related,
             });
         }

@@ -86,6 +86,10 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
                             entries: vec![(body.bindings[*binding].name.clone(), *binding)],
                         });
                     }
+                    Stmt::Assign { target, value } => {
+                        compute_expr_scopes(body, scopes, *target, scope);
+                        compute_expr_scopes(body, scopes, *value, scope);
+                    }
                     Stmt::Expr(e) => compute_expr_scopes(body, scopes, *e, scope),
                 }
             }

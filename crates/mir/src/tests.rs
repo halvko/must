@@ -735,3 +735,129 @@ static apply = const fn (f: fn() -> usize) -> usize { f() };
         "#]],
     );
 }
+
+#[test]
+fn assignment_reuses_the_lets_local() {
+    // `x`'s local (`_1`) is allocated once, by the `let`; the assignment
+    // writes into that same slot rather than minting a new one.
+    check_mir(
+        "static f = fn () -> usize { let mut x = 1; x = 2; x };",
+        expect![[r#"
+            item f:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: usize  // x
+              bb0:
+                _1 = 1
+                _1 = 2
+                _0 = _1
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn assignment_to_a_captured_local_is_diagnosed_and_trapped() {
+    // Mirrors `capture_is_diagnosed_and_trapped`: writing to a local of an
+    // enclosing function is exactly as unsupported as reading it.
+    check_mir(
+        "static f = fn () -> usize { let mut a = 1; let g = fn () -> usize { a = 2; 0 }; g() };",
+        expect![[r#"
+            item f:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: usize
+              bb0:
+                _1 = trap "`a` is a local of an enclosing function; captures are not supported yet" -> bb1
+              bb1:
+                _0 = 0
+                return
+            }
+            fn b1() -> usize {
+              _0: usize  // return
+              _1: usize  // a
+              _2: fn() -> usize  // g
+              _3: usize
+              bb0:
+                _1 = 1
+                _2 = fn b0
+                _3 = call _2() -> bb1
+              bb1:
+                _0 = _3
+                return
+            }
+            fn b2() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b1
+                return
+            }
+            mir diagnostic at 68..69: `a` is a local of an enclosing function; captures are not supported yet
+        "#]],
+    );
+}
+
+#[test]
+fn assignment_to_an_immutable_binding_traps_with_the_diagnostic_message() {
+    // The RHS still evaluates (the CFG keeps everything); the write itself
+    // is replaced by a trap carrying inference's exact squiggle text.
+    check_mir(
+        "static f = fn () -> usize { let x = 1; x = 2; x };",
+        expect![[r#"
+            item f:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: usize  // x
+              _2: usize
+              bb0:
+                _1 = 1
+                _2 = trap "cannot assign to `x`: it is not declared `mut`" -> bb1
+              bb1:
+                _0 = _1
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn assignment_to_a_non_variable_traps_with_the_validation_message() {
+    // Validation squiggled the LHS with "can only assign to a variable";
+    // the trap borrows that exact text via the shared constant.
+    check_mir(
+        "static f = fn () -> usize { let mut x = 1; x + 1 = 2; x };",
+        expect![[r#"
+            item f:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: usize  // x
+              _2: usize
+              bb0:
+                _1 = 1
+                _2 = trap "can only assign to a variable" -> bb1
+              bb1:
+                _0 = _1
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}

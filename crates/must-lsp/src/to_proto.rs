@@ -49,6 +49,7 @@ pub(crate) fn semantic_tokens_legend() -> lsp_types::SemanticTokensLegend {
             SemanticTokenModifier::DECLARATION,
             SemanticTokenModifier::STATIC,
             SemanticTokenModifier::DEFAULT_LIBRARY,
+            SemanticTokenModifier::new("mutable"),
         ],
     }
 }

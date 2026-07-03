@@ -4,6 +4,9 @@
 
 - **T09** `==`/`!=` are builtin and permitted on any type; the checker only requires the
   operands to agree.
+- **T07** Mutability. `let mut` declares a mutable binding; assignment is a statement;
+  local mutation inside a const context is fine; `mut` parameters are local copies; an
+  assignment the checker rejects traps rather than proceeding.
 - **T11** Inference groups use bidirected edges, not pure SCCs, because higher-order
   functions need their call sites in the same group to constrain type variables.
   Fully-typed items are firewall items, checked once against their own contract and never

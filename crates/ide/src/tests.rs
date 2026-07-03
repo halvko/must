@@ -89,6 +89,22 @@ fn goto_builtin_is_none() {
     check_no_goto(r#"static f = fn { print$0("hi") };"#);
 }
 
+#[test]
+fn goto_assignment_lhs() {
+    // The LHS of an assignment lowers as a normal expression, so goto-def
+    // works on it exactly like any other read of the binding.
+    check_goto(
+        r#"
+static f = fn {
+    let mut x = 1;
+    x$0 = 5;
+};
+"#,
+        "x",
+        0,
+    );
+}
+
 fn check_hover(fixture_text: &str, expected_markup: &str) {
     let (analysis, _file, pos) = fixture(fixture_text);
     let hover = analysis.hover(pos).expect("hover returned None");
@@ -124,6 +140,30 @@ fn hover_binding_definition() {
     check_hover(
         r#"static main = fn { let s$0 = "hello"; print(s); };"#,
         "```must\ns: str\n```",
+    );
+}
+
+#[test]
+fn hover_mut_binding_definition_shows_mut() {
+    check_hover(
+        r#"static main = fn { let mut s$0 = "hello"; s = "bye"; };"#,
+        "```must\nmut s: str\n```",
+    );
+}
+
+#[test]
+fn hover_mut_binding_use_shows_mut() {
+    check_hover(
+        r#"static main = fn { let mut s = "hello"; print(s$0); };"#,
+        "```must\nmut s: str\n```",
+    );
+}
+
+#[test]
+fn hover_mut_param_shows_mut() {
+    check_hover(
+        "static f = fn (mut n$0: usize) { n = n + 1; };",
+        "```must\nmut n: usize\n```",
     );
 }
 
@@ -242,6 +282,7 @@ fn check_highlights(text: &str, expect: expect_test::Expect) {
             (crate::HlMods::DECLARATION, "declaration"),
             (crate::HlMods::STATIC, "static"),
             (crate::HlMods::DEFAULT_LIBRARY, "defaultLibrary"),
+            (crate::HlMods::MUTABLE, "mutable"),
         ] {
             if hl.mods.contains(flag) {
                 rendered.push('.');
@@ -325,6 +366,53 @@ fn highlights_const_fn_and_const_block_keywords() {
 }
 
 #[test]
+fn highlights_mut_keyword() {
+    check_highlights(
+        "static f = fn { let mut x = 1; x = 2; };",
+        expect_test::expect![[r#"
+            0..6 "static" Keyword
+            7..8 "f" Function.declaration.static
+            9..10 "=" Operator
+            11..13 "fn" Keyword
+            16..19 "let" Keyword
+            20..23 "mut" Keyword
+            24..25 "x" Variable.declaration.mutable
+            26..27 "=" Operator
+            28..29 "1" Number
+            31..32 "x" Variable.mutable
+            33..34 "=" Operator
+            35..36 "2" Number
+        "#]],
+    );
+}
+
+#[test]
+fn highlights_mutable_param_declaration_and_uses() {
+    // The `mutable` modifier follows the binding, not just its declaration:
+    // both the `mut` parameter's name and its later reads/assignment carry
+    // it, while an ordinary immutable `let` next to it does not.
+    check_highlights(
+        "static f = fn (mut n: usize) { let y = n; n = y; };",
+        expect_test::expect![[r#"
+            0..6 "static" Keyword
+            7..8 "f" Function.declaration.static
+            9..10 "=" Operator
+            11..13 "fn" Keyword
+            15..18 "mut" Keyword
+            19..20 "n" Parameter.declaration.mutable
+            22..27 "usize" Type.defaultLibrary
+            31..34 "let" Keyword
+            35..36 "y" Variable.declaration
+            37..38 "=" Operator
+            39..40 "n" Parameter.mutable
+            42..43 "n" Parameter.mutable
+            44..45 "=" Operator
+            46..47 "y" Variable
+        "#]],
+    );
+}
+
+#[test]
 fn highlights_split_multiline_strings_per_line() {
     check_highlights(
         "static s = \"one\ntwo\";",
@@ -379,6 +467,34 @@ fn diagnostics_include_const_check_findings() {
     assert_eq!(errors[0].related.len(), 1);
     assert_eq!(errors[0].related[0].message, "`double` is defined here");
     assert_eq!(&src[errors[0].related[0].range], "double");
+}
+
+#[test]
+fn assign_to_immutable_squiggles_the_lhs_name_with_related_info() {
+    // The squiggle sits on the assignment's LHS use of `x`; the related
+    // hint points back at the `let`'s binding name, where `mut` is missing.
+    let src = "static f = fn { let x = 1; x = 2; };";
+    let (analysis, file, _pos) = fixture(&format!("{src}$0"));
+    let diagnostics = analysis.diagnostics(file);
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::Severity::Error)
+        .collect();
+    assert_eq!(errors.len(), 1, "diagnostics: {diagnostics:?}");
+    assert_eq!(
+        errors[0].message,
+        "cannot assign to `x`: it is not declared `mut`"
+    );
+    // The LHS use (offset 27), not the declaration (offset 20).
+    assert_eq!(&src[errors[0].range], "x");
+    assert_eq!(u32::from(errors[0].range.start()), 27);
+    assert_eq!(errors[0].related.len(), 1);
+    assert_eq!(
+        errors[0].related[0].message,
+        "`x` is declared without `mut` here"
+    );
+    assert_eq!(&src[errors[0].related[0].range], "x");
+    assert_eq!(u32::from(errors[0].related[0].range.start()), 20);
 }
 
 #[test]

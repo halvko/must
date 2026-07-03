@@ -40,6 +40,7 @@ impl HlMods {
     pub const DECLARATION: u32 = 1 << 0;
     pub const STATIC: u32 = 1 << 1;
     pub const DEFAULT_LIBRARY: u32 = 1 << 2;
+    pub const MUTABLE: u32 = 1 << 3;
 
     pub fn contains(self, flag: u32) -> bool {
         self.0 & flag != 0
@@ -72,7 +73,7 @@ fn classify(
         COMMENT => HlTag::Comment,
         STRING => HlTag::String,
         INT_NUMBER => HlTag::Number,
-        FN_KW | STATIC_KW | CONST_KW | LET_KW | IF_KW | ELSE_KW | TRUE_KW | FALSE_KW => {
+        FN_KW | STATIC_KW | CONST_KW | LET_KW | MUT_KW | IF_KW | ELSE_KW | TRUE_KW | FALSE_KW => {
             HlTag::Keyword
         }
         PLUS | MINUS | STAR | SLASH | EQ | THIN_ARROW | AMP | EQ2 | NEQ | L_ANGLE | R_ANGLE
@@ -105,13 +106,27 @@ fn classify_ident(
             };
             Some((tag, HlMods(HlMods::DECLARATION | HlMods::STATIC)))
         }
-        (NAME, PARAM) => Some((HlTag::Parameter, HlMods(HlMods::DECLARATION))),
-        (NAME, LET_STMT) => Some((HlTag::Variable, HlMods(HlMods::DECLARATION))),
+        (NAME, PARAM) | (NAME, LET_STMT) => {
+            let item = item_of(db, file, root, &owner)?;
+            let (body, source_map) = hir::body_with_source_map(db, item);
+            let mut mods = HlMods::DECLARATION;
+            if let Some(binding) = source_map.binding_for_node(SyntaxNodePtr::new(&parent))
+                && body.bindings[binding].mutable
+            {
+                mods |= HlMods::MUTABLE;
+            }
+            let tag = if owner.kind() == PARAM {
+                HlTag::Parameter
+            } else {
+                HlTag::Variable
+            };
+            Some((tag, HlMods(mods)))
+        }
         // All nameable types are builtin for now (`usize`, `str`, ...).
         (NAME_REF, PATH_TYPE) => Some((HlTag::Type, HlMods(HlMods::DEFAULT_LIBRARY))),
         (NAME_REF, PATH_EXPR) => {
             let item = item_of(db, file, root, &owner)?;
-            let (_, source_map) = hir::body_with_source_map(db, item);
+            let (body, source_map) = hir::body_with_source_map(db, item);
             let expr = source_map.expr_for_node(SyntaxNodePtr::new(&owner))?;
             match *hir::resolutions(db, item).get(expr)? {
                 hir::Resolution::Local(binding) => {
@@ -123,7 +138,12 @@ fn classify_ident(
                     } else {
                         HlTag::Variable
                     };
-                    Some((tag, HlMods::NONE))
+                    let mods = if body.bindings[binding].mutable {
+                        HlMods::MUTABLE
+                    } else {
+                        0
+                    };
+                    Some((tag, HlMods(mods)))
                 }
                 hir::Resolution::Item(_) | hir::Resolution::Ambiguous(_) => {
                     let infer = hir::infer::infer(db, item);

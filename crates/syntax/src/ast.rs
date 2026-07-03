@@ -89,6 +89,11 @@ ast_node!(
     ConstBlockExpr: CONST_BLOCK_EXPR
 );
 ast_node!(LetStmt: LET_STMT);
+ast_node!(
+    /// `lhs = rhs;`. Superset-parsed: `lhs` may be any expression (validation
+    /// rejects anything but a plain variable).
+    AssignStmt: ASSIGN_STMT
+);
 ast_node!(ExprStmt: EXPR_STMT);
 ast_node!(CallExpr: CALL_EXPR);
 ast_node!(ArgList: ARG_LIST);
@@ -116,7 +121,7 @@ ast_enum!(
     IfExpr
 );
 ast_enum!(Type: FnType, UnitType, NeverType, PathType, RefType, HoleType);
-ast_enum!(Stmt: LetStmt, ExprStmt);
+ast_enum!(Stmt: LetStmt, AssignStmt, ExprStmt);
 
 impl SourceFile {
     pub fn items(&self) -> impl Iterator<Item = StaticItem> + use<> {
@@ -198,6 +203,12 @@ impl ParamList {
 }
 
 impl Param {
+    pub fn mut_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, MUT_KW)
+    }
+    pub fn is_mut(&self) -> bool {
+        self.mut_token().is_some()
+    }
     pub fn name(&self) -> Option<Name> {
         child(&self.syntax)
     }
@@ -232,6 +243,12 @@ impl ConstBlockExpr {
 }
 
 impl LetStmt {
+    pub fn mut_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, MUT_KW)
+    }
+    pub fn is_mut(&self) -> bool {
+        self.mut_token().is_some()
+    }
     pub fn name(&self) -> Option<Name> {
         child(&self.syntax)
     }
@@ -240,6 +257,15 @@ impl LetStmt {
     }
     pub fn initializer(&self) -> Option<Expr> {
         child(&self.syntax)
+    }
+}
+
+impl AssignStmt {
+    pub fn lhs(&self) -> Option<Expr> {
+        children(&self.syntax).next()
+    }
+    pub fn rhs(&self) -> Option<Expr> {
+        children(&self.syntax).nth(1)
     }
 }
 

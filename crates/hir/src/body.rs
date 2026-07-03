@@ -31,6 +31,11 @@ pub struct Body {
 pub struct BindingData {
     pub name: String,
     pub type_ref: Option<TypeRef>,
+    /// Whether the binding was introduced with `mut` (`let mut` / a `mut`
+    /// parameter). A hole (`_`) is never mutable — there is no name to
+    /// assign through — regardless of a written `mut` (validation flags
+    /// that as pointless).
+    pub mutable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,7 +90,18 @@ pub enum LiteralData {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Stmt {
-    Let { binding: BindingId, init: ExprId },
+    Let {
+        binding: BindingId,
+        init: ExprId,
+    },
+    /// `target = value;`. `target` lowers as a normal expression (so its
+    /// `NameRef` gets the usual source-map + resolution entries — goto-def
+    /// and hover on the LHS work for free), even though the only target
+    /// shape validation allows is a plain variable.
+    Assign {
+        target: ExprId,
+        value: ExprId,
+    },
     Expr(ExprId),
 }
 
@@ -239,7 +255,18 @@ impl LowerCtx {
                         list.params()
                             .map(|param| {
                                 let type_ref = TypeRef::from_opt_ast(param.ty());
-                                self.alloc_binding(param.name(), type_ref, param.syntax())
+                                let binding = self.alloc_binding(
+                                    param.name(),
+                                    type_ref,
+                                    param.is_mut(),
+                                    param.syntax(),
+                                );
+                                if let Some(ty) = param.ty() {
+                                    self.source_map
+                                        .binding_annotation_back
+                                        .insert(binding, SyntaxNodePtr::new(ty.syntax()));
+                                }
+                                binding
                             })
                             .collect()
                     })
@@ -268,13 +295,18 @@ impl LowerCtx {
                 ast::Stmt::LetStmt(it) => {
                     let init = self.lower_opt_expr(it.initializer());
                     let type_ref = TypeRef::from_opt_ast(it.ty());
-                    let binding = self.alloc_binding(it.name(), type_ref, it.syntax());
+                    let binding = self.alloc_binding(it.name(), type_ref, it.is_mut(), it.syntax());
                     if let Some(ty) = it.ty() {
                         self.source_map
                             .binding_annotation_back
                             .insert(binding, SyntaxNodePtr::new(ty.syntax()));
                     }
                     Stmt::Let { binding, init }
+                }
+                ast::Stmt::AssignStmt(it) => {
+                    let target = self.lower_opt_expr(it.lhs());
+                    let value = self.lower_opt_expr(it.rhs());
+                    Stmt::Assign { target, value }
                 }
                 ast::Stmt::ExprStmt(it) => Stmt::Expr(self.lower_opt_expr(it.expr())),
             })
@@ -287,11 +319,17 @@ impl LowerCtx {
         &mut self,
         name: Option<ast::Name>,
         type_ref: Option<TypeRef>,
+        mutable: bool,
         fallback_node: &syntax::SyntaxNode,
     ) -> BindingId {
+        // A hole binds no name, so there is nothing `mut` could ever make
+        // assignable — `mutable` stays `false` regardless of the written
+        // keyword (validation flags a written `mut` there separately).
+        let is_hole = name.as_ref().is_some_and(|n| n.is_hole());
         let id = self.bindings.alloc(BindingData {
             name: name.as_ref().map(|n| n.text()).unwrap_or_default(),
             type_ref,
+            mutable: mutable && !is_hole,
         });
         let ptr = match &name {
             Some(name) => SyntaxNodePtr::new(name.syntax()),

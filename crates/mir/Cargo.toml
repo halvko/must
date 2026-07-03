@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 base-db.workspace = true
 hir.workspace = true
+syntax.workspace = true
 salsa.workspace = true
 la-arena.workspace = true
 rustc-hash.workspace = true

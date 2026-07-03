@@ -220,7 +220,8 @@ fn param_list(p: &mut Parser<'_>) {
 
 fn param(p: &mut Parser<'_>) {
     let m = p.start();
-    if matches!(p.current(), IDENT | HOLE) {
+    if matches!(p.current(), IDENT | HOLE | MUT_KW) {
+        p.eat(MUT_KW);
         pattern(p, "expected a parameter name");
         if p.eat(COLON) {
             type_(p);
@@ -287,6 +288,18 @@ fn const_block_expr(p: &mut Parser<'_>) -> CompletedMarker {
 fn expr_stmt_or_tail(p: &mut Parser<'_>) {
     let m = p.start();
     let parsed = expr(p);
+    // Superset-parse any expression as the assignment target; validation
+    // rejects anything but a plain variable. The RHS is parsed with `expr`,
+    // which stops before a following `=` (it isn't a binary operator), so
+    // `x = y = z` naturally falls through to the `;` expectation below
+    // instead of chaining.
+    if p.at(EQ) {
+        p.bump(EQ);
+        expr(p);
+        p.expect_after_prev(SEMICOLON);
+        m.complete(p, ASSIGN_STMT);
+        return;
+    }
     if p.eat(SEMICOLON) {
         m.complete(p, EXPR_STMT);
         return;
@@ -303,6 +316,7 @@ fn expr_stmt_or_tail(p: &mut Parser<'_>) {
 fn let_stmt(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(LET_KW);
+    p.eat(MUT_KW);
     pattern(p, "expected a binding name");
     if p.eat(COLON) {
         type_(p);

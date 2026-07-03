@@ -145,6 +145,13 @@ impl CheckCtx<'_> {
                 for stmt in stmts {
                     match stmt {
                         Stmt::Let { init, .. } => self.check_expr(*init, in_const),
+                        // Local mutation is allowed in const contexts (no
+                        // rule rejects it here); just visit both
+                        // sub-expressions the same as any other statement.
+                        Stmt::Assign { target, value } => {
+                            self.check_expr(*target, in_const);
+                            self.check_expr(*value, in_const);
+                        }
                         Stmt::Expr(e) => self.check_expr(*e, in_const),
                     }
                 }

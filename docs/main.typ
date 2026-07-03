@@ -175,6 +175,46 @@ Const evaluation has no side effects, with one exception: `panic`. Calling
 `print` in a const context is an error; calling `panic` is allowed —
 failing loudly at compile time is the point of putting code there.
 
+== Mutability
+
+`let` bindings are immutable by default; `let mut` opts into assignment.
+Assignment is a statement, not an expression:
+
+```must
+static count = fn (n: usize) -> usize {
+    let mut total = 0;
+    total = total + n;
+    total
+};
+```
+
+Parameters take `mut` the same way, before the name. A `mut` parameter is a
+local copy — mutating it is invisible to the caller:
+
+```must
+static clamp_to_ten = fn (mut n: usize) -> usize {
+    if n > 10 { n = 10; };
+    n
+};
+```
+
+Local mutation is allowed in const contexts. Const evaluation having no side
+effects means no *observable* effects — mutating a binding in a private
+frame that no one else can see is fine:
+
+```must
+static x = const { let mut n = 1; n = n + 1; n };
+```
+
+`static mut` does not exist (deferred until there is a story for it): a
+`static` names one place, but that place cannot be reassigned, a `const`
+doesn't even have a single place an assignment could write to, and builtins
+are not assignable either.
+
+A rejected assignment is a check-time diagnostic, and — like every deferred
+error — running code that reaches one crashes at exactly the place the
+checker complained about, with the same message the squiggle showed.
+
 == Statics and consts are accessible in their declarations
 
 ```must

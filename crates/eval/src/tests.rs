@@ -676,3 +676,72 @@ static cyc: usize = const { cyc };
         "#]],
     );
 }
+
+#[test]
+fn mutation_of_a_let_binding_is_visible_to_later_reads() {
+    check_run(
+        "",
+        "(fn { let mut x = 1; x = x + 2; x })()",
+        expect![[r#"
+            => 3
+        "#]],
+    );
+}
+
+#[test]
+fn mutating_a_mut_param_is_visible_to_later_reads() {
+    check_run(
+        "static f = fn (mut n: usize) -> usize { n = n + 1; n };",
+        "f(41)",
+        expect![[r#"
+            => 42
+        "#]],
+    );
+}
+
+#[test]
+fn assigning_to_an_immutable_binding_traps_at_runtime() {
+    // The executed path runs into the assignment: it crashes with exactly
+    // the message the editor shows as a squiggle.
+    check_run(
+        "",
+        "(fn { let x = 1; x = 2; x })()",
+        expect![[r#"
+            error[Trap]: cannot assign to `x`: it is not declared `mut`
+        "#]],
+    );
+}
+
+#[test]
+fn illegal_assignment_in_an_unevaluated_branch_does_not_crash() {
+    // The dead branch's assignment is squiggled (tested in hir) and
+    // trapped, but only the evaluated path crashes: with the condition
+    // true the function returns normally.
+    check_run(
+        "",
+        "(fn () -> usize { let x = 1; if true { x } else { x = 2; x } })()",
+        expect![[r#"
+            => 1
+        "#]],
+    );
+}
+
+#[test]
+fn mutation_inside_a_const_fn_body_works_at_compile_time() {
+    // `double` mutates a local of its own body; forcing `x` through it at
+    // check time exercises mutation in a const context end to end.
+    check_const(
+        r#"
+static double = const fn (n: usize) -> usize {
+    let mut r = n;
+    r = r + r;
+    r
+};
+static x = double(21);
+"#,
+        expect![[r#"
+            double = fn
+            x = 42
+        "#]],
+    );
+}

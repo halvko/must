@@ -16,6 +16,7 @@ use rustc_hash::FxHashMap;
 
 use crate::body::{BindingId, Body, ExprData, ExprId, LiteralData, Stmt, body};
 use crate::constraint::{self, Cause, Constraints, Join, Witness, resolve_fully};
+use crate::item_tree::Constness;
 use crate::scopes::{Builtin, Resolution, resolutions};
 use crate::ty::{Ty, TyVar, TyVarValue, lower_type_ref, signature, signature_needs_annotation};
 use crate::{ItemId, ItemLoc, TypeRef};
@@ -84,6 +85,34 @@ pub enum InferenceDiagnostic {
         /// The item whose type couldn't be inferred.
         item: ItemLoc,
     },
+    /// An assignment whose target resolves to a local declared without
+    /// `mut`. Squiggle on the target; the binding's declaration carries the
+    /// related hint (and is where a later quick fix will insert `mut`).
+    AssignToImmutable {
+        /// The assignment's target expression.
+        target: ExprId,
+        binding: BindingId,
+        /// The binding's name, carried here so [`Self::message`] can render
+        /// without the body in hand (same reason `NeedsAnnotation` carries
+        /// an [`ItemLoc`]).
+        name: String,
+    },
+    /// An assignment whose target resolves to a top-level item. `static`s
+    /// have an identity but cannot be reassigned; `const`s don't even have
+    /// a single place an assignment could write to — the message
+    /// distinguishes the two.
+    AssignToItem {
+        /// The assignment's target expression.
+        target: ExprId,
+        item: ItemLoc,
+        constness: Constness,
+    },
+    /// An assignment whose target resolves to a builtin function.
+    AssignToBuiltin {
+        /// The assignment's target expression.
+        target: ExprId,
+        builtin: Builtin,
+    },
 }
 
 impl InferenceDiagnostic {
@@ -96,6 +125,9 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::ArgCountMismatch { expr, .. }
             | InferenceDiagnostic::NeedsAnnotation { expr, .. } => *expr,
             InferenceDiagnostic::IfBranchMismatch { else_expr, .. } => *else_expr,
+            InferenceDiagnostic::AssignToImmutable { target, .. }
+            | InferenceDiagnostic::AssignToItem { target, .. }
+            | InferenceDiagnostic::AssignToBuiltin { target, .. } => *target,
         }
     }
 
@@ -141,6 +173,28 @@ impl InferenceDiagnostic {
                 format!(
                     "cannot infer the type of `{display}` across items; \
                      add a type annotation to its definition"
+                )
+            }
+            InferenceDiagnostic::AssignToImmutable { name, .. } => {
+                format!("cannot assign to `{name}`: it is not declared `mut`")
+            }
+            InferenceDiagnostic::AssignToItem {
+                item, constness, ..
+            } => match constness {
+                Constness::Static => format!(
+                    "cannot assign to `{}`: `static` items cannot be reassigned",
+                    item.display_name()
+                ),
+                Constness::Const => format!(
+                    "cannot assign to `{}`: a `const` is copied into each use, \
+                     so there is no single place to assign to",
+                    item.display_name()
+                ),
+            },
+            InferenceDiagnostic::AssignToBuiltin { builtin, .. } => {
+                format!(
+                    "cannot assign to `{}`: it is a builtin function",
+                    builtin.name()
                 )
             }
         }
@@ -249,7 +303,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     *else_ty = resolve_fully(self.table, else_ty);
                 }
                 InferenceDiagnostic::ArgCountMismatch { .. }
-                | InferenceDiagnostic::NeedsAnnotation { .. } => {}
+                | InferenceDiagnostic::NeedsAnnotation { .. }
+                | InferenceDiagnostic::AssignToImmutable { .. }
+                | InferenceDiagnostic::AssignToItem { .. }
+                | InferenceDiagnostic::AssignToBuiltin { .. } => {}
             }
         }
         result
@@ -496,6 +553,64 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             let binding_cause = has_annotation.then_some(Cause::Binding(*binding));
                             let ty = self.infer_expr_with(*init, &declared, binding_cause);
                             self.result.type_of_binding.insert(*binding, ty);
+                        }
+                        Stmt::Assign { target, value } => {
+                            // The target is an ordinary read for typing
+                            // purposes — it just so happens to also be
+                            // written. Its own expectation is free (no
+                            // outer axiom constrains what's being assigned
+                            // to); the resulting type is what the value
+                            // must match, same as a `let` with a declared
+                            // type flows its annotation down as `expected`
+                            // with `Cause::Binding`.
+                            let fresh = self.fresh_var();
+                            let target_ty = self.infer_expr(*target, &fresh);
+                            // Enforcement: the only legal target is a `mut`
+                            // local. Unresolved names already carry the
+                            // unresolved-name diagnostic, non-name targets a
+                            // validation error, and ambiguous names the
+                            // duplicate-definition diagnostics — none of
+                            // those gets a second squiggle here.
+                            let cause = match self.resolutions.get(*target) {
+                                Some(Resolution::Local(binding)) => {
+                                    let data = &self.body.bindings[*binding];
+                                    if !data.mutable {
+                                        self.result.diagnostics.push(
+                                            InferenceDiagnostic::AssignToImmutable {
+                                                target: *target,
+                                                binding: *binding,
+                                                name: data.name.clone(),
+                                            },
+                                        );
+                                    }
+                                    Some(Cause::Binding(*binding))
+                                }
+                                Some(Resolution::Item(loc)) => {
+                                    let constness = crate::item_data(self.db, loc.to_id(self.db))
+                                        .as_ref()
+                                        .map(|it| it.constness)
+                                        .unwrap_or(Constness::Static);
+                                    self.result.diagnostics.push(
+                                        InferenceDiagnostic::AssignToItem {
+                                            target: *target,
+                                            item: loc.clone(),
+                                            constness,
+                                        },
+                                    );
+                                    None
+                                }
+                                Some(Resolution::Builtin(builtin)) => {
+                                    self.result.diagnostics.push(
+                                        InferenceDiagnostic::AssignToBuiltin {
+                                            target: *target,
+                                            builtin: *builtin,
+                                        },
+                                    );
+                                    None
+                                }
+                                Some(Resolution::Ambiguous(_)) | None => None,
+                            };
+                            self.infer_expr_with(*value, &target_ty, cause);
                         }
                         Stmt::Expr(e) => {
                             let fresh_var = self.fresh_var();

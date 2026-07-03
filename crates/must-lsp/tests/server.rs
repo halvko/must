@@ -342,6 +342,57 @@ fn quick_fix_inserts_semicolon_from_cursor_on_anchor() {
 }
 
 #[test]
+fn quick_fix_makes_an_immutable_binding_mutable() {
+    let mut client = TestClient::start();
+    let file = uri("file:///make-mut.must");
+
+    client.open(&file, "static f = fn { let x = 1; x = 2; };");
+    let diags = client.next_diagnostics();
+    assert_eq!(diags.diagnostics.len(), 2); // the error + the companion hint
+    let diag = diags
+        .diagnostics
+        .iter()
+        .find(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
+        .expect("has the error diagnostic");
+    assert_eq!(
+        diag.message,
+        "cannot assign to `x`: it is not declared `mut`"
+    );
+
+    let response =
+        client.request::<lsp_types::request::CodeActionRequest>(lsp_types::CodeActionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+            range: diag.range,
+            context: lsp_types::CodeActionContext::default(),
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        });
+    let actions = response.expect("expected code actions");
+    assert_eq!(actions.len(), 1);
+    let lsp_types::CodeActionOrCommand::CodeAction(action) = &actions[0] else {
+        panic!("expected a code action, got {actions:?}");
+    };
+    assert_eq!(action.title, "Make `x` mutable");
+
+    // Uri-keyed maps are the shape the LSP protocol mandates.
+    #[allow(clippy::mutable_key_type)]
+    let changes = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .expect("action has a workspace edit");
+    let edits = &changes[&file];
+    assert_eq!(edits.len(), 1);
+    // A pure insertion of `mut ` right before the binding's name `x`
+    // (line 0, column 20): applying it yields `let mut x = 1;`.
+    assert_eq!(edits[0].range.start, lsp_types::Position::new(0, 20));
+    assert_eq!(edits[0].range.end, lsp_types::Position::new(0, 20));
+    assert_eq!(edits[0].new_text, "mut ");
+
+    drop(client);
+}
+
+#[test]
 fn duplicate_definition_links_to_the_first_one() {
     let client = TestClient::start();
     let file = uri("file:///dup.must");
@@ -421,6 +472,59 @@ fn semantic_tokens_over_protocol() {
         (0, 7, 1, 6, 3), // `x`: variable, declaration|static
         (0, 2, 1, 4, 0), // `=`
         (0, 2, 1, 2, 0), // `1`
+    ];
+    let actual: Vec<_> = tokens
+        .data
+        .iter()
+        .map(|t| {
+            (
+                t.delta_line,
+                t.delta_start,
+                t.length,
+                t.token_type,
+                t.token_modifiers_bitset,
+            )
+        })
+        .collect();
+    assert_eq!(actual, expected);
+
+    drop(client);
+}
+
+#[test]
+fn semantic_tokens_carry_the_mutable_modifier() {
+    let mut client = TestClient::start();
+    let file = uri("file:///mut-tokens.must");
+
+    client.open(&file, "static f = fn { let mut x = 1; x = 2; };");
+    client.next_diagnostics();
+
+    let response = client.request::<lsp_types::request::SemanticTokensFullRequest>(
+        lsp_types::SemanticTokensParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        },
+    );
+    let Some(lsp_types::SemanticTokensResult::Tokens(tokens)) = response else {
+        panic!("expected full semantic tokens, got {response:?}");
+    };
+    // Modifier bits: declaration = 1, static = 2, defaultLibrary = 4,
+    // mutable = 8 (the legend's fourth entry).
+    let expected = [
+        // delta_line, delta_start, length, token_type, modifiers
+        (0, 0, 6, 3, 0), // `static`
+        (0, 7, 1, 5, 3), // `f`: function, declaration|static
+        (0, 2, 1, 4, 0), // `=`
+        (0, 2, 2, 3, 0), // `fn`
+        (0, 5, 3, 3, 0), // `let`
+        (0, 4, 3, 3, 0), // `mut`
+        (0, 4, 1, 6, 9), // `x`: variable, declaration|mutable
+        (0, 2, 1, 4, 0), // `=`
+        (0, 2, 1, 2, 0), // `1`
+        (0, 3, 1, 6, 8), // `x` (the assignment target): variable, mutable
+        (0, 2, 1, 4, 0), // `=`
+        (0, 2, 1, 2, 0), // `2`
     ];
     let actual: Vec<_> = tokens
         .data

@@ -33,6 +33,7 @@ pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
         value_traps: FxHashMap::default(),
         call_traps: FxHashMap::default(),
         const_call_traps: FxHashMap::default(),
+        assign_traps: FxHashMap::default(),
         initializer_context: true,
     };
     ctx.seed_traps();
@@ -68,6 +69,12 @@ struct LowerCtx<'db> {
     /// fine as runtime code. How they trap depends on where they lower —
     /// see the `ExprData::Call` arm.
     const_call_traps: FxHashMap<ExprId, String>,
+    /// Assignment *targets* inference rejected (immutable binding, item,
+    /// builtin), keyed by the target expression: the write must not happen,
+    /// so `lower_assign_target` traps instead of storing. The target is
+    /// never lowered as a read, so unlike `value_traps` these only fire
+    /// there.
+    assign_traps: FxHashMap<ExprId, String>,
     /// True while lowering the item initializer's own const context: the
     /// root body outside any `fn` literal and outside any `const` block.
     /// That is the one const context with a runtime escape (the runner's
@@ -100,6 +107,15 @@ impl LowerCtx<'_> {
                 // Handled where the name is lowered, which also covers
                 // signatures broken by written-but-wrong annotations.
                 InferenceDiagnostic::NeedsAnnotation { .. } => {}
+                // Reported on the assignment's target; the operation that
+                // must not execute is the write — `lower_assign_target`
+                // looks these up by target instead of the read path's
+                // `value_traps` (the target is never lowered as a read).
+                InferenceDiagnostic::AssignToImmutable { target, .. }
+                | InferenceDiagnostic::AssignToItem { target, .. }
+                | InferenceDiagnostic::AssignToBuiltin { target, .. } => {
+                    self.assign_traps.insert(*target, diag.message());
+                }
             }
         }
         // Const-check diagnostics are reported on the *callee* (the
@@ -300,6 +316,10 @@ impl LowerCtx<'_> {
                             b.local_for_binding.insert(*binding, local);
                             b.push_assign(local, Rvalue::Use(init_op), *init);
                         }
+                        Stmt::Assign { target, value } => {
+                            let value_op = self.lower_expr(b, *value);
+                            self.lower_assign_target(b, *target, *value, value_op);
+                        }
                         Stmt::Expr(e) => {
                             // Lowered for its effects; the value is dropped.
                             self.lower_expr(b, *e);
@@ -389,6 +409,97 @@ impl LowerCtx<'_> {
             Some(Resolution::Builtin(builtin)) => Operand::Const(Const::Builtin(*builtin)),
             // Justified by the unresolved-name diagnostic.
             None => self.trap(b, expr, hir::diag::unresolved_name(name)),
+        }
+    }
+
+    /// Lower an assignment's LHS: writes `value_op` into the target's local
+    /// instead of reading it. The only real write is to a `mut` local that
+    /// already has a slot in this body — the same local a `let` allocated,
+    /// so the assignment reuses it rather than minting a new one. Every
+    /// other case traps instead of silently dropping the RHS's effects,
+    /// always with the message of a diagnostic already reported on the
+    /// target: inference's assignment enforcement (immutable binding, item,
+    /// builtin), the capture diagnostic (same as the read path), name
+    /// resolution (unresolved/ambiguous), a parse error (missing target),
+    /// or syntax validation (a non-variable target).
+    fn lower_assign_target(
+        &mut self,
+        b: &mut BodyBuilder,
+        target: ExprId,
+        value: ExprId,
+        value_op: Operand,
+    ) {
+        // A target inference rejected: trap with the squiggle's exact text.
+        if let Some(message) = self.assign_traps.get(&target).cloned() {
+            self.trap(b, target, message);
+            return;
+        }
+        if let ExprData::NameRef(name) = &self.body.exprs[target] {
+            match self.resolutions.get(target) {
+                Some(Resolution::Local(binding)) => match b.local_for_binding.get(binding) {
+                    Some(&local) => {
+                        b.push_assign(local, Rvalue::Use(value_op), value);
+                    }
+                    // A local of an enclosing function: the same unsupported
+                    // capture the read path (`lower_name_ref`) reports.
+                    None => {
+                        let diag = MirDiagnostic::UnsupportedCapture {
+                            expr: target,
+                            name: name.clone(),
+                        };
+                        let message = diag.message();
+                        self.diagnostics.push(diag);
+                        self.trap(b, target, message);
+                    }
+                },
+                // Item and builtin targets were seeded into `assign_traps`
+                // above (inference always reports them), so these arms are
+                // unreachable in practice — kept total by re-rendering the
+                // same diagnostics' messages rather than inventing text
+                // (mirrors `lower_name_ref`'s `NeedsAnnotation` handling).
+                Some(Resolution::Item(loc)) => {
+                    let constness = hir::item_data(self.db, loc.to_id(self.db))
+                        .as_ref()
+                        .map(|it| it.constness)
+                        .unwrap_or(hir::Constness::Static);
+                    let message = InferenceDiagnostic::AssignToItem {
+                        target,
+                        item: loc.clone(),
+                        constness,
+                    }
+                    .message();
+                    self.trap(b, target, message);
+                }
+                Some(Resolution::Builtin(builtin)) => {
+                    let message = InferenceDiagnostic::AssignToBuiltin {
+                        target,
+                        builtin: *builtin,
+                    }
+                    .message();
+                    self.trap(b, target, message);
+                }
+                // Justified by the duplicate-definition diagnostics.
+                Some(Resolution::Ambiguous(_)) => {
+                    self.trap(b, target, hir::diag::defined_multiple_times(name));
+                }
+                // Justified by the unresolved-name diagnostic.
+                None => {
+                    self.trap(b, target, hir::diag::unresolved_name(name));
+                }
+            }
+            return;
+        }
+        match &self.body.exprs[target] {
+            // Justified by the parse errors of the broken source (same
+            // wording as the read path's `ExprData::Missing` arm).
+            ExprData::Missing => {
+                self.trap(b, target, "syntax error: missing expression".to_owned());
+            }
+            // A non-variable target: validation already squiggled it with
+            // exactly this text (a shared constant, so the two can't drift).
+            _ => {
+                self.trap(b, target, syntax::CAN_ONLY_ASSIGN_TO_A_VARIABLE.to_owned());
+            }
         }
     }
 
