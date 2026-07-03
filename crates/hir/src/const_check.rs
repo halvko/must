@@ -159,6 +159,16 @@ impl CheckCtx<'_> {
                     self.check_expr(*tail, in_const);
                 }
             }
+            // Record construction is not a call — nothing to reject; the
+            // field initializers sit in the same context as the literal.
+            ExprData::RecordLit { fields } => {
+                for (_, field) in fields {
+                    self.check_expr(*field, in_const);
+                }
+            }
+            // A field access evaluates its receiver; the projection itself
+            // has no effect.
+            ExprData::Field { receiver, .. } => self.check_expr(*receiver, in_const),
             // `const { ... }` re-enters a const context wherever it appears.
             ExprData::ConstBlock { body } => self.check_expr(*body, true),
             // *Defining* a function in a const context is always fine; only
@@ -203,6 +213,10 @@ impl CheckCtx<'_> {
                             .push(ConstCheckDiagnostic::ValueCall { callee }),
                     }
                 }
+                // A construction call `Foo(...)`: pure construction, not a
+                // user function — always legal in a const context (like
+                // record literals, which it erases to at runtime).
+                Some(Resolution::TypeItem(_)) => {}
                 // The one side effect const contexts allow.
                 Some(Resolution::Builtin(Builtin::Panic)) => {}
                 Some(Resolution::Builtin(builtin @ Builtin::Print)) => {

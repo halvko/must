@@ -11,7 +11,15 @@ use crate::parser::{CompletedMarker, Parser};
 fn at_expr_recovery(p: &Parser<'_>) -> bool {
     matches!(
         p.current(),
-        EOF | R_BRACE | R_PAREN | SEMICOLON | COMMA | STATIC_KW | CONST_KW | LET_KW | ELSE_KW
+        EOF | R_BRACE
+            | R_PAREN
+            | SEMICOLON
+            | COMMA
+            | STATIC_KW
+            | CONST_KW
+            | TYPE_KW
+            | LET_KW
+            | ELSE_KW
     )
 }
 
@@ -19,8 +27,8 @@ pub(crate) fn source_file(p: &mut Parser<'_>) {
     let m = p.start();
     while !p.at(EOF) {
         match p.current() {
-            STATIC_KW | CONST_KW => item(p),
-            _ => p.err_and_bump("expected an item (`static` or `const`)"),
+            STATIC_KW | CONST_KW | TYPE_KW => item(p),
+            _ => p.err_and_bump("expected an item (`static`, `const` or `type`)"),
         }
     }
     m.complete(p, SOURCE_FILE);
@@ -28,7 +36,15 @@ pub(crate) fn source_file(p: &mut Parser<'_>) {
 
 fn item(p: &mut Parser<'_>) {
     let m = p.start();
-    p.bump_any(); // STATIC_KW | CONST_KW
+    // `type Foo = expr;` shares the whole item shape with `static`/`const`
+    // (superset parsing: a `: Type` annotation on a `type` item parses too;
+    // validation rejects it with a removal fix). Only the node kind differs.
+    let kind = if p.at(TYPE_KW) {
+        TYPE_ITEM
+    } else {
+        STATIC_ITEM
+    };
+    p.bump_any(); // STATIC_KW | CONST_KW | TYPE_KW
     pattern(p, "expected a name for the item");
     if p.eat(COLON) {
         type_(p);
@@ -47,7 +63,7 @@ fn item(p: &mut Parser<'_>) {
         p.error("expected `=` followed by the item's value");
         p.eat(SEMICOLON);
     }
-    m.complete(p, STATIC_ITEM);
+    m.complete(p, kind);
 }
 
 /// A pattern an assignment is destructured to
@@ -84,6 +100,20 @@ fn expr_bp(p: &mut Parser<'_>, min_bp: u8) -> Option<CompletedMarker> {
             lhs = m.complete(p, CALL_EXPR);
             continue;
         }
+        // Field access sits in the same tier as calls, so `a.b.c`, `f().x`
+        // and `a.b()` all fall out of this loop naturally.
+        if p.at(DOT) {
+            let m = lhs.precede(p);
+            p.bump(DOT);
+            // `name_ref` asserts it is at IDENT, so guard first.
+            if p.at(IDENT) {
+                name_ref(p);
+            } else {
+                p.error("expected a field name after `.`");
+            }
+            lhs = m.complete(p, FIELD_EXPR);
+            continue;
+        }
         let (l_bp, r_bp) = match p.current() {
             EQ2 | NEQ | L_ANGLE | R_ANGLE | LTEQ | GTEQ => (1, 2),
             PLUS | MINUS => (3, 4),
@@ -115,6 +145,15 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
             _ => {}
         }
     }
+    // `struct` only starts an expression when immediately followed by `{` (a
+    // record literal). Unlike `const`, a dangling `struct` has no second life
+    // as an item keyword, so when `{` doesn't follow we deliberately let it
+    // fall through to the catch-all below, which consumes it as a garbage
+    // token with "expected an expression" — there is nothing else useful a
+    // caller could do with it.
+    if p.at(STRUCT_KW) && p.nth(1) == L_BRACE {
+        return Some(record_expr(p));
+    }
     let m = match p.current() {
         INT_NUMBER | STRING | TRUE_KW | FALSE_KW => {
             let m = p.start();
@@ -133,6 +172,8 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
             p.expect_after_prev(R_PAREN);
             m.complete(p, PAREN_EXPR)
         }
+        // A bare `{` is always a block. Record literals are introduced by the
+        // `struct` keyword (handled above), so no lookahead is needed here.
         L_BRACE => block_expr(p),
         FN_KW => fn_literal(p),
         IF_KW => if_expr(p),
@@ -251,6 +292,47 @@ fn arg_list(p: &mut Parser<'_>) {
     m.complete(p, ARG_LIST);
 }
 
+/// `struct { field, field: expr, ... }` — a record literal. The caller has
+/// already confirmed `p.at(STRUCT_KW) && p.nth(1) == L_BRACE`.
+fn record_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump(STRUCT_KW);
+    p.bump(L_BRACE);
+    while !p.at(R_BRACE) && !p.at(EOF) {
+        let before = p.pos();
+        if p.at(DOT3) {
+            // Open-record marker: a bare token, validation rejects it later.
+            p.bump(DOT3);
+        } else {
+            record_expr_field(p);
+        }
+        if !p.at(R_BRACE) {
+            p.expect(COMMA, "`,`");
+        }
+        if p.pos() == before {
+            break;
+        }
+    }
+    p.expect_after_prev(R_BRACE);
+    m.complete(p, RECORD_EXPR)
+}
+
+/// A record-literal field: `name` (shorthand for `name: name`) or `name: expr`.
+fn record_expr_field(p: &mut Parser<'_>) {
+    let m = p.start();
+    if p.at(IDENT) {
+        let nm = p.start();
+        p.bump(IDENT);
+        nm.complete(p, NAME_REF);
+    } else {
+        p.error("expected a field name");
+    }
+    if p.eat(COLON) {
+        expr(p);
+    }
+    m.complete(p, RECORD_EXPR_FIELD);
+}
+
 fn block_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(L_BRACE);
@@ -260,8 +342,9 @@ fn block_expr(p: &mut Parser<'_>) -> CompletedMarker {
             // Recover at the enclosing item: don't consume, and leave the
             // "expected `}`" report to the expect below. `const fn` and
             // `const {` are expressions, not a misplaced item, so only bail
-            // here when the one-token lookahead rules those out.
-            STATIC_KW => break,
+            // here when the one-token lookahead rules those out. `type`
+            // never starts an expression, so it always means an item.
+            STATIC_KW | TYPE_KW => break,
             CONST_KW if !matches!(p.nth(1), FN_KW | L_BRACE) => break,
             SEMICOLON => p.bump_any(),
             _ => {
@@ -385,8 +468,55 @@ fn type_(p: &mut Parser<'_>) {
             p.bump(HOLE);
             m.complete(p, HOLE_TYPE);
         }
+        // Record types are introduced by `struct`; a bare `{` is not a type.
+        STRUCT_KW => record_type(p),
         _ => p.error("expected a type"),
     }
+}
+
+/// `struct { name: Type, name: Type, ... }` — a record type. Dispatched on the
+/// leading `struct` keyword; the `{` is expected (not guaranteed) afterwards.
+fn record_type(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.bump(STRUCT_KW);
+    if p.expect(L_BRACE, "`{`") {
+        while !p.at(R_BRACE) && !p.at(EOF) {
+            let before = p.pos();
+            if p.at(DOT3) {
+                // Open-record marker: a bare token, validation rejects it later.
+                p.bump(DOT3);
+            } else {
+                record_type_field(p);
+            }
+            if !p.at(R_BRACE) {
+                p.expect(COMMA, "`,`");
+            }
+            if p.pos() == before {
+                break;
+            }
+        }
+        p.expect_after_prev(R_BRACE);
+    }
+    m.complete(p, RECORD_TYPE);
+}
+
+/// A record-type field: `name: Type`. The name is a declaration, so it is
+/// wrapped in `NAME` (like `param`/`pattern`), not `NAME_REF`.
+fn record_type_field(p: &mut Parser<'_>) {
+    let m = p.start();
+    if p.at(IDENT) {
+        let nm = p.start();
+        p.bump(IDENT);
+        nm.complete(p, NAME);
+    } else {
+        p.error("expected a field name");
+    }
+    if p.eat(COLON) {
+        type_(p);
+    } else {
+        p.error("expected `:` followed by the field's type");
+    }
+    m.complete(p, RECORD_TYPE_FIELD);
 }
 
 fn ret_type(p: &mut Parser<'_>) {

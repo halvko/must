@@ -272,20 +272,20 @@ impl<W: Write> Session<W> {
                 let reference = request.arguments["variablesReference"]
                     .as_i64()
                     .unwrap_or(0);
-                let variables: Vec<Value> = self
-                    .debuggee
-                    .as_ref()
-                    .map(|d| d.locals(reference))
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(name, value)| {
-                        json!({
+                let mut variables = Vec::new();
+                if let Some(debuggee) = self.debuggee.as_mut() {
+                    for (name, value) in debuggee.dap_variables(reference) {
+                        // A record gets its own reference so the client can
+                        // expand it into fields; a scalar's is 0 (DAP's "not
+                        // expandable").
+                        let child_ref = debuggee.register(&value);
+                        variables.push(json!({
                             "name": name,
                             "value": value.display(),
-                            "variablesReference": 0,
-                        })
-                    })
-                    .collect();
+                            "variablesReference": child_ref,
+                        }));
+                    }
+                }
                 self.respond(&request, json!({ "variables": variables }))?;
             }
             "evaluate" => {

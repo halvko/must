@@ -49,6 +49,11 @@ pub enum Cause {
         /// The argument the requirement applies to.
         arg: ExprId,
     },
+    /// Axiom: a type-constructor call (`Foo(...)`) requires its argument to
+    /// have the declared underlying record type. Carries the call
+    /// expression; the renderer digs the mismatching field's *declaration*
+    /// out of the `type` item and points there.
+    Constructor(ExprId),
     /// Axiom: an arithmetic/comparison operator requires its operand type.
     /// Carries the binary expression; the renderer points at the operator
     /// token.
@@ -184,6 +189,22 @@ impl Constraints {
                         .all(|(p1, p2)| self.unify(table, p1, p2, cause));
                     params_ok && self.unify(table, &f1.ret, &f2.ret, cause)
                 }
+            }
+            // Nominal: same declaration or nothing. A `Named` never unifies
+            // with its own underlying record either (no implicit
+            // nominal↔structural coercion) — that case falls through to the
+            // catch-all `false` below.
+            (Ty::Named(a), Ty::Named(b)) => a == b,
+            // Structural, exact field-set equality: same names (both sides
+            // are canonically sorted, so zipping compares the sets), then
+            // the field types unify pairwise. No subtyping.
+            (Ty::Record(r1), Ty::Record(r2)) => {
+                r1.fields.len() == r2.fields.len()
+                    && r1
+                        .fields
+                        .iter()
+                        .zip(&r2.fields)
+                        .all(|((n1, t1), (n2, t2))| n1 == n2 && self.unify(table, t1, t2, cause))
             }
             _ => false,
         }
@@ -463,6 +484,12 @@ pub(crate) fn resolve_fully(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty)
             let ret = resolve_fully(table, &f.ret);
             Ty::fn_type(params, ret)
         }
+        Ty::Record(rec) => Ty::record(
+            rec.fields
+                .iter()
+                .map(|(name, ty)| (name.clone(), resolve_fully(table, ty)))
+                .collect(),
+        ),
         other => other.clone(),
     }
 }
@@ -479,6 +506,7 @@ fn occurs(table: &mut InPlaceUnificationTable<TyVar>, var: TyVar, ty: &Ty) -> bo
             }
         }
         Ty::Fn(f) => f.params.iter().any(|p| occurs(table, var, p)) || occurs(table, var, &f.ret),
+        Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| occurs(table, var, ty)),
         _ => false,
     }
 }

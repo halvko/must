@@ -266,6 +266,74 @@ fn breakpoint_hit_inspect_and_resume() {
 }
 
 #[test]
+fn record_local_expands_into_fields() {
+    let program = fixture(
+        "rec",
+        "static main = fn {\n    let p = struct { x: 1, y: 2 };\n    print(\"done\");\n};\n",
+    );
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        ("launch", json!({ "program": program.to_str().unwrap() })),
+        ("setBreakpoints", json!({ "breakpoints": [{ "line": 3 }] })),
+        ("configurationDone", json!({})),
+        ("stackTrace", json!({ "threadId": 1 })),
+        ("scopes", json!({ "frameId": 2 })),
+        ("variables", json!({ "variablesReference": 2 })),
+        // The reference for `p` is deterministic: it's the first compound
+        // value registered since the last resume, so `RECORD_REF_BASE + 0`.
+        ("variables", json!({ "variablesReference": 100_000 })),
+        ("evaluate", json!({ "expression": "p", "frameId": 2 })),
+        (
+            "evaluate",
+            json!({ "expression": "p.x + p.y", "frameId": 2 }),
+        ),
+        ("continue", json!({ "threadId": 1 })),
+        ("disconnect", json!({})),
+    ]);
+
+    let stack = &responses_for(&messages, "stackTrace")[0]["body"]["stackFrames"];
+    assert_eq!(stack[0]["name"], "main");
+    assert_eq!(stack[0]["line"], 3);
+
+    // The local itself: display string, plus a non-zero reference marking
+    // it expandable (unlike every scalar local elsewhere in the suite).
+    let vars = &responses_for(&messages, "variables")[0]["body"]["variables"];
+    assert_eq!(vars.as_array().unwrap().len(), 1);
+    assert_eq!(vars[0]["name"], "p");
+    assert_eq!(vars[0]["value"], "{ x: 1, y: 2 }");
+    assert_eq!(vars[0]["variablesReference"], 100_000);
+
+    // Expanding it: one child per field, in the record's canonical (sorted)
+    // order, each a plain scalar (variablesReference 0 — no further
+    // expansion).
+    let fields = responses_for(&messages, "variables")[1]["body"]["variables"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let field_view: Vec<(&str, &str, i64)> = fields
+        .iter()
+        .map(|f| {
+            (
+                f["name"].as_str().unwrap(),
+                f["value"].as_str().unwrap(),
+                f["variablesReference"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(field_view, vec![("x", "1", 0), ("y", "2", 0)]);
+
+    // Console evaluation sees the same structured value and can compute
+    // over its fields.
+    let evals = responses_for(&messages, "evaluate");
+    assert_eq!(evals[0]["body"]["result"], "{ x: 1, y: 2 }");
+    assert_eq!(evals[1]["body"]["result"], "3");
+
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
 fn column_breakpoints_distinguish_calls_on_one_line() {
     let program = fixture(
         "cols",
@@ -783,6 +851,42 @@ fn breakpoint_on_a_future_line_fires_after_unwind() {
     );
     let stack = &responses_for(&messages, "stackTrace")[0]["body"]["stackFrames"];
     assert_eq!(stack[0]["line"], 4);
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
+fn named_typed_local_displays_its_record_value() {
+    // Erasure end-to-end: a `Foo`-typed local is its underlying record in
+    // the variables panel — same display, same expansion as a bare record.
+    let program = fixture(
+        "named",
+        "type Foo = struct { x: usize };\nstatic main = fn {\n    let p = Foo(struct { x: 1 });\n    print(\"done\");\n};\n",
+    );
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        ("launch", json!({ "program": program.to_str().unwrap() })),
+        ("setBreakpoints", json!({ "breakpoints": [{ "line": 4 }] })),
+        ("configurationDone", json!({})),
+        ("stackTrace", json!({ "threadId": 1 })),
+        ("scopes", json!({ "frameId": 2 })),
+        ("variables", json!({ "variablesReference": 2 })),
+        ("variables", json!({ "variablesReference": 100_000 })),
+        ("continue", json!({ "threadId": 1 })),
+        ("disconnect", json!({})),
+    ]);
+
+    let vars = &responses_for(&messages, "variables")[0]["body"]["variables"];
+    assert_eq!(vars.as_array().unwrap().len(), 1);
+    assert_eq!(vars[0]["name"], "p");
+    assert_eq!(vars[0]["value"], "{ x: 1 }");
+    assert_eq!(vars[0]["variablesReference"], 100_000);
+
+    let fields = &responses_for(&messages, "variables")[1]["body"]["variables"];
+    assert_eq!(fields[0]["name"], "x");
+    assert_eq!(fields[0]["value"], "1");
+
     assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
 
     let _ = std::fs::remove_file(program);

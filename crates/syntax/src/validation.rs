@@ -33,11 +33,61 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             }
         } else if let Some(let_stmt) = ast::LetStmt::cast(node.clone()) {
             require_mut_names_a_binding(let_stmt.mut_token(), let_stmt.name(), &mut errors);
+        } else if let Some(record_ty) = ast::RecordType::cast(node.clone()) {
+            let names = record_ty
+                .fields()
+                .filter_map(|f| f.name())
+                .map(|n| (n.text(), n.syntax().text_range()));
+            report_duplicate_fields(names, &mut errors);
+            reject_open_record(record_ty.dot3_token(), &mut errors);
+        } else if let Some(record_expr) = ast::RecordExpr::cast(node.clone()) {
+            let names = record_expr
+                .fields()
+                .filter_map(|f| f.name_ref())
+                .map(|n| (n.text(), n.syntax().text_range()));
+            report_duplicate_fields(names, &mut errors);
+            reject_open_record(record_expr.dot3_token(), &mut errors);
+        } else if let Some(type_item) = ast::TypeItem::cast(node.clone()) {
+            reject_type_item_annotation(&type_item, &mut errors);
         } else if let Some(param) = ast::Param::cast(node) {
             require_mut_names_a_binding(param.mut_token(), param.name(), &mut errors);
         }
     }
     errors
+}
+
+/// Report every repeat of a field name after its first occurrence. Empty
+/// names (missing in broken code) are ignored so they never collide.
+fn report_duplicate_fields(
+    fields: impl Iterator<Item = (String, TextRange)>,
+    errors: &mut Vec<SyntaxError>,
+) {
+    let mut seen = std::collections::HashSet::new();
+    for (name, range) in fields {
+        if name.is_empty() {
+            continue;
+        }
+        if !seen.insert(name.clone()) {
+            errors.push(SyntaxError {
+                message: format!("duplicate field `{name}`"),
+                range,
+                fix: None,
+            });
+        }
+    }
+}
+
+/// `...` in a record type or literal parses (reserving the syntax) but is
+/// always rejected: open records are not supported yet.
+fn reject_open_record(dot3: Option<SyntaxToken>, errors: &mut Vec<SyntaxError>) {
+    let Some(dot3) = dot3 else {
+        return;
+    };
+    errors.push(SyntaxError {
+        message: "open record types are not supported yet".to_owned(),
+        range: dot3.text_range(),
+        fix: None,
+    });
 }
 
 /// The message for a non-variable assignment target. A `pub const` because
@@ -87,6 +137,32 @@ fn require_mut_names_a_binding(
                     mut_token.text_range().start(),
                     name.syntax().text_range().start(),
                 ),
+                insert: String::new(),
+            }],
+        }),
+    });
+}
+
+/// The grammar superset-parses a `: Type` annotation on a `type` item (the
+/// item shape is shared with `static`/`const`); reject it — a `type`
+/// declaration *is* the type, there is nothing to annotate — with a fix
+/// that drops the annotation.
+fn reject_type_item_annotation(type_item: &ast::TypeItem, errors: &mut Vec<SyntaxError>) {
+    let Some(colon) = type_item.colon_token() else {
+        return;
+    };
+    let end = type_item
+        .ty()
+        .map(|ty| ty.syntax().text_range().end())
+        .unwrap_or_else(|| colon.text_range().end());
+    let range = TextRange::new(colon.text_range().start(), end);
+    errors.push(SyntaxError {
+        message: "a `type` declaration takes no type annotation".to_owned(),
+        range,
+        fix: Some(Fix {
+            label: "Remove the annotation".to_owned(),
+            edits: vec![TextEdit {
+                range,
                 insert: String::new(),
             }],
         }),

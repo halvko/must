@@ -78,6 +78,11 @@ fn next_token(rest: &str) -> (SyntaxKind, usize, Option<String>) {
         ':' => (COLON, 1, None),
         ';' => (SEMICOLON, 1, None),
         ',' => (COMMA, 1, None),
+        // `...` is one token; a lone or double `.` falls out as `DOT`(s).
+        '.' if rest.as_bytes().get(1) == Some(&b'.') && rest.as_bytes().get(2) == Some(&b'.') => {
+            (DOT3, 3, None)
+        }
+        '.' => (DOT, 1, None),
         '=' => (EQ, 1, None),
         '+' => (PLUS, 1, None),
         '-' => (MINUS, 1, None),

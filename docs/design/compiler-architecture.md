@@ -25,6 +25,8 @@
 - **X09** The interpreter is an oracle, not a spec. A detected-UB stop is a property of the
   interpreter, never a guarantee of the language; compiled Must may do anything with the same
   program.
+- **X14** User-visible field and member order is definition order. Internal name-sorted
+  canonicalization is an identity device and must never leak.
 - **X16** Diagnostics have no stable codes. A severity word, free text and a caret are the whole
   contract. Warnings never affect exit status.
 
@@ -37,5 +39,7 @@
 
 ## Re-evaluate when
 
+- **Layout, tuples or FFI make field order observable** — MIR's order is name-sorted and
+  definition order does not exist at that boundary. Fix it then. **X14**
 - **Diagnostic codes get a customer** — a way to suppress a lint, or a way to reword without
   breaking anyone matching output. Message text is load-bearing today. **X16**

@@ -2,11 +2,12 @@
 
 use std::sync::Arc;
 
-use base_db::Db;
+use base_db::{Db, SourceFile};
 use ena::unify::{InPlaceUnificationTable, NoError, UnifyKey, UnifyValue};
 
-use crate::ItemId;
-use crate::item_tree::TypeRef;
+use crate::item_tree::{TypeRef, type_decl};
+use crate::scopes::{Resolution, type_scope};
+use crate::{ItemId, ItemLoc};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
@@ -21,6 +22,19 @@ pub enum Ty {
     Str,
     Bool,
     Fn(Arc<FnTy>),
+    /// `{ x: usize, y: str }`: a structural record. Two record types are the
+    /// same type exactly when their field sets are equal (same names, same
+    /// types) — no subtyping, no width coercion. Fields are always sorted by
+    /// name (see [`Ty::record`]), so plain equality is field-set equality.
+    Record(Arc<RecordTy>),
+    /// A nominal type declared by a `type` item. Identity *is* the
+    /// declaration (the same range-free scheme as [`ItemLoc`]): two `Named`s
+    /// unify exactly when they point at the same declaration, and a `Named`
+    /// never unifies with the structurally-identical bare record — no
+    /// implicit nominal↔structural coercion in either direction. The
+    /// declared shape is *not* carried here; it is projected on demand
+    /// through [`type_underlying`] (field access, construction).
+    Named(ItemLoc),
     /// Type of broken code. Infectious and silent: producing further
     /// diagnostics from an `Error` type would only be noise.
     Error,
@@ -32,15 +46,46 @@ pub struct FnTy {
     pub ret: Ty,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct RecordTy {
+    /// Sorted by field name — the canonical order for equality, unification
+    /// and display. Construct via [`Ty::record`] to keep the invariant.
+    pub fields: Vec<(String, Ty)>,
+}
+
+impl RecordTy {
+    pub fn field_ty(&self, name: &str) -> Option<&Ty> {
+        self.fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, ty)| ty)
+    }
+}
+
 impl Ty {
     pub fn fn_type(params: Vec<Ty>, ret: Ty) -> Ty {
         Ty::Fn(Arc::new(FnTy { params, ret }))
+    }
+
+    /// A record type in canonical form: fields sorted by name. Duplicate
+    /// names keep the FIRST occurrence (the stable sort preserves source
+    /// order among equals) — validation already errors on the duplicate, so
+    /// this is recovery, not semantics.
+    pub fn record(mut fields: Vec<(String, Ty)>) -> Ty {
+        fields.sort_by(|(a, _), (b, _)| a.cmp(b));
+        fields.dedup_by(|second, first| second.0 == first.0);
+        Ty::Record(Arc::new(RecordTy { fields }))
     }
 
     pub fn contains_error(&self) -> bool {
         match self {
             Ty::Error => true,
             Ty::Fn(f) => f.ret.contains_error() || f.params.iter().any(Ty::contains_error),
+            Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| ty.contains_error()),
+            // Identity only: a broken *declaration* carries its own
+            // diagnostics at the declaration site; uses of the name must
+            // not cascade.
+            Ty::Named(_) => false,
             _ => false,
         }
     }
@@ -66,6 +111,19 @@ impl Ty {
                     ret => format!("fn({params}) -> {}", ret.display()),
                 }
             }
+            Ty::Record(rec) => {
+                if rec.fields.is_empty() {
+                    return "struct {}".to_owned();
+                }
+                let fields = rec
+                    .fields
+                    .iter()
+                    .map(|(name, ty)| format!("{name}: {}", ty.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("struct {{ {fields} }}")
+            }
+            Ty::Named(loc) => loc.display_name().to_owned(),
         }
     }
 }
@@ -122,31 +180,61 @@ pub fn builtin_type_by_name(name: &str) -> Option<Ty> {
     }
 }
 
+/// Resolve a name in *type* position: a `type` item wins, then the builtin
+/// types, and a value item is no type at all (the diagnostics pass in
+/// [`crate::file_diagnostics`] mirrors this order exactly — the two must
+/// agree so every silent `Ty::Error` here has a diagnostic there).
+///
+/// Goes through [`type_scope`] — not [`crate::scopes::file_scope`] — so
+/// annotation lowering (and with it `infer`/`signature`) only depends on
+/// the file's *type* items and backdates across value-item edits.
+fn lower_type_path(db: &dyn Db, file: SourceFile, name: &str) -> Ty {
+    match type_scope(db, file).resolve(name) {
+        Some(Resolution::TypeItem(loc)) => Ty::Named(loc),
+        // The duplicate definitions carry the diagnostics.
+        Some(Resolution::Ambiguous(_)) => Ty::Error,
+        // A value item (invisible here) or nothing: only a builtin type
+        // name can save it.
+        _ => builtin_type_by_name(name).unwrap_or(Ty::Error),
+    }
+}
+
 /// Lower a syntactic type annotation. References are transparent for now
 /// (`&'static str` and `str` are the same type to inference).
-pub(crate) fn lower_type_ref(value: &TypeRef, table: &mut InPlaceUnificationTable<TyVar>) -> Ty {
+pub(crate) fn lower_type_ref(
+    db: &dyn Db,
+    file: SourceFile,
+    value: &TypeRef,
+    table: &mut InPlaceUnificationTable<TyVar>,
+) -> Ty {
     match value {
         TypeRef::Unit => Ty::Unit,
         TypeRef::Never => Ty::Never,
         TypeRef::Fn { params, ret } => {
             let params = params
                 .iter()
-                .map(|param_ty| lower_type_ref(param_ty, table))
+                .map(|param_ty| lower_type_ref(db, file, param_ty, table))
                 .collect();
 
             let ret = ret
                 .as_ref()
-                .map(|ret_ty| lower_type_ref(ret_ty, table))
+                .map(|ret_ty| lower_type_ref(db, file, ret_ty, table))
                 .unwrap_or_else(|| Ty::Infer(table.new_key(TyVarValue::Unknown)));
 
             Ty::fn_type(params, ret)
         }
         TypeRef::Ref(type_ref) => {
             // TODO: once we introduce references this can't discard them any longer
-            lower_type_ref(type_ref, table)
+            lower_type_ref(db, file, type_ref, table)
         }
-        TypeRef::Path(path) => builtin_type_by_name(path).unwrap_or(Ty::Error),
+        TypeRef::Path(path) => lower_type_path(db, file, path),
         TypeRef::Hole => Ty::Infer(table.new_key(TyVarValue::Unknown)),
+        TypeRef::Record(fields) => Ty::record(
+            fields
+                .iter()
+                .map(|(name, ty)| (name.clone(), lower_type_ref(db, file, ty, table)))
+                .collect(),
+        ),
         TypeRef::Error => Ty::Error,
     }
 }
@@ -161,9 +249,33 @@ pub(crate) fn is_fully_typed(value: &TypeRef) -> bool {
             params.iter().all(is_fully_typed) && ret.as_deref().is_some_and(is_fully_typed)
         }
         TypeRef::Ref(inner) => is_fully_typed(inner),
+        TypeRef::Record(fields) => fields.iter().all(|(_, ty)| is_fully_typed(ty)),
         TypeRef::Hole => false,
         _ => true,
     }
+}
+
+/// The underlying record type a `type` item declares, or `None` when the
+/// declaration is broken (RHS not a `struct` literal — diagnosed at the
+/// declaration). Field access on a [`Ty::Named`] and construction calls
+/// project through this; MIR uses its sorted field order for projections.
+///
+/// A declaration's `TypeRef`s can only be `Path`/`Record`/`Error` (see
+/// [`crate::item_tree::type_decl`]), none of which mint inference
+/// variables, so lowering with a throwaway table is sound. Recursive
+/// declarations (`type Foo = struct { next: Foo }`) terminate because
+/// lowering a path stops at [`Ty::Named`] — nothing expands.
+#[salsa::tracked]
+pub fn type_underlying<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<Ty> {
+    let decl = type_decl(db, item).as_ref()?;
+    let file = item.file(db);
+    let mut table = InPlaceUnificationTable::new();
+    Some(Ty::record(
+        decl.fields
+            .iter()
+            .map(|(name, ty)| (name.clone(), lower_type_ref(db, file, ty, &mut table)))
+            .collect(),
+    ))
 }
 
 /// The type other items see for `item`. A fully-typed contract is the
@@ -185,7 +297,12 @@ pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
         if is_fully_typed(type_ref) {
             // Fully typed: no hole ever creates a variable, so the
             // lowering table stays empty and is thrown away.
-            return lower_type_ref(type_ref, &mut InPlaceUnificationTable::new());
+            return lower_type_ref(
+                db,
+                item.file(db),
+                type_ref,
+                &mut InPlaceUnificationTable::new(),
+            );
         }
     }
     let Some(index) = crate::item_index(db, item) else {

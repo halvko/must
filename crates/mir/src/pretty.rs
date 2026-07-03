@@ -4,8 +4,8 @@
 use std::fmt::Write as _;
 
 use crate::{
-    BlockId, BodyId, Const, LocalId, MirBody, MirLowered, Operand, Rvalue, StatementKind,
-    TerminatorKind,
+    AggregateKind, BlockId, BodyId, Const, LocalId, MirBody, MirLowered, Operand, Rvalue,
+    StatementKind, TerminatorKind,
 };
 
 pub fn render(lowered: &MirLowered) -> String {
@@ -60,6 +60,19 @@ fn render_rvalue(rvalue: &Rvalue) -> String {
         Rvalue::BinaryOp(bin_op, l, r) => {
             format!("{bin_op:?}({}, {})", operand(l), operand(r))
         }
+        Rvalue::Aggregate {
+            kind: AggregateKind::Record(fields),
+            ops,
+        } => {
+            let parts = fields
+                .iter()
+                .zip(ops)
+                .map(|(name, op)| format!("{name}: {}", operand(op)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{ {parts} }}")
+        }
+        Rvalue::Field { base, index } => format!("{}.{index}", operand(base)),
     }
 }
 

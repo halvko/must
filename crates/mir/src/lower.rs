@@ -13,8 +13,8 @@ use la_arena::{Arena, ArenaMap};
 use rustc_hash::FxHashMap;
 
 use crate::{
-    BlockData, BlockId, BodyId, Const, LocalData, LocalId, MirBody, MirDiagnostic, MirLowered,
-    Operand, Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
+    AggregateKind, BlockData, BlockId, BodyId, Const, LocalData, LocalId, MirBody, MirDiagnostic,
+    MirLowered, Operand, Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
 };
 
 pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
@@ -116,6 +116,32 @@ impl LowerCtx<'_> {
                 | InferenceDiagnostic::AssignToBuiltin { target, .. } => {
                     self.assign_traps.insert(*target, diag.message());
                 }
+                // A literal that doesn't have the record type it must have,
+                // or a field value with nowhere to go: the value must not
+                // flow on. `RecordLitExtraField` squiggles the field name,
+                // but the diagnostic's `expr` is the field's value — a value
+                // trap there is the direct reconciliation.
+                InferenceDiagnostic::RecordLitMissingFields { expr, .. }
+                | InferenceDiagnostic::RecordLitExtraField { expr, .. } => {
+                    self.value_traps.insert(*expr, diag.message());
+                }
+                // Both are reported at (or inside) the field-access
+                // expression, which is exactly the value that cannot be
+                // produced — the reconciliation is direct.
+                InferenceDiagnostic::NoSuchField { expr, .. }
+                | InferenceDiagnostic::FieldOnUnknownType { expr, .. } => {
+                    self.value_traps.insert(*expr, diag.message());
+                }
+                // A bare type name read as a value: the name itself is the
+                // value that cannot be produced.
+                InferenceDiagnostic::TypeNotValue { expr, .. } => {
+                    self.value_traps.insert(*expr, diag.message());
+                }
+                // A construction call with the wrong arity: like
+                // `ArgCountMismatch`, the call operation itself is broken.
+                InferenceDiagnostic::TypeCtorArgCount { expr, .. } => {
+                    self.call_traps.insert(*expr, diag.message());
+                }
             }
         }
         // Const-check diagnostics are reported on the *callee* (the
@@ -200,6 +226,29 @@ impl LowerCtx<'_> {
             ExprData::Literal(LiteralData::Bool(v)) => Operand::Const(Const::Bool(*v)),
             ExprData::NameRef(name) => self.lower_name_ref(b, expr, name),
             ExprData::Call { callee, args } => {
+                // A construction call `Foo(arg)`. Erasure decision: nominal
+                // types exist only in the static type system — a `Foo` *is*
+                // its underlying record at runtime (`Value::Record`, no
+                // tag), matching the language's types-don't-exist-at-runtime
+                // stance. So the constructor lowers to nothing at all: the
+                // argument's operand simply flows through. Equality between
+                // two `Foo`s is therefore structural under the hood, and the
+                // type system alone guarantees a `Foo` never meets a bare
+                // record in a comparison. The callee is not lowered — a type
+                // name has no value (reading one traps, see
+                // `lower_name_ref`); as a construction head it is legal and
+                // erased.
+                if let Some(Resolution::TypeItem(_)) = self.resolutions.get(*callee) {
+                    let mut arg_ops: Vec<Operand> =
+                        args.iter().map(|&arg| self.lower_expr(b, arg)).collect();
+                    // Wrong arity: inference seeded a call trap
+                    // (`TypeCtorArgCount`); the arguments were still
+                    // evaluated for their effects, like any broken call.
+                    if let Some(message) = self.call_traps.get(&expr).cloned() {
+                        return self.trap(b, expr, message);
+                    }
+                    return arg_ops.pop().unwrap_or(Operand::Const(Const::Unit));
+                }
                 let callee_op = self.lower_expr(b, *callee);
                 let arg_ops: Vec<Operand> =
                     args.iter().map(|&arg| self.lower_expr(b, arg)).collect();
@@ -345,6 +394,105 @@ impl LowerCtx<'_> {
                 self.const_blocks.push((expr, body_id));
                 Operand::Const(Const::ConstBlock(body_id))
             }
+            // A record literal lowers to an `Aggregate`. Field initializers
+            // are lowered in *source* order (so calls, mutation, etc. happen
+            // in the order the program writes them), collected by name, then
+            // reassembled into the operand list in the type's canonical
+            // (sorted) order — the same order `Ty::Record` uses, which is
+            // what `Rvalue::Field`'s index refers to. A field the literal
+            // doesn't actually supply (missing-field diagnostic, already a
+            // pending value trap) or one the type doesn't want (extra-field
+            // diagnostic, likewise) gets a harmless placeholder: the whole
+            // expression is about to be trapped by the `lower_expr` wrapper,
+            // so the aggregate itself is never observed.
+            ExprData::RecordLit { fields } => {
+                let mut by_name: Vec<(String, Operand)> = Vec::new();
+                for (name, field_expr) in fields {
+                    let op = self.lower_expr(b, *field_expr);
+                    if !by_name.iter().any(|(n, _)| n == name) {
+                        by_name.push((name.clone(), op));
+                    }
+                }
+                let field_names: Vec<String> = match self.ty(expr) {
+                    Ty::Record(rec) => rec.fields.iter().map(|(name, _)| name.clone()).collect(),
+                    // The literal didn't conclude a record type (a plain
+                    // type mismatch elsewhere already traps this value) —
+                    // any deterministic order keeps lowering total.
+                    _ => {
+                        let mut names: Vec<String> =
+                            by_name.iter().map(|(name, _)| name.clone()).collect();
+                        names.sort();
+                        names
+                    }
+                };
+                let ops = field_names
+                    .iter()
+                    .map(|name| {
+                        by_name
+                            .iter()
+                            .find(|(n, _)| n == name)
+                            .map(|(_, op)| op.clone())
+                            .unwrap_or(Operand::Const(Const::Unit))
+                    })
+                    .collect();
+                let dest = b.temp(self.ty(expr));
+                b.push_assign(
+                    dest,
+                    Rvalue::Aggregate {
+                        kind: AggregateKind::Record(field_names),
+                        ops,
+                    },
+                    expr,
+                );
+                Operand::Copy(dest)
+            }
+            // `receiver.field` lowers to a positional projection: the
+            // receiver's record type is already resolved by inference, so
+            // the field name becomes an index into its sorted field list.
+            ExprData::Field { receiver, name } => {
+                let base = self.lower_expr(b, *receiver);
+                // No field name at all (`a.`): the parse error covers it,
+                // same invented-but-generic wording as a missing operand.
+                if name.is_empty() {
+                    return self.trap(b, expr, "syntax error: missing field name".to_owned());
+                }
+                // A named receiver projects through its declared shape:
+                // erased at runtime, the value is the underlying record and
+                // the index comes from the declaration's sorted field order
+                // (the same canonical order `Ty::Record` uses).
+                let receiver_record = match self.ty(*receiver) {
+                    Ty::Record(rec) => Some(Ty::Record(rec)),
+                    Ty::Named(loc) => hir::type_underlying(self.db, loc.to_id(self.db)),
+                    _ => None,
+                };
+                match receiver_record {
+                    Some(Ty::Record(rec)) => {
+                        match rec.fields.iter().position(|(n, _)| n == name) {
+                            Some(index) => {
+                                let dest = b.temp(self.ty(expr));
+                                b.push_assign(
+                                    dest,
+                                    Rvalue::Field {
+                                        base,
+                                        index: index as u32,
+                                    },
+                                    expr,
+                                );
+                                Operand::Copy(dest)
+                            }
+                            // `NoSuchField` already seeded a value trap for
+                            // `expr`; the `lower_expr` wrapper replaces this
+                            // placeholder.
+                            None => Operand::Const(Const::Unit),
+                        }
+                    }
+                    // Not a (known) record: `NoSuchField`/`FieldOnUnknownType`
+                    // already seeded a value trap, or the receiver diverges
+                    // or was itself already trapped — either way this
+                    // operand is never observed.
+                    _ => Operand::Const(Const::Unit),
+                }
+            }
             ExprData::FnLiteral {
                 params,
                 body: fn_body,
@@ -401,6 +549,19 @@ impl LowerCtx<'_> {
                     return self.trap(b, expr, message);
                 }
                 Operand::Const(Const::Item(loc.clone()))
+            }
+            // A type has no value to read. Construction heads never get
+            // here (the `Call` arm intercepts them); every other read is
+            // justified by the type-not-a-value diagnostic, whose message
+            // this trap re-renders (kept total even if the seeding ever
+            // drifts).
+            Some(Resolution::TypeItem(_)) => {
+                let message = InferenceDiagnostic::TypeNotValue {
+                    expr,
+                    name: name.to_owned(),
+                }
+                .message();
+                self.trap(b, expr, message)
             }
             // Justified by the duplicate-definition diagnostics.
             Some(Resolution::Ambiguous(_)) => {
@@ -460,12 +621,22 @@ impl LowerCtx<'_> {
                 Some(Resolution::Item(loc)) => {
                     let constness = hir::item_data(self.db, loc.to_id(self.db))
                         .as_ref()
-                        .map(|it| it.constness)
+                        .and_then(|it| it.kind.constness())
                         .unwrap_or(hir::Constness::Static);
                     let message = InferenceDiagnostic::AssignToItem {
                         target,
                         item: loc.clone(),
                         constness,
+                    }
+                    .message();
+                    self.trap(b, target, message);
+                }
+                // Assigning to a type name: the target read already carries
+                // the type-not-a-value diagnostic; trap with its message.
+                Some(Resolution::TypeItem(_)) => {
+                    let message = InferenceDiagnostic::TypeNotValue {
+                        expr: target,
+                        name: name.clone(),
                     }
                     .message();
                     self.trap(b, target, message);

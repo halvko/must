@@ -1207,7 +1207,11 @@ static e = const { 2 };
         .to_owned(),
     );
     let tree = item_tree(&db, file);
-    let constness: Vec<Constness> = tree.items.iter().map(|item| item.constness).collect();
+    let constness: Vec<Constness> = tree
+        .items
+        .iter()
+        .filter_map(|item| item.kind.constness())
+        .collect();
     assert_eq!(
         constness,
         vec![
@@ -1593,6 +1597,576 @@ fn assignment_to_an_unresolved_name_does_not_panic() {
         "static f = fn { y = 2; };",
         expect![[r#"
             16..17: unresolved name `y`
+        "#]],
+    );
+}
+
+// --- Records: structural typing ---
+
+#[test]
+fn record_literal_infers_structurally() {
+    check_infer(
+        r#"static f = fn { let p = struct { x: 1, y: "s" }; };"#,
+        expect![[r#"
+            11..50 'fn { let p = stru...': fn()
+            14..50 '{ let p = struct ...': ()
+            20..21 'p': struct { x: usize, y: str }
+            24..47 'struct { x: 1, y:...': struct { x: usize, y: str }
+            36..37 '1': usize
+            42..45 '"s"': str
+        "#]],
+    );
+}
+
+#[test]
+fn record_type_canonicalizes_field_order() {
+    // The annotation writes the fields in one order, the literal in the
+    // other: field order is irrelevant to the type, so both are the same
+    // record and nothing is reported.
+    check_diagnostics(
+        r#"static f = fn { let p: struct { y: str, x: usize } = struct { x: 1, y: "s" }; };"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn annotated_let_with_matching_record_is_ok() {
+    check_diagnostics(
+        r#"static f = fn { let p: struct { x: usize, y: str } = struct { x: 1, y: "s" }; };"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn record_field_mismatch_blames_the_field_and_cites_the_annotation() {
+    // Bidirectional: the annotation's field types flow into the field
+    // initializers, so the squiggle lands on `"s"` (not the whole literal)
+    // and cites the annotation as the cause.
+    check_diagnostics(
+        r#"static f = fn { let p: struct { x: usize } = struct { x: "s" }; };"#,
+        expect![[r#"
+            57..60: type mismatch: expected `usize`, found `str` (expected `usize` because of this annotation at 23..42)
+        "#]],
+    );
+}
+
+#[test]
+fn record_literal_missing_field() {
+    check_diagnostics(
+        r#"static f = fn { let p: struct { x: usize, y: str } = struct { x: 1 }; };"#,
+        expect![[r#"
+            53..68: record literal is missing field `y: str`
+        "#]],
+    );
+}
+
+#[test]
+fn record_literal_missing_several_fields() {
+    check_diagnostics(
+        r#"static f = fn { let p: struct { x: usize, y: str, z: bool } = struct { y: "s" }; };"#,
+        expect![[r#"
+            62..79: record literal is missing fields `x: usize`, `z: bool`
+        "#]],
+    );
+}
+
+#[test]
+fn record_literal_extra_field() {
+    // Exact field-set equality: the extra field is an error (squiggle on
+    // its name), never silently dropped.
+    check_diagnostics(
+        r#"static f = fn { let p: struct { x: usize } = struct { x: 1, z: 2 }; };"#,
+        expect![[r#"
+            60..61: no field `z` in expected type `struct { x: usize }`
+        "#]],
+    );
+}
+
+#[test]
+fn record_literal_against_non_record_expectation() {
+    check_diagnostics(
+        r#"static f = fn { let n: usize = struct { x: 1 }; };"#,
+        expect![[r#"
+            31..46: type mismatch: expected `usize`, found `struct { x: usize }` (expected `usize` because of this annotation at 23..28)
+        "#]],
+    );
+}
+
+#[test]
+fn field_access_infers_the_field_type() {
+    check_infer(
+        r#"static f = fn { let p = struct { x: 1 }; let y = p.x; };"#,
+        expect![[r#"
+            11..55 'fn { let p = stru...': fn()
+            14..55 '{ let p = struct ...': ()
+            20..21 'p': struct { x: usize }
+            24..39 'struct { x: 1 }': struct { x: usize }
+            36..37 '1': usize
+            45..46 'y': usize
+            49..50 'p': struct { x: usize }
+            49..52 'p.x': usize
+        "#]],
+    );
+}
+
+#[test]
+fn field_access_unknown_field() {
+    check_diagnostics(
+        r#"static f = fn { let p = struct { x: 1 }; p.z; };"#,
+        expect![[r#"
+            43..44: no field `z` on `struct { x: usize }`
+        "#]],
+    );
+}
+
+#[test]
+fn field_access_on_non_record() {
+    check_diagnostics(
+        r#"static f = fn { let n = 1; n.x; };"#,
+        expect![[r#"
+            29..30: no field `x` on `usize`
+        "#]],
+    );
+}
+
+#[test]
+fn chained_field_access_through_nested_records() {
+    check_infer(
+        r#"static f = fn { let a = struct { b: struct { c: "deep" } }; a.b.c };"#,
+        expect![[r#"
+            11..67 'fn { let a = stru...': fn() -> str
+            14..67 '{ let a = struct ...': str
+            20..21 'a': struct { b: struct { c: str } }
+            24..58 'struct { b: struc...': struct { b: struct { c: str } }
+            36..56 'struct { c: "deep" }': struct { c: str }
+            48..54 '"deep"': str
+            60..61 'a': struct { b: struct { c: str } }
+            60..63 'a.b': struct { c: str }
+            60..65 'a.b.c': str
+        "#]],
+    );
+}
+
+#[test]
+fn field_access_on_unannotated_param_requires_an_annotation() {
+    // Exact structural equality can't run backwards from a field name, so
+    // an undetermined receiver is reported (on the receiver — the
+    // annotation goes there), not silently left dangling.
+    check_diagnostics(
+        r#"static f = fn (p) { p.x };"#,
+        expect![[r#"
+            20..21: cannot determine the type of this expression; add a type annotation
+        "#]],
+    );
+}
+
+#[test]
+fn shorthand_field_resolves_and_type_checks() {
+    check_diagnostics(
+        r#"static f = fn { let x = 1; let p: struct { x: usize } = struct { x, }; };"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn shorthand_field_with_wrong_type_blames_the_shorthand() {
+    // The shorthand's value is a normal reference to `s`, so the squiggle
+    // lands on the shorthand name itself.
+    check_diagnostics(
+        r#"static f = fn { let s = "a"; let p: struct { s: usize } = struct { s, }; };"#,
+        expect![[r#"
+            67..68: type mismatch: expected `usize`, found `str` (expected `usize` because of this annotation at 36..55)
+        "#]],
+    );
+}
+
+#[test]
+fn unresolved_shorthand_field_reports_unresolved_name() {
+    check_diagnostics(
+        r#"static f = fn { let p = struct { x, }; };"#,
+        expect![[r#"
+            33..34: unresolved name `x`
+        "#]],
+    );
+}
+
+#[test]
+fn if_branches_with_mismatched_records_report_branch_mismatch() {
+    // Join regression: records go through the existing join machinery
+    // unchanged, so two branches disagreeing on a record type produce the
+    // ordinary branch-mismatch diagnostic, verbatim.
+    check_diagnostics(
+        r#"static f = fn (c: bool) { if c { struct { x: 1 } } else { struct { x: "s" } } };"#,
+        expect![[r#"
+            58..75: `if` branches have incompatible types: `struct { x: usize }` vs `struct { x: str }`; add a type annotation to decide between them (this branch has type `struct { x: usize }` at 33..48)
+        "#]],
+    );
+}
+
+#[test]
+fn record_literal_in_initializer_is_const_clean() {
+    // Record construction is not a call: const-checking has nothing to say
+    // about a pure record literal in an item initializer.
+    check_diagnostics(r#"static p = struct { x: 1, y: "s" };"#, expect![[r#""#]]);
+}
+
+#[test]
+fn record_signature_flows_across_items() {
+    check_diagnostics(
+        r#"
+static origin: struct { x: usize, y: usize } = struct { x: 0, y: 0 };
+static f = fn { let x = origin.x; };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+/// `is_fully_typed` digs into record fields: a record annotation with a
+/// hole field is only a partial contract, so the item routes through group
+/// inference and — the hole staying unfilled — the use site asks for an
+/// annotation instead of the annotation acting as a firewall. A hole-free
+/// record annotation is a full contract: its item is a firewall edge, and
+/// editing its body never re-runs its caller's group inference.
+#[test]
+fn hole_field_record_annotation_is_not_a_firewall_contract() {
+    // `panic` diverges, so nothing ever fills `y`: the group signature has
+    // an undetermined field, and the use site requests an annotation
+    // rather than silently publishing `y: _` as if it were a contract.
+    check_diagnostics(
+        r#"
+static s: struct { x: usize, y: _ } = panic("boom");
+static main = fn { s; };
+"#,
+        expect![[r#"
+            73..74: cannot infer the type of `s` across items; add a type annotation to its definition (defined here at 8..9)
+        "#]],
+    );
+
+    // Positive: `a`'s annotation names every field, so it is a full
+    // contract — `a` stays out of `b`'s binding group.
+    use salsa::Setter as _;
+    use std::sync::{Arc, Mutex};
+
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let log_handle = Arc::clone(&log);
+    let mut db = RootDatabase::with_event_callback(Box::new(move |event| {
+        if let salsa::EventKind::WillExecute { database_key } = event.kind {
+            log_handle.lock().unwrap().push(format!("{database_key:?}"));
+        }
+    }));
+
+    let text_v1 = "static a: struct { x: usize } = struct { x: 1 };\n\
+                   static b = fn { a.x; };\n";
+    // Only `a`'s body changes; the annotation (the whole contract) is
+    // identical, so dependents must backdate.
+    let text_v2 = "static a: struct { x: usize } = struct { x: 2 };\n\
+                   static b = fn { a.x; };\n";
+
+    let file = SourceFile::new(&db, "test.must".to_owned(), text_v1.to_owned());
+    for &item in crate::file_item_ids(&db, file) {
+        crate::infer::infer(&db, item);
+    }
+    let executed_infers = |log: &Mutex<Vec<String>>| {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.contains("infer"))
+            .count()
+    };
+    assert!(
+        executed_infers(&log) >= 2,
+        "both items inferred initially; executed: {:?}",
+        log.lock().unwrap()
+    );
+
+    log.lock().unwrap().clear();
+    file.set_text(&mut db).to(text_v2.to_owned());
+    for &item in crate::file_item_ids(&db, file) {
+        crate::infer::infer(&db, item);
+    }
+    let log = log.lock().unwrap();
+    // `a`'s annotation is a full contract, so `b` never joins its group:
+    // editing `a`'s body re-infers `a` alone and never runs `infer_group`.
+    assert!(
+        !log.iter().any(|entry| entry.contains("infer_group")),
+        "a hole-free record annotation must be a firewall edge: {log:#?}"
+    );
+    assert_eq!(
+        log.iter().filter(|entry| entry.contains("infer")).count(),
+        1,
+        "only the edited item may re-infer; executed: {log:#?}"
+    );
+}
+
+// ---- named types (`type Foo = struct { ... };`) ----
+
+#[test]
+fn type_decl_alone_is_clean() {
+    check_diagnostics("type Foo = struct { x: usize, y: str };", expect![[r#""#]]);
+}
+
+#[test]
+fn type_and_static_share_the_flat_namespace() {
+    // One namespace: a `type` and a `static` of the same name collide via
+    // the ordinary duplicate machinery.
+    check_diagnostics(
+        r#"
+type Foo = struct { x: usize };
+static Foo = 5;
+"#,
+        expect![[r#"
+            40..43: `Foo` is defined multiple times (first defined here at 6..9)
+        "#]],
+    );
+}
+
+#[test]
+fn type_rhs_must_be_a_struct_literal() {
+    check_diagnostics(
+        "type Foo = 5;",
+        expect![[r#"
+            11..12: only a `struct` literal can declare a type (for now)
+        "#]],
+    );
+}
+
+#[test]
+fn type_decl_fields_must_be_types() {
+    // A computed expression and a shorthand field are both "not a type";
+    // an unknown or value name in a field gets the type-position errors.
+    check_diagnostics(
+        r#"
+static five = 5;
+type Foo = struct { a: 5, b, c: missing, d: five };
+"#,
+        expect![[r#"
+            41..42: expected a type for field `a`
+            44..45: expected a type for field `b`
+            50..57: unknown type `missing`
+            62..66: `five` is not a type
+        "#]],
+    );
+}
+
+#[test]
+fn annotation_resolves_named_type_and_field_projects() {
+    check_infer(
+        r#"
+type Foo = struct { x: usize };
+static f = fn (p: Foo) -> usize { p.x };
+"#,
+        expect![[r#"
+            44..72 'fn (p: Foo) -> us...': fn(Foo) -> usize
+            48..49 'p': Foo
+            65..72 '{ p.x }': usize
+            67..68 'p': Foo
+            67..70 'p.x': usize
+        "#]],
+    );
+}
+
+#[test]
+fn value_item_in_type_position_is_an_error() {
+    check_diagnostics(
+        r#"
+static double = fn (x: usize) -> usize { x + x };
+static f = fn (p: double) { };
+"#,
+        expect![[r#"
+            69..75: `double` is not a type
+        "#]],
+    );
+}
+
+#[test]
+fn bare_type_name_is_not_a_value() {
+    check_diagnostics(
+        r#"
+type Foo = struct { x: usize };
+static x = Foo;
+"#,
+        expect![[r#"
+            44..47: `Foo` is a type, not a value
+        "#]],
+    );
+}
+
+#[test]
+fn construction_call_produces_the_named_type() {
+    check_infer(
+        r#"
+type Foo = struct { x: usize };
+static p = Foo(struct { x: 1 });
+"#,
+        expect![[r#"
+            44..47 'Foo': fn(struct { x: usize }) -> Foo
+            44..64 'Foo(struct { x: 1 })': Foo
+            48..63 'struct { x: 1 }': struct { x: usize }
+            60..61 '1': usize
+        "#]],
+    );
+}
+
+#[test]
+fn construction_field_mismatch_cites_the_field_declaration() {
+    // The squiggle lands on the wrong field's value; the hint points at the
+    // field's declaration inside the `type` item.
+    check_diagnostics(
+        r#"
+type Foo = struct { x: usize };
+static p = Foo(struct { x: "s" });
+"#,
+        expect![[r#"
+            60..63: type mismatch: expected `usize`, found `str` (expected `usize` because of this field declaration at 21..29)
+        "#]],
+    );
+}
+
+#[test]
+fn construction_non_record_argument_cites_the_declaration() {
+    check_diagnostics(
+        r#"
+type Foo = struct { x: usize };
+static p = Foo(5);
+"#,
+        expect![[r#"
+            48..49: type mismatch: expected `struct { x: usize }`, found `usize` (expected `struct { x: usize }` because of `Foo`'s declaration at 6..9)
+        "#]],
+    );
+}
+
+#[test]
+fn construction_takes_exactly_one_argument() {
+    check_diagnostics(
+        r#"
+type Foo = struct { x: usize };
+static p = Foo(struct { x: 1 }, 2);
+static q = Foo();
+"#,
+        expect![[r#"
+            44..67: `Foo` takes exactly one argument (its underlying `struct` value), found 2 (`Foo` is defined here at 6..9)
+            80..85: `Foo` takes exactly one argument (its underlying `struct` value), found 0 (`Foo` is defined here at 6..9)
+        "#]],
+    );
+}
+
+#[test]
+fn named_type_is_distinct_from_its_underlying_record() {
+    // No implicit nominal↔structural coercion in either direction. The
+    // named-expected direction carries the construct-it hint.
+    check_diagnostics(
+        r#"
+type Foo = struct { x: usize };
+static a: Foo = struct { x: 1 };
+static b: struct { x: usize } = Foo(struct { x: 1 });
+"#,
+        expect![[r#"
+            49..64: type mismatch: expected `Foo`, found `struct { x: usize }`; `Foo` is a distinct type — construct it with `Foo(...)` (expected `Foo` because of this annotation at 43..46)
+            98..118: type mismatch: expected `struct { x: usize }`, found `Foo` (expected `struct { x: usize }` because of this annotation at 76..95)
+        "#]],
+    );
+}
+
+#[test]
+fn named_types_unify_by_declaration_not_shape() {
+    // Same shape, different declarations: still different types.
+    check_diagnostics(
+        r#"
+type Meters = struct { value: usize };
+type Feet = struct { value: usize };
+static len: Meters = Feet(struct { value: 3 });
+"#,
+        expect![[r#"
+            98..123: type mismatch: expected `Meters`, found `Feet` (expected `Meters` because of this annotation at 89..95)
+        "#]],
+    );
+}
+
+#[test]
+fn no_such_field_on_named_type_points_at_the_declaration() {
+    check_diagnostics(
+        r#"
+type Foo = struct { x: usize };
+static f = fn (p: Foo) { p.z };
+"#,
+        expect![[r#"
+            60..61: no field `z` on `Foo` (the fields of `Foo` are declared here at 12..31)
+        "#]],
+    );
+}
+
+#[test]
+fn equality_between_named_and_bare_record_is_a_type_error() {
+    // Eq/Ne go through unification, so nominal vs structural is rejected
+    // like any other mismatch.
+    check_diagnostics(
+        r#"
+type Foo = struct { x: usize };
+static eq = Foo(struct { x: 1 }) == struct { x: 1 };
+"#,
+        expect![[r#"
+            69..84: type mismatch: expected `Foo`, found `struct { x: usize }`; `Foo` is a distinct type — construct it with `Foo(...)` (this operand has type `Foo` at 45..65)
+        "#]],
+    );
+}
+
+#[test]
+fn construction_is_legal_in_const_contexts() {
+    // Pure construction, not a user fn call: fine in an item initializer
+    // (always a const context) and inside a `const { ... }` block.
+    check_diagnostics(
+        r#"
+type Foo = struct { x: usize };
+static a = Foo(struct { x: 1 });
+const b = const { Foo(struct { x: 2 }) };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn recursive_type_declaration_does_not_hang() {
+    // `Ty::Named` is identity, not expansion: a self-referential field
+    // lowers to `Named(Foo)` and stops.
+    check_diagnostics(
+        r#"
+type Foo = struct { next: Foo };
+static f = fn (p: Foo) { p.next.next };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn assigning_to_a_type_name_reports_type_not_value() {
+    check_diagnostics(
+        r#"
+type Foo = struct { x: usize };
+static f = fn { Foo = 5; };
+"#,
+        expect![[r#"
+            49..52: `Foo` is a type, not a value
+        "#]],
+    );
+}
+
+#[test]
+fn hole_typed_binding_can_hold_a_named_type() {
+    check_infer(
+        r#"
+type Foo = struct { x: usize };
+static f = fn { let p = Foo(struct { x: 1 }); p.x };
+"#,
+        expect![[r#"
+            44..84 'fn { let p = Foo(...': fn() -> usize
+            47..84 '{ let p = Foo(str...': usize
+            53..54 'p': Foo
+            57..60 'Foo': fn(struct { x: usize }) -> Foo
+            57..77 'Foo(struct { x: 1 })': Foo
+            61..76 'struct { x: 1 }': struct { x: usize }
+            73..74 '1': usize
+            79..80 'p': Foo
+            79..82 'p.x': usize
         "#]],
     );
 }

@@ -152,7 +152,21 @@ pub(crate) struct Debuggee<W: Write + Clone> {
     /// Set when execution crashed: frames stay inspectable; the next resume
     /// terminates the session.
     pub(crate) crashed: Option<EvalError>,
+    /// Compound values (records) handed out through `variables`, indexed by
+    /// `variablesReference - RECORD_REF_BASE`: DAP lets a client expand a
+    /// structured variable by re-requesting `variables` with the reference
+    /// it was given, so a value that outlives the request that produced it
+    /// needs somewhere to live. Cleared on every resume — like the paused
+    /// frames themselves, these references are only meaningful for the
+    /// pause that handed them out.
+    record_vars: Vec<Value>,
 }
+
+/// First `variablesReference` used for a registered compound value. Frame
+/// ids (the scope-level references `scopes` hands out) are small — at most
+/// `MAX_FRAMES` in `eval::machine` — so this is comfortably out of range for
+/// any real call stack.
+const RECORD_REF_BASE: i64 = 100_000;
 
 impl<W: Write + Clone> Debuggee<W> {
     /// Read and prepare `path`, ready to run `entry`. Errors are fully
@@ -184,6 +198,7 @@ impl<W: Write + Clone> Debuggee<W> {
             sat_at: Default::default(),
             executable_positions,
             crashed: None,
+            record_vars: Vec::new(),
         })
     }
 
@@ -271,6 +286,9 @@ impl<W: Write + Clone> Debuggee<W> {
     }
 
     pub(crate) fn resume(&mut self, mode: ResumeMode, statement_granularity: bool) -> Outcome {
+        // Every variablesReference handed out for the pause we're leaving
+        // becomes meaningless the moment execution moves.
+        self.record_vars.clear();
         let start = self.position();
         // Line-level view of a position: what "somewhere new" means at line
         // granularity (multiple statements on one line don't re-stop).
@@ -416,6 +434,34 @@ impl<W: Write + Clone> Debuggee<W> {
             .collect()
     }
 
+    /// Registers `value` for later structured expansion and returns the
+    /// `variablesReference` to hand back for it, or `0` if it has no
+    /// children (DAP's convention for "not expandable" — every scalar
+    /// value).
+    pub(crate) fn register(&mut self, value: &Value) -> i64 {
+        match value {
+            Value::Record { .. } => {
+                self.record_vars.push(value.clone());
+                RECORD_REF_BASE + (self.record_vars.len() as i64 - 1)
+            }
+            _ => 0,
+        }
+    }
+
+    /// The children behind a `variablesReference`: a frame's named locals
+    /// when `reference` is a frame id (as `scopes` hands out), or a
+    /// previously `register`ed compound value's fields.
+    pub(crate) fn dap_variables(&mut self, reference: i64) -> Vec<(String, Value)> {
+        if reference >= RECORD_REF_BASE {
+            let index = (reference - RECORD_REF_BASE) as usize;
+            return match self.record_vars.get(index) {
+                Some(Value::Record { fields }) => fields.clone(),
+                _ => Vec::new(),
+            };
+        }
+        self.locals(reference)
+    }
+
     /// Console evaluation, against the selected frame: a bare name reads a
     /// local directly; any other expression is wrapped in a synthetic fn
     /// whose parameters are the frame's locals, which the machine then
@@ -465,7 +511,12 @@ impl<W: Write + Clone> Debuggee<W> {
             locals.push((name.clone(), ty.clone(), value.clone()));
             if matches!(
                 ty,
-                hir::Ty::Unit | hir::Ty::Int | hir::Ty::Str | hir::Ty::Bool | hir::Ty::Fn(_)
+                hir::Ty::Unit
+                    | hir::Ty::Int
+                    | hir::Ty::Str
+                    | hir::Ty::Bool
+                    | hir::Ty::Fn(_)
+                    | hir::Ty::Record(_)
             ) {
                 wrapper_params.retain(|(existing, _, _)| existing != &name);
                 wrapper_params.push((name, ty, value));

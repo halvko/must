@@ -62,9 +62,13 @@ pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
         .items
         .iter()
         .map(|it| {
-            it.type_ref
-                .as_ref()
-                .is_none_or(|tr| !crate::ty::is_fully_typed(tr))
+            // Type items declare no value: they have no signature to infer,
+            // so they never join a binding group.
+            matches!(it.kind, crate::item_tree::ItemKind::Value(_))
+                && it
+                    .type_ref
+                    .as_ref()
+                    .is_none_or(|tr| !crate::ty::is_fully_typed(tr))
         })
         .collect();
 
@@ -228,6 +232,7 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
             // No initializer: nothing to infer from (parse errors cover it).
             let mut ctx = InferCtx::new(
                 db,
+                file,
                 body,
                 crate::resolutions(db, item),
                 &mut table,
@@ -243,10 +248,11 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
         let expected = crate::item_data(db, item)
             .as_ref()
             .and_then(|it| it.type_ref.as_ref())
-            .map(|type_ref| lower_type_ref(type_ref, &mut table))
+            .map(|type_ref| lower_type_ref(db, file, type_ref, &mut table))
             .unwrap_or_else(|| Ty::Infer(table.new_key(TyVarValue::Unknown)));
         let mut ctx = InferCtx::new(
             db,
+            file,
             body,
             crate::resolutions(db, item),
             &mut table,
@@ -294,6 +300,12 @@ fn erase_infer(ty: &Ty) -> Ty {
         Ty::Fn(f) => Ty::fn_type(
             f.params.iter().map(erase_infer).collect(),
             erase_infer(&f.ret),
+        ),
+        Ty::Record(rec) => Ty::record(
+            rec.fields
+                .iter()
+                .map(|(name, ty)| (name.clone(), erase_infer(ty)))
+                .collect(),
         ),
         other => other.clone(),
     }

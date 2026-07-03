@@ -1,0 +1,39 @@
+// Records (`struct { x: usize }` types, `struct { x: 1 }` literals) and
+// named types (`type Point = struct { ... }`) — construction, field access,
+// structural equality, and runtime erasure.
+//
+// Run: must-lsp run examples/records.must -e 'sum_pair'    (=> 0)
+// Run: must-lsp run examples/records.must -e 'moved'       (=> { x: 5, y: 0 })
+// Run: must-lsp run examples/records.must -e 'same_point'  (=> true)
+
+// A plain record type is structural: no name, exact field match required —
+// `struct { x: usize, y: usize }` and `struct { y: usize, x: usize }` are
+// the same type, field order doesn't matter.
+static origin_plain = struct { x: 0, y: 0 };
+
+static sum_pair = origin_plain.x + origin_plain.y;
+
+// A `type` item wraps a record shape in a nominal identity. `Point` unifies
+// only with itself — never with a bare `struct { x: usize, y: usize }`, in
+// either direction. Construction is a plain call: the type name applied to
+// the underlying record value.
+type Point = struct { x: usize, y: usize };
+
+static origin = Point(struct { x: 0, y: 0 });
+
+// Field access projects straight through to the declared shape. Named-type
+// construction is pure, so it's legal in a const context — which every
+// item initializer is, hence the `const fn` marker here.
+static translate = const fn (p: Point, dx: usize) -> Point {
+    Point(struct { x: p.x + dx, y: p.y })
+};
+
+static moved = translate(origin, 5);
+
+// Exact structural equality, same as plain records.
+static same_point = moved == Point(struct { x: 5, y: 0 });
+
+// At runtime a named type is fully erased: `moved` *is* its record value,
+// same representation as a bare `struct { x: usize, y: usize }` — hover
+// `moved` in the editor and the type still reads `Point`; only the checker
+// keeps `Point` and the bare shape apart.

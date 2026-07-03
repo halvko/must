@@ -834,6 +834,130 @@ fn assignment_to_an_immutable_binding_traps_with_the_diagnostic_message() {
 }
 
 #[test]
+fn record_literal_evaluates_fields_in_source_order_then_aggregates_in_sorted_order() {
+    // Field initializers evaluate in the order they're written — `y` calls
+    // `g` before `x` calls `f` — but the aggregate itself lists operands in
+    // the type's canonical (sorted) order: `_3`/`_2` are just referenced in
+    // `x, y` order once both have already been computed.
+    check_mir(
+        r#"
+static f = fn () -> usize { 1 }
+static g = fn () -> usize { 2 }
+static r = fn { struct { y: g(), x: f() } };
+"#,
+        expect![[r#"
+            item f:
+            fn b0() -> usize {
+              _0: usize  // return
+              bb0:
+                _0 = 1
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item g:
+            fn b0() -> usize {
+              _0: usize  // return
+              bb0:
+                _0 = 2
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item r:
+            fn b0() -> struct { x: usize, y: usize } {
+              _0: struct { x: usize, y: usize }  // return
+              _1: usize
+              _2: usize
+              _3: struct { x: usize, y: usize }
+              bb0:
+                _1 = call item g() -> bb1
+              bb1:
+                _2 = call item f() -> bb2
+              bb2:
+                _3 = { x: _2, y: _1 }
+                _0 = _3
+                return
+            }
+            fn b1() -> fn() -> struct { x: usize, y: usize } {
+              _0: fn() -> struct { x: usize, y: usize }  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn record_field_access_lowers_to_a_positional_projection() {
+    check_mir(
+        r#"static f = fn { let p = struct { x: 1, y: 2 }; p.y };"#,
+        expect![[r#"
+            item f:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: struct { x: usize, y: usize }
+              _2: struct { x: usize, y: usize }  // p
+              _3: usize
+              bb0:
+                _1 = { x: 1, y: 2 }
+                _2 = _1
+                _3 = _2.1
+                _0 = _3
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn field_access_on_a_nonexistent_field_still_traps() {
+    // Records have a real MIR story now, but a field inference rejected is
+    // exactly as trapped as before — the diagnostic just isn't
+    // `UnsupportedRecord` anymore.
+    check_mir(
+        r#"static f = fn { let p = struct { x: 1 }; p.y };"#,
+        expect![[r#"
+            item f:
+            fn b0() -> {error} {
+              _0: {error}  // return
+              _1: struct { x: usize }
+              _2: struct { x: usize }  // p
+              _3: {error}
+              bb0:
+                _1 = { x: 1 }
+                _2 = _1
+                _3 = trap "no field `y` on `struct { x: usize }`" -> bb1
+              bb1:
+                _0 = _3
+                return
+            }
+            fn b1() -> fn() -> {error} {
+              _0: fn() -> {error}  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
 fn assignment_to_a_non_variable_traps_with_the_validation_message() {
     // Validation squiggled the LHS with "can only assign to a variable";
     // the trap borrows that exact text via the shared constant.
@@ -854,6 +978,60 @@ fn assignment_to_a_non_variable_traps_with_the_validation_message() {
             }
             fn b1() -> fn() -> usize {
               _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn named_type_constructor_erases_in_mir() {
+    // `Foo(struct { x: 1 })` lowers to the record aggregate alone — no
+    // call, no tag: nominal types exist only in the static type system.
+    // The `type` item itself lowers to nothing (no root body).
+    check_mir(
+        r#"
+type Foo = struct { x: usize };
+static p = Foo(struct { x: 1 });
+"#,
+        expect![[r#"
+            item Foo:
+            item p:
+            fn b0() -> Foo {
+              _0: Foo  // return
+              _1: struct { x: usize }
+              bb0:
+                _1 = { x: 1 }
+                _0 = _1
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn field_access_through_named_type_projects_by_declared_order() {
+    check_mir(
+        r#"
+type Pair = struct { b: usize, a: usize };
+static second = fn (p: Pair) -> usize { p.b };
+"#,
+        expect![[r#"
+            item Pair:
+            item second:
+            fn b0(_1: Pair) -> usize {
+              _0: usize  // return
+              _1: Pair  // param p
+              _2: usize
+              bb0:
+                _2 = _1.1
+                _0 = _2
+                return
+            }
+            fn b1() -> fn(Pair) -> usize {
+              _0: fn(Pair) -> usize  // return
               bb0:
                 _0 = fn b0
                 return

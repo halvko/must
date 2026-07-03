@@ -366,6 +366,20 @@ fn highlights_const_fn_and_const_block_keywords() {
 }
 
 #[test]
+fn highlights_struct_keyword() {
+    check_highlights(
+        "static p = struct { x: 1 };",
+        expect_test::expect![[r#"
+            0..6 "static" Keyword
+            7..8 "p" Variable.declaration.static
+            9..10 "=" Operator
+            11..17 "struct" Keyword
+            23..24 "1" Number
+        "#]],
+    );
+}
+
+#[test]
 fn highlights_mut_keyword() {
     check_highlights(
         "static f = fn { let mut x = 1; x = 2; };",
@@ -574,6 +588,16 @@ fn hover_item_shows_const_value() {
     check_hover(
         "static exa$0mple = 4 + 5;",
         "```must\nexample: usize = 9\n```",
+    );
+}
+
+#[test]
+fn hover_item_shows_record_const_value() {
+    // Records const-evaluate: `Value::Record` displays like the type
+    // does, field by field, in the same canonical (sorted) order.
+    check_hover(
+        "static po$0int = struct { y: 2, x: 1 };",
+        "```must\npoint: struct { x: usize, y: usize } = { x: 1, y: 2 }\n```",
     );
 }
 
@@ -805,4 +829,149 @@ static f = fn (n: usize) -> () {
     );
     let hint_text = &src[mismatch.related[0].range];
     assert_eq!(hint_text, "str");
+}
+
+#[test]
+fn hover_record_typed_binding() {
+    // The record type renders canonically (sorted fields) on the binding.
+    check_hover(
+        r#"static f = fn { let p$0 = struct { y: "s", x: 1 }; };"#,
+        "```must\np: struct { x: usize, y: str }\n```",
+    );
+}
+
+#[test]
+fn hover_field_access_shows_the_field_type() {
+    check_hover(
+        r#"static f = fn { let p = struct { x: 1 }; let y = p.x$0; };"#,
+        "```must\nx: usize\n```",
+    );
+}
+
+#[test]
+fn hover_chained_field_access_intermediate_step() {
+    // Hovering `b` in `a.b.c` shows the intermediate record's type.
+    check_hover(
+        r#"static f = fn { let a = struct { b: struct { c: "deep" } }; a.b$0.c; };"#,
+        "```must\nb: struct { c: str }\n```",
+    );
+}
+
+#[test]
+fn record_expression_evaluates_cleanly() {
+    // Records are typed structurally and have a MIR/eval story
+    // (aggregates and field projections) — the "not yet" diagnostic is
+    // gone, and a record initializer is exactly as clean as any other.
+    let (analysis, file, _pos) = fixture("static p = struct { x: 1 };$0");
+    let diagnostics = analysis.diagnostics(file);
+    assert_eq!(diagnostics, Vec::new(), "diagnostics: {diagnostics:?}");
+}
+
+// ---- named types ----
+
+#[test]
+fn goto_type_item_from_annotation() {
+    check_goto(
+        r#"
+type Foo = struct { x: usize };
+static f = fn (p: Foo$0) { p.x };
+"#,
+        "Foo",
+        0,
+    );
+}
+
+#[test]
+fn goto_type_item_from_construction_call() {
+    check_goto(
+        r#"
+type Foo = struct { x: usize };
+static p = Foo$0(struct { x: 1 });
+"#,
+        "Foo",
+        0,
+    );
+}
+
+#[test]
+fn goto_builtin_type_in_annotation_is_none() {
+    check_no_goto("static f = fn (n: usize$0) { n };");
+}
+
+#[test]
+fn hover_type_item_declaration() {
+    check_hover(
+        "type Foo$0 = struct { y: str, x: usize };",
+        "```must\ntype Foo = struct { x: usize, y: str }\n```",
+    );
+}
+
+#[test]
+fn hover_type_name_in_annotation() {
+    check_hover(
+        r#"
+type Foo = struct { x: usize };
+static f = fn (p: Foo$0) { p.x };
+"#,
+        "```must\ntype Foo = struct { x: usize }\n```",
+    );
+}
+
+#[test]
+fn hover_type_name_in_construction_call() {
+    check_hover(
+        r#"
+type Foo = struct { x: usize };
+static p = Foo$0(struct { x: 1 });
+"#,
+        "```must\ntype Foo = struct { x: usize }\n```",
+    );
+}
+
+#[test]
+fn hover_named_typed_binding_shows_the_name() {
+    check_hover(
+        r#"
+type Foo = struct { x: usize };
+static f = fn { let p$0 = Foo(struct { x: 1 }); p.x };
+"#,
+        "```must\np: Foo\n```",
+    );
+}
+
+#[test]
+fn highlights_named_types() {
+    // The declaration and both reference positions (annotation,
+    // construction head) carry the type highlight class; builtins keep
+    // the library modifier, user types don't.
+    check_highlights(
+        r#"type Foo = struct { x: usize };
+static f = fn (p: Foo) { Foo(struct { x: p.x }) };"#,
+        expect_test::expect![[r#"
+            0..4 "type" Keyword
+            5..8 "Foo" Type.declaration
+            9..10 "=" Operator
+            11..17 "struct" Keyword
+            23..28 "usize" Type.defaultLibrary
+            32..38 "static" Keyword
+            39..40 "f" Function.declaration.static
+            41..42 "=" Operator
+            43..45 "fn" Keyword
+            47..48 "p" Parameter.declaration
+            50..53 "Foo" Type
+            57..60 "Foo" Type
+            61..67 "struct" Keyword
+            73..74 "p" Parameter
+        "#]],
+    );
+}
+
+#[test]
+fn type_item_file_evaluates_cleanly() {
+    // Type items have no value; the eager check-eval loop must not invent
+    // a diagnostic for them.
+    let (analysis, file, _pos) =
+        fixture("type Foo = struct { x: usize };\nstatic p = Foo(struct { x: 1 });$0");
+    let diagnostics = analysis.diagnostics(file);
+    assert_eq!(diagnostics, Vec::new(), "diagnostics: {diagnostics:?}");
 }

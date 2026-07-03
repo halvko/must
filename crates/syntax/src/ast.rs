@@ -77,6 +77,12 @@ ast_node!(
     /// `static name: Type = expr;` or `const name: Type = expr;`
     StaticItem: STATIC_ITEM
 );
+ast_node!(
+    /// `type Name = struct { ... };` — a newtype declaration. The RHS is an
+    /// ordinary expression grammar-wise; hir restricts it to a `struct`
+    /// literal with a diagnostic (keeping the parse resilient).
+    TypeItem: TYPE_ITEM
+);
 ast_node!(Name: NAME);
 ast_node!(NameRef: NAME_REF);
 ast_node!(FnLiteral: FN_LITERAL);
@@ -108,6 +114,20 @@ ast_node!(NeverType: NEVER_TYPE);
 ast_node!(PathType: PATH_TYPE);
 ast_node!(RefType: REF_TYPE);
 ast_node!(HoleType: HOLE_TYPE);
+ast_node!(
+    /// `{ x: T, y: U }`, a structural record type.
+    RecordType: RECORD_TYPE
+);
+ast_node!(RecordTypeField: RECORD_TYPE_FIELD);
+ast_node!(
+    /// `{ x: e, y }`, a record literal.
+    RecordExpr: RECORD_EXPR
+);
+ast_node!(RecordExprField: RECORD_EXPR_FIELD);
+ast_node!(
+    /// `receiver.field`, a field access.
+    FieldExpr: FIELD_EXPR
+);
 
 ast_enum!(
     Expr: FnLiteral,
@@ -118,14 +138,47 @@ ast_enum!(
     ConstBlockExpr,
     ParenExpr,
     BinExpr,
-    IfExpr
+    IfExpr,
+    RecordExpr,
+    FieldExpr
 );
-ast_enum!(Type: FnType, UnitType, NeverType, PathType, RefType, HoleType);
+ast_enum!(
+    Type: FnType,
+    UnitType,
+    NeverType,
+    PathType,
+    RefType,
+    HoleType,
+    RecordType
+);
 ast_enum!(Stmt: LetStmt, AssignStmt, ExprStmt);
+ast_enum!(
+    /// Any top-level item.
+    Item: StaticItem,
+    TypeItem
+);
 
 impl SourceFile {
-    pub fn items(&self) -> impl Iterator<Item = StaticItem> + use<> {
+    pub fn items(&self) -> impl Iterator<Item = Item> + use<> {
         children(&self.syntax)
+    }
+}
+
+impl Item {
+    pub fn name(&self) -> Option<Name> {
+        child(self.syntax())
+    }
+    pub fn body(&self) -> Option<Expr> {
+        child(self.syntax())
+    }
+    /// The item's type annotation. Only `static`/`const` items have one; a
+    /// `type` item's annotation is superset-parsed junk (validation rejects
+    /// it), so it is never surfaced here.
+    pub fn ty(&self) -> Option<Type> {
+        match self {
+            Item::StaticItem(it) => it.ty(),
+            Item::TypeItem(_) => None,
+        }
     }
 }
 
@@ -149,6 +202,24 @@ impl StaticItem {
             .filter_map(|it| it.into_token())
             .find(|it| !it.kind().is_trivia())
             .is_some_and(|it| it.kind() == CONST_KW)
+    }
+}
+
+impl TypeItem {
+    pub fn name(&self) -> Option<Name> {
+        child(&self.syntax)
+    }
+    /// The declaration's RHS — restricted to a `struct` literal by hir, but
+    /// any expression parses (resilience).
+    pub fn body(&self) -> Option<Expr> {
+        child(&self.syntax)
+    }
+    /// A superset-parsed `: Type` annotation (validation rejects it).
+    pub fn colon_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, COLON)
+    }
+    pub fn ty(&self) -> Option<Type> {
+        child(&self.syntax)
     }
 }
 
@@ -427,6 +498,70 @@ impl PathType {
 
 impl RefType {
     pub fn ty(&self) -> Option<Type> {
+        child(&self.syntax)
+    }
+}
+
+impl RecordType {
+    pub fn fields(&self) -> impl Iterator<Item = RecordTypeField> + use<> {
+        children(&self.syntax)
+    }
+    /// The leading `struct` keyword.
+    pub fn struct_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, STRUCT_KW)
+    }
+    /// The trailing open-record marker `...`, if present.
+    pub fn dot3_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, DOT3)
+    }
+}
+
+impl RecordTypeField {
+    pub fn name(&self) -> Option<Name> {
+        child(&self.syntax)
+    }
+    pub fn ty(&self) -> Option<Type> {
+        child(&self.syntax)
+    }
+}
+
+impl RecordExpr {
+    pub fn fields(&self) -> impl Iterator<Item = RecordExprField> + use<> {
+        children(&self.syntax)
+    }
+    /// The leading `struct` keyword.
+    pub fn struct_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, STRUCT_KW)
+    }
+    /// The trailing open-record marker `...`, if present.
+    pub fn dot3_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, DOT3)
+    }
+}
+
+impl RecordExprField {
+    pub fn name_ref(&self) -> Option<NameRef> {
+        child(&self.syntax)
+    }
+    pub fn colon_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, COLON)
+    }
+    pub fn expr(&self) -> Option<Expr> {
+        child(&self.syntax)
+    }
+    /// Shorthand fields (`x` meaning `x: x`) have no colon.
+    pub fn is_shorthand(&self) -> bool {
+        self.colon_token().is_none()
+    }
+}
+
+impl FieldExpr {
+    /// The pre-dot expression whose field is being accessed.
+    pub fn receiver(&self) -> Option<Expr> {
+        child(&self.syntax)
+    }
+    /// The field being accessed.
+    pub fn name_ref(&self) -> Option<NameRef> {
         child(&self.syntax)
     }
 }

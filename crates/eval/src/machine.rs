@@ -9,8 +9,8 @@ use base_db::Db;
 use hir::{Builtin, ExprId, ItemLoc};
 use la_arena::ArenaMap;
 use mir::{
-    BodyId, Const, LocalData, LocalId, MirBody, MirLowered, Operand, Rvalue, StatementKind,
-    TerminatorKind,
+    AggregateKind, BodyId, Const, LocalData, LocalId, MirBody, MirLowered, Operand, Rvalue,
+    StatementKind, TerminatorKind,
 };
 use rustc_hash::FxHashMap;
 
@@ -553,6 +553,37 @@ impl<'db, M: Mode> Machine<'db, M> {
                 let l = self.eval_operand(loc, body, l, origin)?;
                 let r = self.eval_operand(loc, body, r, origin)?;
                 self.eval_bin_op(*op, l, r, loc, origin)
+            }
+            Rvalue::Aggregate {
+                kind: AggregateKind::Record(names),
+                ops,
+            } => {
+                let mut fields = Vec::with_capacity(ops.len());
+                for (name, op) in names.iter().zip(ops) {
+                    let value = self.eval_operand(loc, body, op, origin)?;
+                    fields.push((name.clone(), value));
+                }
+                Ok(Value::Record { fields })
+            }
+            Rvalue::Field { base, index } => {
+                let base = self.eval_operand(loc, body, base, origin)?;
+                match base {
+                    Value::Record { mut fields } => {
+                        let index = *index as usize;
+                        if index < fields.len() {
+                            Ok(fields.swap_remove(index).1)
+                        } else {
+                            Err(self.internal_error(
+                                format!(
+                                    "record field index {index} out of range ({} fields)",
+                                    fields.len()
+                                ),
+                                Some((loc.clone(), origin)),
+                            ))
+                        }
+                    }
+                    other => Err(self.ill_typed("a record value", &other, loc, origin)),
+                }
             }
         }
     }

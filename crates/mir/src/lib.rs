@@ -108,6 +108,32 @@ pub enum StatementKind {
 pub enum Rvalue {
     Use(Operand),
     BinaryOp(BinOp, Operand, Operand),
+    /// Builds a compound value from its parts. `ops` line up with
+    /// `kind`'s canonical field order — for [`AggregateKind::Record`],
+    /// sorted by name, matching [`Ty::Record`]'s canonical order. Lowering
+    /// evaluates field initializers in *source* order (into whatever
+    /// operands that takes) before assembling this in canonical order, so
+    /// side effects follow the written program even though the aggregate
+    /// itself doesn't.
+    Aggregate {
+        kind: AggregateKind,
+        ops: Vec<Operand>,
+    },
+    /// Reads one field out of a record value by position. `index` is into
+    /// the same sorted field order [`AggregateKind::Record`] and
+    /// [`Ty::Record`] use — the receiver's type is resolved at lowering, so
+    /// the field name is already gone by the time it reaches MIR.
+    Field {
+        base: Operand,
+        index: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AggregateKind {
+    /// Field names sorted by name — the same canonical order as
+    /// [`Ty::Record`]'s fields, so `ops[i]` is the value of `fields[i]`.
+    Record(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

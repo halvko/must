@@ -9,7 +9,7 @@
 //! model. Trait obligations and further deferred constraint kinds slot into
 //! the same store later without changing the query graph.
 
-use base_db::Db;
+use base_db::{Db, SourceFile};
 use ena::unify::InPlaceUnificationTable;
 use la_arena::ArenaMap;
 use rustc_hash::FxHashMap;
@@ -18,7 +18,9 @@ use crate::body::{BindingId, Body, ExprData, ExprId, LiteralData, Stmt, body};
 use crate::constraint::{self, Cause, Constraints, Join, Witness, resolve_fully};
 use crate::item_tree::Constness;
 use crate::scopes::{Builtin, Resolution, resolutions};
-use crate::ty::{Ty, TyVar, TyVarValue, lower_type_ref, signature, signature_needs_annotation};
+use crate::ty::{
+    Ty, TyVar, TyVarValue, lower_type_ref, signature, signature_needs_annotation, type_underlying,
+};
 use crate::{ItemId, ItemLoc, TypeRef};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -113,6 +115,66 @@ pub enum InferenceDiagnostic {
         target: ExprId,
         builtin: Builtin,
     },
+    /// A record literal checked against a record type that requires fields
+    /// the literal doesn't have. One diagnostic on the whole literal naming
+    /// every missing field — the fix (adding fields) happens there.
+    RecordLitMissingFields {
+        /// The record literal expression.
+        expr: ExprId,
+        /// The missing `(name, type)` pairs, sorted by name.
+        fields: Vec<(String, Ty)>,
+    },
+    /// A record literal field its expected record type has no room for
+    /// (exact field-set equality: extra fields are errors, not dropped).
+    /// One diagnostic per extra field; the renderer narrows the squiggle to
+    /// the field's name.
+    RecordLitExtraField {
+        /// The extra field's value expression.
+        expr: ExprId,
+        name: String,
+        /// The expected record type that lacks the field.
+        expected: Ty,
+    },
+    /// A field access on a type that has no such field: a record without
+    /// it, or a non-record. The renderer narrows the squiggle to the field
+    /// name.
+    NoSuchField {
+        /// The field-access expression.
+        expr: ExprId,
+        name: String,
+        receiver_ty: Ty,
+    },
+    /// A field access whose receiver's type is still undetermined when the
+    /// access is checked. Structural records use exact equality, so a field
+    /// name can never determine the receiver's type backwards — the way out
+    /// is an annotation.
+    FieldOnUnknownType {
+        /// The field-access expression (where MIR will trap).
+        expr: ExprId,
+        /// The receiver — carries the squiggle: the annotation goes there.
+        receiver: ExprId,
+    },
+    /// A bare use of a `type` item in expression position. Types are not
+    /// first-class values; the one expression position a type name may
+    /// appear in is as a construction head (`Foo(...)`), which never
+    /// reaches this.
+    TypeNotValue {
+        /// The referencing expression (the name — carries the squiggle).
+        expr: ExprId,
+        /// The type's name, carried so [`Self::message`] renders without
+        /// the body in hand (same reason `AssignToImmutable` carries one).
+        name: String,
+    },
+    /// A construction call `Foo(...)` with anything but exactly one
+    /// argument. A constructor is a plain function taking the underlying
+    /// record value — nothing more.
+    TypeCtorArgCount {
+        /// The call expression.
+        expr: ExprId,
+        /// The `type` item being constructed.
+        item: ItemLoc,
+        found: usize,
+    },
 }
 
 impl InferenceDiagnostic {
@@ -123,7 +185,13 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::AllBranchesMismatch { expr, .. }
             | InferenceDiagnostic::NotCallable { expr, .. }
             | InferenceDiagnostic::ArgCountMismatch { expr, .. }
-            | InferenceDiagnostic::NeedsAnnotation { expr, .. } => *expr,
+            | InferenceDiagnostic::NeedsAnnotation { expr, .. }
+            | InferenceDiagnostic::RecordLitMissingFields { expr, .. }
+            | InferenceDiagnostic::RecordLitExtraField { expr, .. }
+            | InferenceDiagnostic::NoSuchField { expr, .. }
+            | InferenceDiagnostic::TypeNotValue { expr, .. }
+            | InferenceDiagnostic::TypeCtorArgCount { expr, .. } => *expr,
+            InferenceDiagnostic::FieldOnUnknownType { receiver, .. } => *receiver,
             InferenceDiagnostic::IfBranchMismatch { else_expr, .. } => *else_expr,
             InferenceDiagnostic::AssignToImmutable { target, .. }
             | InferenceDiagnostic::AssignToItem { target, .. }
@@ -138,11 +206,24 @@ impl InferenceDiagnostic {
         match self {
             InferenceDiagnostic::TypeMismatch {
                 expected, actual, ..
-            } => format!(
-                "type mismatch: expected `{}`, found `{}`",
-                expected.display(),
-                actual.display()
-            ),
+            } => {
+                let base = format!(
+                    "type mismatch: expected `{}`, found `{}`",
+                    expected.display(),
+                    actual.display()
+                );
+                // A nominal/structural near-miss: the found record may even
+                // be the declared shape, but a named type never coerces —
+                // say how to actually make one.
+                if let (Ty::Named(loc), Ty::Record(_)) = (expected, actual) {
+                    format!(
+                        "{base}; `{name}` is a distinct type — construct it with `{name}(...)`",
+                        name = loc.display_name()
+                    )
+                } else {
+                    base
+                }
+            }
             InferenceDiagnostic::AllBranchesMismatch {
                 expected, actual, ..
             } => format!(
@@ -197,6 +278,39 @@ impl InferenceDiagnostic {
                     builtin.name()
                 )
             }
+            InferenceDiagnostic::RecordLitMissingFields { fields, .. } => {
+                let list = fields
+                    .iter()
+                    .map(|(name, ty)| format!("`{name}: {}`", ty.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                if fields.len() == 1 {
+                    format!("record literal is missing field {list}")
+                } else {
+                    format!("record literal is missing fields {list}")
+                }
+            }
+            InferenceDiagnostic::RecordLitExtraField { name, expected, .. } => {
+                format!(
+                    "no field `{name}` in expected type `{}`",
+                    expected.display()
+                )
+            }
+            InferenceDiagnostic::NoSuchField {
+                name, receiver_ty, ..
+            } => {
+                format!("no field `{name}` on `{}`", receiver_ty.display())
+            }
+            InferenceDiagnostic::FieldOnUnknownType { .. } => {
+                "cannot determine the type of this expression; add a type annotation".to_owned()
+            }
+            InferenceDiagnostic::TypeNotValue { name, .. } => {
+                format!("`{name}` is a type, not a value")
+            }
+            InferenceDiagnostic::TypeCtorArgCount { item, found, .. } => format!(
+                "`{}` takes exactly one argument (its underlying `struct` value), found {found}",
+                item.display_name()
+            ),
         }
     }
 }
@@ -204,6 +318,7 @@ impl InferenceDiagnostic {
 #[salsa::tracked(returns(ref))]
 pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
     let body = body(db, item);
+    let file = item.file(db);
     let mut table = InPlaceUnificationTable::new();
     let no_group = FxHashMap::default();
     let mut ctx;
@@ -213,12 +328,12 @@ pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
         let ty_ref = crate::item_data(db, item)
             .as_ref()
             .and_then(|it| it.type_ref.as_ref());
-        let expected = lower_type_ref(ty_ref.unwrap_or(&TypeRef::Hole), &mut table);
+        let expected = lower_type_ref(db, file, ty_ref.unwrap_or(&TypeRef::Hole), &mut table);
         let cause = ty_ref.is_some().then_some(Cause::ItemAnnotation);
-        ctx = InferCtx::new(db, body, resolutions(db, item), &mut table, &no_group);
+        ctx = InferCtx::new(db, file, body, resolutions(db, item), &mut table, &no_group);
         ctx.infer_expr_with(root, &expected, cause);
     } else {
-        ctx = InferCtx::new(db, body, resolutions(db, item), &mut table, &no_group);
+        ctx = InferCtx::new(db, file, body, resolutions(db, item), &mut table, &no_group);
     }
 
     ctx.finish()
@@ -226,6 +341,8 @@ pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
 
 pub(crate) struct InferCtx<'a, 'db> {
     db: &'db dyn Db,
+    /// The file the body's annotations resolve type names in.
+    file: SourceFile,
     body: &'db Body,
     resolutions: &'db ArenaMap<ExprId, Resolution>,
     table: &'a mut InPlaceUnificationTable<TyVar>,
@@ -246,6 +363,7 @@ pub(crate) struct InferCtx<'a, 'db> {
 impl<'a, 'db> InferCtx<'a, 'db> {
     pub(crate) fn new(
         db: &'db dyn Db,
+        file: SourceFile,
         body: &'db Body,
         resolutions: &'db ArenaMap<ExprId, Resolution>,
         table: &'a mut InPlaceUnificationTable<TyVar>,
@@ -253,6 +371,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     ) -> InferCtx<'a, 'db> {
         InferCtx {
             db,
+            file,
             body,
             resolutions,
             table,
@@ -302,11 +421,25 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     *then_ty = resolve_fully(self.table, then_ty);
                     *else_ty = resolve_fully(self.table, else_ty);
                 }
+                InferenceDiagnostic::RecordLitMissingFields { fields, .. } => {
+                    for (_, ty) in fields.iter_mut() {
+                        *ty = resolve_fully(self.table, ty);
+                    }
+                }
+                InferenceDiagnostic::RecordLitExtraField { expected, .. } => {
+                    *expected = resolve_fully(self.table, expected);
+                }
+                InferenceDiagnostic::NoSuchField { receiver_ty, .. } => {
+                    *receiver_ty = resolve_fully(self.table, receiver_ty);
+                }
                 InferenceDiagnostic::ArgCountMismatch { .. }
                 | InferenceDiagnostic::NeedsAnnotation { .. }
                 | InferenceDiagnostic::AssignToImmutable { .. }
                 | InferenceDiagnostic::AssignToItem { .. }
-                | InferenceDiagnostic::AssignToBuiltin { .. } => {}
+                | InferenceDiagnostic::AssignToBuiltin { .. }
+                | InferenceDiagnostic::FieldOnUnknownType { .. }
+                | InferenceDiagnostic::TypeNotValue { .. }
+                | InferenceDiagnostic::TypeCtorArgCount { .. } => {}
             }
         }
         result
@@ -331,7 +464,20 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             ExprData::Literal(LiteralData::Int(_)) => Ty::Int,
             ExprData::Literal(LiteralData::Str(_)) => Ty::Str,
             ExprData::Literal(LiteralData::Bool(_)) => Ty::Bool,
-            ExprData::NameRef(_) => match self.resolutions.get(expr) {
+            ExprData::NameRef(name) => match self.resolutions.get(expr) {
+                // A type is not a first-class value. The one legal
+                // expression position for a type name — the head of a
+                // construction call — is intercepted in the `Call` arm and
+                // never infers the callee, so reaching this *is* the error.
+                Some(Resolution::TypeItem(_)) => {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::TypeNotValue {
+                            expr,
+                            name: name.clone(),
+                        });
+                    Ty::Error
+                }
                 Some(Resolution::Local(binding)) => self
                     .result
                     .type_of_binding
@@ -369,6 +515,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 None => Ty::Error, // unresolved: already diagnosed by name resolution
             },
             ExprData::Call { callee, args } => {
+                // A construction call: the type name used as a plain
+                // constructor function taking the underlying record —
+                // `Foo(struct { x: 1 })`. Intercepted before the callee is
+                // inferred (a bare type name in expression position is an
+                // error; as a construction head it is the one legal use).
+                if let Some(Resolution::TypeItem(loc)) = self.resolutions.get(*callee).cloned() {
+                    return self.infer_construction(expr, *callee, &loc, args, expected, cause);
+                }
                 let fresh = self.fresh_var();
                 let callee_ty = self.infer_expr(*callee, &fresh);
                 match self.resolve_shallow(&callee_ty) {
@@ -548,7 +702,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             let declared = self.body.bindings[*binding]
                                 .type_ref
                                 .as_ref()
-                                .map(|it| lower_type_ref(it, self.table))
+                                .map(|it| lower_type_ref(self.db, self.file, it, self.table))
                                 .unwrap_or_else(|| self.fresh_var());
                             let binding_cause = has_annotation.then_some(Cause::Binding(*binding));
                             let ty = self.infer_expr_with(*init, &declared, binding_cause);
@@ -588,7 +742,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 Some(Resolution::Item(loc)) => {
                                     let constness = crate::item_data(self.db, loc.to_id(self.db))
                                         .as_ref()
-                                        .map(|it| it.constness)
+                                        .and_then(|it| it.kind.constness())
                                         .unwrap_or(Constness::Static);
                                     self.result.diagnostics.push(
                                         InferenceDiagnostic::AssignToItem {
@@ -599,6 +753,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     );
                                     None
                                 }
+                                // The target read already reported "is a
+                                // type, not a value" (the `NameRef` arm ran
+                                // on it); a second assignment-specific
+                                // squiggle on the same name adds nothing.
+                                Some(Resolution::TypeItem(_)) => None,
                                 Some(Resolution::Builtin(builtin)) => {
                                     self.result.diagnostics.push(
                                         InferenceDiagnostic::AssignToBuiltin {
@@ -640,6 +799,149 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 self.result.type_of_expr.insert(expr, ty.clone());
                 return ty;
             }
+            ExprData::RecordLit { fields } => {
+                // Bidirectional: when the context already expects a record,
+                // the expected field types flow into the field initializers
+                // (with the same cause, so a wrong field blames the field's
+                // expression and cites the annotation/call that demanded the
+                // type — same shape as call arguments and annotated lets).
+                if let Ty::Record(expected_rec) = self.resolve_shallow(expected) {
+                    let has = |name: &str| fields.iter().any(|(n, _)| n.as_str() == name);
+                    let missing: Vec<(String, Ty)> = expected_rec
+                        .fields
+                        .iter()
+                        .filter(|(name, _)| !has(name))
+                        .cloned()
+                        .collect();
+                    if !missing.is_empty() {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::RecordLitMissingFields {
+                                expr,
+                                fields: missing,
+                            });
+                    }
+                    let mut seen: Vec<&str> = Vec::new();
+                    for (name, field_expr) in fields {
+                        match expected_rec.field_ty(name) {
+                            Some(field_ty) => {
+                                self.infer_expr_with(*field_expr, &field_ty.clone(), cause);
+                            }
+                            None => {
+                                // An extra field (exact field-set equality:
+                                // nothing is dropped silently). Duplicates of
+                                // one extra name get a single diagnostic —
+                                // validation already flags the duplication.
+                                if !seen.contains(&name.as_str()) {
+                                    self.result.diagnostics.push(
+                                        InferenceDiagnostic::RecordLitExtraField {
+                                            expr: *field_expr,
+                                            name: name.clone(),
+                                            expected: Ty::Record(expected_rec.clone()),
+                                        },
+                                    );
+                                }
+                                let fresh = self.fresh_var();
+                                self.infer_expr(*field_expr, &fresh);
+                            }
+                        }
+                        seen.push(name.as_str());
+                    }
+                    // Field mismatches were reported above (or the sets
+                    // match); either way the literal recovers with the
+                    // expected type so nothing cascades.
+                    let ty = Ty::Record(expected_rec);
+                    self.result.type_of_expr.insert(expr, ty.clone());
+                    return ty;
+                }
+                // No record expectation: infer every field and conclude a
+                // record type, then let the ordinary check judge it (binding
+                // a free variable, or reporting a plain mismatch against a
+                // non-record expectation).
+                let field_tys = fields
+                    .iter()
+                    .map(|(name, field_expr)| {
+                        let fresh = self.fresh_var();
+                        (name.clone(), self.infer_expr(*field_expr, &fresh))
+                    })
+                    .collect();
+                Ty::record(field_tys)
+            }
+            ExprData::Field { receiver, name } => {
+                let fresh = self.fresh_var();
+                let receiver_ty = self.infer_expr(*receiver, &fresh);
+                if name.is_empty() {
+                    // `a.` — the parse error covers it.
+                    Ty::Error
+                } else {
+                    match self.resolve_shallow(&receiver_ty) {
+                        Ty::Record(rec) => match rec.field_ty(name) {
+                            Some(field_ty) => field_ty.clone(),
+                            None => {
+                                self.result
+                                    .diagnostics
+                                    .push(InferenceDiagnostic::NoSuchField {
+                                        expr,
+                                        name: name.clone(),
+                                        receiver_ty: Ty::Record(rec),
+                                    });
+                                Ty::Error
+                            }
+                        },
+                        // A named type projects through to its declared
+                        // shape: `p.x` on a `Foo` works exactly as on the
+                        // underlying record.
+                        Ty::Named(loc) => {
+                            match type_underlying(self.db, loc.to_id(self.db)) {
+                                Some(Ty::Record(rec)) => match rec.field_ty(name) {
+                                    Some(field_ty) => field_ty.clone(),
+                                    None => {
+                                        self.result.diagnostics.push(
+                                            InferenceDiagnostic::NoSuchField {
+                                                expr,
+                                                name: name.clone(),
+                                                receiver_ty: Ty::Named(loc),
+                                            },
+                                        );
+                                        Ty::Error
+                                    }
+                                },
+                                // Broken declaration: its own diagnostic
+                                // sits at the declaration site; stay silent.
+                                _ => Ty::Error,
+                            }
+                        }
+                        // Evaluating the receiver already diverges (same
+                        // reasoning as a diverging callee).
+                        Ty::Never => Ty::Never,
+                        // Structural equality can't run backwards from a
+                        // field name, so an undetermined receiver stays
+                        // undetermined: ask for the annotation.
+                        Ty::Infer(_) => {
+                            self.result
+                                .diagnostics
+                                .push(InferenceDiagnostic::FieldOnUnknownType {
+                                    expr,
+                                    receiver: *receiver,
+                                });
+                            Ty::Error
+                        }
+                        // Errors are infectious and silent — a broken
+                        // receiver must not cascade into field diagnostics.
+                        broken if broken.contains_error() => Ty::Error,
+                        other => {
+                            self.result
+                                .diagnostics
+                                .push(InferenceDiagnostic::NoSuchField {
+                                    expr,
+                                    name: name.clone(),
+                                    receiver_ty: other,
+                                });
+                            Ty::Error
+                        }
+                    }
+                }
+            }
             ExprData::FnLiteral {
                 params,
                 ret_type,
@@ -652,7 +954,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     .iter()
                     .map(|&param| {
                         let ty = match &self.body.bindings[param].type_ref {
-                            Some(type_ref) => lower_type_ref(type_ref, self.table),
+                            Some(type_ref) => {
+                                lower_type_ref(self.db, self.file, type_ref, self.table)
+                            }
                             None => self.fresh_var(),
                         };
                         self.result.type_of_binding.insert(param, ty.clone());
@@ -660,7 +964,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     })
                     .collect();
                 let ret = match ret_type {
-                    Some(type_ref) => lower_type_ref(type_ref, self.table),
+                    Some(type_ref) => lower_type_ref(self.db, self.file, type_ref, self.table),
                     None => self.fresh_var(),
                 };
                 let ret_cause = ret_type.is_some().then_some(Cause::ReturnAnnotation(expr));
@@ -678,6 +982,53 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         };
 
         let ty = self.check(expr, ty, expected, cause);
+        self.result.type_of_expr.insert(expr, ty.clone());
+        ty
+    }
+
+    /// A construction call `Foo(arg)`: type-check the single argument
+    /// against the declared underlying record bidirectionally (the declared
+    /// field types flow into a literal argument's fields, blame cites the
+    /// declaration via [`Cause::Constructor`]) and produce [`Ty::Named`].
+    fn infer_construction(
+        &mut self,
+        expr: ExprId,
+        callee: ExprId,
+        loc: &ItemLoc,
+        args: &[ExprId],
+        expected: &Ty,
+        cause: Option<Cause>,
+    ) -> Ty {
+        // `None` when the declaration is broken (RHS not a `struct`
+        // literal): the declaration site carries the diagnostic, so the
+        // argument is checked against `{error}` — infectious and silent.
+        let underlying = type_underlying(self.db, loc.to_id(self.db)).unwrap_or(Ty::Error);
+        // The constructor *is* a function value conceptually; give the
+        // callee name that type so hover on `Foo` in `Foo(...)` is honest.
+        self.result.type_of_expr.insert(
+            callee,
+            Ty::fn_type(vec![underlying.clone()], Ty::Named(loc.clone())),
+        );
+        if args.len() != 1 {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::TypeCtorArgCount {
+                    expr,
+                    item: loc.clone(),
+                    found: args.len(),
+                });
+        }
+        for (i, &arg) in args.iter().enumerate() {
+            if i == 0 {
+                self.infer_expr_with(arg, &underlying, Some(Cause::Constructor(expr)));
+            } else {
+                // Surplus arguments (already diagnosed): infer freely so
+                // their contents still get types and diagnostics.
+                let fresh = self.fresh_var();
+                self.infer_expr(arg, &fresh);
+            }
+        }
+        let ty = self.check(expr, Ty::Named(loc.clone()), expected, cause);
         self.result.type_of_expr.insert(expr, ty.clone());
         ty
     }

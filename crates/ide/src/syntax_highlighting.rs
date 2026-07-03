@@ -73,9 +73,8 @@ fn classify(
         COMMENT => HlTag::Comment,
         STRING => HlTag::String,
         INT_NUMBER => HlTag::Number,
-        FN_KW | STATIC_KW | CONST_KW | LET_KW | MUT_KW | IF_KW | ELSE_KW | TRUE_KW | FALSE_KW => {
-            HlTag::Keyword
-        }
+        FN_KW | STATIC_KW | CONST_KW | TYPE_KW | STRUCT_KW | LET_KW | MUT_KW | IF_KW | ELSE_KW
+        | TRUE_KW | FALSE_KW => HlTag::Keyword,
         PLUS | MINUS | STAR | SLASH | EQ | THIN_ARROW | AMP | EQ2 | NEQ | L_ANGLE | R_ANGLE
         | LTEQ | GTEQ => HlTag::Operator,
         // `!` only exists as the never type today.
@@ -106,6 +105,8 @@ fn classify_ident(
             };
             Some((tag, HlMods(HlMods::DECLARATION | HlMods::STATIC)))
         }
+        // A `type` item's name declaration is a type, through and through.
+        (NAME, TYPE_ITEM) => Some((HlTag::Type, HlMods(HlMods::DECLARATION))),
         (NAME, PARAM) | (NAME, LET_STMT) => {
             let item = item_of(db, file, root, &owner)?;
             let (body, source_map) = hir::body_with_source_map(db, item);
@@ -122,9 +123,16 @@ fn classify_ident(
             };
             Some((tag, HlMods(mods)))
         }
-        // All nameable types are builtin for now (`usize`, `str`, ...).
-        (NAME_REF, PATH_TYPE) => Some((HlTag::Type, HlMods(HlMods::DEFAULT_LIBRARY))),
+        // Type position: user-declared types render as plain types, the
+        // builtins (`usize`, `str`, ...) keep their library modifier.
+        (NAME_REF, PATH_TYPE) => Some(classify_type_name(db, file, token.text())),
         (NAME_REF, PATH_EXPR) => {
+            // Inside a `type` declaration's RHS every "expression" is
+            // really type syntax (`type Foo = struct { x: usize };`), so
+            // names there classify as type names, not values.
+            if owner.ancestors().any(|n| n.kind() == TYPE_ITEM) {
+                return Some(classify_type_name(db, file, token.text()));
+            }
             let item = item_of(db, file, root, &owner)?;
             let (body, source_map) = hir::body_with_source_map(db, item);
             let expr = source_map.expr_for_node(SyntaxNodePtr::new(&owner))?;
@@ -153,6 +161,10 @@ fn classify_ident(
                     };
                     Some((tag, HlMods(HlMods::STATIC)))
                 }
+                // A construction head (`Foo(...)`) — or a stray value use,
+                // which the diagnostics call out; either way the name *is*
+                // a type.
+                hir::Resolution::TypeItem(_) => Some((HlTag::Type, HlMods::NONE)),
                 hir::Resolution::Builtin(_) => {
                     Some((HlTag::Function, HlMods(HlMods::DEFAULT_LIBRARY)))
                 }
@@ -175,20 +187,34 @@ fn item_is_fn(db: &RootDatabase, item: hir::ItemId<'_>) -> bool {
     )
 }
 
+/// A name used as a type: a `type` item reference, or a builtin type name
+/// with the library modifier. Unknown names still color as types — that's
+/// what the position says they were meant to be; diagnostics carry the news.
+fn classify_type_name(db: &RootDatabase, file: SourceFile, name: &str) -> (HlTag, HlMods) {
+    match hir::file_scope(db, file).resolve(name) {
+        Some(hir::Resolution::TypeItem(_)) => (HlTag::Type, HlMods::NONE),
+        _ => (HlTag::Type, HlMods(HlMods::DEFAULT_LIBRARY)),
+    }
+}
+
 fn item_of<'db>(
     db: &'db RootDatabase,
     file: SourceFile,
     root: &SyntaxNode,
     node: &SyntaxNode,
 ) -> Option<hir::ItemId<'db>> {
-    let item_node = node
-        .ancestors()
-        .find(|n| n.kind() == SyntaxKind::STATIC_ITEM)?;
+    let item_node = node.ancestors().find(is_item)?;
     let index = root
         .children()
-        .filter(|n| n.kind() == SyntaxKind::STATIC_ITEM)
+        .filter(is_item)
         .position(|n| n == item_node)?;
     hir::file_item_ids(db, file).get(index).copied()
+}
+
+/// Whether the node is a top-level item — the positional index over these
+/// must match `hir::file_item_ids`, which counts *all* item kinds.
+fn is_item(node: &SyntaxNode) -> bool {
+    matches!(node.kind(), SyntaxKind::STATIC_ITEM | SyntaxKind::TYPE_ITEM)
 }
 
 /// Push the token's range, split at line breaks: LSP clients aren't required

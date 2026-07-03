@@ -10,7 +10,7 @@ use la_arena::{Arena, ArenaMap, Idx};
 use rustc_hash::FxHashMap;
 
 use crate::body::{BindingId, Body, ExprData, ExprId, Stmt, body};
-use crate::item_tree::item_tree;
+use crate::item_tree::{ItemKind, item_tree};
 use crate::{ItemId, ItemLoc};
 
 pub type ScopeId = Idx<ScopeData>;
@@ -134,6 +134,16 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
                 compute_expr_scopes(body, scopes, *else_branch, scope);
             }
         }
+        ExprData::RecordLit { fields } => {
+            for (_, field) in fields {
+                compute_expr_scopes(body, scopes, *field, scope);
+            }
+        }
+        // The field name is a projection, not a scoped reference; only the
+        // receiver is an expression.
+        ExprData::Field { receiver, .. } => {
+            compute_expr_scopes(body, scopes, *receiver, scope);
+        }
         ExprData::Missing | ExprData::Literal(_) | ExprData::NameRef(_) => {}
     }
 }
@@ -142,6 +152,10 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
 pub enum Resolution {
     Local(BindingId),
     Item(ItemLoc),
+    /// A `type` item. Kept apart from [`Resolution::Item`] so every consumer
+    /// is forced to decide what a *type* means for it: a value use is an
+    /// error, a call is a construction, a type position is a name hit.
+    TypeItem(ItemLoc),
     /// The name is defined by more than one item. Resolves to the first
     /// definition so navigation has a target, but no use can be given a
     /// meaning: inference types these as `{error}`, and the extra
@@ -188,6 +202,7 @@ pub struct FileScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ScopeEntry {
     loc: ItemLoc,
+    kind: ItemKind,
     ambiguous: bool,
 }
 
@@ -203,9 +218,80 @@ impl FileScope {
         Some(if entry.ambiguous {
             Resolution::Ambiguous(entry.loc.clone())
         } else {
-            Resolution::Item(entry.loc.clone())
+            match entry.kind {
+                ItemKind::Value(_) => Resolution::Item(entry.loc.clone()),
+                ItemKind::Type => Resolution::TypeItem(entry.loc.clone()),
+            }
         })
     }
+}
+
+/// The type-item names of a file — the slice of [`FileScope`] that type
+/// *annotation* lowering depends on. Its own query so that adding or
+/// removing a **value** item leaves this value unchanged and inference of
+/// annotated items backdates behind it (the item-insertion firewall test
+/// pins this); depending on the full [`file_scope`] from `lower_type_ref`
+/// would re-run every annotated item's inference on any item insertion.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TypeScope {
+    entries: FxHashMap<String, TypeScopeEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TypeScopeEntry {
+    loc: ItemLoc,
+    /// Whether the name is declared more than once file-wide (by items of
+    /// *any* kind): an ambiguous name names no type, and a value item
+    /// stealing a type's name must flip this value (so dependents re-run).
+    ambiguous: bool,
+}
+
+impl TypeScope {
+    pub fn resolve(&self, name: &str) -> Option<Resolution> {
+        let entry = self.entries.get(name)?;
+        Some(if entry.ambiguous {
+            Resolution::Ambiguous(entry.loc.clone())
+        } else {
+            Resolution::TypeItem(entry.loc.clone())
+        })
+    }
+}
+
+#[salsa::tracked(returns(ref))]
+pub fn type_scope(db: &dyn Db, file: SourceFile) -> TypeScope {
+    let tree = item_tree(db, file);
+    let mut counts: FxHashMap<&str, u32> = FxHashMap::default();
+    for data in tree.items.iter() {
+        *counts.entry(data.name.as_str()).or_insert(0) += 1;
+    }
+    // Disambiguators count occurrences the same way `file_item_ids` does,
+    // so an `ItemLoc` here and the interned `ItemId` agree on identity.
+    let mut seen: FxHashMap<&str, u32> = FxHashMap::default();
+    let mut scope = TypeScope::default();
+    for data in tree.items.iter() {
+        let disambiguator = {
+            let counter = seen.entry(data.name.as_str()).or_insert(0);
+            let current = *counter;
+            *counter += 1;
+            current
+        };
+        if data.name.is_empty() || !matches!(data.kind, ItemKind::Type) {
+            continue;
+        }
+        let loc = ItemLoc {
+            file,
+            name: std::sync::Arc::from(data.name.as_str()),
+            disambiguator,
+        };
+        scope
+            .entries
+            .entry(data.name.clone())
+            .or_insert(TypeScopeEntry {
+                loc,
+                ambiguous: counts[data.name.as_str()] > 1,
+            });
+    }
+    scope
 }
 
 /// Items are visible everywhere, including their own bodies — mutual
@@ -236,6 +322,7 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
             std::collections::hash_map::Entry::Vacant(slot) => {
                 slot.insert(ScopeEntry {
                     loc,
+                    kind: data.kind,
                     ambiguous: false,
                 });
             }

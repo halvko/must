@@ -69,6 +69,22 @@ pub enum ExprData {
     ConstBlock {
         body: ExprId,
     },
+    /// `{ x: e, y }`: a record literal. Fields keep source order (squiggles
+    /// and evaluation order follow the source); the *type* canonicalizes to
+    /// name order in inference. A shorthand field `x` lowers as the name
+    /// plus a [`ExprData::NameRef`] for `x`, so the reference resolves
+    /// through scopes like any other.
+    RecordLit {
+        fields: Vec<(String, ExprId)>,
+    },
+    /// `receiver.field`. The field name is not an expression of its own —
+    /// it names a projection, not a value in scope.
+    Field {
+        receiver: ExprId,
+        /// Empty when the name is missing (broken source, e.g. `a.`); the
+        /// parse error covers it, inference stays silent.
+        name: String,
+    },
     FnLiteral {
         /// Whether the literal was written `const fn`. Orthogonal to the
         /// enclosing item's own `static`/`const`; read by the separate
@@ -136,9 +152,13 @@ impl BodySourceMap {
 #[salsa::tracked(returns(ref))]
 pub fn body_with_source_map<'db>(db: &'db dyn Db, item: ItemId<'db>) -> (Body, BodySourceMap) {
     let mut ctx = LowerCtx::default();
-    let root = item_source(db, item)
-        .and_then(|it| it.body())
-        .map(|expr| ctx.lower_expr(expr));
+    // A `type` item's RHS is a *type declaration*, not a value: it is read
+    // syntactically by `type_decl` and never lowered, inferred, const-checked
+    // or evaluated — so its body here is empty (`root: None`).
+    let root = match item_source(db, item) {
+        Some(syntax::ast::Item::StaticItem(it)) => it.body().map(|expr| ctx.lower_expr(expr)),
+        Some(syntax::ast::Item::TypeItem(_)) | None => None,
+    };
     (
         Body {
             exprs: ctx.exprs,
@@ -246,6 +266,32 @@ impl LowerCtx {
                     None => self.missing_expr(),
                 };
                 self.alloc_expr(ExprData::ConstBlock { body }, it.syntax())
+            }
+            ast::Expr::RecordExpr(it) => {
+                let fields = it
+                    .fields()
+                    .filter_map(|field| {
+                        // No name: broken source, the parse error covers it.
+                        let name_ref = field.name_ref()?;
+                        let name = name_ref.text();
+                        let value = if field.is_shorthand() {
+                            // `x` is sugar for `x: x`: the value is a normal
+                            // `NameRef` allocated on the name's own node, so
+                            // resolution, hover and the source map treat it
+                            // like any other reference to `x`.
+                            self.alloc_expr(ExprData::NameRef(name.clone()), name_ref.syntax())
+                        } else {
+                            self.lower_opt_expr(field.expr())
+                        };
+                        Some((name, value))
+                    })
+                    .collect();
+                self.alloc_expr(ExprData::RecordLit { fields }, it.syntax())
+            }
+            ast::Expr::FieldExpr(it) => {
+                let receiver = self.lower_opt_expr(it.receiver());
+                let name = it.name_ref().map(|n| n.text()).unwrap_or_default();
+                self.alloc_expr(ExprData::Field { receiver, name }, it.syntax())
             }
             ast::Expr::FnLiteral(it) => {
                 let is_const = it.is_const();

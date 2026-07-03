@@ -33,6 +33,14 @@ pub enum Value {
     Bool(bool),
     Fn(FnValue),
     Builtin(Builtin),
+    /// A record value: fields sorted by name, matching `Ty::Record` and
+    /// `mir::AggregateKind::Record`'s canonical order. The derived
+    /// `PartialEq` is exactly structural equality on that sorted list, so
+    /// `==`/`!=` on records fall out of the machine's generic operand
+    /// equality for free.
+    Record {
+        fields: Vec<(String, Value)>,
+    },
 }
 
 /// A function value: which item's lowered MIR holds its code, and which of
@@ -52,6 +60,17 @@ impl Value {
             Value::Bool(b) => b.to_string(),
             Value::Fn(_) => "fn".to_owned(),
             Value::Builtin(b) => format!("builtin {}", b.name()),
+            Value::Record { fields } => {
+                if fields.is_empty() {
+                    return "{}".to_owned();
+                }
+                let parts = fields
+                    .iter()
+                    .map(|(name, value)| format!("{name}: {}", value.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{{ {parts} }}")
+            }
         }
     }
 }

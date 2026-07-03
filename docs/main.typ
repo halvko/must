@@ -37,7 +37,7 @@ static main = fn {
 
 Plain enums: e.g. the type `"hello"` is a valid type.
 
-Plain structs: e.g. the type `{ a: string }` is a valid type (without a tag)
+Plain structs: e.g. the type `struct { a: string }` is a valid type (without a tag)
 
 Tagged types can be created:
 
@@ -256,62 +256,62 @@ static fib2 = fn (n: usize) -> usize {
 
 == functions can destructure arguments
 
+Not implemented yet — none of this parses today, not even in a
+parse-and-reserve way. This section sketches a future direction:
+destructuring a record parameter inline (`fn ({n}: {n: usize})`), a
+shorthand that folds the annotation into the pattern (`fn({n: usize})`),
+renaming a bound field (`fn({n as a: usize})`), an opt-in `...` that
+allows — and ignores — extra fields ("duck typing") on plain records and
+through a named type's exposed fields, and field-level visibility
+(`pub(self)`, `pub(mod)`) gating which fields a duck-typed pattern may see
+through a named type.
+
+A function parameter today is a plain `name: Type` pair, nothing more —
+whatever a caller wants to pull out of a record argument is projected
+through ordinary field access in the body:
+
+```must
+type Example = struct { n: usize, a: str };
+
+static example = fn (e: Example) -> usize {
+    e.n
+}
 ```
-static example = fn ({n}: {n: usize}) => {
-    print(n);
-}
 
-// with unnecessary type annotation
+== Named types
 
-static example_extra_type = fn({n: usize}: {n: usize}) => {
-    print(n);
-}
+A `type` item declares a new *nominal* type over a structural record — a
+newtype, not an alias. It is deliberately neither `static` (types have no
+runtime location) nor `const` (reserved for future type aliases). For now
+only a `struct` literal can declare a type; `enum` literals join later.
 
-// or shorthand
-
-static example_short = fn({n: usize}) => {
-    print(n);
-}
-
-// and with rename
-
-static example_rename = fn({n as a: usize}) => {
-    print(a);
-    // print(n); <-- error
-}
-
-// and with space for pointless input
-static example_pointless = fn({n, ...}: {n: usize, a: string}) => {
-    print(n);
-}
-
-// opt-in duck typing
-static example_allows_extra_fields({n: usize, ...}: {n: usize, ...}) => {
-    print(args.n);
-}
-
-// duck typing shorthand
-static example_duck_typed({n: usize, ...}) => {
-    print(n)
-}
-
-struct Example {
-    n: usize,
-    a: string,
-}
-
-static takes_partial(e: Example {n, ...}) => {
-    print(n);
-}
-
-struct ExampleWithPrivate {
-    pub(self) n: usize,
-    pub(mod) a: string,
-} with Self {
-    new = fn(n: usize) -> Self { n, ... } => {}
-}
-
-// static illegal(e: ExampleWithPrivate { n, ...}) => { <-- type error: ExampleWithPrivate doesn't expose a field n
-//     loop {}
-// }
 ```
+type Point = struct { x: usize, y: usize };
+```
+
+`Point` unifies only with itself: same declaration or nothing. There is no
+implicit coercion between a named type and its underlying record shape, in
+either direction — a `Point` is not a `struct { x: usize, y: usize }` and
+vice versa (the error explains the underlying shape and how to construct).
+
+Construction is a plain function call: the type name applied to the
+underlying record value. Constructors are functions — no special brace
+syntax on the type name.
+
+```
+static origin = Point(struct { x: 0, y: 0 });
+
+static translate = fn (p: Point, dx: usize) -> Point {
+    // Field access projects through to the declared shape.
+    Point(struct { x: p.x + dx, y: p.y })
+};
+```
+
+A bare `Point` in expression position is an error (`Point` is a type, not a
+value); the construction head is its one legal expression position.
+Construction is pure, so it is legal in const contexts.
+
+At runtime named types are fully erased: a `Point` value *is* its record
+value — same representation, structural equality under the hood. The type
+system alone keeps `Point` and bare records apart, so erased equality is
+only ever asked between two values of the same nominal type.

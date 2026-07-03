@@ -2,8 +2,13 @@
 
 ## Conclusions
 
-- **T09** `==`/`!=` are builtin and permitted on any type; the checker only requires the
-  operands to agree.
+- **T09** `==`/`!=` are builtin in v1 and permitted on any type; the checker only requires
+  the operands to agree. Structurally defined for every value shape; records compare over
+  canonically sorted fields.
+- **T03** `type Foo =` always mints. No transparent aliases; two identical spellings are
+  two types. Records are exact structural types; a structural record has no declaration,
+  so it has no owner, and the newtype line is what gives it one. Nominal and structural
+  never coerce.
 - **T07** Mutability. `let mut` declares a mutable binding; assignment is a statement;
   local mutation inside a const context is fine; `mut` parameters are local copies; an
   assignment the checker rejects traps rather than proceeding.
@@ -18,6 +23,9 @@
 
 ## Discarded
 
+- **Transparent type aliases** — two identical spellings are two types, always.
+  **Nominal-to-structural coercion** — a named type and its identical record shape stay
+  distinct. **T03**
 - **Equality on function values as a designed relation** — it fell out of a derive, not a
   decision, and is not to be relied on. **T09**
 

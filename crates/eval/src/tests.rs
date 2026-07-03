@@ -745,3 +745,135 @@ static x = double(21);
         "#]],
     );
 }
+
+#[test]
+fn record_construction_and_field_access() {
+    check_run(
+        "",
+        "(fn { let p = struct { x: 1, y: 2 }; p.x + p.y })()",
+        expect![[r#"
+            => 3
+        "#]],
+    );
+}
+
+#[test]
+fn nested_records_construct_and_project() {
+    check_run(
+        "",
+        r#"(fn { let a = struct { b: struct { c: 5 } }; a.b.c })()"#,
+        expect![[r#"
+            => 5
+        "#]],
+    );
+}
+
+#[test]
+fn records_const_evaluate() {
+    check_const(
+        r#"
+static p = struct { x: 1, y: 2 };
+static sum = p.x + p.y;
+"#,
+        expect![[r#"
+            p = { x: 1, y: 2 }
+            sum = 3
+        "#]],
+    );
+}
+
+#[test]
+fn shorthand_fields_evaluate() {
+    check_run(
+        "",
+        r#"(fn { let x = 5; let y = 6; let p = struct { x, y }; p.x + p.y })()"#,
+        expect![[r#"
+            => 11
+        "#]],
+    );
+}
+
+#[test]
+fn record_equality_is_structural_both_ways() {
+    check_run(
+        "",
+        r#"(struct { x: 1 } == struct { x: 1 })"#,
+        expect![[r#"
+            => true
+        "#]],
+    );
+    check_run(
+        "",
+        r#"(struct { x: 1 } == struct { x: 2 })"#,
+        expect![[r#"
+            => false
+        "#]],
+    );
+    check_run(
+        "",
+        r#"(struct { x: 1 } != struct { x: 2 })"#,
+        expect![[r#"
+            => true
+        "#]],
+    );
+}
+
+#[test]
+fn field_access_on_a_nonexistent_field_still_traps_at_runtime() {
+    // Records have a real MIR/eval story now, but a field inference
+    // rejected is exactly as trapped as before records had an eval story
+    // (the earlier message, unchanged).
+    check_run(
+        "",
+        r#"(fn { let p = struct { x: 1 }; p.y })()"#,
+        expect![[r#"
+            error[Trap]: no field `y` on `struct { x: usize }`
+        "#]],
+    );
+}
+
+#[test]
+fn named_type_construction_erases_to_its_record() {
+    // Full erasure: `Foo(v)` is `v` at runtime — the const value of a
+    // Foo-typed item is a plain record value. Forcing the `type` item
+    // itself (this helper forces every item) yields a Trap-kind error,
+    // the kind `ide` never surfaces as a diagnostic: a type has no value,
+    // and reads of `Foo` already trap with their own type-not-a-value
+    // message.
+    check_const(
+        r#"
+type Foo = struct { x: usize, y: str };
+static p = Foo(struct { x: 1, y: "s" });
+static x = p.x;
+"#,
+        expect![[r#"
+            Foo = error[Trap]: `Foo` has no value
+            p = { x: 1, y: "s" }
+            x = 1
+        "#]],
+    );
+}
+
+#[test]
+fn named_type_equality_is_structural_under_the_hood() {
+    // The type system keeps `Foo` and bare records apart; between two
+    // `Foo`s, equality is the underlying records' structural equality.
+    check_run(
+        "type Foo = struct { x: usize };",
+        r#"(Foo(struct { x: 1 }) == Foo(struct { x: 1 }))"#,
+        expect![[r#"
+            => true
+        "#]],
+    );
+}
+
+#[test]
+fn named_type_inequality_observes_field_values() {
+    check_run(
+        "type Foo = struct { x: usize };",
+        r#"(Foo(struct { x: 1 }) == Foo(struct { x: 2 }))"#,
+        expect![[r#"
+            => false
+        "#]],
+    );
+}

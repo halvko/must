@@ -25,13 +25,40 @@ pub(crate) fn hover(
     let parent = token.parent()?;
 
     let item_index = |node: &SyntaxNode| {
-        let item_node = node
-            .ancestors()
-            .find(|n| n.kind() == SyntaxKind::STATIC_ITEM)?;
+        let item_node = node.ancestors().find(|n| ast::Item::can_cast(n.kind()))?;
         root.children()
-            .filter(|n| n.kind() == SyntaxKind::STATIC_ITEM)
+            .filter(|n| ast::Item::can_cast(n.kind()))
             .position(|n| n == item_node)
     };
+
+    // A type name in annotation position: show the declaration.
+    if let Some(name_ref) = ast::NameRef::cast(parent.clone())
+        && name_ref
+            .syntax()
+            .parent()
+            .is_some_and(|p| p.kind() == SyntaxKind::PATH_TYPE)
+    {
+        let hir::Resolution::TypeItem(loc) = hir::file_scope(db, file).resolve(&name_ref.text())?
+        else {
+            return None;
+        };
+        return type_item_hover(db, loc.to_id(db), name_ref.syntax().text_range());
+    }
+
+    // The field name of a field access: the type of the whole access — the
+    // field's type — under the field's name.
+    if let Some(name_ref) = ast::NameRef::cast(parent.clone())
+        && let Some(field_expr) = name_ref.syntax().parent().and_then(ast::FieldExpr::cast)
+    {
+        let item = *hir::file_item_ids(db, file).get(item_index(field_expr.syntax())?)?;
+        let (_, source_map) = hir::body_with_source_map(db, item);
+        let expr = source_map.expr_for_node(SyntaxNodePtr::new(field_expr.syntax()))?;
+        let ty = hir::infer::infer(db, item).type_of_expr.get(expr)?.clone();
+        return Some(HoverResult {
+            markup: format!("```must\n{}: {}\n```", name_ref.text(), ty.display()),
+            range: name_ref.syntax().text_range(),
+        });
+    }
 
     let (name, ty, range, value, mutable) =
         if let Some(name_ref) = ast::NameRef::cast(parent.clone()) {
@@ -42,6 +69,12 @@ pub(crate) fn hover(
             let expr = source_map.expr_for_node(SyntaxNodePtr::new(path_expr.syntax()))?;
             let ty = hir::infer::infer(db, item).type_of_expr.get(expr)?.clone();
             let resolution = hir::resolutions(db, item).get(expr).cloned();
+            // A type name in expression position (a construction head, or a
+            // stray use the diagnostics call out): show the declaration,
+            // not the constructor's function type.
+            if let Some(hir::Resolution::TypeItem(ref loc)) = resolution {
+                return type_item_hover(db, loc.to_id(db), name_ref.syntax().text_range());
+            }
             // A use of another item also shows that item's const value.
             let value = match resolution {
                 Some(hir::Resolution::Item(ref loc)) => const_display(db, loc.to_id(db)),
@@ -61,6 +94,13 @@ pub(crate) fn hover(
         } else {
             let name = ast::Name::cast(parent)?;
             let item = *hir::file_item_ids(db, file).get(item_index(name.syntax())?)?;
+            if name
+                .syntax()
+                .parent()
+                .is_some_and(|p| p.kind() == SyntaxKind::TYPE_ITEM)
+            {
+                return type_item_hover(db, item, name.syntax().text_range());
+            }
             if name
                 .syntax()
                 .parent()
@@ -90,6 +130,23 @@ pub(crate) fn hover(
     })
 }
 
+/// Hover for a `type` item (on its declaration or any reference): the whole
+/// declaration, with the underlying shape in canonical (sorted) form. A
+/// broken declaration (RHS not a `struct` literal) shows just the head —
+/// its diagnostic explains the rest.
+fn type_item_hover(
+    db: &RootDatabase,
+    item: hir::ItemId<'_>,
+    range: TextRange,
+) -> Option<HoverResult> {
+    let name = item.name(db);
+    let markup = match hir::type_underlying(db, item) {
+        Some(underlying) => format!("```must\ntype {name} = {}\n```", underlying.display()),
+        None => format!("```must\ntype {name}\n```"),
+    };
+    Some(HoverResult { markup, range })
+}
+
 /// Hovering the `const` keyword of a `const { … }` block shows the block's
 /// computed compile-time value, the way hovering an item shows its const
 /// value. Failures show nothing — they already carry a diagnostic.
@@ -106,10 +163,10 @@ fn const_block_hover(
     let item_node = block
         .syntax()
         .ancestors()
-        .find(|n| n.kind() == SyntaxKind::STATIC_ITEM)?;
+        .find(|n| ast::Item::can_cast(n.kind()))?;
     let index = root
         .children()
-        .filter(|n| n.kind() == SyntaxKind::STATIC_ITEM)
+        .filter(|n| ast::Item::can_cast(n.kind()))
         .position(|n| n == item_node)?;
     let item = *hir::file_item_ids(db, file).get(index)?;
     let (_, source_map) = hir::body_with_source_map(db, item);

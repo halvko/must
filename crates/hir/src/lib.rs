@@ -26,11 +26,12 @@ pub use body::{BindingId, Body, BodySourceMap, ExprId, body_with_source_map};
 pub use const_check::ConstCheckDiagnostic;
 pub use constraint::Cause;
 pub use infer::{InferenceDiagnostic, InferenceResult};
-pub use item_tree::{Constness, ItemTree, TypeRef, item_source};
+pub use item_tree::{Constness, ItemKind, ItemTree, TypeDeclData, TypeRef, item_source, type_decl};
 pub use scopes::{
-    Builtin, Duplicate, ExprScopes, FileScope, Resolution, expr_scopes, file_scope, resolutions,
+    Builtin, Duplicate, ExprScopes, FileScope, Resolution, TypeScope, expr_scopes, file_scope,
+    resolutions, type_scope,
 };
-pub use ty::{FnTy, Ty, signature};
+pub use ty::{FnTy, Ty, signature, type_underlying};
 
 /// Stable identity of a top-level item: survives edits to other items,
 /// reordering of unrelated code, and any edit inside its own body.
@@ -194,8 +195,8 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         });
     }
 
-    // Unknown type names, in any annotation position. Without this, a
-    // typo'd type lowers to a silent `{error}`.
+    // Bad type names, in any annotation position: unknown, or naming a
+    // value item. Without this, a typo'd type lowers to a silent `{error}`.
     for path_type in parse(db, file)
         .syntax_node()
         .descendants()
@@ -204,14 +205,42 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         let Some(name_ref) = path_type.name_ref() else {
             continue;
         };
-        if ty::builtin_type_by_name(&name_ref.text()).is_none() {
+        if let Some(message) = type_position_error(db, file, &name_ref.text()) {
             diagnostics.push(Diagnostic {
                 range: path_type.syntax().text_range(),
                 severity: Severity::Error,
-                message: format!("unknown type `{}`", name_ref.text()),
+                message,
                 fix: None,
                 related: Vec::new(),
             });
+        }
+    }
+
+    // `type` declarations: the RHS must be a `struct` literal whose field
+    // values are types. `type_decl` reads the same shape syntactically;
+    // every `TypeRef::Error` it can produce has a diagnostic from here.
+    for &item in file_item_ids(db, file) {
+        let Some(ast::Item::TypeItem(decl)) = item_source(db, item) else {
+            continue;
+        };
+        let Some(rhs) = decl.body() else {
+            // No RHS at all: the parse errors cover it.
+            continue;
+        };
+        match rhs {
+            ast::Expr::RecordExpr(record) => {
+                type_decl_field_diagnostics(db, file, &record, &mut diagnostics);
+            }
+            other => diagnostics.push(Diagnostic {
+                range: other.syntax().text_range(),
+                severity: Severity::Error,
+                // When `enum` literals land they become the second accepted
+                // RHS here; until they even parse, the message doesn't
+                // promise them.
+                message: "only a `struct` literal can declare a type (for now)".to_owned(),
+                fix: None,
+                related: Vec::new(),
+            }),
         }
     }
 
@@ -248,6 +277,28 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 continue;
             };
             let range = ptr.text_range();
+            // Field diagnostics squiggle the field *name*, not the whole
+            // expression (which may span a long receiver or initializer):
+            // the name is the thing that's wrong.
+            let range = match diag {
+                InferenceDiagnostic::NoSuchField { .. } => {
+                    ast::FieldExpr::cast(ptr.to_node(&syntax_root))
+                        .and_then(|it| it.name_ref())
+                        .map(|n| n.syntax().text_range())
+                        .unwrap_or(range)
+                }
+                // Reported on the extra field's value expression; the name
+                // sits on the enclosing record-field node. (A shorthand
+                // field's value *is* its name, so this is a no-op there.)
+                InferenceDiagnostic::RecordLitExtraField { .. } => ptr
+                    .to_node(&syntax_root)
+                    .ancestors()
+                    .find_map(ast::RecordExprField::cast)
+                    .and_then(|f| f.name_ref())
+                    .map(|n| n.syntax().text_range())
+                    .unwrap_or(range),
+                _ => range,
+            };
             // Messages render in `InferenceDiagnostic::message` (shared with
             // MIR's traps); only ranges and related locations attach here.
             let mut related = match diag {
@@ -388,6 +439,62 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                                 })
                                 .into_iter()
                                 .collect(),
+                            Cause::Constructor(call) => {
+                                // Blame the *declaration*: the mismatching
+                                // field's declared type when the diagnosed
+                                // expression sits in a record-literal field,
+                                // the declaration's name otherwise.
+                                let callee = match &body.exprs[*call] {
+                                    body::ExprData::Call { callee, .. } => *callee,
+                                    _ => *call,
+                                };
+                                let Some(Resolution::TypeItem(loc)) = resolutions.get(callee)
+                                else {
+                                    return Vec::new();
+                                };
+                                let Some(ast::Item::TypeItem(decl)) =
+                                    item_source(db, loc.to_id(db))
+                                else {
+                                    return Vec::new();
+                                };
+                                let field_decl = ptr
+                                    .to_node(&syntax_root)
+                                    .ancestors()
+                                    .find_map(ast::RecordExprField::cast)
+                                    .and_then(|f| f.name_ref())
+                                    .map(|n| n.text())
+                                    .and_then(|name| match decl.body()? {
+                                        ast::Expr::RecordExpr(record) => {
+                                            record.fields().find(|f| {
+                                                f.name_ref().is_some_and(|n| n.text() == name)
+                                            })
+                                        }
+                                        _ => None,
+                                    });
+                                match field_decl {
+                                    Some(field) => vec![RelatedInfo {
+                                        file: loc.file,
+                                        range: field.syntax().text_range(),
+                                        message: format!(
+                                            "expected `{}` because of this field declaration",
+                                            expected.display()
+                                        ),
+                                    }],
+                                    None => decl
+                                        .name()
+                                        .map(|n| RelatedInfo {
+                                            file: loc.file,
+                                            range: n.syntax().text_range(),
+                                            message: format!(
+                                                "expected `{}` because of `{}`'s declaration",
+                                                expected.display(),
+                                                loc.display_name()
+                                            ),
+                                        })
+                                        .into_iter()
+                                        .collect(),
+                                }
+                            }
                             Cause::CallSite { call, arg } => {
                                 // Self-evident when the mismatch sits inside
                                 // the call itself; skip the hints then. (The
@@ -485,6 +592,35 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                             file: target.file,
                             range: name.syntax().text_range(),
                             message: format!("`{}` is defined here", target.display_name()),
+                        }]
+                    })
+                    .unwrap_or_default(),
+                // Same shape as `ArgCountMismatch`: the constructor's
+                // declaration is one click away.
+                InferenceDiagnostic::TypeCtorArgCount { item: target, .. } => item_name(target)
+                    .map(|name| {
+                        vec![RelatedInfo {
+                            file: target.file,
+                            range: name.syntax().text_range(),
+                            message: format!("`{}` is defined here", target.display_name()),
+                        }]
+                    })
+                    .unwrap_or_default(),
+                // The message names the nominal type only; where its fields
+                // are declared is the hint.
+                InferenceDiagnostic::NoSuchField {
+                    receiver_ty: Ty::Named(loc),
+                    ..
+                } => item_source(db, loc.to_id(db))
+                    .and_then(|it| it.body())
+                    .map(|decl_body| {
+                        vec![RelatedInfo {
+                            file: loc.file,
+                            range: decl_body.syntax().text_range(),
+                            message: format!(
+                                "the fields of `{}` are declared here",
+                                loc.display_name()
+                            ),
                         }]
                     })
                     .unwrap_or_default(),
@@ -608,4 +744,77 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 
     diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
     diagnostics
+}
+
+/// The error for `name` in *type* position, if any. Mirrors the resolution
+/// order of `ty::lower_type_path` exactly — a `type` item wins, then the
+/// builtin types, then a value item is "not a type" — so every silent
+/// `Ty::Error` the lowering produces has a diagnostic from here. (Only the
+/// *message choice* consults the full [`file_scope`]; this function runs in
+/// the diagnostics aggregator, outside the inference firewall.)
+fn type_position_error(db: &dyn Db, file: SourceFile, name: &str) -> Option<String> {
+    match type_scope(db, file).resolve(name) {
+        // A type item; or a duplicate name, whose definitions already
+        // carry the diagnostics.
+        Some(_) => None,
+        None => {
+            if ty::builtin_type_by_name(name).is_some() {
+                return None;
+            }
+            match file_scope(db, file).resolve(name) {
+                // Also covers value-item duplicates: whichever way the
+                // ambiguity resolves, it is not a type.
+                Some(_) => Some(format!("`{name}` is not a type")),
+                None => Some(format!("unknown type `{name}`")),
+            }
+        }
+    }
+}
+
+/// Check the fields of a `struct` literal used as a type declaration: each
+/// field value must itself denote a type — a type name or a nested `struct`
+/// literal (mirroring `item_tree::expr_as_type_ref`).
+fn type_decl_field_diagnostics(
+    db: &dyn Db,
+    file: SourceFile,
+    record: &ast::RecordExpr,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    fn simple_error(range: TextRange, message: String) -> Diagnostic {
+        Diagnostic {
+            range,
+            severity: Severity::Error,
+            message,
+            fix: None,
+            related: Vec::new(),
+        }
+    }
+    for field in record.fields() {
+        let Some(name_ref) = field.name_ref() else {
+            // No field name: broken source, the parse error covers it.
+            continue;
+        };
+        match field.expr() {
+            // Shorthand (`x` without `: type`): there is no type to read.
+            None => diagnostics.push(simple_error(
+                field.syntax().text_range(),
+                format!("expected a type for field `{}`", name_ref.text()),
+            )),
+            Some(ast::Expr::PathExpr(path)) => {
+                let Some(type_name) = path.name_ref() else {
+                    continue;
+                };
+                if let Some(message) = type_position_error(db, file, &type_name.text()) {
+                    diagnostics.push(simple_error(path.syntax().text_range(), message));
+                }
+            }
+            Some(ast::Expr::RecordExpr(nested)) => {
+                type_decl_field_diagnostics(db, file, &nested, diagnostics);
+            }
+            Some(other) => diagnostics.push(simple_error(
+                other.syntax().text_range(),
+                format!("expected a type for field `{}`", name_ref.text()),
+            )),
+        }
+    }
 }
