@@ -4,6 +4,13 @@
 
 type Task = Box<dyn FnOnce() + Send>;
 
+/// Workers run analysis and const evaluation, and const-forcing recursion
+/// burns Rust stack per nested item — with the 2 MiB default, a deep const
+/// chain overflows before eval's 128-level forcing cap fires, and a stack
+/// overflow kills the whole server (it cannot be caught). The cap's budget
+/// assumes this size.
+const WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+
 pub(crate) struct TaskPool {
     sender: crossbeam_channel::Sender<Task>,
 }
@@ -15,6 +22,7 @@ impl TaskPool {
             let receiver = receiver.clone();
             std::thread::Builder::new()
                 .name(format!("must-lsp-worker-{i}"))
+                .stack_size(WORKER_STACK_SIZE)
                 .spawn(move || {
                     while let Ok(task) = receiver.recv() {
                         // A panicking task must not kill the worker: with a
