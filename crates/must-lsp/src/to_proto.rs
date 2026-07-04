@@ -102,6 +102,54 @@ pub(crate) fn semantic_tokens(
     }
 }
 
+fn completion_item_kind(kind: ide::CompletionItemKind) -> lsp_types::CompletionItemKind {
+    match kind {
+        ide::CompletionItemKind::Function => lsp_types::CompletionItemKind::FUNCTION,
+        ide::CompletionItemKind::Variable => lsp_types::CompletionItemKind::VARIABLE,
+        ide::CompletionItemKind::Field => lsp_types::CompletionItemKind::FIELD,
+        ide::CompletionItemKind::EnumMember => lsp_types::CompletionItemKind::ENUM_MEMBER,
+        ide::CompletionItemKind::Struct => lsp_types::CompletionItemKind::STRUCT,
+        ide::CompletionItemKind::Enum => lsp_types::CompletionItemKind::ENUM,
+        ide::CompletionItemKind::Constant => lsp_types::CompletionItemKind::CONSTANT,
+        ide::CompletionItemKind::Keyword => lsp_types::CompletionItemKind::KEYWORD,
+    }
+}
+
+/// Picks between a snippet's two spellings per the client's own
+/// `snippet_support` capability (read once at `initialize`, see
+/// `GlobalState::new`) — a snippet-incapable client must never see literal
+/// `$1`s, so it gets the candidate's plain fallback instead, with no
+/// `insertTextFormat` set (defaults to plain text per the LSP spec).
+pub(crate) fn completion_item(
+    line_index: &LineIndex,
+    item: ide::CompletionItem,
+    snippet_support: bool,
+) -> lsp_types::CompletionItem {
+    let (new_text, insert_text_format) = match item.text_edit.insert {
+        ide::InsertText::Plain(text) => (text, None),
+        ide::InsertText::Snippet { snippet, plain } => {
+            if snippet_support {
+                (snippet, Some(lsp_types::InsertTextFormat::SNIPPET))
+            } else {
+                (plain, None)
+            }
+        }
+    };
+    lsp_types::CompletionItem {
+        label: item.label,
+        kind: Some(completion_item_kind(item.kind)),
+        detail: item.detail,
+        sort_text: Some(item.sort_text),
+        filter_text: Some(item.filter_text),
+        insert_text_format,
+        text_edit: Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
+            range: range(line_index, item.text_edit.range),
+            new_text,
+        })),
+        ..Default::default()
+    }
+}
+
 pub(crate) fn diagnostic(
     snapshot: &crate::Snapshot,
     line_index: &LineIndex,

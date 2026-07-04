@@ -214,7 +214,9 @@ fn variant_hover(
 }
 
 /// `Circle(usize)` / `Point` — a variant as its declaration writes it.
-fn render_variant(name: &str, payload: &[hir::Ty]) -> String {
+/// `pub(crate)`: `completions`'s `::`-segment and match-arm-pattern
+/// candidates render a variant's payload signature the same way.
+pub(crate) fn render_variant(name: &str, payload: &[hir::Ty]) -> String {
     if payload.is_empty() {
         return name.to_owned();
     }

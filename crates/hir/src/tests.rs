@@ -3831,3 +3831,224 @@ fn non_const_fn_literal_call_offers_no_fix() {
     assert_eq!(diagnostics.len(), 1);
     assert!(diagnostics[0].fix.is_none());
 }
+
+/// Renders every *kept* expectation, `check_infer`-style: `range 'snippet':
+/// expected type`. What is absent matters as much as what is present — an
+/// entry survives `InferCtx::finish` only if it resolves to a concrete type
+/// (no unbound inference variable, no `{error}`); see
+/// `InferenceResult::expectation_of_expr`.
+fn check_expectations(text: &str, expect: Expect) {
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let mut lines = Vec::new();
+    for &item in crate::file_item_ids(&db, file) {
+        let (_, source_map) = crate::body_with_source_map(&db, item);
+        let result = crate::infer::infer(&db, item);
+        for (expr, ty) in result.expectation_of_expr.iter() {
+            if let Some(ptr) = source_map.node_for_expr(expr) {
+                lines.push((ptr.text_range(), ty.display()));
+            }
+        }
+    }
+    lines.sort_by_key(|(range, _)| (range.start(), range.end()));
+    let rendered = lines
+        .into_iter()
+        .map(|(range, ty)| {
+            let snippet: String = text[range].replace('\n', " ");
+            let snippet = if snippet.len() > 20 {
+                format!("{}...", &snippet[..17])
+            } else {
+                snippet
+            };
+            format!("{range:?} '{snippet}': {ty}\n")
+        })
+        .collect::<String>();
+    expect.assert_eq(&rendered);
+}
+
+#[test]
+fn expectation_recorded_for_annotated_let_initializer() {
+    check_expectations(
+        "static main = fn { let x: usize = 5; };",
+        expect![[r#"
+            14..38 'fn { let x: usize...': fn()
+            17..38 '{ let x: usize = ...': ()
+            34..35 '5': usize
+        "#]],
+    );
+}
+
+#[test]
+fn expectation_recorded_for_call_argument() {
+    check_expectations(
+        r#"static main = fn { print("hi"); };"#,
+        expect![[r#"
+            14..33 'fn { print("hi"); }': fn()
+            17..33 '{ print("hi"); }': ()
+            19..24 'print': fn(str)
+            19..30 'print("hi")': ()
+            25..29 '"hi"': str
+        "#]],
+    );
+}
+
+#[test]
+fn expectation_recorded_for_record_literal_field() {
+    check_expectations(
+        r#"
+type Foo = struct { x: usize };
+static main = fn { Foo(struct { x: 1 }); };
+"#,
+        expect![[r#"
+            47..75 'fn { Foo(struct {...': fn()
+            50..75 '{ Foo(struct { x:...': ()
+            52..72 'Foo(struct { x: 1 })': Foo
+            56..71 'struct { x: 1 }': struct { x: usize }
+            68..69 '1': usize
+        "#]],
+    );
+}
+
+#[test]
+fn expectation_recorded_for_if_branches_under_annotation() {
+    check_expectations(
+        "static f: fn(bool) -> usize = fn (b: bool) -> usize { if b { 1 } else { 2 } };",
+        expect![[r#"
+            30..77 'fn (b: bool) -> u...': fn(bool) -> usize
+            52..77 '{ if b { 1 } else...': usize
+            54..75 'if b { 1 } else {...': usize
+            57..58 'b': bool
+            59..64 '{ 1 }': usize
+            61..62 '1': usize
+            70..75 '{ 2 }': usize
+            72..73 '2': usize
+        "#]],
+    );
+}
+
+#[test]
+fn expectation_recorded_for_match_arm_tails() {
+    check_expectations(
+        r#"
+type Shape = enum { Circle, Square };
+static f: fn(Shape) -> usize = fn (s: Shape) -> usize {
+    match s { ::Circle => 1, ::Square => 2 }
+};
+"#,
+        expect![[r#"
+            70..141 'fn (s: Shape) -> ...': fn(Shape) -> usize
+            93..141 '{     match s { :...': usize
+            99..139 'match s { ::Circl...': usize
+            105..106 's': Shape
+            121..122 '1': usize
+            136..137 '2': usize
+        "#]],
+    );
+}
+
+#[test]
+fn expectation_recorded_for_break_value() {
+    check_expectations(
+        "static f: fn() -> usize = fn () -> usize { loop { break 1; } };",
+        expect![[r#"
+            26..62 'fn () -> usize { ...': fn() -> usize
+            41..62 '{ loop { break 1;...': usize
+            43..60 'loop { break 1; }': usize
+            48..60 '{ break 1; }': ()
+            56..57 '1': usize
+        "#]],
+    );
+}
+
+#[test]
+fn expectation_for_bare_let_initializer_is_its_own_type() {
+    // Pinned behavior, not a design statement: a bare `let`'s initializer
+    // is checked against a fresh variable, which the check then unifies
+    // with the initializer's own type — so the recorded expectation
+    // resolves concrete (to `usize` here) and is KEPT, even though nothing
+    // outside the expression demanded it.
+    check_expectations(
+        "static main = fn { let x = 5; };",
+        expect![[r#"
+            14..31 'fn { let x = 5; }': fn()
+            17..31 '{ let x = 5; }': ()
+            27..28 '5': usize
+        "#]],
+    );
+}
+
+#[test]
+fn expectation_dropped_when_fresh_variable_stays_unbound() {
+    // `panic(..)` is `!`, which *adopts* a still-free expectation instead
+    // of unifying with it (see `InferCtx::check`'s early `Never` path) —
+    // the bare `let`'s fresh variable stays unbound, so the initializer
+    // call gets NO kept expectation. Its argument still does (`str`, the
+    // builtin's parameter type).
+    check_expectations(
+        r#"static main = fn { let x = panic("msg"); };"#,
+        expect![[r#"
+            14..42 'fn { let x = pani...': fn()
+            17..42 '{ let x = panic("...': ()
+            27..32 'panic': fn(str) -> !
+            33..38 '"msg"': str
+        "#]],
+    );
+}
+
+/// Companion to the two firewall tests above (same event-log style):
+/// expectation recording must not leak extra invalidation. A body edit
+/// that changes no types — and so no *kept* expectations — re-executes
+/// only the edited item's own `infer`, and produces a value-EQUAL
+/// `InferenceResult` (expectations included: they are range-free and hold
+/// no canonicalized variable indices, those entries are dropped), so
+/// everything downstream of the query backdates exactly as before
+/// expectation recording existed.
+#[test]
+fn firewall_expectation_recording_backdates_unchanged_types() {
+    use salsa::Setter as _;
+    use std::sync::{Arc, Mutex};
+
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let log_handle = Arc::clone(&log);
+    let mut db = RootDatabase::with_event_callback(Box::new(move |event| {
+        if let salsa::EventKind::WillExecute { database_key } = event.kind {
+            log_handle.lock().unwrap().push(format!("{database_key:?}"));
+        }
+    }));
+
+    let text_v1 = "static a: fn() -> usize = fn () -> usize { let x: usize = 1; x };\n\
+                   static b: fn() -> usize = fn () -> usize { a() };\n";
+    // Only the literal changes: every type, and every kept expectation
+    // (`x`'s annotated initializer among them), is identical.
+    let text_v2 = "static a: fn() -> usize = fn () -> usize { let x: usize = 2; x };\n\
+                   static b: fn() -> usize = fn () -> usize { a() };\n";
+
+    let file = SourceFile::new(&db, "test.must".to_owned(), text_v1.to_owned());
+    let before: Vec<crate::InferenceResult> = crate::file_item_ids(&db, file)
+        .iter()
+        .map(|&item| crate::infer::infer(&db, item).clone())
+        .collect();
+    assert!(
+        before
+            .iter()
+            .any(|result| result.expectation_of_expr.iter().count() > 0),
+        "the fixture records expectations at all"
+    );
+
+    log.lock().unwrap().clear();
+    file.set_text(&mut db).to(text_v2.to_owned());
+    let after: Vec<crate::InferenceResult> = crate::file_item_ids(&db, file)
+        .iter()
+        .map(|&item| crate::infer::infer(&db, item).clone())
+        .collect();
+    assert_eq!(
+        before, after,
+        "a types-preserving edit must leave the results value-equal (backdating)"
+    );
+    let log = log.lock().unwrap();
+    assert_eq!(
+        log.iter().filter(|entry| entry.contains("infer")).count(),
+        1,
+        "only the edited item may re-infer; executed: {log:#?}"
+    );
+}

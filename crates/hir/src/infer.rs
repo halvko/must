@@ -59,6 +59,22 @@ pub struct InferenceResult {
     /// [`Self::type_of_binding`] under its own binding). MIR reads this for
     /// the synthetic "whole value" local a `Record`/`Newtype` pattern needs.
     pub type_of_pat: ArenaMap<PatId, Ty>,
+    /// The type each expression was *checked against*: the `expected`
+    /// parameter in hand at every position [`InferCtx::infer_expr_with`]
+    /// visits — the same fact the blame system's causes are built on, just
+    /// persisted. Recorded for every expression during traversal, then
+    /// filtered in the finish pass: an entry survives only if it resolves
+    /// to a concrete type — one still containing an unbound inference
+    /// variable carried no real expectation (checking against a fresh
+    /// variable is how "infer freely" is spelled), and one containing
+    /// `{error}` describes broken code. Dropping the unresolved ones also
+    /// keeps the result value-deterministic (no canonicalized variable
+    /// indices), which the incrementality firewall's backdating relies on.
+    /// Note the flip side: a fresh-variable expectation that unification
+    /// later *pins* (typically to the expression's own type — a bare
+    /// `let`'s initializer, an equality operand) resolves concrete and is
+    /// kept. Consumed by ide completions for type-directed ranking.
+    pub expectation_of_expr: ArenaMap<ExprId, Ty>,
     pub diagnostics: Vec<InferenceDiagnostic>,
 }
 
@@ -966,6 +982,19 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         for (_, ty) in result.type_of_pat.iter_mut() {
             *ty = resolve_fully(self.table, ty);
         }
+        // Expectations: resolve like `type_of_expr`, but *drop* what
+        // doesn't resolve to a concrete type — an unbound variable means
+        // the position had no real expectation, and an `{error}` means the
+        // expectation itself came from broken code (see the field's doc
+        // for why both must go).
+        let recorded = std::mem::take(&mut result.expectation_of_expr);
+        for (expr, ty) in recorded.iter() {
+            let resolved = resolve_fully(self.table, ty);
+            if resolved.contains_infer() || resolved.contains_error() {
+                continue;
+            }
+            result.expectation_of_expr.insert(expr, resolved);
+        }
         result
     }
 
@@ -983,6 +1012,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// expected — recorded when the expectation binds a type variable, and
     /// cited when the check fails outright.
     fn infer_expr_with(&mut self, expr: ExprId, expected: &Ty, cause: Option<Cause>) -> Ty {
+        // Persist the expectation before anything else so every arm —
+        // including the early-`return`ing ones (`if` without `else`, block
+        // tails, `const` blocks, record literals, `match`, constructions) —
+        // records it; `finish` resolves and filters. Recording only:
+        // nothing below reads this map.
+        self.result
+            .expectation_of_expr
+            .insert(expr, expected.clone());
         // A join sink propagates only through transparent wrappers (block
         // tails, `const` blocks) into an `if`'s witness position. Any other
         // expression is a leaf of the enclosing join, and its

@@ -257,6 +257,24 @@ impl FileScope {
             }
         })
     }
+
+    /// Every unambiguous name this file declares, each with its resolution —
+    /// completions' candidate source (used instead of [`Self::resolve`] when
+    /// the caller wants *all* names, not one). An ambiguous name is skipped:
+    /// no single resolution names a symbol worth offering, and its
+    /// definitions already carry the diagnostic.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, Resolution)> {
+        self.entries.iter().filter_map(|(name, entry)| {
+            if entry.ambiguous {
+                return None;
+            }
+            let resolution = match entry.kind {
+                ItemKind::Value(_) => Resolution::Item(entry.loc.clone()),
+                ItemKind::Type => Resolution::TypeItem(entry.loc.clone()),
+            };
+            Some((name.as_str(), resolution))
+        })
+    }
 }
 
 /// The type-item names of a file — the slice of [`FileScope`] that type
@@ -287,6 +305,15 @@ impl TypeScope {
         } else {
             Resolution::TypeItem(entry.loc.clone())
         })
+    }
+
+    /// Every unambiguous type name this file declares — completions' type-
+    /// position candidate source. Same ambiguity handling as
+    /// [`FileScope::iter`].
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &ItemLoc)> {
+        self.entries
+            .iter()
+            .filter_map(|(name, entry)| (!entry.ambiguous).then_some((name.as_str(), &entry.loc)))
     }
 }
 

@@ -525,6 +525,34 @@ fn assign_to_immutable_squiggles_the_lhs_name_with_related_info() {
 }
 
 #[test]
+fn field_assign_to_immutable_root_offers_the_make_mut_fix() {
+    // Same machinery as the plain-assignment case: the squiggle sits on
+    // the ROOT name inside the place, the message carries the field path,
+    // and the fix inserts `mut ` at the binding's declaration.
+    let src = "static f = fn { let p = struct { x: 1 }; p.x = 2; };";
+    let (analysis, file, _pos) = fixture(&format!("{src}$0"));
+    let diagnostics = analysis.diagnostics(file);
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::Severity::Error)
+        .collect();
+    assert_eq!(errors.len(), 1, "diagnostics: {diagnostics:?}");
+    assert_eq!(
+        errors[0].message,
+        "cannot assign to `p.x`: `p` is not declared `mut`"
+    );
+    // The root `p` inside the place (offset 41), not the whole `p.x`.
+    assert_eq!(&src[errors[0].range], "p");
+    assert_eq!(u32::from(errors[0].range.start()), 41);
+    let fix = errors[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Make `p` mutable");
+    assert_eq!(fix.edits.len(), 1);
+    assert_eq!(fix.edits[0].edit.insert, "mut ");
+    // Right before the declaration's `p` (offset 20).
+    assert_eq!(u32::from(fix.edits[0].edit.range.start()), 20);
+}
+
+#[test]
 fn const_check_finding_is_not_double_reported_by_const_eval() {
     // Const-evaluating `x` crashes at the trap MIR planted for the
     // const-check violation, but that failure is `Trap` — an
@@ -1449,5 +1477,1067 @@ fn goto_param_record_destructured_binding_use() {
         "static f = fn (struct { num }: struct { num: usize }) { num$0 };",
         "num",
         0,
+    );
+}
+
+/// Renders each completion as `label Kind (detail)`, one per line, in the
+/// exact order `Analysis::completions` returns (already rank-sorted).
+fn check_completions(fixture_text: &str, expect: expect_test::Expect) {
+    let (analysis, _file, pos) = fixture(fixture_text);
+    let mut rendered = String::new();
+    for item in analysis.completions(pos) {
+        rendered.push_str(&item.label);
+        rendered.push(' ');
+        rendered.push_str(&format!("{:?}", item.kind));
+        if let Some(detail) = &item.detail {
+            rendered.push_str(&format!(" ({detail})"));
+        }
+        rendered.push('\n');
+    }
+    expect.assert_eq(&rendered);
+}
+
+fn check_no_completion(fixture_text: &str, label: &str) {
+    let (analysis, _file, pos) = fixture(fixture_text);
+    assert!(
+        !analysis.completions(pos).iter().any(|c| c.label == label),
+        "expected no completion labeled {label:?}"
+    );
+}
+
+fn check_has_completion(fixture_text: &str, label: &str) {
+    let (analysis, _file, pos) = fixture(fixture_text);
+    assert!(
+        analysis.completions(pos).iter().any(|c| c.label == label),
+        "expected a completion labeled {label:?}"
+    );
+}
+
+#[test]
+fn completions_expression_position_ranks_locals_items_builtins_keywords() {
+    // A call argument: expression position, but not a fresh statement — no
+    // `let` among the keywords. The typed prefix `x` is a real
+    // expression checked against `print`'s parameter, so the position
+    // carries a `str` expectation — `panic` (returns `!`, which widens to
+    // anything) is the one candidate whose *call* satisfies it, so its
+    // type tier lifts it above every tier-2 candidate; below that the
+    // provenance order (locals, items, builtins, keywords) is intact.
+    check_completions(
+        r#"
+type Shape = struct { r: usize };
+static area = fn (r: usize) -> usize { r * r };
+static main = fn {
+    let x = 1;
+    print(x$0);
+};
+"#,
+        expect_test::expect![[r#"
+            panic Function (fn(str) -> !)
+            x Variable (usize)
+            Shape Struct (struct { r: usize })
+            area Function (fn(usize) -> usize)
+            main Function (fn())
+            print Function (fn(str))
+            const Keyword
+            false Keyword
+            fn Keyword
+            if Keyword
+            loop Keyword
+            match Keyword
+            struct Keyword
+            true Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_mutable_local_carries_mut_in_detail() {
+    // Doubles as the type-tier no-expectation regression pin: an empty
+    // prefix in a call-argument hole is not one of `expected_type_at`'s two
+    // provable shapes, so no type ranking applies and the provenance
+    // ordering is untouched.
+    check_completions(
+        r#"
+static main = fn {
+    let mut x = 1;
+    print($0);
+};
+"#,
+        expect_test::expect![[r#"
+            x Variable (mut usize)
+            main Function (fn())
+            panic Function (fn(str) -> !)
+            print Function (fn(str))
+            const Keyword
+            false Keyword
+            fn Keyword
+            if Keyword
+            loop Keyword
+            match Keyword
+            struct Keyword
+            true Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_type_position_shows_only_types_and_builtins() {
+    check_completions(
+        r#"
+type Point = struct { x: usize, y: usize };
+static make_point = fn (x: usize) -> $0 { x };
+"#,
+        expect_test::expect![[r#"
+            Point Struct (struct { x: usize, y: usize })
+            bool Keyword
+            str Keyword
+            string Keyword
+            usize Keyword
+            fn Keyword
+            struct Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_type_position_excludes_locals_and_value_items() {
+    check_no_completion(
+        r#"
+static helper = fn { 1 };
+static main = fn (n: $0) { n };
+"#,
+        "helper",
+    );
+}
+
+#[test]
+fn completions_statement_start_includes_let() {
+    check_has_completion(
+        r#"
+static main = fn {
+    let x = 1;
+    $0
+};
+"#,
+        "let",
+    );
+}
+
+#[test]
+fn completions_statement_start_sees_the_preceding_let() {
+    // The trailing statement slot has no `ExprId` of its own (nothing was
+    // ever lowered there) — this exercises the block-walk reconstruction in
+    // `locals_in_block` rather than a plain `scope_of` lookup.
+    check_has_completion(
+        r#"
+static main = fn {
+    let x = 1;
+    $0
+};
+"#,
+        "x",
+    );
+}
+
+#[test]
+fn completions_expression_position_has_no_let() {
+    check_no_completion(
+        r#"
+static main = fn {
+    print($0);
+};
+"#,
+        "let",
+    );
+}
+
+#[test]
+fn completions_break_continue_only_inside_a_loop() {
+    check_has_completion(
+        r#"
+static main = fn {
+    loop {
+        $0
+    }
+};
+"#,
+        "break",
+    );
+    check_has_completion(
+        r#"
+static main = fn {
+    loop {
+        $0
+    }
+};
+"#,
+        "continue",
+    );
+    check_no_completion(
+        r#"
+static main = fn {
+    $0
+};
+"#,
+        "break",
+    );
+}
+
+#[test]
+fn completions_break_does_not_cross_a_nested_fn_literal_boundary() {
+    // A closure written inside a loop's body is its own const-check/loop
+    // boundary (mirrors `hir::infer`'s `loop_sinks` save/restore) — `break`
+    // here couldn't exit the outer loop, so it shouldn't be offered.
+    check_no_completion(
+        r#"
+static main = fn {
+    loop {
+        let inner = fn { $0 };
+    }
+};
+"#,
+        "break",
+    );
+}
+
+#[test]
+fn completions_top_level_offers_exactly_static_const_type() {
+    check_completions(
+        "$0",
+        expect_test::expect![[r#"
+            const Keyword
+            static Keyword
+            type Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_empty_file_top_level() {
+    // Same shape as the general top-level case, exercised on a genuinely
+    // empty file (no tokens at all for the speculative parse to hang off).
+    check_completions(
+        "$0",
+        expect_test::expect![[r#"
+            const Keyword
+            static Keyword
+            type Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_typed_prefix_still_classifies_and_edit_covers_the_prefix() {
+    let (analysis, _file, pos) = fixture(
+        r#"
+static main = fn {
+    let price = 1;
+    pri$0
+};
+"#,
+    );
+    let items = analysis.completions(pos);
+    let local = items
+        .iter()
+        .find(|c| c.label == "price")
+        .expect("`price` offered even though only `pri` was typed — filtering is client-side");
+    // `pri` sits right before the cursor; the edit replaces exactly that,
+    // not the identifier that would follow it if there were one.
+    let prefix_start = pos.offset - syntax::TextSize::new(3);
+    assert_eq!(local.text_edit.range.start(), prefix_start);
+    assert_eq!(local.text_edit.range.end(), pos.offset);
+}
+
+#[test]
+fn completions_cursor_mid_identifier_of_an_existing_name() {
+    let (analysis, _file, pos) = fixture(
+        r#"
+static main = fn {
+    let abc = 1;
+    print(ab$0c);
+};
+"#,
+    );
+    let items = analysis.completions(pos);
+    assert!(
+        items.iter().any(|c| c.label == "abc"),
+        "still classifies as expression position and offers the shadowed-over local"
+    );
+    let edited = items.iter().find(|c| c.label == "abc").unwrap();
+    // Only `ab` (the part before the cursor) is replaced; the `c` that
+    // follows is left alone.
+    let prefix_start = pos.offset - syntax::TextSize::new(2);
+    assert_eq!(edited.text_edit.range.start(), prefix_start);
+    assert_eq!(edited.text_edit.range.end(), pos.offset);
+}
+
+#[test]
+fn completions_inside_a_string_literal_is_empty() {
+    let (analysis, _file, pos) = fixture(r#"static main = fn { print("hi $0"); };"#);
+    assert_eq!(analysis.completions(pos), Vec::new());
+}
+
+#[test]
+fn completions_inside_a_comment_is_empty() {
+    let (analysis, _file, pos) = fixture("// hi $0\nstatic main = fn { 1 };");
+    assert_eq!(analysis.completions(pos), Vec::new());
+}
+
+// ---- field access ----
+
+#[test]
+fn completions_dot_field_access_on_record_local() {
+    check_completions(
+        r#"
+static f = fn {
+    let p = struct { x: 1, y: 2 };
+    p.$0
+};
+"#,
+        expect_test::expect![[r#"
+            x Field (usize)
+            y Field (usize)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_dot_field_access_through_named_type_erasure() {
+    check_completions(
+        r#"
+type Point = struct { x: usize, y: usize };
+static f = fn (p: Point) {
+    p.$0
+};
+"#,
+        expect_test::expect![[r#"
+            x Field (usize)
+            y Field (usize)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_dot_field_access_chained() {
+    check_completions(
+        r#"
+type Inner = struct { z: usize };
+type Outer = struct { inner: Inner };
+static f = fn (o: Outer) {
+    o.inner.$0
+};
+"#,
+        expect_test::expect![[r#"
+            z Field (usize)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_dot_field_access_non_record_receiver_is_empty() {
+    check_completions(
+        r#"
+static f = fn (n: usize) {
+    n.$0
+};
+"#,
+        expect_test::expect![""],
+    );
+}
+
+#[test]
+fn completions_dot_field_access_unknown_receiver_is_empty() {
+    check_completions(
+        r#"
+static f = fn {
+    nope.$0
+};
+"#,
+        expect_test::expect![""],
+    );
+}
+
+// ---- `::` second segment (member completions) ----
+
+#[test]
+fn completions_variant_segment_expression_position() {
+    check_completions(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn {
+    Shape::$0
+};
+"#,
+        expect_test::expect![[r#"
+            Circle EnumMember (Circle(usize))
+            Point EnumMember (Point)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_variant_segment_type_position() {
+    check_completions(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape::$0) {};
+"#,
+        expect_test::expect![[r#"
+            Circle EnumMember (Circle(usize))
+            Point EnumMember (Point)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_variant_segment_after_struct_type_is_empty() {
+    check_completions(
+        r#"
+type Point = struct { x: usize };
+static f = fn {
+    Point::$0
+};
+"#,
+        expect_test::expect![""],
+    );
+}
+
+// ---- match-arm pattern position ----
+
+#[test]
+fn completions_match_arm_uncovered_variants_ranked_first() {
+    // One arm (`::Point`) already written and covered; the bare slot of a
+    // fresh arm should rank the two *uncovered* variants above the
+    // already-covered one (rank-down, not filtered — an arm matching it
+    // again would be unreachable, but it's still shown), with `_` last.
+    // The bare slot labels/inserts the sigil form `::Variant` (see
+    // `match_arm_items`' doc).
+    check_completions(
+        r#"
+type Shape = enum { Circle(usize), Point, Square(usize) };
+static f = fn (s: Shape) {
+    match s {
+        ::Point => 1,
+        $0
+    }
+};
+"#,
+        expect_test::expect![[r#"
+            ::Circle EnumMember (Circle(usize))
+            ::Square EnumMember (Square(usize))
+            ::Point EnumMember (Point)
+            _ Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_match_arm_sigil_context_inserts_bare_variant_name() {
+    check_completions(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) {
+    match s {
+        ::$0
+    }
+};
+"#,
+        expect_test::expect![[r#"
+            Circle EnumMember (Circle(usize))
+            Point EnumMember (Point)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_match_arm_qualified_context_inserts_bare_variant_name() {
+    // Past an already-typed `Enum::`, same bare spelling as the elided
+    // sigil — the qualifier is already on screen.
+    check_completions(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) {
+    match s {
+        Shape::$0
+    }
+};
+"#,
+        expect_test::expect![[r#"
+            Circle EnumMember (Circle(usize))
+            Point EnumMember (Point)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_match_arm_bare_slot_inserts_sigil_variant_and_offers_wildcard() {
+    // A bare pattern slot has no `::` at all yet — a bare `Circle` insert
+    // would just bind a fresh local named `Circle` (G25: bare names
+    // always bind), so this inserts the sigil form `::Circle` (label =
+    // insertion; the filter text stays the bare name so a typed `Cir`
+    // still matches). `_` is also offered (it's only reachable from a
+    // bare slot — there's no way to spell it after a `::`).
+    let fixture_text = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) {
+    match s {
+        $0
+    }
+};
+"#;
+    check_has_completion(fixture_text, "::Circle");
+    check_no_completion(fixture_text, "Circle");
+    check_no_completion(fixture_text, "Shape::Circle");
+    check_has_completion(fixture_text, "_");
+
+    let (analysis, _file, pos) = fixture(fixture_text);
+    let items = analysis.completions(pos);
+    let circle = items.iter().find(|c| c.label == "::Circle").unwrap();
+    // `Circle` carries a payload, so the bare slot's sigil insertion is
+    // a snippet with a tab-stop for it; a snippet-incapable client falls
+    // back to the bare `::Circle` (no parens — the payload-less form).
+    assert_eq!(
+        circle.text_edit.insert,
+        crate::InsertText::Snippet {
+            snippet: "::Circle($1)".to_owned(),
+            plain: "::Circle".to_owned(),
+        }
+    );
+    assert_eq!(circle.filter_text, "Circle");
+}
+
+#[test]
+fn completions_match_arm_non_enum_scrutinee() {
+    // A bare slot still offers the universal `_`; a `::`-sigil slot has no
+    // enum to draw variants from, so it offers nothing at all.
+    check_completions(
+        r#"
+static f = fn (s: usize) {
+    match s {
+        $0
+    }
+};
+"#,
+        expect_test::expect![[r#"
+            _ Keyword
+        "#]],
+    );
+    check_completions(
+        r#"
+static f = fn (s: usize) {
+    match s {
+        ::$0
+    }
+};
+"#,
+        expect_test::expect![""],
+    );
+}
+
+// ---- record-literal field names ----
+
+#[test]
+fn completions_record_literal_missing_fields_excludes_already_written() {
+    check_completions(
+        r#"
+type Point = struct { x: usize, y: usize };
+static f = fn {
+    Point(struct { x: 1, $0 })
+};
+"#,
+        expect_test::expect![[r#"
+            y Field (usize)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_record_literal_matching_local_ranked_first() {
+    check_completions(
+        r#"
+type Point = struct { x: usize, y: usize };
+static f = fn {
+    let y = 5;
+    Point(struct { x: 1, $0 })
+};
+"#,
+        expect_test::expect![[r#"
+            y Variable (usize)
+            y Field (usize)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_record_literal_annotated_let_context() {
+    check_completions(
+        r#"
+type Point = struct { x: usize, y: usize };
+static f = fn {
+    let p: Point = struct { $0 };
+};
+"#,
+        expect_test::expect![[r#"
+            x Field (usize)
+            y Field (usize)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_record_literal_no_expectation_fallback_is_expression_position() {
+    // No construction head, no type annotation: the record's shape says
+    // nothing here, so this falls back to ordinary expression-position
+    // candidates rather than going silent.
+    check_has_completion(
+        r#"
+static f = fn {
+    let p = struct { $0 };
+};
+"#,
+        "if",
+    );
+    check_no_completion(
+        r#"
+static f = fn {
+    let p = struct { $0 };
+};
+"#,
+        "let",
+    );
+}
+
+// ---- `type X = …` RHS ----
+
+#[test]
+fn completions_type_item_rhs_offers_exactly_struct_and_enum() {
+    check_completions(
+        "type X = $0;",
+        expect_test::expect![[r#"
+            enum Keyword
+            struct Keyword
+        "#]],
+    );
+}
+
+// ---- type-directed ranking ----
+
+#[test]
+fn completions_type_ranking_exact_local_above_mismatched_local() {
+    // The typed prefix `s` sits in an annotated `let`'s initializer, so
+    // the position expects `str`: the `str` local ranks tier 0, `panic`
+    // (returns `!`) tier 1 via its return type, everything else tier 2 in
+    // the usual provenance order — the mismatched `usize` local included.
+    check_completions(
+        r#"
+static main = fn (s: str, n: usize) {
+    let want: str = s$0;
+};
+"#,
+        expect_test::expect![[r#"
+            s Variable (str)
+            panic Function (fn(str) -> !)
+            n Variable (usize)
+            main Function (fn(str, usize))
+            print Function (fn(str))
+            const Keyword
+            false Keyword
+            fn Keyword
+            if Keyword
+            loop Keyword
+            match Keyword
+            struct Keyword
+            true Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_type_ranking_matching_return_type_above_mismatched() {
+    // `g` resolves to nothing, but the *position* (an annotated `let`'s
+    // initializer) still expects `str`: `get_s`'s call would satisfy it
+    // (tier 1, like `panic`), `get_n`'s wouldn't (tier 2).
+    check_completions(
+        r#"
+static get_s: fn() -> str = fn () -> str { "s" };
+static get_n: fn() -> usize = fn () -> usize { 1 };
+static main = fn {
+    let x: str = g$0;
+};
+"#,
+        expect_test::expect![[r#"
+            get_s Function (fn() -> str)
+            panic Function (fn(str) -> !)
+            get_n Function (fn() -> usize)
+            main Function (fn())
+            print Function (fn(str))
+            const Keyword
+            false Keyword
+            fn Keyword
+            if Keyword
+            loop Keyword
+            match Keyword
+            struct Keyword
+            true Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_type_ranking_fn_typed_expectation_ranks_the_fn_itself_exact() {
+    // Under a `fn`-typed expectation the matching function is tier 0 as a
+    // *value* (passing it, not calling it); `panic` still reaches tier 1
+    // through its `!` return, everything else stays tier 2.
+    check_completions(
+        r#"
+static helper: fn() -> usize = fn () -> usize { 1 };
+static main = fn {
+    let f: fn() -> usize = h$0;
+};
+"#,
+        expect_test::expect![[r#"
+            helper Function (fn() -> usize)
+            panic Function (fn(str) -> !)
+            main Function (fn())
+            print Function (fn(str))
+            const Keyword
+            false Keyword
+            fn Keyword
+            if Keyword
+            loop Keyword
+            match Keyword
+            struct Keyword
+            true Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_type_ranking_fresh_hole_after_annotated_let_eq() {
+    // No prefix at all: `let x: Foo = |` lowers the absent initializer as
+    // a `Missing` expression checked against the annotation — the one
+    // no-prefix shape `expected_type_at` can prove. The `Point`-typed
+    // local ranks tier 0 over the `usize` one.
+    check_completions(
+        r#"
+type Point = struct { x: usize };
+static main = fn (p: Point, n: usize) {
+    let q: Point = $0;
+};
+"#,
+        expect_test::expect![[r#"
+            p Variable (Point)
+            panic Function (fn(str) -> !)
+            n Variable (usize)
+            Point Struct (struct { x: usize })
+            main Function (fn(Point, usize))
+            print Function (fn(str))
+            const Keyword
+            false Keyword
+            fn Keyword
+            if Keyword
+            loop Keyword
+            match Keyword
+            struct Keyword
+            true Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_type_ranking_variant_under_enum_expectation() {
+    // A variant candidate under its own enum's expectation widens to it
+    // (tier 1): its sort key outranks every unrankable/mismatching
+    // (tier 2) item's.
+    let (analysis, _file, pos) = fixture(
+        r#"
+type Shape = enum { Circle(usize), Square };
+static main = fn {
+    let s: Shape = Shape::C$0;
+};
+"#,
+    );
+    let items = analysis.completions(pos);
+    let circle = items
+        .iter()
+        .find(|c| c.label == "Circle")
+        .expect("Circle is offered");
+    assert_eq!(circle.sort_text, "1_20_Circle");
+    assert!(
+        circle.sort_text.as_str() < "2_00_",
+        "outranks any tier-2 item"
+    );
+
+    // Control: under a non-matching expectation the same variant is
+    // tier 2 — type ranking is the expectation's doing, not the context's.
+    let (analysis, _file, pos) = fixture(
+        r#"
+type Shape = enum { Circle(usize), Square };
+static main = fn {
+    let n: usize = Shape::C$0;
+};
+"#,
+    );
+    let items = analysis.completions(pos);
+    let circle = items
+        .iter()
+        .find(|c| c.label == "Circle")
+        .expect("Circle is offered");
+    assert_eq!(circle.sort_text, "2_20_Circle");
+}
+
+#[test]
+fn completions_type_ranking_match_arm_variants_carry_the_widening_tier() {
+    // Match-arm variant candidates rank against the scrutinee's enum: all
+    // widen (tier 1), with gold-before-covered preserved inside the tier
+    // and `_` staying an unranked keyword.
+    let (analysis, _file, pos) = fixture(
+        r#"
+type Shape = enum { Circle(usize), Square };
+static f = fn (s: Shape) -> usize {
+    match s { ::Square => 2, $0 }
+};
+"#,
+    );
+    let items = analysis.completions(pos);
+    let sort_text = |label: &str| {
+        items
+            .iter()
+            .find(|c| c.label == label)
+            .unwrap_or_else(|| panic!("{label} is offered"))
+            .sort_text
+            .clone()
+    };
+    assert_eq!(sort_text("::Circle"), "1_00_::Circle", "uncovered: gold");
+    assert_eq!(sort_text("::Square"), "1_20_::Square", "covered: item");
+    assert_eq!(sort_text("_"), "2_40__");
+}
+
+#[test]
+fn completions_type_ranking_statement_start_without_prefix_keeps_untyped_ordering() {
+    // A fresh statement slot with no prefix has no provable expectation:
+    // the provenance ordering (locals, items, builtins, keywords) is
+    // untouched.
+    check_completions(
+        r#"
+static main = fn {
+    let s = "hi";
+    $0
+};
+"#,
+        expect_test::expect![[r#"
+            s Variable (str)
+            main Function (fn())
+            panic Function (fn(str) -> !)
+            print Function (fn(str))
+            const Keyword
+            false Keyword
+            fn Keyword
+            if Keyword
+            let Keyword
+            loop Keyword
+            match Keyword
+            struct Keyword
+            true Keyword
+        "#]],
+    );
+}
+
+// ---- snippets ----
+
+/// The `InsertText` of the one completion labeled `label` (of any kind).
+/// Panics on zero or multiple matches — most snippet fixtures below only ever
+/// produce one candidate under that label.
+fn completion_insert(fixture_text: &str, label: &str) -> crate::InsertText {
+    let (analysis, _file, pos) = fixture(fixture_text);
+    let items = analysis.completions(pos);
+    items
+        .iter()
+        .find(|c| c.label == label)
+        .unwrap_or_else(|| panic!("no completion labeled {label:?}: {items:?}"))
+        .text_edit
+        .insert
+        .clone()
+}
+
+/// Same as [`completion_insert`], but disambiguated by kind too — needed
+/// where a shorthand-matching local and a field share one label (the
+/// record-literal gold case).
+fn completion_insert_kind(
+    fixture_text: &str,
+    label: &str,
+    kind: crate::CompletionItemKind,
+) -> crate::InsertText {
+    let (analysis, _file, pos) = fixture(fixture_text);
+    let items = analysis.completions(pos);
+    items
+        .iter()
+        .find(|c| c.label == label && c.kind == kind)
+        .unwrap_or_else(|| panic!("no completion labeled {label:?} of kind {kind:?}: {items:?}"))
+        .text_edit
+        .insert
+        .clone()
+}
+
+#[test]
+fn completions_snippet_fn_call_with_params_inserts_a_snippet() {
+    // A parameterful fn in expression position offers `name($1)`, falling
+    // back to a bare `name()` for a snippet-incapable client.
+    assert_eq!(
+        completion_insert(
+            r#"
+static add = fn (a: usize, b: usize) -> usize { a };
+static main = fn {
+    $0
+};
+"#,
+            "add",
+        ),
+        crate::InsertText::Snippet {
+            snippet: "add($1)".to_owned(),
+            plain: "add()".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn completions_snippet_zero_arity_fn_call_is_plain() {
+    // No parameters, nothing for a tab stop to land on: always the plain
+    // `name()`, snippet or not.
+    assert_eq!(
+        completion_insert(
+            r#"
+static go = fn { 1 };
+static main = fn {
+    $0
+};
+"#,
+            "go",
+        ),
+        crate::InsertText::Plain("go()".to_owned())
+    );
+}
+
+#[test]
+fn completions_snippet_fn_typed_expectation_suppresses_the_call_snippet() {
+    // Under a `fn`-typed expectation the position wants the fn *passed*,
+    // not called — even though `helper` itself is nominally zero-arity, the
+    // insertion is the bare name with no call syntax at all (distinct from
+    // the zero-arity case above, which still inserts `()`).
+    assert_eq!(
+        completion_insert(
+            r#"
+static helper: fn() -> usize = fn () -> usize { 1 };
+static main = fn {
+    let f: fn() -> usize = h$0;
+};
+"#,
+            "helper",
+        ),
+        crate::InsertText::Plain("helper".to_owned())
+    );
+}
+
+#[test]
+fn completions_snippet_builtin_fn_call_with_params() {
+    // Builtins go through the same snippet rule as file items — `print`
+    // takes one param.
+    assert_eq!(
+        completion_insert(
+            r#"
+static main = fn {
+    $0
+};
+"#,
+            "print",
+        ),
+        crate::InsertText::Snippet {
+            snippet: "print($1)".to_owned(),
+            plain: "print()".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn completions_snippet_type_item_rhs_struct_and_enum() {
+    let fixture_text = "type X = $0;";
+    assert_eq!(
+        completion_insert(fixture_text, "struct"),
+        crate::InsertText::Snippet {
+            snippet: "struct { $1 }".to_owned(),
+            plain: "struct { }".to_owned(),
+        }
+    );
+    assert_eq!(
+        completion_insert(fixture_text, "enum"),
+        crate::InsertText::Snippet {
+            snippet: "enum { $1 }".to_owned(),
+            plain: "enum { }".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn completions_snippet_match_arm_payload_variant_qualified_context() {
+    // Past an already-typed qualifier, a payload-carrying variant inserts
+    // just the bare name plus its own tab-stopped parens; a payload-less
+    // one is untouched (still a plain bare name, the payload-less form).
+    let fixture_text = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) {
+    match s {
+        Shape::$0
+    }
+};
+"#;
+    assert_eq!(
+        completion_insert(fixture_text, "Circle"),
+        crate::InsertText::Snippet {
+            snippet: "Circle($1)".to_owned(),
+            plain: "Circle".to_owned(),
+        }
+    );
+    assert_eq!(
+        completion_insert(fixture_text, "Point"),
+        crate::InsertText::Plain("Point".to_owned())
+    );
+}
+
+#[test]
+fn completions_snippet_record_literal_missing_field_inserts_a_snippet() {
+    assert_eq!(
+        completion_insert(
+            r#"
+type Point = struct { x: usize, y: usize };
+static f = fn {
+    Point(struct { x: 1, $0 })
+};
+"#,
+            "y",
+        ),
+        crate::InsertText::Snippet {
+            snippet: "y: $1".to_owned(),
+            plain: "y: ".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn completions_snippet_record_literal_gold_local_stays_a_plain_bare_name() {
+    // The shorthand-matching local (`y` meaning `y: y`) is not the field
+    // slot itself — it keeps inserting just its own name, snippet-free.
+    assert_eq!(
+        completion_insert_kind(
+            r#"
+type Point = struct { x: usize, y: usize };
+static f = fn {
+    let y = 5;
+    Point(struct { x: 1, $0 })
+};
+"#,
+            "y",
+            crate::CompletionItemKind::Variable,
+        ),
+        crate::InsertText::Plain("y".to_owned())
     );
 }

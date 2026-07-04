@@ -822,3 +822,344 @@ fn run_lens_executes_the_buffer() {
 
     drop(client);
 }
+
+#[test]
+fn completion_capability_is_advertised_with_dot_and_colon_triggers() {
+    let capabilities = must_lsp::server_capabilities();
+    let completion = capabilities
+        .completion_provider
+        .expect("completion_provider capability advertised");
+    assert_eq!(completion.resolve_provider, Some(false));
+    assert_eq!(
+        completion.trigger_characters,
+        Some(vec![".".to_owned(), ":".to_owned()])
+    );
+}
+
+#[test]
+fn completion_over_protocol_returns_ranked_items_with_a_text_edit() {
+    let mut client = TestClient::start();
+    let file = uri("file:///completion.must");
+
+    client.open(
+        &file,
+        "static main = fn {\n    let x = 1;\n    print(x);\n}\n",
+    );
+    client.next_diagnostics();
+
+    // Right before the `x` argument on line 2 (`    print(x);`, column 10):
+    // an expression position with a visible local, the enclosing `main`
+    // itself as a file item, and the builtin functions/keywords.
+    let response = client.request::<lsp_types::request::Completion>(lsp_types::CompletionParams {
+        text_document_position: lsp_types::TextDocumentPositionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+            position: lsp_types::Position::new(2, 10),
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+        context: None,
+    });
+    let Some(lsp_types::CompletionResponse::Array(items)) = response else {
+        panic!("expected a plain array of completion items, got {response:?}");
+    };
+
+    let local = items
+        .iter()
+        .find(|it| it.label == "x")
+        .expect("the local `x` is offered");
+    assert_eq!(local.kind, Some(lsp_types::CompletionItemKind::VARIABLE));
+    // `2`: the type tier — no typed prefix here and a call-argument
+    // hole carries no provable expectation, so every candidate ties at the
+    // worst tier. `10`: the `Local` provenance tier — two digits wide,
+    // spaced by tens, to leave room for the `Gold` tier (member/match-arm
+    // completions' single best answer) below it. See `ide::completions`'s
+    // module doc.
+    assert_eq!(local.sort_text.as_deref(), Some("2_10_x"));
+    let edit = match local.text_edit.as_ref().expect("has a text edit") {
+        lsp_types::CompletionTextEdit::Edit(edit) => edit,
+        other => panic!("expected a plain edit, got {other:?}"),
+    };
+    // No prefix typed (the `(` right before the cursor isn't an identifier
+    // character), so the edit is a pure insertion right at the cursor.
+    assert_eq!(edit.range.start, lsp_types::Position::new(2, 10));
+    assert_eq!(edit.range.end, lsp_types::Position::new(2, 10));
+    assert_eq!(edit.new_text, "x");
+
+    let main_item = items
+        .iter()
+        .find(|it| it.label == "main")
+        .expect("the enclosing item itself is offered (recursion is legal)");
+    assert_eq!(
+        main_item.kind,
+        Some(lsp_types::CompletionItemKind::FUNCTION)
+    );
+    assert_eq!(main_item.detail.as_deref(), Some("fn()"));
+
+    let print_item = items
+        .iter()
+        .find(|it| it.label == "print")
+        .expect("the builtin `print` is offered");
+    assert_eq!(
+        print_item.kind,
+        Some(lsp_types::CompletionItemKind::FUNCTION)
+    );
+
+    // Not a fresh statement (nested inside `print(...)`'s argument list), so
+    // no `let` — but the ordinary expression-position keywords are there.
+    assert!(!items.iter().any(|it| it.label == "let"));
+    let if_kw = items
+        .iter()
+        .find(|it| it.label == "if")
+        .expect("keywords are offered too");
+    assert_eq!(if_kw.kind, Some(lsp_types::CompletionItemKind::KEYWORD));
+
+    drop(client);
+}
+
+/// Type tier end to end: in a typed context (the typed prefix `g` in an
+/// annotated `let`'s initializer expects `str`), `sortText` leads with the
+/// type tier — a function whose *return* satisfies the expectation
+/// outranks one whose doesn't, across provenance-equal candidates.
+#[test]
+fn completion_sort_text_reflects_the_type_expectation() {
+    let mut client = TestClient::start();
+    let file = uri("file:///typed_completion.must");
+
+    client.open(
+        &file,
+        "static get_s: fn() -> str = fn () -> str { \"s\" };\n\
+         static get_n: fn() -> usize = fn () -> usize { 1 };\n\
+         static main = fn {\n    let x: str = g;\n};\n",
+    );
+    client.next_diagnostics();
+
+    // Right after the `g` on line 3 (`    let x: str = g;`, column 18).
+    let response = client.request::<lsp_types::request::Completion>(lsp_types::CompletionParams {
+        text_document_position: lsp_types::TextDocumentPositionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+            position: lsp_types::Position::new(3, 18),
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+        context: None,
+    });
+    let Some(lsp_types::CompletionResponse::Array(items)) = response else {
+        panic!("expected a plain array of completion items, got {response:?}");
+    };
+
+    let sort_text = |label: &str| {
+        items
+            .iter()
+            .find(|it| it.label == label)
+            .unwrap_or_else(|| panic!("`{label}` is offered: {items:?}"))
+            .sort_text
+            .clone()
+            .expect("sortText is set")
+    };
+    // Calling `get_s` yields the expected `str`: type tier 1. `get_n`
+    // can't satisfy the position: tier 2, like an untyped position.
+    assert_eq!(sort_text("get_s"), "1_20_get_s");
+    assert_eq!(sort_text("get_n"), "2_20_get_n");
+    assert!(
+        sort_text("get_s") < sort_text("get_n"),
+        "the satisfying candidate sorts first"
+    );
+
+    drop(client);
+}
+
+#[test]
+fn dot_triggered_completion_over_protocol_returns_field_items() {
+    let mut client = TestClient::start();
+    let file = uri("file:///dot_completion.must");
+
+    client.open(
+        &file,
+        "type Point = struct { x: usize, y: usize };\nstatic main = fn {\n    let p = struct { x: 1, y: 2 };\n    p.\n}\n",
+    );
+    client.next_diagnostics();
+
+    // Right after `p.` on line 3 (`    p.`, column 6): a field-access
+    // position over a record local.
+    let response = client.request::<lsp_types::request::Completion>(lsp_types::CompletionParams {
+        text_document_position: lsp_types::TextDocumentPositionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+            position: lsp_types::Position::new(3, 6),
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+        context: None,
+    });
+    let Some(lsp_types::CompletionResponse::Array(items)) = response else {
+        panic!("expected a plain array of completion items, got {response:?}");
+    };
+
+    assert_eq!(items.len(), 2, "expected exactly the two fields: {items:?}");
+    let x_field = items
+        .iter()
+        .find(|it| it.label == "x")
+        .expect("field `x` is offered");
+    assert_eq!(x_field.kind, Some(lsp_types::CompletionItemKind::FIELD));
+    assert_eq!(x_field.detail.as_deref(), Some("usize"));
+    let y_field = items
+        .iter()
+        .find(|it| it.label == "y")
+        .expect("field `y` is offered");
+    assert_eq!(y_field.kind, Some(lsp_types::CompletionItemKind::FIELD));
+    assert_eq!(y_field.detail.as_deref(), Some("usize"));
+
+    drop(client);
+}
+
+/// `InitializeParams` advertising (or not) `snippetSupport` — the one
+/// capability snippet insertion gates on (`GlobalState::new`'s
+/// `snippet_support`).
+fn init_with_snippet_support(support: bool) -> lsp_types::InitializeParams {
+    lsp_types::InitializeParams {
+        capabilities: lsp_types::ClientCapabilities {
+            text_document: Some(lsp_types::TextDocumentClientCapabilities {
+                completion: Some(lsp_types::CompletionClientCapabilities {
+                    completion_item: Some(lsp_types::CompletionItemCapability {
+                        snippet_support: Some(support),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// Fetches the `add` completion item at the fixed spot both snippet tests
+/// share: a fresh statement in `main`'s body, where `add` (two params) is
+/// visible as a file item.
+fn add_completion_item(
+    client: &mut TestClient,
+    file: &lsp_types::Uri,
+) -> lsp_types::CompletionItem {
+    client.open(
+        file,
+        "static add = fn (a: usize, b: usize) -> usize { a };\nstatic main = fn {\n    \n};\n",
+    );
+    client.next_diagnostics();
+
+    let response = client.request::<lsp_types::request::Completion>(lsp_types::CompletionParams {
+        text_document_position: lsp_types::TextDocumentPositionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+            position: lsp_types::Position::new(2, 4),
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+        context: None,
+    });
+    let Some(lsp_types::CompletionResponse::Array(items)) = response else {
+        panic!("expected a plain array of completion items, got {response:?}");
+    };
+    items
+        .into_iter()
+        .find(|it| it.label == "add")
+        .expect("`add` is offered")
+}
+
+#[test]
+fn snippet_capable_client_receives_snippet_format_items() {
+    let mut client = TestClient::start_with(init_with_snippet_support(true));
+    let file = uri("file:///snippet_capable.must");
+
+    let add = add_completion_item(&mut client, &file);
+    assert_eq!(
+        add.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET)
+    );
+    let edit = match add.text_edit.as_ref().expect("has a text edit") {
+        lsp_types::CompletionTextEdit::Edit(edit) => edit,
+        other => panic!("expected a plain edit, got {other:?}"),
+    };
+    assert_eq!(edit.new_text, "add($1)");
+
+    drop(client);
+}
+
+#[test]
+fn snippet_incapable_client_receives_the_plain_fallback() {
+    // `TestClient::start` uses `InitializeParams::default()` — no
+    // `snippetSupport` at all — but spelling it out here documents exactly
+    // what's under test, matching the capable variant above.
+    let mut client = TestClient::start_with(init_with_snippet_support(false));
+    let file = uri("file:///snippet_incapable.must");
+
+    let add = add_completion_item(&mut client, &file);
+    assert_eq!(add.insert_text_format, None);
+    let edit = match add.text_edit.as_ref().expect("has a text edit") {
+        lsp_types::CompletionTextEdit::Edit(edit) => edit,
+        other => panic!("expected a plain edit, got {other:?}"),
+    };
+    // The plain fallback is still the call form (`add()`), not the bare
+    // literal snippet text (`add($1)`) and not the bare name either.
+    assert_eq!(edit.new_text, "add()");
+
+    drop(client);
+}
+
+/// Dogfood: open a real example file and ask for completions at a
+/// hand-picked, unremarkable spot (a fresh statement at the top of
+/// `run_lights`'s body). Not a snapshot of the whole list — examples are
+/// free to grow — just: several distinct completion kinds show up (an item
+/// function, a type, a keyword, a builtin) and the server doesn't panic
+/// answering a real file.
+#[test]
+fn dogfood_state_machine_example_offers_sensible_completions() {
+    let mut client = TestClient::start();
+    let file = uri("file:///state_machine.must");
+
+    let text = include_str!("../../../examples/state_machine.must");
+    client.open(&file, text);
+    let diags = client.next_diagnostics();
+    assert_eq!(
+        diags.diagnostics,
+        vec![],
+        "the example is expected to be clean"
+    );
+
+    // Right before `let mut l = Light::Red;` in `run_lights`'s body.
+    let target_line = text
+        .lines()
+        .position(|line| line.trim_start() == "let mut l = Light::Red;")
+        .expect("fixture still has this exact statement — update the offset if it moves")
+        as u32;
+    let response = client.request::<lsp_types::request::Completion>(lsp_types::CompletionParams {
+        text_document_position: lsp_types::TextDocumentPositionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+            position: lsp_types::Position::new(target_line, 4),
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+        context: None,
+    });
+    let Some(lsp_types::CompletionResponse::Array(items)) = response else {
+        panic!("expected a plain array of completion items, got {response:?}");
+    };
+    assert!(!items.is_empty(), "expected some completions, got none");
+
+    let has = |label: &str| items.iter().any(|it| it.label == label);
+    assert!(has("let"), "statement-start keyword `let` is offered");
+    assert!(has("Light"), "the enum type item is offered");
+    assert!(
+        has("run_lights"),
+        "recursion into the enclosing fn is legal"
+    );
+    assert!(has("describe"), "sibling fn items are offered");
+    assert!(has("print"), "the builtin fn is offered");
+
+    let kinds: std::collections::HashSet<_> =
+        items.iter().map(|it| format!("{:?}", it.kind)).collect();
+    assert!(
+        kinds.len() >= 3,
+        "expected several distinct completion kinds, got {kinds:?}"
+    );
+
+    drop(client);
+}

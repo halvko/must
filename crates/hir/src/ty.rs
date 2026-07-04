@@ -113,6 +113,19 @@ impl Ty {
         Ty::Record(Arc::new(RecordTy { fields }))
     }
 
+    /// Whether any part of the type is an inference variable — after
+    /// `resolve_fully`, an *unbound* one. Same traversal shape as
+    /// [`Ty::contains_error`]: `Named`/`Variant` are identity-only, their
+    /// declared shapes are not carried here.
+    pub fn contains_infer(&self) -> bool {
+        match self {
+            Ty::Infer(_) => true,
+            Ty::Fn(f) => f.ret.contains_infer() || f.params.iter().any(Ty::contains_infer),
+            Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| ty.contains_infer()),
+            _ => false,
+        }
+    }
+
     pub fn contains_error(&self) -> bool {
         match self {
             Ty::Error => true,

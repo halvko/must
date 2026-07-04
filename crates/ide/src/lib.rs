@@ -3,11 +3,13 @@
 //! This crate speaks `TextSize`/`TextRange` and its own result types; the
 //! LSP layer converts at the boundary. It must never depend on lsp-types.
 
+mod completions;
 mod goto_definition;
 mod hover;
 mod syntax_highlighting;
 
 use base_db::{RootDatabase, SourceFile};
+pub use completions::{CompletionItem, CompletionItemKind, CompletionTextEdit, InsertText};
 pub use goto_definition::NavigationTarget;
 pub use hir::RelatedInfo;
 pub use hover::HoverResult;
@@ -285,6 +287,12 @@ impl Analysis {
 
     pub fn hover(&self, pos: FilePosition) -> Option<HoverResult> {
         hover::hover(&self.db, pos)
+    }
+
+    /// Completions at `pos`: a speculative-parse core over this snapshot's
+    /// memoized queries — see `completions` module docs.
+    pub fn completions(&self, pos: FilePosition) -> Vec<CompletionItem> {
+        completions::completions(&self.db, pos)
     }
 
     /// Semantic highlighting for the whole file.

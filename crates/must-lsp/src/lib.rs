@@ -28,8 +28,8 @@ use lsp_types::notification::{
     PublishDiagnostics,
 };
 use lsp_types::request::{
-    CodeActionRequest, CodeLensRequest, ExecuteCommand, GotoDefinition, HoverRequest, Request as _,
-    SemanticTokensFullRequest, SemanticTokensRefresh,
+    CodeActionRequest, CodeLensRequest, Completion, ExecuteCommand, GotoDefinition, HoverRequest,
+    Request as _, SemanticTokensFullRequest, SemanticTokensRefresh,
 };
 
 /// The workspace command behind the ▶ run code lens: arguments are
@@ -53,6 +53,13 @@ pub fn server_capabilities() -> lsp_types::ServerCapabilities {
         code_action_provider: Some(lsp_types::CodeActionProviderCapability::Simple(true)),
         code_lens_provider: Some(lsp_types::CodeLensOptions {
             resolve_provider: Some(false),
+        }),
+        // Trigger chars registered for `.`/`::` — member and variant
+        // candidates classify those contexts and answer directly.
+        completion_provider: Some(lsp_types::CompletionOptions {
+            resolve_provider: Some(false),
+            trigger_characters: Some(vec![".".to_owned(), ":".to_owned()]),
+            ..Default::default()
         }),
         execute_command_provider: Some(lsp_types::ExecuteCommandOptions {
             commands: vec![RUN_COMMAND.to_owned()],
@@ -144,6 +151,10 @@ struct GlobalState {
     next_generation: u64,
     /// Client supports `workspace/semanticTokens/refresh`.
     semantic_tokens_refresh: bool,
+    /// Client's `textDocument.completion.completionItem.snippetSupport`
+    /// gates every would-be snippet insertion — see
+    /// `to_proto::completion_item`.
+    snippet_support: bool,
     /// Counter for ids of server→client requests (own namespace).
     outgoing_requests: i32,
 }
@@ -174,6 +185,8 @@ struct FileMaps {
 struct Snapshot {
     pub(crate) analysis: ide::Analysis,
     files: Arc<FileMaps>,
+    /// See `GlobalState::snippet_support`.
+    snippet_support: bool,
 }
 
 impl Snapshot {
@@ -200,6 +213,13 @@ impl GlobalState {
                 .and_then(|w| w.semantic_tokens.as_ref())
                 .and_then(|st| st.refresh_support)
                 .unwrap_or(false),
+            snippet_support: client
+                .text_document
+                .as_ref()
+                .and_then(|td| td.completion.as_ref())
+                .and_then(|c| c.completion_item.as_ref())
+                .and_then(|ci| ci.snippet_support)
+                .unwrap_or(false),
             outgoing_requests: 0,
         }
     }
@@ -208,6 +228,7 @@ impl GlobalState {
         Snapshot {
             analysis: self.host.snapshot(),
             files: Arc::clone(&self.files),
+            snippet_support: self.snippet_support,
         }
     }
 
@@ -247,6 +268,11 @@ impl GlobalState {
             HoverRequest::METHOD => {
                 self.spawn_request(req, |snapshot, params| {
                     serde_json::to_value(snapshot.hover(params)).ok()
+                });
+            }
+            Completion::METHOD => {
+                self.spawn_request(req, |snapshot, params| {
+                    serde_json::to_value(snapshot.completions(params)).ok()
                 });
             }
             CodeActionRequest::METHOD => {
@@ -758,6 +784,29 @@ impl Snapshot {
             }),
             range: Some(to_proto::range(&line_index, hover.range)),
         })
+    }
+
+    fn completions(
+        &self,
+        params: lsp_types::CompletionParams,
+    ) -> Option<lsp_types::CompletionResponse> {
+        let doc = params.text_document_position;
+        let Some(FileState::Open(file)) = self.files.by_uri.get(&doc.text_document.uri).copied()
+        else {
+            tracing::warn!(uri = %doc.text_document.uri.as_str(), "completions for a document that is not open");
+            return None;
+        };
+        let line_index = self.analysis.line_index(file);
+        let offset = from_proto::offset(&line_index, doc.position)?;
+        let items = self
+            .analysis
+            .completions(ide::FilePosition { file, offset });
+        Some(lsp_types::CompletionResponse::Array(
+            items
+                .into_iter()
+                .map(|item| to_proto::completion_item(&line_index, item, self.snippet_support))
+                .collect(),
+        ))
     }
 }
 
