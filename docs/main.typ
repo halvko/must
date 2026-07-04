@@ -173,6 +173,20 @@ static count = fn (n: usize) -> usize {
 };
 ```
 
+Fields follow their binding: when a record binding is `mut`, its fields
+(and fields of fields, through named types too) are assignable — `p.x = 1;`
+— and when it isn't, they are exactly as frozen as the binding itself.
+Mutability is transitive from the binding, in both directions; there is no
+per-field `mut`:
+
+```must
+static shift = fn () -> usize {
+    let mut p = struct { x: 1, y: 2 };
+    p.x = 10;       // fine: `p` is `mut`, so its fields are writable
+    p.x + p.y
+};
+```
+
 Parameters take `mut` the same way, before the name. A `mut` parameter is a
 local copy — mutating it is invisible to the caller:
 

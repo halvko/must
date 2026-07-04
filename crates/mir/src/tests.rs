@@ -958,9 +958,80 @@ fn field_access_on_a_nonexistent_field_still_traps() {
 }
 
 #[test]
+fn nested_field_assign_lowers_to_a_place_projection() {
+    // `p.a.b = 2;` writes through a Place: the root's local plus the
+    // field-index path (innermost first — `a`'s index in `p`, then `b`'s
+    // in `p.a`), rendered `_1.0.0`. The RHS is evaluated before the write,
+    // like every assignment.
+    check_mir(
+        "static f = fn () -> usize { let mut p = struct { a: struct { b: 1 } }; p.a.b = 2; p.a.b };",
+        expect![[r#"
+            item f:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: struct { b: usize }
+              _2: struct { a: struct { b: usize } }
+              _3: struct { a: struct { b: usize } }  // p
+              _4: struct { b: usize }
+              _5: usize
+              bb0:
+                _1 = { b: 1 }
+                _2 = { a: _1 }
+                _3 = _2
+                _3.0.0 = 2
+                _4 = _3.0
+                _5 = _4.0
+                _0 = _5
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn field_assign_on_an_immutable_root_traps() {
+    // Inference rejected the root; the write is replaced by a trap with
+    // the squiggle's exact text (squiggle-equals-crash).
+    check_mir(
+        "static f = fn () -> usize { let p = struct { x: 1 }; p.x = 2; p.x };",
+        expect![[r#"
+            item f:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: struct { x: usize }
+              _2: struct { x: usize }  // p
+              _3: struct { x: usize }
+              _4: usize
+              bb0:
+                _1 = { x: 1 }
+                _2 = _1
+                _3 = trap "cannot assign to `p.x`: `p` is not declared `mut`" -> bb1
+              bb1:
+                _4 = _2.0
+                _0 = _4
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
 fn assignment_to_a_non_variable_traps_with_the_validation_message() {
-    // Validation squiggled the LHS with "can only assign to a variable";
-    // the trap borrows that exact text via the shared constant.
+    // Validation squiggled the LHS with "can only assign to a variable or
+    // its fields"; the trap borrows that exact text via the shared
+    // constant.
     check_mir(
         "static f = fn () -> usize { let mut x = 1; x + 1 = 2; x };",
         expect![[r#"
@@ -971,7 +1042,7 @@ fn assignment_to_a_non_variable_traps_with_the_validation_message() {
               _2: usize
               bb0:
                 _1 = 1
-                _2 = trap "can only assign to a variable" -> bb1
+                _2 = trap "can only assign to a variable or its fields" -> bb1
               bb1:
                 _0 = _1
                 return

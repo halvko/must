@@ -14,7 +14,7 @@ use rustc_hash::FxHashMap;
 
 use crate::{
     AggregateKind, BlockData, BlockId, BodyId, Const, LocalData, LocalId, MirBody, MirDiagnostic,
-    MirLowered, Operand, Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
+    MirLowered, Operand, Place, Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
 };
 
 pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
@@ -235,6 +235,29 @@ impl LowerCtx<'_> {
             .get(expr)
             .cloned()
             .unwrap_or(Ty::Error)
+    }
+
+    /// The positional index of `name` in `receiver`'s record type — the
+    /// name→index resolution both field reads and field-assign places use.
+    /// A named receiver projects through its declared shape: erased at
+    /// runtime, the value is the underlying record and the index comes from
+    /// the declaration's sorted field order (the same canonical order
+    /// `Ty::Record` uses). `None` when the receiver isn't a (known) record
+    /// or the field doesn't exist — always already diagnosed upstream.
+    fn field_index(&self, receiver: ExprId, name: &str) -> Option<u32> {
+        let receiver_record = match self.ty(receiver) {
+            Ty::Record(rec) => Some(Ty::Record(rec)),
+            Ty::Named(loc) => hir::type_underlying(self.db, loc.to_id(self.db)),
+            _ => None,
+        };
+        match receiver_record {
+            Some(Ty::Record(rec)) => rec
+                .fields
+                .iter()
+                .position(|(n, _)| n == name)
+                .map(|index| index as u32),
+            _ => None,
+        }
     }
 
     fn lower_fn(&mut self, params: &[hir::body::Param], body_expr: ExprId, ret_ty: Ty) -> BodyId {
@@ -575,41 +598,18 @@ impl LowerCtx<'_> {
                 if name.is_empty() {
                     return self.trap(b, expr, "syntax error: missing field name".to_owned());
                 }
-                // A named receiver projects through its declared shape:
-                // erased at runtime, the value is the underlying record and
-                // the index comes from the declaration's sorted field order
-                // (the same canonical order `Ty::Record` uses).
-                let receiver_record = match self.ty(*receiver) {
-                    Ty::Record(rec) => Some(Ty::Record(rec)),
-                    Ty::Named(loc) => hir::type_underlying(self.db, loc.to_id(self.db)),
-                    _ => None,
-                };
-                match receiver_record {
-                    Some(Ty::Record(rec)) => {
-                        match rec.fields.iter().position(|(n, _)| n == name) {
-                            Some(index) => {
-                                let dest = b.temp(self.ty(expr));
-                                b.push_assign(
-                                    dest,
-                                    Rvalue::Field {
-                                        base,
-                                        index: index as u32,
-                                    },
-                                    expr,
-                                );
-                                Operand::Copy(dest)
-                            }
-                            // `NoSuchField` already seeded a value trap for
-                            // `expr`; the `lower_expr` wrapper replaces this
-                            // placeholder.
-                            None => Operand::Const(Const::Unit),
-                        }
+                match self.field_index(*receiver, name) {
+                    Some(index) => {
+                        let dest = b.temp(self.ty(expr));
+                        b.push_assign(dest, Rvalue::Field { base, index }, expr);
+                        Operand::Copy(dest)
                     }
-                    // Not a (known) record: `NoSuchField`/`FieldOnUnknownType`
-                    // already seeded a value trap, or the receiver diverges
-                    // or was itself already trapped — either way this
-                    // operand is never observed.
-                    _ => Operand::Const(Const::Unit),
+                    // No such field, or not a (known) record at all:
+                    // `NoSuchField`/`FieldOnUnknownType` already seeded a
+                    // value trap, or the receiver diverges or was itself
+                    // already trapped — either way this operand is never
+                    // observed.
+                    None => Operand::Const(Const::Unit),
                 }
             }
             // `Shape::Circle` as a value (not a direct call — those are
@@ -1242,16 +1242,18 @@ impl LowerCtx<'_> {
         }
     }
 
-    /// Lower an assignment's LHS: writes `value_op` into the target's local
-    /// instead of reading it. The only real write is to a `mut` local that
-    /// already has a slot in this body — the same local a `let` allocated,
-    /// so the assignment reuses it rather than minting a new one. Every
-    /// other case traps instead of silently dropping the RHS's effects,
-    /// always with the message of a diagnostic already reported on the
-    /// target: inference's assignment enforcement (immutable binding, item,
-    /// builtin), the capture diagnostic (same as the read path), name
-    /// resolution (unresolved/ambiguous), a parse error (missing target),
-    /// or syntax validation (a non-variable target).
+    /// Lower an assignment's LHS: writes `value_op` into the target's place
+    /// instead of reading it. The only real writes are to a `mut` local
+    /// that already has a slot in this body — the same local a `let`
+    /// allocated, so the assignment reuses it rather than minting a new
+    /// one — and through a chain of field projections rooted at one (see
+    /// [`Self::lower_field_assign_target`]). Every other case traps instead
+    /// of silently dropping the RHS's effects, always with the message of a
+    /// diagnostic already reported on the target: inference's assignment
+    /// enforcement (immutable binding, item, builtin), the capture
+    /// diagnostic (same as the read path), name resolution
+    /// (unresolved/ambiguous), a parse error (missing target), or syntax
+    /// validation (a non-place target).
     fn lower_assign_target(
         &mut self,
         b: &mut BodyBuilder,
@@ -1262,6 +1264,10 @@ impl LowerCtx<'_> {
         // A target inference rejected: trap with the squiggle's exact text.
         if let Some(message) = self.assign_traps.get(&target).cloned() {
             self.trap(b, target, message);
+            return;
+        }
+        if let ExprData::Field { .. } = &self.body.exprs[target] {
+            self.lower_field_assign_target(b, target, value, value_op);
             return;
         }
         if let ExprData::NameRef(name) = &self.body.exprs[target] {
@@ -1335,17 +1341,150 @@ impl LowerCtx<'_> {
             ExprData::Missing => {
                 self.trap(b, target, "syntax error: missing expression".to_owned());
             }
-            // A field target: validation already squiggled it with exactly
-            // this text (a shared constant, same sharing contract as
-            // `CAN_ONLY_ASSIGN_TO_A_VARIABLE`).
-            ExprData::Field { .. } => {
-                self.trap(b, target, syntax::CANNOT_ASSIGN_TO_A_FIELD.to_owned());
-            }
-            // Any other non-variable target: validation already squiggled
-            // it with exactly this text (a shared constant, so the two
-            // can't drift).
+            // Any other non-place target: validation already squiggled it
+            // with exactly this text (a shared constant, so the two can't
+            // drift).
             _ => {
                 self.trap(b, target, syntax::CAN_ONLY_ASSIGN_TO_A_VARIABLE.to_owned());
+            }
+        }
+    }
+
+    /// Lower a field-chain assignment target (`p.x = e;`, `p.a.b = e;`):
+    /// the write goes through a [`Place`] projection — the root binding's
+    /// local plus the chain's field indices (resolved through the receiver
+    /// types exactly like [`Self::field_index`] read projections). The
+    /// target is never lowered as a read, so the traps inference/validation
+    /// reported on it are reconciled here, mirroring the plain-name path:
+    /// the root's assignment enforcement first (immutable root — the
+    /// headline diagnostic — item, builtin), then any broken link in the
+    /// chain (unknown field, non-record receiver, a root that isn't even a
+    /// value), then the root's own resolution failures.
+    fn lower_field_assign_target(
+        &mut self,
+        b: &mut BodyBuilder,
+        target: ExprId,
+        value: ExprId,
+        value_op: Operand,
+    ) {
+        // The chain's field-access expressions, outermost first; `root` is
+        // the non-field expression at its base.
+        let mut chain = Vec::new();
+        let mut root = target;
+        while let ExprData::Field { receiver, .. } = &self.body.exprs[root] {
+            chain.push(root);
+            root = *receiver;
+        }
+        // Inference rejected the root as an assignment target (immutable
+        // binding, item, builtin): trap with the squiggle's exact text.
+        if let Some(message) = self.assign_traps.get(&root).cloned() {
+            self.trap(b, root, message);
+            return;
+        }
+        // A broken link, root-outward: the root read itself (a type name,
+        // …), then each projection (unknown field, non-record receiver,
+        // undetermined type) — all pending value traps seeded from the
+        // target's read-typing.
+        for &expr in std::iter::once(&root).chain(chain.iter().rev()) {
+            if let Some(message) = self.value_traps.get(&expr).cloned() {
+                self.trap(b, expr, message);
+                return;
+            }
+        }
+        let ExprData::NameRef(name) = &self.body.exprs[root] else {
+            match &self.body.exprs[root] {
+                // Justified by the parse errors of the broken source.
+                ExprData::Missing => {
+                    self.trap(b, root, "syntax error: missing expression".to_owned());
+                }
+                // A chain rooted in a non-variable: validation already
+                // squiggled the whole target with exactly this text.
+                _ => {
+                    self.trap(b, target, syntax::CAN_ONLY_ASSIGN_TO_A_VARIABLE.to_owned());
+                }
+            }
+            return;
+        };
+        match self.resolutions.get(root) {
+            Some(Resolution::Local(binding)) => match b.local_for_binding.get(binding) {
+                Some(&local) => {
+                    // Innermost projection first: `p.a.b` writes through
+                    // `a`'s index in `p`, then `b`'s index in `p.a`.
+                    let mut projection = Vec::with_capacity(chain.len());
+                    for &field_expr in chain.iter().rev() {
+                        let ExprData::Field { receiver, name } = &self.body.exprs[field_expr]
+                        else {
+                            unreachable!("chain holds only field expressions");
+                        };
+                        match self.field_index(*receiver, name) {
+                            Some(index) => projection.push(index),
+                            // No index and no diagnosed trap above: the
+                            // receiver's type is `{error}` (infectious and
+                            // silent), so the value the root would hold is
+                            // already trapped upstream — skip the write,
+                            // like the read path's never-observed
+                            // placeholder, and keep lowering total.
+                            None => return,
+                        }
+                    }
+                    b.push_assign(Place { local, projection }, Rvalue::Use(value_op), value);
+                }
+                // A local of an enclosing function: the same unsupported
+                // capture the read path (`lower_name_ref`) reports.
+                None => {
+                    let diag = MirDiagnostic::UnsupportedCapture {
+                        expr: root,
+                        name: name.clone(),
+                    };
+                    let message = diag.message();
+                    self.diagnostics.push(diag);
+                    self.trap(b, root, message);
+                }
+            },
+            // Item and builtin roots were seeded into `assign_traps` above
+            // (inference always reports them — fields don't make a
+            // non-place root assignable), so these arms are unreachable in
+            // practice; kept total by re-rendering the same diagnostics'
+            // messages, like `lower_assign_target`'s twins.
+            Some(Resolution::Item(loc)) => {
+                let constness = hir::item_data(self.db, loc.to_id(self.db))
+                    .as_ref()
+                    .and_then(|it| it.kind.constness())
+                    .unwrap_or(hir::Constness::Static);
+                let message = InferenceDiagnostic::AssignToItem {
+                    target: root,
+                    item: loc.clone(),
+                    constness,
+                }
+                .message();
+                self.trap(b, root, message);
+            }
+            // A type name's field: the root read already carries the
+            // type-not-a-value diagnostic (a pending value trap, handled
+            // above); re-render for totality.
+            Some(Resolution::TypeItem(_)) => {
+                let message = InferenceDiagnostic::TypeNotValue {
+                    expr: root,
+                    name: name.clone(),
+                }
+                .message();
+                self.trap(b, root, message);
+            }
+            Some(Resolution::Builtin(builtin)) => {
+                let message = InferenceDiagnostic::AssignToBuiltin {
+                    target: root,
+                    builtin: *builtin,
+                }
+                .message();
+                self.trap(b, root, message);
+            }
+            // Justified by the duplicate-definition diagnostics.
+            Some(Resolution::Ambiguous(_)) => {
+                self.trap(b, root, hir::diag::defined_multiple_times(name));
+            }
+            // Justified by the unresolved-name diagnostic.
+            None => {
+                self.trap(b, root, hir::diag::unresolved_name(name));
             }
         }
     }
@@ -1491,9 +1630,12 @@ impl BodyBuilder {
         })
     }
 
-    fn push_assign(&mut self, dest: LocalId, rvalue: Rvalue, origin: ExprId) {
+    fn push_assign(&mut self, dest: impl Into<Place>, rvalue: Rvalue, origin: ExprId) {
         self.blocks[self.current].statements.push(Statement {
-            kind: StatementKind::Assign { dest, rvalue },
+            kind: StatementKind::Assign {
+                dest: dest.into(),
+                rvalue,
+            },
             origin,
         });
     }

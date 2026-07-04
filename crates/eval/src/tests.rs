@@ -745,6 +745,103 @@ fn illegal_assignment_in_an_unevaluated_branch_does_not_crash() {
 }
 
 #[test]
+fn field_assignment_mutates_the_record() {
+    check_run(
+        "",
+        "(fn { let mut p = struct { x: 1, y: 2 }; p.x = 10; p.x + p.y })()",
+        expect![[r#"
+            => 12
+        "#]],
+    );
+}
+
+#[test]
+fn nested_field_assignment_writes_through_both_levels() {
+    // The projection navigates `outer.inner` then `inner.b`; the sibling
+    // field and the outer record's other field are untouched.
+    check_run(
+        "",
+        "(fn {
+            let mut p = struct { inner: struct { a: 1, b: 2 }, c: 3 };
+            p.inner.b = 20;
+            p.inner.a + p.inner.b + p.c
+        })()",
+        expect![[r#"
+            => 24
+        "#]],
+    );
+}
+
+#[test]
+fn field_assignment_through_a_named_type() {
+    // Erasure: a `Point` is its underlying record at runtime; the write
+    // projects through the declaration's field order.
+    check_run(
+        r#"
+type Point = struct { x: usize, y: usize };
+static main = fn () -> usize {
+    let mut p = Point(struct { x: 1, y: 2 });
+    p.x = 40;
+    p.x + p.y
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 42
+        "#]],
+    );
+}
+
+#[test]
+fn field_assignment_in_a_const_fn_works_at_compile_time() {
+    // The field-projection twin of local mutation in a const context:
+    // forcing `x` runs the write at check time.
+    check_const(
+        r#"
+static bump = const fn (mut p: struct { n: usize }) -> usize {
+    p.n = p.n + 1;
+    p.n
+};
+static x = bump(struct { n: 41 });
+"#,
+        expect![[r#"
+            bump = fn
+            x = 42
+        "#]],
+    );
+}
+
+#[test]
+fn field_assignment_to_an_immutable_root_traps_at_runtime() {
+    // Squiggle-equals-crash, field edition: the message blames the root
+    // binding, exactly as the editor shows it.
+    check_run(
+        "",
+        "(fn { let p = struct { x: 1 }; p.x = 2; p.x })()",
+        expect![[r#"
+            error[Trap]: cannot assign to `p.x`: `p` is not declared `mut`
+        "#]],
+    );
+}
+
+#[test]
+fn illegal_field_assign_in_an_unevaluated_branch_does_not_crash() {
+    // Culprit-branch idiom: the dead branch's unknown-field write is
+    // squiggled (tested in hir) and trapped, but only the evaluated path
+    // decides the run.
+    check_run(
+        "",
+        "(fn () -> usize {
+            let mut p = struct { x: 1 };
+            if true { p.x } else { p.bogus = 2; p.x }
+        })()",
+        expect![[r#"
+            => 1
+        "#]],
+    );
+}
+
+#[test]
 fn mutation_inside_a_const_fn_body_works_at_compile_time() {
     // `double` mutates a local of its own body; forcing `x` through it at
     // check time exercises mutation in a const context end to end.

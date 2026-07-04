@@ -3669,12 +3669,116 @@ fn let_mut_on_a_destructuring_pattern_is_a_syntax_error() {
 }
 
 #[test]
-fn field_assignment_reports_the_dedicated_message() {
+fn field_assign_on_a_mut_root_is_clean() {
+    // Mutability is transitive from the binding: a `mut` root makes every
+    // field of it assignable — no per-field `mut` exists.
+    check_diagnostics(
+        r#"static f = fn (mut p: struct { x: usize }) -> usize { p.x = 1; p.x };"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn nested_field_assign_on_a_mut_root_is_clean() {
+    check_diagnostics(
+        r#"static f = fn { let mut p = struct { a: struct { b: 1 } }; p.a.b = 2; };"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn field_assign_on_an_immutable_root_blames_the_root() {
+    // The squiggle sits on the root name inside the place — the fix
+    // (adding `mut`) belongs to the binding, not the field — and the
+    // message spells both the place and the root out.
     check_diagnostics(
         r#"static f = fn (p: struct { x: usize }) { p.x = 1; };"#,
         expect![[r#"
-            41..44: assigning to a field is not supported yet
+            41..42: cannot assign to `p.x`: `p` is not declared `mut` (`p` is declared without `mut` here at 15..16)
         "#]],
+    );
+}
+
+#[test]
+fn field_assign_to_immutable_root_offers_the_make_mut_fix() {
+    // Same machinery as a plain assignment to an immutable binding: the
+    // insert-`mut` fix anchors at the binding's declaration.
+    let text = "static f = fn { let p = struct { x: 1 }; p.x = 2; };";
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    assert_eq!(
+        diagnostics[0].message,
+        "cannot assign to `p.x`: `p` is not declared `mut`"
+    );
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Make `p` mutable");
+    assert_eq!(fix.edits.len(), 1);
+    assert_eq!(fix.edits[0].insert, "mut ");
+    // Right before `p`'s declaration (offset 20 is the `p` in `let p`).
+    assert_eq!(u32::from(fix.edits[0].range.start()), 20);
+}
+
+#[test]
+fn field_assign_through_a_named_type_is_clean() {
+    // A named type projects through its declared record for writes the
+    // same as for reads.
+    check_diagnostics(
+        r#"
+type Point = struct { x: usize, y: usize };
+static f = fn (mut p: Point) -> usize { p.x = 3; p.x + p.y };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn unknown_field_in_an_assign_target_reports_no_such_field() {
+    // The target lowers as an ordinary field read for typing, so the
+    // existing `NoSuchField` fires at the target position — no
+    // assignment-specific wording needed.
+    check_diagnostics(
+        r#"static f = fn { let mut p = struct { x: 1 }; p.y = 2; };"#,
+        expect![[r#"
+            47..48: no field `y` on `struct { x: usize }`
+        "#]],
+    );
+}
+
+#[test]
+fn field_assign_through_a_non_record_reports_no_such_field() {
+    check_diagnostics(
+        r#"static f = fn { let mut n = 1; n.x = 2; };"#,
+        expect![[r#"
+            33..34: no field `x` on `usize`
+        "#]],
+    );
+}
+
+#[test]
+fn field_assign_rhs_mismatch_blames_the_annotated_root() {
+    // The RHS is checked against the *field's* type; the root binding's
+    // annotation is the axiom cited (its record type spells the field's
+    // type out — the same flow record-literal field checking uses).
+    check_diagnostics(
+        r#"static f = fn (mut p: struct { x: usize }) { p.x = "one"; };"#,
+        expect![[r#"
+            51..56: type mismatch: expected `usize`, found `str` (expected `usize` because of this annotation at 22..41)
+        "#]],
+    );
+}
+
+#[test]
+fn field_assign_in_a_const_fn_is_clean() {
+    // Field assignment is as legal in a const context as local assignment:
+    // mutating a private local record is not an observable effect.
+    check_diagnostics(
+        r#"
+static bump = const fn (mut p: struct { x: usize }) -> usize { p.x = p.x + 1; p.x };
+static two: usize = bump(struct { x: 1 });
+"#,
+        expect![[r#""#]],
     );
 }
 

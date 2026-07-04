@@ -2065,7 +2065,7 @@ fn assignment_to_non_name_is_rejected() {
                     WHITESPACE@41..42 " "
                     R_BRACE@42..43 "}"
                 SEMICOLON@43..44 ";"
-            error 31..36: can only assign to a variable
+            error 31..36: can only assign to a variable or its fields
         "#]],
     );
 }
@@ -5102,7 +5102,10 @@ fn pub_rejected_on_record_literal_field() {
 }
 
 #[test]
-fn field_assignment_gets_its_own_message() {
+fn field_assignment_is_a_legal_target() {
+    // A field access is a place: it parses as the assignment's LHS and
+    // validation has nothing to say (whether the root is `mut` is
+    // semantic — inference's call).
     check(
         "static f = fn (p: struct { x: usize }) { p.x = 1; };",
         expect![[r#"
@@ -5163,7 +5166,102 @@ fn field_assignment_gets_its_own_message() {
                     WHITESPACE@49..50 " "
                     R_BRACE@50..51 "}"
                 SEMICOLON@51..52 ";"
-            error 41..44: assigning to a field is not supported yet
+        "#]],
+    );
+}
+
+#[test]
+fn nested_field_assignment_parses_as_a_field_chain_target() {
+    // `p.a.b = 2;` — the LHS is a field access whose receiver is another
+    // field access, rooted at a plain variable: a legal place.
+    check(
+        "static f = fn { p.a.b = 2; };",
+        expect![[r#"
+            SOURCE_FILE@0..29
+              STATIC_ITEM@0..29
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..28
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..28
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    ASSIGN_STMT@16..26
+                      FIELD_EXPR@16..21
+                        FIELD_EXPR@16..19
+                          PATH_EXPR@16..17
+                            NAME_REF@16..17
+                              IDENT@16..17 "p"
+                          DOT@17..18 "."
+                          NAME_REF@18..19
+                            IDENT@18..19 "a"
+                        DOT@19..20 "."
+                        NAME_REF@20..21
+                          IDENT@20..21 "b"
+                      WHITESPACE@21..22 " "
+                      EQ@22..23 "="
+                      WHITESPACE@23..24 " "
+                      LITERAL@24..25
+                        INT_NUMBER@24..25 "2"
+                      SEMICOLON@25..26 ";"
+                    WHITESPACE@26..27 " "
+                    R_BRACE@27..28 "}"
+                SEMICOLON@28..29 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn field_chain_rooted_at_a_call_is_rejected() {
+    // A chain is a place only when it roots at a variable; `f().x` has no
+    // stable location to write to. The whole LHS carries the (widened)
+    // non-place message.
+    check(
+        "static g = fn { f().x = 1; };",
+        expect![[r#"
+            SOURCE_FILE@0..29
+              STATIC_ITEM@0..29
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "g"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..28
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..28
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    ASSIGN_STMT@16..26
+                      FIELD_EXPR@16..21
+                        CALL_EXPR@16..19
+                          PATH_EXPR@16..17
+                            NAME_REF@16..17
+                              IDENT@16..17 "f"
+                          ARG_LIST@17..19
+                            L_PAREN@17..18 "("
+                            R_PAREN@18..19 ")"
+                        DOT@19..20 "."
+                        NAME_REF@20..21
+                          IDENT@20..21 "x"
+                      WHITESPACE@21..22 " "
+                      EQ@22..23 "="
+                      WHITESPACE@23..24 " "
+                      LITERAL@24..25
+                        INT_NUMBER@24..25 "1"
+                      SEMICOLON@25..26 ";"
+                    WHITESPACE@26..27 " "
+                    R_BRACE@27..28 "}"
+                SEMICOLON@28..29 ";"
+            error 16..21: can only assign to a variable or its fields
         "#]],
     );
 }

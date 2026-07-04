@@ -334,6 +334,43 @@ fn record_local_expands_into_fields() {
 }
 
 #[test]
+fn mutated_field_shows_its_new_value_in_locals() {
+    // `p.x = 10;` writes through the Place projection; paused after it,
+    // the variables panel shows the mutated record — same display and
+    // expansion machinery as an untouched one.
+    let program = fixture(
+        "mutrec",
+        "static main = fn {\n    let mut p = struct { x: 1, y: 2 };\n    p.x = 10;\n    print(\"done\");\n};\n",
+    );
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        ("launch", json!({ "program": program.to_str().unwrap() })),
+        ("setBreakpoints", json!({ "breakpoints": [{ "line": 4 }] })),
+        ("configurationDone", json!({})),
+        ("stackTrace", json!({ "threadId": 1 })),
+        ("scopes", json!({ "frameId": 2 })),
+        ("variables", json!({ "variablesReference": 2 })),
+        ("variables", json!({ "variablesReference": 100_000 })),
+        ("continue", json!({ "threadId": 1 })),
+        ("disconnect", json!({})),
+    ]);
+
+    let vars = &responses_for(&messages, "variables")[0]["body"]["variables"];
+    assert_eq!(vars[0]["name"], "p");
+    assert_eq!(vars[0]["value"], "{ x: 10, y: 2 }");
+
+    let fields = &responses_for(&messages, "variables")[1]["body"]["variables"];
+    assert_eq!(fields[0]["name"], "x");
+    assert_eq!(fields[0]["value"], "10");
+    assert_eq!(fields[1]["name"], "y");
+    assert_eq!(fields[1]["value"], "2");
+
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
 fn column_breakpoints_distinguish_calls_on_one_line() {
     let program = fixture(
         "cols",

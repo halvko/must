@@ -99,9 +99,32 @@ pub struct Statement {
     pub origin: ExprId,
 }
 
+/// A writable location: a local, optionally projected into by a chain of
+/// field indices. Indices use the same canonical sorted field order as
+/// [`Ty::Record`] and [`AggregateKind::Record`] — the write-side twin of
+/// [`Rvalue::Field`] (reads stay operand-based; only writes need to name a
+/// nested destination). Field *names* are resolved to indices at lowering,
+/// like every other projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Place {
+    pub local: LocalId,
+    /// Field-index path into the local's (possibly nested) record value;
+    /// empty means the whole local.
+    pub projection: Vec<u32>,
+}
+
+impl From<LocalId> for Place {
+    fn from(local: LocalId) -> Place {
+        Place {
+            local,
+            projection: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatementKind {
-    Assign { dest: LocalId, rvalue: Rvalue },
+    Assign { dest: Place, rvalue: Rvalue },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

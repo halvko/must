@@ -162,29 +162,33 @@ fn reject_open_record(dot3: Option<SyntaxToken>, errors: &mut Vec<SyntaxError>) 
     });
 }
 
-/// The message for a non-variable assignment target. A `pub const` because
+/// The message for a non-place assignment target. A `pub const` because
 /// `mir` traps such targets with exactly the squiggle's text (the
 /// single-render rule of `hir::diag`, except this message originates here
 /// in validation rather than in a semantic analysis).
-pub const CAN_ONLY_ASSIGN_TO_A_VARIABLE: &str = "can only assign to a variable";
-
-/// The message for a field-assignment target (`p.x = 1;`). Same sharing
-/// contract as [`CAN_ONLY_ASSIGN_TO_A_VARIABLE`]: `mir` traps a field target
-/// with exactly this text.
-pub const CANNOT_ASSIGN_TO_A_FIELD: &str = "assigning to a field is not supported yet";
+pub const CAN_ONLY_ASSIGN_TO_A_VARIABLE: &str = "can only assign to a variable or its fields";
 
 /// The grammar superset-parses any expression as an assignment's LHS;
-/// reject anything but a plain variable. A field access gets its own honest
-/// message (it *is* a place, structurally — just not one assignment
-/// supports yet) rather than the generic "not a variable" wording.
+/// accept a place — a plain variable, or a chain of field accesses rooted
+/// at one — and reject everything else. Only the *structure* is judged
+/// here; whether the root is `mut` (mutability is transitive from the
+/// binding to every field, with no per-field `mut`) is inference's call.
 fn require_variable_target(expr: &ast::Expr, errors: &mut Vec<SyntaxError>) {
-    let message = match expr {
-        ast::Expr::PathExpr(_) => return,
-        ast::Expr::FieldExpr(_) => CANNOT_ASSIGN_TO_A_FIELD,
-        _ => CAN_ONLY_ASSIGN_TO_A_VARIABLE,
-    };
+    let mut place = expr.clone();
+    loop {
+        match place {
+            ast::Expr::PathExpr(_) => return,
+            ast::Expr::FieldExpr(field) => match field.receiver() {
+                Some(receiver) => place = receiver,
+                // `.x = 1` with no receiver at all: broken source, the
+                // parse error covers it.
+                None => return,
+            },
+            _ => break,
+        }
+    }
     errors.push(SyntaxError {
-        message: message.to_owned(),
+        message: CAN_ONLY_ASSIGN_TO_A_VARIABLE.to_owned(),
         range: expr.syntax().text_range(),
         fix: None,
     });

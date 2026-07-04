@@ -401,8 +401,8 @@ impl<'db, M: Mode> Machine<'db, M> {
         if let Some(stmt) = block.statements.get(statement) {
             let StatementKind::Assign { dest, rvalue } = &stmt.kind;
             let value = self.eval_rvalue(&loc, body, rvalue, stmt.origin)?;
+            self.write_place(&loc, body, dest, value, stmt.origin)?;
             let frame = self.frames.last_mut().expect("frame still live");
-            frame.locals.insert(*dest, value);
             frame.statement += 1;
             return Ok(StepEvent::Progress);
         }
@@ -566,6 +566,36 @@ impl<'db, M: Mode> Machine<'db, M> {
             }
         }
         Ok(StepEvent::Progress)
+    }
+
+    /// Store `value` into `dest` on the topmost frame: the whole local for
+    /// an empty projection, or the nested `Value::Record` field the index
+    /// path names — mutated in place; values are plain Rust data in
+    /// `frame.locals`. Only records are writable through (field assignment
+    /// is compile-checked to record chains; variant payloads aren't
+    /// reachable as places), so anything else here is an invariant
+    /// violation, loud like every other ill-typed value.
+    fn write_place(
+        &mut self,
+        loc: &ItemLoc,
+        body: &MirBody,
+        dest: &mir::Place,
+        value: Value,
+        origin: ExprId,
+    ) -> Result<(), EvalError> {
+        let frame = self.frames.last_mut().expect("frame still live");
+        if dest.projection.is_empty() {
+            frame.locals.insert(dest.local, value);
+            return Ok(());
+        }
+        let result = match frame.locals.get_mut(dest.local) {
+            None => Err(format!(
+                "write through uninitialized {}",
+                local_name(body, dest.local)
+            )),
+            Some(slot) => project_mut(slot, &dest.projection).map(|field| *field = value),
+        };
+        result.map_err(|detail| self.internal_error(detail, Some((loc.clone(), origin))))
     }
 
     fn jump(&mut self, target: mir::BlockId) {
@@ -829,6 +859,37 @@ impl<'db, M: Mode> Machine<'db, M> {
             Some((loc.clone(), origin)),
         )
     }
+}
+
+/// Navigate a field-index path to the nested record field it names,
+/// mutably. Errors are the *detail* strings of internal errors (the caller
+/// attaches the origin): reaching a non-record or an out-of-range index
+/// means a value the checker should have refused was written through.
+fn project_mut<'v>(slot: &'v mut Value, projection: &[u32]) -> Result<&'v mut Value, String> {
+    let mut current = slot;
+    for &index in projection {
+        let index = index as usize;
+        match current {
+            Value::Record { fields } => {
+                let len = fields.len();
+                current = match fields.get_mut(index) {
+                    Some((_, field)) => field,
+                    None => {
+                        return Err(format!(
+                            "record field index {index} out of range ({len} elements)"
+                        ));
+                    }
+                };
+            }
+            other => {
+                return Err(format!(
+                    "expected a record value to assign into, found `{}`",
+                    other.display()
+                ));
+            }
+        }
+    }
+    Ok(current)
 }
 
 fn local_name(body: &MirBody, local: LocalId) -> String {

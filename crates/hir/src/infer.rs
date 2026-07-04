@@ -119,17 +119,24 @@ pub enum InferenceDiagnostic {
         /// The item whose type couldn't be inferred.
         item: ItemLoc,
     },
-    /// An assignment whose target resolves to a local declared without
-    /// `mut`. Squiggle on the target; the binding's declaration carries the
-    /// related hint (and is where a later quick fix will insert `mut`).
+    /// An assignment whose target is (or is a chain of field accesses
+    /// rooted at) a local declared without `mut` — mutability is transitive
+    /// from the binding to every field, so the *root* is what's judged (no
+    /// per-field `mut`). Squiggle on the root name; the binding's
+    /// declaration carries the related hint (and the insert-`mut` quick
+    /// fix).
     AssignToImmutable {
-        /// The assignment's target expression.
+        /// The root name expression inside the target place.
         target: ExprId,
         binding: BindingId,
         /// The binding's name, carried here so [`Self::message`] can render
         /// without the body in hand (same reason `NeedsAnnotation` carries
         /// an [`ItemLoc`]).
         name: String,
+        /// The whole place as written (`p` for a plain assignment, `p.x.y`
+        /// for a field chain) — equal to `name` exactly when the target is
+        /// the bare binding; [`Self::message`] words the two differently.
+        place: String,
     },
     /// An assignment whose target resolves to a top-level item. `static`s
     /// have an identity but cannot be reassigned; `const`s don't even have
@@ -558,8 +565,15 @@ impl InferenceDiagnostic {
                      add a type annotation to its definition"
                 )
             }
-            InferenceDiagnostic::AssignToImmutable { name, .. } => {
-                format!("cannot assign to `{name}`: it is not declared `mut`")
+            InferenceDiagnostic::AssignToImmutable { name, place, .. } => {
+                if place == name {
+                    format!("cannot assign to `{name}`: it is not declared `mut`")
+                } else {
+                    // A field chain: the root binding carries the blame —
+                    // immutability is transitive, there is no per-field
+                    // `mut` to add.
+                    format!("cannot assign to `{place}`: `{name}` is not declared `mut`")
+                }
             }
             InferenceDiagnostic::AssignToItem {
                 item, constness, ..
@@ -1318,9 +1332,17 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             // to); the resulting type is what the value
                             // must match, same as a `let` with a declared
                             // type flows its annotation down as `expected`
-                            // with `Cause::Binding`.
+                            // with `Cause::Binding`. For a field-chain
+                            // target this read-typing already yields the
+                            // *field's* type (and reports unknown fields /
+                            // non-record receivers on the way).
                             let fresh = self.fresh_var();
                             let target_ty = self.infer_expr(*target, &fresh);
+                            if let ExprData::Field { .. } = &self.body.exprs[*target] {
+                                let cause = self.check_field_assign_target(*target);
+                                self.infer_expr_with(*value, &target_ty, cause);
+                                continue;
+                            }
                             // Enforcement: the only legal target is a `mut`
                             // local. Unresolved names already carry the
                             // unresolved-name diagnostic, non-name targets a
@@ -1336,6 +1358,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                                 target: *target,
                                                 binding: *binding,
                                                 name: data.name.clone(),
+                                                place: data.name.clone(),
                                             },
                                         );
                                     }
@@ -1752,6 +1775,82 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let ty = self.check(expr, ty, expected, cause);
         self.result.type_of_expr.insert(expr, ty.clone());
         ty
+    }
+
+    /// Enforcement for a field-chain assignment target (`p.x = e;`,
+    /// `p.a.b = e;`): assignability is Rust's transitivity rule — legal
+    /// exactly when the ROOT binding is `mut`; outer immutability implies
+    /// inner immutability and vice versa, with no per-field `mut`. The
+    /// chain was already inferred as an ordinary read (unknown fields and
+    /// non-record receivers got their `NoSuchField`-family squiggles
+    /// there), so only the root is ruled on here. Returns the cause the
+    /// RHS check should cite: the root binding's annotation when it has
+    /// one — its record type spells the field's type out, the same axiom
+    /// record-literal field checking flows down — and nothing otherwise
+    /// (the inferred-from-initializer fallback hint would claim the
+    /// *binding* has the field's type).
+    fn check_field_assign_target(&mut self, target: ExprId) -> Option<Cause> {
+        let mut segments: Vec<String> = Vec::new();
+        let mut root = target;
+        while let ExprData::Field { receiver, name } = &self.body.exprs[root] {
+            segments.push(name.clone());
+            root = *receiver;
+        }
+        let ExprData::NameRef(root_name) = &self.body.exprs[root] else {
+            // A chain rooted in a non-variable: validation already
+            // squiggled the whole target ("can only assign to a variable
+            // or its fields"); a missing root is a parse error. No second
+            // squiggle either way.
+            return None;
+        };
+        segments.push(root_name.clone());
+        segments.reverse();
+        let place = segments.join(".");
+        // The same target taxonomy as a plain-name assignment, judged at
+        // the root; the silent arms match its reasoning too (the root read
+        // already carries `TypeNotValue` / unresolved-name / duplicate
+        // diagnostics).
+        match self.resolutions.get(root) {
+            Some(Resolution::Local(binding)) => {
+                let data = &self.body.bindings[*binding];
+                if !data.mutable {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::AssignToImmutable {
+                            target: root,
+                            binding: *binding,
+                            name: data.name.clone(),
+                            place,
+                        });
+                }
+                data.type_ref.is_some().then_some(Cause::Binding(*binding))
+            }
+            Some(Resolution::Item(loc)) => {
+                let constness = crate::item_data(self.db, loc.to_id(self.db))
+                    .as_ref()
+                    .and_then(|it| it.kind.constness())
+                    .unwrap_or(Constness::Static);
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::AssignToItem {
+                        target: root,
+                        item: loc.clone(),
+                        constness,
+                    });
+                None
+            }
+            Some(Resolution::TypeItem(_)) => None,
+            Some(Resolution::Builtin(builtin)) => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::AssignToBuiltin {
+                        target: root,
+                        builtin: *builtin,
+                    });
+                None
+            }
+            Some(Resolution::Ambiguous(_)) | None => None,
+        }
     }
 
     /// Resolve `Enum::Variant` in expression position — the type-directed

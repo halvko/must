@@ -4,7 +4,7 @@
 use std::fmt::Write as _;
 
 use crate::{
-    AggregateKind, BlockId, BodyId, Const, LocalId, MirBody, MirLowered, Operand, Rvalue,
+    AggregateKind, BlockId, BodyId, Const, LocalId, MirBody, MirLowered, Operand, Place, Rvalue,
     StatementKind, TerminatorKind,
 };
 
@@ -47,7 +47,7 @@ fn render_body(id: BodyId, body: &MirBody, out: &mut String) {
         let _ = writeln!(out, "  {}:", block(id));
         for stmt in &data.statements {
             let StatementKind::Assign { dest, rvalue } = &stmt.kind;
-            let _ = writeln!(out, "    {} = {}", local(*dest), render_rvalue(rvalue));
+            let _ = writeln!(out, "    {} = {}", place(dest), render_rvalue(rvalue));
         }
         let _ = writeln!(out, "    {}", render_terminator(&data.terminator.kind));
     }
@@ -175,6 +175,16 @@ fn operand(op: &Operand) -> String {
 
 fn local(id: LocalId) -> String {
     format!("_{}", u32::from(id.into_raw()))
+}
+
+/// `_1` for a whole local, `_1.0.2` through a field-index projection —
+/// the same dotted spelling `Rvalue::Field` reads render with.
+fn place(p: &Place) -> String {
+    let mut out = local(p.local);
+    for index in &p.projection {
+        let _ = write!(out, ".{index}");
+    }
+    out
 }
 
 fn block(id: BlockId) -> String {
