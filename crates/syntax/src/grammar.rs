@@ -227,13 +227,13 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
     // fall through to the catch-all below, which consumes it as a garbage
     // token with "expected an expression" — there is nothing else useful a
     // caller could do with it.
-    if p.at(STRUCT_KW) && p.nth(1) == L_BRACE {
+    if p.at(STRUCT_KW) && at_type_literal_body(p) {
         return Some(record_expr(p));
     }
     // `enum { ... }` — same dispatch scheme as `struct`. Grammar-wise it is
     // an expression (a `type` item's RHS parses with `expr`); validation
     // rejects it everywhere but as a `type` declaration's value.
-    if p.at(ENUM_KW) && p.nth(1) == L_BRACE {
+    if p.at(ENUM_KW) && at_type_literal_body(p) {
         return Some(enum_expr(p));
     }
     let m = match p.current() {
@@ -248,9 +248,25 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
             // `Shape::Circle` — a two-segment variant path. Exactly two
             // segments for now: a further `::` is left for the caller to
             // stumble over (there is nothing deeper to name yet).
+            // `f::<usize, 42>` — a turbofish argument list, gated on the
+            // same unambiguous `COLON2 L_ANGLE` lookahead as a generic
+            // binder: nothing else follows `::` with `<`.
             if p.at(COLON2) {
                 p.bump(COLON2);
-                if p.at(IDENT) {
+                if p.at(L_ANGLE) {
+                    generic_arg_list(p);
+                    // `Option::<usize>::Some` — a variant of a generic
+                    // enum: the turbofish sits on the enum, the variant
+                    // segment follows.
+                    if p.at(COLON2) {
+                        p.bump(COLON2);
+                        if p.at(IDENT) {
+                            name_ref(p);
+                        } else {
+                            p.error("expected a variant name after `::`");
+                        }
+                    }
+                } else if p.at(IDENT) {
                     name_ref(p);
                 } else {
                     p.error("expected a variant name after `::`");
@@ -290,6 +306,12 @@ fn fn_literal(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.eat(CONST_KW); // optional `const` marker; caller has already checked FN_KW follows
     p.bump(FN_KW);
+    // `fn::<T, const V: usize>(...)` — the generic binder list. Gated on the
+    // unambiguous two-token `COLON2 L_ANGLE` lookahead: nothing else legally
+    // follows `fn` with a `::`.
+    if p.at(COLON2) && p.nth(1) == L_ANGLE {
+        generic_param_list(p);
+    }
     // In valid code bodies are blocks, so `(` after `fn` can only be
     // parameters — no lookahead needed anywhere in here.
     if p.at(L_PAREN) {
@@ -560,7 +582,7 @@ fn at_expr_start(p: &Parser<'_>) -> bool {
         INT_NUMBER | STRING | TRUE_KW | FALSE_KW | IDENT | L_PAREN | L_BRACE | FN_KW | IF_KW
         | MATCH_KW | LOOP_KW | BREAK_KW | CONTINUE_KW => true,
         CONST_KW => matches!(p.nth(1), FN_KW | L_BRACE),
-        STRUCT_KW | ENUM_KW => p.nth(1) == L_BRACE,
+        STRUCT_KW | ENUM_KW => at_type_literal_body(p),
         _ => false,
     }
 }
@@ -611,6 +633,50 @@ fn param(p: &mut Parser<'_>) {
     m.complete(p, PARAM);
 }
 
+/// `::<T, const V: usize>` — a generic fn literal's binder list. The caller
+/// has already confirmed `p.at(COLON2) && p.nth(1) == L_ANGLE`.
+fn generic_param_list(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.bump(COLON2);
+    p.bump(L_ANGLE);
+    while !p.at(R_ANGLE) && !p.at(EOF) {
+        let before = p.pos();
+        generic_param(p);
+        if !p.at(R_ANGLE) {
+            p.expect(COMMA, "`,`");
+        }
+        if p.pos() == before {
+            break;
+        }
+    }
+    p.expect_after_prev(R_ANGLE);
+    m.complete(p, GENERIC_PARAM_LIST);
+}
+
+/// One generic parameter: a bare name (`TYPE_PARAM`) or `const name: Type`
+/// (`CONST_PARAM`).
+fn generic_param(p: &mut Parser<'_>) {
+    if p.at(CONST_KW) {
+        let m = p.start();
+        p.bump(CONST_KW);
+        pattern(p, "expected a name for the const parameter");
+        if p.eat(COLON) {
+            type_(p);
+        } else {
+            p.error("expected `:` followed by the const parameter's type");
+        }
+        m.complete(p, CONST_PARAM);
+    } else if matches!(p.current(), IDENT | HOLE) {
+        let m = p.start();
+        pattern(p, "expected a type parameter name");
+        m.complete(p, TYPE_PARAM);
+    } else if !p.at(COMMA) && !p.at(R_ANGLE) {
+        p.err_and_bump("expected a generic parameter");
+    } else {
+        p.error("expected a generic parameter");
+    }
+}
+
 fn arg_list(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(L_PAREN);
@@ -628,12 +694,132 @@ fn arg_list(p: &mut Parser<'_>) {
     m.complete(p, ARG_LIST);
 }
 
-/// `struct { field, field: expr, ... }` — a record literal. The caller has
-/// already confirmed `p.at(STRUCT_KW) && p.nth(1) == L_BRACE`.
+/// `::<usize, 42, const LEN>` — a turbofish argument list. The caller has
+/// already bumped the `COLON2` and confirmed `p.at(L_ANGLE)`.
+fn generic_arg_list(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.bump(L_ANGLE);
+    while !p.at(R_ANGLE) && !p.at(EOF) {
+        let before = p.pos();
+        generic_arg(p);
+        if !p.at(R_ANGLE) {
+            p.expect(COMMA, "`,`");
+        }
+        if p.pos() == before {
+            break;
+        }
+    }
+    p.expect_after_prev(R_ANGLE);
+    m.complete(p, GENERIC_ARG_LIST);
+}
+
+/// One turbofish argument. Disambiguated by form, not by the declaration
+/// (trees stay stable under declaration edits). The const-arg forms are:
+///
+/// - a literal-shaped token (`42`, `"x"`, `true`, `false`) — const by form;
+/// - `const` + a bare name (`const N`) — a forced value reading of a name
+///   that would otherwise parse as a type;
+/// - `const` + a literal (`const 42`) — also legal;
+/// - `const { ... }` — a const block, delegated to the shared const-block
+///   parser so its const-context checking, staging, evaluation and blame all
+///   come from the existing `const { ... }` machinery unchanged.
+///
+/// Everything else — any type, including the `_` hole — parses as `TYPE_ARG`.
+/// Whether a given position actually accepts a const or a type is a semantic
+/// question, deferred.
+///
+/// There is no additive-precedence or paren escape any more, and a bare
+/// braced block is not accepted either: a compound expression must be
+/// written `const { ... }` (the `const` keyword is required in v1). A bare
+/// `>`/`<` still closes the list, so comparisons live inside a const block.
+///
+/// A `TYPE_ARG`'s type is parsed with the ordinary `type_` grammar, which
+/// means a nested turbofish (`Pair::<Pair::<usize>>`) parses today as a
+/// side effect — there is no lexer-level `>>` merge in this language (every
+/// `>` is its own token), so no ambiguity forces restricting this. Nothing
+/// downstream acts on nested generic args yet.
+fn generic_arg(p: &mut Parser<'_>) {
+    match p.current() {
+        // Const by form: a bare literal.
+        INT_NUMBER | STRING | TRUE_KW | FALSE_KW => {
+            let m = p.start();
+            let lit = p.start();
+            p.bump_any();
+            lit.complete(p, LITERAL);
+            m.complete(p, CONST_ARG);
+        }
+        // A bare braced block is not a const arg in v1 — the `const` keyword
+        // is required (`const { ... }`). Consume the block under an ERROR
+        // node so recovery is clean, and point at the required spelling.
+        L_BRACE => {
+            let m = p.start();
+            p.error("a braced const argument must be written `const { ... }`");
+            block_expr(p);
+            m.complete(p, ERROR);
+        }
+        // `const { ... }` — a const block; delegate to the shared parser so
+        // the tree and its compile-time semantics (const-context checking,
+        // staging, evaluation, blame) come from the existing `const { ... }`
+        // machinery unchanged.
+        CONST_KW if p.nth(1) == L_BRACE => {
+            let m = p.start();
+            const_block_expr(p);
+            m.complete(p, CONST_ARG);
+        }
+        CONST_KW => {
+            let m = p.start();
+            p.bump(CONST_KW);
+            // After `const`, only a bare name (forced value reading) or a
+            // literal is legal. A compound expression must be a const block —
+            // `const N + 1` and `const (a > b)` are gone; point at braces.
+            match p.current() {
+                INT_NUMBER | STRING | TRUE_KW | FALSE_KW => {
+                    let lit = p.start();
+                    p.bump_any();
+                    lit.complete(p, LITERAL);
+                }
+                IDENT => {
+                    let path = p.start();
+                    name_ref(p);
+                    path.complete(p, PATH_EXPR);
+                }
+                _ => {
+                    p.error(
+                        "expected a name, literal, or `{ ... }` block after `const`; \
+                         wrap a compound expression in `const { ... }`",
+                    );
+                }
+            }
+            m.complete(p, CONST_ARG);
+        }
+        _ => {
+            let m = p.start();
+            type_(p);
+            m.complete(p, TYPE_ARG);
+        }
+    }
+}
+
+/// Whether the token after a `struct`/`enum` keyword opens a type-literal
+/// body: `{` directly, or a `::<...>` generic binder (which the body's `{`
+/// then follows) — `struct::<T> { a: T }`.
+fn at_type_literal_body(p: &Parser<'_>) -> bool {
+    p.nth(1) == L_BRACE || (p.nth(1) == COLON2 && p.nth(2) == L_ANGLE)
+}
+
+/// `struct { field, field: expr, ... }` — a record literal, with an
+/// optional `::<T, const N: usize>` binder between the keyword and the
+/// braces (`type Pair = struct::<T> { ... }`). The caller has already
+/// confirmed `p.at(STRUCT_KW)` and [`at_type_literal_body`].
 fn record_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(STRUCT_KW);
-    p.bump(L_BRACE);
+    if p.at(COLON2) && p.nth(1) == L_ANGLE {
+        generic_param_list(p);
+    }
+    if !p.expect(L_BRACE, "`{`") {
+        return m.complete(p, RECORD_EXPR);
+    }
     while !p.at(R_BRACE) && !p.at(EOF) {
         let before = p.pos();
         if p.at(DOT3) {
@@ -654,12 +840,18 @@ fn record_expr(p: &mut Parser<'_>) -> CompletedMarker {
 }
 
 /// `enum { Variant(Type, ...), Variant, ... }` — an enum literal (only
-/// meaningful as a `type` declaration's RHS). The caller has already
-/// confirmed `p.at(ENUM_KW) && p.nth(1) == L_BRACE`.
+/// meaningful as a `type` declaration's RHS), with an optional generic
+/// binder like [`record_expr`]'s. The caller has already confirmed
+/// `p.at(ENUM_KW)` and [`at_type_literal_body`].
 fn enum_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(ENUM_KW);
-    p.bump(L_BRACE);
+    if p.at(COLON2) && p.nth(1) == L_ANGLE {
+        generic_param_list(p);
+    }
+    if !p.expect(L_BRACE, "`{`") {
+        return m.complete(p, ENUM_EXPR);
+    }
     while !p.at(R_BRACE) && !p.at(EOF) {
         let before = p.pos();
         enum_variant(p);
@@ -851,10 +1043,15 @@ fn type_(p: &mut Parser<'_>) {
         IDENT => {
             let m = p.start();
             name_ref(p);
-            // `Shape::Circle` in type position: a variant type.
+            // `Shape::Circle` in type position: a variant type. `Pair::<T>`
+            // in type position: a generic type mention (future — no generic
+            // type declarations exist yet, but the syntax parses uniformly
+            // with the expression side).
             if p.at(COLON2) {
                 p.bump(COLON2);
-                if p.at(IDENT) {
+                if p.at(L_ANGLE) {
+                    generic_arg_list(p);
+                } else if p.at(IDENT) {
                     name_ref(p);
                 } else {
                     p.error("expected a variant name after `::`");

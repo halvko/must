@@ -195,6 +195,42 @@ ast_node!(
     /// `continue`, restarting the enclosing `loop`'s body.
     ContinueExpr: CONTINUE_EXPR
 );
+ast_node!(
+    /// `::<T, const V: usize>` — a generic fn literal's binder list.
+    GenericParamList: GENERIC_PARAM_LIST
+);
+ast_node!(
+    /// A bare-name generic parameter (`T`).
+    TypeParam: TYPE_PARAM
+);
+ast_node!(
+    /// `const name: Type` — a const generic parameter.
+    ConstParam: CONST_PARAM
+);
+ast_node!(
+    /// `::<usize, 42>` — a turbofish argument list at a call site or type
+    /// mention.
+    GenericArgList: GENERIC_ARG_LIST
+);
+ast_node!(
+    /// A type argument in a [`GenericArgList`] — any type, including the
+    /// `_` hole.
+    TypeArg: TYPE_ARG
+);
+ast_node!(
+    /// A const argument in a [`GenericArgList`]: a bare literal (`42`,
+    /// `"x"`, `true`, `false`) or a `const`-prefixed expression.
+    ConstArg: CONST_ARG
+);
+
+ast_enum!(
+    /// One generic parameter: a bare type name or a `const` value binder.
+    GenericParam: TypeParam, ConstParam
+);
+ast_enum!(
+    /// One turbofish argument: a type (including `_`) or a const value.
+    GenericArg: TypeArg, ConstArg
+);
 
 ast_enum!(
     Expr: FnLiteral,
@@ -339,6 +375,11 @@ impl FnLiteral {
     pub fn is_const(&self) -> bool {
         self.const_token().is_some()
     }
+    /// The generic binder (`fn::<T, const N: usize>`), when present; hir
+    /// lowers it.
+    pub fn generic_param_list(&self) -> Option<GenericParamList> {
+        child(&self.syntax)
+    }
     pub fn param_list(&self) -> Option<ParamList> {
         child(&self.syntax)
     }
@@ -348,6 +389,27 @@ impl FnLiteral {
     /// The language requires a block, but the parser accepts any expression
     /// for resilience — validation flags non-block bodies.
     pub fn body(&self) -> Option<Expr> {
+        child(&self.syntax)
+    }
+}
+
+impl GenericParamList {
+    pub fn params(&self) -> impl Iterator<Item = GenericParam> + use<> {
+        children(&self.syntax)
+    }
+}
+
+impl TypeParam {
+    pub fn name(&self) -> Option<Name> {
+        child(&self.syntax)
+    }
+}
+
+impl ConstParam {
+    pub fn name(&self) -> Option<Name> {
+        child(&self.syntax)
+    }
+    pub fn ty(&self) -> Option<Type> {
         child(&self.syntax)
     }
 }
@@ -573,6 +635,11 @@ impl PathExpr {
     pub fn colon2_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, COLON2)
     }
+    /// The turbofish argument list (`f::<usize, 42>`), when present; hir
+    /// lowers it and reports arity and position errors.
+    pub fn generic_arg_list(&self) -> Option<GenericArgList> {
+        child(&self.syntax)
+    }
 }
 
 impl MatchExpr {
@@ -733,6 +800,11 @@ impl EnumExpr {
     pub fn enum_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, ENUM_KW)
     }
+    /// The `::<T, const N: usize>` binder list of a generic type
+    /// declaration (`type Option = enum::<T> { ... }`), when present.
+    pub fn generic_param_list(&self) -> Option<GenericParamList> {
+        child(&self.syntax)
+    }
 }
 
 impl EnumVariant {
@@ -764,6 +836,37 @@ impl PathType {
     /// present.
     pub fn variant_name_ref(&self) -> Option<NameRef> {
         children::<NameRef>(&self.syntax).nth(1)
+    }
+    /// The turbofish argument list (`Pair::<usize>`), when present; hir
+    /// lowers it and reports arity and position errors.
+    pub fn generic_arg_list(&self) -> Option<GenericArgList> {
+        child(&self.syntax)
+    }
+}
+
+impl GenericArgList {
+    pub fn args(&self) -> impl Iterator<Item = GenericArg> + use<> {
+        children(&self.syntax)
+    }
+}
+
+impl TypeArg {
+    pub fn ty(&self) -> Option<Type> {
+        child(&self.syntax)
+    }
+}
+
+impl ConstArg {
+    /// The `const` keyword of the `const <expr>` spelling; absent for the
+    /// bare-literal spelling (`42`, `"x"`, `true`, `false`).
+    pub fn const_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, CONST_KW)
+    }
+    /// The const value: a `Literal` for the bare-literal spelling, any
+    /// expression for the `const`-prefixed spelling (superset — semantics
+    /// restrict this later).
+    pub fn expr(&self) -> Option<Expr> {
+        child(&self.syntax)
     }
 }
 
@@ -808,6 +911,11 @@ impl RecordExpr {
     /// The leading `struct` keyword.
     pub fn struct_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, STRUCT_KW)
+    }
+    /// The `::<T, const N: usize>` binder list of a generic type
+    /// declaration (`type Pair = struct::<T> { ... }`), when present.
+    pub fn generic_param_list(&self) -> Option<GenericParamList> {
+        child(&self.syntax)
     }
     /// The trailing open-record marker `...`, if present.
     pub fn dot3_token(&self) -> Option<SyntaxToken> {

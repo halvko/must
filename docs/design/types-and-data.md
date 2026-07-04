@@ -19,20 +19,20 @@
   exactly when the root binding is `mut`; there is no per-field `mut`.
 - **T10** Joins resolve at statement boundaries, function return included; nested joins
   flatten to one, and blame treats the nest as one statement.
-- **T11** Inference groups use bidirected edges, not pure SCCs, because higher-order
-  functions need their call sites in the same group to constrain type variables.
-  Fully-typed items are firewall items, checked once against their own contract and never
-  joining a group; `_` marks where inference is still asked for. There is no cross-file
-  inference.
+- **T11** Inference groups use bidirected edges, not pure SCCs, because higher-order functions
+  need their call sites in the same group to constrain type variables. Generic and fully-typed
+  items are firewall items, checked once against their own contract and never against
+  instantiations, so they never join a group. There is no cross-file inference.
 - **T12** An unconstrained join resolves by a family-aware plurality vote over concrete branch
   types: unresolved branches abstain, all-free ties tie together, a family tie recovers with
   the first witness.
+- **T13** All generic positions are invariant; no subtyping anywhere.
 
 ## Discarded
 
 - **Transparent type aliases** — two identical spellings are two types, always.
   **Nominal-to-structural coercion** — a named type and its identical record shape stay
-  distinct. **T03**
+  distinct. **Subtyping in generic positions.** **T03 T13**
 - **Equality on function values as a designed relation** — it fell out of a derive, not a
   decision, and is not to be relied on. **T09**
 

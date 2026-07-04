@@ -109,6 +109,12 @@ pub enum SyntaxKind {
     RECORD_PAT,
     RECORD_PAT_FIELD,
     NEWTYPE_PAT,
+    GENERIC_PARAM_LIST,
+    TYPE_PARAM,
+    CONST_PARAM,
+    GENERIC_ARG_LIST,
+    TYPE_ARG,
+    CONST_ARG,
     ERROR,
 }
 

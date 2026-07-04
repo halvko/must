@@ -218,6 +218,8 @@ fn classify_ident(
                 // which the diagnostics call out; either way the name *is*
                 // a type.
                 hir::Resolution::TypeItem(_) => Some((HlTag::Type, HlMods::NONE)),
+                // A const param reads like an immutable parameter.
+                hir::Resolution::ConstParam(_) => Some((HlTag::Parameter, HlMods::NONE)),
                 hir::Resolution::Builtin(_) => {
                     Some((HlTag::Function, HlMods(HlMods::DEFAULT_LIBRARY)))
                 }

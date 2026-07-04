@@ -60,6 +60,21 @@ pub enum ExprData {
         /// The second segment's text. Empty when broken (`Shape::` — the
         /// parse error covers it).
         variant: String,
+        /// The enum's written turbofish (`Option::<usize>::Some`), when
+        /// present — matched against the enum's binder during inference,
+        /// exactly like a [`ExprData::GenericApp`]'s.
+        args: Option<Vec<GenericArgData>>,
+    },
+    /// `f::<usize, 42>` — a turbofish mention. The base is a real
+    /// [`ExprData::NameRef`] allocated on the first segment's node (same
+    /// scheme as [`ExprData::VariantPath`]: resolution, goto-def and hover
+    /// on `f` work like any reference); the arguments are matched against
+    /// the resolved item's generic binder during inference.
+    GenericApp {
+        /// The mentioned name (a `NameRef` expression).
+        base: ExprId,
+        /// The written arguments, in source order.
+        args: Vec<GenericArgData>,
     },
     Call {
         callee: ExprId,
@@ -136,6 +151,22 @@ pub enum ExprData {
     /// `continue`: restarts the enclosing `loop`'s body. Typed `!` like
     /// `break`.
     Continue,
+}
+
+/// One turbofish argument, disambiguated by *form* at parse time (a
+/// literal or `const`-prefixed expression is a const arg; anything else is
+/// a type — see the grammar): whether the position actually takes a type
+/// or a const is checked against the declaration during inference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GenericArgData {
+    /// A type argument, including the `_` hole (which is an *error* in a
+    /// const position — const args are never inferred, TR06).
+    Type(TypeRef),
+    /// A const argument's value expression. Lowered like any expression
+    /// (scoped, resolved, type-checked); its *evaluation* is staged
+    /// for instance identity — inference records these in
+    /// [`crate::infer::InferenceResult::const_args_of_expr`].
+    Const(ExprId),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -411,6 +442,38 @@ impl LowerCtx {
                 let Some(name_ref) = it.name_ref() else {
                     return self.missing_expr();
                 };
+                // `f::<usize, 42>`: like a variant path, the base lowers as
+                // a normal `NameRef` on its own node; the whole path is the
+                // turbofish mention. Type args stay syntactic (`TypeRef`,
+                // range-free); const args are ordinary expressions. With a
+                // trailing variant segment (`Option::<usize>::Some`) the
+                // whole path is a variant-path mention carrying the args.
+                if let Some(arg_list) = it.generic_arg_list() {
+                    let base =
+                        self.alloc_expr(ExprData::NameRef(name_ref.text()), name_ref.syntax());
+                    let args: Vec<GenericArgData> = arg_list
+                        .args()
+                        .map(|arg| match arg {
+                            ast::GenericArg::TypeArg(ty_arg) => GenericArgData::Type(
+                                ty_arg.ty().map(TypeRef::from_ast).unwrap_or(TypeRef::Error),
+                            ),
+                            ast::GenericArg::ConstArg(const_arg) => {
+                                GenericArgData::Const(self.lower_opt_expr(const_arg.expr()))
+                            }
+                        })
+                        .collect();
+                    if let Some(variant) = it.variant_name_ref() {
+                        return self.alloc_expr(
+                            ExprData::VariantPath {
+                                base,
+                                variant: variant.text(),
+                                args: Some(args),
+                            },
+                            it.syntax(),
+                        );
+                    }
+                    return self.alloc_expr(ExprData::GenericApp { base, args }, it.syntax());
+                }
                 // `Shape::Circle`: the base lowers as a normal `NameRef` on
                 // its own node (resolution, goto-def and hover on `Shape`
                 // work like any reference); the whole path is the
@@ -419,7 +482,14 @@ impl LowerCtx {
                     let base =
                         self.alloc_expr(ExprData::NameRef(name_ref.text()), name_ref.syntax());
                     let variant = it.variant_name_ref().map(|n| n.text()).unwrap_or_default();
-                    return self.alloc_expr(ExprData::VariantPath { base, variant }, it.syntax());
+                    return self.alloc_expr(
+                        ExprData::VariantPath {
+                            base,
+                            variant,
+                            args: None,
+                        },
+                        it.syntax(),
+                    );
                 }
                 self.alloc_expr(ExprData::NameRef(name_ref.text()), it.syntax())
             }
@@ -732,7 +802,7 @@ impl LowerCtx {
     }
 }
 
-fn unescape(raw: &str) -> String {
+pub(crate) fn unescape(raw: &str) -> String {
     // Tolerates a missing closing quote (unterminated string literals).
     let inner = raw.strip_prefix('"').unwrap_or(raw);
     let inner = inner.strip_suffix('"').unwrap_or(inner);

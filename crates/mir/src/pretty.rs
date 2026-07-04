@@ -82,6 +82,14 @@ fn render_rvalue(rvalue: &Rvalue) -> String {
             format!("payload({parts})")
         }
         Rvalue::Field { base, index } => format!("{}.{index}", operand(base)),
+        Rvalue::Instantiate { item, const_args } => {
+            let args = const_args
+                .iter()
+                .map(operand)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("instantiate {}({args})", item.display_name())
+        }
         Rvalue::WidenToEnum {
             op,
             decl,
@@ -169,6 +177,7 @@ fn operand(op: &Operand) -> String {
             Const::Builtin(b) => format!("builtin {}", b.name()),
             Const::Fn(body) => format!("fn {}", body_name(*body)),
             Const::ConstBlock(body) => format!("const {}", body_name(*body)),
+            Const::ConstParam(index) => format!("const param {index}"),
         },
     }
 }

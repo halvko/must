@@ -4052,3 +4052,916 @@ fn firewall_expectation_recording_backdates_unchanged_types() {
         "only the edited item may re-infer; executed: {log:#?}"
     );
 }
+
+// ---- generics: item tree, schemes, rigid bodies, instantiation ----
+
+#[test]
+fn item_tree_records_generic_binder() {
+    let db = RootDatabase::default();
+    let file = SourceFile::new(
+        &db,
+        "test.must".to_owned(),
+        "static f = fn::<T, const N: usize>(x: T) -> T { x };".to_owned(),
+    );
+    let item = crate::file_item_ids(&db, file)[0];
+    let data = crate::item_data(&db, item).as_ref().expect("item data");
+    let rendered: Vec<String> = data
+        .generics
+        .iter()
+        .map(|param| match &param.kind {
+            crate::item_tree::GenericParamKind::Type => format!("type {}", param.name),
+            crate::item_tree::GenericParamKind::Const(ty) => {
+                format!("const {}: {ty:?}", param.name)
+            }
+        })
+        .collect();
+    assert_eq!(
+        rendered,
+        vec!["type T".to_owned(), "const N: Path(\"usize\")".to_owned()],
+        "binder kinds and order are recorded"
+    );
+    assert!(
+        data.type_ref.is_some(),
+        "a fully annotated binder synthesizes the scheme's TypeRef"
+    );
+}
+
+/// Same style as the body-edit firewall test above: an edit inside a
+/// generic item's body must not re-run its callers' inference — the scheme
+/// (from the binder's mandatory annotations) is unchanged, so `item_data`
+/// backdates and `signature` never re-fires downstream.
+#[test]
+fn firewall_generic_body_edit_does_not_reinfer_callers() {
+    use salsa::Setter as _;
+    use std::sync::{Arc, Mutex};
+
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let log_handle = Arc::clone(&log);
+    let mut db = RootDatabase::with_event_callback(Box::new(move |event| {
+        if let salsa::EventKind::WillExecute { database_key } = event.kind {
+            log_handle.lock().unwrap().push(format!("{database_key:?}"));
+        }
+    }));
+
+    let text_v1 = "static id = fn::<T>(x: T) -> T { x };\n\
+                   static g: fn() -> usize = fn () -> usize { id::<usize>(4) };\n";
+    let text_v2 = "static id = fn::<T>(x: T) -> T { let y = x; y };\n\
+                   static g: fn() -> usize = fn () -> usize { id::<usize>(4) };\n";
+
+    let file = SourceFile::new(&db, "test.must".to_owned(), text_v1.to_owned());
+    for &item in crate::file_item_ids(&db, file) {
+        crate::infer::infer(&db, item);
+    }
+    log.lock().unwrap().clear();
+    file.set_text(&mut db).to(text_v2.to_owned());
+    for &item in crate::file_item_ids(&db, file) {
+        crate::infer::infer(&db, item);
+    }
+    let log = log.lock().unwrap();
+    assert_eq!(
+        log.iter().filter(|entry| entry.contains("infer")).count(),
+        1,
+        "only the edited generic item may re-infer; executed: {log:#?}"
+    );
+}
+
+#[test]
+fn generic_fn_fully_annotated_is_clean() {
+    check_diagnostics("static id = fn::<T>(x: T) -> T { x };", expect![[r#""#]]);
+}
+
+#[test]
+fn generic_fn_missing_param_annotation_errors() {
+    check_diagnostics(
+        "static id = fn::<T>(x) -> T { x };",
+        expect![[r#"
+            14..19: a generic function must annotate all parameters and its return type
+        "#]],
+    );
+}
+
+#[test]
+fn generic_fn_missing_return_type_errors() {
+    check_diagnostics(
+        "static id = fn::<T>(x: T) { x };",
+        expect![[r#"
+            14..19: a generic function must annotate all parameters and its return type
+        "#]],
+    );
+}
+
+#[test]
+fn rigid_param_passes_stores_returns_and_compares() {
+    // Everything an opaque value supports: pass through a `let` (with a
+    // `T` annotation resolving to the rigid param), store in a record
+    // field, compare with `==`, return through a join.
+    check_diagnostics(
+        "static f = fn::<T>(x: T) -> T { let y: T = x; let r = struct { v: y }; if x == y { r.v } else { x } };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn rigid_param_field_access_call_and_arithmetic_error_ordinarily() {
+    check_diagnostics(
+        "static f = fn::<T>(x: T) -> T { let a = x.field; let b = x(); let c = x + 1; x };",
+        expect![[r#"
+            42..47: no field `field` on `T`
+            57..58: expression of type `T` is not callable
+            70..71: type mismatch: expected `usize`, found `T` (`+` requires `usize` operands at 72..73)
+        "#]],
+    );
+}
+
+#[test]
+fn const_param_reads_as_a_value_of_its_declared_type() {
+    check_diagnostics(
+        "static f = fn::<const N: usize>() -> usize { N + 1 };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn const_param_misused_errors_ordinarily() {
+    check_diagnostics(
+        "static f = fn::<const N: usize>() -> usize { N() };",
+        expect![[r#"
+            45..46: expression of type `usize` is not callable
+        "#]],
+    );
+}
+
+#[test]
+fn const_param_cannot_be_assigned() {
+    check_diagnostics(
+        "static f = fn::<const N: usize>() -> usize { N = 3; N };",
+        expect![[r#"
+            45..46: cannot assign to `N`: it is a const parameter
+        "#]],
+    );
+}
+
+#[test]
+fn dependent_const_param_type_is_rejected() {
+    // TR06: no dependent params — a const param's type cannot name a type
+    // param of the same binder.
+    check_diagnostics(
+        "static f = fn::<T, const N: T>(x: T) -> T { x };",
+        expect![[r#"
+            28..29: a const parameter's type cannot mention a type parameter
+        "#]],
+    );
+}
+
+#[test]
+fn const_param_hole_type_is_rejected() {
+    check_diagnostics(
+        "static f = fn::<const N: _>() -> usize { N };",
+        expect![[r#"
+            25..26: a const parameter's type must be a fully written type; a declaration has nothing to infer `_` from
+        "#]],
+    );
+}
+
+#[test]
+fn variant_path_on_type_param_errors() {
+    check_diagnostics(
+        "static f = fn::<T>(x: T) -> usize { let y: T::Bad = 1; 1 };",
+        expect![[r#"
+            43..49: `T` has no variants (it is a type parameter)
+        "#]],
+    );
+}
+
+#[test]
+fn nested_generic_binder_is_rejected() {
+    // TR06: generics are item-level; a binder on a nested literal parses but
+    // is rejected (generic closures wait for the capture story). The
+    // binder's own error also covers the nested `T` mentions, which lower
+    // to a silent `{error}`.
+    check_diagnostics(
+        "static f = fn () -> usize { let id = fn::<T>(x: T) -> T { x }; 1 };",
+        expect![[r#"
+            39..44: generic function literals are only supported as item initializers
+        "#]],
+    );
+}
+
+#[test]
+fn generic_item_never_joins_an_inference_group() {
+    // TR06, load-bearing: a group's shared signature variable is a monotype,
+    // so membership would pin the scheme to one instantiation.
+    let db = RootDatabase::default();
+    let file = SourceFile::new(
+        &db,
+        "test.must".to_owned(),
+        "static id = fn::<T>(x: T) -> T { x };\nstatic caller = fn () { print(id(\"hi\")) };"
+            .to_owned(),
+    );
+    let groups = crate::groups::inference_groups(&db, file);
+    assert_eq!(groups.group_of[0], None, "the generic item joins no group");
+    assert!(
+        groups.group_of[1].is_some(),
+        "the unannotated caller still gets a group of its own"
+    );
+    // The other direction: the caller sees only the scheme, and the call
+    // type-checks against a fresh instantiation (T = str) — no diagnostics.
+    check_diagnostics(
+        "static id = fn::<T>(x: T) -> T { x };\nstatic caller = fn () { print(id(\"hi\")) };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn turbofish_instantiates_the_scheme() {
+    check_diagnostics(
+        "static id = fn::<T>(x: T) -> T { x };\nstatic g = fn () -> usize { id::<usize>(4) };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn type_params_infer_from_value_arguments() {
+    // A generic item with ONLY type params may be mentioned bare: ordinary
+    // unification fills the params from the value arguments.
+    check_diagnostics(
+        "static id = fn::<T>(x: T) -> T { x };\nstatic g = fn () -> str { id(\"hi\") };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn turbofish_pins_the_param_against_the_value_argument() {
+    check_diagnostics(
+        "static id = fn::<T>(x: T) -> T { x };\nstatic g = fn () -> usize { id::<usize>(\"hi\") };",
+        expect![[r#"
+            78..82: type mismatch: expected `usize`, found `str` (because `T` was instantiated to `usize` by this argument at 71..76)
+        "#]],
+    );
+}
+
+#[test]
+fn turbofish_arity_mismatch() {
+    check_diagnostics(
+        "static id = fn::<T>(x: T) -> T { x };\nstatic g = fn () -> usize { id::<usize, usize>(4) };",
+        expect![[r#"
+            66..84: `id` takes 1 generic argument, found 2 (declared here at 7..9)
+        "#]],
+    );
+}
+
+#[test]
+fn turbofish_hole_leaves_a_type_param_to_inference() {
+    check_diagnostics(
+        "static pick = fn::<A, B>(a: A, b: B) -> A { a };\nstatic g = fn () -> usize { pick::<_, str>(4, \"x\") };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn const_arg_hole_is_an_error() {
+    check_diagnostics(
+        "static rep = fn::<T, const N: usize>(x: T) -> T { x };\nstatic g = fn () -> usize { rep::<usize, _>(4) };",
+        expect![[r#"
+            83..98: const arguments cannot be inferred
+        "#]],
+    );
+}
+
+#[test]
+fn turbofish_on_a_non_generic_item_errors() {
+    check_diagnostics(
+        "static f = fn (x: usize) -> usize { x };\nstatic g = fn () -> usize { f::<usize>(1) };",
+        expect![[r#"
+            69..79: `f` takes no generic arguments
+        "#]],
+    );
+}
+
+#[test]
+fn bare_mention_with_const_params_requires_a_turbofish() {
+    check_diagnostics(
+        "static rep = fn::<T, const N: usize>(x: T) -> T { x };\nstatic g = fn () -> usize { rep(4) };",
+        expect![[r#"
+            83..86: const arguments must be written explicitly; write `rep::<...>` (declared here at 7..10)
+        "#]],
+    );
+}
+
+#[test]
+fn const_arg_type_checks_against_the_declared_type() {
+    check_diagnostics(
+        "static rep = fn::<T, const N: usize>(x: T) -> T { x };\nstatic g = fn () -> usize { rep::<usize, \"x\">(4) };",
+        expect![[r#"
+            96..99: type mismatch: expected `usize`, found `str`
+        "#]],
+    );
+}
+
+#[test]
+fn generic_arg_kind_mismatches() {
+    // A value where a type param is declared...
+    check_diagnostics(
+        "static id = fn::<T>(x: T) -> T { x };\nstatic g = fn () -> usize { id::<42>(4) };",
+        expect![[r#"
+            66..74: `T` is a type parameter; write a type
+        "#]],
+    );
+    // ...and a type where a const param is declared.
+    check_diagnostics(
+        "static rep = fn::<T, const N: usize>(x: T) -> T { x };\nstatic g = fn () -> usize { rep::<usize, str>(4) };",
+        expect![[r#"
+            83..100: `N` is a const parameter; write a value (a literal, or `const <expr>`)
+        "#]],
+    );
+}
+
+#[test]
+fn unresolved_type_param_at_a_mention_is_reported() {
+    check_diagnostics(
+        "static id = fn::<T>(x: T) -> T { x };\nstatic g = fn () { id; };",
+        expect![[r#"
+            57..59: cannot infer the type parameter `T` of `id`; write `id::<...>` to specify it (defined here at 7..9)
+        "#]],
+    );
+}
+
+#[test]
+fn turbofish_in_type_position_takes_no_generic_arguments() {
+    check_diagnostics(
+        "type Foo = struct { x: usize };\nstatic f: Foo::<usize> = Foo(struct { x: 1 });",
+        expect![[r#"
+            42..54: `Foo` takes no generic arguments (declared here at 5..8)
+        "#]],
+    );
+}
+
+#[test]
+fn generic_const_fn_body_is_a_const_context() {
+    check_diagnostics(
+        "static f = const fn::<const N: usize>() -> usize { g() };\nstatic g = fn () -> usize { 1 };",
+        expect![[r#"
+            51..52: cannot call `g` in a const context; marking it `const fn` would allow this (`g` is defined here at 65..66) (this `const fn` is always a const context at 11..16)
+        "#]],
+    );
+}
+
+#[test]
+fn instantiated_generic_const_fn_call_is_const_legal() {
+    // The const-check diagnostic must NOT fire: the rule keys off the
+    // `const fn` marker exactly as for a plain mention. (The
+    // initializer also genuinely EVALUATES — pinned on the eval side.)
+    check_diagnostics(
+        "static cid = const fn::<T>(x: T) -> T { x };\nstatic v: usize = cid::<usize>(4);",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn instantiated_generic_plain_fn_call_in_a_const_context_is_rejected() {
+    check_diagnostics(
+        "static id = fn::<T>(x: T) -> T { x };\nstatic v: usize = id::<usize>(4);",
+        expect![[r#"
+            56..67: cannot call `id` in a const context; marking it `const fn` would allow this (`id` is defined here at 7..9) (this item's initializer is a const context at 38..44)
+        "#]],
+    );
+}
+
+/// Type-tier interplay: an expectation against a rigid-param annotation is
+/// a REAL expectation — `Ty::Param` is not an inference variable, so the
+/// finish pass must keep it (`contains_infer` is false for params).
+#[test]
+fn expectation_recorded_against_rigid_param_annotation() {
+    check_expectations(
+        "static id = fn::<T>(x: T) -> T { let y: T = x; y };",
+        expect![[r#"
+            12..50 'fn::<T>(x: T) -> ...': fn(T) -> T
+            31..50 '{ let y: T = x; y }': T
+            44..45 'x': T
+            47..48 'y': T
+        "#]],
+    );
+}
+
+#[test]
+fn generic_item_may_recurse_through_a_fresh_instantiation() {
+    // The mention in its own body instantiates the scheme like any other
+    // (no group membership, no cycle: the scheme never consults the body).
+    check_diagnostics(
+        "static id = fn::<T>(x: T) -> T { id(x) };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn turbofish_may_name_the_enclosing_binder_param() {
+    // Inside a generic body, a turbofish type argument may be the body's
+    // own rigid param: `id::<U>` pins the callee's `T` to rigid `U`.
+    check_diagnostics(
+        "static id = fn::<T>(x: T) -> T { x };\nstatic wrap = fn::<U>(x: U) -> U { id::<U>(x) };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn divergence_widens_into_a_rigid_param_return() {
+    // `!` widens to everything, a rigid param included (divergence produces
+    // no value to convert); no VALUE type widens to or from a param.
+    check_diagnostics(
+        "static f = fn::<T>(x: T) -> T { panic(\"unimplemented\") };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_binder_names_each_type_param_once() {
+    // A rigid `Ty::Param` is positional, so a repeated name leaves the
+    // first parameter unnameable; the second occurrence is the error.
+    check_diagnostics(
+        "static id = fn::<T, T>(x: T) -> T { x };",
+        expect![[r#"
+            20..21: duplicate generic parameter `T` (first declared here at 17..18)
+        "#]],
+    );
+}
+
+#[test]
+fn a_binder_names_each_const_param_once() {
+    // Same rule for const params, whose mentions resolve to the LAST
+    // declaration of the name.
+    check_diagnostics(
+        "static sq = fn::<const N: usize, const N: usize>() -> usize { N };",
+        expect![[r#"
+            39..40: duplicate generic parameter `N` (first declared here at 23..24)
+        "#]],
+    );
+}
+
+#[test]
+fn type_and_const_params_share_the_binders_namespace() {
+    check_diagnostics(
+        "static f = fn::<T, const T: usize>(x: T) -> usize { T };",
+        expect![[r#"
+            25..26: duplicate generic parameter `T` (first declared here at 16..17)
+        "#]],
+    );
+}
+
+#[test]
+fn a_type_declarations_binder_names_each_param_once() {
+    check_diagnostics(
+        "type Pair = struct::<T, T> { a: T, b: T };",
+        expect![[r#"
+            24..25: duplicate generic parameter `T` (first declared here at 21..22)
+        "#]],
+    );
+}
+
+#[test]
+fn two_items_may_each_bind_the_same_param_name() {
+    // The rule is per BINDER, not per file: separate binders are separate
+    // namespaces.
+    check_diagnostics(
+        "static id = fn::<T>(x: T) -> T { x };\nstatic other = fn::<T>(x: T) -> T { x };",
+        expect![[r#""#]],
+    );
+}
+
+// ---- generics: the const-arg domain excludes fn values ----
+
+#[test]
+fn fn_typed_const_param_is_rejected_at_the_declaration() {
+    // TR06 (concrete data types only): fn values carry edit-unstable
+    // `BodyId` identity, so they are outside the const-arg domain —
+    // rejected where the domain is declared.
+    check_diagnostics(
+        "static f = fn::<const N: fn() -> usize>() -> usize { 1 };",
+        expect![[r#"
+            25..38: a function value cannot be a const argument (yet)
+        "#]],
+    );
+}
+
+#[test]
+fn fn_typed_const_param_smuggled_in_a_record_is_rejected_too() {
+    check_diagnostics(
+        "static f = fn::<const N: { g: fn() -> usize }>() -> usize { 1 };",
+        expect![[r#"
+            25..26: expected a type
+            27..28: expected `,`
+            28..29: expected `,`
+            30..32: expected `,`
+            32..33: expected `,`
+            33..34: expected `,`
+            35..37: expected `,`
+            38..43: expected `,`
+            44..45: expected `,`
+            60..61: type mismatch: expected `usize`, found `usize` (expected `usize` because of this return type at 49..57)
+        "#]],
+    );
+}
+
+#[test]
+fn fn_typed_const_arg_is_rejected_at_the_mention() {
+    // The belt: a mention that would pass an fn value repeats the
+    // declaration's exact text at the mention — and the argument is never
+    // recorded, so no fn value can reach instance identity.
+    check_diagnostics(
+        "static f = fn::<const N: fn() -> usize>() -> usize { 1 };\nstatic g = fn () -> usize { let h = fn () -> usize { 2 }; f::<const h>() };",
+        expect![[r#"
+            25..38: a function value cannot be a const argument (yet)
+            116..128: a function value cannot be a const argument (yet)
+        "#]],
+    );
+}
+
+#[test]
+fn const_param_forwards_as_a_const_arg() {
+    // The composition case: inside a generic body, the binder's own
+    // const param is a legal const ARGUMENT — `rep::<const N>` records
+    // and type-checks like any const-arg expression.
+    check_diagnostics(
+        "static rep = const fn::<const N: usize>(x: usize) -> usize { x * N };\nstatic rep2 = const fn::<const N: usize>(x: usize) -> usize { rep::<const N>(x) };",
+        expect![[r#""#]],
+    );
+}
+
+// ---- generic type declarations ----
+
+#[test]
+fn generic_record_construction_with_explicit_args() {
+    check_infer(
+        "type Pair = struct::<T> { a: T, b: T };\n\
+         static main = fn () -> usize { let p = Pair::<usize>(struct { a: 1, b: 2 }); p.a + p.b };",
+        expect![[r#"
+            54..128 'fn () -> usize { ...': fn() -> usize
+            69..128 '{ let p = Pair::<...': usize
+            75..76 'p': Pair::<usize>
+            79..92 'Pair::<usize>': fn(struct { a: usize, b: usize }) -> Pair::<usize>
+            79..115 'Pair::<usize>(str...': Pair::<usize>
+            93..114 'struct { a: 1, b:...': struct { a: usize, b: usize }
+            105..106 '1': usize
+            111..112 '2': usize
+            117..118 'p': Pair::<usize>
+            117..120 'p.a': usize
+            117..126 'p.a + p.b': usize
+            123..124 'p': Pair::<usize>
+            123..126 'p.b': usize
+        "#]],
+    );
+}
+
+#[test]
+fn generic_record_construction_infers_args_from_payload() {
+    check_infer(
+        "type Pair = struct::<T> { a: T, b: T };\n\
+         static main = fn () -> usize { let p = Pair(struct { a: 1, b: 2 }); p.b };",
+        expect![[r#"
+            54..113 'fn () -> usize { ...': fn() -> usize
+            69..113 '{ let p = Pair(st...': usize
+            75..76 'p': Pair::<usize>
+            79..83 'Pair': fn(struct { a: usize, b: usize }) -> Pair::<usize>
+            79..106 'Pair(struct { a: ...': Pair::<usize>
+            84..105 'struct { a: 1, b:...': struct { a: usize, b: usize }
+            96..97 '1': usize
+            102..103 '2': usize
+            108..109 'p': Pair::<usize>
+            108..111 'p.b': usize
+        "#]],
+    );
+}
+
+#[test]
+fn generic_type_arity_mismatch_blames_the_use_site() {
+    check_diagnostics(
+        "type Pair = struct::<T> { a: T, b: T };\n\
+         static main = fn () { let p = Pair::<usize, str>(struct { a: 1, b: 2 }); };",
+        expect![[r#"
+            70..88: `Pair` takes 1 generic argument, found 2 (declared here at 5..9)
+        "#]],
+    );
+}
+
+#[test]
+fn generic_type_arity_mismatch_in_annotation_blames_the_use_site() {
+    check_diagnostics(
+        "type Pair = struct::<T> { a: T, b: T };\n\
+         static main = fn () { let p: Pair::<usize, str> = Pair::<usize>(struct { a: 1, b: 2 }); };",
+        expect![[r#"
+            69..87: `Pair` takes 1 generic argument, found 2 (declared here at 5..9)
+        "#]],
+    );
+}
+
+#[test]
+fn bare_generic_type_in_annotation_requires_the_turbofish() {
+    check_diagnostics(
+        "type Pair = struct::<T> { a: T, b: T };\n\
+         static main = fn () { let p: Pair = Pair::<usize>(struct { a: 1, b: 2 }); };",
+        expect![[r#"
+            69..73: `Pair` takes 1 generic argument, found 0 (declared here at 5..9)
+        "#]],
+    );
+}
+
+#[test]
+fn annotation_hole_arg_is_pinned_by_the_initializer() {
+    check_infer(
+        "type Pair = struct::<T> { a: T, b: T };\n\
+         static main = fn () { let p: Pair::<_> = Pair(struct { a: 1, b: 2 }); };",
+        expect![[r#"
+            54..111 'fn () { let p: Pa...': fn()
+            60..111 '{ let p: Pair::<_...': ()
+            66..67 'p': Pair::<usize>
+            81..85 'Pair': fn(struct { a: usize, b: usize }) -> Pair::<usize>
+            81..108 'Pair(struct { a: ...': Pair::<usize>
+            86..107 'struct { a: 1, b:...': struct { a: usize, b: usize }
+            98..99 '1': usize
+            104..105 '2': usize
+        "#]],
+    );
+}
+
+#[test]
+fn different_type_args_do_not_unify() {
+    check_diagnostics(
+        "type Pair = struct::<T> { a: T, b: T };\n\
+         static main = fn () { let p: Pair::<str> = Pair::<usize>(struct { a: 1, b: 2 }); };",
+        expect![[r#"
+            83..119: type mismatch: expected `Pair::<str>`, found `Pair::<usize>` (expected `Pair::<str>` because of this annotation at 69..80)
+        "#]],
+    );
+}
+
+#[test]
+fn same_args_unify_across_bodies() {
+    check_diagnostics(
+        "type Pair = struct::<T> { a: T, b: T };\n\
+         static mk = fn () -> Pair::<usize> { Pair::<usize>(struct { a: 1, b: 2 }) };\n\
+         static use_it = fn (p: Pair::<usize>) -> usize { p.a };\n\
+         static main = fn () -> usize { use_it(mk()) };",
+        expect![[""]],
+    );
+}
+
+#[test]
+fn generic_variant_construction_and_widening_preserve_args() {
+    check_infer(
+        "type Option = enum::<T> { Some(T), None };\n\
+         static main = fn () -> usize {\n\
+             let mut o = Option::<usize>::Some(3);\n\
+             o = Option::<usize>::None;\n\
+             1\n\
+         };",
+        expect![[r#"
+            57..142 'fn () -> usize { ...': fn() -> usize
+            72..142 '{ let mut o = Opt...': usize
+            82..83 'o': Option::<usize>
+            86..107 'Option::<usize>::...': fn(usize) -> Option::<usize>::Some
+            86..110 'Option::<usize>::...': Option::<usize>::Some
+            108..109 '3': usize
+            112..113 'o': Option::<usize>
+            116..137 'Option::<usize>::...': Option::<usize>
+            139..140 '1': usize
+        "#]],
+    );
+}
+
+#[test]
+fn generic_variant_args_infer_from_the_payload() {
+    check_infer(
+        "type Option = enum::<T> { Some(T), None };\n\
+         static main = fn () -> Option::<usize> { Option::Some(3) };",
+        expect![[r#"
+            57..101 'fn () -> Option::...': fn() -> Option::<usize>
+            82..101 '{ Option::Some(3) }': Option::<usize>
+            84..96 'Option::Some': fn(usize) -> Option::<usize>::Some
+            84..99 'Option::Some(3)': Option::<usize>
+            97..98 '3': usize
+        "#]],
+    );
+}
+
+#[test]
+fn widening_to_the_wrong_args_is_a_mismatch() {
+    check_diagnostics(
+        "type Option = enum::<T> { Some(T), None };\n\
+         static main = fn () -> Option::<usize> { Option::<str>::Some(\"x\") };",
+        expect![[r#"
+            84..108: type mismatch: expected `Option::<usize>`, found `Option::<str>::Some` (expected `Option::<usize>` because of this return type at 63..81)
+        "#]],
+    );
+}
+
+#[test]
+fn match_over_a_generic_enum_is_exhaustive_and_typed() {
+    check_infer(
+        "type Option = enum::<T> { Some(T), None };\n\
+         static main = fn () -> usize {\n\
+             match Option::<usize>::Some(3) { ::Some(x) => x, ::None => 0, }\n\
+         };",
+        expect![[r#"
+            57..139 'fn () -> usize { ...': fn() -> usize
+            72..139 '{ match Option::<...': usize
+            74..137 'match Option::<us...': usize
+            80..101 'Option::<usize>::...': fn(usize) -> Option::<usize>::Some
+            80..104 'Option::<usize>::...': Option::<usize>::Some
+            102..103 '3': usize
+            114..115 'x': usize
+            120..121 'x': usize
+            133..134 '0': usize
+        "#]],
+    );
+}
+
+#[test]
+fn non_exhaustive_match_over_a_generic_enum_is_reported() {
+    check_diagnostics(
+        "type Option = enum::<T> { Some(T), None };\n\
+         static main = fn () -> usize {\n\
+             let o: Option::<usize> = Option::<usize>::Some(3);\n\
+             match o { ::Some(x) => x, }\n\
+         };",
+        expect![[r#"
+            125..130: this `match` does not cover `Option::None`
+        "#]],
+    );
+}
+
+#[test]
+fn const_params_on_types_distinguish_instances() {
+    check_diagnostics(
+        "type Buf = struct::<const N: usize> { len: usize };\n\
+         static main = fn () { let b: Buf::<8> = Buf::<9>(struct { len: 1 }); };",
+        expect![[r#"
+            92..119: type mismatch: expected `Buf::<8>`, found `Buf::<9>` (expected `Buf::<8>` because of this annotation at 81..89)
+        "#]],
+    );
+}
+
+#[test]
+fn const_param_type_annotation_and_construction_agree() {
+    check_infer(
+        "type Buf = struct::<const N: usize> { len: usize };\n\
+         static main = fn () -> usize { let b: Buf::<8> = Buf::<8>(struct { len: 3 }); b.len };",
+        expect![[r#"
+            66..137 'fn () -> usize { ...': fn() -> usize
+            81..137 '{ let b: Buf::<8>...': usize
+            87..88 'b': Buf::<8>
+            101..109 'Buf::<8>': fn(struct { len: usize }) -> Buf::<8>
+            101..128 'Buf::<8>(struct {...': Buf::<8>
+            107..108 '8': usize
+            110..127 'struct { len: 3 }': struct { len: usize }
+            124..125 '3': usize
+            130..131 'b': Buf::<8>
+            130..135 'b.len': usize
+        "#]],
+    );
+}
+
+#[test]
+fn const_block_in_annotation_position_is_rejected() {
+    check_diagnostics(
+        "type Buf = struct::<const N: usize> { len: usize };\n\
+         static main = fn () { let b: Buf::<const { 4 + 4 }> = Buf::<8>(struct { len: 1 }); };",
+        expect![[r#"
+            87..102: a `const { ... }` block cannot parameterize a type; pass the value through a generic function's const parameter instead
+        "#]],
+    );
+}
+
+#[test]
+fn const_block_in_type_construction_turbofish_is_rejected() {
+    check_diagnostics(
+        "type Buf = struct::<const N: usize> { len: usize };\n\
+         static main = fn () { let b = Buf::<const { 4 + 4 }>(struct { len: 1 }); };",
+        expect![[r#"
+            82..104: a `const { ... }` block cannot parameterize a type; pass the value through a generic function's const parameter instead
+        "#]],
+    );
+}
+
+#[test]
+fn const_param_as_a_field_type_is_rejected() {
+    check_diagnostics(
+        "type Buf = struct::<const N: usize> { len: N };",
+        expect![[r#"
+            43..44: `N` is a const parameter, not a type
+        "#]],
+    );
+}
+
+#[test]
+fn const_param_forwards_into_a_generic_type_inside_a_generic_fn() {
+    check_diagnostics(
+        "type Buf = struct::<const N: usize> { len: usize };\n\
+         static mk = fn::<const N: usize>(len: usize) -> Buf::<N> { Buf::<N>(struct { len }) };\n\
+         static main = fn () { let b: Buf::<8> = mk::<8>(3); };",
+        expect![[""]],
+    );
+}
+
+#[test]
+fn self_referential_generic_type_does_not_hang() {
+    check_diagnostics(
+        "type List = struct::<T> { next: List::<T> };",
+        expect![[""]],
+    );
+}
+
+#[test]
+fn unpinned_generic_type_param_is_reported_at_the_mention() {
+    check_diagnostics(
+        "type Option = enum::<T> { Some(T), None };\n\
+         static main = fn () { let o = Option::None; };",
+        expect![[r#"
+            73..85: cannot infer the type parameter `T` of `Option`; write `Option::<...>` to specify it (defined here at 5..11)
+        "#]],
+    );
+}
+
+#[test]
+fn generic_type_display_in_diagnostics() {
+    check_diagnostics(
+        "type Pair = struct::<T> { a: T, b: T };\n\
+         static main = fn () -> usize { Pair::<usize>(struct { a: 1, b: 2 }) };",
+        expect![[r#"
+            71..107: type mismatch: expected `usize`, found `Pair::<usize>` (expected `usize` because of this return type at 60..68)
+        "#]],
+    );
+}
+
+#[test]
+fn generic_type_name_is_not_a_value() {
+    check_diagnostics(
+        "type Pair = struct::<T> { a: T, b: T };\n\
+         static main = fn () { let x = Pair::<usize>; };",
+        expect![[r#"
+            70..83: `Pair` is a type, not a value
+        "#]],
+    );
+}
+
+#[test]
+fn kind_mismatches_on_a_generic_type_mention() {
+    check_diagnostics(
+        "type Buf = struct::<T, const N: usize> { x: T };\n\
+         static main = fn () { let b: Buf::<8, usize> = Buf::<8, usize>(struct { x: 1 }); };",
+        expect![[r#"
+            84..85: `T` is a type parameter; write a type
+            87..92: `N` is a const parameter; write a value (a literal, or `const <expr>`)
+            96..111: `T` is a type parameter; write a type
+            96..111: `N` is a const parameter; write a value (a literal, or `const <expr>`)
+        "#]],
+    );
+}
+
+#[test]
+fn generic_mention_in_a_declaration_field_mirrors_lowering() {
+    // Unknown arg name inside a declaration's generic mention.
+    check_diagnostics(
+        "type Pair = struct::<T> { a: T, b: T };\n\
+         type Holder = struct { p: Pair::<Missing> };",
+        expect![[r#"
+            73..80: unknown type `Missing`
+        "#]],
+    );
+    // A bare generic mention in a field needs its args spelled.
+    check_diagnostics(
+        "type Pair = struct::<T> { a: T, b: T };\n\
+         type Holder = struct { p: Pair };",
+        expect![[r#"
+            66..70: `Pair` takes 1 generic argument, found 0
+        "#]],
+    );
+    // A hole arg has nothing to infer from in a declaration.
+    check_diagnostics(
+        "type Pair = struct::<T> { a: T, b: T };\n\
+         type Holder = struct { p: Pair::<_> };",
+        expect![[r#"
+            66..75: a field's type must be a fully written type; a declaration has nothing to infer `_` from
+        "#]],
+    );
+}
+
+#[test]
+fn generic_variant_type_annotation_is_not_spellable_yet() {
+    check_diagnostics(
+        "type Option = enum::<T> { Some(T), None };\n\
+         static main = fn (o: Option::Some) {};",
+        expect![[r#"
+            64..76: `Option` is generic; a generic enum's variant types cannot be written in annotations yet
+        "#]],
+    );
+}
+
+#[test]
+fn generic_enum_payload_mentions_check_in_declarations() {
+    // A generic mention inside another enum's payload.
+    check_diagnostics(
+        "type Option = enum::<T> { Some(T), None };\n\
+         type Holder = enum { Held(Option::<usize>), Empty };\n\
+         static main = fn () -> Holder { Holder::Held(Option::<usize>::Some(1)) };",
+        expect![[""]],
+    );
+}

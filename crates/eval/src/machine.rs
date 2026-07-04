@@ -14,7 +14,7 @@ use mir::{
 };
 use rustc_hash::FxHashMap;
 
-use crate::{EvalError, EvalErrorKind, FnValue, Value};
+use crate::{EvalError, EvalErrorKind, FnValue, GenericArgValue, Instance, Value};
 
 /// What the machine does at its impure edges. [`ConstMode`] refuses;
 /// the runner's mode performs the I/O.
@@ -82,6 +82,13 @@ pub struct Frame {
     /// Index of the next statement to execute in `block`; past the end
     /// means the terminator is next.
     statement: usize,
+    /// The instance this frame executes under: the evaluated const args of
+    /// the fn value that was called (dense const-param order — see
+    /// [`FnValue::const_args`]), threaded into compile-time bodies forced
+    /// from here (`const` blocks, const arguments) so `ConstParam`
+    /// operands resolve anywhere inside the generic body. Empty outside
+    /// generic code.
+    const_args: Vec<Value>,
     locals: ArenaMap<LocalId, Value>,
     /// Caller linkage: the local the return value lands in, and the block
     /// the caller resumes at (`None` = the callee's type promised to
@@ -105,13 +112,18 @@ pub struct Machine<'db, M> {
     /// Memoized const values — failures too, or a failing item would be
     /// re-evaluated at every use site.
     forced: FxHashMap<ItemLoc, Result<Value, EvalError>>,
-    /// `const { … }` blocks currently being forced (cycle detection),
-    /// innermost last — the block-level twin of `forcing`.
-    forcing_blocks: Vec<(ItemLoc, BodyId)>,
-    /// Per-run memo for `const { … }` blocks, keyed by owning item and
-    /// lowered body: a const block inside a hot function evaluates once per
-    /// machine run. Failures memoize too, like `forced`.
-    forced_blocks: FxHashMap<(ItemLoc, BodyId), Result<Value, EvalError>>,
+    /// Compile-time bodies (`const { … }` blocks and turbofish const
+    /// arguments) currently being forced (cycle detection), innermost last
+    /// — the block-level twin of `forcing`. Keyed per *instance*: the same
+    /// block forced under two instantiations is two evaluations, not a
+    /// cycle.
+    forcing_blocks: Vec<(Instance, BodyId)>,
+    /// Per-run memo for compile-time bodies, keyed by owning instance
+    /// (item + the const-param values the body may read — TR06's applicative
+    /// identity) and lowered body: a const block inside a hot function
+    /// evaluates once per machine run *per instance*. Failures memoize
+    /// too, like `forced`.
+    forced_blocks: FxHashMap<(Instance, BodyId), Result<Value, EvalError>>,
     /// How many const-block bodies were actually executed (memo misses) —
     /// observable instrumentation for the memoization guarantee.
     const_block_evaluations: u64,
@@ -184,11 +196,29 @@ impl<'db, M: Mode> Machine<'db, M> {
         result
     }
 
-    /// The (per-run memoized) value of a `const { … }` block — `body` is one
-    /// of `loc`'s lowered bodies. Like [`Self::force_item`], forcing is
-    /// always a const context, whichever mode drives the machine.
-    pub fn force_const_block(&mut self, loc: &ItemLoc, body: BodyId) -> Result<Value, EvalError> {
-        let key = (loc.clone(), body);
+    /// The (per-run memoized) value of a compile-time body — a `const
+    /// { … }` block or a turbofish const argument; `body` is one of `loc`'s
+    /// lowered bodies. `const_env` is the enclosing instance's const-param
+    /// values (empty outside generic code): the body may read `ConstParam`
+    /// operands, so both the executing frame and the memo key carry it —
+    /// the same block under two instantiations is two values. Like
+    /// [`Self::force_item`], forcing is always a const context, whichever
+    /// mode drives the machine.
+    pub fn force_const_block(
+        &mut self,
+        loc: &ItemLoc,
+        body: BodyId,
+        const_env: Vec<Value>,
+    ) -> Result<Value, EvalError> {
+        let instance = Instance {
+            item: loc.clone(),
+            args: const_env
+                .iter()
+                .cloned()
+                .map(GenericArgValue::Const)
+                .collect(),
+        };
+        let key = (instance, body);
         if let Some(result) = self.forced_blocks.get(&key) {
             return result.clone();
         }
@@ -211,7 +241,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         let saved_frames = std::mem::take(&mut self.frames);
         let saved_fuel = std::mem::replace(&mut self.const_fuel, CONST_FUEL);
         let result = self
-            .push_frame(loc.clone(), body, Vec::new(), None)
+            .push_frame(loc.clone(), body, Vec::new(), const_env, None)
             .and_then(|()| self.run_to_done());
         self.frames = saved_frames;
         self.const_fuel = saved_fuel;
@@ -227,13 +257,14 @@ impl<'db, M: Mode> Machine<'db, M> {
         self.const_block_evaluations
     }
 
-    /// The `const` block expression `body` was lowered from — the origin
-    /// for errors about the block as a whole (cycles).
+    /// The `const` block (or const argument) expression `body` was lowered
+    /// from — the origin for errors about the block as a whole (cycles).
     fn const_block_origin(&self, loc: &ItemLoc, body: BodyId) -> Option<(ItemLoc, ExprId)> {
-        let expr = self
-            .lowered(loc)
+        let lowered = self.lowered(loc);
+        let expr = lowered
             .const_blocks
             .iter()
+            .chain(&lowered.const_args)
             .find_map(|&(expr, b)| (b == body).then_some(expr))?;
         Some((loc.clone(), expr))
     }
@@ -258,7 +289,9 @@ impl<'db, M: Mode> Machine<'db, M> {
                 origin: None,
             });
         };
-        self.push_frame(loc.clone(), root, Vec::new(), None)
+        // An item root executes outside any generic binder (a generic
+        // item's root just constructs its fn value), so no const env.
+        self.push_frame(loc.clone(), root, Vec::new(), Vec::new(), None)
     }
 
     /// The live call stack, bottom first. On an `Err` from [`Self::step`]
@@ -292,20 +325,43 @@ impl<'db, M: Mode> Machine<'db, M> {
 
     /// The user-named locals of a frame that currently hold values, with
     /// their declared MIR types, in declaration order (shadowing repeats a
-    /// name; later wins).
+    /// name; later wins). A frame executing under a generic instance
+    /// additionally lists the binder's const params first (`N = 3` in
+    /// `rep::<3>`'s frame) — they read like locals in the source, so the
+    /// debugger shows them like locals; locals declared later shadow them,
+    /// consistent with the name resolution order. Their type is
+    /// reconstructed from the value (the declared `TypeRef` would need a
+    /// lowering context this debugger surface doesn't warrant).
     pub fn frame_named_locals(&self, index: usize) -> Vec<(String, hir::Ty, Value)> {
         let Some(frame) = self.frames.get(index) else {
             return Vec::new();
         };
+        let mut out = Vec::new();
+        if !frame.const_args.is_empty() {
+            let generics = hir::item_data(self.db, frame.loc.to_id(self.db))
+                .as_ref()
+                .map(|data| data.generics.clone())
+                .unwrap_or_default();
+            let mut values = frame.const_args.iter();
+            for param in &generics {
+                let hir::item_tree::GenericParamKind::Const(_) = param.kind else {
+                    continue;
+                };
+                let Some(value) = values.next() else {
+                    break;
+                };
+                if !param.name.is_empty() {
+                    out.push((param.name.clone(), value_ty(value), value.clone()));
+                }
+            }
+        }
         let body = &self.lowered(&frame.loc).bodies[frame.body];
-        body.locals
-            .iter()
-            .filter_map(|(id, data)| {
-                let name = data.name.clone()?;
-                let value = frame.locals.get(id)?.clone();
-                Some((name, data.ty.clone(), value))
-            })
-            .collect()
+        out.extend(body.locals.iter().filter_map(|(id, data)| {
+            let name = data.name.clone()?;
+            let value = frame.locals.get(id)?.clone();
+            Some((name, data.ty.clone(), value))
+        }));
+        out
     }
 
     /// Call a function value with already-evaluated arguments, to
@@ -315,7 +371,7 @@ impl<'db, M: Mode> Machine<'db, M> {
     pub fn call_value(&mut self, f: FnValue, args: Vec<Value>) -> Result<Value, EvalError> {
         let saved = std::mem::take(&mut self.frames);
         let result = self
-            .push_frame(f.item, f.body, args, None)
+            .push_frame(f.item, f.body, args, f.const_args, None)
             .and_then(|()| self.run_to_done());
         self.frames = saved;
         result
@@ -343,6 +399,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         loc: ItemLoc,
         body_id: BodyId,
         args: Vec<Value>,
+        const_args: Vec<Value>,
         return_to: Option<(LocalId, Option<mir::BlockId>)>,
     ) -> Result<(), EvalError> {
         if self.frames.len() >= MAX_FRAMES {
@@ -380,6 +437,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             serial: self.next_frame_serial,
             block: body.entry,
             statement: 0,
+            const_args,
             locals,
             return_to,
         });
@@ -474,7 +532,13 @@ impl<'db, M: Mode> Machine<'db, M> {
                     .collect::<Result<Vec<_>, _>>()?;
                 match callee {
                     Value::Fn(f) => {
-                        self.push_frame(f.item, f.body, args, Some((*dest, *target)))?;
+                        self.push_frame(
+                            f.item,
+                            f.body,
+                            args,
+                            f.const_args,
+                            Some((*dest, *target)),
+                        )?;
                     }
                     Value::Builtin(builtin) => {
                         let result = self.builtin_call(builtin, args, &loc, origin)?;
@@ -659,6 +723,27 @@ impl<'db, M: Mode> Machine<'db, M> {
                     payload,
                 })
             }
+            // Constructing a generic instance's fn value: the item's own
+            // value (its root is the fn literal — a plain lazy forcing)
+            // with the *evaluated* const arguments attached. Each operand
+            // is a compile-time body (`Const::ConstBlock`); forcing it
+            // inherits this frame's const env, which is what lets a const
+            // param forward as a const argument (`rep::<const N>` inside
+            // another generic body).
+            Rvalue::Instantiate { item, const_args } => {
+                let args = const_args
+                    .iter()
+                    .map(|op| self.eval_operand(loc, body, op, origin))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let value = self.force_item(item.clone())?;
+                let Value::Fn(f) = value else {
+                    return Err(self.ill_typed("a function value", &value, loc, origin));
+                };
+                Ok(Value::Fn(FnValue {
+                    const_args: args,
+                    ..f
+                }))
+            }
             Rvalue::Field { base, index } => {
                 let base = self.eval_operand(loc, body, base, origin)?;
                 let index = *index as usize;
@@ -779,13 +864,49 @@ impl<'db, M: Mode> Machine<'db, M> {
                 Const::Bool(b) => Value::Bool(*b),
                 Const::Builtin(b) => Value::Builtin(*b),
                 Const::Item(item) => self.force_item(item.clone())?,
+                // A fn literal constructed inside a generic frame inherits
+                // the frame's const-param values: its body may read them
+                // (the binder scopes the whole item), so const params
+                // behave like auto-captured constants. Empty everywhere
+                // else — zero cost for non-generic code.
                 Const::Fn(body) => Value::Fn(FnValue {
                     item: loc.clone(),
                     body: *body,
+                    const_args: self.current_const_args(),
                 }),
-                Const::ConstBlock(body) => self.force_const_block(loc, *body)?,
+                Const::ConstBlock(body) => {
+                    let env = self.current_const_args();
+                    self.force_const_block(loc, *body, env)?
+                }
+                // TR06's substitution model: the operand resolves against
+                // the executing frame's instance. No frame values means a
+                // *standalone* check-time forcing inside a generic item —
+                // not knowable pre-instantiation, so the distinguished
+                // kind lets the diagnostics layer skip it.
+                Const::ConstParam(index) => self
+                    .frames
+                    .last()
+                    .and_then(|frame| frame.const_args.get(*index as usize))
+                    .cloned()
+                    .ok_or(EvalError {
+                        kind: EvalErrorKind::Uninstantiated,
+                        message: "the value of a const parameter is not known \
+                                  before instantiation"
+                            .to_owned(),
+                        origin: Some((loc.clone(), origin)),
+                    })?,
             }),
         }
+    }
+
+    /// The executing frame's const-param values — the environment
+    /// compile-time bodies and nested fn values constructed from it
+    /// inherit. Empty with no live frame (item roots).
+    fn current_const_args(&self) -> Vec<Value> {
+        self.frames
+            .last()
+            .map(|frame| frame.const_args.clone())
+            .unwrap_or_default()
     }
 
     fn builtin_call(
@@ -890,6 +1011,34 @@ fn project_mut<'v>(slot: &'v mut Value, projection: &[u32]) -> Result<&'v mut Va
         }
     }
     Ok(current)
+}
+
+/// Best-effort type of a runtime value, for displaying const params in the
+/// debugger (their declared `TypeRef` isn't lowered here). Scalars and
+/// records reconstruct exactly; a tagged variant value is its enum; the
+/// carriers whose static type isn't recoverable from the value alone
+/// (tag-free payloads, fn values) fall back to `{error}`, which only
+/// demotes them from console-eval parameters — the variables panel still
+/// shows name and value.
+fn value_ty(value: &Value) -> hir::Ty {
+    match value {
+        Value::Unit => hir::Ty::Unit,
+        Value::Int(_) => hir::Ty::Int,
+        Value::Str(_) => hir::Ty::Str,
+        Value::Bool(_) => hir::Ty::Bool,
+        Value::Record { fields } => hir::Ty::record(
+            fields
+                .iter()
+                .map(|(name, value)| (name.clone(), value_ty(value)))
+                .collect(),
+        ),
+        // Generic args are erased at runtime, so the recovered type is the
+        // bare declaration (`Option`, args unknown) — enough for the
+        // variables panel; console-eval parameters demote like the other
+        // unrecoverable carriers when the static type was an instance.
+        Value::Variant { decl, .. } => hir::Ty::Named(hir::NamedTy::plain(decl.clone())),
+        Value::Fn(_) | Value::Builtin(_) | Value::Tuple(_) => hir::Ty::Error,
+    }
 }
 
 fn local_name(body: &MirBody, local: LocalId) -> String {

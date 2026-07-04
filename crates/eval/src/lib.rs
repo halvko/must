@@ -70,6 +70,87 @@ pub enum Value {
 pub struct FnValue {
     pub item: ItemLoc,
     pub body: BodyId,
+    /// The instance's evaluated const arguments, dense over the item's
+    /// *const* params in binder order (`mir::Const::ConstParam`'s index
+    /// space) — empty for non-generic functions. Type arguments never
+    /// appear: they don't affect lowering (TR06), so the runtime identity of
+    /// an instance is `(item, const_args)` alone. Frames executing this
+    /// value resolve `ConstParam` operands here; fn literals *nested* in a
+    /// generic body inherit the enclosing frame's values at construction,
+    /// so const params behave like auto-captured constants.
+    pub const_args: Vec<Value>,
+}
+
+/// Identity of one instantiation of a generic item — TR06's applicative key:
+/// same item + same (canonical) args = the same instance everywhere, with
+/// no call-site component (arena-indexed `ExprId`s churn under edits;
+/// range-free identity is the firewall invariant). Today this keys the
+/// machine's per-instance memo for compile-time bodies (`const` blocks and
+/// const arguments evaluated under a generic frame); later it is the key
+/// of `mono_mir(db, Instance)` and FFI symbol mangling.
+///
+/// Deliberately CONST-ARGS-ONLY (TR06): type params never affect lowering —
+/// MIR consults types only for structure the body projects, and a rigid
+/// param is opaque — so the runtime key omits them. The FULL key with type
+/// arguments exists at the *type* level only, for when generic type
+/// declarations and a monomorphizing backend need it; nothing the interpreter
+/// does ever distinguishes `id::<usize>` from `id::<str>`.
+///
+/// Lives in `eval` because [`GenericArgValue`] wraps [`Value`] — mir sits
+/// below eval in the crate graph, and hoisting `Value` out of the
+/// interpreter for a key nothing below eval consumes yet would invert the
+/// layering for no benefit. When `mono_mir` lands, the key can move (or be
+/// re-exported) with it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Instance {
+    pub item: ItemLoc,
+    pub args: Vec<GenericArgValue>,
+}
+
+/// One canonical generic argument of an [`Instance`]. Const-only in v1 —
+/// see [`Instance`] for why type arguments don't enter the runtime key; the
+/// variant exists (rather than a bare `Value`) so that adding a type-level
+/// arm later is an extension, not a re-keying.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum GenericArgValue {
+    Const(Value),
+}
+
+/// [`Value`] is hashable so it can sit in instance-identity keys
+/// ([`Instance`], the machine's per-instance memos). Hand-written for one
+/// reason: [`Value::Fn`] must never be a correctness lever in a key — an
+/// [`FnValue`] carries a `BodyId` arena index that renumbers under body
+/// edits, which is exactly why fn values are excluded from the const-arg
+/// domain (TR06: concrete data types only) and rejected at the hir level (see
+/// `hir::diag::FN_CONST_ARG`) before hashing could ever matter. The `Fn`
+/// arm therefore hashes as its discriminant alone — a lawful collision
+/// (equal values still hash equal), never an identity.
+impl std::hash::Hash for Value {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Value::Unit => {}
+            Value::Int(v) => v.hash(state),
+            Value::Str(s) => s.hash(state),
+            Value::Bool(b) => b.hash(state),
+            // Discriminant only — see the impl comment.
+            Value::Fn(_) => {}
+            Value::Builtin(b) => b.hash(state),
+            Value::Record { fields } => fields.hash(state),
+            Value::Tuple(values) => values.hash(state),
+            Value::Variant {
+                decl,
+                index,
+                name,
+                payload,
+            } => {
+                decl.hash(state);
+                index.hash(state);
+                name.hash(state);
+                payload.hash(state);
+            }
+        }
+    }
 }
 
 impl Value {
@@ -146,6 +227,16 @@ pub enum EvalErrorKind {
     Runtime,
     /// Const-mode refusals: impure builtins, cycles, the recursion limit.
     NotConst,
+    /// A `ConstParam` operand was read with no instance to resolve it
+    /// against — a compile-time body inside a *generic* item, forced
+    /// standalone at check time ([`const_arg_values`],
+    /// [`const_block_values`]). Not an error in the program: the value is
+    /// simply not knowable pre-instantiation (TR06 — const arguments live
+    /// on the instance, so evaluation depending on `const V` is
+    /// per-instance), so the diagnostics layer
+    /// skips it like [`Self::Trap`]; every *instantiated* execution
+    /// carries the values and never produces this.
+    Uninstantiated,
 }
 
 /// The item's value as a compile-time constant — the `static x = const { … }`
@@ -171,6 +262,28 @@ pub fn const_block_values<'db>(
     mir::mir_lowered(db, item)
         .const_blocks
         .iter()
-        .map(|&(expr, body)| (expr, machine.force_const_block(&loc, body)))
+        .map(|&(expr, body)| (expr, machine.force_const_block(&loc, body, Vec::new())))
+        .collect()
+}
+
+/// The check-time value of every turbofish const argument in the item's
+/// lowered MIR — the [`const_block_values`] twin for `rep::<3>`'s `3`
+/// (const arguments are compile-time wherever their mention sits, mentions
+/// inside uncalled functions included). Keyed by the argument's value
+/// expression. Inside a *generic* item an argument may read the enclosing
+/// binder's const params ([`EvalErrorKind::Uninstantiated`] — skipped by
+/// the diagnostics layer; the value is computed per instance at the
+/// mention's execution instead).
+#[salsa::tracked(returns(ref))]
+pub fn const_arg_values<'db>(
+    db: &'db dyn Db,
+    item: ItemId<'db>,
+) -> Vec<(ExprId, Result<Value, EvalError>)> {
+    let loc = hir::item_loc(db, item);
+    let mut machine = Machine::for_const(db);
+    mir::mir_lowered(db, item)
+        .const_args
+        .iter()
+        .map(|&(expr, body)| (expr, machine.force_const_block(&loc, body, Vec::new())))
         .collect()
 }

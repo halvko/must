@@ -33,7 +33,7 @@ use rustc_hash::FxHashMap;
 use crate::constraint::resolve_fully;
 use crate::infer::InferCtx;
 use crate::item_tree::item_tree;
-use crate::ty::{Ty, TyVar, TyVarValue, lower_type_ref};
+use crate::ty::{ParamScope, Ty, TyVar, TyVarValue, lower_type_ref_in};
 use crate::{ItemLoc, file_item_ids, item_loc};
 
 /// One inference group per salsa key.
@@ -63,12 +63,19 @@ pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
         .iter()
         .map(|it| {
             // Type items declare no value: they have no signature to infer,
-            // so they never join a binding group.
+            // so they never join a binding group. Generic items NEVER join
+            // one either (TR06, load-bearing): a group's shared signature
+            // variable is a monotype, so membership would pin every
+            // instantiation of the scheme to one type. The fully-annotated
+            // rule makes them firewall items — their scheme is complete
+            // from the binder (and when the rule is violated the signature
+            // is `{error}` with the definition carrying the diagnostic),
+            // so there is nothing group inference could add; the explicit
+            // `generics.is_empty()` guard keeps rule-violating generics
+            // (whose `type_ref` is `None`) out too.
             matches!(it.kind, crate::item_tree::ItemKind::Value(_))
-                && it
-                    .type_ref
-                    .as_ref()
-                    .is_none_or(|tr| !crate::ty::is_fully_typed(tr))
+                && it.generics.is_empty()
+                && it.type_ref.as_ref().is_none_or(|tr| !tr.is_fully_typed())
         })
         .collect();
 
@@ -248,7 +255,9 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
         let expected = crate::item_data(db, item)
             .as_ref()
             .and_then(|it| it.type_ref.as_ref())
-            .map(|type_ref| lower_type_ref(db, file, type_ref, &mut table))
+            .map(|type_ref| {
+                lower_type_ref_in(db, file, type_ref, &mut table, &ParamScope::default())
+            })
             .unwrap_or_else(|| Ty::Infer(table.new_key(TyVarValue::Unknown)));
         let mut ctx = InferCtx::new(
             db,

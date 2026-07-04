@@ -21,14 +21,20 @@ pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
     let body = hir::body::body(db, item);
     let infer = hir::infer::infer(db, item);
     let const_diagnostics = hir::const_check::const_check(db, item);
+    let own_generics = hir::item_data(db, item)
+        .as_ref()
+        .map(|it| it.generics.as_slice())
+        .unwrap_or(&[]);
     let mut ctx = LowerCtx {
         db,
         body,
         infer,
         const_diagnostics,
         resolutions: hir::resolutions(db, item),
+        own_generics,
         bodies: Arena::default(),
         const_blocks: Vec::new(),
+        const_args: Vec::new(),
         diagnostics: Vec::new(),
         value_traps: FxHashMap::default(),
         call_traps: FxHashMap::default(),
@@ -46,6 +52,7 @@ pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
         bodies: ctx.bodies,
         root,
         const_blocks: ctx.const_blocks,
+        const_args: ctx.const_args,
         diagnostics: ctx.diagnostics,
     }
 }
@@ -56,8 +63,16 @@ struct LowerCtx<'db> {
     infer: &'db InferenceResult,
     const_diagnostics: &'db [hir::ConstCheckDiagnostic],
     resolutions: &'db ArenaMap<ExprId, Resolution>,
+    /// The item's own generic binder — the index space
+    /// [`Resolution::ConstParam`] refers into, converted to the dense
+    /// const-only indexing [`Const::ConstParam`] uses (see
+    /// [`LowerCtx::const_param_index`]).
+    own_generics: &'db [hir::item_tree::GenericParamData],
     bodies: Arena<MirBody>,
     const_blocks: Vec<(ExprId, BodyId)>,
+    /// Turbofish const-argument bodies, in lowering order — see
+    /// [`MirLowered::const_args`].
+    const_args: Vec<(ExprId, BodyId)>,
     diagnostics: Vec<MirDiagnostic>,
     /// Expressions whose *value* the context can't accept (type mismatches):
     /// lowered normally for the CFG, then trapped before the value flows on.
@@ -206,6 +221,23 @@ impl LowerCtx<'_> {
                 | InferenceDiagnostic::PatNotRecord { .. }
                 | InferenceDiagnostic::PatUnknownType { .. }
                 | InferenceDiagnostic::PatNamedTypeMismatch { .. } => {}
+                // A broken generic mention: the mention's value cannot be
+                // produced — a value trap right there (checked before the
+                // `GenericApp` arm would lower an instantiation).
+                InferenceDiagnostic::GenericArgCount { expr, .. }
+                | InferenceDiagnostic::NotGeneric { expr, .. }
+                | InferenceDiagnostic::ConstArgHole { expr }
+                | InferenceDiagnostic::GenericArgKindMismatch { expr, .. }
+                | InferenceDiagnostic::MissingConstArgs { expr, .. }
+                | InferenceDiagnostic::CannotInferGenericParam { expr, .. }
+                | InferenceDiagnostic::FnConstArg { expr }
+                | InferenceDiagnostic::TypeConstArgUnsupported { expr, .. } => {
+                    self.value_traps.insert(*expr, diag.message());
+                }
+                // Reported on the assignment's target, like the arms above.
+                InferenceDiagnostic::AssignToConstParam { target, .. } => {
+                    self.assign_traps.insert(*target, diag.message());
+                }
             }
         }
         // Const-check diagnostics are reported on the *callee* (the
@@ -247,7 +279,9 @@ impl LowerCtx<'_> {
     fn field_index(&self, receiver: ExprId, name: &str) -> Option<u32> {
         let receiver_record = match self.ty(receiver) {
             Ty::Record(rec) => Some(Ty::Record(rec)),
-            Ty::Named(loc) => hir::type_underlying(self.db, loc.to_id(self.db)),
+            // Substituted for honesty, though the *index* is
+            // arg-independent (names sort the same under any substitution).
+            Ty::Named(named) => hir::type_underlying_for(self.db, &named),
             _ => None,
         };
         match receiver_record {
@@ -289,7 +323,10 @@ impl LowerCtx<'_> {
         // where its enum was needed — the conversion (tag injection)
         // happens here and only here.
         if let Some(variant) = self.infer.widened.get(expr).cloned() {
-            let dest = b.temp(Ty::Named(variant.decl.clone()));
+            let dest = b.temp(Ty::Named(hir::NamedTy {
+                decl: variant.decl.clone(),
+                args: variant.args.clone(),
+            }));
             b.push_assign(
                 dest,
                 Rvalue::WidenToEnum {
@@ -318,6 +355,82 @@ impl LowerCtx<'_> {
             ExprData::Literal(LiteralData::Str(s)) => Operand::Const(Const::Str(s.clone())),
             ExprData::Literal(LiteralData::Bool(v)) => Operand::Const(Const::Bool(*v)),
             ExprData::NameRef(name) => self.lower_name_ref(b, expr, name),
+            // A turbofish mention. Type arguments need nothing at runtime
+            // (TR06: rigid params never affect lowering), so a mention with
+            // no const args is exactly the base item's own value; const
+            // args lower to compile-time bodies of their own (they are
+            // const contexts wherever the mention sits — same machinery as
+            // `const` blocks) and an [`Rvalue::Instantiate`] attaches
+            // their values to the fn value.
+            ExprData::GenericApp { base, .. } => {
+                if self.value_traps.contains_key(&expr) {
+                    // A diagnosed mention (`takes no generic arguments`,
+                    // wrong arity, `_` in a const position, …): the
+                    // wrapper's value trap carries the better message; the
+                    // placeholder is never observed.
+                    return Operand::Const(Const::Unit);
+                }
+                let name = match &self.body.exprs[*base] {
+                    ExprData::NameRef(name) => name.clone(),
+                    _ => String::new(),
+                };
+                match self.resolutions.get(*base) {
+                    Some(Resolution::Item(loc)) => {
+                        let loc = loc.clone();
+                        // Recorded only when the arity matched and every
+                        // const position got a value (broken mentions have
+                        // value traps and never reach here).
+                        let recorded = self.infer.const_args_of_expr.get(expr).cloned();
+                        match recorded {
+                            Some(args) if !args.is_empty() => {
+                                let sig = hir::signature(self.db, loc.to_id(self.db));
+                                if sig.contains_error() {
+                                    // A broken scheme (fully-annotated rule
+                                    // violated): the definition carries the
+                                    // diagnostic; the mention's value
+                                    // refuses like `lower_name_ref`'s
+                                    // broken-annotation arm.
+                                    return self.trap(
+                                        b,
+                                        expr,
+                                        format!(
+                                            "cannot use `{name}`: \
+                                             its type annotation has errors"
+                                        ),
+                                    );
+                                }
+                                let const_args = args
+                                    .iter()
+                                    .map(|&(_, value)| {
+                                        let body_id = self.lower_const_arg(value);
+                                        Operand::Const(Const::ConstBlock(body_id))
+                                    })
+                                    .collect();
+                                let dest = b.temp(self.ty(expr));
+                                b.push_assign(
+                                    dest,
+                                    Rvalue::Instantiate {
+                                        item: loc,
+                                        const_args,
+                                    },
+                                    expr,
+                                );
+                                Operand::Copy(dest)
+                            }
+                            // No const params: the instance's value IS the
+                            // item's value (type args are type-level only),
+                            // so the mention lowers exactly like a bare one.
+                            _ => self.lower_name_ref(b, *base, &name),
+                        }
+                    }
+                    // Undiagnosed non-generic bases don't reach here (a
+                    // clean mention resolves to a generic item or carries a
+                    // `NotGeneric`-family value trap); kept total by
+                    // lowering the base name as if the turbofish weren't
+                    // there.
+                    _ => self.lower_name_ref(b, *base, &name),
+                }
+            }
             ExprData::Call { callee, args } => {
                 // A construction call `Foo(arg)`. Erasure decision: nominal
                 // types exist only in the static type system — a `Foo` *is*
@@ -330,8 +443,26 @@ impl LowerCtx<'_> {
                 // record in a comparison. The callee is not lowered — a type
                 // name has no value (reading one traps, see
                 // `lower_name_ref`); as a construction head it is legal and
-                // erased.
-                if let Some(Resolution::TypeItem(_)) = self.resolutions.get(*callee) {
+                // erased. A turbofished head (`Pair::<usize>(...)`) is the
+                // same construction: the generic args are type-level only,
+                // so the erasure story is identical.
+                let ctor_head = match &body.exprs[*callee] {
+                    ExprData::GenericApp { base, .. } => {
+                        matches!(self.resolutions.get(*base), Some(Resolution::TypeItem(_)))
+                    }
+                    _ => matches!(self.resolutions.get(*callee), Some(Resolution::TypeItem(_))),
+                };
+                if ctor_head {
+                    // A broken turbofish (arity, kinds, an unrepresentable
+                    // const arg) was diagnosed — and value-trapped — on the
+                    // CALLEE mention; the construction refuses with that
+                    // exact message (args still evaluated for effects).
+                    if let Some(message) = self.value_traps.get(callee).cloned() {
+                        for &arg in args {
+                            self.lower_expr(b, arg);
+                        }
+                        return self.trap(b, expr, message);
+                    }
                     let mut arg_ops: Vec<Operand> =
                         args.iter().map(|&arg| self.lower_expr(b, arg)).collect();
                     // Wrong arity, or an enum type constructed directly
@@ -621,11 +752,11 @@ impl LowerCtx<'_> {
             ExprData::VariantPath { base, .. } => {
                 match self.infer.variant_of_expr.get(expr).cloned() {
                     Some(variant) => {
-                        let payload_tys = hir::enum_variants(self.db, variant.decl.to_id(self.db))
-                            .as_ref()
-                            .and_then(|variants| variants.get(variant.index as usize))
-                            .map(|(_, payload)| payload.clone())
-                            .unwrap_or_default();
+                        // Substituted with the mention's enum args, so a
+                        // synthesized constructor body's param types are
+                        // the instance's, not the rigid generic body's.
+                        let payload_tys =
+                            hir::variant_payloads_for(self.db, &variant).unwrap_or_default();
                         if payload_tys.is_empty() {
                             let dest = b.temp(self.ty(expr));
                             b.push_assign(
@@ -790,8 +921,13 @@ impl LowerCtx<'_> {
         let scrut = Operand::Copy(scrut_local);
 
         match self.ty(scrutinee) {
-            Ty::Named(decl) if hir::enum_variants(self.db, decl.to_id(self.db)).is_some() => {
-                self.lower_match_switch(b, expr, &scrut, decl, arms)
+            // The dispatch is keyed on the DECLARATION alone: variant
+            // indices (and so tags) are identical across instantiations of
+            // a generic enum — the args never reach the runtime switch.
+            Ty::Named(named)
+                if hir::enum_variants(self.db, named.decl.to_id(self.db)).is_some() =>
+            {
+                self.lower_match_switch(b, expr, &scrut, named.decl, arms)
             }
             Ty::Variant(variant) => {
                 let covering =
@@ -1145,8 +1281,7 @@ impl LowerCtx<'_> {
             PatData::Record { fields, .. } => {
                 let rec = match self.infer.type_of_pat.get(pat) {
                     Some(Ty::Record(rec)) => Some(rec.clone()),
-                    Some(Ty::Named(loc)) => match hir::type_underlying(self.db, loc.to_id(self.db))
-                    {
+                    Some(Ty::Named(named)) => match hir::type_underlying_for(self.db, named) {
                         Some(Ty::Record(rec)) => Some(rec),
                         _ => None,
                     },
@@ -1218,6 +1353,14 @@ impl LowerCtx<'_> {
                     return self.trap(b, expr, message);
                 }
                 Operand::Const(Const::Item(loc.clone()))
+            }
+            // A const param's value materializes per instantiation: the
+            // operand resolves against the executing frame's instance
+            // (`FnValue.const_args`) — TR06's substitution model. Lowering
+            // converts the binder index to the dense const-only index the
+            // operand uses.
+            Some(Resolution::ConstParam(index)) => {
+                Operand::Const(Const::ConstParam(self.const_param_index(*index)))
             }
             // A type has no value to read. Construction heads never get
             // here (the `Call` arm intercepts them); every other read is
@@ -1302,6 +1445,16 @@ impl LowerCtx<'_> {
                         target,
                         item: loc.clone(),
                         constness,
+                    }
+                    .message();
+                    self.trap(b, target, message);
+                }
+                // A const param target was seeded into `assign_traps` too
+                // (inference always reports it); kept total the same way.
+                Some(Resolution::ConstParam(_)) => {
+                    let message = InferenceDiagnostic::AssignToConstParam {
+                        target,
+                        name: name.clone(),
                     }
                     .message();
                     self.trap(b, target, message);
@@ -1446,6 +1599,14 @@ impl LowerCtx<'_> {
             // non-place root assignable), so these arms are unreachable in
             // practice; kept total by re-rendering the same diagnostics'
             // messages, like `lower_assign_target`'s twins.
+            Some(Resolution::ConstParam(_)) => {
+                let message = InferenceDiagnostic::AssignToConstParam {
+                    target: root,
+                    name: name.clone(),
+                }
+                .message();
+                self.trap(b, root, message);
+            }
             Some(Resolution::Item(loc)) => {
                 let constness = hir::item_data(self.db, loc.to_id(self.db))
                     .as_ref()
@@ -1543,6 +1704,29 @@ impl LowerCtx<'_> {
         );
         b.current = target;
         Operand::Copy(dest)
+    }
+
+    /// Lower one turbofish const argument's value expression to its own
+    /// zero-parameter body — the same shape as a `const { … }` block's
+    /// (compile-time under every execution, so `initializer_context` is
+    /// off: const violations in it trap unconditionally) — and record it
+    /// for the check-time evaluation surface.
+    fn lower_const_arg(&mut self, value: ExprId) -> BodyId {
+        let saved = std::mem::replace(&mut self.initializer_context, false);
+        let body_id = self.lower_fn(&[], value, self.ty(value));
+        self.initializer_context = saved;
+        self.const_args.push((value, body_id));
+        body_id
+    }
+
+    /// Binder index → dense const-only index (what [`Const::ConstParam`]
+    /// and `FnValue.const_args` use): type params claim no runtime slot.
+    fn const_param_index(&self, binder_index: u32) -> u32 {
+        self.own_generics
+            .iter()
+            .take(binder_index as usize)
+            .filter(|param| matches!(param.kind, hir::item_tree::GenericParamKind::Const(_)))
+            .count() as u32
     }
 }
 

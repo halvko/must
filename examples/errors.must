@@ -66,3 +66,14 @@ static shadow_variant = fn (s: Shape) -> str {
         Point => "point",
     }
 };
+
+// 8. Rigid-parameter misuse: inside a generic body a type param `T`
+//    unifies only with itself, so `x + 1` is rejected the same way it
+//    would be for any other non-`usize` type — no caller's instantiation
+//    ever makes `T` support an operation the body wasn't checked against.
+//    (See `generics.must` for what a rigid `T` *does* support.)
+//    error: type mismatch: expected `usize`, found `T`
+static rigid_add_one = fn::<T>(x: T) -> T {
+    let y = x + 1;
+    x
+};

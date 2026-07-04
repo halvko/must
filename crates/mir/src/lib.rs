@@ -51,6 +51,15 @@ pub struct MirLowered {
     /// Inner blocks precede the blocks enclosing them (lowering completes
     /// inside out).
     pub const_blocks: Vec<(ExprId, BodyId)>,
+    /// Every turbofish const argument (`rep::<3>` — the `3`), with the
+    /// zero-parameter body its value expression lowered to. Const args are
+    /// compile-time positions wherever their mention sits, exactly like
+    /// `const` blocks — the same check-time evaluation surface
+    /// (`eval::const_arg_values`), and the operands a
+    /// [`Rvalue::Instantiate`] forces at instantiation time. Keyed by the
+    /// argument's *value expression* (each has its own node, so failures
+    /// squiggle the argument, not the whole mention).
+    pub const_args: Vec<(ExprId, BodyId)>,
     /// Findings of lowering itself — MIR is a diagnostic *producer* like any
     /// other analysis; the aggregator attaches ranges.
     pub diagnostics: Vec<MirDiagnostic>,
@@ -150,6 +159,28 @@ pub enum Rvalue {
         base: Operand,
         index: u32,
     },
+    /// Constructs the fn value of a generic instantiation (`rep::<3>`):
+    /// the mentioned item's own fn value with the *evaluated* const
+    /// arguments attached (`FnValue.const_args` on the eval side) — an
+    /// Aggregate-like construction, evaluated where the mention sits. The
+    /// operands are `Const::ConstBlock` references to the argument bodies
+    /// in [`MirLowered::const_args`]: a const argument is a compile-time
+    /// expression exactly like a `const { … }` block, so it shares that
+    /// machinery (forced once, memoized per enclosing instance).
+    ///
+    /// Deliberately carries NO type arguments: under rigid-param checking
+    /// type params never affect lowering (TR06 — MIR consults types only for
+    /// structure the body projects, and a param is opaque), so the runtime
+    /// key of an instance is its const args alone. The FULL instance key
+    /// (type args included) exists at the *type* level only — a
+    /// monomorphizing backend will need it; the interpreter never does.
+    Instantiate {
+        /// The generic item being instantiated.
+        item: ItemLoc,
+        /// One operand per *const* param, in binder order (dense: type
+        /// params claim no slot — they need nothing at runtime).
+        const_args: Vec<Operand>,
+    },
     /// The variant → enum widening conversion: takes a *variant-typed*
     /// (tag-free payload) value and injects the tag, producing an
     /// *enum-typed* (tagged) value. This op is the only place a tag is
@@ -195,10 +226,22 @@ pub enum Const {
     Builtin(Builtin),
     /// A `fn` literal; its code is in [`MirLowered::bodies`] of the same item.
     Fn(BodyId),
-    /// A `const { … }` block: the referenced body (in the same item's
-    /// [`MirLowered::bodies`]) is forced at compile time — evaluated once
-    /// per machine run and memoized, never executed as runtime code.
+    /// A `const { … }` block — or a turbofish const argument, which is the
+    /// same thing (a compile-time expression body; see
+    /// [`MirLowered::const_args`]): the referenced body (in the same
+    /// item's [`MirLowered::bodies`]) is forced at compile time —
+    /// evaluated once per machine run and memoized (per enclosing
+    /// instance, when the body reads const params), never executed as
+    /// runtime code.
     ConstBlock(BodyId),
+    /// A read of the enclosing generic binder's const parameter, resolved
+    /// from the executing frame's instance (`FnValue.const_args`) — the
+    /// TR06 substitution model: ONE MIR per generic item, materialized per
+    /// frame. The index is *dense over const params only* (type params
+    /// claim no slot — they never affect lowering), i.e. `const N` in
+    /// `fn::<T, const N: usize>` is `ConstParam(0)`; lowering converts
+    /// from the binder index `Resolution::ConstParam` carries.
+    ConstParam(u32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -61,6 +61,29 @@
 //! client without `snippetSupport` — `must-lsp::to_proto` picks between the
 //! two per client capability; `ide` itself has no notion of "the client",
 //! only the two spellings.
+//!
+//! ## Detail, and why there is no `completionItem/resolve`
+//!
+//! Every candidate carries its `detail` eagerly, computed in one pass here:
+//! the fully rendered type for a value/`fn`/local (`fn_call_insert`'s
+//! candidates and `local_detail`), the declaration shape for a `type` item
+//! (`type_item_detail` — a `struct { … }`/`enum { … }` body, the type-item
+//! provenance its `Struct`/`Enum` kind already names), a variant's payload
+//! signature for a variant candidate (`hover::render_variant`), and the
+//! field's own type for a field completion (field access, record-literal
+//! fields, and record-pattern fields alike). All of it is already
+//! memoized on the real snapshot (`infer`, `type_underlying`,
+//! `enum_variants`), so it is a cheap read, not lazy work.
+//!
+//! Lazy `completionItem/resolve` exists to defer *expensive* per-item work
+//! (fetching doc comments, computing import edits) off the initial list.
+//! Must has neither: no doc comments in the grammar, and no imports. The
+//! only thing a resolve pass could fill in is exactly this type detail —
+//! already cheap and already eager — so wiring resolve would add a round
+//! trip and a server-side item cache to recompute what the first response
+//! already carried. `must-lsp` therefore advertises `resolve_provider:
+//! Some(false)` and never registers a resolve handler; revisit only if a
+//! genuinely lazy field (docs, import edits) ever lands.
 
 use base_db::{RootDatabase, SourceFile, parse};
 use syntax::ast::{self, AstNode as _};
@@ -297,6 +320,17 @@ enum Context {
     /// token sits before the cursor, so (unlike its not-yet-closed end)
     /// that start back-maps directly to the real tree.
     RecordLiteralField { record_start: TextSize },
+    /// A field-name slot inside a record-destructuring pattern
+    /// (`struct { <cursor> }` in a `let`/parameter binding, or nested one
+    /// level down inside a `Name(…)` newtype pattern). Completes the record
+    /// type's field names; the `..` rest, `mut`, and `as`-rename spellings
+    /// are all still valid around the completed shorthand binding. Carries
+    /// the record pattern's own start offset — its `struct` keyword sits
+    /// before the cursor, so that start back-maps directly to the real tree
+    /// (the same trick `RecordLiteralField` uses). The `as`-rename slot
+    /// (`x as <cursor>`) is a *fresh* binding name and never classifies
+    /// here.
+    RecordPatternField { record_pat_start: TextSize },
     /// The whole RHS of a `type X = …` declaration: offers exactly
     /// the `struct`/`enum` keywords, not the general expression-position
     /// candidates the marker would otherwise classify as.
@@ -407,6 +441,9 @@ pub(crate) fn completions(
             edit_range,
             expected_ty,
         ),
+        Some(Context::RecordPatternField { record_pat_start }) => {
+            record_pattern_items(db, file, &real_root, offset, record_pat_start, edit_range)
+        }
         Some(Context::TypeItemRhs) => type_item_rhs_items(edit_range),
         None => Vec::new(),
     };
@@ -441,6 +478,24 @@ fn classify(parent: &SyntaxNode) -> Option<Context> {
         return Some(Context::MatchArmPattern {
             scrutinee_range: scrutinee.syntax().text_range(),
             bare: true,
+        });
+    }
+
+    // A field-name slot inside a record-destructuring pattern: the marker's
+    // declaration `Name` is a `RECORD_PAT_FIELD`'s *field* name (the first
+    // `Name`; never its `as`-rename, the second — that's a brand-new binding
+    // name, nothing to complete, same as a bare `let`/param name). Checked
+    // here (before the `NameRef` cast) for the same reason as the match-arm
+    // bind above: a pattern field name is a `Name`, not a `NameRef`.
+    if let Some(name) = ast::Name::cast(parent.clone())
+        && let Some(field) = name.syntax().parent().and_then(ast::RecordPatField::cast)
+        && field
+            .field_name()
+            .is_some_and(|n| n.syntax() == name.syntax())
+    {
+        let record_pat = ast::RecordPat::cast(field.syntax().parent()?)?;
+        return Some(Context::RecordPatternField {
+            record_pat_start: record_pat.syntax().text_range().start(),
         });
     }
 
@@ -819,7 +874,7 @@ fn field_items(
     };
     let record = match ty {
         hir::Ty::Record(rec) => Some(rec.clone()),
-        hir::Ty::Named(loc) => match hir::type_underlying(db, loc.to_id(db)) {
+        hir::Ty::Named(named) => match hir::type_underlying_for(db, named) {
             Some(hir::Ty::Record(rec)) => Some(rec),
             _ => None,
         },
@@ -875,8 +930,11 @@ fn variant_segment_items(
             // The candidate's type is the variant type itself: exact under
             // a variant-typed expectation, `widens_to` (tier 1) under the
             // enum's.
+            // No mention args exist at `Enum::<cursor>` — an empty list
+            // is fine for ranking/display (a generic enum renders bare).
             let variant_ty = hir::Ty::Variant(hir::VariantTy {
                 decl: loc.clone(),
+                args: Vec::new(),
                 index: index as u32,
                 name: std::sync::Arc::from(name.as_str()),
             });
@@ -943,11 +1001,13 @@ fn match_arm_items(
     };
     let inference = hir::infer::infer(db, item);
 
-    let enum_loc = match inference.type_of_expr.get(scrutinee_expr) {
-        Some(hir::Ty::Named(loc)) if hir::enum_variants(db, loc.to_id(db)).is_some() => loc.clone(),
+    let enum_named = match inference.type_of_expr.get(scrutinee_expr) {
+        Some(hir::Ty::Named(named)) if hir::enum_variants(db, named.decl.to_id(db)).is_some() => {
+            named.clone()
+        }
         _ => return if bare { wildcard() } else { Vec::new() },
     };
-    let Some(variants) = hir::enum_variants(db, enum_loc.to_id(db)).as_ref() else {
+    let Some(variants) = hir::enum_variants(db, enum_named.decl.to_id(db)).as_ref() else {
         return if bare { wildcard() } else { Vec::new() };
     };
 
@@ -984,7 +1044,7 @@ fn match_arm_items(
     // every variant candidate widens to it (tier 1, gold or not), keeping
     // the pattern slot's candidates ahead of where an unrankable candidate
     // would sort while preserving gold-before-covered within the tier.
-    let scrutinee_ty = hir::Ty::Named(enum_loc.clone());
+    let scrutinee_ty = hir::Ty::Named(enum_named.clone());
     let mut items: Vec<CompletionItem> = variants
         .iter()
         .enumerate()
@@ -1000,7 +1060,8 @@ fn match_arm_items(
                 Provenance::Gold
             };
             let variant_ty = hir::Ty::Variant(hir::VariantTy {
-                decl: enum_loc.clone(),
+                decl: enum_named.decl.clone(),
+                args: enum_named.args.clone(),
                 index: index as u32,
                 name: std::sync::Arc::from(name.as_str()),
             });
@@ -1182,6 +1243,97 @@ fn expected_record(
         return None;
     };
     hir::type_underlying(db, loc.to_id(db))
+}
+
+/// A field-name slot inside a record-destructuring pattern
+/// (`let struct { <cursor> } = p;`, a `fn (struct { <cursor> }: T)`
+/// parameter, or the inner `struct { <cursor> }` of a `Name(…)` newtype
+/// pattern): the field names of the record type flowing into the pattern,
+/// minus the fields already bound elsewhere in the *same* pattern.
+///
+/// The type comes from the real snapshot's `InferenceResult::type_of_pat`
+/// — the record type `check_pat` matched this pattern against (the
+/// initializer's type for a `let`, the parameter's annotation, the
+/// newtype's underlying record) — never reconstructed syntactically. A
+/// completed field inserts just its own name (the shorthand binding); the
+/// surrounding `mut`, `..` rest, and `as`-rename spellings all stay valid
+/// around it, so no snippet is needed. Detail is the field's own type,
+/// like every other field completion.
+///
+/// When the pattern's type isn't a record we can project through (unknown,
+/// still-inferring, or genuinely non-record — each already carries its own
+/// squiggle), this offers no field items rather than guessing; a record
+/// pattern's field slot has no other generally-valid candidates, so that
+/// leaves the same empty result the classifier gave before this.
+fn record_pattern_items(
+    db: &RootDatabase,
+    file: SourceFile,
+    real_root: &SyntaxNode,
+    offset: TextSize,
+    record_pat_start: TextSize,
+    edit_range: TextRange,
+) -> Vec<CompletionItem> {
+    let Some(anchor) = real_anchor(real_root, record_pat_start) else {
+        return Vec::new();
+    };
+    let Some(record_pat) = anchor.ancestors().find_map(ast::RecordPat::cast) else {
+        return Vec::new();
+    };
+
+    // Fields already bound earlier in this pattern — excluding the field
+    // slot the cursor sits in (its own half-typed name must not exclude
+    // itself). Mirrors `record_literal_items`' already-written filter.
+    let already_bound: Vec<String> = record_pat
+        .fields()
+        .filter(|field| !field.syntax().text_range().contains(offset))
+        .filter_map(|field| field.field_name())
+        .map(|name| name.text())
+        .collect();
+
+    let Some(item) = item_at(db, file, real_root, &anchor) else {
+        return Vec::new();
+    };
+    let (_, source_map) = hir::body_with_source_map(db, item);
+    let Some(pat_id) = source_map.pat_for_node(SyntaxNodePtr::new(record_pat.syntax())) else {
+        return Vec::new();
+    };
+    let inference = hir::infer::infer(db, item);
+    let Some(ty) = inference.type_of_pat.get(pat_id) else {
+        return Vec::new();
+    };
+    // The pattern's type directly (`Ty::Record`) or through a named type's
+    // declaration (`Ty::Named`) — same projection as `field_items`. Anything
+    // else has no record shape to complete against.
+    let record = match ty {
+        hir::Ty::Record(rec) => Some(rec.clone()),
+        hir::Ty::Named(named) => match hir::type_underlying_for(db, named) {
+            Some(hir::Ty::Record(rec)) => Some(rec),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(record) = record else {
+        return Vec::new();
+    };
+    record
+        .fields
+        .iter()
+        .filter(|(name, _)| !already_bound.contains(name))
+        .map(|(name, ty)| {
+            // A field *name* binds a value, it is not itself a value — there
+            // is nothing to rank against an expectation (its detail already
+            // shows the type the binding will have). Like `record_literal_
+            // items`' field candidates, it stays at `TYPE_TIER_NONE`.
+            completion_item(
+                name.clone(),
+                CompletionItemKind::Field,
+                Provenance::Item,
+                TYPE_TIER_NONE,
+                Some(ty.display()),
+                edit_range,
+            )
+        })
+        .collect()
 }
 
 /// The type the expression completed at `offset` is expected to have, when

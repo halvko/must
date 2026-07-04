@@ -107,6 +107,26 @@ pub(crate) fn goto_definition(
         Resolution::Item(loc) | Resolution::Ambiguous(loc) | Resolution::TypeItem(loc) => {
             nav_to_item(db, loc)
         }
+        // A const param: jump to its declaration in the enclosing
+        // binder (`const N: usize` in `fn::<...>`).
+        Resolution::ConstParam(index) => {
+            let fn_lit = hir::item_source(db, item)
+                .and_then(|it| it.body())
+                .and_then(|body| match body {
+                    ast::Expr::FnLiteral(fn_lit) => Some(fn_lit),
+                    _ => None,
+                })?;
+            let param = fn_lit.generic_param_list()?.params().nth(*index as usize)?;
+            let ast::GenericParam::ConstParam(const_param) = param else {
+                return None;
+            };
+            let name = const_param.name()?;
+            Some(NavigationTarget {
+                file,
+                full_range: const_param.syntax().text_range(),
+                focus_range: name.syntax().text_range(),
+            })
+        }
         // Builtins have no source to jump to.
         Resolution::Builtin(_) => None,
     }
@@ -165,6 +185,7 @@ fn nav_to_variant_by_name(
         db,
         &hir::VariantTy {
             decl: loc.clone(),
+            args: Vec::new(),
             index: index as u32,
             name: name.into(),
         },

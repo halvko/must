@@ -121,6 +121,7 @@ impl<'t> Parser<'t> {
             SEMICOLON => ";",
             R_PAREN => ")",
             R_BRACE => "}",
+            R_ANGLE => ">",
             _ => unreachable!("{kind:?} is not a closer"),
         };
         self.events.push(Event::Error {

@@ -27,7 +27,7 @@ use rustc_hash::FxHashMap;
 use crate::ItemLoc;
 use crate::body::{BindingId, ExprId};
 use crate::infer::InferenceDiagnostic;
-use crate::ty::{Ty, TyVar, TyVarValue, VariantTy, widens_to};
+use crate::ty::{ConstArgValue, GenericArg, NamedTy, Ty, TyVar, TyVarValue, VariantTy};
 
 /// Why a type was required or concluded. Attached to
 /// [`InferenceDiagnostic::TypeMismatch`] to render "because of this" hints;
@@ -65,6 +65,20 @@ pub enum Cause {
     /// Axiom: an `if` without an `else` produces `()` when the condition is
     /// false, so the then-branch must too. Carries the `if` expression.
     MissingElse(ExprId),
+    /// Axiom: a turbofish argument instantiated a generic item's type
+    /// parameter to this type at this mention (`id::<usize>` pinned `T`).
+    /// Recorded on the instantiation's fresh variable; when the variable
+    /// later mismatches, the renderer points at the turbofish argument —
+    /// "because `T` was instantiated to `usize` by this argument". (A type
+    /// param pinned by a *value* argument instead records no `GenericArg`;
+    /// such mismatches render the ordinary [`Cause::CallSite`] hints.)
+    GenericArg {
+        /// The turbofish mention expression (`ExprData::GenericApp`).
+        mention: ExprId,
+        /// The argument's position in the turbofish list (= the param's
+        /// binder index; positions align once arity checked out).
+        index: u32,
+    },
     /// Conclusion: this sibling branch of a join produced the type.
     Branch(ExprId),
     /// Conclusion: in an equality, the first operand's type is what the
@@ -147,6 +161,32 @@ impl Constraints {
         std::mem::take(&mut self.widenings)
     }
 
+    /// The [`Cause::GenericArg`]s recorded on `ty`'s variable (if it is
+    /// one): why an instantiated type parameter has the type it has.
+    /// Consulted by `InferCtx::check` on a direct mismatch — unlike the
+    /// join solver, direct checks don't otherwise read the cause store, and
+    /// without this the "instantiated by this argument" hint would only
+    /// ever show on join mismatches.
+    pub(crate) fn generic_arg_causes(
+        &self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        ty: &Ty,
+    ) -> Vec<Cause> {
+        let Ty::Infer(var) = ty else {
+            return Vec::new();
+        };
+        self.causes
+            .get(&table.find(*var))
+            .map(|causes| {
+                causes
+                    .iter()
+                    .copied()
+                    .filter(|cause| matches!(cause, Cause::GenericArg { .. }))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The one unification entry point. Binding a variable to a concrete
     /// type records `cause` (first cause wins) for later blame attribution.
     pub(crate) fn unify(
@@ -206,17 +246,31 @@ impl Constraints {
                     params_ok && self.unify(table, &f1.ret, &f2.ret, cause)
                 }
             }
-            // Nominal: same declaration or nothing. A `Named` never unifies
-            // with its own underlying record either (no implicit
-            // nominal↔structural coercion) — that case falls through to the
-            // catch-all `false` below.
-            (Ty::Named(a), Ty::Named(b)) => a == b,
-            // A variant type unifies only with itself. Variant vs. its enum
-            // is deliberately FALSE here: unification is equational, and
-            // variant → enum is a runtime conversion (`widens_to`), applied
-            // only at check sites — never inferred backwards through a
-            // unification variable.
-            (Ty::Variant(a), Ty::Variant(b)) => a == b,
+            // Nominal: same declaration AND pointwise-unifying args, or
+            // nothing — the applicative identity, with NO variance of any
+            // kind (Must has no subtyping; every argument position is
+            // invariant). A `Named` never unifies with its own underlying
+            // record either (no implicit nominal↔structural coercion) —
+            // that case falls through to the catch-all `false` below.
+            (Ty::Named(a), Ty::Named(b)) => {
+                a.decl == b.decl && self.unify_args(table, &a.args, &b.args, cause)
+            }
+            // Rigid: a type parameter unifies only with itself (same item,
+            // same binder index). `Param` vs anything concrete is FALSE —
+            // that opacity is what makes a generic body check once, before
+            // any instantiation (TR06).
+            (Ty::Param(a), Ty::Param(b)) => a == b,
+            // A variant type unifies only with itself — same declaration,
+            // same variant, pointwise-unifying enum args. Variant vs. its
+            // enum is deliberately FALSE here: unification is equational,
+            // and variant → enum is a runtime conversion (`widens_to`),
+            // applied only at check sites — never inferred backwards
+            // through a unification variable.
+            (Ty::Variant(a), Ty::Variant(b)) => {
+                a.decl == b.decl
+                    && a.index == b.index
+                    && self.unify_args(table, &a.args, &b.args, cause)
+            }
             // Structural, exact field-set equality: same names (both sides
             // are canonically sorted, so zipping compares the sets), then
             // the field types unify pairwise. No subtyping.
@@ -230,6 +284,53 @@ impl Constraints {
             }
             _ => false,
         }
+    }
+
+    /// Pointwise generic-argument unification (both lists come from
+    /// mentions of the SAME declaration, so lengths and kinds line up by
+    /// construction; a defensive length check keeps this total anyway).
+    /// Const args are values, not types: they unify by plain equality —
+    /// rigid `Param`s equal only themselves — with `Error` infectious and
+    /// silent on either side.
+    fn unify_args(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        a: &[GenericArg],
+        b: &[GenericArg],
+        cause: Option<Cause>,
+    ) -> bool {
+        a.len() == b.len()
+            && a.iter().zip(b).all(|(x, y)| match (x, y) {
+                (GenericArg::Ty(x), GenericArg::Ty(y)) => self.unify(table, x, y, cause),
+                (GenericArg::Const(x), GenericArg::Const(y)) => {
+                    matches!(x, ConstArgValue::Error) || matches!(y, ConstArgValue::Error) || x == y
+                }
+                _ => false,
+            })
+    }
+
+    /// The variant → enum widening judgement, argument-preserving: `actual`
+    /// is a variant of exactly the enum `expected` names AND the enum args
+    /// unify pointwise (`Option::<usize>::Some` widens to `Option::<usize>`,
+    /// never to `Option::<str>`). Returns the variant (for the conversion
+    /// record) on success. The two check sites (`InferCtx::check`, the join
+    /// solver below) go through here so the args can bind still-free
+    /// variables on either side.
+    pub(crate) fn widen_to_enum(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        actual: &Ty,
+        expected: &Ty,
+    ) -> Option<VariantTy> {
+        let (Ty::Variant(variant), Ty::Named(named)) = (actual, expected) else {
+            return None;
+        };
+        if variant.decl != named.decl {
+            return None;
+        }
+        let variant = variant.clone();
+        self.unify_args(table, &variant.args, &named.args, None)
+            .then_some(variant)
     }
 
     /// Solve all deferred joins, emitting blame-attributed diagnostics.
@@ -331,7 +432,22 @@ impl Constraints {
                     let Family::Enum(loc) = &family else {
                         unreachable!("only enum families hold more than one type")
                     };
-                    Ty::Named(loc.clone())
+                    // The enum with the first member's generic args: the
+                    // remaining members' args unify against it in the
+                    // witness pass below (an arg disagreement is an
+                    // ordinary culprit).
+                    let args = members
+                        .iter()
+                        .find_map(|ty| match ty {
+                            Ty::Variant(variant) => Some(variant.args.clone()),
+                            Ty::Named(named) => Some(named.args.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    Ty::Named(NamedTy {
+                        decl: loc.clone(),
+                        args,
+                    })
                 };
                 // The winning leaves are the causes: "this branch has type
                 // …" hints, wherever in the nesting those leaves sit.
@@ -375,15 +491,13 @@ impl Constraints {
                         // Hint on the tail sub-expression that produced the
                         // type, not the whole branch.
                         siblings.push(Cause::Branch(witness.blame));
-                    } else if widens_to(&actual, &expected) {
+                    } else if let Some(variant) = self.widen_to_enum(table, &actual, &expected) {
                         // Not unified (the leaf keeps its precise variant
                         // type) — the conversion op lands on this edge. Not
                         // a sibling either: a "this branch has type
                         // `Shape`" hint on a `Shape::Circle` leaf would
                         // lie.
-                        if let Ty::Variant(variant) = actual {
-                            self.widenings.push((witness.blame, variant));
-                        }
+                        self.widenings.push((witness.blame, variant));
                         widened += 1;
                     } else {
                         culprits.push((witness, actual));
@@ -442,9 +556,13 @@ enum Family {
 }
 
 fn family_of(ty: &Ty) -> Family {
+    // Keyed by declaration alone (not args): mixed-arg leaves of one enum
+    // are one family whose vote resolves to the first member's args — a
+    // real arg disagreement then surfaces as an ordinary witness mismatch
+    // rather than a family tie.
     match ty {
         Ty::Variant(variant) => Family::Enum(variant.decl.clone()),
-        Ty::Named(loc) => Family::Enum(loc.clone()),
+        Ty::Named(named) => Family::Enum(named.decl.clone()),
         other => Family::Shape(other.clone()),
     }
 }
@@ -515,8 +633,31 @@ pub(crate) fn resolve_fully(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty)
                 .map(|(name, ty)| (name.clone(), resolve_fully(table, ty)))
                 .collect(),
         ),
+        Ty::Named(named) => Ty::Named(NamedTy {
+            decl: named.decl.clone(),
+            args: resolve_args_fully(table, &named.args),
+        }),
+        Ty::Variant(variant) => Ty::Variant(VariantTy {
+            args: resolve_args_fully(table, &variant.args),
+            ..variant.clone()
+        }),
         other => other.clone(),
     }
+}
+
+/// [`resolve_fully`] over a generic-argument list — also used by `infer`'s
+/// finish pass for the `VariantTy`s persisted outside any `Ty` (`widened`,
+/// `variant_of_expr`, `variant_of_pat`).
+pub(crate) fn resolve_args_fully(
+    table: &mut InPlaceUnificationTable<TyVar>,
+    args: &[GenericArg],
+) -> Vec<GenericArg> {
+    args.iter()
+        .map(|arg| match arg {
+            GenericArg::Ty(ty) => GenericArg::Ty(resolve_fully(table, ty)),
+            GenericArg::Const(value) => GenericArg::Const(value.clone()),
+        })
+        .collect()
 }
 
 fn occurs(table: &mut InPlaceUnificationTable<TyVar>, var: TyVar, ty: &Ty) -> bool {
@@ -532,6 +673,12 @@ fn occurs(table: &mut InPlaceUnificationTable<TyVar>, var: TyVar, ty: &Ty) -> bo
         }
         Ty::Fn(f) => f.params.iter().any(|p| occurs(table, var, p)) || occurs(table, var, &f.ret),
         Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| occurs(table, var, ty)),
+        Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
+            args.iter().any(|arg| match arg {
+                GenericArg::Ty(ty) => occurs(table, var, ty),
+                GenericArg::Const(_) => false,
+            })
+        }
         _ => false,
     }
 }

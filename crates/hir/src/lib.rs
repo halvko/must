@@ -31,7 +31,10 @@ pub use scopes::{
     Builtin, Duplicate, ExprScopes, FileScope, Resolution, TypeScope, expr_scopes, file_scope,
     resolutions, type_scope,
 };
-pub use ty::{FnTy, Ty, VariantTy, enum_variants, signature, type_underlying, widens_to};
+pub use ty::{
+    ConstArgValue, FnTy, GenericArg, NamedTy, Ty, VariantTy, enum_variants, signature,
+    substitute_args, type_underlying, type_underlying_for, variant_payloads_for, widens_to,
+};
 
 /// Stable identity of a top-level item: survives edits to other items,
 /// reordering of unrelated code, and any edit inside its own body.
@@ -196,8 +199,16 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     }
 
     // Bad type names, in any annotation position: unknown, naming a value
-    // item, or a `::` path that names no variant. Without this, a typo'd
-    // type lowers to a silent `{error}`.
+    // item, a `::` path that names no variant, or a generic mention whose
+    // turbofish is wrong (arity, kinds, unrepresentable const args).
+    // Without this, a typo'd type lowers to a silent `{error}` — this pass
+    // is the diagnostic MIRROR of `ty`'s annotation lowering, which stays
+    // purely syntactic (const eval never runs there) and silent. Type
+    // params of an enclosing generic binder are real type names here (they
+    // lower to rigid `Ty::Param`s), EXCEPT inside the binder itself: a
+    // const param's declared type naming a type param is a dependent
+    // param, deferred (TR06) — it lowers to a silent `{error}` with the
+    // diagnostic below.
     for path_type in parse(db, file)
         .syntax_node()
         .descendants()
@@ -206,15 +217,196 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         let Some(name_ref) = path_type.name_ref() else {
             continue;
         };
-        let message = match path_type.variant_name_ref() {
-            Some(variant) => variant_position_error(db, file, &name_ref.text(), &variant.text()),
-            None => type_position_error(db, file, &name_ref.text()),
+        let name = name_ref.text();
+        // A PathType sitting in a CONST-argument position of an enclosing
+        // turbofish (`Buf::<N>`'s `N` parses as a type arg) is judged by
+        // the owner's argument checks — inference for expression-position
+        // mentions, [`apply_position_diagnostics`] for annotations — never
+        // as a type of its own.
+        if in_const_arg_position(db, file, &path_type) {
+            continue;
+        }
+        let binder = enclosing_binder_info(path_type.syntax());
+        if path_type.generic_arg_list().is_some() || binder.names_const_param(&name) {
+            // A turbofish (or a const-param name in plain type position):
+            // the generic-mention checks own the whole judgement here — a
+            // binder param with args, a non-generic target with args, and
+            // every per-argument problem.
+            apply_position_diagnostics(
+                db,
+                file,
+                path_type.syntax(),
+                &name,
+                path_type.generic_arg_list().as_ref(),
+                &binder,
+                &mut diagnostics,
+            );
+            continue;
+        }
+        let message = match type_param_binding(&path_type, &name) {
+            // In scope and rigid: a use is fine, but a type param has no
+            // variants to name through `::`.
+            TypeParamBinding::Bound => path_type
+                .variant_name_ref()
+                .map(|_| format!("`{name}` has no variants (it is a type parameter)")),
+            TypeParamBinding::InOwnBinder => {
+                Some("a const parameter's type cannot mention a type parameter".to_owned())
+            }
+            TypeParamBinding::NotBound => match path_type.variant_name_ref() {
+                Some(variant) => variant_position_error(db, file, &name, &variant.text()),
+                None => type_position_error(db, file, &name),
+            },
         };
         if let Some(message) = message {
             diagnostics.push(Diagnostic {
                 range: path_type.syntax().text_range(),
                 severity: Severity::Error,
                 message,
+                fix: None,
+                related: Vec::new(),
+            });
+            continue;
+        }
+        // A GENERIC type item mentioned bare: annotation lowering is
+        // syntactic, so the arity must always be spelled in type position
+        // (`Pair::<usize>`, `_` holes allowed where inference can fill
+        // them).
+        if path_type.variant_name_ref().is_none()
+            && !matches!(
+                type_param_binding(&path_type, &name),
+                TypeParamBinding::Bound | TypeParamBinding::InOwnBinder
+            )
+            && let Some(Resolution::TypeItem(loc)) = type_scope(db, file).resolve(&name)
+        {
+            let arity = decl_generics_len(db, &loc);
+            if arity > 0 {
+                diagnostics.push(Diagnostic {
+                    range: path_type.syntax().text_range(),
+                    severity: Severity::Error,
+                    message: diag::generic_arg_count(&name, arity, 0),
+                    fix: None,
+                    related: declared_here(db, &loc),
+                });
+            }
+        }
+    }
+
+    // One binder, one name per parameter. Type and const params share the
+    // binder's namespace: a rigid `Ty::Param` is positional and a const
+    // param's mention resolves to the LAST declaration of the name, so a
+    // repeat leaves the earlier parameter unnameable rather than
+    // ambiguous. Reported at the second occurrence, pointing at the first.
+    // Per LIST, not per item: two binders are two namespaces, whoever owns
+    // them.
+    for list in parse(db, file)
+        .syntax_node()
+        .descendants()
+        .filter_map(ast::GenericParamList::cast)
+    {
+        let mut seen: Vec<(String, TextRange)> = Vec::new();
+        for param in list.params() {
+            let name = match &param {
+                ast::GenericParam::TypeParam(it) => it.name(),
+                ast::GenericParam::ConstParam(it) => it.name(),
+            };
+            let Some(name) = name else {
+                continue;
+            };
+            let text = name.text();
+            if text.is_empty() {
+                continue;
+            }
+            match seen.iter().find(|(seen, _)| *seen == text) {
+                Some(&(_, first)) => diagnostics.push(Diagnostic {
+                    range: name.syntax().text_range(),
+                    severity: Severity::Error,
+                    message: format!("duplicate generic parameter `{text}`"),
+                    fix: None,
+                    related: vec![RelatedInfo {
+                        file,
+                        range: first,
+                        message: "first declared here".to_owned(),
+                    }],
+                }),
+                None => seen.push((text, name.syntax().text_range())),
+            }
+        }
+    }
+
+    // The item-level generic rule (TR06): a generic fn literal's binder
+    // signature IS the item's contract, so every param and the return type
+    // must be written — the fact is range-free (`generics` non-empty,
+    // synthesized `type_ref` absent), only the range attaches here. Const-
+    // param declared types get the enum-payload treatment: real type
+    // syntax, but nothing to infer a hole from.
+    for &item in file_item_ids(db, file) {
+        let Some(data) = item_data(db, item).as_ref() else {
+            continue;
+        };
+        if data.generics.is_empty() {
+            continue;
+        }
+        let fn_literal =
+            item_source(db, item)
+                .and_then(|it| it.body())
+                .and_then(|body| match body {
+                    ast::Expr::FnLiteral(fn_lit) => Some(fn_lit),
+                    _ => None,
+                });
+        let Some(fn_literal) = fn_literal else {
+            continue;
+        };
+        if data.type_ref.is_none() {
+            let range = fn_literal
+                .generic_param_list()
+                .map(|list| list.syntax().text_range())
+                .unwrap_or_else(|| fn_literal.syntax().text_range());
+            diagnostics.push(Diagnostic {
+                range,
+                severity: Severity::Error,
+                message: diag::GENERIC_FN_NEEDS_FULL_ANNOTATION.to_owned(),
+                fix: None,
+                related: Vec::new(),
+            });
+        }
+        for param in fn_literal
+            .generic_param_list()
+            .into_iter()
+            .flat_map(|list| list.params())
+        {
+            let ast::GenericParam::ConstParam(const_param) = param else {
+                continue;
+            };
+            let Some(ty) = const_param.ty() else {
+                // No declared type at all: the parse error covers it.
+                continue;
+            };
+            let type_ref = TypeRef::from_ast(ty.clone());
+            // Fn values are outside the const-arg domain (TR06: concrete
+            // data types only): their identity is a `BodyId` arena index,
+            // which renumbers under body edits — instance identity built
+            // on one would churn.
+            // Rejected here at the source (the declaration); inference
+            // repeats the same text at any mention that would pass one.
+            if type_ref.mentions_fn() {
+                diagnostics.push(Diagnostic {
+                    range: ty.syntax().text_range(),
+                    severity: Severity::Error,
+                    message: diag::FN_CONST_ARG.to_owned(),
+                    fix: None,
+                    related: Vec::new(),
+                });
+                continue;
+            }
+            if type_ref.is_fully_typed() {
+                continue;
+            }
+            diagnostics.push(Diagnostic {
+                range: ty.syntax().text_range(),
+                severity: Severity::Error,
+                message: "a const parameter's type must be a fully written type; \
+                          a declaration has nothing to infer `_` from"
+                    .to_owned(),
                 fix: None,
                 related: Vec::new(),
             });
@@ -331,12 +523,24 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             // Messages render in `InferenceDiagnostic::message` (shared with
             // MIR's traps); only ranges and related locations attach here.
             let mut related = match diag {
-                InferenceDiagnostic::NeedsAnnotation { item, .. } => item_name(item)
+                InferenceDiagnostic::NeedsAnnotation { item, .. }
+                | InferenceDiagnostic::CannotInferGenericParam { item, .. } => item_name(item)
                     .map(|n| {
                         vec![RelatedInfo {
                             file: item.file,
                             range: n.syntax().text_range(),
                             message: "defined here".to_owned(),
+                        }]
+                    })
+                    .unwrap_or_default(),
+                // The binder (arity, param kinds) is one click away.
+                InferenceDiagnostic::GenericArgCount { item, .. }
+                | InferenceDiagnostic::MissingConstArgs { item, .. } => item_name(item)
+                    .map(|n| {
+                        vec![RelatedInfo {
+                            file: item.file,
+                            range: n.syntax().text_range(),
+                            message: "declared here".to_owned(),
                         }]
                     })
                     .unwrap_or_default(),
@@ -564,6 +768,53 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                                     });
                                 callee_hint.into_iter().chain(arg_hint).collect()
                             }
+                            Cause::GenericArg { mention, index } => {
+                                // Point at the turbofish argument that
+                                // instantiated the param, naming the param
+                                // from the mentioned item's binder.
+                                let Some(node) = ast_for_expr(*mention) else {
+                                    return Vec::new();
+                                };
+                                let Some(arg) = ast::PathExpr::cast(node)
+                                    .and_then(|path| path.generic_arg_list())
+                                    .and_then(|list| list.args().nth(*index as usize))
+                                else {
+                                    return Vec::new();
+                                };
+                                let param_name = match &body.exprs[*mention] {
+                                    body::ExprData::GenericApp { base, .. } => {
+                                        match resolutions.get(*base) {
+                                            Some(Resolution::Item(loc)) => {
+                                                item_data(db, loc.to_id(db)).as_ref().and_then(
+                                                    |data| {
+                                                        data.generics
+                                                            .get(*index as usize)
+                                                            .map(|param| param.name.clone())
+                                                    },
+                                                )
+                                            }
+                                            _ => None,
+                                        }
+                                    }
+                                    _ => None,
+                                };
+                                let Some(param_name) = param_name else {
+                                    return Vec::new();
+                                };
+                                let range = match &arg {
+                                    ast::GenericArg::TypeArg(it) => it.syntax().text_range(),
+                                    ast::GenericArg::ConstArg(it) => it.syntax().text_range(),
+                                };
+                                vec![RelatedInfo {
+                                    file,
+                                    range,
+                                    message: format!(
+                                        "because `{param_name}` was instantiated to `{}` \
+                                         by this argument",
+                                        expected.display()
+                                    ),
+                                }]
+                            }
                         }
                     };
                     reasons.iter().flat_map(render_reason).collect()
@@ -655,21 +906,24 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 // is declared is the hint (an enum has variants, not
                 // fields — say so instead of promising fields).
                 InferenceDiagnostic::NoSuchField {
-                    receiver_ty: Ty::Named(loc),
+                    receiver_ty: Ty::Named(named),
                     ..
-                } => item_source(db, loc.to_id(db))
+                } => item_source(db, named.decl.to_id(db))
                     .and_then(|it| it.body())
                     .map(|decl_body| {
-                        let message = if ty::enum_variants(db, loc.to_id(db)).is_some() {
+                        let message = if ty::enum_variants(db, named.decl.to_id(db)).is_some() {
                             format!(
                                 "`{}` is an `enum`, declared here — it has variants, not fields",
-                                loc.display_name()
+                                named.decl.display_name()
                             )
                         } else {
-                            format!("the fields of `{}` are declared here", loc.display_name())
+                            format!(
+                                "the fields of `{}` are declared here",
+                                named.decl.display_name()
+                            )
                         };
                         vec![RelatedInfo {
-                            file: loc.file,
+                            file: named.decl.file,
                             range: decl_body.syntax().text_range(),
                             message,
                         }]
@@ -892,6 +1146,406 @@ fn const_context_reason(
     })
 }
 
+/// How `name`, at the position of `path_type`, relates to the enclosing
+/// generic binders — the syntactic mirror of the param scope inference
+/// lowers annotations under.
+enum TypeParamBinding {
+    /// Declared by an enclosing fn literal's binder; the mention is inside
+    /// the literal (its param/return annotations or its body).
+    Bound,
+    /// Declared by a binder the mention sits INSIDE of (a const param's
+    /// declared type): a dependent const param, deferred (TR06).
+    InOwnBinder,
+    NotBound,
+}
+
+fn type_param_binding(path_type: &ast::PathType, name: &str) -> TypeParamBinding {
+    // The binder list is a direct child of its literal, so climbing hits
+    // the list (if the path is inside one) strictly before that literal.
+    let mut inside_binder = true;
+    let mut passed_a_binder_list = false;
+    for ancestor in path_type.syntax().ancestors() {
+        if ast::GenericParamList::can_cast(ancestor.kind()) {
+            passed_a_binder_list = true;
+        }
+        // A binder can sit on a fn literal or (for type declarations) on a
+        // `struct`/`enum` literal — all three are climbed the same way.
+        let list = if let Some(fn_literal) = ast::FnLiteral::cast(ancestor.clone()) {
+            fn_literal.generic_param_list()
+        } else if let Some(record) = ast::RecordExpr::cast(ancestor.clone()) {
+            match record.generic_param_list() {
+                Some(list) => Some(list),
+                // A nested (binder-less) record literal is transparent —
+                // the item-level binder scopes the whole declaration.
+                None => continue,
+            }
+        } else if let Some(en) = ast::EnumExpr::cast(ancestor.clone()) {
+            match en.generic_param_list() {
+                Some(list) => Some(list),
+                None => continue,
+            }
+        } else {
+            continue;
+        };
+        let declares = list
+            .into_iter()
+            .flat_map(|list| list.params())
+            .any(|param| match param {
+                ast::GenericParam::TypeParam(it) => it.name().is_some_and(|n| n.text() == name),
+                ast::GenericParam::ConstParam(_) => false,
+            });
+        if declares {
+            return if inside_binder && passed_a_binder_list {
+                TypeParamBinding::InOwnBinder
+            } else {
+                TypeParamBinding::Bound
+            };
+        }
+        // Past the first literal, any binder list we crossed belonged
+        // to it, not to a literal further out.
+        inside_binder = false;
+    }
+    TypeParamBinding::NotBound
+}
+
+/// The generic-binder arity of the type item `loc` (0 for non-generic).
+fn decl_generics_len(db: &dyn Db, loc: &ItemLoc) -> usize {
+    item_data(db, loc.to_id(db))
+        .as_ref()
+        .map(|data| data.generics.len())
+        .unwrap_or(0)
+}
+
+/// The "declared here" hint pointing at `loc`'s name — the same related
+/// info the expression-side `GenericArgCount` renders.
+fn declared_here(db: &dyn Db, loc: &ItemLoc) -> Vec<RelatedInfo> {
+    item_source(db, loc.to_id(db))
+        .and_then(|it| it.name())
+        .map(|name| {
+            vec![RelatedInfo {
+                file: loc.file,
+                range: name.syntax().text_range(),
+                message: "declared here".to_owned(),
+            }]
+        })
+        .unwrap_or_default()
+}
+
+/// The enclosing generic binder's params, read syntactically — the mirror
+/// of the [`crate::ty`] `ParamScope` annotation lowering runs under.
+#[derive(Default)]
+struct BinderInfo {
+    type_params: Vec<String>,
+    /// `(name, declared type)` per const param.
+    const_params: Vec<(String, Option<ast::Type>)>,
+}
+
+impl BinderInfo {
+    fn names_type_param(&self, name: &str) -> bool {
+        self.type_params.iter().any(|param| param == name)
+    }
+    fn names_const_param(&self, name: &str) -> bool {
+        self.const_params.iter().any(|(param, _)| param == name)
+    }
+    fn const_param_ty(&self, name: &str) -> Option<&ast::Type> {
+        self.const_params
+            .iter()
+            .find(|(param, _)| param == name)
+            .and_then(|(_, ty)| ty.as_ref())
+    }
+}
+
+/// The binder of the first enclosing generic literal — a `fn::<...>`, or a
+/// type declaration's `struct::<...>`/`enum::<...>`. Literals without a
+/// binder are climbed through (the item-level binder scopes the whole
+/// body/declaration).
+fn enclosing_binder_info(node: &syntax::SyntaxNode) -> BinderInfo {
+    for ancestor in node.ancestors() {
+        let list = if let Some(fn_literal) = ast::FnLiteral::cast(ancestor.clone()) {
+            fn_literal.generic_param_list()
+        } else if let Some(record) = ast::RecordExpr::cast(ancestor.clone()) {
+            record.generic_param_list()
+        } else if let Some(en) = ast::EnumExpr::cast(ancestor.clone()) {
+            en.generic_param_list()
+        } else {
+            continue;
+        };
+        let Some(list) = list else {
+            continue;
+        };
+        let mut info = BinderInfo::default();
+        for param in list.params() {
+            match param {
+                ast::GenericParam::TypeParam(it) => {
+                    if let Some(name) = it.name() {
+                        info.type_params.push(name.text());
+                    }
+                }
+                ast::GenericParam::ConstParam(it) => {
+                    if let Some(name) = it.name() {
+                        info.const_params.push((name.text(), it.ty()));
+                    }
+                }
+            }
+        }
+        return info;
+    }
+    BinderInfo::default()
+}
+
+/// Whether `path_type` is the written form of a CONST argument (`N` in
+/// `Buf::<N>` parses as a type arg): the owning mention's binder declares a
+/// const param at its position. Such a node is judged by the owner's
+/// argument checks, never as a type of its own.
+fn in_const_arg_position(db: &dyn Db, file: SourceFile, path_type: &ast::PathType) -> bool {
+    let Some(type_arg) = path_type.syntax().parent().and_then(ast::TypeArg::cast) else {
+        return false;
+    };
+    let Some(list) = type_arg
+        .syntax()
+        .parent()
+        .and_then(ast::GenericArgList::cast)
+    else {
+        return false;
+    };
+    let Some(index) = list.args().position(|arg| match &arg {
+        ast::GenericArg::TypeArg(it) => it.syntax() == type_arg.syntax(),
+        ast::GenericArg::ConstArg(_) => false,
+    }) else {
+        return false;
+    };
+    let Some(owner) = list.syntax().parent() else {
+        return false;
+    };
+    // The owner is a PATH_TYPE or PATH_EXPR; its first NameRef is the base.
+    let Some(base) = owner.children().find_map(ast::NameRef::cast) else {
+        return false;
+    };
+    let name = base.text();
+    let loc = match type_scope(db, file).resolve(&name) {
+        Some(Resolution::TypeItem(loc)) => loc,
+        _ => match file_scope(db, file).resolve(&name) {
+            Some(Resolution::Item(loc)) => loc,
+            _ => return false,
+        },
+    };
+    item_data(db, loc.to_id(db))
+        .as_ref()
+        .and_then(|data| data.generics.get(index))
+        .is_some_and(|param| matches!(param.kind, item_tree::GenericParamKind::Const(_)))
+}
+
+/// The annotation MIRROR of `ty::lower_apply`: every silent `Ty::Error`
+/// (or `Error`-slotted argument) the eval-free lowering of a type-position
+/// turbofish can produce gets its diagnostic here — same resolution order,
+/// same argument judgement. Also handles a bare const-param name used as a
+/// type (`len: N`).
+#[allow(clippy::too_many_arguments)]
+fn apply_position_diagnostics(
+    db: &dyn Db,
+    file: SourceFile,
+    node: &syntax::SyntaxNode,
+    name: &str,
+    list: Option<&ast::GenericArgList>,
+    binder: &BinderInfo,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let whole = node.text_range();
+    let simple = |range: TextRange, message: String| Diagnostic {
+        range,
+        severity: Severity::Error,
+        message,
+        fix: None,
+        related: Vec::new(),
+    };
+    if binder.names_type_param(name) {
+        if list.is_some() {
+            diagnostics.push(simple(whole, diag::takes_no_generic_args(name)));
+        }
+        return;
+    }
+    if binder.names_const_param(name) {
+        diagnostics.push(simple(
+            whole,
+            format!("`{name}` is a const parameter, not a type"),
+        ));
+        return;
+    }
+    let target = match type_scope(db, file).resolve(name) {
+        Some(Resolution::TypeItem(loc)) => loc,
+        // Ambiguous: the duplicate definitions carry the diagnostics.
+        Some(_) => return,
+        None => {
+            if ty::builtin_type_by_name(name).is_some() {
+                if list.is_some() {
+                    diagnostics.push(simple(whole, diag::takes_no_generic_args(name)));
+                }
+                return;
+            }
+            if let Some(message) = type_position_error(db, file, name) {
+                diagnostics.push(simple(whole, message));
+            }
+            return;
+        }
+    };
+    let generics = item_data(db, target.to_id(db))
+        .as_ref()
+        .map(|data| data.generics.clone())
+        .unwrap_or_default();
+    if generics.is_empty() {
+        if list.is_some() {
+            diagnostics.push(Diagnostic {
+                range: whole,
+                severity: Severity::Error,
+                message: diag::takes_no_generic_args(name),
+                fix: None,
+                related: declared_here(db, &target),
+            });
+        }
+        return;
+    }
+    let written: Vec<ast::GenericArg> = list.map(|l| l.args().collect()).unwrap_or_default();
+    if written.len() != generics.len() {
+        diagnostics.push(Diagnostic {
+            range: whole,
+            severity: Severity::Error,
+            message: diag::generic_arg_count(name, generics.len(), written.len()),
+            fix: None,
+            related: declared_here(db, &target),
+        });
+        return;
+    }
+    for (param, arg) in generics.iter().zip(&written) {
+        let arg_range = match arg {
+            ast::GenericArg::TypeArg(it) => it.syntax().text_range(),
+            ast::GenericArg::ConstArg(it) => it.syntax().text_range(),
+        };
+        match (&param.kind, arg) {
+            // Inner type args are PathTypes of their own — the pass visits
+            // them independently; nothing to add here.
+            (item_tree::GenericParamKind::Type, ast::GenericArg::TypeArg(_)) => {}
+            (item_tree::GenericParamKind::Type, ast::GenericArg::ConstArg(_)) => {
+                diagnostics.push(simple(arg_range, diag::type_param_needs_type(&param.name)));
+            }
+            (item_tree::GenericParamKind::Const(declared), ast::GenericArg::ConstArg(arg)) => {
+                if let Some(message) =
+                    const_annotation_arg_error(db, file, &target, declared, arg, binder)
+                {
+                    diagnostics.push(simple(arg_range, message));
+                }
+            }
+            (item_tree::GenericParamKind::Const(declared), ast::GenericArg::TypeArg(ty_arg)) => {
+                match ty_arg.ty() {
+                    // `_`: const args are never inferred (TR06).
+                    Some(ast::Type::HoleType(_)) => {
+                        diagnostics.push(simple(arg_range, diag::CONST_ARG_HOLE.to_owned()));
+                    }
+                    // A bare `N`: an in-scope const-param name.
+                    Some(ast::Type::PathType(path))
+                        if path.variant_name_ref().is_none()
+                            && path.generic_arg_list().is_none()
+                            && path
+                                .name_ref()
+                                .is_some_and(|n| binder.names_const_param(&n.text())) =>
+                    {
+                        let param_name = path.name_ref().expect("checked above").text();
+                        if let Some(message) = const_param_agreement_error(
+                            db,
+                            file,
+                            &target,
+                            declared,
+                            binder,
+                            &param_name,
+                        ) {
+                            diagnostics.push(simple(arg_range, message));
+                        }
+                    }
+                    _ => {
+                        diagnostics.push(simple(
+                            arg_range,
+                            diag::const_param_needs_value(&param.name),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Judge one `ConstArg` in annotation position against the const param's
+/// declared type — mirroring `ty::lower_const_arg_ref` case by case:
+/// literals type-check by their literal kind, `const N` must name an
+/// in-scope const param of the same declared type, and blocks are outside
+/// the annotation domain entirely (the firewall).
+fn const_annotation_arg_error(
+    db: &dyn Db,
+    file: SourceFile,
+    target: &ItemLoc,
+    declared: &TypeRef,
+    arg: &ast::ConstArg,
+    binder: &BinderInfo,
+) -> Option<String> {
+    match arg.expr() {
+        Some(ast::Expr::Literal(lit)) => {
+            let found = match lit.kind()? {
+                ast::LiteralKind::Int(token) => {
+                    if token.text().replace('_', "").parse::<u128>().is_err() {
+                        return Some(diag::INT_LITERAL_TOO_LARGE.to_owned());
+                    }
+                    Ty::Int
+                }
+                ast::LiteralKind::Str(_) => Ty::Str,
+                ast::LiteralKind::Bool(_) => Ty::Bool,
+            };
+            let expected = ty::lower_const_decl_ty(db, target.file, declared);
+            if expected.contains_error() || expected == found {
+                return None;
+            }
+            Some(format!(
+                "type mismatch: expected `{}`, found `{}`",
+                expected.display(),
+                found.display()
+            ))
+        }
+        Some(ast::Expr::PathExpr(path)) => {
+            let name = path.name_ref()?.text();
+            if binder.names_const_param(&name) {
+                const_param_agreement_error(db, file, target, declared, binder, &name)
+            } else {
+                Some(diag::TYPE_CONST_ARG_NOT_LITERAL.to_owned())
+            }
+        }
+        Some(ast::Expr::ConstBlockExpr(_)) => Some(diag::CONST_BLOCK_TYPE_ARG.to_owned()),
+        // Broken source: the parse errors cover it.
+        None => None,
+        Some(_) => Some(diag::TYPE_CONST_ARG_NOT_LITERAL.to_owned()),
+    }
+}
+
+/// `Buf::<N>` forwarding the enclosing binder's const param `N`: the two
+/// declared types must agree — there is no subtyping (or conversion) in
+/// the const-arg domain either.
+fn const_param_agreement_error(
+    db: &dyn Db,
+    file: SourceFile,
+    target: &ItemLoc,
+    declared: &TypeRef,
+    binder: &BinderInfo,
+    param_name: &str,
+) -> Option<String> {
+    let expected = ty::lower_const_decl_ty(db, target.file, declared);
+    let own_declared = TypeRef::from_ast(binder.const_param_ty(param_name)?.clone());
+    let found = ty::lower_const_decl_ty(db, file, &own_declared);
+    if expected.contains_error() || found.contains_error() || expected == found {
+        return None;
+    }
+    Some(format!(
+        "type mismatch: expected `{}`, found `{}`",
+        expected.display(),
+        found.display()
+    ))
+}
+
 fn type_position_error(db: &dyn Db, file: SourceFile, name: &str) -> Option<String> {
     match type_scope(db, file).resolve(name) {
         // A type item; or a duplicate name, whose definitions already
@@ -926,6 +1580,15 @@ fn variant_position_error(
     match type_scope(db, file).resolve(base) {
         Some(Resolution::TypeItem(loc)) => {
             let item = loc.to_id(db);
+            // A generic enum's variant types have no annotation spelling
+            // yet (`Option::<usize>::Some` parses only in expression
+            // position) — the lowering is `Ty::Error`, this is its mirror.
+            if decl_generics_len(db, &loc) > 0 {
+                return Some(format!(
+                    "`{base}` is generic; a generic enum's variant types \
+                     cannot be written in annotations yet"
+                ));
+            }
             match ty::enum_variants(db, item) {
                 Some(variants) => {
                     if variant.is_empty() {
@@ -1025,13 +1688,75 @@ fn type_decl_field_diagnostics(
                 let Some(type_name) = path.name_ref() else {
                     continue;
                 };
+                let name = type_name.text();
+                let binder = enclosing_binder_info(path.syntax());
+                if let Some(list) = path.generic_arg_list() {
+                    if path.variant_name_ref().is_some() {
+                        diagnostics.push(simple_error(
+                            path.syntax().text_range(),
+                            format!(
+                                "`{name}` is generic; a generic enum's variant types \
+                                 cannot be written in annotations yet"
+                            ),
+                        ));
+                        continue;
+                    }
+                    // A hole inside the args has nothing to infer from in a
+                    // declaration (same rule as enum payloads).
+                    if !item_tree::expr_as_type_ref(ast::Expr::PathExpr(path.clone()))
+                        .is_fully_typed()
+                    {
+                        diagnostics.push(simple_error(
+                            path.syntax().text_range(),
+                            "a field's type must be a fully written type; \
+                             a declaration has nothing to infer `_` from"
+                                .to_owned(),
+                        ));
+                    }
+                    apply_position_diagnostics(
+                        db,
+                        file,
+                        path.syntax(),
+                        &name,
+                        Some(&list),
+                        &binder,
+                        diagnostics,
+                    );
+                    continue;
+                }
+                // The enclosing binder's params are real type names here —
+                // except a const param, which is a value.
+                if binder.names_type_param(&name) {
+                    if path.variant_name_ref().is_some() {
+                        diagnostics.push(simple_error(
+                            path.syntax().text_range(),
+                            format!("`{name}` has no variants (it is a type parameter)"),
+                        ));
+                    }
+                    continue;
+                }
+                if binder.names_const_param(&name) {
+                    diagnostics.push(simple_error(
+                        path.syntax().text_range(),
+                        format!("`{name}` is a const parameter, not a type"),
+                    ));
+                    continue;
+                }
                 let message = match path.variant_name_ref() {
                     // `x: Shape::Circle` as a field's type: same checks as
                     // annotation position.
-                    Some(variant) => {
-                        variant_position_error(db, file, &type_name.text(), &variant.text())
-                    }
-                    None => type_position_error(db, file, &type_name.text()),
+                    Some(variant) => variant_position_error(db, file, &name, &variant.text()),
+                    None => type_position_error(db, file, &name).or_else(|| {
+                        // A bare mention of a GENERIC type: the args must
+                        // be spelled (same rule as annotation position).
+                        match type_scope(db, file).resolve(&name) {
+                            Some(Resolution::TypeItem(loc)) => {
+                                let arity = decl_generics_len(db, &loc);
+                                (arity > 0).then(|| diag::generic_arg_count(&name, arity, 0))
+                            }
+                            _ => None,
+                        }
+                    }),
                 };
                 if let Some(message) = message {
                     diagnostics.push(simple_error(path.syntax().text_range(), message));

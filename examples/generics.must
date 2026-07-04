@@ -1,0 +1,51 @@
+// Generic functions: `fn::<...>` binders for type params and const params,
+// turbofish instantiation (`::<...>`), and const-param forwarding. Generic
+// items are firewall items — never joined into an inference group — so
+// each body is checked exactly once, before any call site is known, and
+// every instantiation shares that one check.
+//
+// Run: must-lsp run examples/generics.must -e 'id("hi")'       (=> "hi")
+// Run: must-lsp run examples/generics.must -e 'id::<usize>(4)' (=> 4)
+// Run: must-lsp run examples/generics.must -e 'square_val'     (=> 49)
+// Run: must-lsp run examples/generics.must -e 'cube_val'       (=> 27)
+
+// A type-param generic, fully annotated: `x: T` and `-> T` are mandatory,
+// not stylistic. With no inference group to lean on, there is no argument
+// type yet at check time to infer `x`'s type, `T` itself, or the return
+// type FROM — an omitted annotation is a check-time error naming exactly
+// that, not a silently-inferred one.
+static id = fn::<T>(x: T) -> T { x };
+
+// Two instantiations of the same `id`: an argument's type can infer `T`
+// (`"hi"` forces `T = str`, no turbofish needed), or a turbofish pins it
+// explicitly ahead of the value arguments — the only option when nothing
+// about the call would otherwise fix it (an unused type param, say).
+
+// A const-param generic: `N` is a value of its declared type (`usize`
+// here), read like any other binding inside the body, but supplied
+// per-instantiation as a compile-time argument rather than a runtime one.
+// Hover `square_val` in the editor and it already shows `usize = 49` — the
+// squaring ran at check time, so there is no runtime call left to make.
+static square = const fn::<const N: usize>() -> usize { N * N };
+static square_val = square::<7>();
+
+// Const-param forwarding: a generic calling another generic passes its own
+// const param straight through with `::<const N>` — `cube_step`'s `N`
+// resolves from `cube`'s `N`, not from a fresh literal at that call site.
+// This is how generics compose without collapsing to one instantiation
+// baked into the caller.
+static cube_step = const fn::<const N: usize>(acc: usize) -> usize { acc * N };
+static cube = const fn::<const N: usize>() -> usize { cube_step::<const N>(N * N) };
+static cube_val = cube::<3>();
+
+// What a rigid `T` cannot do, and why that's the feature: inside
+// `fn::<T>(x: T) -> T { ... }`, writing `x + 1` is a check-time error —
+// "type mismatch: expected `usize`, found `T`" — because `T` unifies only
+// with itself; it never widens into `usize` or anything else just because
+// some caller happens to pass one. Field access and calling `x` are
+// rejected the same way ("no field ... on `T`", "expression of type `T`
+// is not callable"). If any of those were allowed, the one shared body
+// check above would be unsound for whichever instantiation didn't actually
+// support the operation — rigidity is what makes checking once, before
+// instantiation, correct at all. See `errors.must` for the trapped
+// diagnostic verbatim.

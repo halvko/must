@@ -17,6 +17,7 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             if let Some(body) = fn_literal.body() {
                 require_block(&body, BRACE_RULE, &mut errors);
             }
+            reject_nested_generic_binder(&fn_literal, &mut errors);
         } else if let Some(if_expr) = ast::IfExpr::cast(node.clone()) {
             if let Some(then) = if_expr.then_branch() {
                 require_block(&then, "`if` branches are blocks", &mut errors);
@@ -56,6 +57,11 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
                 .map(|n| (n.text(), n.syntax().text_range()));
             report_duplicate_fields(names, &mut errors);
             reject_open_record(record_expr.dot3_token(), &mut errors);
+            reject_stray_type_binder(
+                record_expr.generic_param_list(),
+                record_expr.syntax(),
+                &mut errors,
+            );
             for field in record_expr.fields() {
                 reject_pub_field(field.pub_token(), &mut errors);
             }
@@ -68,6 +74,11 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
                 .map(|n| (n.text(), n.syntax().text_range()));
             report_duplicates(names, "variant", &mut errors);
             require_enum_declares_a_type(&enum_expr, &mut errors);
+            reject_stray_type_binder(
+                enum_expr.generic_param_list(),
+                enum_expr.syntax(),
+                &mut errors,
+            );
         } else if let Some(rest) = ast::RestPat::cast(node.clone()) {
             // `..` in a record pattern means "ignore the remaining fields" —
             // legal. Everywhere else a pattern can appear (a variant
@@ -92,7 +103,7 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             report_duplicate_fields(names, &mut errors);
         } else if let Some(variant_pat) = ast::VariantPat::cast(node.clone()) {
             reject_unqualified_bare_variant_pat(&variant_pat, &mut errors);
-        } else if let Some(param) = ast::Param::cast(node) {
+        } else if let Some(param) = ast::Param::cast(node.clone()) {
             require_mut_names_a_binding(param.mut_token(), param.pat(), &mut errors);
         }
     }
@@ -321,6 +332,57 @@ fn reject_unqualified_bare_variant_pat(
                 insert: "::".to_owned(),
             }],
         }),
+    });
+}
+
+/// A generic binder is only supported where the item tree can read it: on a
+/// fn literal that *is* a `static`/`const` item's initializer (TR06: generics
+/// are item-level in v1 — generic closures need scheme-typed bindings and
+/// wait for the capture story). Anywhere else — a nested literal, a
+/// parenthesized initializer — the binder parses but is rejected honestly.
+fn reject_nested_generic_binder(fn_literal: &ast::FnLiteral, errors: &mut Vec<SyntaxError>) {
+    let Some(generic_param_list) = fn_literal.generic_param_list() else {
+        return;
+    };
+    if fn_literal
+        .syntax()
+        .parent()
+        .is_some_and(|p| ast::StaticItem::can_cast(p.kind()))
+    {
+        return;
+    }
+    errors.push(SyntaxError {
+        message: "generic function literals are only supported as item initializers".to_owned(),
+        range: generic_param_list.syntax().text_range(),
+        fix: None,
+    });
+}
+
+/// A generic binder on a `struct`/`enum` literal is only meaningful where
+/// the literal declares a type — directly as a `type` item's value
+/// (`type Pair = struct::<T> { ... }`). A record *literal* in value
+/// position never takes one; the binder parses (superset) and is rejected
+/// here. (A misplaced `enum` literal is additionally rejected as a whole by
+/// [`require_enum_declares_a_type`].)
+fn reject_stray_type_binder(
+    list: Option<ast::GenericParamList>,
+    literal: &SyntaxNode,
+    errors: &mut Vec<SyntaxError>,
+) {
+    let Some(list) = list else {
+        return;
+    };
+    if literal
+        .parent()
+        .is_some_and(|p| ast::TypeItem::can_cast(p.kind()))
+    {
+        return;
+    }
+    errors.push(SyntaxError {
+        message: "a generic binder is only supported on a `type` declaration's `struct`/`enum`"
+            .to_owned(),
+        range: list.syntax().text_range(),
+        fix: None,
     });
 }
 

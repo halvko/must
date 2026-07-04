@@ -15,16 +15,20 @@ use la_arena::ArenaMap;
 use rustc_hash::FxHashMap;
 
 use crate::body::{
-    BindingId, Body, ExprData, ExprId, LiteralData, MatchArm, PatData, PatId, Stmt, body,
+    BindingId, Body, ExprData, ExprId, GenericArgData, LiteralData, MatchArm, PatData, PatId, Stmt,
+    body,
 };
-use crate::constraint::{self, Cause, Constraints, Join, Witness, resolve_fully};
-use crate::item_tree::{Constness, TypeDeclData};
+use crate::constraint::{
+    self, Cause, Constraints, Join, Witness, resolve_args_fully, resolve_fully,
+};
+use crate::item_tree::{Constness, GenericParamData, GenericParamKind, TypeDeclData};
 use crate::scopes::{Builtin, Resolution, resolutions, type_scope};
 use crate::ty::{
-    Ty, TyVar, TyVarValue, VariantTy, builtin_type_by_name, enum_variants, lower_type_ref,
-    signature, signature_needs_annotation, type_underlying, widens_to,
+    ConstArgValue, GenericArg, NamedTy, ParamScope, Ty, TyVar, TyVarValue, VariantTy,
+    builtin_type_by_name, enum_variants, generic_param_scope, lower_type_ref_in, signature,
+    signature_needs_annotation, substitute_args, type_underlying_for,
 };
-use crate::{ItemId, ItemLoc, Severity, TypeRef};
+use crate::{ItemId, ItemLoc, Severity, TypeRef, item_loc};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InferenceResult {
@@ -75,6 +79,11 @@ pub struct InferenceResult {
     /// `let`'s initializer, an equality operand) resolves concrete and is
     /// kept. Consumed by ide completions for type-directed ranking.
     pub expectation_of_expr: ArenaMap<ExprId, Ty>,
+    /// The const arguments of every turbofish mention whose arity matched:
+    /// `(binder index, value expression)` pairs, in source order. Inference
+    /// only *type-checks* the values against their declared const-param
+    /// types; evaluation and instance identity consume this later.
+    pub const_args_of_expr: ArenaMap<ExprId, Vec<(u32, ExprId)>>,
     pub diagnostics: Vec<InferenceDiagnostic>,
 }
 
@@ -429,6 +438,98 @@ pub enum InferenceDiagnostic {
         expected: Ty,
         actual: Ty,
     },
+    /// A turbofish with the wrong number of arguments for the generic
+    /// item's binder. The declaration is the related location.
+    GenericArgCount {
+        /// The turbofish mention expression.
+        expr: ExprId,
+        /// The generic item.
+        item: ItemLoc,
+        /// How many generic parameters the binder declares.
+        expected: usize,
+        found: usize,
+    },
+    /// A turbofish on something that takes no generic arguments: a
+    /// non-generic item, a local, a builtin, a (non-generic — all of them,
+    /// today) type item, a const parameter.
+    NotGeneric {
+        /// The turbofish mention expression.
+        expr: ExprId,
+        /// The mentioned name, carried so [`Self::message`] renders without
+        /// the body in hand.
+        name: String,
+    },
+    /// `_` written in a *const* argument position. Const args are never
+    /// inferred (TR06: running an instance backwards is
+    /// inference-through-conversion, categorically refused).
+    ConstArgHole {
+        /// The turbofish mention expression.
+        expr: ExprId,
+    },
+    /// A turbofish argument of the wrong kind for its position: a value
+    /// where the binder declares a type parameter, or a type where it
+    /// declares a const parameter.
+    GenericArgKindMismatch {
+        /// The turbofish mention expression.
+        expr: ExprId,
+        /// The parameter's declared name.
+        param: String,
+        /// Whether the binder declares a *const* parameter at this
+        /// position (so a type was written where a value belongs).
+        param_is_const: bool,
+    },
+    /// A bare mention of a generic item that declares const parameters:
+    /// const args are never inferred (TR06), so the mention must spell them
+    /// with a turbofish.
+    MissingConstArgs {
+        /// The referencing expression.
+        expr: ExprId,
+        /// The generic item.
+        item: ItemLoc,
+    },
+    /// A mention of a generic item whose type parameter was never pinned —
+    /// neither a turbofish nor any value/expectation determined it by the
+    /// end of inference. The mention-site sibling of
+    /// [`Self::NeedsAnnotation`].
+    CannotInferGenericParam {
+        /// The referencing expression.
+        expr: ExprId,
+        /// The generic item.
+        item: ItemLoc,
+        /// The undetermined type parameter's name.
+        param: String,
+    },
+    /// An assignment whose target resolves to a const parameter of the
+    /// enclosing generic binder — a compile-time value, not a place.
+    AssignToConstParam {
+        /// The assignment's target expression.
+        target: ExprId,
+        /// The parameter's name, carried for [`Self::message`].
+        name: String,
+    },
+    /// A const argument in a position whose declared type mentions an fn
+    /// type: fn values are outside the const-arg domain (TR06: concrete
+    /// data types only — their `BodyId` identity is edit-unstable). The
+    /// mention-side belt of the declaration-site rejection in
+    /// [`crate::file_diagnostics`]; both
+    /// render [`crate::diag::FN_CONST_ARG`].
+    FnConstArg {
+        /// The turbofish mention expression.
+        expr: ExprId,
+    },
+    /// A const argument that must flow into a TYPE's identity but isn't a
+    /// literal or a const-param name. Type identity lives on the eval-free
+    /// annotation path, so a `const { ... }` block (or any other computed
+    /// value) can never parameterize a type — the clean way out is binding
+    /// the value through a generic *function*'s const parameter.
+    TypeConstArgUnsupported {
+        /// The turbofish mention expression.
+        expr: ExprId,
+        /// Whether the offending argument is a `const { ... }` block (the
+        /// message points at the generic-fn escape hatch) or some other
+        /// non-literal value.
+        is_block: bool,
+    },
 }
 
 /// Why an arm can never run — one message per cause, so the fix is named.
@@ -466,7 +567,15 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::NonExhaustiveMatch { expr, .. }
             | InferenceDiagnostic::MatchWithoutCatchAll { expr, .. }
             | InferenceDiagnostic::BreakOutsideLoop { expr }
-            | InferenceDiagnostic::ContinueOutsideLoop { expr } => *expr,
+            | InferenceDiagnostic::ContinueOutsideLoop { expr }
+            | InferenceDiagnostic::GenericArgCount { expr, .. }
+            | InferenceDiagnostic::NotGeneric { expr, .. }
+            | InferenceDiagnostic::ConstArgHole { expr }
+            | InferenceDiagnostic::GenericArgKindMismatch { expr, .. }
+            | InferenceDiagnostic::MissingConstArgs { expr, .. }
+            | InferenceDiagnostic::CannotInferGenericParam { expr, .. }
+            | InferenceDiagnostic::FnConstArg { expr }
+            | InferenceDiagnostic::TypeConstArgUnsupported { expr, .. } => *expr,
             InferenceDiagnostic::UnreachableArm { match_expr, .. }
             | InferenceDiagnostic::NonEnumScrutineeVariantPat { match_expr, .. }
             | InferenceDiagnostic::PatNoSuchVariant { match_expr, .. }
@@ -479,7 +588,8 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::IfBranchMismatch { else_expr, .. } => *else_expr,
             InferenceDiagnostic::AssignToImmutable { target, .. }
             | InferenceDiagnostic::AssignToItem { target, .. }
-            | InferenceDiagnostic::AssignToBuiltin { target, .. } => *target,
+            | InferenceDiagnostic::AssignToBuiltin { target, .. }
+            | InferenceDiagnostic::AssignToConstParam { target, .. } => *target,
             InferenceDiagnostic::PatUnknownField { expr, .. }
             | InferenceDiagnostic::PatMissingFields { expr, .. }
             | InferenceDiagnostic::PatBindingNeedsAnnotation { expr, .. }
@@ -540,10 +650,10 @@ impl InferenceDiagnostic {
                 // A nominal/structural near-miss: the found record may even
                 // be the declared shape, but a named type never coerces —
                 // say how to actually make one.
-                if let (Ty::Named(loc), Ty::Record(_)) = (expected, actual) {
+                if let (Ty::Named(named), Ty::Record(_)) = (expected, actual) {
                     format!(
                         "{base}; `{name}` is a distinct type — construct it with `{name}(...)`",
-                        name = loc.display_name()
+                        name = named.decl.display_name()
                     )
                 } else {
                     base
@@ -771,6 +881,52 @@ impl InferenceDiagnostic {
                 expected.display(),
                 actual.display()
             ),
+            InferenceDiagnostic::GenericArgCount {
+                item,
+                expected,
+                found,
+                ..
+            } => crate::diag::generic_arg_count(item.display_name(), *expected, *found),
+            InferenceDiagnostic::NotGeneric { name, .. } => {
+                crate::diag::takes_no_generic_args(name)
+            }
+            InferenceDiagnostic::ConstArgHole { .. } => crate::diag::CONST_ARG_HOLE.to_owned(),
+            InferenceDiagnostic::GenericArgKindMismatch {
+                param,
+                param_is_const,
+                ..
+            } => {
+                if *param_is_const {
+                    crate::diag::const_param_needs_value(param)
+                } else {
+                    crate::diag::type_param_needs_type(param)
+                }
+            }
+            InferenceDiagnostic::MissingConstArgs { item, .. } => {
+                format!(
+                    "const arguments must be written explicitly; write `{}::<...>`",
+                    item.display_name()
+                )
+            }
+            InferenceDiagnostic::CannotInferGenericParam { item, param, .. } => {
+                format!(
+                    "cannot infer the type parameter `{param}` of `{}`; \
+                     write `{}::<...>` to specify it",
+                    item.display_name(),
+                    item.display_name()
+                )
+            }
+            InferenceDiagnostic::AssignToConstParam { name, .. } => {
+                format!("cannot assign to `{name}`: it is a const parameter")
+            }
+            InferenceDiagnostic::FnConstArg { .. } => crate::diag::FN_CONST_ARG.to_owned(),
+            InferenceDiagnostic::TypeConstArgUnsupported { is_block, .. } => {
+                if *is_block {
+                    crate::diag::CONST_BLOCK_TYPE_ARG.to_owned()
+                } else {
+                    crate::diag::TYPE_CONST_ARG_NOT_LITERAL.to_owned()
+                }
+            }
         }
     }
 }
@@ -783,14 +939,41 @@ pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
     let no_group = FxHashMap::default();
     let mut ctx;
 
+    // The item's own generic binder (TR06): its type params resolve to rigid
+    // `Ty::Param`s in every type position lowered inside this body, and its
+    // const params are value names (resolved by `scopes`). The whole body
+    // is inside the binder — for a generic item the root IS the binder's
+    // literal — so one body-wide scope is exact.
+    let generics: &[GenericParamData] = crate::item_data(db, item)
+        .as_ref()
+        .map(|it| it.generics.as_slice())
+        .unwrap_or(&[]);
+    let type_params = if generics.is_empty() {
+        ParamScope::default()
+    } else {
+        generic_param_scope(db, item, generics)
+    };
+
     if let Some(root) = body.root {
-        // Check the body against the item's annotation, if any.
+        // Check the body against the item's annotation, if any. For a
+        // generic item the "annotation" is the scheme synthesized from the
+        // literal's own (mandatory) annotations, lowered under the param
+        // scope — the same `Ty` `signature` returns.
         let ty_ref = crate::item_data(db, item)
             .as_ref()
             .and_then(|it| it.type_ref.as_ref());
-        let expected = lower_type_ref(db, file, ty_ref.unwrap_or(&TypeRef::Hole), &mut table);
+        let expected = lower_type_ref_in(
+            db,
+            file,
+            ty_ref.unwrap_or(&TypeRef::Hole),
+            &mut table,
+            &type_params,
+        );
         let cause = ty_ref.is_some().then_some(Cause::ItemAnnotation);
         ctx = InferCtx::new(db, file, body, resolutions(db, item), &mut table, &no_group);
+        ctx.type_params = type_params;
+        ctx.own_generics = generics;
+        ctx.own_item = Some(item_loc(db, item));
         ctx.infer_expr_with(root, &expected, cause);
     } else {
         ctx = InferCtx::new(db, file, body, resolutions(db, item), &mut table, &no_group);
@@ -835,6 +1018,34 @@ pub(crate) struct InferCtx<'a, 'db> {
     /// own); a `break`/`continue` with this empty is the outside-a-loop
     /// error.
     loop_sinks: Vec<usize>,
+    /// The item's own generic binder scope (type params → rigid
+    /// [`Ty::Param`]s, const params → rigid [`ConstArgValue::Param`]s),
+    /// applied by [`Self::lower_type_ref`] to every type annotation
+    /// lowered inside this body (TR06). Empty for non-generic items and in
+    /// group mode (generic items never join groups).
+    type_params: ParamScope,
+    /// The item's own binder entries, for const-param value types
+    /// ([`Resolution::ConstParam`] carries only the index).
+    own_generics: &'db [GenericParamData],
+    /// The item's own identity — the `item` half of a rigid
+    /// [`ConstArgValue::Param`] minted from a body-side const-param read
+    /// (`Buf::<const N>(...)`). `None` only in group mode, where const
+    /// params can't occur (generic items never join groups).
+    own_item: Option<ItemLoc>,
+    /// Every generic-item mention instantiated with fresh variables, so
+    /// [`Self::finish`] can report type params the whole traversal never
+    /// pinned (the mention-site sibling of `NeedsAnnotation`).
+    pending_instantiations: Vec<PendingInstantiation>,
+}
+
+/// One instantiation of a generic item's scheme at a mention: which fresh
+/// variable stands for which of the item's type params.
+struct PendingInstantiation {
+    /// The mentioning expression (a `NameRef` or `GenericApp`).
+    expr: ExprId,
+    item: ItemLoc,
+    /// `(param name, the fresh variable)` per *type* param.
+    params: Vec<(String, Ty)>,
 }
 
 /// A join under construction. The root `if` of a nest opens one; every
@@ -871,7 +1082,20 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             join_sinks: Vec::new(),
             witness_sink: None,
             loop_sinks: Vec::new(),
+            type_params: ParamScope::default(),
+            own_generics: &[],
+            own_item: None,
+            pending_instantiations: Vec::new(),
         }
+    }
+
+    /// Lower a type annotation under this body's generic binder (the
+    /// param scope is empty outside generic items). Every annotation
+    /// lowered during inference of this body must go through here, not
+    /// through the free function — that is what makes `x: T` inside a
+    /// generic body resolve to the rigid param.
+    fn lower_type_ref(&mut self, type_ref: &TypeRef) -> Ty {
+        lower_type_ref_in(self.db, self.file, type_ref, self.table, &self.type_params)
     }
 
     /// Solve the deferred constraints. Must run after traversal in *every*
@@ -890,12 +1114,42 @@ impl<'a, 'db> InferCtx<'a, 'db> {
 
     fn finish(mut self) -> InferenceResult {
         self.solve();
+        // Instantiations the whole traversal (joins included) never pinned:
+        // the mention-site sibling of `NeedsAnnotation` — the definition is
+        // fine, this particular use just doesn't say which type it wants.
+        let pending = std::mem::take(&mut self.pending_instantiations);
+        for instantiation in pending {
+            for (param, var) in instantiation.params {
+                if resolve_fully(self.table, &var).contains_infer() {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::CannotInferGenericParam {
+                            expr: instantiation.expr,
+                            item: instantiation.item.clone(),
+                            param,
+                        });
+                }
+            }
+        }
         let mut result = std::mem::take(&mut self.result);
         for (_, ty) in result.type_of_expr.iter_mut() {
             *ty = resolve_fully(self.table, ty);
         }
         for (_, ty) in result.type_of_binding.iter_mut() {
             *ty = resolve_fully(self.table, ty);
+        }
+        // `VariantTy`s persisted outside any `Ty` carry generic args of
+        // their own — resolve them too, both for MIR (payload substitution
+        // needs the pinned args) and for value-determinism (an unresolved
+        // canonical variable index would break backdating).
+        for (_, variant) in result.widened.iter_mut() {
+            variant.args = resolve_args_fully(self.table, &variant.args);
+        }
+        for (_, variant) in result.variant_of_expr.iter_mut() {
+            variant.args = resolve_args_fully(self.table, &variant.args);
+        }
+        for (_, variant) in result.variant_of_pat.iter_mut() {
+            variant.args = resolve_args_fully(self.table, &variant.args);
         }
         for diag in result.diagnostics.iter_mut() {
             match diag {
@@ -976,7 +1230,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::BreakOutsideLoop { .. }
                 | InferenceDiagnostic::ContinueOutsideLoop { .. }
                 | InferenceDiagnostic::PatBindingNeedsAnnotation { .. }
-                | InferenceDiagnostic::PatUnknownType { .. } => {}
+                | InferenceDiagnostic::PatUnknownType { .. }
+                | InferenceDiagnostic::GenericArgCount { .. }
+                | InferenceDiagnostic::NotGeneric { .. }
+                | InferenceDiagnostic::ConstArgHole { .. }
+                | InferenceDiagnostic::GenericArgKindMismatch { .. }
+                | InferenceDiagnostic::MissingConstArgs { .. }
+                | InferenceDiagnostic::CannotInferGenericParam { .. }
+                | InferenceDiagnostic::AssignToConstParam { .. }
+                | InferenceDiagnostic::FnConstArg { .. }
+                | InferenceDiagnostic::TypeConstArgUnsupported { .. } => {}
             }
         }
         for (_, ty) in result.type_of_pat.iter_mut() {
@@ -1051,6 +1314,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     .get(*binding)
                     .cloned()
                     .unwrap_or(Ty::Error),
+                // A const param of the enclosing binder reads as a value of
+                // its declared type. That type is lowered WITHOUT the param
+                // scope: a dependent `const N: T` is rejected (TR06) — the
+                // diagnostics pass reports it and `T` lowers to a silent
+                // `{error}` here.
+                Some(Resolution::ConstParam(index)) => self.const_param_value_ty(*index),
                 Some(Resolution::Item(loc)) => {
                     // A member of this item's own binding group resolves to
                     // its shared signature variable — that's interprocedural
@@ -1059,20 +1328,31 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         member_sig.clone()
                     } else {
                         let target = loc.to_id(self.db);
-                        let sig = signature(self.db, target);
-                        // Inference couldn't determine the signature from
-                        // the definition: that's only visible from uses (an
-                        // unused undetermined item is fine), so the
-                        // diagnostic lives here.
-                        if signature_needs_annotation(self.db, target) {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::NeedsAnnotation {
-                                    expr,
-                                    item: loc.clone(),
-                                });
+                        // A generic item has no ONE type: every mention
+                        // instantiates the scheme afresh (let-polymorphism
+                        // at the item boundary, TR06). A bare mention gets a
+                        // fresh variable per type param — and is an error
+                        // when the binder declares const params, which are
+                        // never inferred (TR06).
+                        let generics = item_generics(self.db, target);
+                        if !generics.is_empty() {
+                            self.instantiate_mention(expr, loc.clone(), generics, None)
+                        } else {
+                            let sig = signature(self.db, target);
+                            // Inference couldn't determine the signature
+                            // from the definition: that's only visible from
+                            // uses (an unused undetermined item is fine),
+                            // so the diagnostic lives here.
+                            if signature_needs_annotation(self.db, target) {
+                                self.result.diagnostics.push(
+                                    InferenceDiagnostic::NeedsAnnotation {
+                                        expr,
+                                        item: loc.clone(),
+                                    },
+                                );
+                            }
+                            sig
                         }
-                        sig
                     }
                 }
                 // No one signature a use could take on; the duplicate
@@ -1081,17 +1361,42 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 Some(Resolution::Builtin(builtin)) => builtin_type(*builtin),
                 None => Ty::Error, // unresolved: already diagnosed by name resolution
             },
-            ExprData::VariantPath { base, variant } => {
-                self.infer_variant_path(expr, *base, variant)
-            }
+            ExprData::VariantPath {
+                base,
+                variant,
+                args,
+            } => self.infer_variant_path(expr, *base, variant, args.as_deref()),
+            ExprData::GenericApp { base, args } => self.infer_generic_app(expr, *base, args),
             ExprData::Call { callee, args } => {
                 // A construction call: the type name used as a plain
                 // constructor function taking the underlying record —
-                // `Foo(struct { x: 1 })`. Intercepted before the callee is
-                // inferred (a bare type name in expression position is an
-                // error; as a construction head it is the one legal use).
-                if let Some(Resolution::TypeItem(loc)) = self.resolutions.get(*callee).cloned() {
-                    return self.infer_construction(expr, *callee, &loc, args, expected, cause);
+                // `Foo(struct { x: 1 })`, or `Pair::<usize>(...)` with the
+                // type's generic arguments spelled. Intercepted before the
+                // callee is inferred (a bare type name in expression
+                // position is an error; as a construction head it is the
+                // one legal use).
+                let ctor = match &self.body.exprs[*callee] {
+                    ExprData::GenericApp { base, args } => {
+                        match self.resolutions.get(*base).cloned() {
+                            Some(Resolution::TypeItem(loc)) => Some((loc, Some(args.clone()))),
+                            _ => None,
+                        }
+                    }
+                    _ => match self.resolutions.get(*callee).cloned() {
+                        Some(Resolution::TypeItem(loc)) => Some((loc, None)),
+                        _ => None,
+                    },
+                };
+                if let Some((loc, generic_args)) = ctor {
+                    return self.infer_construction(
+                        expr,
+                        *callee,
+                        &loc,
+                        generic_args.as_deref(),
+                        args,
+                        expected,
+                        cause,
+                    );
                 }
                 let fresh = self.fresh_var();
                 let callee_ty = self.infer_expr(*callee, &fresh);
@@ -1318,7 +1623,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 let declared = self.body.bindings[binding]
                                     .type_ref
                                     .as_ref()
-                                    .map(|it| lower_type_ref(self.db, self.file, it, self.table))
+                                    .map(|it| self.lower_type_ref(it))
                                     .unwrap_or_else(|| self.fresh_var());
                                 let binding_cause =
                                     has_annotation.then_some(Cause::Binding(binding));
@@ -1340,7 +1645,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     && let Ty::Variant(variant) = self.resolve_shallow(&ty)
                                 {
                                     self.result.widened.insert(*init, variant.clone());
-                                    ty = Ty::Named(variant.decl);
+                                    // Argument-preserving, like every
+                                    // widening edge.
+                                    ty = Ty::Named(NamedTy {
+                                        decl: variant.decl,
+                                        args: variant.args,
+                                    });
                                 }
                                 self.result.type_of_binding.insert(binding, ty.clone());
                                 self.result.type_of_pat.insert(*pat, ty);
@@ -1352,7 +1662,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 // callee) — a bare `Record` pattern has
                                 // nothing to go on and needs one explicitly.
                                 let declared = match type_ref {
-                                    Some(tr) => lower_type_ref(self.db, self.file, tr, self.table),
+                                    Some(tr) => self.lower_type_ref(tr),
                                     None => self
                                         .declared_type_for_pat(*pat)
                                         .unwrap_or_else(|| self.fresh_var()),
@@ -1400,6 +1710,22 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                         );
                                     }
                                     Some(Cause::Binding(*binding))
+                                }
+                                // A const param is a compile-time value,
+                                // not a place.
+                                Some(Resolution::ConstParam(index)) => {
+                                    let name = self
+                                        .own_generics
+                                        .get(*index as usize)
+                                        .map(|param| param.name.clone())
+                                        .unwrap_or_default();
+                                    self.result.diagnostics.push(
+                                        InferenceDiagnostic::AssignToConstParam {
+                                            target: *target,
+                                            name,
+                                        },
+                                    );
+                                    None
                                 }
                                 Some(Resolution::Item(loc)) => {
                                     let constness = crate::item_data(self.db, loc.to_id(self.db))
@@ -1564,10 +1890,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             }
                         },
                         // A named type projects through to its declared
-                        // shape: `p.x` on a `Foo` works exactly as on the
-                        // underlying record.
-                        Ty::Named(loc) => {
-                            match type_underlying(self.db, loc.to_id(self.db)) {
+                        // shape — with the mention's generic args
+                        // substituted in: `p.a` on a `Pair::<usize>` is a
+                        // `usize`.
+                        Ty::Named(named) => {
+                            match type_underlying_for(self.db, &named) {
                                 Some(Ty::Record(rec)) => match rec.field_ty(name) {
                                     Some(field_ty) => field_ty.clone(),
                                     None => {
@@ -1575,7 +1902,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                             InferenceDiagnostic::NoSuchField {
                                                 expr,
                                                 name: name.clone(),
-                                                receiver_ty: Ty::Named(loc),
+                                                receiver_ty: Ty::Named(named),
                                             },
                                         );
                                         Ty::Error
@@ -1588,12 +1915,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     // broken declaration's own diagnostic
                                     // sits at the declaration site — stay
                                     // silent for it.
-                                    if enum_variants(self.db, loc.to_id(self.db)).is_some() {
+                                    if enum_variants(self.db, named.decl.to_id(self.db)).is_some() {
                                         self.result.diagnostics.push(
                                             InferenceDiagnostic::NoSuchField {
                                                 expr,
                                                 name: name.clone(),
-                                                receiver_ty: Ty::Named(loc),
+                                                receiver_ty: Ty::Named(named),
                                             },
                                         );
                                     }
@@ -1647,9 +1974,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             // The common case, unchanged: a bare name's own
                             // annotation (if any) is the axiom.
                             match &self.body.bindings[*binding].type_ref {
-                                Some(type_ref) => {
-                                    lower_type_ref(self.db, self.file, type_ref, self.table)
-                                }
+                                Some(type_ref) => self.lower_type_ref(type_ref),
                                 None => self.fresh_var(),
                             }
                         } else {
@@ -1658,9 +1983,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             // `Newtype` pattern names its own type outright
                             // (`fn (Foo(...))` needs no annotation).
                             match &param.type_ref {
-                                Some(type_ref) => {
-                                    lower_type_ref(self.db, self.file, type_ref, self.table)
-                                }
+                                Some(type_ref) => self.lower_type_ref(type_ref),
                                 None => self
                                     .declared_type_for_pat(param.pat)
                                     .unwrap_or_else(|| self.fresh_var()),
@@ -1674,7 +1997,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     })
                     .collect();
                 let ret = match ret_type {
-                    Some(type_ref) => lower_type_ref(self.db, self.file, type_ref, self.table),
+                    Some(type_ref) => self.lower_type_ref(type_ref),
                     None => self.fresh_var(),
                 };
                 let ret_cause = ret_type.is_some().then_some(Cause::ReturnAnnotation(expr));
@@ -1862,6 +2185,20 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
                 data.type_ref.is_some().then_some(Cause::Binding(*binding))
             }
+            // A const param is a compile-time value, not a place — and it
+            // has no fields anyway; the root is what's judged, as for
+            // locals.
+            Some(Resolution::ConstParam(index)) => {
+                let name = self
+                    .own_generics
+                    .get(*index as usize)
+                    .map(|param| param.name.clone())
+                    .unwrap_or_default();
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::AssignToConstParam { target: root, name });
+                None
+            }
             Some(Resolution::Item(loc)) => {
                 let constness = crate::item_data(self.db, loc.to_id(self.db))
                     .as_ref()
@@ -1903,9 +2240,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// type name in expression position is an error (`TypeNotValue`), but
     /// as a variant path's base it is legal — the same interception idea
     /// as construction heads.
-    fn infer_variant_path(&mut self, expr: ExprId, base: ExprId, variant: &str) -> Ty {
+    fn infer_variant_path(
+        &mut self,
+        expr: ExprId,
+        base: ExprId,
+        variant: &str,
+        args: Option<&[GenericArgData]>,
+    ) -> Ty {
         match self.resolutions.get(base) {
             Some(Resolution::TypeItem(loc)) => {
+                let loc = loc.clone();
                 let item = loc.to_id(self.db);
                 let Some(variants) = enum_variants(self.db, item).as_ref() else {
                     // A struct type has no variants; a broken declaration
@@ -1921,16 +2265,24 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 item: loc.clone(),
                             });
                     }
+                    self.infer_const_args_free(args.unwrap_or(&[]));
                     return Ty::Error;
                 };
                 // `Shape::` — the parse error covers the missing name.
                 if variant.is_empty() {
+                    self.infer_const_args_free(args.unwrap_or(&[]));
                     return Ty::Error;
                 }
                 match variants.iter().position(|(name, _)| name == variant) {
                     Some(index) => {
+                        // Instantiate the ENUM mention: written turbofish
+                        // args are checked, unwritten type params get fresh
+                        // variables that the payload (or the expectation
+                        // the value meets) pins by ordinary unification.
+                        let named = self.instantiate_type_mention(expr, &loc, args);
                         let variant_ty = VariantTy {
                             decl: loc.clone(),
+                            args: named.args,
                             index: index as u32,
                             name: std::sync::Arc::from(variant),
                         };
@@ -1939,7 +2291,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         if payload.is_empty() {
                             Ty::Variant(variant_ty)
                         } else {
-                            Ty::fn_type(payload.clone(), Ty::Variant(variant_ty))
+                            let payload = payload
+                                .iter()
+                                .map(|ty| substitute_args(ty, &loc, &variant_ty.args))
+                                .collect();
+                            Ty::fn_type(payload, Ty::Variant(variant_ty))
                         }
                     }
                     None => {
@@ -1950,11 +2306,17 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 item: loc.clone(),
                                 name: variant.to_owned(),
                             });
+                        self.infer_const_args_free(args.unwrap_or(&[]));
                         Ty::Error
                     }
                 }
             }
-            Some(Resolution::Local(_) | Resolution::Item(_) | Resolution::Builtin(_)) => {
+            Some(
+                Resolution::Local(_)
+                | Resolution::Item(_)
+                | Resolution::Builtin(_)
+                | Resolution::ConstParam(_),
+            ) => {
                 let name = match &self.body.exprs[base] {
                     ExprData::NameRef(name) => name.clone(),
                     _ => String::new(),
@@ -1962,12 +2324,332 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 self.result
                     .diagnostics
                     .push(InferenceDiagnostic::VariantPathOnValue { expr, name });
+                self.infer_const_args_free(args.unwrap_or(&[]));
                 Ty::Error
             }
             // Duplicate definitions / an unresolved base carry their own
             // diagnostics (the base is an ordinary `NameRef` to name
             // resolution).
-            Some(Resolution::Ambiguous(_)) | None => Ty::Error,
+            Some(Resolution::Ambiguous(_)) | None => {
+                self.infer_const_args_free(args.unwrap_or(&[]));
+                Ty::Error
+            }
+        }
+    }
+
+    /// The value type of the enclosing binder's const param `index`
+    /// (`const N: usize` — a read of `N` has type `usize`). Lowered with
+    /// no param scope (dependent `const N: T` is rejected, TR06) and no
+    /// inference context (a declaration has nothing to fill `_` with):
+    /// any minted variable erases to `{error}`; the diagnostics pass in
+    /// [`crate::file_diagnostics`] reports both cases at the declaration.
+    fn const_param_value_ty(&mut self, index: u32) -> Ty {
+        match self.own_generics.get(index as usize) {
+            Some(GenericParamData {
+                kind: GenericParamKind::Const(type_ref),
+                ..
+            }) => self.lower_const_param_ty(type_ref),
+            // A stale index or a type param read as a value: broken
+            // source, silently `{error}`.
+            _ => Ty::Error,
+        }
+    }
+
+    /// Lower a const param's *declared* type — see
+    /// [`Self::const_param_value_ty`] for the no-param-scope/no-holes
+    /// reasoning; also used for the declared type a turbofish const
+    /// argument is checked against.
+    fn lower_const_param_ty(&mut self, type_ref: &TypeRef) -> Ty {
+        let ty = lower_type_ref_in(
+            self.db,
+            self.file,
+            type_ref,
+            self.table,
+            &ParamScope::default(),
+        );
+        if ty.contains_infer() { Ty::Error } else { ty }
+    }
+
+    /// Instantiate a mention of the generic item `loc` (TR06): a fresh
+    /// variable per type param — checked/unified against the written
+    /// turbofish type args when present (`_` stays free), with
+    /// [`Cause::GenericArg`] recorded so later mismatches can point at the
+    /// pinning argument — and every const arg type-checked against its
+    /// declared type and recorded for later use. `args: None` is a bare
+    /// mention: type params are left to inference; const params error
+    /// (never inferred). Returns the instantiated signature.
+    fn instantiate_mention(
+        &mut self,
+        expr: ExprId,
+        loc: ItemLoc,
+        generics: &[GenericParamData],
+        args: Option<&[GenericArgData]>,
+    ) -> Ty {
+        let target = loc.to_id(self.db);
+        let sig = signature(self.db, target);
+        let matched_args = match args {
+            Some(args) if args.len() != generics.len() => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::GenericArgCount {
+                        expr,
+                        item: loc.clone(),
+                        expected: generics.len(),
+                        found: args.len(),
+                    });
+                // No positional matching is trustworthy; the const-value
+                // expressions are still inferred (freely) so their
+                // contents get types and diagnostics.
+                self.infer_const_args_free(args);
+                None
+            }
+            Some(args) => Some(args),
+            None => {
+                // A bare mention: const args are never inferred (TR06 —
+                // running an instance backwards is
+                // inference-through-conversion, categorically refused).
+                if generics
+                    .iter()
+                    .any(|param| matches!(param.kind, GenericParamKind::Const(_)))
+                {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::MissingConstArgs {
+                            expr,
+                            item: loc.clone(),
+                        });
+                }
+                None
+            }
+        };
+        let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
+        let mut const_subst: FxHashMap<u32, ConstArgValue> = FxHashMap::default();
+        let mut pending: Vec<(String, Ty)> = Vec::new();
+        let mut const_args: Vec<(u32, ExprId)> = Vec::new();
+        for (index, param) in generics.iter().enumerate() {
+            let written = matched_args.map(|args| &args[index]);
+            match &param.kind {
+                GenericParamKind::Type => {
+                    let var = self.fresh_var();
+                    match written {
+                        Some(GenericArgData::Type(type_ref)) => {
+                            // Written under the MENTION's own binder scope:
+                            // a turbofish inside a generic body may say
+                            // `id::<T>`. A `_` lowers to a fresh variable —
+                            // explicitly "infer this one".
+                            let written_ty = self.lower_type_ref(type_ref);
+                            self.constraints.unify(
+                                self.table,
+                                &var,
+                                &written_ty,
+                                Some(Cause::GenericArg {
+                                    mention: expr,
+                                    index: index as u32,
+                                }),
+                            );
+                        }
+                        Some(GenericArgData::Const(value)) => {
+                            let value = *value;
+                            self.result.diagnostics.push(
+                                InferenceDiagnostic::GenericArgKindMismatch {
+                                    expr,
+                                    param: param.name.clone(),
+                                    param_is_const: false,
+                                },
+                            );
+                            let fresh = self.fresh_var();
+                            self.infer_expr(value, &fresh);
+                        }
+                        None => {}
+                    }
+                    pending.push((param.name.clone(), var.clone()));
+                    subst.insert(index as u32, var);
+                }
+                GenericParamKind::Const(declared) => match written {
+                    Some(GenericArgData::Const(value)) => {
+                        let value = *value;
+                        let declared = self.lower_const_param_ty(declared);
+                        // Fn values are outside the const-arg domain
+                        // (TR06: concrete data types only): the
+                        // declaration already carries this exact text
+                        // (see `file_diagnostics`); repeating it here is
+                        // the belt at the mention — and the argument is
+                        // NOT recorded, so no fn value can ever reach
+                        // instance identity or evaluation.
+                        let fn_valued = declared.mentions_fn();
+                        if fn_valued {
+                            self.result
+                                .diagnostics
+                                .push(InferenceDiagnostic::FnConstArg { expr });
+                        }
+                        self.infer_expr_with(
+                            value,
+                            &declared,
+                            Some(Cause::GenericArg {
+                                mention: expr,
+                                index: index as u32,
+                            }),
+                        );
+                        if !fn_valued {
+                            const_args.push((index as u32, value));
+                            // The scheme's TYPES may mention this const
+                            // param (`fn::<const N: usize>(b: Buf::<N>)`) —
+                            // substitution then needs the value at the type
+                            // level, where only the annotation-representable
+                            // domain exists. A computed value (a
+                            // `const { ... }` block) is fine for the
+                            // *instance* (eval handles it) but cannot enter
+                            // TYPE identity — diagnosed only if the scheme
+                            // actually embeds the param in a type.
+                            match self.try_type_const_arg_value(value) {
+                                Ok(arg_value) => {
+                                    const_subst.insert(index as u32, arg_value);
+                                }
+                                Err(is_block) => {
+                                    if ty_mentions_const_param(&sig, &loc, index as u32) {
+                                        self.result.diagnostics.push(
+                                            InferenceDiagnostic::TypeConstArgUnsupported {
+                                                expr,
+                                                is_block,
+                                            },
+                                        );
+                                    }
+                                    const_subst.insert(index as u32, ConstArgValue::Error);
+                                }
+                            }
+                        }
+                    }
+                    Some(GenericArgData::Type(TypeRef::Hole)) => {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::ConstArgHole { expr });
+                    }
+                    Some(GenericArgData::Type(_)) => {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::GenericArgKindMismatch {
+                                expr,
+                                param: param.name.clone(),
+                                param_is_const: true,
+                            });
+                    }
+                    // Already reported: `MissingConstArgs` (bare mention)
+                    // or `GenericArgCount` (unmatchable list).
+                    None => {}
+                },
+            }
+        }
+        if !const_args.is_empty() {
+            self.result.const_args_of_expr.insert(expr, const_args);
+        }
+        if !sig.contains_error() && !pending.is_empty() {
+            // A broken scheme (fully-annotated rule violated) is excluded:
+            // the definition carries the diagnostic, and piling
+            // cannot-infer noise on every mention would drown it.
+            self.pending_instantiations.push(PendingInstantiation {
+                expr,
+                item: loc.clone(),
+                params: pending,
+            });
+        }
+        instantiate_scheme(&sig, &loc, &subst, &const_subst)
+    }
+
+    /// A turbofish mention `f::<usize, 42>`. The base resolves like any
+    /// name but is not inferred as an expression (the same interception
+    /// idea as variant-path bases and construction heads); the arguments
+    /// are judged against the resolved item's binder. A turbofish on
+    /// anything non-generic is an error, recovering with the base's own
+    /// type as if the turbofish weren't there.
+    fn infer_generic_app(&mut self, expr: ExprId, base: ExprId, args: &[GenericArgData]) -> Ty {
+        let base_name = match &self.body.exprs[base] {
+            ExprData::NameRef(name) => name.clone(),
+            _ => String::new(),
+        };
+        match self.resolutions.get(base) {
+            Some(Resolution::Item(loc)) => {
+                let loc = loc.clone();
+                if let Some(member_sig) = self.in_group.get(&loc) {
+                    // Generic items never join groups, so an in-group
+                    // member is non-generic by construction.
+                    let member_sig = member_sig.clone();
+                    self.push_not_generic(expr, &base_name);
+                    self.infer_const_args_free(args);
+                    return member_sig;
+                }
+                let target = loc.to_id(self.db);
+                let generics = item_generics(self.db, target);
+                if generics.is_empty() {
+                    self.push_not_generic(expr, &base_name);
+                    self.infer_const_args_free(args);
+                    return signature(self.db, target);
+                }
+                self.instantiate_mention(expr, loc, generics, Some(args))
+            }
+            Some(Resolution::Local(binding)) => {
+                let binding = *binding;
+                self.push_not_generic(expr, &base_name);
+                self.infer_const_args_free(args);
+                self.result
+                    .type_of_binding
+                    .get(binding)
+                    .cloned()
+                    .unwrap_or(Ty::Error)
+            }
+            Some(Resolution::ConstParam(index)) => {
+                let index = *index;
+                self.push_not_generic(expr, &base_name);
+                self.infer_const_args_free(args);
+                self.const_param_value_ty(index)
+            }
+            Some(Resolution::Builtin(builtin)) => {
+                let builtin = *builtin;
+                self.push_not_generic(expr, &base_name);
+                self.infer_const_args_free(args);
+                builtin_type(builtin)
+            }
+            // A bare `Pair::<usize>` in value position: types are not
+            // first-class values — the legal positions (a construction
+            // head, a variant path's base) are intercepted before this
+            // runs, so reaching here IS the error, exactly like a bare
+            // un-turbofished type name.
+            Some(Resolution::TypeItem(_)) => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::TypeNotValue {
+                        expr,
+                        name: base_name.clone(),
+                    });
+                self.infer_const_args_free(args);
+                Ty::Error
+            }
+            // The duplicate-definition/unresolved-name diagnostics sit on
+            // the base.
+            Some(Resolution::Ambiguous(_)) | None => {
+                self.infer_const_args_free(args);
+                Ty::Error
+            }
+        }
+    }
+
+    fn push_not_generic(&mut self, expr: ExprId, name: &str) {
+        self.result
+            .diagnostics
+            .push(InferenceDiagnostic::NotGeneric {
+                expr,
+                name: name.to_owned(),
+            });
+    }
+
+    /// Infer every const-argument value freely — the error paths, where no
+    /// declared type can be matched up; contents still get types and
+    /// diagnostics.
+    fn infer_const_args_free(&mut self, args: &[GenericArgData]) {
+        for arg in args {
+            if let GenericArgData::Const(value) = arg {
+                let fresh = self.fresh_var();
+                self.infer_expr(*value, &fresh);
+            }
         }
     }
 
@@ -2005,20 +2687,41 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         type_scope(self.db, self.file).resolve(enum_name)
                     && enum_variants(self.db, loc.to_id(self.db)).is_some()
                 {
-                    self.unify(&scrut_ty, &Ty::Named(loc.clone()));
+                    // A generic enum still pins the scrutinee, with fresh
+                    // variables per type param (the arms' payload bindings
+                    // determine them) — EXCEPT when the binder declares
+                    // const params, which are never inferred (TR06): the
+                    // scrutinee then stays unknown and the pattern gets
+                    // the ordinary annotate-the-scrutinee diagnostic.
+                    let generics = item_generics(self.db, loc.to_id(self.db));
+                    if generics
+                        .iter()
+                        .any(|param| matches!(param.kind, GenericParamKind::Const(_)))
+                    {
+                        continue;
+                    }
+                    let args = generics
+                        .iter()
+                        .map(|_| GenericArg::Ty(self.fresh_var()))
+                        .collect();
+                    let named = NamedTy {
+                        decl: loc.clone(),
+                        args,
+                    };
+                    self.unify(&scrut_ty, &Ty::Named(named));
                     break;
                 }
             }
         }
         let scrut = match self.resolve_shallow(&scrut_ty) {
-            Ty::Named(loc) => {
-                if enum_variants(self.db, loc.to_id(self.db)).is_some() {
-                    Scrutinee::Enum(loc)
+            Ty::Named(named) => {
+                if enum_variants(self.db, named.decl.to_id(self.db)).is_some() {
+                    Scrutinee::Enum(named)
                 } else if matches!(
-                    crate::type_decl(self.db, loc.to_id(self.db)),
+                    crate::type_decl(self.db, named.decl.to_id(self.db)),
                     Some(TypeDeclData::Struct { .. })
                 ) {
-                    Scrutinee::Other(Ty::Named(loc))
+                    Scrutinee::Other(Ty::Named(named))
                 } else {
                     // A broken declaration: its own diagnostics sit at the
                     // declaration site (infectious, silent).
@@ -2050,7 +2753,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // reach, and whether a catch-all (`_`/binding — or the scrutinee's
         // own variant on a variant-typed scrutinee) has been seen.
         let n_variants = match &scrut {
-            Scrutinee::Enum(loc) => enum_variants(self.db, loc.to_id(self.db))
+            Scrutinee::Enum(named) => enum_variants(self.db, named.decl.to_id(self.db))
                 .as_ref()
                 .map(Vec::len)
                 .unwrap_or(0),
@@ -2095,7 +2798,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 Cover::All => {
                     if n_variants > 0 && covered.iter().all(|&c| c) {
                         let name = match &scrut {
-                            Scrutinee::Enum(loc) => loc.display_name().to_owned(),
+                            Scrutinee::Enum(named) => named.decl.display_name().to_owned(),
                             _ => String::new(),
                         };
                         self.push_unreachable(
@@ -2124,16 +2827,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // already said what's wrong).
         if !catch_all {
             match &scrut {
-                Scrutinee::Enum(loc) => {
+                Scrutinee::Enum(named) => {
                     if !covered.iter().all(|&c| c) {
-                        let variants = enum_variants(self.db, loc.to_id(self.db))
+                        let variants = enum_variants(self.db, named.decl.to_id(self.db))
                             .as_ref()
                             .expect("classified as an enum above");
                         let uncovered = variants
                             .iter()
                             .enumerate()
                             .filter(|&(i, _)| !covered[i])
-                            .map(|(_, (name, _))| format!("{}::{name}", loc.display_name()))
+                            .map(|(_, (name, _))| format!("{}::{name}", named.decl.display_name()))
                             .collect();
                         self.result
                             .diagnostics
@@ -2201,6 +2904,26 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         ty
     }
 
+    /// Generic args for a pattern's enum: taken from the scrutinee when it
+    /// is (a variant of) the same enum — patterns never introduce args of
+    /// their own beyond a written turbofish, and the scrutinee's are the
+    /// ground truth. A wrong-enum pattern (its own diagnostic) gets
+    /// all-error args, so the declaration's rigid params never leak into
+    /// the arm's binding types.
+    fn pat_enum_args(&mut self, target: &ItemLoc, scrut: &Scrutinee) -> Vec<GenericArg> {
+        match scrut {
+            Scrutinee::Enum(named) if named.decl == *target => named.args.clone(),
+            Scrutinee::Variant(variant) if variant.decl == *target => variant.args.clone(),
+            _ => item_generics(self.db, target.to_id(self.db))
+                .iter()
+                .map(|param| match param.kind {
+                    GenericParamKind::Type => GenericArg::Ty(Ty::Error),
+                    GenericParamKind::Const(_) => GenericArg::Const(ConstArgValue::Error),
+                })
+                .collect(),
+        }
+    }
+
     fn push_unreachable(&mut self, match_expr: ExprId, pat: PatId, reason: UnreachableReason) {
         self.result
             .diagnostics
@@ -2230,7 +2953,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // actually match it. This does *not* change the binding's
                 // type or the `Cover::All` outcome — it only warns.
                 let enum_loc = match scrut {
-                    Scrutinee::Enum(loc) => Some(loc.clone()),
+                    Scrutinee::Enum(named) => Some(named.decl.clone()),
                     Scrutinee::Variant(variant) => Some(variant.decl.clone()),
                     _ => None,
                 };
@@ -2249,7 +2972,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         });
                 }
                 let ty = match scrut {
-                    Scrutinee::Enum(loc) => Ty::Named(loc.clone()),
+                    Scrutinee::Enum(named) => Ty::Named(named.clone()),
                     Scrutinee::Variant(variant) => Ty::Variant(variant.clone()),
                     Scrutinee::Other(ty) | Scrutinee::Unknown(ty) => ty.clone(),
                     Scrutinee::Error => Ty::Error,
@@ -2274,7 +2997,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         }
                     },
                     None => match scrut {
-                        Scrutinee::Enum(loc) => loc.clone(),
+                        Scrutinee::Enum(named) => named.decl.clone(),
                         Scrutinee::Variant(variant) => variant.decl.clone(),
                         Scrutinee::Other(ty) => {
                             self.result.diagnostics.push(
@@ -2323,16 +3046,24 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     self.bind_error(&bindings);
                     return Cover::Nothing;
                 };
+                let args = self.pat_enum_args(&target, scrut);
                 let variant_ty = VariantTy {
                     decl: target.clone(),
+                    args,
                     index: index as u32,
                     name: std::sync::Arc::from(variant.as_str()),
                 };
                 self.result.variant_of_pat.insert(pat, variant_ty.clone());
                 // Payload binding types come from the declaration either
                 // way — even a wrong-enum pattern's arm body shouldn't
-                // cascade.
-                let payload = variants[index].1.clone();
+                // cascade — with the scrutinee's generic args substituted
+                // in (a wrong-enum pattern gets all-error args, so the
+                // declaration's rigid params never leak into a binding).
+                let payload: Vec<Ty> = variants[index]
+                    .1
+                    .iter()
+                    .map(|ty| substitute_args(ty, &target, &variant_ty.args))
+                    .collect();
                 if !rest && bindings.len() != payload.len() {
                     self.result.diagnostics.push(InferenceDiagnostic::PatArity {
                         match_expr,
@@ -2347,8 +3078,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     self.result.type_of_binding.insert(binding, ty);
                 }
                 match scrut {
-                    Scrutinee::Enum(scrut_loc) => {
-                        if *scrut_loc != target {
+                    Scrutinee::Enum(scrut_named) => {
+                        if scrut_named.decl != target {
                             self.result
                                 .diagnostics
                                 .push(InferenceDiagnostic::PatWrongEnum {
@@ -2356,7 +3087,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     pat,
                                     item: target,
                                     variant: variant_ty.name.to_string(),
-                                    scrutinee: Ty::Named(scrut_loc.clone()),
+                                    scrutinee: Ty::Named(scrut_named.clone()),
                                 });
                             Cover::Nothing
                         } else {
@@ -2480,11 +3211,43 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         match &self.body.pats[pat] {
             PatData::Newtype { type_name, .. } => {
                 match type_scope(self.db, self.file).resolve(type_name) {
-                    Some(Resolution::TypeItem(loc)) => Some(Ty::Named(loc)),
+                    Some(Resolution::TypeItem(loc)) => {
+                        // A generic newtype pattern determines the type
+                        // FAMILY; its args come from the initializer (fresh
+                        // vars, ordinary unification) — except const
+                        // params, which are never inferred (TR06): the value
+                        // side must pin the type then, so claim nothing.
+                        let generics = item_generics(self.db, loc.to_id(self.db));
+                        if generics
+                            .iter()
+                            .any(|param| matches!(param.kind, GenericParamKind::Const(_)))
+                        {
+                            return None;
+                        }
+                        let named = self.named_with_fresh_args(&loc);
+                        Some(Ty::Named(named))
+                    }
                     _ => None,
                 }
             }
             _ => None,
+        }
+    }
+
+    /// The named type `loc` with a fresh inference variable per type param
+    /// (and `Error` for const params — never inferred): the "some instance
+    /// of this family" type a pattern or recovery path claims.
+    fn named_with_fresh_args(&mut self, loc: &ItemLoc) -> NamedTy {
+        let args = item_generics(self.db, loc.to_id(self.db))
+            .iter()
+            .map(|param| match param.kind {
+                GenericParamKind::Type => GenericArg::Ty(self.fresh_var()),
+                GenericParamKind::Const(_) => GenericArg::Const(ConstArgValue::Error),
+            })
+            .collect();
+        NamedTy {
+            decl: loc.clone(),
+            args,
         }
     }
 
@@ -2618,9 +3381,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     return;
                 };
                 match self.resolve_shallow(ty) {
-                    Ty::Named(loc) if loc == target => {
-                        let underlying =
-                            type_underlying(self.db, target.to_id(self.db)).unwrap_or(Ty::Error);
+                    Ty::Named(named) if named.decl == target => {
+                        let underlying = type_underlying_for(self.db, &named).unwrap_or(Ty::Error);
                         self.check_pat(inner, &underlying, anchor);
                     }
                     Ty::Infer(_) => {
@@ -2631,12 +3393,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     }
                     Ty::Error => self.bind_pat_error(inner),
                     other => {
+                        let expected = self.named_with_fresh_args(&target);
                         self.result
                             .diagnostics
                             .push(InferenceDiagnostic::PatNamedTypeMismatch {
                                 pat,
                                 expr: anchor,
-                                expected: Ty::Named(target),
+                                expected: Ty::Named(expected),
                                 actual: other,
                             });
                         self.bind_pat_error(inner);
@@ -2646,19 +3409,26 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         }
     }
 
-    /// A construction call `Foo(arg)`: type-check the single argument
-    /// against the declared underlying record bidirectionally (the declared
-    /// field types flow into a literal argument's fields, blame cites the
-    /// declaration via [`Cause::Constructor`]) and produce [`Ty::Named`].
+    /// A construction call `Foo(arg)` / `Pair::<usize>(arg)`: instantiate
+    /// the type mention (written turbofish args checked, missing ones left
+    /// to inference), then type-check the single argument against the
+    /// *substituted* underlying record bidirectionally (the declared field
+    /// types — with the mention's args in place of the rigid params — flow
+    /// into a literal argument's fields, blame cites the declaration via
+    /// [`Cause::Constructor`]) and produce [`Ty::Named`]. An unwritten
+    /// type arg is pinned by the payload through ordinary unification.
+    #[allow(clippy::too_many_arguments)]
     fn infer_construction(
         &mut self,
         expr: ExprId,
         callee: ExprId,
         loc: &ItemLoc,
+        generic_args: Option<&[GenericArgData]>,
         args: &[ExprId],
         expected: &Ty,
         cause: Option<Cause>,
     ) -> Ty {
+        let named = self.instantiate_type_mention(callee, loc, generic_args);
         // An enum type constructs through its variants, never directly:
         // there is no one shape `Shape(...)` could take. Recover with the
         // enum type (that's what the user meant to produce) so downstream
@@ -2674,19 +3444,19 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 let fresh = self.fresh_var();
                 self.infer_expr(arg, &fresh);
             }
-            let ty = self.check(expr, Ty::Named(loc.clone()), expected, cause);
+            let ty = self.check(expr, Ty::Named(named), expected, cause);
             self.result.type_of_expr.insert(expr, ty.clone());
             return ty;
         }
         // `None` when the declaration is broken (RHS not a `struct`
         // literal): the declaration site carries the diagnostic, so the
         // argument is checked against `{error}` — infectious and silent.
-        let underlying = type_underlying(self.db, loc.to_id(self.db)).unwrap_or(Ty::Error);
+        let underlying = type_underlying_for(self.db, &named).unwrap_or(Ty::Error);
         // The constructor *is* a function value conceptually; give the
         // callee name that type so hover on `Foo` in `Foo(...)` is honest.
         self.result.type_of_expr.insert(
             callee,
-            Ty::fn_type(vec![underlying.clone()], Ty::Named(loc.clone())),
+            Ty::fn_type(vec![underlying.clone()], Ty::Named(named.clone())),
         );
         if args.len() != 1 {
             self.result
@@ -2707,9 +3477,262 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 self.infer_expr(arg, &fresh);
             }
         }
-        let ty = self.check(expr, Ty::Named(loc.clone()), expected, cause);
+        let ty = self.check(expr, Ty::Named(named), expected, cause);
         self.result.type_of_expr.insert(expr, ty.clone());
         ty
+    }
+
+    /// Instantiate a mention of the TYPE item `loc` — the type-side sibling
+    /// of [`Self::instantiate_mention`]: a fresh variable per type param
+    /// (unified with the written turbofish arg when present, `_` staying
+    /// free, with [`Cause::GenericArg`] recorded), and const args
+    /// restricted to the annotation-representable domain — literals and
+    /// const-param reads. Anything computed (a `const { ... }` block, an
+    /// item) is rejected: type identity lives on the eval-free path, so a
+    /// value that needs evaluation can never enter it. `written: None` is a
+    /// bare mention (`Pair(...)`): type params are left to inference, const
+    /// params error (never inferred, TR06). Non-generic declarations get the
+    /// plain identity (plus `NotGeneric` when a turbofish was written).
+    fn instantiate_type_mention(
+        &mut self,
+        mention: ExprId,
+        loc: &ItemLoc,
+        written: Option<&[GenericArgData]>,
+    ) -> NamedTy {
+        let generics = item_generics(self.db, loc.to_id(self.db));
+        if generics.is_empty() {
+            if let Some(args) = written {
+                self.push_not_generic(mention, loc.display_name());
+                self.infer_const_args_free(args);
+            }
+            return NamedTy::plain(loc.clone());
+        }
+        let matched = match written {
+            Some(args) if args.len() != generics.len() => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::GenericArgCount {
+                        expr: mention,
+                        item: loc.clone(),
+                        expected: generics.len(),
+                        found: args.len(),
+                    });
+                self.infer_const_args_free(args);
+                None
+            }
+            Some(args) => Some(args),
+            None => {
+                // A bare mention: const args are never inferred (TR06).
+                if generics
+                    .iter()
+                    .any(|param| matches!(param.kind, GenericParamKind::Const(_)))
+                {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::MissingConstArgs {
+                            expr: mention,
+                            item: loc.clone(),
+                        });
+                }
+                None
+            }
+        };
+        let mut pending: Vec<(String, Ty)> = Vec::new();
+        let mut out: Vec<GenericArg> = Vec::with_capacity(generics.len());
+        for (index, param) in generics.iter().enumerate() {
+            let arg = matched.map(|args| &args[index]);
+            match &param.kind {
+                GenericParamKind::Type => {
+                    let var = self.fresh_var();
+                    match arg {
+                        Some(GenericArgData::Type(type_ref)) => {
+                            let written_ty = self.lower_type_ref(type_ref);
+                            self.constraints.unify(
+                                self.table,
+                                &var,
+                                &written_ty,
+                                Some(Cause::GenericArg {
+                                    mention,
+                                    index: index as u32,
+                                }),
+                            );
+                        }
+                        Some(GenericArgData::Const(value)) => {
+                            let value = *value;
+                            self.result.diagnostics.push(
+                                InferenceDiagnostic::GenericArgKindMismatch {
+                                    expr: mention,
+                                    param: param.name.clone(),
+                                    param_is_const: false,
+                                },
+                            );
+                            let fresh = self.fresh_var();
+                            self.infer_expr(value, &fresh);
+                        }
+                        None => {}
+                    }
+                    pending.push((param.name.clone(), var.clone()));
+                    out.push(GenericArg::Ty(var));
+                }
+                GenericParamKind::Const(declared) => {
+                    let value = match arg {
+                        Some(GenericArgData::Const(value)) => {
+                            let value = *value;
+                            let declared = self.lower_const_param_ty(declared);
+                            // Fn values are outside the const-arg domain
+                            // (TR06: concrete data types only) — same belt
+                            // as fn mentions.
+                            let fn_valued = declared.mentions_fn();
+                            if fn_valued {
+                                self.result
+                                    .diagnostics
+                                    .push(InferenceDiagnostic::FnConstArg { expr: mention });
+                            }
+                            self.infer_expr_with(
+                                value,
+                                &declared,
+                                Some(Cause::GenericArg {
+                                    mention,
+                                    index: index as u32,
+                                }),
+                            );
+                            if fn_valued {
+                                ConstArgValue::Error
+                            } else {
+                                self.type_const_arg_value(mention, value)
+                            }
+                        }
+                        Some(GenericArgData::Type(TypeRef::Hole)) => {
+                            self.result
+                                .diagnostics
+                                .push(InferenceDiagnostic::ConstArgHole { expr: mention });
+                            ConstArgValue::Error
+                        }
+                        // A bare `N`: a const position whose argument
+                        // parsed as a type naming an in-scope const
+                        // param — same acceptance (and the same
+                        // declared-type agreement check) as the
+                        // annotation path.
+                        Some(GenericArgData::Type(TypeRef::Path(path)))
+                            if self.type_params.consts.contains_key(path.as_str()) =>
+                        {
+                            let forwarded = self.type_params.consts[path.as_str()].clone();
+                            if let ConstArgValue::Param {
+                                index: own_index, ..
+                            } = &forwarded
+                                && let Some(GenericParamData {
+                                    kind: GenericParamKind::Const(own_declared),
+                                    ..
+                                }) = self.own_generics.get(*own_index as usize)
+                            {
+                                let own_declared = own_declared.clone();
+                                let expected = self.lower_const_param_ty(declared);
+                                let found = self.lower_const_param_ty(&own_declared);
+                                if !expected.contains_error()
+                                    && !found.contains_error()
+                                    && expected != found
+                                {
+                                    self.result.diagnostics.push(
+                                        InferenceDiagnostic::TypeMismatch {
+                                            expr: mention,
+                                            expected,
+                                            actual: found,
+                                            reasons: Vec::new(),
+                                        },
+                                    );
+                                }
+                            }
+                            forwarded
+                        }
+                        Some(GenericArgData::Type(_)) => {
+                            self.result.diagnostics.push(
+                                InferenceDiagnostic::GenericArgKindMismatch {
+                                    expr: mention,
+                                    param: param.name.clone(),
+                                    param_is_const: true,
+                                },
+                            );
+                            ConstArgValue::Error
+                        }
+                        // Already reported: `MissingConstArgs` (bare
+                        // mention) or `GenericArgCount` (unmatchable list).
+                        None => ConstArgValue::Error,
+                    };
+                    out.push(GenericArg::Const(value));
+                }
+            }
+        }
+        // A broken declaration (RHS not a `struct`/`enum` literal) never
+        // pins its params — the declaration site carries the diagnostic;
+        // cannot-infer noise per mention would drown it.
+        if !pending.is_empty() && crate::type_decl(self.db, loc.to_id(self.db)).is_some() {
+            self.pending_instantiations.push(PendingInstantiation {
+                expr: mention,
+                item: loc.clone(),
+                params: pending,
+            });
+        }
+        NamedTy {
+            decl: loc.clone(),
+            args: out,
+        }
+    }
+
+    /// The type-level value of an expression-position const argument —
+    /// restricted to the annotation-representable domain (literals and
+    /// const-param reads), because the value enters TYPE identity and type
+    /// identity lives on the eval-free path. Anything computed gets the
+    /// clean diagnostic pointing at the generic-fn escape hatch.
+    fn type_const_arg_value(&mut self, mention: ExprId, value: ExprId) -> ConstArgValue {
+        match self.try_type_const_arg_value(value) {
+            Ok(value) => value,
+            Err(is_block) => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::TypeConstArgUnsupported {
+                        expr: mention,
+                        is_block,
+                    });
+                ConstArgValue::Error
+            }
+        }
+    }
+
+    /// [`Self::type_const_arg_value`] without the diagnostic: `Err(is_block)`
+    /// is "outside the annotation-representable domain" — the caller
+    /// decides whether that's worth reporting (a fn mention only cares when
+    /// its scheme embeds the param in a type). Silently-broken cases (an
+    /// overflowing literal, an unresolved name) are `Ok(Error)`: their own
+    /// diagnostics cover them.
+    fn try_type_const_arg_value(&self, value: ExprId) -> Result<ConstArgValue, bool> {
+        match &self.body.exprs[value] {
+            ExprData::Literal(LiteralData::Int(Some(v))) => Ok(ConstArgValue::Int(*v)),
+            // Overflow: the literal's own diagnostic covers it.
+            ExprData::Literal(LiteralData::Int(None)) => Ok(ConstArgValue::Error),
+            ExprData::Literal(LiteralData::Str(s)) => {
+                Ok(ConstArgValue::Str(std::sync::Arc::from(s.as_str())))
+            }
+            ExprData::Literal(LiteralData::Bool(b)) => Ok(ConstArgValue::Bool(*b)),
+            ExprData::NameRef(_) => match (self.resolutions.get(value), &self.own_item) {
+                (Some(Resolution::ConstParam(index)), Some(own)) => {
+                    let name = self
+                        .own_generics
+                        .get(*index as usize)
+                        .map(|param| param.name.as_str())
+                        .unwrap_or_default();
+                    Ok(ConstArgValue::Param {
+                        item: own.clone(),
+                        index: *index,
+                        name: std::sync::Arc::from(name),
+                    })
+                }
+                // Unresolved: the unresolved-name diagnostic covers it.
+                (None, _) => Ok(ConstArgValue::Error),
+                _ => Err(false),
+            },
+            ExprData::ConstBlock { .. } => Err(true),
+            _ => Err(false),
+        }
     }
 
     /// Register the value of a branch as a witness of the join being
@@ -2772,13 +3795,24 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         }
         let resolved_actual = self.resolve_shallow(&actual);
         let resolved_expected = self.resolve_shallow(expected);
-        if widens_to(&resolved_actual, &resolved_expected) {
-            if let Ty::Variant(variant) = resolved_actual {
-                self.result.widened.insert(expr, variant);
-            }
+        if let Some(variant) =
+            self.constraints
+                .widen_to_enum(self.table, &resolved_actual, &resolved_expected)
+        {
+            self.result.widened.insert(expr, variant);
             // The context's type is what flows on from here — the value is
             // tagged at this edge, so hover past it shows the enum.
             return resolved_expected;
+        }
+        let mut reasons: Vec<Cause> = cause.into_iter().collect();
+        // When a turbofish pinned the expected side, say so: direct checks
+        // don't otherwise consult the cause store (only the join solver
+        // does), and "because `T` was instantiated to `usize` by this
+        // argument" is exactly the missing why.
+        for recorded in self.constraints.generic_arg_causes(self.table, expected) {
+            if !reasons.contains(&recorded) {
+                reasons.push(recorded);
+            }
         }
         self.result
             .diagnostics
@@ -2786,7 +3820,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 expr,
                 expected: expected.clone(),
                 actual,
-                reasons: cause.into_iter().collect(),
+                reasons,
             });
         expected.clone()
     }
@@ -2804,8 +3838,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
 /// the arms must cover.
 enum Scrutinee {
     /// Enum-typed (tagged at runtime): the arms dispatch over the
-    /// declaration's variants.
-    Enum(ItemLoc),
+    /// declaration's variants; the mention's generic args flow into the
+    /// arms' payload binding types.
+    Enum(NamedTy),
     /// Variant-typed (tag-free at runtime): only this one variant can
     /// ever show up — no dispatch.
     Variant(VariantTy),
@@ -2847,5 +3882,117 @@ fn builtin_type(builtin: Builtin) -> Ty {
     match builtin {
         Builtin::Print => Ty::fn_type(vec![Ty::Str], Ty::Unit),
         Builtin::Panic => Ty::fn_type(vec![Ty::Str], Ty::Never),
+    }
+}
+
+/// The generic binder of `item` — empty for non-generic items.
+fn item_generics<'db>(db: &'db dyn Db, item: ItemId<'db>) -> &'db [GenericParamData] {
+    crate::item_data(db, item)
+        .as_ref()
+        .map(|it| it.generics.as_slice())
+        .unwrap_or(&[])
+}
+
+/// Instantiate `item`'s scheme: replace each of its rigid [`Ty::Param`]s
+/// with the mention's substitution (binder index → type), and each rigid
+/// [`ConstArgValue::Param`] inside a generic-type mention's args with the
+/// written const arg's type-level value (`fn::<const N: usize>(b:
+/// Buf::<N>)` at `f::<3>` gives `Buf::<3>`; an unwritten/unrepresentable
+/// value lands on `Error` — the mention carries the diagnostic). Params of
+/// a *different* item never occur in a scheme today (params can't escape
+/// their body), but are left untouched for totality.
+fn instantiate_scheme(
+    ty: &Ty,
+    item: &ItemLoc,
+    subst: &FxHashMap<u32, Ty>,
+    const_subst: &FxHashMap<u32, ConstArgValue>,
+) -> Ty {
+    match ty {
+        Ty::Param(param) if param.item == *item => subst
+            .get(&param.index)
+            .cloned()
+            .unwrap_or_else(|| ty.clone()),
+        Ty::Fn(f) => Ty::fn_type(
+            f.params
+                .iter()
+                .map(|p| instantiate_scheme(p, item, subst, const_subst))
+                .collect(),
+            instantiate_scheme(&f.ret, item, subst, const_subst),
+        ),
+        Ty::Record(rec) => Ty::record(
+            rec.fields
+                .iter()
+                .map(|(name, ty)| {
+                    (
+                        name.clone(),
+                        instantiate_scheme(ty, item, subst, const_subst),
+                    )
+                })
+                .collect(),
+        ),
+        Ty::Named(named) => Ty::Named(NamedTy {
+            decl: named.decl.clone(),
+            args: instantiate_scheme_args(&named.args, item, subst, const_subst),
+        }),
+        Ty::Variant(variant) => Ty::Variant(VariantTy {
+            args: instantiate_scheme_args(&variant.args, item, subst, const_subst),
+            ..variant.clone()
+        }),
+        other => other.clone(),
+    }
+}
+
+fn instantiate_scheme_args(
+    args: &[GenericArg],
+    item: &ItemLoc,
+    subst: &FxHashMap<u32, Ty>,
+    const_subst: &FxHashMap<u32, ConstArgValue>,
+) -> Vec<GenericArg> {
+    args.iter()
+        .map(|arg| match arg {
+            GenericArg::Ty(ty) => GenericArg::Ty(instantiate_scheme(ty, item, subst, const_subst)),
+            GenericArg::Const(ConstArgValue::Param {
+                item: param_item,
+                index,
+                ..
+            }) if param_item == item => GenericArg::Const(
+                const_subst
+                    .get(index)
+                    .cloned()
+                    .unwrap_or(ConstArgValue::Error),
+            ),
+            other => other.clone(),
+        })
+        .collect()
+}
+
+/// Whether `item`'s const param `index` appears anywhere in `ty` (inside a
+/// generic-type mention's args) — decides whether an unrepresentable const
+/// argument matters at the TYPE level (see `instantiate_mention`).
+fn ty_mentions_const_param(ty: &Ty, item: &ItemLoc, index: u32) -> bool {
+    let in_args = |args: &[GenericArg]| {
+        args.iter().any(|arg| match arg {
+            GenericArg::Ty(ty) => ty_mentions_const_param(ty, item, index),
+            GenericArg::Const(ConstArgValue::Param {
+                item: param_item,
+                index: param_index,
+                ..
+            }) => param_item == item && *param_index == index,
+            GenericArg::Const(_) => false,
+        })
+    };
+    match ty {
+        Ty::Fn(f) => {
+            f.params
+                .iter()
+                .any(|p| ty_mentions_const_param(p, item, index))
+                || ty_mentions_const_param(&f.ret, item, index)
+        }
+        Ty::Record(rec) => rec
+            .fields
+            .iter()
+            .any(|(_, ty)| ty_mentions_const_param(ty, item, index)),
+        Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => in_args(args),
+        _ => false,
     }
 }

@@ -487,3 +487,84 @@ Loops are const-legal — fine in `const fn` bodies and `const { ... }`
 blocks. Compile-time evaluation is fuel-bounded, so an infinite loop in an
 initializer is not a hung compiler but the ordinary
 "constant evaluation ran out of fuel" diagnostic at check time.
+
+== Generics
+
+A generic item binds type and const params on the fn literal itself —
+`fn::<T, const N: usize>(...)` — and is instantiated with a turbofish
+`::<...>`. Generic items are *firewall items*: never joined into an
+inference group, so a body is checked exactly once, before any call site is
+known, and every instantiation shares that one check. A type param `T` is
+*rigid* inside the body — it unifies only with itself, never widening into
+`usize` or anything else — which is what makes the single pre-instantiation
+check sound.
+
+```
+// `const fn` here because `four`'s initializer, like every item initializer,
+// is a const context, and a plain `fn` cannot be called from one.
+static id = const fn::<T>(x: T) -> T { x };      // T inferred from the argument
+static four = id::<usize>(4);                    // or pinned by turbofish
+static square = const fn::<const N: usize>() -> usize { N * N };
+static forty_nine = square::<7>();
+```
+
+A *const argument* is deliberately restricted grammar — it is one of three
+things, and nothing else:
+
+- a literal (`square::<7>`),
+- a bare `const name`, forwarding a const param (`rep::<const N>` inside a
+  generic body passes the binder's own `N` straight through), or
+- a `const { ... }` block for anything compound (`square::<const { 3 + 4 }>`).
+
+There is no additive-operator escape and no parenthesis escape: `const N + 1`
+and `const (a > b)` no longer parse — the parser points at the braced
+spelling, `const { ... }`. A bare `{ ... }` without the `const` keyword is
+likewise a parse error asking for `const { ... }`. Const arguments are never
+inferred from an ordinary call and never peeled from a runtime value; write
+them explicitly at the turbofish.
+
+A binder names each parameter once, across kinds: `fn::<T, T>` and
+`fn::<T, const T: usize>` are both a *duplicate generic parameter* error,
+reported at the second occurrence.
+
+== Generic type declarations
+
+A `type` item may bind its own type and const params, with
+`struct::<...>` / `enum::<...>`, and reuse them across its fields or variant
+payloads:
+
+```
+type Pair = struct::<T> { a: T, b: T };
+type Option = enum::<T> { Some(T), None };
+type Buf = struct::<const N: usize> { len: usize };
+```
+
+A generic type is instantiated with a turbofish in both annotation and
+construction position. Construction is the same plain call as any named type
+— the head applied to the underlying record — and the type argument may be
+inferred from the payload, or escaped with `_`:
+
+```
+static labeled = Pair::<str>(struct { a: "left", b: "right" });
+static inferred = Pair(struct { a: "x", b: "y" }); // T = str, from the payload
+```
+
+Const params make instances *distinct types*: `Buf::<8>` and `Buf::<9>` do
+not unify (the const argument is checked, not decorative).
+Variants of a generic enum spell their arguments before the variant name:
+`Option::<usize>::Some(3)`, and mixed variants widen to the generic enum
+exactly as in the non-generic case.
+
+Honest restrictions, all diagnosed:
+
+- A *bare* generic name in type position is an arity error (`Pair` takes 1
+  generic argument, found 0) — a generic type's arguments are never optional
+  in an annotation.
+- A `const { ... }` block *cannot parameterize a type*: the argument to
+  `Buf::<...>` must be a literal or a `const name`; a compound length is
+  passed through a generic function's const parameter instead.
+- A const param cannot be used as a *type* (`{ len: N }` is "`N` is a const
+  parameter, not a type").
+- A generic enum's *variant types* are not spellable in annotations yet
+  (`fn (o: Option::Some)` is rejected with that reason); use the whole
+  generic enum, or a monomorphic enum, until it lands.

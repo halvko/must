@@ -25,6 +25,8 @@
 - **X09** The interpreter is an oracle, not a spec. A detected-UB stop is a property of the
   interpreter, never a guarantee of the language; compiled Must may do anything with the same
   program.
+- **X13** Declaration-site checking. A generic body is checked once against rigid parameters,
+  never per instantiation.
 - **X14** User-visible field and member order is definition order. Internal name-sorted
   canonicalization is an identity device and must never leak.
 - **X16** Diagnostics have no stable codes. A severity word, free text and a caret are the whole
@@ -32,6 +34,10 @@
 
 ## Discarded
 
+- **Per-instantiation body checking** — squiggles appear in a body because a distant caller
+  edited an argument; hostile to a server-first compiler and to per-body blame. **X13**
+- **Generative instantiation identity** — needs call-site ids in the memo key, and arena
+  indices churn under edits. **X04 X13**
 - **SSA MIR** — user locals are ordinary mutable places. An SSA layer, if it comes, is a
   separate LIR below MIR. **X06**
 - **Interpreter traps as language semantics** — refused in advance, so nobody reads them as

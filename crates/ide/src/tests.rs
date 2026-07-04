@@ -2541,3 +2541,244 @@ static f = fn {
         crate::InsertText::Plain("y".to_owned())
     );
 }
+
+// ---- record-pattern field names ----
+
+#[test]
+fn completions_record_pattern_let_destructure_field_names() {
+    // A `let struct { … }` destructure completes the field names of the
+    // initializer's record type, with the field's own type as detail.
+    check_completions(
+        r#"static f = fn { let struct { $0 } = struct { x: 1, y: "s" }; };"#,
+        expect_test::expect![[r#"
+            x Field (usize)
+            y Field (str)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_record_pattern_param_destructure_field_names() {
+    // A parameter's `struct { … }` pattern completes the field names of its
+    // own annotation.
+    check_completions(
+        "static f = fn (struct { $0 }: struct { m: str, n: usize }) { 1 };",
+        expect_test::expect![[r#"
+            m Field (str)
+            n Field (usize)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_record_pattern_nested_in_newtype_pattern() {
+    // The genuine "nested record pattern" case in this grammar: a
+    // `Name(struct { … })` newtype pattern (match-arm variant payloads only
+    // bind names, never nest a `struct { … }`). Completes the newtype's
+    // underlying record fields.
+    check_completions(
+        r#"
+type Point = struct { x: usize, y: usize };
+static f = fn (p: Point) { let Point(struct { $0 }) = p; 1 };
+"#,
+        expect_test::expect![[r#"
+            x Field (usize)
+            y Field (usize)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_record_pattern_excludes_already_bound_fields() {
+    // A field named earlier in the same pattern is dropped; only the
+    // still-unbound fields are offered.
+    check_completions(
+        r#"static f = fn { let struct { x, $0 } = struct { x: 1, y: 2, z: 3 }; };"#,
+        expect_test::expect![[r#"
+            y Field (usize)
+            z Field (usize)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_record_pattern_partial_prefix_classifies_and_edit_covers_the_prefix() {
+    // A half-typed field name still classifies as a record-pattern field
+    // slot (filtering is client-side, by `filter_text`); the field slot the
+    // cursor sits in does not exclude itself, and the edit replaces exactly
+    // the typed prefix.
+    let (analysis, _file, pos) =
+        fixture(r#"static f = fn { let struct { na$0 } = struct { name: 1, note: 2 }; };"#);
+    let items = analysis.completions(pos);
+    let field = items
+        .iter()
+        .find(|c| c.label == "name")
+        .expect("`name` offered even though only `na` was typed");
+    assert_eq!(field.kind, crate::CompletionItemKind::Field);
+    let prefix_start = pos.offset - syntax::TextSize::new(2);
+    assert_eq!(field.text_edit.range.start(), prefix_start);
+    assert_eq!(field.text_edit.range.end(), pos.offset);
+}
+
+#[test]
+fn completions_record_pattern_undeterminable_type_offers_no_field_items() {
+    // An un-annotated parameter has no determinable record type flowing into
+    // the destructure — offer nothing rather than guessing (and a record
+    // pattern's field slot has no other generally-valid candidates).
+    let (analysis, _file, pos) = fixture("static f = fn (p) { let struct { $0 } = p; 1 };");
+    assert_eq!(analysis.completions(pos), Vec::new());
+}
+
+#[test]
+fn completions_record_pattern_non_record_type_offers_no_field_items() {
+    // Destructuring a non-record value is a type error, but completion must
+    // not invent field items for it.
+    let (analysis, _file, pos) = fixture("static f = fn { let struct { $0 } = 1; };");
+    assert!(
+        !analysis
+            .completions(pos)
+            .iter()
+            .any(|c| c.kind == crate::CompletionItemKind::Field),
+        "no field items for a non-record scrutinee"
+    );
+}
+
+#[test]
+fn completions_record_pattern_rename_slot_offers_nothing() {
+    // The `as`-rename target (`x as <cursor>`) is a brand-new binding name,
+    // not a field selector — nothing to complete there.
+    check_no_completion(
+        r#"static f = fn { let struct { x as $0 } = struct { x: 1 }; };"#,
+        "x",
+    );
+}
+
+#[test]
+fn completions_variant_item_detail_shows_payload_shape() {
+    // Detail assertion for variant items: a `::` segment candidate renders
+    // its payload signature the way its declaration writes it.
+    check_completions(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static s = Shape::$0;
+"#,
+        expect_test::expect![[r#"
+            Circle EnumMember (Circle(usize))
+            Point EnumMember (Point)
+        "#]],
+    );
+}
+
+// ---- generics: ide smoke + real evaluation ----
+//
+// The no-panic smoke tests keep their smoke shape: completions/hover with the
+// cursor inside turbofish/binder syntax must not blow up; no assertion on
+// the exact results.
+
+#[test]
+fn completions_do_not_panic_near_a_turbofish() {
+    let (analysis, _file, pos) = fixture(
+        "static f = fn (x: usize) -> usize { x };\nstatic g = fn () -> usize { f::<usize$0>(1) };",
+    );
+    let _ = analysis.completions(pos);
+}
+
+#[test]
+fn hover_does_not_panic_near_a_turbofish() {
+    let (analysis, _file, pos) = fixture(
+        "static f = fn (x: usize) -> usize { x };\nstatic g = fn () -> usize { f::<usize$0>(1) };",
+    );
+    let _ = analysis.hover(pos);
+}
+
+#[test]
+fn completions_do_not_panic_inside_a_generic_fn_binder() {
+    let (analysis, _file, pos) = fixture("static id = fn::<T$0>(x: T) -> T { x };");
+    let _ = analysis.completions(pos);
+}
+
+#[test]
+fn completions_do_not_panic_inside_a_generic_body() {
+    let (analysis, _file, pos) = fixture("static id = fn::<T, const N: usize>(x: T) -> T { $0x };");
+    let _ = analysis.completions(pos);
+}
+
+#[test]
+fn hover_does_not_panic_on_a_rigid_param_annotation() {
+    // Hover on the `T` of `x: T` inside a generic body.
+    let (analysis, _file, pos) = fixture("static id = fn::<T>(x: T$0) -> T { x };");
+    let _ = analysis.hover(pos);
+}
+
+#[test]
+fn hover_shows_the_rigid_param_through_the_bound_value() {
+    // Hover on `x` in the body: its type is the rigid param, displayed by
+    // its binder name.
+    let (analysis, _file, pos) = fixture("static id = fn::<T>(x: T) -> T { x$0 };");
+    if let Some(hover) = analysis.hover(pos) {
+        assert!(
+            hover.markup.contains('T'),
+            "hover should mention the param: {:?}",
+            hover.markup
+        );
+    }
+}
+
+#[test]
+fn generic_call_in_an_initializer_evaluates_at_check_time() {
+    // The staging refusal is gone: the same fixture now EVALUATES —
+    // zero diagnostics, and hovering the item shows the computed value.
+    let (analysis, file, _pos) = fixture(
+        "static cid = const fn::<T>(x: T) -> T { x };\nstatic v: usize = cid::<usize>(4);$0",
+    );
+    let diagnostics = analysis.diagnostics(file);
+    assert_eq!(diagnostics, vec![], "expected a clean file");
+    check_hover(
+        "static cid = const fn::<T>(x: T) -> T { x };\nstatic v$0: usize = cid::<usize>(4);",
+        "```must\nv: usize = 4\n```",
+    );
+}
+
+#[test]
+fn generic_const_arg_panic_is_a_single_diagnostic_at_the_arg() {
+    // A panicking const argument surfaces once, at the argument's range:
+    // `const_arg_values` reports it there, and the initializer's own
+    // forcing (which fails at the same origin) dedups against it — no
+    // double diagnostics.
+    let source = "static rep = const fn::<const N: usize>(x: usize) -> usize { x * N };\n\
+                  static y: usize = rep::<const { panic(\"nope\") }>(14);";
+    let (analysis, file, _pos) = fixture(&format!("{source}$0"));
+    let diagnostics = analysis.diagnostics(file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    assert_eq!(diagnostics[0].message, "constant evaluation panicked: nope");
+    assert_eq!(
+        &source[usize::from(diagnostics[0].range.start())..usize::from(diagnostics[0].range.end())],
+        "panic(\"nope\")",
+        "the squiggle sits inside the argument"
+    );
+}
+
+#[test]
+fn goto_definition_on_a_const_param_jumps_to_the_binder() {
+    check_goto(
+        "static f = fn::<const N: usize>() -> usize { N$0 + 1 };",
+        "N",
+        0,
+    );
+}
+
+#[test]
+fn hover_shows_generic_type_instance() {
+    check_hover(
+        "type Pair = struct::<T> { a: T, b: T };\nstatic main = fn { let p$0 = Pair::<usize>(struct { a: 1, b: 2 }); };",
+        "```must\np: Pair::<usize>\n```",
+    );
+}
+
+#[test]
+fn hover_shows_generic_variant_instance() {
+    check_hover(
+        "type Option = enum::<T> { Some(T), None };\nstatic main = fn { let o$0 = Option::<usize>::Some(3); };",
+        "```must\no: Option::<usize>::Some\n```",
+    );
+}

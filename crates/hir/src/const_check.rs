@@ -117,6 +117,17 @@ impl CheckCtx<'_> {
             // A variant path is a name (or a pure constructor value) —
             // nothing to reject; its base is a bare `NameRef`.
             ExprData::VariantPath { .. } => {}
+            // A turbofish mention: the base is a bare `NameRef`; const
+            // ARGUMENTS are compile-time positions wherever the mention
+            // sits (they will be const-evaluated for instance identity), so
+            // they check as const contexts unconditionally.
+            ExprData::GenericApp { args, .. } => {
+                for arg in args {
+                    if let crate::body::GenericArgData::Const(value) = arg {
+                        self.check_expr(*value, true);
+                    }
+                }
+            }
             ExprData::Call { callee, args } => {
                 if in_const {
                     self.check_callee(*callee);
@@ -220,49 +231,67 @@ impl CheckCtx<'_> {
             // A directly-called variant constructor (`Shape::Circle(3)`):
             // pure construction, like `Foo(...)` — always const-legal.
             ExprData::VariantPath { .. } => {}
-            ExprData::NameRef(_) => match self.resolutions.get(callee) {
-                Some(Resolution::Item(loc)) => {
-                    match root_fn_is_const(self.db, loc.to_id(self.db)) {
-                        Some(true) => {}
-                        Some(false) => {
-                            self.diagnostics.push(ConstCheckDiagnostic::NonConstFnCall {
-                                callee,
-                                item: loc.clone(),
-                            })
-                        }
-                        // The item's root isn't literally a fn literal —
-                        // maybe a wrapper around one, maybe not a function
-                        // at all. No peeling: conservatively a value call.
-                        None => self
-                            .diagnostics
-                            .push(ConstCheckDiagnostic::ValueCall { callee }),
-                    }
-                }
-                // A construction call `Foo(...)`: pure construction, not a
-                // user function — always legal in a const context (like
-                // record literals, which it erases to at runtime).
-                Some(Resolution::TypeItem(_)) => {}
-                // The one side effect const contexts allow.
-                Some(Resolution::Builtin(Builtin::Panic)) => {}
-                Some(Resolution::Builtin(builtin @ Builtin::Print)) => {
-                    self.diagnostics.push(ConstCheckDiagnostic::SideEffectCall {
-                        callee,
-                        builtin: *builtin,
-                    });
-                }
-                Some(Resolution::Local(_)) => self
-                    .diagnostics
-                    .push(ConstCheckDiagnostic::ValueCall { callee }),
-                // The duplicate definitions already carry a diagnostic; no
-                // verdict about a use of the name is trustworthy.
-                Some(Resolution::Ambiguous(_)) => {}
-                // Unresolved: already reported by name resolution.
-                None => {}
-            },
+            // A turbofish callee (`f::<usize>(4)`) is judged by what its
+            // base names — calling an instantiated generic `const fn` in a
+            // const context is legal (evaluation is staged, but the RULE
+            // keys off the marker exactly as for a plain mention). The
+            // diagnostic still lands on the whole callee expression.
+            ExprData::GenericApp { base, .. } => self.check_named_callee(callee, *base),
+            ExprData::NameRef(_) => self.check_named_callee(callee, callee),
             // Any other callee expression is a value of unknown const-ness.
             _ => self
                 .diagnostics
                 .push(ConstCheckDiagnostic::ValueCall { callee }),
+        }
+    }
+
+    /// The name-resolution part of [`Self::check_callee`]: `name_expr` is
+    /// the `NameRef` whose resolution is judged (the callee itself, or a
+    /// turbofish callee's base); `callee` is where the diagnostic lands.
+    fn check_named_callee(&mut self, callee: ExprId, name_expr: ExprId) {
+        match self.resolutions.get(name_expr) {
+            Some(Resolution::Item(loc)) => {
+                match root_fn_is_const(self.db, loc.to_id(self.db)) {
+                    Some(true) => {}
+                    Some(false) => self.diagnostics.push(ConstCheckDiagnostic::NonConstFnCall {
+                        callee,
+                        item: loc.clone(),
+                    }),
+                    // The item's root isn't literally a fn literal —
+                    // maybe a wrapper around one, maybe not a function
+                    // at all. No peeling: conservatively a value call.
+                    None => self
+                        .diagnostics
+                        .push(ConstCheckDiagnostic::ValueCall { callee }),
+                }
+            }
+            // A construction call `Foo(...)`: pure construction, not a
+            // user function — always legal in a const context (like
+            // record literals, which it erases to at runtime).
+            Some(Resolution::TypeItem(_)) => {}
+            // The one side effect const contexts allow.
+            Some(Resolution::Builtin(Builtin::Panic)) => {}
+            Some(Resolution::Builtin(builtin @ Builtin::Print)) => {
+                self.diagnostics.push(ConstCheckDiagnostic::SideEffectCall {
+                    callee,
+                    builtin: *builtin,
+                });
+            }
+            Some(Resolution::Local(_)) => self
+                .diagnostics
+                .push(ConstCheckDiagnostic::ValueCall { callee }),
+            // A const param's value is plain data — fn-valued const
+            // params are excluded from the domain (TR06: concrete data
+            // types only) — so calling one is a value call like calling
+            // any local.
+            Some(Resolution::ConstParam(_)) => self
+                .diagnostics
+                .push(ConstCheckDiagnostic::ValueCall { callee }),
+            // The duplicate definitions already carry a diagnostic; no
+            // verdict about a use of the name is trustworthy.
+            Some(Resolution::Ambiguous(_)) => {}
+            // Unresolved: already reported by name resolution.
+            None => {}
         }
     }
 }

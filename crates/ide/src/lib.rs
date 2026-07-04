@@ -241,6 +241,43 @@ impl Analysis {
                 });
             }
         }
+        // Turbofish const arguments are compile-time exactly like `const`
+        // blocks — same loop, same shapes: failures at check time are
+        // diagnostics (a panicking argument squiggles the argument), and
+        // when the failing mention also sits in a forced initializer,
+        // `const_value` reports the identical error at the identical
+        // origin — the final dedup collapses the pair. Arguments whose
+        // value needs an instance (`Uninstantiated`, inside generic
+        // bodies) are skipped by `const_eval_message`.
+        for &item in hir::file_item_ids(&self.db, file) {
+            for (arg_expr, result) in eval::const_arg_values(&self.db, item) {
+                let Err(err) = result else {
+                    continue;
+                };
+                let Some(message) = const_eval_message(err) else {
+                    continue;
+                };
+                // A foreign origin (the failure lives in another file's
+                // item) falls back to the argument itself, which is
+                // always in this file.
+                let (loc, expr) = err
+                    .origin
+                    .clone()
+                    .filter(|(loc, _)| loc.file == file)
+                    .unwrap_or_else(|| (hir::item_loc(&self.db, item), *arg_expr));
+                let (_, source_map) = hir::body_with_source_map(&self.db, loc.to_id(&self.db));
+                let Some(range) = source_map.node_for_expr(expr).map(|ptr| ptr.text_range()) else {
+                    continue;
+                };
+                diagnostics.push(Diagnostic {
+                    range,
+                    severity: Severity::Error,
+                    message,
+                    fix: None,
+                    related: Vec::new(),
+                });
+            }
+        }
         // Related locations only travel as `DiagnosticRelatedInformation`,
         // which some editors render as bare underlines with no visible link
         // back to the error. Give each one a companion information-severity
@@ -349,6 +386,10 @@ pub struct RunLens {
 fn const_eval_message(err: &eval::EvalError) -> Option<String> {
     Some(match err.kind {
         eval::EvalErrorKind::Trap => return None,
+        // Not an error: a compile-time body inside a generic item read a
+        // const param — its value exists only per instance (TR06), where
+        // the mention's own evaluation checks it.
+        eval::EvalErrorKind::Uninstantiated => return None,
         eval::EvalErrorKind::Panic => {
             format!("constant evaluation panicked: {}", err.message)
         }

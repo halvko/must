@@ -148,9 +148,27 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
             compute_expr_scopes(body, scopes, *receiver, scope);
         }
         // The variant name is resolved against the enum during inference,
-        // not lexically; only the base is a scoped reference.
-        ExprData::VariantPath { base, .. } => {
+        // not lexically; only the base is a scoped reference — plus any
+        // turbofish const-arg values, which are ordinary scoped
+        // expressions (same as a `GenericApp`'s).
+        ExprData::VariantPath { base, args, .. } => {
             compute_expr_scopes(body, scopes, *base, scope);
+            for arg in args.iter().flatten() {
+                if let crate::body::GenericArgData::Const(value) = arg {
+                    compute_expr_scopes(body, scopes, *value, scope);
+                }
+            }
+        }
+        // The base is a scoped reference like a variant path's; type args
+        // are not expressions, const-arg *values* are ordinary scoped
+        // expressions.
+        ExprData::GenericApp { base, args } => {
+            compute_expr_scopes(body, scopes, *base, scope);
+            for arg in args {
+                if let crate::body::GenericArgData::Const(value) = arg {
+                    compute_expr_scopes(body, scopes, *value, scope);
+                }
+            }
         }
         ExprData::Match { scrutinee, arms } => {
             compute_expr_scopes(body, scopes, *scrutinee, scope);
@@ -184,6 +202,16 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Resolution {
     Local(BindingId),
+    /// A `const` parameter of the enclosing item's generic binder
+    /// (`fn::<const N: usize>` — `N` reads as a value of its declared type
+    /// inside the body). Deliberately NOT a [`Resolution::Local`]: const
+    /// params have no [`BindingId`] (they are binder facts from the item
+    /// tree, not body bindings), so none of the locals machinery — value
+    /// slots, `mut`, scopes arena — applies to them; carrying the binder
+    /// index instead keeps every consumer honest about that. Locals shadow
+    /// const params; const params shadow items and builtins (the binder
+    /// sits lexically between the body and the file).
+    ConstParam(u32),
     Item(ItemLoc),
     /// A `type` item. Kept apart from [`Resolution::Item`] so every consumer
     /// is forced to decide what a *type* means for it: a value use is an
@@ -405,6 +433,29 @@ pub fn resolutions<'db>(db: &'db dyn Db, item: ItemId<'db>) -> ArenaMap<ExprId, 
     let body = body(db, item);
     let scopes = expr_scopes(db, item);
     let file_scope = file_scope(db, item.file(db));
+    // The item's own generic binder: const params are value names for the
+    // whole body (the body IS the binder's literal for a generic item), a
+    // scope layer between the locals and the file. A name duplicated
+    // within ONE binder is diagnosed at its second occurrence (see
+    // `file_diagnostics`'s duplicate-generic-parameter pass), so this
+    // fallback lookup only ever has to pick one, total-lowering-style;
+    // last declaration wins the same way local shadowing does.
+    let generics = &crate::item_data(db, item)
+        .as_ref()
+        .map(|data| data.generics.clone())
+        .unwrap_or_default();
+    let const_param = |name: &str| {
+        generics
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, param)| {
+                matches!(param.kind, crate::item_tree::GenericParamKind::Const(_))
+                    && param.name == name
+                    && !param.name.is_empty()
+            })
+            .map(|(index, _)| Resolution::ConstParam(index as u32))
+    };
     let mut map = ArenaMap::default();
     for (expr, data) in body.exprs.iter() {
         let ExprData::NameRef(name) = data else {
@@ -414,9 +465,11 @@ pub fn resolutions<'db>(db: &'db dyn Db, item: ItemId<'db>) -> ArenaMap<ExprId, 
             .scope_of(expr)
             .and_then(|scope| scopes.resolve_in_scope(scope, name));
         let resolution = local.map(Resolution::Local).or_else(|| {
-            file_scope
-                .resolve(name)
-                .or_else(|| Builtin::by_name(name).map(Resolution::Builtin))
+            const_param(name).or_else(|| {
+                file_scope
+                    .resolve(name)
+                    .or_else(|| Builtin::by_name(name).map(Resolution::Builtin))
+            })
         });
         if let Some(resolution) = resolution {
             map.insert(expr, resolution);

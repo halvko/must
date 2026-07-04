@@ -566,6 +566,9 @@ impl<W: Write + Clone> Debuggee<W> {
             EvalErrorKind::Panic => "panicked",
             EvalErrorKind::Runtime => "runtime error",
             EvalErrorKind::NotConst => "error",
+            // Unreachable in an instantiated execution; rendered
+            // honestly if it ever escapes.
+            EvalErrorKind::Uninstantiated => "error",
         };
         let mut rendered = format!("{prefix}: {}", err.message);
         if let Some(origin) = &err.origin {
