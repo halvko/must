@@ -1797,6 +1797,301 @@ fn const_param_type_constructs_and_evaluates() {
 }
 
 #[test]
+fn write_through_raw_mut_is_visible_through_the_local() {
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut x = 1;
+    let p = &raw mut x;
+    unsafe { p.* = 42; }
+    x
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 42
+        "#]],
+    );
+}
+
+#[test]
+fn pointer_to_a_field_reads_and_writes_that_element() {
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut r = struct { a: 1, b: 2 };
+    let pa = &raw mut r.a;
+    unsafe { pa.* = 10; }
+    r.a + r.b
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 12
+        "#]],
+    );
+}
+
+#[test]
+fn interior_pointer_survives_whole_value_overwrite() {
+    // Overwriting the whole record writes INTO the allocation, so an
+    // interior pointer minted before the overwrite sees the new field —
+    // exactly real-memory behavior.
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut r = struct { a: 1, b: 2 };
+    let pa = &raw mut r.a;
+    r = struct { a: 3, b: 4 };
+    unsafe { pa.* }
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 3
+        "#]],
+    );
+}
+
+#[test]
+fn pointee_field_reads_chain() {
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut r = struct { a: 1, b: 2 };
+    let p = &raw mut r;
+    unsafe { p.*.a + p.*.b }
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 3
+        "#]],
+    );
+}
+
+#[test]
+fn pointer_copies_alias_the_same_place() {
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut x = 1;
+    let p = &raw mut x;
+    let q = p;
+    unsafe { q.* = 9; p.* }
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 9
+        "#]],
+    );
+}
+
+#[test]
+fn two_addr_of_the_same_static_are_the_same_address() {
+    check_run(
+        r#"
+static s = 7;
+static main = fn() -> bool {
+    let a = &raw s;
+    let b = &raw s;
+    a == b
+};
+"#,
+        "main()",
+        expect![[r#"
+            => true
+        "#]],
+    );
+}
+
+#[test]
+fn deref_of_a_static_pointer_reads_the_static() {
+    check_run(
+        r#"
+static s = struct { a: 40, b: 2 };
+static main = fn() -> usize {
+    let pa = &raw s.a;
+    let pb = &raw s.b;
+    unsafe { pa.* + pb.* }
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 42
+        "#]],
+    );
+}
+
+#[test]
+fn addr_of_a_const_takes_the_address_of_each_use_copy() {
+    // const=copied, now observable: each `&raw c` mention points at its
+    // own copy, so two of them are different addresses.
+    check_run(
+        r#"
+const c = 7;
+static main = fn() -> bool { &raw c == &raw c };
+"#,
+        "main()",
+        expect![[r#"
+            => false
+        "#]],
+    );
+}
+
+#[test]
+fn two_addr_of_the_same_local_are_equal() {
+    check_run(
+        r#"
+static main = fn() -> bool {
+    let mut x = 1;
+    &raw mut x == &raw mut x
+};
+"#,
+        "main()",
+        expect![[r#"
+            => true
+        "#]],
+    );
+}
+
+#[test]
+fn dangling_deref_after_frame_return_is_detected_ub() {
+    check_run(
+        r#"
+static make = fn() -> &raw mut usize {
+    let mut x = 5;
+    &raw mut x
+};
+static main = fn() -> usize {
+    let p = make();
+    unsafe { p.* }
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[UndefinedBehavior]: dangling pointer — the local it pointed to no longer exists (its frame has returned)
+        "#]],
+    );
+}
+
+#[test]
+fn dangling_deref_traps_deterministically() {
+    // Same program, two fresh machines: identical trap kind and message.
+    let text = r#"
+static make = fn() -> &raw mut usize { let mut x = 5; &raw mut x };
+static main = fn() -> usize { let p = make(); unsafe { p.* } };
+static entrypoint = (main());
+"#;
+    let render = || {
+        let db = RootDatabase::default();
+        let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+        let entry_item = *hir::file_item_ids(&db, file)
+            .iter()
+            .find(|&&it| it.name(&db) == "entrypoint")
+            .expect("entrypoint item exists");
+        let mut machine = Machine::new(&db, RunMode { out: Vec::new() });
+        match machine.eval_root(&hir::item_loc(&db, entry_item)) {
+            Ok(value) => format!("=> {}", value.display()),
+            Err(err) => format!("error[{:?}]: {}", err.kind, err.message),
+        }
+    };
+    let first = render();
+    let second = render();
+    assert_eq!(first, second);
+    assert!(
+        first.starts_with("error[UndefinedBehavior]"),
+        "expected detected UB, got: {first}"
+    );
+}
+
+#[test]
+fn pointers_work_inside_const_evaluation() {
+    // Unsafe (and pointers) are legal in const contexts: the whole
+    // computation runs at compile time, the pointer dies inside it.
+    check_const(
+        r#"
+static v = {
+    let mut x = 1;
+    let p = &raw mut x;
+    unsafe { p.* = 41; }
+    x + 1
+};
+"#,
+        expect![[r#"
+            v = 42
+        "#]],
+    );
+}
+
+#[test]
+fn a_pointer_cannot_leave_const_evaluation() {
+    check_const(
+        r#"
+static p = {
+    let mut x = 1;
+    &raw mut x
+};
+"#,
+        expect![[r#"
+            p = error[NotConst]: a pointer cannot leave compile-time evaluation
+        "#]],
+    );
+}
+
+#[test]
+fn a_pointer_inside_a_record_cannot_leave_const_evaluation_either() {
+    check_const(
+        r#"
+static p = {
+    let mut x = 1;
+    struct { ptr: &raw mut x }
+};
+"#,
+        expect![[r#"
+            p = error[NotConst]: a pointer cannot leave compile-time evaluation
+        "#]],
+    );
+}
+
+#[test]
+fn a_pointer_cannot_leave_a_const_block() {
+    check_const_blocks(
+        r#"
+static main = fn() -> usize {
+    const { let mut y = 1; let p = &raw mut y; unsafe { p.* } }
+};
+static bad = fn() {
+    const { let mut y = 1; &raw mut y };
+};
+"#,
+        expect![[r#"
+            main#0 = 1
+            bad#0 = error[NotConst]: a pointer cannot leave compile-time evaluation
+        "#]],
+    );
+}
+
+#[test]
+fn deref_display_is_opaque_never_a_number() {
+    check_run(
+        r#"
+static main = fn() -> &raw usize {
+    let mut x = 1;
+    &raw x
+};
+"#,
+        "main()",
+        expect![[r#"
+            => &raw <opaque>
+        "#]],
+    );
+}
+
+// ---- fixed-size arrays ----
+
+#[test]
 fn arrays_build_read_and_write() {
     check_run(
         r#"

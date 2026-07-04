@@ -928,3 +928,64 @@ fn named_typed_local_displays_its_record_value() {
 
     let _ = std::fs::remove_file(program);
 }
+
+#[test]
+fn array_local_expands_into_elements() {
+    let program = fixture(
+        "arr",
+        "static main = fn {\n    let a = [10, 20, 30];\n    print(\"done\");\n};\n",
+    );
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        ("launch", json!({ "program": program.to_str().unwrap() })),
+        ("setBreakpoints", json!({ "breakpoints": [{ "line": 3 }] })),
+        ("configurationDone", json!({})),
+        ("stackTrace", json!({ "threadId": 1 })),
+        ("scopes", json!({ "frameId": 2 })),
+        ("variables", json!({ "variablesReference": 2 })),
+        // Deterministic like a record's: the first compound value
+        // registered since the last resume.
+        ("variables", json!({ "variablesReference": 100_000 })),
+        (
+            "evaluate",
+            json!({ "expression": "a[1] + a[2]", "frameId": 2 }),
+        ),
+        ("continue", json!({ "threadId": 1 })),
+        ("disconnect", json!({})),
+    ]);
+
+    // The local: the whole array's display, expandable.
+    let vars = &responses_for(&messages, "variables")[0]["body"]["variables"];
+    assert_eq!(vars.as_array().unwrap().len(), 1);
+    assert_eq!(vars[0]["name"], "a");
+    assert_eq!(vars[0]["value"], "[10, 20, 30]");
+    assert_eq!(vars[0]["variablesReference"], 100_000);
+
+    // Expanding it: one child per element, named by index.
+    let elements = responses_for(&messages, "variables")[1]["body"]["variables"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let element_view: Vec<(&str, &str, i64)> = elements
+        .iter()
+        .map(|e| {
+            (
+                e["name"].as_str().unwrap(),
+                e["value"].as_str().unwrap(),
+                e["variablesReference"].as_i64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        element_view,
+        vec![("0", "10", 0), ("1", "20", 0), ("2", "30", 0)]
+    );
+
+    // Console evaluation indexes the frame's array local.
+    let evals = responses_for(&messages, "evaluate");
+    assert_eq!(evals[0]["body"]["result"], "50");
+
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}

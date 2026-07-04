@@ -50,6 +50,16 @@ pub enum Ty {
     /// conversion preserves them); they are projected through
     /// [`variant_payloads_for`].
     Variant(VariantTy),
+    /// `&raw T` / `&raw mut T`: a raw pointer. Unifies exactly and
+    /// equationally like everything else — same mutability, pointwise
+    /// pointee — with NO variance (there is no subtyping to be variant
+    /// over) and no implicit `&raw mut T` → `&raw T` conversion in v1
+    /// (held open as a future shallow [`widens_to`] arm, house style,
+    /// never subtyping).
+    RawPtr {
+        mutable: bool,
+        pointee: Arc<Ty>,
+    },
     /// `[T; N]`: a fixed-size array — structural, like [`Ty::Record`]
     /// (never a `Named` declaration). Unifies exactly: element pointwise,
     /// length by plain equality with [`ConstArgValue::Error`] infectious
@@ -244,6 +254,13 @@ impl Ty {
         Ty::Fn(Arc::new(FnTy { params, ret }))
     }
 
+    pub fn raw_ptr(mutable: bool, pointee: Ty) -> Ty {
+        Ty::RawPtr {
+            mutable,
+            pointee: Arc::new(pointee),
+        }
+    }
+
     pub fn array(elem: Ty, len: ConstArgValue) -> Ty {
         Ty::Array {
             elem: Arc::new(elem),
@@ -270,6 +287,7 @@ impl Ty {
         match self {
             Ty::Infer(_) => true,
             Ty::Fn(f) => f.ret.contains_infer() || f.params.iter().any(Ty::contains_infer),
+            Ty::RawPtr { pointee, .. } => pointee.contains_infer(),
             // The length is never an inference variable (const args are
             // never inferred, TR06) — only the element can be undetermined.
             Ty::Array { elem, .. } => elem.contains_infer(),
@@ -290,6 +308,7 @@ impl Ty {
     pub fn mentions_fn(&self) -> bool {
         match self {
             Ty::Fn(_) => true,
+            Ty::RawPtr { pointee, .. } => pointee.mentions_fn(),
             Ty::Array { elem, .. } => elem.mentions_fn(),
             Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| ty.mentions_fn()),
             Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
@@ -311,6 +330,7 @@ impl Ty {
     pub fn mentions_array(&self) -> bool {
         match self {
             Ty::Array { .. } => true,
+            Ty::RawPtr { pointee, .. } => pointee.mentions_array(),
             Ty::Fn(f) => f.params.iter().any(Ty::mentions_array) || f.ret.mentions_array(),
             Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| ty.mentions_array()),
             Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
@@ -327,6 +347,7 @@ impl Ty {
         match self {
             Ty::Error => true,
             Ty::Fn(f) => f.ret.contains_error() || f.params.iter().any(Ty::contains_error),
+            Ty::RawPtr { pointee, .. } => pointee.contains_error(),
             // A broken length is this type's business, exactly like a
             // broken generic const ARG on a `Named` mention.
             Ty::Array { elem, len } => elem.contains_error() || matches!(len, ConstArgValue::Error),
@@ -367,6 +388,13 @@ impl Ty {
                 match &f.ret {
                     Ty::Unit => format!("fn({params})"),
                     ret => format!("fn({params}) -> {}", ret.display()),
+                }
+            }
+            Ty::RawPtr { mutable, pointee } => {
+                if *mutable {
+                    format!("&raw mut {}", pointee.display())
+                } else {
+                    format!("&raw {}", pointee.display())
                 }
             }
             Ty::Array { elem, len } => {
@@ -661,8 +689,13 @@ pub(crate) fn lower_type_ref_in(
             Ty::fn_type(params, ret)
         }
         TypeRef::Ref(type_ref) => {
-            // TODO: once we introduce references this can't discard them any longer
+            // References are parse-and-reserved (validation rejects them);
+            // lowering stays transparent so the pointee's checking still
+            // works on the reserved spelling.
             lower_type_ref_in(db, file, type_ref, table, scope)
+        }
+        TypeRef::RawPtr { mutable, inner } => {
+            Ty::raw_ptr(*mutable, lower_type_ref_in(db, file, inner, table, scope))
         }
         TypeRef::Array { elem, len } => Ty::array(
             lower_type_ref_in(db, file, elem, table, scope),
@@ -835,6 +868,7 @@ fn erase_infer(ty: &Ty) -> Ty {
             f.params.iter().map(erase_infer).collect(),
             erase_infer(&f.ret),
         ),
+        Ty::RawPtr { mutable, pointee } => Ty::raw_ptr(*mutable, erase_infer(pointee)),
         Ty::Array { elem, len } => Ty::array(erase_infer(elem), len.clone()),
         Ty::Record(rec) => Ty::record(
             rec.fields
@@ -885,6 +919,9 @@ pub fn substitute_args(ty: &Ty, decl: &ItemLoc, args: &[GenericArg]) -> Ty {
                 .collect(),
             substitute_args(&f.ret, decl, args),
         ),
+        Ty::RawPtr { mutable, pointee } => {
+            Ty::raw_ptr(*mutable, substitute_args(pointee, decl, args))
+        }
         Ty::Array { elem, len } => {
             let len = match len {
                 ConstArgValue::Param { item, index, .. } if item == decl => {

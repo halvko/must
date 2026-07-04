@@ -2,17 +2,27 @@
 
 ## Conclusions
 
-- **P09** The command surface. `run` exits 0, 1 for a trap, panic or runtime error, or 2
+- **P09** The command surface. `run` exits 0, 1 for a trap/panic/runtime error/UB, or 2
   for a usage or file-IO failure; `check` likewise. Warnings never affect the exit code.
   Failure kinds have fixed prefix words. The frame limit is 10,000, and the message quotes
   the number.
 - **P11** The debugger runs in-process on the const-eval interpreter (X08): same MIR, same
-  machine, same traps.
+  machine, same UB findings.
 
 ## Discarded
+
+- **A byte-addressed interpreter memory** — commits to layout now and removes the structured
+  value representation that debugger rendering, value display and structural equality depend
+  on. Nothing in the typed model has to be undone for a codegen-era byte model. **A flat
+  linear memory** — address reuse makes use-after-free silently read new data, and the
+  interpreter stops being a UB detector. **Handle/path fakes with no allocation table** —
+  cannot represent heap allocations. **P11**
 
 ## Re-evaluate when
 
 - **Two open debug-adapter bugs**, not decisions: with loops and unfueled run mode an infinite
   loop hangs the session with no interrupt path; and breakpoint arrivals are deduped by
   frame/line/column, so a breakpoint in a loop body fires once per frame. **P11**
+- **A checked build profile** — a codegen-era option with a measured cost:
+  generational-reference checking at 2–10.84% overhead; Must's typed abstract memory is that
+  idea with an infinite-width generation. **P11**

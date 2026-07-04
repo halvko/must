@@ -127,6 +127,7 @@ static main: fn() -> () = fn() -> () {
                     WHITESPACE@108..109 "\n"
                     R_BRACE@109..110 "}"
               WHITESPACE@110..111 "\n"
+            error 51..63: references are not supported yet
         "#]],
     );
 }
@@ -6352,6 +6353,404 @@ fn construction_turbofish_expr() {
         "#]],
     );
 }
+
+#[test]
+fn raw_pointer_types_parse() {
+    check(
+        "static f = fn(p: &raw usize, q: &raw mut usize) -> &raw mut usize { q };",
+        expect![[r#"
+            SOURCE_FILE@0..72
+              STATIC_ITEM@0..72
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..71
+                  FN_KW@11..13 "fn"
+                  PARAM_LIST@13..47
+                    L_PAREN@13..14 "("
+                    PARAM@14..27
+                      BIND_PAT@14..15
+                        NAME@14..15
+                          IDENT@14..15 "p"
+                      COLON@15..16 ":"
+                      WHITESPACE@16..17 " "
+                      RAW_PTR_TYPE@17..27
+                        AMP@17..18 "&"
+                        RAW_KW@18..21 "raw"
+                        WHITESPACE@21..22 " "
+                        PATH_TYPE@22..27
+                          NAME_REF@22..27
+                            IDENT@22..27 "usize"
+                    COMMA@27..28 ","
+                    WHITESPACE@28..29 " "
+                    PARAM@29..46
+                      BIND_PAT@29..30
+                        NAME@29..30
+                          IDENT@29..30 "q"
+                      COLON@30..31 ":"
+                      WHITESPACE@31..32 " "
+                      RAW_PTR_TYPE@32..46
+                        AMP@32..33 "&"
+                        RAW_KW@33..36 "raw"
+                        WHITESPACE@36..37 " "
+                        MUT_KW@37..40 "mut"
+                        WHITESPACE@40..41 " "
+                        PATH_TYPE@41..46
+                          NAME_REF@41..46
+                            IDENT@41..46 "usize"
+                    R_PAREN@46..47 ")"
+                  WHITESPACE@47..48 " "
+                  RET_TYPE@48..65
+                    THIN_ARROW@48..50 "->"
+                    WHITESPACE@50..51 " "
+                    RAW_PTR_TYPE@51..65
+                      AMP@51..52 "&"
+                      RAW_KW@52..55 "raw"
+                      WHITESPACE@55..56 " "
+                      MUT_KW@56..59 "mut"
+                      WHITESPACE@59..60 " "
+                      PATH_TYPE@60..65
+                        NAME_REF@60..65
+                          IDENT@60..65 "usize"
+                  WHITESPACE@65..66 " "
+                  BLOCK_EXPR@66..71
+                    L_BRACE@66..67 "{"
+                    WHITESPACE@67..68 " "
+                    PATH_EXPR@68..69
+                      NAME_REF@68..69
+                        IDENT@68..69 "q"
+                    WHITESPACE@69..70 " "
+                    R_BRACE@70..71 "}"
+                SEMICOLON@71..72 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn addr_of_both_flavors_parse() {
+    check(
+        "static f = fn { let a = &raw x; let b = &raw mut y.z; };",
+        expect![[r#"
+            SOURCE_FILE@0..56
+              STATIC_ITEM@0..56
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..55
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..55
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..31
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      BIND_PAT@20..21
+                        NAME@20..21
+                          IDENT@20..21 "a"
+                      WHITESPACE@21..22 " "
+                      EQ@22..23 "="
+                      WHITESPACE@23..24 " "
+                      ADDR_OF_EXPR@24..30
+                        AMP@24..25 "&"
+                        RAW_KW@25..28 "raw"
+                        WHITESPACE@28..29 " "
+                        PATH_EXPR@29..30
+                          NAME_REF@29..30
+                            IDENT@29..30 "x"
+                      SEMICOLON@30..31 ";"
+                    WHITESPACE@31..32 " "
+                    LET_STMT@32..53
+                      LET_KW@32..35 "let"
+                      WHITESPACE@35..36 " "
+                      BIND_PAT@36..37
+                        NAME@36..37
+                          IDENT@36..37 "b"
+                      WHITESPACE@37..38 " "
+                      EQ@38..39 "="
+                      WHITESPACE@39..40 " "
+                      ADDR_OF_EXPR@40..52
+                        AMP@40..41 "&"
+                        RAW_KW@41..44 "raw"
+                        WHITESPACE@44..45 " "
+                        MUT_KW@45..48 "mut"
+                        WHITESPACE@48..49 " "
+                        FIELD_EXPR@49..52
+                          PATH_EXPR@49..50
+                            NAME_REF@49..50
+                              IDENT@49..50 "y"
+                          DOT@50..51 "."
+                          NAME_REF@51..52
+                            IDENT@51..52 "z"
+                      SEMICOLON@52..53 ";"
+                    WHITESPACE@53..54 " "
+                    R_BRACE@54..55 "}"
+                SEMICOLON@55..56 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn addr_of_binds_tighter_than_comparison() {
+    check(
+        "static f = fn { &raw x == &raw x };",
+        expect![[r#"
+            SOURCE_FILE@0..35
+              STATIC_ITEM@0..35
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..34
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..34
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    BIN_EXPR@16..32
+                      ADDR_OF_EXPR@16..22
+                        AMP@16..17 "&"
+                        RAW_KW@17..20 "raw"
+                        WHITESPACE@20..21 " "
+                        PATH_EXPR@21..22
+                          NAME_REF@21..22
+                            IDENT@21..22 "x"
+                      WHITESPACE@22..23 " "
+                      EQ2@23..25 "=="
+                      WHITESPACE@25..26 " "
+                      ADDR_OF_EXPR@26..32
+                        AMP@26..27 "&"
+                        RAW_KW@27..30 "raw"
+                        WHITESPACE@30..31 " "
+                        PATH_EXPR@31..32
+                          NAME_REF@31..32
+                            IDENT@31..32 "x"
+                    WHITESPACE@32..33 " "
+                    R_BRACE@33..34 "}"
+                SEMICOLON@34..35 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn postfix_deref_chains_in_larger_expressions() {
+    check(
+        "static f = fn { p.*.a + q.*.buf.* };",
+        expect![[r#"
+            SOURCE_FILE@0..36
+              STATIC_ITEM@0..36
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..35
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..35
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    BIN_EXPR@16..33
+                      FIELD_EXPR@16..21
+                        DEREF_EXPR@16..19
+                          PATH_EXPR@16..17
+                            NAME_REF@16..17
+                              IDENT@16..17 "p"
+                          DOT@17..18 "."
+                          STAR@18..19 "*"
+                        DOT@19..20 "."
+                        NAME_REF@20..21
+                          IDENT@20..21 "a"
+                      WHITESPACE@21..22 " "
+                      PLUS@22..23 "+"
+                      WHITESPACE@23..24 " "
+                      DEREF_EXPR@24..33
+                        FIELD_EXPR@24..31
+                          DEREF_EXPR@24..27
+                            PATH_EXPR@24..25
+                              NAME_REF@24..25
+                                IDENT@24..25 "q"
+                            DOT@25..26 "."
+                            STAR@26..27 "*"
+                          DOT@27..28 "."
+                          NAME_REF@28..31
+                            IDENT@28..31 "buf"
+                        DOT@31..32 "."
+                        STAR@32..33 "*"
+                    WHITESPACE@33..34 " "
+                    R_BRACE@34..35 "}"
+                SEMICOLON@35..36 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn deref_write_target_parses() {
+    check(
+        "static f = fn { p.* = 5; };",
+        expect![[r#"
+            SOURCE_FILE@0..27
+              STATIC_ITEM@0..27
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..26
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..26
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    ASSIGN_STMT@16..24
+                      DEREF_EXPR@16..19
+                        PATH_EXPR@16..17
+                          NAME_REF@16..17
+                            IDENT@16..17 "p"
+                        DOT@17..18 "."
+                        STAR@18..19 "*"
+                      WHITESPACE@19..20 " "
+                      EQ@20..21 "="
+                      WHITESPACE@21..22 " "
+                      LITERAL@22..23
+                        INT_NUMBER@22..23 "5"
+                      SEMICOLON@23..24 ";"
+                    WHITESPACE@24..25 " "
+                    R_BRACE@25..26 "}"
+                SEMICOLON@26..27 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn unsafe_block_parses() {
+    check(
+        "static f = fn { unsafe { p.* } };",
+        expect![[r#"
+            SOURCE_FILE@0..33
+              STATIC_ITEM@0..33
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..32
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..32
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    UNSAFE_BLOCK_EXPR@16..30
+                      UNSAFE_KW@16..22 "unsafe"
+                      WHITESPACE@22..23 " "
+                      BLOCK_EXPR@23..30
+                        L_BRACE@23..24 "{"
+                        WHITESPACE@24..25 " "
+                        DEREF_EXPR@25..28
+                          PATH_EXPR@25..26
+                            NAME_REF@25..26
+                              IDENT@25..26 "p"
+                          DOT@26..27 "."
+                          STAR@27..28 "*"
+                        WHITESPACE@28..29 " "
+                        R_BRACE@29..30 "}"
+                    WHITESPACE@30..31 " "
+                    R_BRACE@31..32 "}"
+                SEMICOLON@32..33 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn unsafe_fn_is_reserved() {
+    check(
+        "static f = unsafe fn() {};",
+        expect![[r#"
+            SOURCE_FILE@0..26
+              STATIC_ITEM@0..26
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                UNSAFE_BLOCK_EXPR@11..25
+                  UNSAFE_KW@11..17 "unsafe"
+                  WHITESPACE@17..18 " "
+                  FN_LITERAL@18..25
+                    FN_KW@18..20 "fn"
+                    PARAM_LIST@20..22
+                      L_PAREN@20..21 "("
+                      R_PAREN@21..22 ")"
+                    WHITESPACE@22..23 " "
+                    BLOCK_EXPR@23..25
+                      L_BRACE@23..24 "{"
+                      R_BRACE@24..25 "}"
+                SEMICOLON@25..26 ";"
+            error 18..25: `unsafe fn` is not supported yet; use `unsafe { ... }` blocks inside a plain `fn`
+        "#]],
+    );
+}
+
+#[test]
+fn plain_reference_type_is_reserved() {
+    check(
+        "static f = fn(s: &str) {};",
+        expect![[r#"
+            SOURCE_FILE@0..26
+              STATIC_ITEM@0..26
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..25
+                  FN_KW@11..13 "fn"
+                  PARAM_LIST@13..22
+                    L_PAREN@13..14 "("
+                    PARAM@14..21
+                      BIND_PAT@14..15
+                        NAME@14..15
+                          IDENT@14..15 "s"
+                      COLON@15..16 ":"
+                      WHITESPACE@16..17 " "
+                      REF_TYPE@17..21
+                        AMP@17..18 "&"
+                        PATH_TYPE@18..21
+                          NAME_REF@18..21
+                            IDENT@18..21 "str"
+                    R_PAREN@21..22 ")"
+                  WHITESPACE@22..23 " "
+                  BLOCK_EXPR@23..25
+                    L_BRACE@23..24 "{"
+                    R_BRACE@24..25 "}"
+                SEMICOLON@25..26 ";"
+            error 17..21: references are not supported yet
+        "#]],
+    );
+}
+
+// ---- fixed-size arrays ----
 
 #[test]
 fn array_type_positions() {

@@ -440,7 +440,9 @@ impl<W: Write + Clone> Debuggee<W> {
     /// value).
     pub(crate) fn register(&mut self, value: &Value) -> i64 {
         match value {
-            Value::Record { .. } => {
+            // Records expand into fields, arrays into elements — same
+            // registry, same reference scheme.
+            Value::Record { .. } | Value::Array(_) => {
                 self.record_vars.push(value.clone());
                 RECORD_REF_BASE + (self.record_vars.len() as i64 - 1)
             }
@@ -456,6 +458,12 @@ impl<W: Write + Clone> Debuggee<W> {
             let index = (reference - RECORD_REF_BASE) as usize;
             return match self.record_vars.get(index) {
                 Some(Value::Record { fields }) => fields.clone(),
+                // Elements named by index, like every debugger does it.
+                Some(Value::Array(values)) => values
+                    .iter()
+                    .enumerate()
+                    .map(|(i, value)| (i.to_string(), value.clone()))
+                    .collect(),
                 _ => Vec::new(),
             };
         }
@@ -517,6 +525,7 @@ impl<W: Write + Clone> Debuggee<W> {
                     | hir::Ty::Bool
                     | hir::Ty::Fn(_)
                     | hir::Ty::Record(_)
+                    | hir::Ty::Array { .. }
             ) {
                 wrapper_params.retain(|(existing, _, _)| existing != &name);
                 wrapper_params.push((name, ty, value));
@@ -566,6 +575,9 @@ impl<W: Write + Clone> Debuggee<W> {
             EvalErrorKind::Panic => "panicked",
             EvalErrorKind::Runtime => "runtime error",
             EvalErrorKind::NotConst => "error",
+            // Interpreter-detected UB: a deterministic stop, prefixed as
+            // what it is.
+            EvalErrorKind::UndefinedBehavior => "undefined behavior",
             // Unreachable in an instantiated execution; rendered
             // honestly if it ever escapes.
             EvalErrorKind::Uninstantiated => "error",

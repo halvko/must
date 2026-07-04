@@ -68,6 +68,39 @@ pub enum Value {
         name: String,
         payload: Vec<Value>,
     },
+    /// A raw pointer: an allocation identity plus an ELEMENT-GRANULAR path
+    /// into it — never a byte offset, never an integer. Provenance by
+    /// construction: an [`AllocId`] is never reused, so a dangling pointer
+    /// stays recognizably dangling forever. The derived `PartialEq` on
+    /// `(alloc, path)` is exactly pointer `==`/`!=`, falling out of the
+    /// machine's structural operand equality for free. Displays as
+    /// `&raw <opaque>` — no integer addresses exist to leak.
+    Ptr {
+        alloc: AllocId,
+        path: Vec<PathElem>,
+    },
+}
+
+/// Identity of one abstract-memory allocation, unique per machine run and
+/// NEVER reused (that non-reuse is the whole UB-detection story: a freed or
+/// dead allocation's id keeps naming it). Per-machine-run, so pointers are
+/// excluded from anything memoized across runs (see the const-escape rule
+/// in `Machine::force_item`) and from the const-arg domain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AllocId(pub u64);
+
+/// One step of a pointer's path into its allocation — element-granular
+/// (a record field by canonical sorted index; an array element by index),
+/// NEVER a byte offset: v1 observes no layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PathElem {
+    /// A record field, by the canonical sorted-field index (the same order
+    /// `Ty::Record` and `mir::Place::projection` use).
+    Field(u32),
+    /// An array element. Unconstructible today — the place grammar does
+    /// not reach elements yet — carried so the path shape is already
+    /// right when it does.
+    Index(u64),
 }
 
 /// A function value: which item's lowered MIR holds its code, and which of
@@ -159,6 +192,13 @@ impl std::hash::Hash for Value {
                 name.hash(state);
                 payload.hash(state);
             }
+            // Lawful but never an identity: like `Fn`, pointers are
+            // excluded from the const-arg domain (an `AllocId` is
+            // per-machine-run), so this hash can never key an instance.
+            Value::Ptr { alloc, path } => {
+                alloc.hash(state);
+                path.hash(state);
+            }
         }
     }
 }
@@ -222,6 +262,30 @@ impl Value {
                     format!("{head}({parts})")
                 }
             }
+            // Never a number: no integer addresses exist to leak, and
+            // rendering the (per-run) AllocId would invite reading meaning
+            // into it.
+            Value::Ptr { .. } => "&raw <opaque>".to_owned(),
+        }
+    }
+
+    /// Whether a raw pointer sits anywhere inside the value — the
+    /// const-escape rule's predicate: an `AllocId` means nothing outside
+    /// the machine run that minted it, so a memoized compile-time result
+    /// may not carry one.
+    pub fn contains_ptr(&self) -> bool {
+        match self {
+            Value::Ptr { .. } => true,
+            Value::Record { fields } => fields.iter().any(|(_, value)| value.contains_ptr()),
+            Value::Array(values) => values.iter().any(Value::contains_ptr),
+            Value::Tuple(values) => values.iter().any(Value::contains_ptr),
+            Value::Variant { payload, .. } => payload.iter().any(Value::contains_ptr),
+            Value::Unit
+            | Value::Int(_)
+            | Value::Str(_)
+            | Value::Bool(_)
+            | Value::Fn(_)
+            | Value::Builtin(_) => false,
         }
     }
 }
@@ -245,8 +309,24 @@ pub enum EvalErrorKind {
     /// A dynamic error the interpreter itself raised (division by zero,
     /// overflow, internal invariant violations).
     Runtime,
-    /// Const-mode refusals: impure builtins, cycles, the recursion limit.
+    /// Const-mode refusals: impure builtins, cycles, the recursion limit —
+    /// and a pointer escaping compile-time evaluation (a memoized result
+    /// carrying a `Value::Ptr`: an `AllocId` is per-machine-run, so the
+    /// value would be meaningless outside the run that minted it).
     NotConst,
+    /// The interpreter detected undefined behavior — a dangling deref, a
+    /// write into read-only memory — and stopped deterministically. NOT a
+    /// [`Self::Trap`]: a trap re-fires a message the editor already shows
+    /// as a squiggle, while UB is discovered dynamically and has no
+    /// squiggle to mirror.
+    ///
+    /// Spec status (write this down wherever the semantics are described):
+    /// *"When the interpreter detects undefined behavior it stops with a
+    /// message; this is a quality of the interpreter, not a guarantee of
+    /// the language — compiled Must may do anything with the same
+    /// program."* Exactly Miri's contract: detected-UB traps are
+    /// interpreter quality, not language semantics.
+    UndefinedBehavior,
     /// A `ConstParam` operand was read with no instance to resolve it
     /// against — a compile-time body inside a *generic* item, forced
     /// standalone at check time ([`const_arg_values`],

@@ -105,6 +105,32 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             reject_unqualified_bare_variant_pat(&variant_pat, &mut errors);
         } else if let Some(param) = ast::Param::cast(node.clone()) {
             require_mut_names_a_binding(param.mut_token(), param.pat(), &mut errors);
+        } else if let Some(unsafe_block) = ast::UnsafeBlockExpr::cast(node.clone()) {
+            // Reserved: `unsafe fn` parses whole (its real payoff is
+            // API-contract signalling, which wants doc conventions before
+            // mechanism); any other non-block body gets the ordinary
+            // wrap-in-braces treatment. The parser reports the
+            // missing-body case itself.
+            match unsafe_block.expr() {
+                Some(ast::Expr::FnLiteral(fn_lit)) => errors.push(SyntaxError {
+                    message: "`unsafe fn` is not supported yet; use `unsafe { ... }` blocks \
+                              inside a plain `fn`"
+                        .to_owned(),
+                    range: fn_lit.syntax().text_range(),
+                    fix: None,
+                }),
+                Some(body) => require_block(&body, "`unsafe` blocks", &mut errors),
+                None => {}
+            }
+        } else if let Some(ref_type) = ast::RefType::cast(node.clone()) {
+            // `&T`/`&mut T` stay unclaimed for real references — parse-and-
+            // reserve, the same pattern as `pub` fields. `&raw T` is a
+            // distinct node (`RawPtrType`) and never lands here.
+            errors.push(SyntaxError {
+                message: "references are not supported yet".to_owned(),
+                range: ref_type.syntax().text_range(),
+                fix: None,
+            });
         }
     }
     errors
@@ -193,6 +219,13 @@ fn require_variable_target(expr: &ast::Expr, errors: &mut Vec<SyntaxError>) {
                 Some(receiver) => place = receiver,
                 // `.x = 1` with no receiver at all: broken source, the
                 // parse error covers it.
+                None => return,
+            },
+            // A deref is a place segment too (`p.* = v;`, and the chain
+            // `p.*.x = v;` — how much of it the language accepts is
+            // inference's call, like field-root mutability).
+            ast::Expr::DerefExpr(deref) => match deref.receiver() {
+                Some(receiver) => place = receiver,
                 None => return,
             },
             // An index is a place segment (`a[i] = v;`, `m[0][1] = v;`,

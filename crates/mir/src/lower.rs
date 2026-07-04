@@ -21,6 +21,7 @@ pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
     let body = hir::body::body(db, item);
     let infer = hir::infer::infer(db, item);
     let const_diagnostics = hir::const_check::const_check(db, item);
+    let unsafe_diagnostics = hir::unsafe_check::unsafe_check(db, item);
     let own_generics = hir::item_data(db, item)
         .as_ref()
         .map(|it| it.generics.as_slice())
@@ -30,6 +31,7 @@ pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
         body,
         infer,
         const_diagnostics,
+        unsafe_diagnostics,
         resolutions: hir::resolutions(db, item),
         own_generics,
         bodies: Arena::default(),
@@ -40,6 +42,7 @@ pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
         call_traps: FxHashMap::default(),
         const_call_traps: FxHashMap::default(),
         assign_traps: FxHashMap::default(),
+        unsafe_traps: FxHashMap::default(),
         nonexhaustive_traps: FxHashMap::default(),
         initializer_context: true,
     };
@@ -62,6 +65,7 @@ struct LowerCtx<'db> {
     body: &'db Body,
     infer: &'db InferenceResult,
     const_diagnostics: &'db [hir::ConstCheckDiagnostic],
+    unsafe_diagnostics: &'db [hir::UnsafeCheckDiagnostic],
     resolutions: &'db ArenaMap<ExprId, Resolution>,
     /// The item's own generic binder — the index space
     /// [`Resolution::ConstParam`] refers into, converted to the dense
@@ -91,6 +95,11 @@ struct LowerCtx<'db> {
     /// never lowered as a read, so unlike `value_traps` these only fire
     /// there.
     assign_traps: FxHashMap<ExprId, String>,
+    /// Raw-pointer derefs outside any `unsafe { ... }` block, keyed by the
+    /// deref expression: the operation must not execute at all (a read
+    /// traps instead of loading, a write traps instead of storing), with
+    /// exactly the squiggle's message.
+    unsafe_traps: FxHashMap<ExprId, String>,
     /// Non-exhaustive `match` expressions, keyed by the match: the value
     /// only fails to exist when the *uncovered* case actually shows up, so
     /// this is not a value trap — it becomes the switch's otherwise-arm
@@ -238,6 +247,11 @@ impl LowerCtx<'_> {
                 InferenceDiagnostic::AssignToConstParam { target, .. } => {
                     self.assign_traps.insert(*target, diag.message());
                 }
+                // A deref of a non-pointer: the deref's value cannot be
+                // produced.
+                InferenceDiagnostic::DerefNonPointer { expr, .. } => {
+                    self.value_traps.insert(*expr, diag.message());
+                }
                 // Indexing a non-array, or a compile-time-known index past
                 // a compile-time-known length: the element's value cannot
                 // be produced (the OOB trap carries exactly the text the
@@ -255,7 +269,32 @@ impl LowerCtx<'_> {
                 InferenceDiagnostic::ArrayConstArg { expr } => {
                     self.value_traps.insert(*expr, diag.message());
                 }
+                // A broken address-of: keyed on the WHOLE `&raw` expression
+                // (the squiggle may sit on the root name inside it, but the
+                // value that cannot be produced is the pointer).
+                InferenceDiagnostic::AddrOfNonPlace { expr }
+                | InferenceDiagnostic::AddrOfDerefUnsupported { expr } => {
+                    self.value_traps.insert(*expr, diag.message());
+                }
+                InferenceDiagnostic::AddrOfIndexUnsupported { expr } => {
+                    self.value_traps.insert(*expr, diag.message());
+                }
+                InferenceDiagnostic::AddrOfMutImmutable { addr_of, .. }
+                | InferenceDiagnostic::AddrOfMutItem { addr_of, .. } => {
+                    self.value_traps.insert(*addr_of, diag.message());
+                }
+                // Writes through pointers the checker rejected: keyed on
+                // the target (the deref), like the other assign traps.
+                InferenceDiagnostic::AssignThroughImmutablePointer { target, .. }
+                | InferenceDiagnostic::AssignThroughPointerField { target } => {
+                    self.assign_traps.insert(*target, diag.message());
+                }
             }
+        }
+        // Unsafe-check findings land on the deref expression itself — the
+        // operation (read or write) that must not run outside `unsafe`.
+        for diag in self.unsafe_diagnostics {
+            self.unsafe_traps.insert(diag.expr(), diag.message());
         }
         // Const-check diagnostics are reported on the *callee* (the
         // squiggle sits there), but the operation that must not execute is
@@ -891,6 +930,44 @@ impl LowerCtx<'_> {
                     }
                 }
             }
+            // `&raw place` / `&raw mut place`. The diagnosed cases (not a
+            // place, immutable root, `static mut`, deref-rooted) are all
+            // pending value traps on this expression — the placeholder is
+            // never observed. The clean cases resolve the place like a
+            // field-assign target does: root local (or a temp holding a
+            // `const` use's copy, or a `static`'s one allocation) plus the
+            // chain's field indices.
+            ExprData::AddrOf { mutable, place } => {
+                if self.value_traps.contains_key(&expr) {
+                    return Operand::Const(Const::Unit);
+                }
+                self.lower_addr_of(b, expr, *mutable, *place)
+            }
+            // `p.*` — a read through the pointer. Outside `unsafe` the
+            // operation must not run at all: the trap replaces the load
+            // (the receiver still evaluates for its effects), carrying the
+            // squiggle's exact message.
+            ExprData::Deref { receiver } => {
+                let op = self.lower_expr(b, *receiver);
+                if let Some(message) = self.unsafe_traps.get(&expr).cloned() {
+                    return self.trap(b, expr, message);
+                }
+                match self.ty(*receiver) {
+                    Ty::RawPtr { .. } => {
+                        let dest = b.temp(self.ty(expr));
+                        b.push_assign(dest, Rvalue::Deref(op), expr);
+                        Operand::Copy(dest)
+                    }
+                    // Not a pointer (`DerefNonPointer`/`FieldOnUnknownType`
+                    // seeded a value trap, or the receiver diverges/was
+                    // trapped): never observed.
+                    _ => Operand::Const(Const::Unit),
+                }
+            }
+            // A pure checker region: nothing to lower — the body is the
+            // same runtime code (unlike a `const` block, which is a
+            // compile-time body of its own).
+            ExprData::Unsafe { body: inner } => self.lower_expr(b, *inner),
             ExprData::FnLiteral {
                 params,
                 body: fn_body,
@@ -1277,6 +1354,7 @@ impl LowerCtx<'_> {
                 .unwrap_or(Ty::Error),
             name: (!data.name.is_empty()).then(|| data.name.clone()),
             binding: Some(binding),
+            addressable: false,
         });
         b.local_for_binding.insert(binding, local);
         local
@@ -1303,6 +1381,7 @@ impl LowerCtx<'_> {
                     ty,
                     name: None,
                     binding: None,
+                    addressable: false,
                 });
                 self.bind_binding_pattern(b, pat, &Operand::Copy(local), origin);
                 local
@@ -1322,6 +1401,7 @@ impl LowerCtx<'_> {
                     ty,
                     name: None,
                     binding: None,
+                    addressable: false,
                 })
             }
             PatData::Variant { .. } => {
@@ -1330,6 +1410,7 @@ impl LowerCtx<'_> {
                     ty: Ty::Error,
                     name: None,
                     binding: None,
+                    addressable: false,
                 })
             }
         }
@@ -1487,6 +1568,36 @@ impl LowerCtx<'_> {
         // A target inference rejected: trap with the squiggle's exact text.
         if let Some(message) = self.assign_traps.get(&target).cloned() {
             self.trap(b, target, message);
+            return;
+        }
+        // `p.* = value;` — a store through a raw pointer. The pointer
+        // evaluates like any read; outside `unsafe` the store is replaced
+        // by a trap (the write must not happen), same for a target whose
+        // read-typing failed (non-pointer receiver — its value trap
+        // carries the message).
+        if let ExprData::Deref { receiver } = &self.body.exprs[target] {
+            let receiver = *receiver;
+            let ptr_op = self.lower_expr(b, receiver);
+            if let Some(message) = self.value_traps.get(&target).cloned() {
+                self.trap(b, target, message);
+                return;
+            }
+            if let Some(message) = self.unsafe_traps.get(&target).cloned() {
+                self.trap(b, target, message);
+                return;
+            }
+            // A broken receiver (not a `RawPtr` — `{error}`-typed, its own
+            // story upstream) skips the write, like the field path's
+            // missing-index case.
+            if let Ty::RawPtr { .. } = self.ty(receiver) {
+                b.blocks[b.current].statements.push(Statement {
+                    kind: StatementKind::PtrStore {
+                        ptr: ptr_op,
+                        value: value_op,
+                    },
+                    origin: value,
+                });
+            }
             return;
         }
         if let ExprData::Field { .. } | ExprData::Index { .. } = &self.body.exprs[target] {
@@ -1757,6 +1868,165 @@ impl LowerCtx<'_> {
         }
     }
 
+    /// Lower `&raw [mut] place` for the accepted place shapes (everything
+    /// else was diagnosed and value-trapped upstream): the chain's field
+    /// indices resolve exactly like a field-assign target's, then the root
+    /// decides the flavor —
+    ///
+    /// - a **local**: [`Rvalue::AddrOf`] of its place, and the local is
+    ///   marked `addressable` (the two-tier promotion fact);
+    /// - a **`static` item**: [`Rvalue::AddrOfStatic`] — the item's one
+    ///   machine-wide allocation, so every `&raw S` is the same address;
+    /// - a **`const` item**: the value is copied into a fresh temp and the
+    ///   temp's address is taken — const=copied, now observable (each
+    ///   `&raw C` mention is its own address, honestly).
+    fn lower_addr_of(
+        &mut self,
+        b: &mut BodyBuilder,
+        expr: ExprId,
+        mutable: bool,
+        place: ExprId,
+    ) -> Operand {
+        // The chain's field-access expressions, outermost first; `root` is
+        // the non-field expression at its base.
+        let mut chain = Vec::new();
+        let mut root = place;
+        while let ExprData::Field { receiver, .. } = &self.body.exprs[root] {
+            chain.push(root);
+            root = *receiver;
+        }
+        // A broken link in the chain (unknown field, non-record receiver):
+        // pending value traps from the operand's read-typing.
+        for &link in std::iter::once(&root).chain(chain.iter().rev()) {
+            if let Some(message) = self.value_traps.get(&link).cloned() {
+                return self.trap(b, link, message);
+            }
+        }
+        // Innermost projection first, exactly like a field-assign place.
+        let mut projection = Vec::with_capacity(chain.len());
+        for &field_expr in chain.iter().rev() {
+            let ExprData::Field { receiver, name } = &self.body.exprs[field_expr] else {
+                unreachable!("chain holds only field expressions");
+            };
+            match self.field_index(*receiver, name) {
+                Some(index) => projection.push(index),
+                // `{error}`-typed receiver, silently broken upstream: the
+                // pointer value is never observable — keep lowering total.
+                None => return Operand::Const(Const::Unit),
+            }
+        }
+        let ExprData::NameRef(name) = &self.body.exprs[root] else {
+            // Non-place roots were diagnosed (`AddrOfNonPlace` /
+            // `AddrOfDerefUnsupported`) and trapped by the wrapper; a
+            // missing root is a parse error.
+            return Operand::Const(Const::Unit);
+        };
+        match self.resolutions.get(root) {
+            Some(Resolution::Local(binding)) => match b.local_for_binding.get(binding) {
+                Some(&local) => {
+                    b.locals[local].addressable = true;
+                    let dest = b.temp(self.ty(expr));
+                    b.push_assign(
+                        dest,
+                        Rvalue::AddrOf {
+                            mutable,
+                            place: Place {
+                                local,
+                                projection: projection
+                                    .into_iter()
+                                    .map(crate::ProjElem::Field)
+                                    .collect(),
+                            },
+                        },
+                        expr,
+                    );
+                    Operand::Copy(dest)
+                }
+                // A local of an enclosing function: the same unsupported
+                // capture the read path reports.
+                None => {
+                    let diag = MirDiagnostic::UnsupportedCapture {
+                        expr: root,
+                        name: name.clone(),
+                    };
+                    let message = diag.message();
+                    self.diagnostics.push(diag);
+                    self.trap(b, root, message)
+                }
+            },
+            Some(Resolution::Item(loc)) => {
+                let loc = loc.clone();
+                let target = loc.to_id(self.db);
+                if hir::signature(self.db, target).contains_error() {
+                    // Same reconciliation as `lower_name_ref`'s
+                    // broken-annotation arm.
+                    let message = if hir::ty::signature_needs_annotation(self.db, target) {
+                        InferenceDiagnostic::NeedsAnnotation {
+                            expr: root,
+                            item: loc.clone(),
+                        }
+                        .message()
+                    } else {
+                        format!("cannot use `{name}`: its type annotation has errors")
+                    };
+                    return self.trap(b, root, message);
+                }
+                let constness = hir::item_data(self.db, target)
+                    .as_ref()
+                    .and_then(|it| it.kind.constness())
+                    .unwrap_or(hir::Constness::Static);
+                match constness {
+                    hir::Constness::Static => {
+                        let dest = b.temp(self.ty(expr));
+                        b.push_assign(
+                            dest,
+                            Rvalue::AddrOfStatic {
+                                item: loc,
+                                projection,
+                            },
+                            expr,
+                        );
+                        Operand::Copy(dest)
+                    }
+                    hir::Constness::Const => {
+                        // The address of THIS use's copy: materialize the
+                        // (cloned) const value in a temp and point at it.
+                        let copy = b.temp(self.ty(root));
+                        b.locals[copy].addressable = true;
+                        b.push_assign(copy, Rvalue::Use(Operand::Const(Const::Item(loc))), root);
+                        let dest = b.temp(self.ty(expr));
+                        b.push_assign(
+                            dest,
+                            Rvalue::AddrOf {
+                                mutable,
+                                place: Place {
+                                    local: copy,
+                                    projection: projection
+                                        .into_iter()
+                                        .map(crate::ProjElem::Field)
+                                        .collect(),
+                                },
+                            },
+                            expr,
+                        );
+                        Operand::Copy(dest)
+                    }
+                }
+            }
+            // Justified by the duplicate-definition diagnostics.
+            Some(Resolution::Ambiguous(_)) => {
+                self.trap(b, root, hir::diag::defined_multiple_times(name))
+            }
+            // Non-places (const params, types, builtins) were diagnosed
+            // and trapped by the wrapper; kept total regardless.
+            Some(Resolution::ConstParam(_) | Resolution::TypeItem(_) | Resolution::Builtin(_)) => {
+                Operand::Const(Const::Unit)
+            }
+            // Justified by the unresolved-name diagnostic.
+            None => self.trap(b, root, hir::diag::unresolved_name(name)),
+        }
+    }
+
     /// Synthesize the body of a first-class variant constructor
     /// (`let f = Shape::Circle; f(3)`): one block that assembles the
     /// parameters into the tag-free payload aggregate and returns it. The
@@ -1775,6 +2045,7 @@ impl LowerCtx<'_> {
                 ty: ty.clone(),
                 name: None,
                 binding: None,
+                addressable: false,
             });
             b.params.push(local);
         }
@@ -1881,6 +2152,7 @@ impl BodyBuilder {
             ty: ret_ty,
             name: None,
             binding: None,
+            addressable: false,
         });
         let mut blocks = Arena::default();
         let entry = blocks.alloc(BlockData {
@@ -1918,6 +2190,7 @@ impl BodyBuilder {
             ty,
             name: None,
             binding: None,
+            addressable: false,
         })
     }
 

@@ -14,7 +14,9 @@ use mir::{
 };
 use rustc_hash::FxHashMap;
 
-use crate::{EvalError, EvalErrorKind, FnValue, GenericArgValue, Instance, Value};
+use crate::{
+    AllocId, EvalError, EvalErrorKind, FnValue, GenericArgValue, Instance, PathElem, Value,
+};
 
 /// What the machine does at its impure edges. [`ConstMode`] refuses;
 /// the runner's mode performs the I/O.
@@ -90,6 +92,17 @@ pub struct Frame {
     /// generic code.
     const_args: Vec<Value>,
     locals: ArenaMap<LocalId, Value>,
+    /// The two-tier promotion map: locals whose address was taken, and the
+    /// allocation each one moved into. Populated lazily at the first
+    /// `&raw` of a local (MIR statically marks the candidates — see
+    /// `LocalData::addressable`); once promoted, every read/write of the
+    /// local goes through the allocation, so writes through pointers and
+    /// direct uses see one place. Empty in pointer-free bodies — the
+    /// `is_empty` fast path keeps those executing exactly as before. The
+    /// frame's allocations die (become detectably dangling) when the
+    /// frame returns: `&raw x` is the address of that frame slot, for that
+    /// frame's lifetime.
+    promoted: FxHashMap<LocalId, AllocId>,
     /// Caller linkage: the local the return value lands in, and the block
     /// the caller resumes at (`None` = the callee's type promised to
     /// diverge). `None` overall marks the bottom frame of an execution.
@@ -101,6 +114,33 @@ pub enum StepEvent {
     Progress,
     /// The bottom frame returned: the execution's result.
     Done(Value),
+}
+
+/// One abstract-memory allocation: a TYPED value with liveness and
+/// writability — Miri's skeleton without Miri's bytes. Pointers address
+/// allocations by [`AllocId`] plus an element-granular path; there are no
+/// byte offsets and no integer addresses anywhere, which is what makes the
+/// evaluator a UB detector by construction (a dead allocation is
+/// recognizably dead forever — ids are never reused).
+struct Allocation {
+    value: Value,
+    /// `false` once the owning frame returned (a local): any deref then is
+    /// detected UB.
+    live: bool,
+    /// `false` for statics: any write through a pointer into one is
+    /// detected UB (unreachable from well-typed code — statics only hand
+    /// out shared `&raw` — but the memory model enforces it regardless).
+    writable: bool,
+    kind: AllocKind,
+}
+
+/// What an allocation backs — decides the UB message's wording.
+#[derive(Clone, Copy)]
+enum AllocKind {
+    /// An address-taken local (a frame slot promoted into memory).
+    Local,
+    /// A `static` item's one place.
+    Static,
 }
 
 pub struct Machine<'db, M> {
@@ -131,6 +171,16 @@ pub struct Machine<'db, M> {
     const_depth: usize,
     const_fuel: u64,
     next_frame_serial: u64,
+    /// The typed abstract memory: every address-taken local and every
+    /// `&raw`-mentioned static lives here; nothing else ever does
+    /// (pay-for-what-you-use, applied to the interpreter itself).
+    memory: FxHashMap<AllocId, Allocation>,
+    /// `static` items' one place each, minted read-only on the first
+    /// `&raw S` — so `&raw S == &raw S` holds across mentions
+    /// (static=identity, observable). Plain mentions of `S` keep cloning
+    /// the `forced` memo, unchanged.
+    static_allocs: FxHashMap<ItemLoc, AllocId>,
+    next_alloc: u64,
 }
 
 impl<'db> Machine<'db, ConstMode> {
@@ -156,6 +206,9 @@ impl<'db, M: Mode> Machine<'db, M> {
             const_depth: 0,
             const_fuel: CONST_FUEL,
             next_frame_serial: 0,
+            memory: FxHashMap::default(),
+            static_allocs: FxHashMap::default(),
+            next_alloc: 0,
         }
     }
 
@@ -187,13 +240,38 @@ impl<'db, M: Mode> Machine<'db, M> {
         // queried directly or forced from inside another item's evaluation.
         let saved_frames = std::mem::take(&mut self.frames);
         let saved_fuel = std::mem::replace(&mut self.const_fuel, CONST_FUEL);
-        let result = self.eval_root(&loc);
+        let result = self
+            .eval_root(&loc)
+            .and_then(|value| self.check_const_escape(value, root_origin(self.db, &loc)));
         self.frames = saved_frames;
         self.const_fuel = saved_fuel;
         self.const_depth -= 1;
         self.forcing.pop();
         self.forced.insert(loc, result.clone());
         result
+    }
+
+    /// The v1 const-escape rule: **pointers do not escape const
+    /// evaluation.** A memoized compile-time result carrying a
+    /// `Value::Ptr` is refused — an [`AllocId`] is per-machine-run, so the
+    /// memo would be meaningless to any later run (and the pointee — a
+    /// promoted local of an already-popped frame — is dangling anyway).
+    /// Pointers may live and die *inside* a const computation freely;
+    /// const-built pointer-carrying values (a const `Vec`) wait for an
+    /// interning design.
+    fn check_const_escape(
+        &self,
+        value: Value,
+        origin: Option<(ItemLoc, ExprId)>,
+    ) -> Result<Value, EvalError> {
+        if value.contains_ptr() {
+            return Err(EvalError {
+                kind: EvalErrorKind::NotConst,
+                message: "a pointer cannot leave compile-time evaluation".to_owned(),
+                origin,
+            });
+        }
+        Ok(value)
     }
 
     /// The (per-run memoized) value of a compile-time body — a `const
@@ -242,7 +320,8 @@ impl<'db, M: Mode> Machine<'db, M> {
         let saved_fuel = std::mem::replace(&mut self.const_fuel, CONST_FUEL);
         let result = self
             .push_frame(loc.clone(), body, Vec::new(), const_env, None)
-            .and_then(|()| self.run_to_done());
+            .and_then(|()| self.run_to_done())
+            .and_then(|value| self.check_const_escape(value, self.const_block_origin(loc, body)));
         self.frames = saved_frames;
         self.const_fuel = saved_fuel;
         self.const_depth -= 1;
@@ -358,7 +437,12 @@ impl<'db, M: Mode> Machine<'db, M> {
         let body = &self.lowered(&frame.loc).bodies[frame.body];
         out.extend(body.locals.iter().filter_map(|(id, data)| {
             let name = data.name.clone()?;
-            let value = frame.locals.get(id)?.clone();
+            // A promoted (address-taken) local's current value lives in
+            // its allocation, not the frame map.
+            let value = match frame.promoted.get(&id) {
+                Some(alloc) => self.memory.get(alloc)?.value.clone(),
+                None => frame.locals.get(id)?.clone(),
+            };
             Some((name, data.ty.clone(), value))
         }));
         out
@@ -439,6 +523,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             statement: 0,
             const_args,
             locals,
+            promoted: FxHashMap::default(),
             return_to,
         });
         Ok(())
@@ -457,12 +542,27 @@ impl<'db, M: Mode> Machine<'db, M> {
         let block = &body.blocks[block_id];
 
         if let Some(stmt) = block.statements.get(statement) {
-            let StatementKind::Assign { dest, rvalue } = &stmt.kind;
-            let value = self.eval_rvalue(&loc, body, rvalue, stmt.origin)?;
-            let body = &self.lowered(&loc).bodies[body_id];
-            let projection = self.resolve_projection(&loc, body, &dest.projection, stmt.origin)?;
-            let body = &self.lowered(&loc).bodies[body_id];
-            self.write_place(&loc, body, dest.local, &projection, value, stmt.origin)?;
+            match &stmt.kind {
+                StatementKind::Assign { dest, rvalue } => {
+                    let value = self.eval_rvalue(&loc, body, rvalue, stmt.origin)?;
+                    // Element indices in the destination evaluate before
+                    // the write (bounds are then checked at the write
+                    // itself — an out-of-range element write is an
+                    // ordinary trap, never silent corruption).
+                    let projection =
+                        self.resolve_projection(&loc, body, &dest.projection, stmt.origin)?;
+                    self.write_place(&loc, body, dest.local, &projection, value, stmt.origin)?;
+                }
+                // A store through a raw pointer: resolved against abstract
+                // memory, with liveness and writability checked right here
+                // — the misuse cases are detected UB, not silent
+                // corruption.
+                StatementKind::PtrStore { ptr, value } => {
+                    let ptr = self.eval_operand(&loc, body, ptr, stmt.origin)?;
+                    let value = self.eval_operand(&loc, body, value, stmt.origin)?;
+                    self.ptr_store(ptr, value, &loc, stmt.origin)?;
+                }
+            }
             let frame = self.frames.last_mut().expect("frame still live");
             frame.statement += 1;
             return Ok(StepEvent::Progress);
@@ -573,6 +673,15 @@ impl<'db, M: Mode> Machine<'db, M> {
                     .cloned()
                     .unwrap_or(Value::Unit);
                 let finished = self.frames.pop().expect("frame still live");
+                // The frame's address-taken locals die with it: their
+                // allocations stay in memory (ids are never reused) but go
+                // dead — a later deref through a surviving pointer is
+                // *detected* UB, deterministically.
+                for alloc in finished.promoted.values() {
+                    if let Some(allocation) = self.memory.get_mut(alloc) {
+                        allocation.live = false;
+                    }
+                }
                 match finished.return_to {
                     None => return Ok(StepEvent::Done(value)),
                     Some((dest, Some(target))) => {
@@ -635,18 +744,10 @@ impl<'db, M: Mode> Machine<'db, M> {
         Ok(StepEvent::Progress)
     }
 
-    /// Store `value` into `dest` on the topmost frame: the whole local for
-    /// an empty projection, or the nested `Value::Record` field the index
-    /// path names — mutated in place; values are plain Rust data in
-    /// `frame.locals`. Only records are writable through (field assignment
-    /// is compile-checked to record chains; variant payloads aren't
-    /// reachable as places), so anything else here is an invariant
-    /// violation, loud like every other ill-typed value.
     /// Evaluate a place projection's element-index operands, producing the
-    /// value-walkable form [`Machine::write_place`] consumes. Field steps
-    /// pass through; index steps evaluate to their `usize` value (bounds
-    /// are checked later, at the write, where the array's length is
-    /// known).
+    /// value-walkable form [`write_place`] consumes. Field steps pass
+    /// through; index steps evaluate to their `usize` value (bounds are
+    /// checked later, at the write, where the array's length is known).
     fn resolve_projection(
         &mut self,
         loc: &ItemLoc,
@@ -697,6 +798,36 @@ impl<'db, M: Mode> Machine<'db, M> {
             ProjectError::Shape(detail) => this.internal_error(detail, Some((loc.clone(), origin))),
         };
         let frame = self.frames.last_mut().expect("frame still live");
+        // A promoted (address-taken) local lives in memory, not in the
+        // frame map: the write lands in its allocation, so pointers into
+        // it observe it — including interior pointers surviving a
+        // whole-value overwrite, exactly real-memory behavior. The
+        // `is_empty` fast path keeps pointer-free bodies on the plain
+        // frame-map route.
+        if !frame.promoted.is_empty()
+            && let Some(&alloc) = frame.promoted.get(&local)
+        {
+            let slot = match self.memory.get_mut(&alloc) {
+                Some(allocation) => &mut allocation.value,
+                None => {
+                    return Err(self.internal_error(
+                        "a promoted local's allocation is missing".to_owned(),
+                        Some((loc.clone(), origin)),
+                    ));
+                }
+            };
+            if projection.is_empty() {
+                *slot = value;
+                return Ok(());
+            }
+            return match project_mut(slot, projection) {
+                Ok(field) => {
+                    *field = value;
+                    Ok(())
+                }
+                Err(error) => Err(project_error(self, error)),
+            };
+        }
         if projection.is_empty() {
             frame.locals.insert(local, value);
             return Ok(());
@@ -887,7 +1018,193 @@ impl<'db, M: Mode> Machine<'db, M> {
                     other => Err(self.ill_typed("a record or payload value", &other, loc, origin)),
                 }
             }
+            // `&raw [mut] local[.field...]`: promote the local into
+            // abstract memory (first address-taking only; after that the
+            // allocation IS the local) and mint the pointer — an
+            // (AllocId, path) pair, never a number. Element steps would
+            // evaluate their index here; nothing mints them yet
+            // (array-element address-of is reserved), but the conversion
+            // is total regardless.
+            Rvalue::AddrOf { place, .. } => {
+                let alloc = self.promote_local(place.local, body, loc, origin)?;
+                let mut path = Vec::with_capacity(place.projection.len());
+                for elem in &place.projection {
+                    match elem {
+                        ProjElem::Field(index) => path.push(PathElem::Field(*index)),
+                        ProjElem::Index(op) => {
+                            let value = self.eval_operand(loc, body, op, origin)?;
+                            let Value::Int(index) = value else {
+                                return Err(self.ill_typed("a `usize` index", &value, loc, origin));
+                            };
+                            let index = u64::try_from(index).map_err(|_| {
+                                self.internal_error(
+                                    format!("array index {index} overflows a pointer path"),
+                                    Some((loc.clone(), origin)),
+                                )
+                            })?;
+                            path.push(PathElem::Index(index));
+                        }
+                    }
+                }
+                Ok(Value::Ptr { alloc, path })
+            }
+            // `&raw S[.field...]`: the static's ONE allocation, minted
+            // read-only on first mention — so two `&raw S` are the same
+            // address (static=identity, observable). Plain `S` mentions
+            // keep cloning the memo, unchanged.
+            Rvalue::AddrOfStatic { item, projection } => {
+                let alloc = match self.static_allocs.get(item) {
+                    Some(&alloc) => alloc,
+                    None => {
+                        let value = self.force_item(item.clone())?;
+                        let alloc = self.fresh_alloc(Allocation {
+                            value,
+                            live: true,
+                            writable: false,
+                            kind: AllocKind::Static,
+                        });
+                        self.static_allocs.insert(item.clone(), alloc);
+                        alloc
+                    }
+                };
+                Ok(Value::Ptr {
+                    alloc,
+                    path: projection.iter().map(|&i| PathElem::Field(i)).collect(),
+                })
+            }
+            // `p.*`: validity is checked at the deref — a dead allocation
+            // is detected UB, deterministically.
+            Rvalue::Deref(op) => {
+                let value = self.eval_operand(loc, body, op, origin)?;
+                let Value::Ptr { alloc, path } = value else {
+                    return Err(self.ill_typed("a raw pointer", &value, loc, origin));
+                };
+                self.ptr_read(alloc, &path, loc, origin)
+            }
         }
+    }
+
+    /// The allocation backing `local`, promoting it into abstract memory on
+    /// the first address-taking: the current value moves out of the frame's
+    /// plain map into a live, writable allocation; every later read/write
+    /// of the local goes through it (see `write_place`/`eval_operand`).
+    fn promote_local(
+        &mut self,
+        local: LocalId,
+        body: &MirBody,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<AllocId, EvalError> {
+        let frame = self.frames.last_mut().expect("frame still live");
+        if let Some(&alloc) = frame.promoted.get(&local) {
+            return Ok(alloc);
+        }
+        let Some(value) = frame.locals.remove(local) else {
+            // `&raw` of a local no `let` initialized: unreachable from real
+            // programs (a `let` always initializes); loud like other reads
+            // of uninitialized slots.
+            return Err(self.internal_error(
+                format!("address of uninitialized {}", local_name(body, local)),
+                Some((loc.clone(), origin)),
+            ));
+        };
+        let alloc = self.fresh_alloc(Allocation {
+            value,
+            live: true,
+            writable: true,
+            kind: AllocKind::Local,
+        });
+        let frame = self.frames.last_mut().expect("frame still live");
+        frame.promoted.insert(local, alloc);
+        Ok(alloc)
+    }
+
+    fn fresh_alloc(&mut self, allocation: Allocation) -> AllocId {
+        let alloc = AllocId(self.next_alloc);
+        self.next_alloc += 1;
+        self.memory.insert(alloc, allocation);
+        alloc
+    }
+
+    /// Read through a pointer: liveness first (a dead allocation is
+    /// detected UB), then the element-granular path selects the value.
+    fn ptr_read(
+        &self,
+        alloc: AllocId,
+        path: &[PathElem],
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<Value, EvalError> {
+        let allocation = self.allocation_for_deref(alloc, loc, origin)?;
+        project_path(&allocation.value, path)
+            .cloned()
+            .map_err(|detail| self.internal_error(detail, Some((loc.clone(), origin))))
+    }
+
+    /// Write through a pointer: liveness, then writability (a static's
+    /// allocation is read-only — a write into one is detected UB), then
+    /// the path names the slot.
+    fn ptr_store(
+        &mut self,
+        ptr: Value,
+        value: Value,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<(), EvalError> {
+        let Value::Ptr { alloc, path } = ptr else {
+            return Err(self.ill_typed("a raw pointer", &ptr, loc, origin));
+        };
+        self.allocation_for_deref(alloc, loc, origin)?;
+        let allocation = self.memory.get_mut(&alloc).expect("checked just above");
+        if !allocation.writable {
+            return Err(EvalError {
+                kind: EvalErrorKind::UndefinedBehavior,
+                message: "write through a pointer into read-only memory (a `static`)".to_owned(),
+                origin: Some((loc.clone(), origin)),
+            });
+        }
+        project_path_mut(&mut allocation.value, &path)
+            .map(|slot| *slot = value)
+            .map_err(|detail| self.internal_error(detail, Some((loc.clone(), origin))))
+    }
+
+    /// The liveness gate every deref (read or write) passes through. A
+    /// missing or dead allocation is *detected undefined behavior*: the
+    /// interpreter stops with a message — a quality of the interpreter,
+    /// not a guarantee of the language (compiled Must may do anything with
+    /// the same program).
+    fn allocation_for_deref(
+        &self,
+        alloc: AllocId,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<&Allocation, EvalError> {
+        let ub = |message: &str| EvalError {
+            kind: EvalErrorKind::UndefinedBehavior,
+            message: message.to_owned(),
+            origin: Some((loc.clone(), origin)),
+        };
+        let Some(allocation) = self.memory.get(&alloc) else {
+            // A pointer from a different machine run (the const-escape
+            // rule and the debugger's parameter filter should make this
+            // unreachable): still deterministic, still UB.
+            return Err(ub(
+                "dangling pointer — it does not point into this execution's memory",
+            ));
+        };
+        if !allocation.live {
+            return Err(match allocation.kind {
+                AllocKind::Local => ub(
+                    "dangling pointer — the local it pointed to no longer exists \
+                     (its frame has returned)",
+                ),
+                // A static's allocation is never popped, so a pointer into
+                // one can never dangle this way; the arm only keeps the
+                // match total.
+                AllocKind::Static => ub("use after free — this allocation was already freed"),
+            });
+        }
+        Ok(allocation)
     }
 
     fn eval_bin_op(
@@ -951,17 +1268,28 @@ impl<'db, M: Mode> Machine<'db, M> {
         origin: ExprId,
     ) -> Result<Value, EvalError> {
         match op {
-            Operand::Copy(local) => self
-                .frames
-                .last()
-                .and_then(|frame| frame.locals.get(*local))
-                .cloned()
-                .ok_or_else(|| {
-                    self.internal_error(
-                        format!("read of uninitialized {}", local_name(body, *local)),
-                        Some((loc.clone(), origin)),
-                    )
-                }),
+            Operand::Copy(local) => {
+                let frame = self.frames.last();
+                // The promoted tier first (empty in pointer-free bodies —
+                // one branch, no behavior change): an address-taken
+                // local's current value lives in its allocation.
+                if let Some(frame) = frame
+                    && !frame.promoted.is_empty()
+                    && let Some(alloc) = frame.promoted.get(local)
+                    && let Some(allocation) = self.memory.get(alloc)
+                {
+                    return Ok(allocation.value.clone());
+                }
+                frame
+                    .and_then(|frame| frame.locals.get(*local))
+                    .cloned()
+                    .ok_or_else(|| {
+                        self.internal_error(
+                            format!("read of uninitialized {}", local_name(body, *local)),
+                            Some((loc.clone(), origin)),
+                        )
+                    })
+            }
             Operand::Const(c) => Ok(match c {
                 Const::Unit => Value::Unit,
                 Const::Int(v) => Value::Int(*v),
@@ -1094,6 +1422,96 @@ impl<'db, M: Mode> Machine<'db, M> {
     }
 }
 
+/// Navigate a pointer's element-granular path to the value it names.
+/// Errors are internal-error details (the caller attaches the origin): a
+/// path/shape mismatch means a pointer the type system should have refused
+/// was materialized.
+fn project_path<'v>(slot: &'v Value, path: &[PathElem]) -> Result<&'v Value, String> {
+    let mut current = slot;
+    for elem in path {
+        current = match (elem, current) {
+            (PathElem::Field(index), Value::Record { fields }) => {
+                let len = fields.len();
+                match fields.get(*index as usize) {
+                    Some((_, field)) => field,
+                    None => {
+                        return Err(format!(
+                            "record field index {index} out of range ({len} elements)"
+                        ));
+                    }
+                }
+            }
+            // No pointer INTO an array element can be minted yet (array-
+            // element address-of is reserved), but the path machinery is
+            // already array-aware for when it lands.
+            (PathElem::Index(index), Value::Array(values)) => {
+                let len = values.len();
+                match values.get(*index as usize) {
+                    Some(element) => element,
+                    None => {
+                        return Err(format!("array index {index} out of range ({len} elements)"));
+                    }
+                }
+            }
+            (PathElem::Index(_), other) => {
+                return Err(format!(
+                    "expected an array value to project into, found `{}`",
+                    other.display()
+                ));
+            }
+            (PathElem::Field(_), other) => {
+                return Err(format!(
+                    "expected a record value to project into, found `{}`",
+                    other.display()
+                ));
+            }
+        };
+    }
+    Ok(current)
+}
+
+/// [`project_path`], mutably — the store side.
+fn project_path_mut<'v>(slot: &'v mut Value, path: &[PathElem]) -> Result<&'v mut Value, String> {
+    let mut current = slot;
+    for elem in path {
+        current = match (elem, current) {
+            (PathElem::Field(index), Value::Record { fields }) => {
+                let len = fields.len();
+                match fields.get_mut(*index as usize) {
+                    Some((_, field)) => field,
+                    None => {
+                        return Err(format!(
+                            "record field index {index} out of range ({len} elements)"
+                        ));
+                    }
+                }
+            }
+            (PathElem::Index(index), Value::Array(values)) => {
+                let len = values.len();
+                match values.get_mut(*index as usize) {
+                    Some(element) => element,
+                    None => {
+                        return Err(format!("array index {index} out of range ({len} elements)"));
+                    }
+                }
+            }
+            (PathElem::Index(_), other) => {
+                return Err(format!(
+                    "expected an array value to project into, found `{}`",
+                    other.display()
+                ));
+            }
+            (PathElem::Field(_), other) => {
+                return Err(format!(
+                    "expected a record value to project into, found `{}`",
+                    other.display()
+                ));
+            }
+        };
+    }
+    Ok(current)
+}
+
 /// One resolved step of a place projection: index operands already
 /// evaluated, ready to walk a value.
 enum ResolvedProj {
@@ -1197,7 +1615,11 @@ fn value_ty(value: &Value) -> hir::Ty {
         // variables panel; console-eval parameters demote like the other
         // unrecoverable carriers when the static type was an instance.
         Value::Variant { decl, .. } => hir::Ty::Named(hir::NamedTy::plain(decl.clone())),
-        Value::Fn(_) | Value::Builtin(_) | Value::Tuple(_) => hir::Ty::Error,
+        // A pointer's pointee type isn't recoverable from the value alone
+        // (and a pointer must not cross into a fresh console-eval machine
+        // anyway — its allocation lives here): `{error}` demotes it from
+        // console-eval parameters, the variables panel still shows it.
+        Value::Fn(_) | Value::Builtin(_) | Value::Tuple(_) | Value::Ptr { .. } => hir::Ty::Error,
     }
 }
 

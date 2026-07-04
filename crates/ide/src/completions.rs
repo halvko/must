@@ -818,7 +818,7 @@ fn expression_position_items(
     let mut items = file_value_and_type_items(db, file, edit_range, expected);
     items.extend(builtin_fn_items(edit_range, expected));
     let mut words: Vec<&str> = vec![
-        "if", "match", "loop", "fn", "true", "false", "struct", "const",
+        "if", "match", "loop", "fn", "true", "false", "struct", "const", "unsafe",
     ];
     if statement_start {
         words.push("let");

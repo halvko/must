@@ -1944,6 +1944,102 @@ fn generic_widening_injects_the_tag() {
 }
 
 #[test]
+fn addr_of_deref_and_ptr_store_lower_to_memory_ops() {
+    check_mir(
+        r#"
+static s = 7;
+static main = fn() -> usize {
+    let mut x = 1;
+    let p = &raw mut x;
+    let q = &raw s;
+    unsafe {
+        p.* = 2;
+        p.* + q.*
+    }
+};
+"#,
+        expect![[r#"
+            item s:
+            fn b0() -> usize {
+              _0: usize  // return
+              bb0:
+                _0 = 7
+                return
+            }
+            item main:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: usize  // x
+              _2: &raw mut usize
+              _3: &raw mut usize  // p
+              _4: &raw usize
+              _5: &raw usize  // q
+              _6: usize
+              _7: usize
+              _8: usize
+              bb0:
+                _1 = 1
+                _2 = &raw mut _1
+                _3 = _2
+                _4 = &raw static s
+                _5 = _4
+                store _3.* = 2
+                _6 = _3.*
+                _7 = _5.*
+                _8 = Add(_6, _7)
+                _0 = _8
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn deref_outside_unsafe_lowers_to_a_trap_not_a_load() {
+    check_mir(
+        r#"
+static main = fn() -> usize {
+    let mut x = 1;
+    let p = &raw mut x;
+    p.*
+};
+"#,
+        expect![[r#"
+            item main:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: usize  // x
+              _2: &raw mut usize
+              _3: &raw mut usize  // p
+              _4: usize
+              bb0:
+                _1 = 1
+                _2 = &raw mut _1
+                _3 = _2
+                _4 = trap "dereferencing a raw pointer requires an `unsafe { ... }` block" -> bb1
+              bb1:
+                _0 = _4
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+// ---- fixed-size arrays ----
+
+#[test]
 fn array_literal_index_and_element_assign_lower() {
     check_mir(
         r#"

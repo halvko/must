@@ -20,8 +20,8 @@
   consumer so they share one semantics. Lowering is total: an ill-typed body still lowers,
   with traps that borrow a diagnostic an upstream analysis already reported, so flow
   analyses run past errors. MIR is decl-keyed, erased, and not SSA.
-- **X08** One interpreter serves const eval, `run` and the debugger: same MIR, same
-  machine, same traps.
+- **X08** One interpreter serves const eval, `run` and the debugger: same MIR, same machine,
+  same UB findings.
 - **X09** The interpreter is an oracle, not a spec. A detected-UB stop is a property of the
   interpreter, never a guarantee of the language; compiled Must may do anything with the same
   program.

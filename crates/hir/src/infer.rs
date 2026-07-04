@@ -530,7 +530,15 @@ pub enum InferenceDiagnostic {
         /// non-literal value.
         is_block: bool,
     },
-    /// `a[i]` where `a` is not an array.
+    /// `p.*` where `p` is not a raw pointer.
+    DerefNonPointer {
+        /// The deref expression.
+        expr: ExprId,
+        /// The receiver's (non-pointer) type.
+        ty: Ty,
+    },
+    /// `a[i]` where `a` is not an array — the index sibling of
+    /// [`Self::DerefNonPointer`].
     IndexNonArray {
         /// The index expression.
         expr: ExprId,
@@ -555,6 +563,13 @@ pub enum InferenceDiagnostic {
         /// The empty array literal.
         expr: ExprId,
     },
+    /// `&raw [mut] a[i]...` — a pointer INTO an array element. Reserved
+    /// with the same honest "not yet" as interior-place address-of through
+    /// a deref ([`Self::AddrOfDerefUnsupported`]).
+    AddrOfIndexUnsupported {
+        /// The address-of expression.
+        expr: ExprId,
+    },
     /// A const argument in a position whose declared type mentions an
     /// array: array VALUES stay outside the const-arg domain for now (the
     /// ruled domain is builtins + records + variants). The mention-side
@@ -565,6 +580,64 @@ pub enum InferenceDiagnostic {
     ArrayConstArg {
         /// The turbofish mention expression.
         expr: ExprId,
+    },
+    /// `&raw`/`&raw mut` of something that is not a place — the accepted
+    /// places are a variable, a chain of its fields, or a `static`
+    /// (`&raw` of a temporary is refused outright, dodging rvalue
+    /// promotion entirely).
+    AddrOfNonPlace {
+        /// The address-of expression.
+        expr: ExprId,
+    },
+    /// `&raw [mut] p.*...` — taking the address *through* a deref (a
+    /// pointer into the pointee) is reserved; parsed but rejected at
+    /// the semantic level.
+    AddrOfDerefUnsupported {
+        /// The address-of expression.
+        expr: ExprId,
+    },
+    /// `&raw mut` of a place whose ROOT binding is not `mut` — the same
+    /// transitive-mutability rule assignments use: the root is what's
+    /// judged, there is no per-field `mut`.
+    AddrOfMutImmutable {
+        /// The whole address-of expression (where MIR refuses the value).
+        addr_of: ExprId,
+        /// The root name expression inside the place (carries the
+        /// squiggle).
+        root: ExprId,
+        binding: BindingId,
+        /// The binding's name, for rendering without the body in hand.
+        name: String,
+        /// The whole place as written (`x`, or `x.f.g` for a field chain).
+        place: String,
+    },
+    /// `&raw mut` of a top-level item: a `static` has one place but
+    /// `static mut` stays deferred, and a `const` is copied into each use —
+    /// there is no place to hand out mutably either way. (`&raw` — shared —
+    /// of both is fine: a static's one place, a const use's own copy.)
+    AddrOfMutItem {
+        /// The whole address-of expression (where MIR refuses the value).
+        addr_of: ExprId,
+        /// The root name expression (carries the squiggle).
+        root: ExprId,
+        item: ItemLoc,
+        constness: Constness,
+    },
+    /// `p.* = v;` where `p` is a `&raw T` — writing through a pointer
+    /// requires `&raw mut T`. (`p` itself need not be a `mut` binding:
+    /// writing through it does not reassign it.)
+    AssignThroughImmutablePointer {
+        /// The assignment's target expression (the deref).
+        target: ExprId,
+        /// The pointer's type.
+        ty: Ty,
+    },
+    /// `p.*.x = v;` — assigning into a *projection* of a pointee needs
+    /// place-based derefs, still reserved (an honest "not yet").
+    /// Reading `p.*.x` works today (the deref copies the value out).
+    AssignThroughPointerField {
+        /// The deref expression rooting the target chain.
+        target: ExprId,
     },
 }
 
@@ -612,10 +685,18 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::CannotInferGenericParam { expr, .. }
             | InferenceDiagnostic::FnConstArg { expr }
             | InferenceDiagnostic::TypeConstArgUnsupported { expr, .. }
+            | InferenceDiagnostic::DerefNonPointer { expr, .. }
             | InferenceDiagnostic::IndexNonArray { expr, .. }
             | InferenceDiagnostic::IndexOutOfBounds { expr, .. }
             | InferenceDiagnostic::EmptyArrayNeedsAnnotation { expr }
-            | InferenceDiagnostic::ArrayConstArg { expr } => *expr,
+            | InferenceDiagnostic::ArrayConstArg { expr }
+            | InferenceDiagnostic::AddrOfNonPlace { expr }
+            | InferenceDiagnostic::AddrOfDerefUnsupported { expr }
+            | InferenceDiagnostic::AddrOfIndexUnsupported { expr } => *expr,
+            InferenceDiagnostic::AddrOfMutImmutable { root, .. }
+            | InferenceDiagnostic::AddrOfMutItem { root, .. } => *root,
+            InferenceDiagnostic::AssignThroughImmutablePointer { target, .. }
+            | InferenceDiagnostic::AssignThroughPointerField { target } => *target,
             InferenceDiagnostic::UnreachableArm { match_expr, .. }
             | InferenceDiagnostic::NonEnumScrutineeVariantPat { match_expr, .. }
             | InferenceDiagnostic::PatNoSuchVariant { match_expr, .. }
@@ -967,6 +1048,9 @@ impl InferenceDiagnostic {
                     crate::diag::TYPE_CONST_ARG_NOT_LITERAL.to_owned()
                 }
             }
+            InferenceDiagnostic::DerefNonPointer { ty, .. } => {
+                format!("type `{}` cannot be dereferenced", ty.display())
+            }
             InferenceDiagnostic::IndexNonArray { ty, .. } => {
                 format!("type `{}` cannot be indexed", ty.display())
             }
@@ -976,7 +1060,47 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::EmptyArrayNeedsAnnotation { .. } => {
                 "cannot infer the element type of an empty array; add a type annotation".to_owned()
             }
+            InferenceDiagnostic::AddrOfIndexUnsupported { .. } => {
+                "taking the address of an array element is not supported yet".to_owned()
+            }
             InferenceDiagnostic::ArrayConstArg { .. } => crate::diag::ARRAY_CONST_ARG.to_owned(),
+            InferenceDiagnostic::AddrOfNonPlace { .. } => {
+                "`&raw` can only take the address of a variable, one of its fields, \
+                 or a `static`"
+                    .to_owned()
+            }
+            InferenceDiagnostic::AddrOfDerefUnsupported { .. } => {
+                "taking the address of a pointer's target is not supported yet".to_owned()
+            }
+            InferenceDiagnostic::AddrOfMutImmutable { name, place, .. } => {
+                if place == name {
+                    format!("cannot take `&raw mut` of `{name}`: it is not declared `mut`")
+                } else {
+                    // A field chain: the root binding carries the blame —
+                    // mutability is transitive, exactly as for assignments.
+                    format!("cannot take `&raw mut` of `{place}`: `{name}` is not declared `mut`")
+                }
+            }
+            InferenceDiagnostic::AddrOfMutItem {
+                item, constness, ..
+            } => match constness {
+                Constness::Static => format!(
+                    "cannot take `&raw mut` of `{}`: `static mut` is not supported yet",
+                    item.display_name()
+                ),
+                Constness::Const => format!(
+                    "cannot take `&raw mut` of `{}`: a `const` is copied into each use, \
+                     so there is no place to modify",
+                    item.display_name()
+                ),
+            },
+            InferenceDiagnostic::AssignThroughImmutablePointer { ty, .. } => format!(
+                "cannot assign through `{}`: writing needs a `&raw mut` pointer",
+                ty.display()
+            ),
+            InferenceDiagnostic::AssignThroughPointerField { .. } => {
+                "assigning to a field through a raw pointer is not supported yet".to_owned()
+            }
         }
     }
 }
@@ -1266,7 +1390,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     }
                 }
                 InferenceDiagnostic::PatNotRecord { ty, .. }
-                | InferenceDiagnostic::IndexNonArray { ty, .. } => {
+                | InferenceDiagnostic::DerefNonPointer { ty, .. }
+                | InferenceDiagnostic::IndexNonArray { ty, .. }
+                | InferenceDiagnostic::AssignThroughImmutablePointer { ty, .. } => {
                     *ty = resolve_fully(self.table, ty);
                 }
                 InferenceDiagnostic::PatNamedTypeMismatch {
@@ -1307,9 +1433,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::AssignToConstParam { .. }
                 | InferenceDiagnostic::FnConstArg { .. }
                 | InferenceDiagnostic::TypeConstArgUnsupported { .. }
+                | InferenceDiagnostic::AddrOfNonPlace { .. }
+                | InferenceDiagnostic::AddrOfDerefUnsupported { .. }
+                | InferenceDiagnostic::AddrOfIndexUnsupported { .. }
+                | InferenceDiagnostic::AddrOfMutImmutable { .. }
+                | InferenceDiagnostic::AddrOfMutItem { .. }
                 | InferenceDiagnostic::IndexOutOfBounds { .. }
                 | InferenceDiagnostic::EmptyArrayNeedsAnnotation { .. }
-                | InferenceDiagnostic::ArrayConstArg { .. } => {}
+                | InferenceDiagnostic::ArrayConstArg { .. }
+                | InferenceDiagnostic::AssignThroughPointerField { .. } => {}
             }
         }
         for (_, ty) in result.type_of_pat.iter_mut() {
@@ -1755,6 +1887,31 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             // non-record receivers on the way).
                             let fresh = self.fresh_var();
                             let target_ty = self.infer_expr(*target, &fresh);
+                            // `p.* = v;` — a write through the pointer. The
+                            // deref made a new root: the judgement is the
+                            // pointer's `&raw mut`-ness, not any binding's
+                            // `mut`-ness (`p` itself need not be `mut` —
+                            // writing through it does not reassign it).
+                            if let ExprData::Deref { receiver } = &self.body.exprs[*target] {
+                                let receiver_ty = self
+                                    .result
+                                    .type_of_expr
+                                    .get(*receiver)
+                                    .cloned()
+                                    .unwrap_or(Ty::Error);
+                                if let resolved @ Ty::RawPtr { mutable: false, .. } =
+                                    self.resolve_shallow(&receiver_ty)
+                                {
+                                    self.result.diagnostics.push(
+                                        InferenceDiagnostic::AssignThroughImmutablePointer {
+                                            target: *target,
+                                            ty: resolved,
+                                        },
+                                    );
+                                }
+                                self.infer_expr_with(*value, &target_ty, None);
+                                continue;
+                            }
                             if let ExprData::Field { .. } | ExprData::Index { .. } =
                                 &self.body.exprs[*target]
                             {
@@ -2194,6 +2351,57 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     }
                 }
             }
+            // `&raw place` / `&raw mut place`: the operand reads like any
+            // expression (so field chains get their diagnostics on the
+            // way), then the place rules are judged on its structure.
+            ExprData::AddrOf { mutable, place } => {
+                let mutable = *mutable;
+                let place = *place;
+                let fresh = self.fresh_var();
+                let place_ty = self.infer_expr(place, &fresh);
+                self.check_addr_of_place(expr, mutable, place);
+                Ty::raw_ptr(mutable, place_ty)
+            }
+            // `p.*`: reads through the pointer — `&raw T` and `&raw mut T`
+            // both deref-read to `T` (writing is the assignment path's
+            // judgement).
+            ExprData::Deref { receiver } => {
+                let receiver = *receiver;
+                let fresh = self.fresh_var();
+                let receiver_ty = self.infer_expr(receiver, &fresh);
+                match self.resolve_shallow(&receiver_ty) {
+                    Ty::RawPtr { pointee, .. } => (*pointee).clone(),
+                    // Evaluating the receiver already diverges.
+                    Ty::Never => Ty::Never,
+                    // An undetermined receiver: like a field access, the
+                    // pointee can't be run backwards — ask for an
+                    // annotation (same message, same recovery).
+                    Ty::Infer(_) => {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::FieldOnUnknownType { expr, receiver });
+                        Ty::Error
+                    }
+                    // Errors are infectious and silent.
+                    broken if broken.contains_error() => Ty::Error,
+                    other => {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::DerefNonPointer { expr, ty: other });
+                        Ty::Error
+                    }
+                }
+            }
+            // `unsafe { ... }`: a pure checker region — fully transparent
+            // for typing, exactly like a `const` block, except the loop
+            // context survives (the body is the same runtime code, not a
+            // separate unit): `loop { unsafe { break p.* } }` is fine.
+            ExprData::Unsafe { body: inner } => {
+                self.witness_sink = sink;
+                let ty = self.infer_expr_with(*inner, expected, cause);
+                self.result.type_of_expr.insert(expr, ty.clone());
+                return ty;
+            }
             ExprData::FnLiteral {
                 params,
                 ret_type,
@@ -2404,6 +2612,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             }
         }
         let ExprData::NameRef(root_name) = &self.body.exprs[root] else {
+            // A deref roots the chain (`p.*.x = e;`): structurally a place
+            // (validation accepts it), but writing into a *projection* of a
+            // pointee needs place-based derefs — still reserved (an honest
+            // "not yet"); MIR traps with the same text.
+            if let ExprData::Deref { .. } = &self.body.exprs[root] {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::AssignThroughPointerField { target: root });
+                return None;
+            }
             // A chain rooted in a non-variable: validation already
             // squiggled the whole target ("can only assign to a variable
             // or its fields"); a missing root is a parse error. No second
@@ -2471,6 +2689,98 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 None
             }
             Some(Resolution::Ambiguous(_)) | None => None,
+        }
+    }
+
+    /// The place rules for `&raw place` / `&raw mut place`, judged on the
+    /// operand's structure after it was read-typed: the accepted places
+    /// are a variable, a chain of its fields, or a `static`/`const` item
+    /// (a `const` use's own copy — const=copied, now observable). The
+    /// `mut` flavor additionally requires the ROOT binding to be `mut` —
+    /// the same transitive-mutability rule assignments use — and refuses
+    /// items (`static mut` is deferred; a `const` has no place to hand out
+    /// mutably).
+    fn check_addr_of_place(&mut self, addr_of: ExprId, mutable: bool, place: ExprId) {
+        let mut segments: Vec<String> = Vec::new();
+        let mut root = place;
+        while let ExprData::Field { receiver, name } = &self.body.exprs[root] {
+            segments.push(name.clone());
+            root = *receiver;
+        }
+        match &self.body.exprs[root] {
+            ExprData::NameRef(root_name) => {
+                segments.push(root_name.clone());
+                segments.reverse();
+                let place_str = segments.join(".");
+                match self.resolutions.get(root) {
+                    Some(Resolution::Local(binding)) => {
+                        let data = &self.body.bindings[*binding];
+                        if mutable && !data.mutable {
+                            self.result
+                                .diagnostics
+                                .push(InferenceDiagnostic::AddrOfMutImmutable {
+                                    addr_of,
+                                    root,
+                                    binding: *binding,
+                                    name: data.name.clone(),
+                                    place: place_str,
+                                });
+                        }
+                    }
+                    Some(Resolution::Item(loc)) => {
+                        if mutable {
+                            let constness = crate::item_data(self.db, loc.to_id(self.db))
+                                .as_ref()
+                                .and_then(|it| it.kind.constness())
+                                .unwrap_or(Constness::Static);
+                            self.result
+                                .diagnostics
+                                .push(InferenceDiagnostic::AddrOfMutItem {
+                                    addr_of,
+                                    root,
+                                    item: loc.clone(),
+                                    constness,
+                                });
+                        }
+                    }
+                    // A compile-time value, a type, a builtin: none of
+                    // them is a place.
+                    Some(
+                        Resolution::ConstParam(_)
+                        | Resolution::TypeItem(_)
+                        | Resolution::Builtin(_),
+                    ) => {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::AddrOfNonPlace { expr: addr_of });
+                    }
+                    // Unresolved/ambiguous roots carry their own
+                    // diagnostics from the read.
+                    Some(Resolution::Ambiguous(_)) | None => {}
+                }
+            }
+            // `&raw [mut] p.*...`: a pointer into the pointee — reserved
+            // (place-based derefs).
+            ExprData::Deref { .. } => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::AddrOfDerefUnsupported { expr: addr_of });
+            }
+            // `&raw [mut] a[i]...`: a pointer INTO an element — reserved
+            // like the interior-place case above (a whole-array `&raw a`
+            // works through ordinary promotion).
+            ExprData::Index { .. } => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::AddrOfIndexUnsupported { expr: addr_of });
+            }
+            // Broken source: the parse error covers it.
+            ExprData::Missing => {}
+            _ => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::AddrOfNonPlace { expr: addr_of });
+            }
         }
     }
 
@@ -4135,6 +4445,7 @@ fn peel_blocks(body: &Body, mut expr: ExprId) -> ExprId {
                 tail: Some(tail), ..
             } => *tail,
             ExprData::ConstBlock { body: inner } => *inner,
+            ExprData::Unsafe { body: inner } => *inner,
             _ => return expr,
         };
     }

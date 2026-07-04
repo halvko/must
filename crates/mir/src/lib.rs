@@ -93,6 +93,12 @@ pub struct LocalData {
     pub name: Option<String>,
     /// The binding this local was created for (debugger provenance).
     pub binding: Option<BindingId>,
+    /// Whether the local's address is taken somewhere in the body
+    /// ([`Rvalue::AddrOf`] names it as a place base) — the two-tier locals
+    /// fact: only addressable locals are ever promoted into the
+    /// interpreter's abstract memory; everything else stays on the plain
+    /// per-frame value map, so pointer-free bodies pay nothing.
+    pub addressable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,7 +152,19 @@ impl From<LocalId> for Place {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatementKind {
-    Assign { dest: Place, rvalue: Rvalue },
+    Assign {
+        dest: Place,
+        rvalue: Rvalue,
+    },
+    /// `p.* = value;` — a store through a raw pointer. Not an
+    /// [`StatementKind::Assign`]: the destination is a *pointer value*, not
+    /// a [`Place`] of this frame — the machine resolves it against its
+    /// abstract memory (liveness and writability checked at the store, UB
+    /// on violation).
+    PtrStore {
+        ptr: Operand,
+        value: Operand,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -210,6 +228,30 @@ pub enum Rvalue {
         /// params claim no slot — they need nothing at runtime).
         const_args: Vec<Operand>,
     },
+    /// `&raw place` / `&raw mut place` of a local (or a temp holding a
+    /// `const` use's copy): a pointer to the place — the local plus the
+    /// projection's field path, element-granular. Executing it promotes
+    /// the local into the machine's abstract memory (first time only); the
+    /// resulting value is `(AllocId, path)`, never an integer.
+    AddrOf {
+        mutable: bool,
+        place: Place,
+    },
+    /// `&raw S[.field...]` of a `static` item: the item's ONE place —
+    /// minted once per machine run in the static-allocation table, so
+    /// every `&raw S` is the same address (static=identity, observable).
+    /// Always shared (`&raw mut S` is rejected upstream — `static mut`
+    /// stays deferred); the allocation is read-only.
+    AddrOfStatic {
+        item: ItemLoc,
+        /// Field path into the static's value, canonical sorted order —
+        /// same scheme as [`Place::projection`].
+        projection: Vec<u32>,
+    },
+    /// `p.*` — a read through a raw pointer. Liveness is checked at the
+    /// deref (a dead allocation is detected UB), then the pointee (or the
+    /// pointed-to element) is copied out.
+    Deref(Operand),
     /// The variant → enum widening conversion: takes a *variant-typed*
     /// (tag-free payload) value and injects the tag, producing an
     /// *enum-typed* (tagged) value. This op is the only place a tag is

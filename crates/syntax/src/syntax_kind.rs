@@ -62,6 +62,8 @@ pub enum SyntaxKind {
     FALSE_KW,
     AS_KW,
     PUB_KW,
+    RAW_KW,
+    UNSAFE_KW,
     ERROR_TOKEN,
 
     // Nodes
@@ -117,6 +119,10 @@ pub enum SyntaxKind {
     GENERIC_ARG_LIST,
     TYPE_ARG,
     CONST_ARG,
+    RAW_PTR_TYPE,
+    ADDR_OF_EXPR,
+    DEREF_EXPR,
+    UNSAFE_BLOCK_EXPR,
     ARRAY_TYPE,
     ARRAY_EXPR,
     INDEX_EXPR,
@@ -150,6 +156,8 @@ impl SyntaxKind {
             "false" => FALSE_KW,
             "as" => AS_KW,
             "pub" => PUB_KW,
+            "raw" => RAW_KW,
+            "unsafe" => UNSAFE_KW,
             _ => return None,
         };
         Some(kw)

@@ -2,9 +2,9 @@
 
 ## Conclusions
 
-- **T09** `==`/`!=` are builtin in v1 and permitted on any type; the checker only requires
-  the operands to agree. Structurally defined for every value shape; records compare over
-  canonically sorted fields.
+- **T09** `==`/`!=` are builtin in v1 and permitted on any type; the checker only requires the
+  operands to agree. Structurally defined for records (over canonically sorted fields),
+  arrays, tuples, variants, raw pointers and function values.
 - **T03** `type Foo =` always mints. No transparent aliases; two identical spellings are
   two types. Records are exact structural types; a structural record has no declaration,
   so it has no owner, and the newtype line is what gives it one. Nominal and structural
@@ -13,10 +13,10 @@
   variant-typed value carries no tag, and widening adds one. A plain `let` keeps the precise
   variant; an unannotated `let mut` widens to the enum at binding time, the one place
   mutability changes a type rather than only permissions.
-- **T07** Mutability. `let mut` declares a mutable binding; assignment is a statement;
-  local mutation inside a const context is fine; `mut` parameters are local copies; an
-  assignment the checker rejects traps rather than proceeding. Field assignment is legal
-  exactly when the root binding is `mut`; there is no per-field `mut`.
+- **T07** Mutability. `let mut` declares a mutable binding; assignment is a statement; local
+  mutation inside a const context is fine; `mut` parameters are local copies; an assignment
+  the checker rejects traps rather than proceeding. Field assignment is legal exactly when the
+  root binding is `mut`, and a deref is a new root whose legality is the pointer's mutability.
 - **T10** Joins resolve at statement boundaries, function return included; nested joins
   flatten to one, and blame treats the nest as one statement.
 - **T11** Inference groups use bidirected edges, not pure SCCs, because higher-order functions

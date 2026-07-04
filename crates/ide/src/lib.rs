@@ -396,6 +396,16 @@ fn const_eval_message(err: &eval::EvalError) -> Option<String> {
         eval::EvalErrorKind::Runtime | eval::EvalErrorKind::NotConst => {
             format!("constant evaluation failed: {}", err.message)
         }
+        // UB has no squiggle of its own to re-fire (unlike a trap) — in
+        // const eval it IS discovered here, so it surfaces as a
+        // diagnostic like a compile-time panic does. Const evaluation
+        // cannot *exhibit* UB, only report it.
+        eval::EvalErrorKind::UndefinedBehavior => {
+            format!(
+                "constant evaluation hit undefined behavior: {}",
+                err.message
+            )
+        }
     })
 }
 

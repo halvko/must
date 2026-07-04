@@ -8,6 +8,8 @@
 // Run: must-lsp run examples/generics.must -e 'id::<usize>(4)' (=> 4)
 // Run: must-lsp run examples/generics.must -e 'square_val'     (=> 49)
 // Run: must-lsp run examples/generics.must -e 'cube_val'       (=> 27)
+// Run: must-lsp run examples/generics.must -e 'braced_val'     (=> 49)
+// Run: must-lsp run examples/generics.must -e 'pair_first'     (=> "left")
 
 // A type-param generic, fully annotated: `x: T` and `-> T` are mandatory,
 // not stylistic. With no inference group to lean on, there is no argument
@@ -37,6 +39,32 @@ static square_val = square::<7>();
 static cube_step = const fn::<const N: usize>(acc: usize) -> usize { acc * N };
 static cube = const fn::<const N: usize>() -> usize { cube_step::<const N>(N * N) };
 static cube_val = cube::<3>();
+
+// A const argument is deliberately restricted grammar: a literal
+// (`square::<7>`), a bare `const name` forwarding a const param, or a
+// `const { ... }` block for anything compound. There is no additive-operator
+// or parenthesis escape — `square::<7 + 0>` does not parse; the compound
+// spelling is a const block, which runs at compile time right there in the
+// argument.
+static braced_val = square::<const { 3 + 4 }>();
+
+// Generic *type* declarations (`struct::<...>` / `enum::<...>`): a `type`
+// item may bind its own type and const params, reused across its fields.
+// `Pair::<str>` is the turbofish instantiation; construction is the same
+// plain call as any named type, applied to the underlying record. `T` can
+// also be inferred from the payload (`Pair(struct { a: "x", b: "y" })`
+// works with no turbofish), and `_` escapes a single argument to inference.
+// A *bare* `Pair` in type position is an arity error — a generic type's
+// arguments are never optional in an annotation.
+type Pair = struct::<T> { a: T, b: T };
+static labeled = Pair::<str>(struct { a: "left", b: "right" });
+static pair_first = labeled.a;
+
+// Const params make instances distinct: `Buf::<8>` and `Buf::<9>` are
+// different types (the length is checked, not decorative), and variant
+// paths of a generic enum spell the args before the variant:
+// `Option::<usize>::Some(3)`. See `arrays.must` for a generic const-length
+// buffer end to end.
 
 // What a rigid `T` cannot do, and why that's the feature: inside
 // `fn::<T>(x: T) -> T { ... }`, writing `x + 1` is a check-time error —

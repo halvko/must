@@ -46,8 +46,14 @@ fn render_body(id: BodyId, body: &MirBody, out: &mut String) {
     for (id, data) in body.blocks.iter() {
         let _ = writeln!(out, "  {}:", block(id));
         for stmt in &data.statements {
-            let StatementKind::Assign { dest, rvalue } = &stmt.kind;
-            let _ = writeln!(out, "    {} = {}", place(dest), render_rvalue(rvalue));
+            match &stmt.kind {
+                StatementKind::Assign { dest, rvalue } => {
+                    let _ = writeln!(out, "    {} = {}", place(dest), render_rvalue(rvalue));
+                }
+                StatementKind::PtrStore { ptr, value } => {
+                    let _ = writeln!(out, "    store {}.* = {}", operand(ptr), operand(value));
+                }
+            }
         }
         let _ = writeln!(out, "    {}", render_terminator(&data.terminator.kind));
     }
@@ -91,6 +97,18 @@ fn render_rvalue(rvalue: &Rvalue) -> String {
         Rvalue::Field { base, index } => format!("{}.{index}", operand(base)),
         Rvalue::Index { base, index } => format!("{}[{}]", operand(base), operand(index)),
         Rvalue::Repeat { elem, count } => format!("[{}; {}]", operand(elem), operand(count)),
+        Rvalue::AddrOf { mutable, place: p } => {
+            let flavor = if *mutable { "&raw mut" } else { "&raw" };
+            format!("{flavor} {}", place(p))
+        }
+        Rvalue::AddrOfStatic { item, projection } => {
+            let mut path = format!("&raw static {}", item.display_name());
+            for index in projection {
+                let _ = write!(path, ".{index}");
+            }
+            path
+        }
+        Rvalue::Deref(op) => format!("{}.*", operand(op)),
         Rvalue::Instantiate { item, const_args } => {
             let args = const_args
                 .iter()

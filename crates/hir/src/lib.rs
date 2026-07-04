@@ -14,6 +14,7 @@ pub mod infer;
 pub mod item_tree;
 pub mod scopes;
 pub mod ty;
+pub mod unsafe_check;
 
 #[cfg(test)]
 mod tests;
@@ -35,6 +36,7 @@ pub use ty::{
     ConstArgValue, FnTy, GenericArg, NamedTy, Ty, VariantTy, enum_variants, signature,
     substitute_args, type_underlying, type_underlying_for, variant_payloads_for, widens_to,
 };
+pub use unsafe_check::UnsafeCheckDiagnostic;
 
 /// Stable identity of a top-level item: survives edits to other items,
 /// reordering of unrelated code, and any edit inside its own body.
@@ -893,9 +895,11 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                         })
                         .unwrap_or_default()
                 }
-                InferenceDiagnostic::AssignToImmutable { binding, name, .. } => {
+                InferenceDiagnostic::AssignToImmutable { binding, name, .. }
+                | InferenceDiagnostic::AddrOfMutImmutable { binding, name, .. } => {
                     // Where `mut` is missing — also the anchor for the
-                    // upcoming insert-`mut` quick fix.
+                    // insert-`mut` quick fix (assignments and `&raw mut`
+                    // judge the same transitive root).
                     source_map
                         .node_for_binding(*binding)
                         .map(|ptr| {
@@ -907,7 +911,8 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                         })
                         .unwrap_or_default()
                 }
-                InferenceDiagnostic::AssignToItem { item: target, .. } => item_name(target)
+                InferenceDiagnostic::AssignToItem { item: target, .. }
+                | InferenceDiagnostic::AddrOfMutItem { item: target, .. } => item_name(target)
                     .map(|name| {
                         vec![RelatedInfo {
                             file: target.file,
@@ -983,7 +988,10 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 // (`_`) never resolves as an assignment target, so this
                 // shouldn't fire for one; skip defensively rather than offer
                 // a nonsensical `mut _`.
-                InferenceDiagnostic::AssignToImmutable { binding, name, .. } if name != "_" => {
+                InferenceDiagnostic::AssignToImmutable { binding, name, .. }
+                | InferenceDiagnostic::AddrOfMutImmutable { binding, name, .. }
+                    if name != "_" =>
+                {
                     source_map
                         .node_for_binding(*binding)
                         .map(|ptr| syntax::Fix {
@@ -1002,6 +1010,22 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 message: diag.message(),
                 fix,
                 related,
+            });
+        }
+
+        // Unsafe-check findings: a raw-pointer deref outside any
+        // `unsafe { ... }` block. Messages render in
+        // `UnsafeCheckDiagnostic::message` (shared with MIR's traps).
+        for diag in unsafe_check::unsafe_check(db, item) {
+            let Some(ptr) = source_map.node_for_expr(diag.expr()) else {
+                continue;
+            };
+            diagnostics.push(Diagnostic {
+                range: ptr.text_range(),
+                severity: Severity::Error,
+                message: diag.message(),
+                fix: None,
+                related: Vec::new(),
             });
         }
 

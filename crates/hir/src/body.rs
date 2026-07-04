@@ -135,6 +135,25 @@ pub enum ExprData {
         base: ExprId,
         index: ExprId,
     },
+    /// `&raw place` / `&raw mut place`: takes the address of a place,
+    /// producing a raw pointer. The operand lowers as an ordinary
+    /// expression (its reads resolve, hover works); inference restricts it
+    /// to places — a variable, a chain of its fields, or a `static`.
+    AddrOf {
+        mutable: bool,
+        place: ExprId,
+    },
+    /// `receiver.*`: reads through a raw pointer. As an assignment target
+    /// (`p.* = v;`) the same node names the written-through pointer.
+    Deref {
+        receiver: ExprId,
+    },
+    /// `unsafe { ... }`. A pure *checker region* — transparent for typing,
+    /// scoping and evaluation exactly like a plain block; only the unsafe
+    /// pass ([`crate::unsafe_check`]) reads the boundary.
+    Unsafe {
+        body: ExprId,
+    },
     FnLiteral {
         /// Whether the literal was written `const fn`. Orthogonal to the
         /// enclosing item's own `static`/`const`; read by the separate
@@ -601,6 +620,24 @@ impl LowerCtx {
                 let base = self.lower_opt_expr(it.base());
                 let index = self.lower_opt_expr(it.index());
                 self.alloc_expr(ExprData::Index { base, index }, it.syntax())
+            }
+            ast::Expr::AddrOfExpr(it) => {
+                let place = self.lower_opt_expr(it.expr());
+                self.alloc_expr(
+                    ExprData::AddrOf {
+                        mutable: it.is_mut(),
+                        place,
+                    },
+                    it.syntax(),
+                )
+            }
+            ast::Expr::DerefExpr(it) => {
+                let receiver = self.lower_opt_expr(it.receiver());
+                self.alloc_expr(ExprData::Deref { receiver }, it.syntax())
+            }
+            ast::Expr::UnsafeBlockExpr(it) => {
+                let body = self.lower_opt_expr(it.expr());
+                self.alloc_expr(ExprData::Unsafe { body }, it.syntax())
             }
             // An `enum` literal is type-declaration syntax; in a value body
             // it is broken source (validation rejects it), so there is

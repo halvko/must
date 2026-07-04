@@ -218,6 +218,15 @@ impl CheckCtx<'_> {
                 self.check_expr(*base, in_const);
                 self.check_expr(*index, in_const);
             }
+            // Taking an address and dereferencing are not calls — const
+            // contexts allow them (unsafe operations are legal in const
+            // eval: every would-be UB there is a deterministic detected
+            // trap); only the escape rule in `eval` guards the results.
+            ExprData::AddrOf { place, .. } => self.check_expr(*place, in_const),
+            ExprData::Deref { receiver } => self.check_expr(*receiver, in_const),
+            // `unsafe { ... }` is a checker region, orthogonal to
+            // const-ness: the body sits in the same context.
+            ExprData::Unsafe { body } => self.check_expr(*body, in_const),
             // `const { ... }` re-enters a const context wherever it appears.
             ExprData::ConstBlock { body } => self.check_expr(*body, true),
             // *Defining* a function in a const context is always fine; only

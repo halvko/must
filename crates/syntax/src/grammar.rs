@@ -177,6 +177,18 @@ fn expr_bp(p: &mut Parser<'_>, min_bp: u8) -> Option<CompletedMarker> {
             lhs = m.complete(p, CALL_EXPR);
             continue;
         }
+        // Postfix deref `p.*` sits in the field-access tier: it chains as
+        // just another postfix segment (`p.*.x`, `q.*.buf.*`), which is the
+        // whole point of the spelling — no parens, ever. Lexed as DOT STAR;
+        // checked before the field arm so a `.` followed by `*` never
+        // half-parses as a broken field access.
+        if p.at(DOT) && p.nth(1) == STAR {
+            let m = lhs.precede(p);
+            p.bump(DOT);
+            p.bump(STAR);
+            lhs = m.complete(p, DEREF_EXPR);
+            continue;
+        }
         // Indexing sits in the call/field tier too, so `a[0][1]`, `m[i].x`
         // and `f()[0]` all chain naturally. A `[` after an expression is
         // always an index — array *literals* only start expressions
@@ -249,6 +261,12 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
     if p.at(ENUM_KW) && at_type_literal_body(p) {
         return Some(enum_expr(p));
     }
+    // `&raw x` / `&raw mut x` — address-of. `&` alone is not an expression
+    // starter (references are reserved), so the arm is gated on the `raw`
+    // keyword following.
+    if p.at(AMP) && p.nth(1) == RAW_KW {
+        return Some(addr_of_expr(p));
+    }
     let m = match p.current() {
         INT_NUMBER | STRING | TRUE_KW | FALSE_KW => {
             let m = p.start();
@@ -299,6 +317,7 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         L_BRACE => block_expr(p),
         L_BRACKET => array_expr(p),
         FN_KW => fn_literal(p),
+        UNSAFE_KW => unsafe_block_expr(p),
         IF_KW => if_expr(p),
         MATCH_KW => match_expr(p),
         LOOP_KW => loop_expr(p),
@@ -621,15 +640,53 @@ fn array_expr(p: &mut Parser<'_>) -> CompletedMarker {
     m.complete(p, ARRAY_EXPR)
 }
 
+/// `&raw x` / `&raw mut x` — address-of. The caller has already confirmed
+/// `p.at(AMP) && p.nth(1) == RAW_KW`. The operand parses with a binding
+/// power above every binary operator, so it takes exactly a primary
+/// expression plus its postfix chain (`&raw mut x.f`, and `&raw x == y`
+/// stays a comparison of the pointer) — a superset of the place
+/// expressions the language accepts; hir rejects non-places.
+fn addr_of_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump(AMP);
+    p.bump(RAW_KW);
+    p.eat(MUT_KW);
+    expr_bp(p, 7);
+    m.complete(p, ADDR_OF_EXPR)
+}
+
+/// `unsafe { ... }` — an expression-position block that marks a checker
+/// region (deref of a raw pointer is legal inside). Same shape as
+/// `const { ... }`. `unsafe fn` superset-parses (the literal becomes the
+/// node's child) so validation can reject it with an honest "not
+/// supported yet"; any other non-block body gets the wrap-in-braces
+/// treatment, like `if` branches.
+fn unsafe_block_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump(UNSAFE_KW);
+    if p.at(L_BRACE) {
+        block_expr(p);
+    } else if p.at(FN_KW) || (p.at(CONST_KW) && p.nth(1) == FN_KW) {
+        // Reserved: `unsafe fn ...` parses whole, validation rejects it.
+        fn_literal(p);
+    } else if at_expr_recovery(p) {
+        p.error("expected `{`: `unsafe` blocks are blocks");
+    } else {
+        expr(p);
+    }
+    m.complete(p, UNSAFE_BLOCK_EXPR)
+}
+
 /// Whether the current token can start an expression — the dispatch set of
 /// `primary_expr`, including its one-token-lookahead `const`/`struct`/`enum`
 /// cases. Used where an expression is *optional* (a `break` value).
 fn at_expr_start(p: &Parser<'_>) -> bool {
     match p.current() {
         INT_NUMBER | STRING | TRUE_KW | FALSE_KW | IDENT | L_PAREN | L_BRACE | L_BRACKET
-        | FN_KW | IF_KW | MATCH_KW | LOOP_KW | BREAK_KW | CONTINUE_KW => true,
+        | FN_KW | IF_KW | MATCH_KW | LOOP_KW | BREAK_KW | CONTINUE_KW | UNSAFE_KW => true,
         CONST_KW => matches!(p.nth(1), FN_KW | L_BRACE),
         STRUCT_KW | ENUM_KW => at_type_literal_body(p),
+        AMP => p.nth(1) == RAW_KW,
         _ => false,
     }
 }
@@ -1056,6 +1113,18 @@ fn type_(p: &mut Parser<'_>) {
             let m = p.start();
             p.bump(BANG);
             m.complete(p, NEVER_TYPE);
+        }
+        // `&raw T` / `&raw mut T` — a raw pointer type. Without the `raw`
+        // keyword the `&` still parses as a reference type, which stays
+        // reserved ("references are not supported yet", see validation) —
+        // `&T`/`&mut T` are kept unclaimed for real references later.
+        AMP if p.nth(1) == RAW_KW => {
+            let m = p.start();
+            p.bump(AMP);
+            p.bump(RAW_KW);
+            p.eat(MUT_KW);
+            type_(p);
+            m.complete(p, RAW_PTR_TYPE);
         }
         AMP => {
             let m = p.start();

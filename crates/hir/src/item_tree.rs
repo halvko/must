@@ -102,6 +102,11 @@ pub enum TypeRef {
         ret: Option<Box<TypeRef>>,
     },
     Ref(Box<TypeRef>),
+    /// `&raw T` / `&raw mut T` — a raw pointer type.
+    RawPtr {
+        mutable: bool,
+        inner: Box<TypeRef>,
+    },
     Path(String),
     /// `Pair::<usize, 8>` — a generic type mention with its turbofish. The
     /// name stays syntactic (like [`TypeRef::Path`]); arity, kinds and
@@ -178,6 +183,13 @@ impl TypeRef {
                 Some(inner) => TypeRef::Ref(Box::new(TypeRef::from_ast(inner))),
                 None => TypeRef::Error,
             },
+            ast::Type::RawPtrType(it) => match it.ty() {
+                Some(inner) => TypeRef::RawPtr {
+                    mutable: it.is_mut(),
+                    inner: Box::new(TypeRef::from_ast(inner)),
+                },
+                None => TypeRef::Error,
+            },
             ast::Type::PathType(it) => match it.generic_arg_list() {
                 Some(list) => match it.name_ref() {
                     Some(name) => TypeRef::Apply {
@@ -246,6 +258,7 @@ impl TypeRef {
                     && ret.as_ref().is_some_and(|r| r.is_fully_typed())
             }
             TypeRef::Ref(inner) => inner.is_fully_typed(),
+            TypeRef::RawPtr { inner, .. } => inner.is_fully_typed(),
             TypeRef::Apply { args, .. } => args.iter().all(|arg| match arg {
                 GenericArgRef::Type(ty) => ty.is_fully_typed(),
                 // Const args are never inferred (TR06) — a written one is
@@ -273,6 +286,7 @@ impl TypeRef {
         match self {
             TypeRef::Fn { .. } => true,
             TypeRef::Ref(inner) => inner.mentions_fn(),
+            TypeRef::RawPtr { inner, .. } => inner.mentions_fn(),
             TypeRef::Record(fields) => fields.iter().any(|(_, ty)| ty.mentions_fn()),
             TypeRef::Array { elem, .. } => elem.mentions_fn(),
             TypeRef::Apply { args, .. } => args.iter().any(|arg| match arg {
@@ -299,6 +313,7 @@ impl TypeRef {
         match self {
             TypeRef::Array { .. } => true,
             TypeRef::Ref(inner) => inner.mentions_array(),
+            TypeRef::RawPtr { inner, .. } => inner.mentions_array(),
             TypeRef::Record(fields) => fields.iter().any(|(_, ty)| ty.mentions_array()),
             TypeRef::Fn { params, ret } => {
                 params.iter().any(TypeRef::mentions_array)

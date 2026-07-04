@@ -165,6 +165,10 @@ pub fn evaluate(
                 EvalErrorKind::Panic => "panicked",
                 EvalErrorKind::Runtime => "runtime error",
                 EvalErrorKind::NotConst => "error",
+                // Interpreter-detected UB: a deterministic stop, prefixed
+                // as what it is (a quality of the interpreter, not a
+                // semantic guarantee).
+                EvalErrorKind::UndefinedBehavior => "undefined behavior",
                 // Unreachable in an instantiated execution; rendered
                 // honestly if it ever escapes.
                 EvalErrorKind::Uninstantiated => "error",

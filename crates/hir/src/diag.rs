@@ -32,6 +32,12 @@ pub fn side_effect_call_in_const(name: &str) -> String {
 pub const VALUE_CALL_IN_CONST: &str =
     "cannot call a value in a const context; whether it is a `const fn` is not known from its type";
 
+/// A raw-pointer deref (read or write) outside any `unsafe { ... }` block —
+/// the one operation whose misuse is UB, so the one that needs the marker.
+/// The message names the fix so a quick fix can quote it later.
+pub const DEREF_REQUIRES_UNSAFE: &str =
+    "dereferencing a raw pointer requires an `unsafe { ... }` block";
+
 /// The item-level generic rule (TR06): a generic fn literal's params and
 /// return type are its scheme, so all of them must be written. Shown only
 /// at the definition (mentions stay silent about it — see

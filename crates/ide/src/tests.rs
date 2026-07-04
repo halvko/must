@@ -1546,6 +1546,7 @@ static main = fn {
             match Keyword
             struct Keyword
             true Keyword
+            unsafe Keyword
         "#]],
     );
 }
@@ -1576,6 +1577,7 @@ static main = fn {
             match Keyword
             struct Keyword
             true Keyword
+            unsafe Keyword
         "#]],
     );
 }
@@ -2148,6 +2150,7 @@ static main = fn (s: str, n: usize) {
             match Keyword
             struct Keyword
             true Keyword
+            unsafe Keyword
         "#]],
     );
 }
@@ -2179,6 +2182,7 @@ static main = fn {
             match Keyword
             struct Keyword
             true Keyword
+            unsafe Keyword
         "#]],
     );
 }
@@ -2208,6 +2212,7 @@ static main = fn {
             match Keyword
             struct Keyword
             true Keyword
+            unsafe Keyword
         "#]],
     );
 }
@@ -2240,6 +2245,7 @@ static main = fn (p: Point, n: usize) {
             match Keyword
             struct Keyword
             true Keyword
+            unsafe Keyword
         "#]],
     );
 }
@@ -2339,6 +2345,7 @@ static main = fn {
             match Keyword
             struct Keyword
             true Keyword
+            unsafe Keyword
         "#]],
     );
 }
@@ -2782,6 +2789,24 @@ fn hover_shows_generic_variant_instance() {
         "```must\no: Option::<usize>::Some\n```",
     );
 }
+
+#[test]
+fn hover_raw_pointer_binding_shows_the_pointer_type() {
+    check_hover(
+        "static main = fn { let mut x = 1; let p$0 = &raw mut x; };",
+        "```must\np: &raw mut usize\n```",
+    );
+}
+
+#[test]
+fn hover_deref_receiver_shows_the_pointer_type() {
+    check_hover(
+        "static main = fn() -> usize { let mut x = 1; let p = &raw mut x; unsafe { p$0.* } };",
+        "```must\np: &raw mut usize\n```",
+    );
+}
+
+// ---- fixed-size arrays ----
 
 #[test]
 fn hover_array_local() {

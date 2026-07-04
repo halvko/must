@@ -246,6 +246,20 @@ impl Constraints {
                     params_ok && self.unify(table, &f1.ret, &f2.ret, cause)
                 }
             }
+            // Exact and equational: same mutability, pointwise pointee. No
+            // variance (nothing to be variant over without subtyping), and
+            // `&raw mut T` vs `&raw T` is FALSE — a future relaxation would
+            // be a shallow `widens_to` conversion, never unification.
+            (
+                Ty::RawPtr {
+                    mutable: m1,
+                    pointee: p1,
+                },
+                Ty::RawPtr {
+                    mutable: m2,
+                    pointee: p2,
+                },
+            ) => m1 == m2 && self.unify(table, &p1, &p2, cause),
             // Structural and exact: element pointwise, length by plain
             // equality with `Error` infectious on either side — the same
             // judgement generic const args get in `unify_args`. `[T; 8]`
@@ -637,6 +651,7 @@ pub(crate) fn resolve_fully(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty)
             let ret = resolve_fully(table, &f.ret);
             Ty::fn_type(params, ret)
         }
+        Ty::RawPtr { mutable, pointee } => Ty::raw_ptr(*mutable, resolve_fully(table, pointee)),
         Ty::Array { elem, len } => Ty::array(resolve_fully(table, elem), len.clone()),
         Ty::Record(rec) => Ty::record(
             rec.fields
@@ -683,6 +698,7 @@ fn occurs(table: &mut InPlaceUnificationTable<TyVar>, var: TyVar, ty: &Ty) -> bo
             }
         }
         Ty::Fn(f) => f.params.iter().any(|p| occurs(table, var, p)) || occurs(table, var, &f.ret),
+        Ty::RawPtr { pointee, .. } => occurs(table, var, pointee),
         Ty::Array { elem, .. } => occurs(table, var, elem),
         Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| occurs(table, var, ty)),
         Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {

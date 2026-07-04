@@ -4967,6 +4967,219 @@ fn generic_enum_payload_mentions_check_in_declarations() {
 }
 
 #[test]
+fn raw_pointer_types_infer_and_display() {
+    check_infer(
+        r#"
+static main = fn() -> usize {
+    let mut x = 1;
+    let p = &raw mut x;
+    let q = &raw x;
+    unsafe { p.* }
+};
+"#,
+        expect![[r#"
+            15..114 'fn() -> usize {  ...': fn() -> usize
+            29..114 '{     let mut x =...': usize
+            43..44 'x': usize
+            47..48 '1': usize
+            58..59 'p': &raw mut usize
+            62..72 '&raw mut x': &raw mut usize
+            71..72 'x': usize
+            82..83 'q': &raw usize
+            86..92 '&raw x': &raw usize
+            91..92 'x': usize
+            98..112 'unsafe { p.* }': usize
+            105..112 '{ p.* }': usize
+            107..108 'p': &raw mut usize
+            107..110 'p.*': usize
+        "#]],
+    );
+}
+
+#[test]
+fn addr_of_mut_requires_a_mut_root() {
+    check_diagnostics(
+        "static main = fn { let x = 1; let p = &raw mut x; };",
+        expect![[r#"
+            47..48: cannot take `&raw mut` of `x`: it is not declared `mut` (`x` is declared without `mut` here at 23..24)
+        "#]],
+    );
+}
+
+#[test]
+fn addr_of_mut_of_a_field_blames_the_root() {
+    check_diagnostics(
+        "static main = fn { let r = struct { a: 1 }; let p = &raw mut r.a; };",
+        expect![[r#"
+            61..62: cannot take `&raw mut` of `r.a`: `r` is not declared `mut` (`r` is declared without `mut` here at 23..24)
+        "#]],
+    );
+}
+
+#[test]
+fn addr_of_shared_needs_no_mut() {
+    check_diagnostics(
+        "static main = fn { let x = 1; let p = &raw x; };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn addr_of_mut_of_a_static_is_reserved() {
+    check_diagnostics(
+        "static s = 7;\nstatic main = fn { let p = &raw mut s; };",
+        expect![[r#"
+            50..51: cannot take `&raw mut` of `s`: `static mut` is not supported yet (`s` is defined here at 7..8)
+        "#]],
+    );
+}
+
+#[test]
+fn addr_of_shared_of_items_is_fine() {
+    check_diagnostics(
+        "static s = 7;\nconst c = 8;\nstatic main = fn { let p = &raw s; let q = &raw c; };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn addr_of_a_non_place_errors() {
+    check_diagnostics(
+        "static main = fn { let p = &raw 5; };",
+        expect![[r#"
+            27..33: `&raw` can only take the address of a variable, one of its fields, or a `static`
+        "#]],
+    );
+}
+
+#[test]
+fn addr_of_through_a_deref_is_reserved() {
+    check_diagnostics(
+        "static main = fn { let mut x = 1; let p = &raw mut x; let q = &raw mut p.*; };",
+        expect![[r#"
+            62..74: taking the address of a pointer's target is not supported yet
+            71..74: dereferencing a raw pointer requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn deref_outside_unsafe_errors() {
+    check_diagnostics(
+        "static main = fn() -> usize { let mut x = 1; let p = &raw mut x; p.* };",
+        expect![[r#"
+            65..68: dereferencing a raw pointer requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn deref_inside_unsafe_is_clean() {
+    check_diagnostics(
+        "static main = fn() -> usize { let mut x = 1; let p = &raw mut x; unsafe { p.* } };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn deref_write_outside_unsafe_errors() {
+    check_diagnostics(
+        "static main = fn { let mut x = 1; let p = &raw mut x; p.* = 2; };",
+        expect![[r#"
+            54..57: dereferencing a raw pointer requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn deref_write_through_a_shared_pointer_errors() {
+    check_diagnostics(
+        "static main = fn { let mut x = 1; let p = &raw x; unsafe { p.* = 2; } };",
+        expect![[r#"
+            59..62: cannot assign through `&raw usize`: writing needs a `&raw mut` pointer
+        "#]],
+    );
+}
+
+#[test]
+fn deref_write_into_a_pointee_field_is_reserved() {
+    check_diagnostics(
+        "static main = fn { let mut r = struct { a: 1 }; let p = &raw mut r; unsafe { p.*.a = 2; } };",
+        expect![[r#"
+            77..80: assigning to a field through a raw pointer is not supported yet
+        "#]],
+    );
+}
+
+#[test]
+fn pointee_field_reads_work() {
+    check_diagnostics(
+        "static main = fn() -> usize { let mut r = struct { a: 1, b: 2 }; let p = &raw mut r; unsafe { p.*.a + p.*.b } };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn raw_pointer_unification_is_exact_no_mut_mixing() {
+    check_diagnostics(
+        "static f = fn(p: &raw usize) {};\nstatic main = fn { let mut x = 1; f(&raw mut x); };",
+        expect![[r#"
+            69..79: type mismatch: expected `&raw usize`, found `&raw mut usize`
+        "#]],
+    );
+}
+
+#[test]
+fn raw_pointer_unification_is_exact_no_shared_to_mut() {
+    check_diagnostics(
+        "static f = fn(p: &raw mut usize) {};\nstatic main = fn { let x = 1; f(&raw x); };",
+        expect![[r#"
+            69..75: type mismatch: expected `&raw mut usize`, found `&raw usize`
+        "#]],
+    );
+}
+
+#[test]
+fn raw_pointer_pointee_must_match_exactly() {
+    check_diagnostics(
+        r#"static main = fn { let mut x = 1; let p: &raw mut str = &raw mut x; };"#,
+        expect![[r#"
+            56..66: type mismatch: expected `&raw mut str`, found `&raw mut usize` (expected `&raw mut str` because of this annotation at 41..53)
+        "#]],
+    );
+}
+
+#[test]
+fn raw_pointer_does_not_coerce_to_pointee() {
+    check_diagnostics(
+        "static main = fn { let mut x = 1; let y: usize = &raw mut x; };",
+        expect![[r#"
+            49..59: type mismatch: expected `usize`, found `&raw mut usize` (expected `usize` because of this annotation at 41..46)
+        "#]],
+    );
+}
+
+#[test]
+fn deref_of_a_non_pointer_errors() {
+    check_diagnostics(
+        "static main = fn { let x = 1; unsafe { x.*; } };",
+        expect![[r#"
+            39..42: type `usize` cannot be dereferenced
+        "#]],
+    );
+}
+
+#[test]
+fn pointer_equality_is_legal_and_safe() {
+    check_diagnostics(
+        "static main = fn() -> bool { let mut x = 1; &raw mut x == &raw mut x };",
+        expect![[r#""#]],
+    );
+}
+
+// ---- fixed-size arrays ----
+
+#[test]
 fn array_literal_and_index_infer() {
     check_infer(
         "static f = fn { let a = [1, 2, 3]; let x = a[0]; };",
@@ -5262,6 +5475,40 @@ fn array_valued_const_param_rejected_at_declaration() {
 }
 
 #[test]
+fn addr_of_whole_array_works_element_reserved() {
+    check_diagnostics(
+        r#"
+static f = fn {
+    let mut a = [1, 2];
+    let p = unsafe { (&raw mut a).* };
+    let q = &raw mut a[0];
+};
+"#,
+        expect![[r#"
+            92..105: taking the address of an array element is not supported yet
+        "#]],
+    );
+}
+
+#[test]
+fn match_on_array_scrutinee_rejects_variant_patterns() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Point };
+static f = fn (a: [usize; 2]) -> usize {
+    match a {
+        ::Point => 1,
+        _ => 2,
+    }
+};
+"#,
+        expect![[r#"
+            93..100: only `_` or a binding can match a `[usize; 2]` (for now)
+        "#]],
+    );
+}
+
+#[test]
 fn type_declaration_with_array_field() {
     check_diagnostics(
         r#"
@@ -5304,24 +5551,6 @@ static f = fn {
             79..95 'Shape::Circle(1)': Shape::Circle
             93..94 '1': usize
             97..109 'Shape::Point': Shape::Point
-        "#]],
-    );
-}
-
-#[test]
-fn match_on_array_scrutinee_rejects_variant_patterns() {
-    check_diagnostics(
-        r#"
-type Shape = enum { Point };
-static f = fn (a: [usize; 2]) -> usize {
-    match a {
-        ::Point => 1,
-        _ => 2,
-    }
-};
-"#,
-        expect![[r#"
-            93..100: only `_` or a binding can match a `[usize; 2]` (for now)
         "#]],
     );
 }

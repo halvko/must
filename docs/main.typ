@@ -570,6 +570,59 @@ Honest restrictions, all diagnosed:
   (`fn (o: Option::Some)` is rejected with that reason); use the whole
   generic enum, or a monomorphic enum, until it lands.
 
+== Raw pointers and unsafe
+
+Raw pointers come in two types: `&raw T` (shared) and `&raw mut T`
+(mutable). An address is taken with `&raw place` / `&raw mut place`, where a
+place is a variable or a field chain — there is no address-of a temporary.
+A pointer is followed with the postfix deref `p.*`; there is **no
+auto-deref**, so `p.*` is the only way a pointer is ever read or written.
+
+```must
+static main = fn () -> usize {
+    let mut x = 1;
+    let p = &raw mut x;
+    unsafe { p.* = 42; };
+    x                       // 42
+};
+```
+
+Forming a pointer is safe; *following* one is not. Every deref — read or
+write — must sit inside an `unsafe { ... }` block, a lexical checker region
+within a function (`dereferencing a raw pointer requires an `unsafe { ... }`
+block` otherwise). `&raw mut place` additionally requires the root binding
+to be `mut` — the existing transitivity rule verbatim — and blames the root
+with the same "make it `mut`" quick fix an assignment would; `&raw place`
+(shared) needs no `mut`. `&raw mut` of a `static` is rejected: `static mut`
+stays deferred.
+
+Unsafe is legal in const contexts — pointers may be used freely during
+compile-time evaluation — but a pointer can never *leave* it: a memoized
+initializer whose value contains a pointer is `a pointer cannot leave
+compile-time evaluation`. Statics and consts differ through a pointer just
+as they do everywhere else, now *observably*: a `static` names one place, so
+every `&raw S` is the same address (`&raw S == &raw S` is `true`); a `const`
+is copied into each use, so every `&raw C` addresses its own copy
+(`&raw C == &raw C` is `false`). This is the same identity-vs-copy rule the
+const chapter states, made visible.
+
+`&raw x` on a local is the address of that frame slot, for that frame's
+lifetime — and no longer. Nothing here promises stable addresses for locals
+beyond their frame's life, nor address preservation across copies: copying a
+value copies the pointer bits, never the pointee's identity. Return a
+`&raw mut x` past the frame that owns `x` and a later deref is a dangling
+pointer. The interpreter *detects* that and traps deterministically
+(`error[UndefinedBehavior]: dangling pointer — the local it pointed to no
+longer exists (its frame has returned)`), but that detection is interpreter
+quality, not a language guarantee: the program is undefined behavior, and a
+later backend may do anything with it. Detected-UB traps make the
+interpreter a good teacher; they do not make the code correct. A pointer
+value never renders as a number either — `&raw <opaque>`, because no integer
+addresses exist to leak.
+
+Reserved: writes through a pointee field (`p.*.x = ...`), `&raw` of
+field/element chains beyond the first hop, and `unsafe fn`.
+
 == Arrays
 
 Fixed-size arrays `[T; N]` — the length is part of the type. Literals

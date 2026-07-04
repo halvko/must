@@ -160,6 +160,16 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
             compute_expr_scopes(body, scopes, *base, scope);
             compute_expr_scopes(body, scopes, *index, scope);
         }
+        ExprData::AddrOf { place, .. } => {
+            compute_expr_scopes(body, scopes, *place, scope);
+        }
+        ExprData::Deref { receiver } => {
+            compute_expr_scopes(body, scopes, *receiver, scope);
+        }
+        // Transparent, like a `const` block: a pure checker region.
+        ExprData::Unsafe { body: b } => {
+            compute_expr_scopes(body, scopes, *b, scope);
+        }
         // The variant name is resolved against the enum during inference,
         // not lexically; only the base is a scoped reference — plus any
         // turbofish const-arg values, which are ordinary scoped

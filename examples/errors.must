@@ -5,9 +5,12 @@
 //
 // Each comment quotes the diagnostic's headline (the message text; not the
 // source spans, which shift with the file). The real command prints more
-// than that — a `-->` location, a source snippet, related notes, and for
-// one case a `= help:` quick fix — pasted in full in the accompanying
+// than that — a `-->` location, a source snippet, related notes, and
+// several `= help:` quick fixes — pasted in full in the accompanying
 // report.
+//
+// `must-lsp check examples/errors.must` reports, at the time of writing,
+// exactly: found 12 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -76,4 +79,54 @@ static shadow_variant = fn (s: Shape) -> str {
 static rigid_add_one = fn::<T>(x: T) -> T {
     let y = x + 1;
     x
+};
+
+// 9. Compile-time out-of-bounds: an array length is part of its type, so an
+//    index the checker can evaluate is checked right then — no need to run
+//    anything. The *same* message is what a genuinely runtime-only index
+//    traps with (`must-lsp run` on a dynamic OOB prints it verbatim); the
+//    length just lets the checker reach it early here.
+//    error: index out of bounds: the length is 2 but the index is 2
+static compile_time_oob = fn () -> usize {
+    let a = [1, 2];
+    a[2]
+};
+
+// 10. Deref outside `unsafe`: forming a pointer is safe, but *following* one
+//     — reading or writing `p.*` — must sit inside an `unsafe { ... }` block.
+//     There is no auto-deref, so this is the only way `p.*` ever appears.
+//     error: dereferencing a raw pointer requires an `unsafe { ... }` block
+static deref_outside_unsafe = fn () -> usize {
+    let mut x = 1;
+    let p = &raw mut x;
+    p.*
+};
+
+// 11. `&raw mut` of a non-`mut` root: a mutating pointer may only be taken
+//     to something already assignable, so the mut-root rule blames the
+//     binding and offers the same "make it `mut`" quick fix an assignment
+//     would.
+//     error: cannot take `&raw mut` of `x`: it is not declared `mut`
+//     quick fix offered: "Make `x` mutable"
+static addr_of_non_mut = fn () -> () {
+    let x = 1;
+    let p = &raw mut x;
+};
+
+// 12. Const-param length mismatch: `Buf::<8>` and `Buf::<9>` are distinct
+//     types — the const argument is checked, not decorative — so a `Buf::<9>`
+//     value does not satisfy a `Buf::<8>` annotation.
+//     error: type mismatch: expected `Buf::<8>`, found `Buf::<9>`
+type Buf = struct::<const N: usize> { len: usize };
+static wrong_const_len: Buf::<8> = Buf::<9>(struct { len: 1 });
+
+// 13. A pointer escaping compile-time evaluation: pointers hold no stable
+//     identity beyond the frame that owns their pointee, so one can never be
+//     the *result* of const evaluation — a static's value would outlive the
+//     frame it points into. The whole initializer is a const context, so
+//     the block yielding `&raw mut x` is rejected.
+//     error: constant evaluation failed: a pointer cannot leave compile-time evaluation
+static pointer_escaping_const = const {
+    let mut x = 1;
+    &raw mut x
 };

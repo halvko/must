@@ -233,6 +233,26 @@ ast_enum!(
 );
 
 ast_node!(
+    /// `&raw x` / `&raw mut x` — takes the address of a place, producing a
+    /// raw pointer. The operand superset-parses as any postfix chain; hir
+    /// restricts it to places (a variable, its fields, a `static`).
+    AddrOfExpr: ADDR_OF_EXPR
+);
+ast_node!(
+    /// `p.*` — postfix deref of a raw pointer; chains like field access.
+    DerefExpr: DEREF_EXPR
+);
+ast_node!(
+    /// `unsafe { ... }` — a checker region: raw-pointer derefs are legal
+    /// inside. `unsafe fn` superset-parses into this node too (the child is
+    /// then a [`FnLiteral`]); validation rejects it as reserved.
+    UnsafeBlockExpr: UNSAFE_BLOCK_EXPR
+);
+ast_node!(
+    /// `&raw T` / `&raw mut T` — a raw pointer type.
+    RawPtrType: RAW_PTR_TYPE
+);
+ast_node!(
     /// `[T; N]` — a fixed-size array type. The length is a [`ConstArg`],
     /// the same node a turbofish's const argument uses.
     ArrayType: ARRAY_TYPE
@@ -255,11 +275,14 @@ ast_enum!(
     Literal,
     BlockExpr,
     ConstBlockExpr,
+    UnsafeBlockExpr,
     ParenExpr,
     BinExpr,
     IfExpr,
     RecordExpr,
     FieldExpr,
+    AddrOfExpr,
+    DerefExpr,
     EnumExpr,
     MatchExpr,
     LoopExpr,
@@ -287,6 +310,7 @@ ast_enum!(
     NeverType,
     PathType,
     RefType,
+    RawPtrType,
     HoleType,
     RecordType,
     ArrayType
@@ -891,6 +915,60 @@ impl ConstArg {
 
 impl RefType {
     pub fn ty(&self) -> Option<Type> {
+        child(&self.syntax)
+    }
+    /// The leading `&` — the reservation diagnostic's anchor.
+    pub fn amp_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, AMP)
+    }
+}
+
+impl RawPtrType {
+    pub fn mut_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, MUT_KW)
+    }
+    pub fn is_mut(&self) -> bool {
+        self.mut_token().is_some()
+    }
+    /// The pointee type.
+    pub fn ty(&self) -> Option<Type> {
+        child(&self.syntax)
+    }
+}
+
+impl AddrOfExpr {
+    pub fn raw_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, RAW_KW)
+    }
+    pub fn mut_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, MUT_KW)
+    }
+    pub fn is_mut(&self) -> bool {
+        self.mut_token().is_some()
+    }
+    /// The place whose address is taken.
+    pub fn expr(&self) -> Option<Expr> {
+        child(&self.syntax)
+    }
+}
+
+impl DerefExpr {
+    /// The pointer expression being dereferenced.
+    pub fn receiver(&self) -> Option<Expr> {
+        child(&self.syntax)
+    }
+    pub fn star_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, STAR)
+    }
+}
+
+impl UnsafeBlockExpr {
+    pub fn unsafe_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, UNSAFE_KW)
+    }
+    /// The body — a block when well-formed; a superset-parsed `fn` literal
+    /// for the reserved `unsafe fn` spelling (validation rejects it).
+    pub fn expr(&self) -> Option<Expr> {
         child(&self.syntax)
     }
 }

@@ -77,9 +77,8 @@ fn classify(
         STRING => HlTag::String,
         INT_NUMBER => HlTag::Number,
         FN_KW | STATIC_KW | CONST_KW | TYPE_KW | STRUCT_KW | ENUM_KW | LET_KW | MUT_KW | IF_KW
-        | ELSE_KW | MATCH_KW | LOOP_KW | BREAK_KW | CONTINUE_KW | TRUE_KW | FALSE_KW => {
-            HlTag::Keyword
-        }
+        | ELSE_KW | MATCH_KW | LOOP_KW | BREAK_KW | CONTINUE_KW | TRUE_KW | FALSE_KW | RAW_KW
+        | UNSAFE_KW => HlTag::Keyword,
         PLUS | MINUS | STAR | SLASH | EQ | THIN_ARROW | FAT_ARROW | AMP | EQ2 | NEQ | L_ANGLE
         | R_ANGLE | LTEQ | GTEQ => HlTag::Operator,
         // `!` only exists as the never type today.
