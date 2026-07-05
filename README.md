@@ -58,13 +58,14 @@ The same binary runs Must code (the LSP's analysis, MIR, and interpreter —
 no separate toolchain):
 
 ```sh
-must-lsp run examples/hello.must               # evaluates main()
-must-lsp run examples/fib.must -e 'fib(20)'    # any expression in file scope
+must-lsp run examples/hello.must                    # evaluates main()
+must-lsp run examples/functions.must -e 'fib(20)'   # any expression in file scope
 ```
 
 `examples/` has a short tour beyond `hello.must` — records and named types
 (`records.must`), the tag-free variant-parameter state-machine pattern
-(`state_machine.must`), loops and mutability (`loops.must`), and compile-time
+(`state_machine.must`), loops and mutability (`loops.must`), functions,
+recursion, and higher-order calls (`functions.must`), and compile-time
 evaluation (`compile_time.must`) — plus `errors.must`, an intentionally
 broken file pairing each diagnostic with the exact message
 `must-lsp check` prints for it.

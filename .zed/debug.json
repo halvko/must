@@ -9,10 +9,10 @@
     "program": "$ZED_FILE"
   },
   {
-    "label": "Run examples/fib.must: fib(20)",
+    "label": "Run examples/functions.must: fib(20)",
     "adapter": "must",
     "request": "launch",
-    "program": "$ZED_WORKTREE_ROOT/examples/fib.must",
+    "program": "$ZED_WORKTREE_ROOT/examples/functions.must",
     "entry": "fib(20)"
   }
 ]

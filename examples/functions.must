@@ -1,0 +1,113 @@
+// Functions: named `fn` values bound to statics (optionally annotated with
+// their own `fn(...) -> ...` type), recursion (there is no dedicated `for`
+// or `while` — see `loops.must` for the actual `loop` construct — so plain
+// self-calls are how these are written), mutual recursion (items are
+// visible everywhere in the file, no forward declaration needed), and
+// higher-order calls: passing a function value as an ordinary argument and
+// calling it from inside the callee.
+//
+// Run: must-lsp run examples/functions.must -e 'fib(20)'                 (=> 6765)
+// Run: must-lsp run examples/functions.must -e 'gcd(1071, 462)'          (=> 21)
+// Run: must-lsp run examples/functions.must -e 'is_even(76)'             (=> true)
+// Run: must-lsp run examples/functions.must -e 'is_odd(76)'              (=> false)
+// Run: must-lsp run examples/functions.must -e 'apply_twice(double, 5)'  (=> 20)
+// Run: must-lsp run examples/functions.must                              (=> FizzBuzz 1..15, then the checks below)
+
+// Tree recursion: two recursive calls combined, depth O(n) — comfortably
+// below the interpreter's stack limit.
+static fib: fn(usize) -> usize = fn(n: usize) -> usize {
+    if n < 2 {
+        n
+    } else {
+        fib(n - 1) + fib(n - 2)
+    }
+};
+
+// Must has no `%` operator, so the remainder is derived from integer
+// division: `a - (a / b) * b`. Euclid's algorithm is then linear recursion
+// driven by that remainder.
+static rem: fn(usize, usize) -> usize = fn(a: usize, b: usize) -> usize {
+    a - (a / b) * b
+};
+
+static gcd: fn(usize, usize) -> usize = fn(a: usize, b: usize) -> usize {
+    if b == 0 { a } else { gcd(b, rem(a, b)) }
+};
+
+// Mutual recursion: items are visible everywhere in the file, so is_even
+// can call is_odd (declared below it, textually) with no forward
+// declaration.
+static is_even: fn(usize) -> bool = fn(n: usize) -> bool {
+    if n == 0 { true } else { is_odd(n - 1) }
+};
+
+static is_odd: fn(usize) -> bool = fn(n: usize) -> bool {
+    if n == 0 { false } else { is_even(n - 1) }
+};
+
+// Higher-order calls: `f` is a plain parameter of function type
+// `fn(usize) -> usize`, called exactly like any other binding in scope.
+// Passing `double` here is no different from passing a `usize` — a
+// function value is a value, and this call must happen from inside an
+// ordinary (non-const) fn body: a top-level static initializer is a const
+// context, and `apply_twice` isn't marked `const fn` (see `compile_time.must`
+// for the marker that would let it run at compile time instead).
+static double: fn(usize) -> usize = fn(n: usize) -> usize { n + n };
+
+static apply_twice: fn(fn(usize) -> usize, usize) -> usize =
+    fn(f: fn(usize) -> usize, x: usize) -> usize {
+        f(f(x))
+    };
+
+// FizzBuzz: `classify` selects one of four strings via an if/else-if chain
+// (there is no string concatenation or number formatting, so plain numbers
+// print as "-"), and `run_upto` is the recursive stand-in for a counted
+// loop, printing as it recurses.
+static classify: fn(usize) -> str = fn(n: usize) -> str {
+    if rem(n, 15) == 0 {
+        "fizzbuzz"
+    } else if rem(n, 3) == 0 {
+        "fizz"
+    } else if rem(n, 5) == 0 {
+        "buzz"
+    } else {
+        "-"
+    }
+};
+
+static run_upto: fn(usize, usize) -> () = fn(i: usize, n: usize) -> () {
+    print(classify(i));
+    if i < n { run_upto(i + 1, n) }
+};
+
+static main: fn() -> () = fn() -> () {
+    run_upto(1, 15);
+
+    if fib(10) == 55 {
+        print("fib: fib(10) == 55");
+    } else {
+        print("fib: unexpected");
+    };
+
+    if gcd(35, 64) == 1 {
+        print("gcd: gcd(35, 64) == 1 — Euclid via a hand-derived remainder");
+    } else {
+        print("gcd: unexpected");
+    };
+
+    if is_even(76) {
+        if is_odd(76) {
+            print("mutual recursion: unexpected");
+        } else {
+            print("mutual recursion: is_even(76) and not is_odd(76)");
+        };
+    } else {
+        print("mutual recursion: unexpected");
+    };
+
+    if apply_twice(double, 5) == 20 {
+        print("higher-order: apply_twice(double, 5) == 20 — a fn value passed and called");
+    } else {
+        print("higher-order: unexpected");
+    };
+}
