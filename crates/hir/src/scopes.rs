@@ -252,6 +252,32 @@ pub enum Resolution {
 pub enum Builtin {
     Print,
     Panic,
+    /// `alloc_array::<T>(n)` — one fresh heap allocation of `n`
+    /// uninitialized elements. SAFE (allocating cannot UB); returns the
+    /// result-shaped [`ALLOC_RESULT_NAME`] enum (`Ok(&raw mut T)` /
+    /// `Err`) — the interpreter never produces `Err` (it cannot
+    /// meaningfully OOM), but the signature is stable for the codegen era.
+    /// Refused in const contexts (heap values wait for an interning
+    /// design).
+    AllocArray,
+    /// `dealloc_array::<T>(p, n)` — exact-match free. UNSAFE. `p` must be
+    /// the head of a live heap allocation and `n` its alloc-time count;
+    /// anything else is detected UB. Refused in const contexts.
+    DeallocArray,
+    /// `offset(p, i)` — pointer to element `i` past `p`, within the same
+    /// allocation. SAFE (minting is unchecked; validity is judged at the
+    /// deref) and flavor-preserving (`&raw mut` in → `&raw mut` out) — a
+    /// checker special case, not expressible as one `fn` type.
+    Offset,
+    /// `copy(src, dst, n)` — element-count bulk copy, memmove semantics
+    /// (overlap is DEFINED). UNSAFE (writes through a raw pointer).
+    /// Copying an uninitialized element propagates the marker silently —
+    /// only reading one *as a value* traps.
+    Copy,
+    /// `dangling::<T>()` — a `&raw mut T` that was never valid (one
+    /// reserved never-live allocation per machine). SAFE; any deref is
+    /// detected UB.
+    Dangling,
 }
 
 impl Builtin {
@@ -259,6 +285,11 @@ impl Builtin {
         match name {
             "print" => Some(Builtin::Print),
             "panic" => Some(Builtin::Panic),
+            "alloc_array" => Some(Builtin::AllocArray),
+            "dealloc_array" => Some(Builtin::DeallocArray),
+            "offset" => Some(Builtin::Offset),
+            "copy" => Some(Builtin::Copy),
+            "dangling" => Some(Builtin::Dangling),
             _ => None,
         }
     }
@@ -267,7 +298,46 @@ impl Builtin {
         match self {
             Builtin::Print => "print",
             Builtin::Panic => "panic",
+            Builtin::AllocArray => "alloc_array",
+            Builtin::DeallocArray => "dealloc_array",
+            Builtin::Offset => "offset",
+            Builtin::Copy => "copy",
+            Builtin::Dangling => "dangling",
         }
+    }
+
+    /// Whether calling this builtin requires an enclosing
+    /// `unsafe { ... }` block — exactly the operations whose misuse is UB
+    /// even without a visible deref: freeing invalidates every pointer
+    /// into the allocation, and `copy` writes through a raw pointer.
+    pub fn requires_unsafe(self) -> bool {
+        matches!(self, Builtin::DeallocArray | Builtin::Copy)
+    }
+}
+
+/// The disambiguator reserved for compiler-provided declarations —
+/// [`crate::file_item_ids`] numbers real items 0.., so no source item can
+/// ever collide with it, and an [`ItemLoc`] carrying it round-trips through
+/// interning like any other (its item-tree queries answer the builtin
+/// shape; its *source* queries answer the empty case).
+pub const BUILTIN_DISAMBIGUATOR: u32 = u32::MAX;
+
+/// The result-shaped return of `alloc_array` (and the library convention
+/// for fallible allocators built over it): a compiler-provided generic enum
+/// `AllocResult::<T> = enum { Ok(&raw mut T), Err }`. Provided per FILE —
+/// resolution is per-file today, so each file sees "its" declaration; the
+/// identity scheme is the ordinary `ItemLoc` one with the reserved
+/// disambiguator, which keeps every downstream consumer (patterns, match
+/// lowering, widening, the runtime tag) on the completely ordinary
+/// nominal-enum machinery.
+pub const ALLOC_RESULT_NAME: &str = "AllocResult";
+
+/// The [`ItemLoc`] of `file`'s compiler-provided [`ALLOC_RESULT_NAME`] enum.
+pub fn alloc_result_loc(file: SourceFile) -> ItemLoc {
+    ItemLoc {
+        file,
+        name: std::sync::Arc::from(ALLOC_RESULT_NAME),
+        disambiguator: BUILTIN_DISAMBIGUATOR,
     }
 }
 
@@ -402,6 +472,19 @@ pub fn type_scope(db: &dyn Db, file: SourceFile) -> TypeScope {
                 ambiguous: counts[data.name.as_str()] > 1,
             });
     }
+    // The compiler-provided declarations, visible everywhere like the
+    // builtin value names — inserted only when the file doesn't declare the
+    // name itself (user declarations shadow builtins, the `print`
+    // precedent), and never counted as a duplicate.
+    if !counts.contains_key(ALLOC_RESULT_NAME) {
+        scope.entries.insert(
+            ALLOC_RESULT_NAME.to_owned(),
+            TypeScopeEntry {
+                loc: alloc_result_loc(file),
+                ambiguous: false,
+            },
+        );
+    }
     scope
 }
 
@@ -445,6 +528,18 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
                 });
             }
         }
+    }
+    // The compiler-provided declarations — shadowable, never a duplicate
+    // (see `type_scope`).
+    if !scope.entries.contains_key(ALLOC_RESULT_NAME) {
+        scope.entries.insert(
+            ALLOC_RESULT_NAME.to_owned(),
+            ScopeEntry {
+                loc: alloc_result_loc(file),
+                kind: ItemKind::Type,
+                ambiguous: false,
+            },
+        );
     }
     scope
 }

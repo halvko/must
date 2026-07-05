@@ -79,6 +79,18 @@ pub enum Value {
         alloc: AllocId,
         path: Vec<PathElem>,
     },
+    /// MACHINE-INTERNAL tracked-uninit (the ruled A04 poison): the value of
+    /// a fresh `alloc_array` element before its first write. No surface
+    /// program can name or construct it — no literal, no type, no
+    /// conversion produces one — and no surface program can OBSERVE one
+    /// either: every value-read that would touch it (a deref copy, `==`,
+    /// `print`, an aggregate copy into pure value land) is detected UB at
+    /// the read ("read of uninitialized memory"). Exactly two operations
+    /// see it and live: writing an element (replaces the poison), and the
+    /// `copy` builtin (transports it silently, memmove-style — a copy of a
+    /// partially-written buffer must not lie). Miri's uninit tracking on
+    /// Must's typed memory, one `Value` variant.
+    Uninit,
 }
 
 /// Identity of one abstract-memory allocation, unique per machine run and
@@ -100,7 +112,9 @@ pub enum PathElem {
     /// An array element (`&raw mut a[i]`, `&raw mut p.*.buf[i]`). Minted
     /// WITHOUT a bounds check — validity is a deref-time judgement — so
     /// an out-of-range step here is exactly what the deref-time
-    /// out-of-bounds-pointer UB detection catches.
+    /// out-of-bounds-pointer UB detection catches. The heap's
+    /// pointer-arithmetic builtins (`alloc_array`, `offset`) reuse this
+    /// same shape.
     Index(u64),
 }
 
@@ -200,6 +214,9 @@ impl std::hash::Hash for Value {
                 alloc.hash(state);
                 path.hash(state);
             }
+            // Unreachable in a key (uninit never escapes memory — reads
+            // trap); the discriminant alone is lawful regardless.
+            Value::Uninit => {}
         }
     }
 }
@@ -267,6 +284,10 @@ impl Value {
             // rendering the (per-run) AllocId would invite reading meaning
             // into it.
             Value::Ptr { .. } => "&raw <opaque>".to_owned(),
+            // Unreachable through surface reads (they trap first); shown
+            // only by machine-internal surfaces (the debugger's memory
+            // view, error plumbing).
+            Value::Uninit => "<uninit>".to_owned(),
         }
     }
 
@@ -286,7 +307,30 @@ impl Value {
             | Value::Str(_)
             | Value::Bool(_)
             | Value::Fn(_)
-            | Value::Builtin(_) => false,
+            | Value::Builtin(_)
+            | Value::Uninit => false,
+        }
+    }
+
+    /// Whether tracked-uninit sits anywhere inside the value — the read
+    /// gate's predicate (see [`Value::Uninit`]): a value-read that would
+    /// carry poison into pure value land is detected UB at the read, which
+    /// is exactly what keeps `Uninit` unobservable everywhere else (`==`,
+    /// `print`, keys — none of them need their own check).
+    pub fn contains_uninit(&self) -> bool {
+        match self {
+            Value::Uninit => true,
+            Value::Record { fields } => fields.iter().any(|(_, value)| value.contains_uninit()),
+            Value::Array(values) => values.iter().any(Value::contains_uninit),
+            Value::Tuple(values) => values.iter().any(Value::contains_uninit),
+            Value::Variant { payload, .. } => payload.iter().any(Value::contains_uninit),
+            Value::Unit
+            | Value::Int(_)
+            | Value::Str(_)
+            | Value::Bool(_)
+            | Value::Fn(_)
+            | Value::Builtin(_)
+            | Value::Ptr { .. } => false,
         }
     }
 }
@@ -296,6 +340,19 @@ pub struct EvalError {
     pub kind: EvalErrorKind,
     pub message: String,
     /// Where it happened, for mapping back to source.
+    pub origin: Option<(ItemLoc, ExprId)>,
+    /// Secondary provenance ("allocated here" on a double free), rendered
+    /// by drivers below the primary location. Empty for almost every
+    /// error; carried as the house blame currency so the driver — not the
+    /// machine — turns it into text positions, like `origin`.
+    pub notes: Vec<EvalNote>,
+}
+
+/// One secondary note on an [`EvalError`] — a labelled extra location
+/// (heap-UB errors point at the allocation's birth site with it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvalNote {
+    pub message: String,
     pub origin: Option<(ItemLoc, ExprId)>,
 }
 

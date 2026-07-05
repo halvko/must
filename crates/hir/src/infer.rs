@@ -574,6 +574,26 @@ pub enum InferenceDiagnostic {
         /// The turbofish mention expression.
         expr: ExprId,
     },
+    /// A flavor-polymorphic builtin (`offset`, `copy`) applied to something
+    /// that is not a raw pointer. These builtins accept `&raw T` AND
+    /// `&raw mut T` in the same position, so the argument cannot be checked
+    /// against one expected type — the mismatch gets its own diagnostic.
+    BuiltinExpectsRawPtr {
+        /// The call expression (where MIR refuses the operation).
+        call: ExprId,
+        /// The offending argument (carries the squiggle).
+        arg: ExprId,
+        builtin: Builtin,
+        found: Ty,
+    },
+    /// A flavor-polymorphic builtin (`offset`, `copy`) mentioned without
+    /// being called. Its pointer parameter may be `&raw T` or `&raw mut T`,
+    /// so it has no ONE function type to be a value at.
+    BuiltinNotFirstClass {
+        /// The referencing expression.
+        expr: ExprId,
+        builtin: Builtin,
+    },
     /// `&raw`/`&raw mut` of something that is not a place — the accepted
     /// places are a variable, a chain of its fields, or a `static`
     /// (`&raw` of a temporary is refused outright, dodging rvalue
@@ -686,7 +706,9 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::IndexOutOfBounds { expr, .. }
             | InferenceDiagnostic::EmptyArrayNeedsAnnotation { expr }
             | InferenceDiagnostic::ArrayConstArg { expr }
+            | InferenceDiagnostic::BuiltinNotFirstClass { expr, .. }
             | InferenceDiagnostic::AddrOfNonPlace { expr } => *expr,
+            InferenceDiagnostic::BuiltinExpectsRawPtr { arg, .. } => *arg,
             InferenceDiagnostic::AddrOfMutImmutable { root, .. }
             | InferenceDiagnostic::AddrOfMutItem { root, .. } => *root,
             InferenceDiagnostic::AddrOfMutThroughImmutablePointer { addr_of, .. } => *addr_of,
@@ -1055,6 +1077,21 @@ impl InferenceDiagnostic {
                 "cannot infer the element type of an empty array; add a type annotation".to_owned()
             }
             InferenceDiagnostic::ArrayConstArg { .. } => crate::diag::ARRAY_CONST_ARG.to_owned(),
+            InferenceDiagnostic::BuiltinExpectsRawPtr { builtin, found, .. } => {
+                format!(
+                    "`{}` expects a raw pointer (`&raw T` or `&raw mut T`) here, found `{}`",
+                    builtin.name(),
+                    found.display()
+                )
+            }
+            InferenceDiagnostic::BuiltinNotFirstClass { builtin, .. } => {
+                format!(
+                    "`{}` must be called directly; its pointer parameter accepts both \
+                     `&raw T` and `&raw mut T`, so it has no one function type to be \
+                     a value at",
+                    builtin.name()
+                )
+            }
             InferenceDiagnostic::AddrOfNonPlace { .. } => {
                 "`&raw` can only take the address of a variable, one of its fields, \
                  or a `static`"
@@ -1392,6 +1429,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     *expected = resolve_fully(self.table, expected);
                     *actual = resolve_fully(self.table, actual);
                 }
+                InferenceDiagnostic::BuiltinExpectsRawPtr { found, .. } => {
+                    *found = resolve_fully(self.table, found);
+                }
                 InferenceDiagnostic::ArgCountMismatch { .. }
                 | InferenceDiagnostic::NeedsAnnotation { .. }
                 | InferenceDiagnostic::AssignToImmutable { .. }
@@ -1429,7 +1469,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::AddrOfMutItem { .. }
                 | InferenceDiagnostic::IndexOutOfBounds { .. }
                 | InferenceDiagnostic::EmptyArrayNeedsAnnotation { .. }
-                | InferenceDiagnostic::ArrayConstArg { .. } => {}
+                | InferenceDiagnostic::ArrayConstArg { .. }
+                | InferenceDiagnostic::BuiltinNotFirstClass { .. } => {}
             }
         }
         for (_, ty) in result.type_of_pat.iter_mut() {
@@ -1526,7 +1567,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         // never inferred (TR06).
                         let generics = item_generics(self.db, target);
                         if !generics.is_empty() {
-                            self.instantiate_mention(expr, loc.clone(), generics, None)
+                            let sig = signature(self.db, target);
+                            self.instantiate_mention(expr, loc.clone(), sig, generics, None)
                         } else {
                             let sig = signature(self.db, target);
                             // Inference couldn't determine the signature
@@ -1548,7 +1590,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // No one signature a use could take on; the duplicate
                 // definitions carry the diagnostic.
                 Some(Resolution::Ambiguous(_)) => Ty::Error,
-                Some(Resolution::Builtin(builtin)) => builtin_type(*builtin),
+                Some(Resolution::Builtin(builtin)) => {
+                    let builtin = *builtin;
+                    self.infer_builtin_mention(expr, builtin, None)
+                }
                 None => Ty::Error, // unresolved: already diagnosed by name resolution
             },
             ExprData::VariantPath {
@@ -1587,6 +1632,21 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         expected,
                         cause,
                     );
+                }
+                // The flavor-polymorphic builtins (`offset`, `copy`) are
+                // intercepted like construction heads: their callee has no
+                // one function type to infer, so the call itself is the
+                // special case (see `infer_builtin_special_call`).
+                if let Some(Resolution::Builtin(builtin @ (Builtin::Offset | Builtin::Copy))) =
+                    self.resolutions.get(*callee)
+                {
+                    let builtin = *builtin;
+                    return {
+                        let ty = self.infer_builtin_special_call(expr, builtin, args);
+                        let ty = self.check(expr, ty, expected, cause);
+                        self.result.type_of_expr.insert(expr, ty.clone());
+                        ty
+                    };
                 }
                 let fresh = self.fresh_var();
                 let callee_ty = self.infer_expr(*callee, &fresh);
@@ -2953,11 +3013,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         &mut self,
         expr: ExprId,
         loc: ItemLoc,
+        sig: Ty,
         generics: &[GenericParamData],
         args: Option<&[GenericArgData]>,
     ) -> Ty {
-        let target = loc.to_id(self.db);
-        let sig = signature(self.db, target);
         let matched_args = match args {
             Some(args) if args.len() != generics.len() => {
                 self.result
@@ -3163,7 +3222,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     self.infer_const_args_free(args);
                     return signature(self.db, target);
                 }
-                self.instantiate_mention(expr, loc, generics, Some(args))
+                let sig = signature(self.db, target);
+                self.instantiate_mention(expr, loc, sig, generics, Some(args))
             }
             Some(Resolution::Local(binding)) => {
                 let binding = *binding;
@@ -3183,9 +3243,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             }
             Some(Resolution::Builtin(builtin)) => {
                 let builtin = *builtin;
-                self.push_not_generic(expr, &base_name);
-                self.infer_const_args_free(args);
-                builtin_type(builtin)
+                self.infer_builtin_mention(expr, builtin, Some(args))
             }
             // A bare `Pair::<usize>` in value position: types are not
             // first-class values — the legal positions (a construction
@@ -3218,6 +3276,130 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 expr,
                 name: name.to_owned(),
             });
+    }
+
+    /// A mention of a builtin, bare (`args: None`) or turbofished. The
+    /// monomorphic builtins keep their one fixed type; the scheme-shaped
+    /// ones ([`builtin_generics`]) run the exact same instantiation
+    /// machinery as generic fn items; the flavor-polymorphic pair
+    /// (`offset`/`copy`) has no first-class type at all — its one legal
+    /// position, a direct call, is intercepted in the `Call` arm before
+    /// the callee would be inferred, so reaching here IS the error.
+    fn infer_builtin_mention(
+        &mut self,
+        expr: ExprId,
+        builtin: Builtin,
+        args: Option<&[GenericArgData]>,
+    ) -> Ty {
+        if let Some(generics) = builtin_generics(builtin) {
+            let (loc, sig) = builtin_scheme(builtin, self.file);
+            return self.instantiate_mention(expr, loc, sig, &generics, args);
+        }
+        if let Some(args) = args {
+            self.push_not_generic(expr, builtin.name());
+            self.infer_const_args_free(args);
+            return builtin_type(builtin);
+        }
+        if matches!(builtin, Builtin::Offset | Builtin::Copy) {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::BuiltinNotFirstClass { expr, builtin });
+            return Ty::Error;
+        }
+        builtin_type(builtin)
+    }
+
+    /// A direct call of a flavor-polymorphic builtin — the checker special
+    /// case the ruled spec asks for: `offset` preserves its pointer
+    /// argument's flavor (`&raw mut` in → `&raw mut` out) and `copy`
+    /// accepts either flavor for `src`, neither of which one `fn` type can
+    /// say. Everything else about the call is the ordinary machinery
+    /// (argument expectations with causes, arity as `ArgCountMismatch`).
+    fn infer_builtin_special_call(
+        &mut self,
+        call: ExprId,
+        builtin: Builtin,
+        args: &[ExprId],
+    ) -> Ty {
+        let expected_arity = match builtin {
+            Builtin::Offset => 2,
+            Builtin::Copy => 3,
+            _ => unreachable!("not a flavor-polymorphic builtin"),
+        };
+        if args.len() != expected_arity {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::ArgCountMismatch {
+                    expr: call,
+                    expected: expected_arity,
+                    found: args.len(),
+                });
+            for &arg in args {
+                let fresh = self.fresh_var();
+                self.infer_expr(arg, &fresh);
+            }
+            return Ty::Error;
+        }
+        // The flavor-polymorphic pointer argument: inferred freely, then
+        // judged — a checked expectation would have to pick one flavor.
+        let ptr_arg = |this: &mut Self, arg: ExprId| {
+            let fresh = this.fresh_var();
+            let ty = this.infer_expr(arg, &fresh);
+            match this.resolve_shallow(&ty) {
+                Ty::RawPtr { mutable, pointee } => Some((mutable, pointee)),
+                // Broken or diverging: silent, like every infectious type.
+                Ty::Error | Ty::Never => None,
+                found => {
+                    this.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::BuiltinExpectsRawPtr {
+                            call,
+                            arg,
+                            builtin,
+                            found,
+                        });
+                    None
+                }
+            }
+        };
+        match builtin {
+            // `offset(p, i)`: pointer to element `i` past `p`, same
+            // allocation, same flavor.
+            Builtin::Offset => {
+                let ptr = ptr_arg(self, args[0]);
+                self.infer_expr_with(
+                    args[1],
+                    &Ty::Int,
+                    Some(Cause::CallSite { call, arg: args[1] }),
+                );
+                match ptr {
+                    Some((mutable, pointee)) => Ty::RawPtr { mutable, pointee },
+                    None => Ty::Error,
+                }
+            }
+            // `copy(src, dst, n)`: `src` may be either flavor, `dst` must
+            // be `&raw mut`, and the pointees must agree — `dst` is
+            // checked against `&raw mut <src's pointee>` so the mismatch
+            // diagnostics are the ordinary type-mismatch ones.
+            Builtin::Copy => {
+                let elem = self.fresh_var();
+                if let Some((_, pointee)) = ptr_arg(self, args[0]) {
+                    self.unify(&elem, pointee.as_ref());
+                }
+                self.infer_expr_with(
+                    args[1],
+                    &Ty::raw_ptr(true, elem),
+                    Some(Cause::CallSite { call, arg: args[1] }),
+                );
+                self.infer_expr_with(
+                    args[2],
+                    &Ty::Int,
+                    Some(Cause::CallSite { call, arg: args[2] }),
+                );
+                Ty::Unit
+            }
+            _ => unreachable!("not a flavor-polymorphic builtin"),
+        }
     }
 
     /// Infer every const-argument value freely — the error paths, where no
@@ -4469,7 +4651,72 @@ fn builtin_type(builtin: Builtin) -> Ty {
     match builtin {
         Builtin::Print => Ty::fn_type(vec![Ty::Str], Ty::Unit),
         Builtin::Panic => Ty::fn_type(vec![Ty::Str], Ty::Never),
+        // The generic builtins have no ONE type — every mention
+        // instantiates [`builtin_scheme`] instead (see the `NameRef` and
+        // `GenericApp` arms); the flavor-polymorphic pair has no fn type
+        // at all (special-cased at the call, `BuiltinNotFirstClass`
+        // elsewhere). Reached only on error-recovery paths, where the
+        // infectious silent type is right.
+        Builtin::AllocArray
+        | Builtin::DeallocArray
+        | Builtin::Offset
+        | Builtin::Copy
+        | Builtin::Dangling => Ty::Error,
     }
+}
+
+/// The generic binder of a scheme-shaped builtin (`alloc_array`,
+/// `dealloc_array`, `dangling` — one type param `T`), or `None` for the
+/// monomorphic (`print`, `panic`) and flavor-polymorphic (`offset`, `copy`)
+/// ones. Mirrors [`crate::item_data`]'s shape for generic items so mentions
+/// run the exact same instantiation machinery.
+fn builtin_generics(builtin: Builtin) -> Option<Vec<GenericParamData>> {
+    match builtin {
+        Builtin::AllocArray | Builtin::DeallocArray | Builtin::Dangling => {
+            Some(vec![GenericParamData {
+                name: "T".to_owned(),
+                kind: GenericParamKind::Type,
+            }])
+        }
+        Builtin::Print | Builtin::Panic | Builtin::Offset | Builtin::Copy => None,
+    }
+}
+
+/// The scheme of a generic builtin, exactly as [`signature`] would present
+/// a generic item's: a `Ty::Fn` whose rigid [`crate::ty::ParamTy`]s are
+/// keyed by the builtin's own reserved [`ItemLoc`] (same file-scoped
+/// identity trick as [`crate::alloc_result_loc`]), so
+/// [`InferCtx::instantiate_mention`] substitutes them with zero special
+/// cases.
+fn builtin_scheme(builtin: Builtin, file: SourceFile) -> (ItemLoc, Ty) {
+    let loc = ItemLoc {
+        file,
+        name: std::sync::Arc::from(builtin.name()),
+        disambiguator: crate::BUILTIN_DISAMBIGUATOR,
+    };
+    let t = Ty::Param(crate::ty::ParamTy {
+        item: loc.clone(),
+        index: 0,
+        name: std::sync::Arc::from("T"),
+    });
+    let sig = match builtin {
+        // `alloc_array::<T>(n)` — result-shaped (ruled A03): allocating is
+        // fallible at the SIGNATURE level for codegen-era OOM; the
+        // interpreter itself never produces the `Err` arm.
+        Builtin::AllocArray => Ty::fn_type(
+            vec![Ty::Int],
+            Ty::Named(NamedTy {
+                decl: crate::alloc_result_loc(file),
+                args: vec![GenericArg::Ty(t)],
+            }),
+        ),
+        Builtin::DeallocArray => Ty::fn_type(vec![Ty::raw_ptr(true, t), Ty::Int], Ty::Unit),
+        Builtin::Dangling => Ty::fn_type(Vec::new(), Ty::raw_ptr(true, t)),
+        Builtin::Print | Builtin::Panic | Builtin::Offset | Builtin::Copy => {
+            unreachable!("not a scheme-shaped builtin")
+        }
+    };
+    (loc, sig)
 }
 
 /// The generic binder of `item` — empty for non-generic items.
@@ -4505,6 +4752,10 @@ fn instantiate_scheme(
                 .map(|p| instantiate_scheme(p, item, subst, const_subst))
                 .collect(),
             instantiate_scheme(&f.ret, item, subst, const_subst),
+        ),
+        Ty::RawPtr { mutable, pointee } => Ty::raw_ptr(
+            *mutable,
+            instantiate_scheme(pointee, item, subst, const_subst),
         ),
         // The scheme may embed a const param as an array LENGTH
         // (`fn::<const N: usize>(b: [usize; N])`): substitute the written

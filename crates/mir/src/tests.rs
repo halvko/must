@@ -2283,3 +2283,94 @@ fn compile_time_out_of_bounds_lowers_to_a_trap() {
         "#]],
     );
 }
+
+// ---- the heap builtins --------------------------------------------------
+
+#[test]
+fn heap_builtin_calls_lower_as_plain_builtin_calls() {
+    // Erasure at work: `alloc_array::<usize>`'s MIR carries NO type
+    // argument — the callee is the bare builtin constant, the machine
+    // allocates `n` uninit elements whatever `T` was.
+    check_mir(
+        r#"
+static f = fn (p: &raw mut usize) -> () {
+    unsafe { dealloc_array(p, 1) };
+};
+"#,
+        expect![[r#"
+            item f:
+            fn b0(_1: &raw mut usize) -> () {
+              _0: ()  // return
+              _1: &raw mut usize  // param p
+              _2: ()
+              bb0:
+                _2 = call builtin dealloc_array(_1, 1) -> bb1
+              bb1:
+                _0 = ()
+                return
+            }
+            fn b1() -> fn(&raw mut usize) {
+              _0: fn(&raw mut usize)  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn unsafe_builtin_call_outside_unsafe_lowers_to_a_trap() {
+    // The call must not execute at all: it traps with exactly the
+    // squiggle's message (arguments still evaluated for their effects).
+    check_mir(
+        r#"
+static f = fn (p: &raw mut usize) -> () {
+    dealloc_array(p, 1);
+};
+"#,
+        expect![[r#"
+            item f:
+            fn b0(_1: &raw mut usize) -> () {
+              _0: ()  // return
+              _1: &raw mut usize  // param p
+              _2: ()
+              bb0:
+                _2 = trap "calling `dealloc_array` requires an `unsafe { ... }` block" -> bb1
+              bb1:
+                _0 = ()
+                return
+            }
+            fn b1() -> fn(&raw mut usize) {
+              _0: fn(&raw mut usize)  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn heap_alloc_in_initializer_gets_a_conditional_const_trap() {
+    // Initializer level is the one const context with a runtime escape,
+    // so the fence is a ConstTrap: forcing the item traps, the runner's
+    // synthetic entry may proceed.
+    check_mir(
+        "static x = alloc_array::<usize>(1);",
+        expect![[r#"
+            item x:
+            fn b0() -> AllocResult::<usize> {
+              _0: AllocResult::<usize>  // return
+              _1: AllocResult::<usize>
+              bb0:
+                const trap "cannot allocate during compile-time evaluation: const-built heap values wait for an interning design" -> bb1
+              bb1:
+                _1 = call builtin alloc_array(1) -> bb2
+              bb2:
+                _0 = _1
+                return
+            }
+        "#]],
+    );
+}

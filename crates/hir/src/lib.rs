@@ -29,8 +29,8 @@ pub use constraint::Cause;
 pub use infer::{InferenceDiagnostic, InferenceResult};
 pub use item_tree::{Constness, ItemKind, ItemTree, TypeDeclData, TypeRef, item_source, type_decl};
 pub use scopes::{
-    Builtin, Duplicate, ExprScopes, FileScope, Resolution, TypeScope, expr_scopes, file_scope,
-    resolutions, type_scope,
+    ALLOC_RESULT_NAME, BUILTIN_DISAMBIGUATOR, Builtin, Duplicate, ExprScopes, FileScope,
+    Resolution, TypeScope, alloc_result_loc, expr_scopes, file_scope, resolutions, type_scope,
 };
 pub use ty::{
     ConstArgValue, FnTy, GenericArg, NamedTy, Ty, VariantTy, enum_variants, signature,
@@ -99,6 +99,16 @@ pub fn item_index(db: &dyn Db, item: ItemId<'_>) -> Option<usize> {
         .position(|&it| it == item)
 }
 
+/// Whether `item` is the compiler-provided [`ALLOC_RESULT_NAME`] enum —
+/// the one declaration that exists without source (see
+/// [`scopes::alloc_result_loc`]). Its item-tree-level queries ([`item_data`],
+/// [`type_decl`]) answer the builtin shape; source-level queries
+/// ([`item_source`], [`item_index`]) answer the empty case, exactly like a
+/// stale id.
+pub fn is_alloc_result_decl(db: &dyn Db, item: ItemId<'_>) -> bool {
+    item.disambiguator(db) == BUILTIN_DISAMBIGUATOR && item.name(db) == ALLOC_RESULT_NAME
+}
+
 /// The item-tree entry for `item` (its contract, constness, name).
 /// Tracked so that consumers (`signature`, `infer`) depend on this item's
 /// *entry* rather than on the whole positional item list — inserting an
@@ -106,6 +116,17 @@ pub fn item_index(db: &dyn Db, item: ItemId<'_>) -> Option<usize> {
 /// unchanged value backdates everything downstream.
 #[salsa::tracked(returns(ref))]
 pub fn item_data<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<item_tree::ItemData> {
+    if is_alloc_result_decl(db, item) {
+        return Some(item_tree::ItemData {
+            name: ALLOC_RESULT_NAME.to_owned(),
+            kind: item_tree::ItemKind::Type,
+            type_ref: None,
+            generics: vec![item_tree::GenericParamData {
+                name: "T".to_owned(),
+                kind: item_tree::GenericParamKind::Type,
+            }],
+        });
+    }
     item_tree::item_tree(db, item.file(db))
         .items
         .get(item_index(db, item)?)
@@ -1914,6 +1935,14 @@ fn type_decl_value_diagnostics(
         }
         ast::Expr::RecordExpr(nested) => {
             type_decl_field_diagnostics(db, file, nested, diagnostics);
+        }
+        // `&raw mut T` as a field's type (see `item_tree::expr_as_type_ref`):
+        // the pointee recurses as a type value. A plain `&x` falls through
+        // to the not-a-type arm below (references are reserved).
+        ast::Expr::AddrOfExpr(ptr) if ptr.raw_token().is_some() => {
+            if let Some(inner) = ptr.expr() {
+                type_decl_value_diagnostics(db, file, &inner, "for the pointee", diagnostics);
+            }
         }
         // `[usize; 4]` as a field's type parses as the repeat-form
         // ARRAY_EXPR in this expression position (see

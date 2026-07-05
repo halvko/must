@@ -450,6 +450,25 @@ pub enum TypeDeclData {
 
 #[salsa::tracked(returns(ref))]
 pub fn type_decl<'db>(db: &'db dyn Db, item: crate::ItemId<'db>) -> Option<TypeDeclData> {
+    // The compiler-provided `AllocResult::<T> = enum { Ok(&raw mut T),
+    // Err }` (see `scopes::alloc_result_loc`): declared here, as syntax-
+    // shaped data, so everything downstream (`enum_variants`, patterns,
+    // widening, match lowering) runs the completely ordinary nominal-enum
+    // machinery on it.
+    if crate::is_alloc_result_decl(db, item) {
+        return Some(TypeDeclData::Enum {
+            variants: vec![
+                (
+                    "Ok".to_owned(),
+                    vec![TypeRef::RawPtr {
+                        mutable: true,
+                        inner: Box::new(TypeRef::Path("T".to_owned())),
+                    }],
+                ),
+                ("Err".to_owned(), Vec::new()),
+            ],
+        });
+    }
     let ast::Item::TypeItem(decl) = item_source(db, item)? else {
         return None;
     };
@@ -523,6 +542,21 @@ pub(crate) fn expr_as_type_ref(expr: ast::Expr) -> TypeRef {
             },
         },
         ast::Expr::RecordExpr(it) => TypeRef::Record(record_expr_fields_as_types(&it)),
+        // `&raw mut T` / `&raw T` as a field's type parses as an
+        // ADDR_OF_EXPR in this expression position — the address-of
+        // spelling IS the pointer-type spelling, so reinterpret the
+        // operand as the pointee type. A plain `&x` (no `raw`) stays a
+        // non-type (references are reserved).
+        ast::Expr::AddrOfExpr(it) if it.raw_token().is_some() => {
+            let inner = match it.expr() {
+                Some(expr) => expr_as_type_ref(expr),
+                None => TypeRef::Error,
+            };
+            TypeRef::RawPtr {
+                mutable: it.is_mut(),
+                inner: Box::new(inner),
+            }
+        }
         // `[usize; 4]` as a field's type parses as an ARRAY_EXPR in this
         // expression position — the repeat form's `;` shape is exactly the
         // array type's, so reinterpret element and count. The list form

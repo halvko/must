@@ -90,5 +90,5 @@ static main = fn () -> () {
 // Writes through pointee fields (`p.*.x = ...`), pointers into array
 // elements (`&raw mut a[i]`), and address-of through a deref
 // (`unsafe { &raw mut p.*.x }` — computing an address through a pointer is
-// itself a deref, so it needs `unsafe`) all work. Still reserved:
-// `unsafe fn` and heap allocation.
+// itself a deref, so it needs `unsafe`) all work.
+// Still reserved: `unsafe fn`.

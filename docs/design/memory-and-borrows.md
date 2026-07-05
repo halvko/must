@@ -10,9 +10,13 @@
   copies the bits, so interior pointers survive a whole-value overwrite and do not follow
   copies of the container. Pointers display opaquely, never as a number. This is why byte
   layout could be deferred: v1 never observes it.
-- **M02** Validity is checked at deref, not when a pointer is made: a dangling pointer is
-  fine to hold, and only a use of it is detected UB. Stricter creation-time rules can be
-  added later; the reverse cannot.
+- **M02** Validity is checked at deref, not at offset creation; stricter creation-time
+  rules can be added later, the reverse cannot. `offset` saturates, so a one-past-the-end
+  pointer is fine to hold.
+- **M03** The operations, all element-counted: allocate, free, `offset(p, usize)`, `copy`
+  (memmove semantics), `dangling`. `unsafe` is required for a raw deref, freeing and
+  copying; taking a raw borrow, comparing pointers, `offset`, `dangling` and allocating
+  are safe.
 - **M08** Taking a raw pointer is safe; every consuming operation on one is gated by
   `unsafe`, so safe code may create a dangling raw pointer but cannot use one. A raw
   pointer minted through a deref (`&raw mut p.*.f`) is likewise safe to create.
@@ -22,6 +26,10 @@
 - **M18** Interior mutability in v1 is an immutable handle containing a raw mutable pointer,
   with the pointer flavour governing write-through. Long term, a nominal exclusivity-exempt
   cell type.
+- The acceptance test the design must pass: use-after-free after arena teardown (an outlives
+  violation); double free by value copy (moves plus region close); dangling handle copies
+  after growth (use-after-move); cross-allocator buffer stealing (region inequality, with the
+  runtime identity assert as a backstop).
 
 ## Discarded
 

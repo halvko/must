@@ -1,0 +1,233 @@
+// The heap, built on raw pointers. Five builtins and nothing else —
+// `alloc_array::<T>(n)`, `dealloc_array(p, n)`, `offset(p, i)`,
+// `copy(src, dst, n)`, `dangling::<T>()` — everything above them
+// (containers, arenas, growth) is ordinary library code written in Must,
+// and this file is that library, twice over: a growable `HeapVec` and a
+// typed `Arena`.
+//
+// Run: must-lsp run examples/heap.must
+//
+// The ground rules, all demonstrated below:
+//
+// - `alloc_array::<T>(n)` is SAFE (allocating cannot be UB) and
+//   result-shaped: it returns `AllocResult::<T>`, a compiler-provided enum
+//   `Ok(&raw mut T) | Err`, so every allocation site says what it does
+//   when memory runs out. The interpreter itself can't meaningfully run
+//   out — its alloc never produces `Err` — but the signature is stable for
+//   compiled targets, and fallible ALLOCATORS built over it (the arena
+//   below) produce real `Err`s today. Zero-element requests are a defined
+//   trap (allocators are not required to support them — reserved, never
+//   UB).
+// - Fresh elements are UNINITIALIZED. The interpreter tracks that: reading
+//   an element before its first write is detected UB ("read of
+//   uninitialized memory"), not a zero, not garbage.
+// - `dealloc_array(p, n)` is UNSAFE and exact-match: `p` must be the head
+//   pointer `alloc_array` returned, `n` the original element count, the
+//   allocation still live and actually heap. Every violation is detected
+//   UB with its own message — double free, use after free, wrong count,
+//   interior pointer, freeing a local — each with an "allocated here" note
+//   pointing at the allocation's birth site.
+// - `offset(p, i)` is SAFE and unchecked, exactly like `&raw mut a[i]`:
+//   minting an out-of-range address is fine, dereferencing it is detected
+//   UB. It preserves the pointer's flavor (`&raw mut` in, `&raw mut` out).
+// - `copy(src, dst, n)` is UNSAFE, element-count, and memmove-shaped:
+//   overlapping ranges are DEFINED, uninitialized elements copy silently
+//   (only reading them as values traps), out of range on either side is
+//   detected UB. A zero-length copy is valid through any pointer,
+//   `dangling()` included.
+// - `dangling::<T>()` is SAFE: a `&raw mut T` that was never valid, the
+//   stand-in for "no buffer yet" (there is no null). Any deref is detected
+//   UB.
+// - None of the heap ops run at compile time: `alloc_array` /
+//   `dealloc_array` in a const context are refused eagerly ("const-built
+//   heap values wait for an interning design").
+
+// ---- a growable vector, concretely -------------------------------------
+// One buffer, a length, a capacity. No allocator parameter and no vtable:
+// this HeapVec talks to the platform heap builtins directly (generic
+// containers over pluggable allocators wait for traits). The VALUE is a
+// handle over the buffer: copying it copies the handle, not the elements,
+// and exactly one deinit per buffer is the caller's job — the interpreter
+// deterministically catches every double-free and use-after-free while
+// a move story is built.
+type HeapVec = struct::<T> { ptr: &raw mut T, len: usize, cap: usize };
+
+static heapvec_new = fn::<T>() -> HeapVec::<T> {
+    // Zero capacity, no allocation: `dangling` is the no-buffer-yet
+    // pointer. Nothing ever dereferences it — every access is guarded by
+    // `len`, and growth replaces it before the first write.
+    HeapVec::<T>(struct { ptr: dangling::<T>(), len: 0, cap: 0 })
+};
+
+// Growth is not a primitive: it is alloc + copy + dealloc, composed here.
+// `mut v` is a local copy (the shipped rule), so push RETURNS the updated
+// handle and the caller reassigns: `v = heapvec_push(v, x);`.
+// On `Err` this pushes traps — the ruled v1 policy: a plain `push` never
+// reports OOM upward; a `try_push` returning the result shape is the
+// additive fallible sibling when someone needs it.
+static heapvec_push = fn::<T>(mut v: HeapVec::<T>, x: T) -> HeapVec::<T> {
+    if v.len == v.cap {
+        let new_cap = if v.cap == 0 { 4 } else { v.cap * 2 };
+        let fresh = match alloc_array::<T>(new_cap) {
+            AllocResult::Ok(p) => p,
+            AllocResult::Err => panic("heapvec_push: out of memory"),
+        };
+        unsafe {
+            // `v.len` initialized elements move over; the fresh buffer's
+            // tail stays uninitialized (and unread, by the `len` guard).
+            // First growth copies 0 elements out of the dangling pointer —
+            // legal, zero-length copies always are.
+            copy(v.ptr, fresh, v.len);
+            if v.cap != 0 {
+                dealloc_array(v.ptr, v.cap);
+            };
+        };
+        v.ptr = fresh;
+        v.cap = new_cap;
+    };
+    // The first write into an uninitialized element IS its initialization.
+    // (Assignment targets are places rooted at a name, so the computed
+    // address gets a `let` first — `offset(...).*  = x;` is not a place.)
+    let slot = unsafe { offset(v.ptr, v.len) };
+    unsafe { slot.* = x; };
+    v.len = v.len + 1;
+    v
+};
+
+// Checked indexing, written as EXACTLY the future `a[i]` desugar:
+// check + panic + offset + deref. When indexing becomes a library feature,
+// `v[i]` will lower to this shape — the builtin `a[i]` must stay
+// semantically identical to it, and this fn is the identity's fixture.
+static heapvec_get = fn::<T>(v: HeapVec::<T>, i: usize) -> T {
+    if i < v.len {
+        unsafe { offset(v.ptr, i).* }
+    } else {
+        panic("index out of bounds")
+    }
+};
+
+static heapvec_deinit = fn::<T>(v: HeapVec::<T>) -> () {
+    if v.cap != 0 {
+        unsafe { dealloc_array(v.ptr, v.cap); };
+    };
+};
+
+// ---- a typed arena ------------------------------------------------------
+// ONE backing allocation of `cap` elements, carved out front to back by a
+// bump cursor; individual dealloc is a no-op and the whole backing dies at
+// `arena_deinit`. The state lives on the heap too — an arena handle must
+// outlive the frame that made it, and a local's address dies with its
+// frame — so the handle is an immutable value containing a `&raw mut` to
+// the state: pointer flavor governs write-through, not binding mutability
+// (the interior-mutability pattern, already shipped semantics).
+type ArenaState = struct::<T> { base: &raw mut T, cap: usize, cursor: usize };
+type Arena = struct::<T> { state: &raw mut ArenaState::<T> };
+
+static arena_new = fn::<T>(cap: usize) -> Arena::<T> {
+    let state = match alloc_array::<ArenaState::<T>>(1) {
+        AllocResult::Ok(p) => p,
+        AllocResult::Err => panic("arena_new: out of memory"),
+    };
+    let base = match alloc_array::<T>(cap) {
+        AllocResult::Ok(p) => p,
+        AllocResult::Err => panic("arena_new: out of memory"),
+    };
+    unsafe { state.* = ArenaState::<T>(struct { base: base, cap: cap, cursor: 0 }); };
+    Arena::<T>(struct { state: state })
+};
+
+// The arena allocates in the SAME result shape as the builtin — and unlike
+// the builtin's, its `Err` arm is reachable today: exhaustion is an
+// ordinary answer, not a trap, so callers choose their own policy (the
+// demo below matches on it).
+static arena_alloc = fn::<T>(a: Arena::<T>, n: usize) -> AllocResult::<T> {
+    let cap = unsafe { a.state.*.cap };
+    let cursor = unsafe { a.state.*.cursor };
+    if cap - cursor < n {
+        AllocResult::<T>::Err
+    } else {
+        unsafe {
+            let p = offset(a.state.*.base, cursor);
+            a.state.*.cursor = cursor + n;
+            AllocResult::<T>::Ok(p)
+        }
+    }
+};
+
+// Individual free is deliberately nothing: arena memory dies all at once.
+static arena_dealloc = fn::<T>(a: Arena::<T>, p: &raw mut T, n: usize) -> () { };
+
+static arena_deinit = fn::<T>(a: Arena::<T>) -> () {
+    unsafe {
+        dealloc_array(a.state.*.base, a.state.*.cap);   // the backing first
+        dealloc_array(a.state, 1);                      // then the state itself
+    };
+};
+
+// ---- the tour -----------------------------------------------------------
+static main = fn () -> () {
+    // Raw roundtrip: allocate three, write three, read one back, free.
+    // The match is not optional politeness — `alloc_array` RETURNS the
+    // result enum, so the type system makes every call site say what `Err`
+    // means here.
+    match alloc_array::<usize>(3) {
+        AllocResult::Ok(p) => {
+            unsafe {
+                p.* = 10;
+                let p1 = offset(p, 1);
+                p1.* = 20;
+                let p2 = offset(p, 2);
+                p2.* = 30;
+            };
+            if unsafe { offset(p, 2).* } == 30 {
+                print("roundtrip: wrote 3 elements through offset, read them back");
+            } else {
+                print("roundtrip: unexpected");
+            };
+            unsafe { dealloc_array(p, 3); };
+        }
+        AllocResult::Err => print("roundtrip: out of memory"),
+    };
+
+    // HeapVec: pushes past the initial capacity force a growth (fresh
+    // buffer, copy, free old) — invisible from here, which is the point.
+    let mut v = heapvec_new::<usize>();
+    let mut i = 0;
+    loop {
+        if i == 6 { break; };
+        v = heapvec_push(v, i * i);
+        i = i + 1;
+    };
+    if heapvec_get(v, 5) == 25 {
+        print("heapvec: pushed 6 squares across a growth, get(5) == 25");
+    } else {
+        print("heapvec: unexpected");
+    };
+    heapvec_deinit(v);
+
+    // Arena: carve 3 + 2 out of a 4-element arena — the second carve
+    // doesn't fit, and exhaustion arrives as a VALUE, not a crash.
+    let a = arena_new::<usize>(4);
+    match arena_alloc(a, 3) {
+        AllocResult::Ok(p) => {
+            let last = unsafe { offset(p, 2) };
+            unsafe { last.* = 7; };
+            print("arena: carved 3 of 4 elements");
+        }
+        AllocResult::Err => print("arena: unexpected exhaustion"),
+    };
+    match arena_alloc::<usize>(a, 2) {
+        AllocResult::Ok(p) => print("arena: unexpected fit"),
+        AllocResult::Err => print("arena: a further 2 don't fit — Err, by value"),
+    };
+    arena_deinit(a);
+}
+
+// What this file deliberately does NOT contain: a leak report or `forget`
+// (deferred — allocation origins already land, so the report is cheap to
+// add when a customer appears), signed pointer arithmetic (Must has no
+// signed integers yet; a signed twin waits on them), `realloc`/in-place
+// growth (growth is alloc+copy+dealloc, composed by the container),
+// `size_of`/byte views/pointer casts (the layout era), and any
+// allocator-vtable machinery (generic containers over allocators wait for
+// traits — the containers above are concrete on purpose).

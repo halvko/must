@@ -177,6 +177,14 @@ pub fn evaluate(
             if let Some(location) = locate(&db, file, path, original_len, err.origin) {
                 rendered.push_str(&format!("\n  --> {location}"));
             }
+            // Secondary provenance ("allocated here" on a double free):
+            // one located line per note.
+            for note in &err.notes {
+                rendered.push_str(&format!("\n  note: {}", note.message));
+                if let Some(location) = locate(&db, file, path, original_len, note.origin.clone()) {
+                    rendered.push_str(&format!("\n  --> {location}"));
+                }
+            }
             Err(rendered)
         }
     }
@@ -345,7 +353,6 @@ static main = fn {
         "#]],
         );
     }
-
     #[test]
     fn user_static_with_the_entry_name_does_not_hijack() {
         check(
@@ -368,6 +375,148 @@ static main = fn { print(
             "1",
             expect_test::expect![[r#"
                 => 1
+            "#]],
+        );
+    }
+
+    #[test]
+    fn heapvec_roundtrip_runs_through_the_cli() {
+        // The heap example at CLI level: growth (alloc + copy +
+        // dealloc old), checked get, one deinit — clean run, no leak
+        // noise, no UB.
+        check(
+            r#"
+type HeapVec = struct::<T> { ptr: &raw mut T, len: usize, cap: usize };
+static heapvec_new = fn::<T>() -> HeapVec::<T> {
+    HeapVec::<T>(struct { ptr: dangling::<T>(), len: 0, cap: 0 })
+};
+static heapvec_push = fn::<T>(mut v: HeapVec::<T>, x: T) -> HeapVec::<T> {
+    if v.len == v.cap {
+        let new_cap = if v.cap == 0 { 4 } else { v.cap * 2 };
+        let fresh = match alloc_array::<T>(new_cap) {
+            AllocResult::Ok(p) => p,
+            AllocResult::Err => panic("heapvec_push: out of memory"),
+        };
+        unsafe {
+            copy(v.ptr, fresh, v.len);
+            if v.cap != 0 {
+                dealloc_array(v.ptr, v.cap);
+            };
+        };
+        v.ptr = fresh;
+        v.cap = new_cap;
+    };
+    let slot = unsafe { offset(v.ptr, v.len) };
+    unsafe { slot.* = x; };
+    v.len = v.len + 1;
+    v
+};
+static heapvec_get = fn::<T>(v: HeapVec::<T>, i: usize) -> T {
+    if i < v.len {
+        unsafe { offset(v.ptr, i).* }
+    } else {
+        panic("index out of bounds")
+    }
+};
+static heapvec_deinit = fn::<T>(v: HeapVec::<T>) -> () {
+    if v.cap != 0 {
+        unsafe { dealloc_array(v.ptr, v.cap); };
+    };
+};
+static main = fn () -> usize {
+    let mut v = heapvec_new::<usize>();
+    let mut i = 0;
+    loop {
+        if i == 5 { break; };
+        v = heapvec_push(v, i + 1);
+        i = i + 1;
+    };
+    let sum = heapvec_get(v, 0) + heapvec_get(v, 4);
+    heapvec_deinit(v);
+    sum
+}
+"#,
+            "main()",
+            expect_test::expect![[r#"
+                => 6
+            "#]],
+        );
+    }
+
+    #[test]
+    fn heap_double_free_is_located_with_its_allocation_site() {
+        // Detected UB with secondary provenance: the crash locates the
+        // second free, the note locates the allocation's birth.
+        check(
+            r#"
+static main = fn () -> () {
+    let p = match alloc_array::<usize>(2) {
+        AllocResult::Ok(p) => p,
+        AllocResult::Err => panic("oom"),
+    };
+    unsafe { dealloc_array(p, 2); };
+    unsafe { dealloc_array(p, 2); };
+}
+"#,
+            "main()",
+            expect_test::expect![[r#"
+                undefined behavior: double free — this allocation was already freed
+                  --> test.must:8:14
+                  note: allocated here
+                  --> test.must:3:19
+            "#]],
+        );
+    }
+
+    #[test]
+    fn arena_exhaustion_is_a_value_at_cli_level() {
+        check(
+            r#"
+type ArenaState = struct::<T> { base: &raw mut T, cap: usize, cursor: usize };
+type Arena = struct::<T> { state: &raw mut ArenaState::<T> };
+static arena_new = fn::<T>(cap: usize) -> Arena::<T> {
+    let state = match alloc_array::<ArenaState::<T>>(1) {
+        AllocResult::Ok(p) => p,
+        AllocResult::Err => panic("arena_new: out of memory"),
+    };
+    let base = match alloc_array::<T>(cap) {
+        AllocResult::Ok(p) => p,
+        AllocResult::Err => panic("arena_new: out of memory"),
+    };
+    unsafe { state.* = ArenaState::<T>(struct { base: base, cap: cap, cursor: 0 }); };
+    Arena::<T>(struct { state: state })
+};
+static arena_alloc = fn::<T>(a: Arena::<T>, n: usize) -> AllocResult::<T> {
+    let cap = unsafe { a.state.*.cap };
+    let cursor = unsafe { a.state.*.cursor };
+    if cap - cursor < n {
+        AllocResult::<T>::Err
+    } else {
+        unsafe {
+            let p = offset(a.state.*.base, cursor);
+            a.state.*.cursor = cursor + n;
+            AllocResult::<T>::Ok(p)
+        }
+    }
+};
+static arena_deinit = fn::<T>(a: Arena::<T>) -> () {
+    unsafe {
+        dealloc_array(a.state.*.base, a.state.*.cap);
+        dealloc_array(a.state, 1);
+    };
+};
+static main = fn () -> () {
+    let a = arena_new::<usize>(2);
+    match arena_alloc(a, 3) {
+        AllocResult::Ok(p) => print("unexpected fit"),
+        AllocResult::Err => print("exhausted, by value"),
+    };
+    arena_deinit(a);
+}
+"#,
+            "main()",
+            expect_test::expect![[r#"
+                exhausted, by value
             "#]],
         );
     }

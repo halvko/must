@@ -38,6 +38,29 @@ pub const VALUE_CALL_IN_CONST: &str =
 pub const DEREF_REQUIRES_UNSAFE: &str =
     "dereferencing a raw pointer requires an `unsafe { ... }` block";
 
+/// A call of an unsafe builtin (`dealloc_array`, `copy`) outside any
+/// `unsafe { ... }` block — the same rule as [`DEREF_REQUIRES_UNSAFE`]
+/// (operations whose misuse is UB need the marker), same fix-naming shape.
+pub fn builtin_call_requires_unsafe(name: &str) -> String {
+    format!("calling `{name}` requires an `unsafe {{ ... }}` block")
+}
+
+/// The eager const fence (C04): `alloc_array` / `dealloc_array` refuse in
+/// const contexts until interning (C06) delivers — refusing eagerly keeps
+/// the later relaxation a grant instead of a retraction. Rendered per verb
+/// so the message names the construct.
+pub fn heap_call_in_const(builtin_name: &str) -> String {
+    let verb = if builtin_name == "dealloc_array" {
+        "deallocate"
+    } else {
+        "allocate"
+    };
+    format!(
+        "cannot {verb} during compile-time evaluation: \
+         const-built heap values wait for an interning design"
+    )
+}
+
 /// The item-level generic rule (TR06): a generic fn literal's params and
 /// return type are its scheme, so all of them must be written. Shown only
 /// at the definition (mentions stay silent about it — see

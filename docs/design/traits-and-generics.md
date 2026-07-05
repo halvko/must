@@ -10,8 +10,9 @@
   allowed; const parameters are never inferred, and `_` in const position is an error. The
   const-parameter domain is any concrete data type. Monomorphization is hybrid: one MIR per
   generic item, with const arguments carried on the instance.
-- **TR07** A rigid parameter supports no operations at all; bounds are the only mechanism
-  that re-opens them, and that is why declaration-site checking is sound.
+- **TR07** A rigid parameter supports no operations at all; bounds are the only mechanism that
+  re-opens them. This decided the allocator interface's shape (A06) and is why
+  declaration-site checking is sound.
 - **TR08** Closures are nominal: each literal is its own type hiding a capture struct,
   callable through a trait impl, statically dispatched, for zero call overhead. The arrow's
   kind slot is row-shaped, flat until a payload-carrying axis exists. `Fn`/`FnMut`/`FnOnce`

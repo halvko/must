@@ -1534,9 +1534,15 @@ static main = fn {
         expect_test::expect![[r#"
             panic Function (fn(str) -> !)
             x Variable (usize)
+            AllocResult Enum (enum { Ok(&raw mut T), Err })
             Shape Struct (struct { r: usize })
             area Function (fn(usize) -> usize)
             main Function (fn())
+            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
+            copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
+            dangling Function (fn::<T>() -> &raw mut T)
+            dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
+            offset Function (fn(&raw [mut] T, usize) -> &raw [mut] T)
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -1566,7 +1572,13 @@ static main = fn {
 "#,
         expect_test::expect![[r#"
             x Variable (mut usize)
+            AllocResult Enum (enum { Ok(&raw mut T), Err })
             main Function (fn())
+            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
+            copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
+            dangling Function (fn::<T>() -> &raw mut T)
+            dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
+            offset Function (fn(&raw [mut] T, usize) -> &raw [mut] T)
             panic Function (fn(str) -> !)
             print Function (fn(str))
             const Keyword
@@ -1590,6 +1602,7 @@ type Point = struct { x: usize, y: usize };
 static make_point = fn (x: usize) -> $0 { x };
 "#,
         expect_test::expect![[r#"
+            AllocResult Enum (enum { Ok(&raw mut T), Err })
             Point Struct (struct { x: usize, y: usize })
             bool Keyword
             str Keyword
@@ -2140,7 +2153,13 @@ static main = fn (s: str, n: usize) {
             s Variable (str)
             panic Function (fn(str) -> !)
             n Variable (usize)
+            AllocResult Enum (enum { Ok(&raw mut T), Err })
             main Function (fn(str, usize))
+            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
+            copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
+            dangling Function (fn::<T>() -> &raw mut T)
+            dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
+            offset Function (fn(&raw [mut] T, usize) -> &raw [mut] T)
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -2171,8 +2190,14 @@ static main = fn {
         expect_test::expect![[r#"
             get_s Function (fn() -> str)
             panic Function (fn(str) -> !)
+            AllocResult Enum (enum { Ok(&raw mut T), Err })
             get_n Function (fn() -> usize)
             main Function (fn())
+            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
+            copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
+            dangling Function (fn::<T>() -> &raw mut T)
+            dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
+            offset Function (fn(&raw [mut] T, usize) -> &raw [mut] T)
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -2202,7 +2227,13 @@ static main = fn {
         expect_test::expect![[r#"
             helper Function (fn() -> usize)
             panic Function (fn(str) -> !)
+            AllocResult Enum (enum { Ok(&raw mut T), Err })
             main Function (fn())
+            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
+            copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
+            dangling Function (fn::<T>() -> &raw mut T)
+            dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
+            offset Function (fn(&raw [mut] T, usize) -> &raw [mut] T)
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -2234,8 +2265,14 @@ static main = fn (p: Point, n: usize) {
             p Variable (Point)
             panic Function (fn(str) -> !)
             n Variable (usize)
+            AllocResult Enum (enum { Ok(&raw mut T), Err })
             Point Struct (struct { x: usize })
             main Function (fn(Point, usize))
+            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
+            copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
+            dangling Function (fn::<T>() -> &raw mut T)
+            dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
+            offset Function (fn(&raw [mut] T, usize) -> &raw [mut] T)
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -2333,7 +2370,13 @@ static main = fn {
 "#,
         expect_test::expect![[r#"
             s Variable (str)
+            AllocResult Enum (enum { Ok(&raw mut T), Err })
             main Function (fn())
+            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
+            copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
+            dangling Function (fn::<T>() -> &raw mut T)
+            dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
+            offset Function (fn(&raw [mut] T, usize) -> &raw [mut] T)
             panic Function (fn(str) -> !)
             print Function (fn(str))
             const Keyword

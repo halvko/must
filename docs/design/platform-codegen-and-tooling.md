@@ -2,6 +2,18 @@
 
 ## Conclusions
 
+- **P01** Three layers, and the platform owns `main`. Layer 0 is bare: no platform, no
+  effects; purity is checkable by a symbol scan. Layer 1 is platform hooks: effects are
+  platform imports, so a host that does not provide a hook has statically denied the
+  capability. Layer 2 is batteries: day-to-day users write what they write today and never
+  learn the word "platform"; embedders replace layer 2, not the language. Const check's "no
+  effects in const contexts" is the same judgment at a different boundary.
+- **P02** The embeddability checklist, an acceptance test for any memory, FFI or platform
+  ruling: no process-global mutable state, many instances per process; the host supplies the
+  allocator at instantiation through one small uniform interface; deterministic teardown;
+  errors cross a registered boundary and never unwind host frames; no raw pointers cross the
+  boundary; no ambient authority. Items 1 and 3 rule out tracing GC and pervasive refcounting;
+  item 4 is why traps map to a panic hook.
 - **P09** The command surface. `run` exits 0, 1 for a trap/panic/runtime error/UB, or 2
   for a usage or file-IO failure; `check` likewise. Warnings never affect the exit code.
   Failure kinds have fixed prefix words. The frame limit is 10,000, and the message quotes
@@ -11,6 +23,14 @@
 
 ## Discarded
 
+- **Tracing GC and pervasive refcounting** — fail the embeddability checklist before pause
+  times or throughput come up, and independently fail no-runtime. **A runtime of any kind** —
+  this is what killed algebraic effect handlers, ambient-context calling conventions, and
+  unwinding. **P01 P02**
+- **Unwinding through host frames** — errors cross a registered boundary; traps map to a panic
+  hook. **P02**
+- **A hidden context parameter on every call** — non-allocating functions pay an ABI slot.
+  **P01**
 - **A byte-addressed interpreter memory** — commits to layout now and removes the structured
   value representation that debugger rendering, value display and structural equality depend
   on. Nothing in the typed model has to be undone for a codegen-era byte model. **A flat

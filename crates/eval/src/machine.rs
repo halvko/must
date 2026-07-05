@@ -15,7 +15,8 @@ use mir::{
 use rustc_hash::FxHashMap;
 
 use crate::{
-    AllocId, EvalError, EvalErrorKind, FnValue, GenericArgValue, Instance, PathElem, Value,
+    AllocId, EvalError, EvalErrorKind, EvalNote, FnValue, GenericArgValue, Instance, PathElem,
+    Value,
 };
 
 /// What the machine does at its impure edges. [`ConstMode`] refuses;
@@ -37,6 +38,7 @@ impl Mode for ConstMode {
             kind: EvalErrorKind::NotConst,
             message: hir::diag::side_effect_call_in_const("print"),
             origin: None,
+            notes: Vec::new(),
         })
     }
 }
@@ -52,6 +54,7 @@ impl<W: std::io::Write> Mode for RunMode<W> {
             kind: EvalErrorKind::Runtime,
             message: format!("I/O error in `print`: {err}"),
             origin: None,
+            notes: Vec::new(),
         })
     }
 }
@@ -71,6 +74,11 @@ const MAX_CONST_DEPTH: usize = 128;
 /// terminate even on adversarial input. Run-mode code outside initializers
 /// is not fueled — a long-running program is the user's business.
 const CONST_FUEL: u64 = 1_000_000;
+
+/// The tracked-uninit read message (ruled A04): one text for every gate —
+/// value reads that would carry poison out of memory, and path steps into
+/// never-written structure.
+const UNINIT_READ: &str = "read of uninitialized memory — this element was never written";
 
 /// One Must call frame.
 pub struct Frame {
@@ -124,14 +132,35 @@ pub enum StepEvent {
 /// recognizably dead forever — ids are never reused).
 struct Allocation {
     value: Value,
-    /// `false` once the owning frame returned (a local): any deref then is
-    /// detected UB.
+    /// `false` once the owning frame returned (a local) or the allocation
+    /// was freed (`dealloc_array` on heap): any deref then is detected UB.
     live: bool,
     /// `false` for statics: any write through a pointer into one is
     /// detected UB (unreachable from well-typed code — statics only hand
     /// out shared `&raw` — but the memory model enforces it regardless).
     writable: bool,
     kind: AllocKind,
+    /// The allocation's birth site — recorded for heap allocations (the
+    /// `alloc_array` call), `None` for the rest. The blame currency of the
+    /// heap-UB diagnostics: double free / use-after-free / dealloc
+    /// mismatches attach an "allocated here" note pointing at it.
+    origin: Option<(ItemLoc, ExprId)>,
+}
+
+impl Allocation {
+    /// The "allocated here" note heap-UB errors carry — empty when no
+    /// birth site was recorded (non-heap allocations).
+    fn allocated_here(&self) -> Vec<EvalNote> {
+        self.origin
+            .as_ref()
+            .map(|origin| {
+                vec![EvalNote {
+                    message: "allocated here".to_owned(),
+                    origin: Some(origin.clone()),
+                }]
+            })
+            .unwrap_or_default()
+    }
 }
 
 /// What an allocation backs — decides the UB message's wording.
@@ -141,6 +170,14 @@ enum AllocKind {
     Local,
     /// A `static` item's one place.
     Static,
+    /// An `alloc_array` heap allocation: dies at `dealloc_array` (the
+    /// frame-pop-kills-locals mechanism applied to heap — dangling
+    /// detection needed zero new logic).
+    Heap,
+    /// The reserved never-live allocation behind the `dangling` builtin,
+    /// minted at most once per machine. Never `live`, so every deref is
+    /// detected UB, with its own wording.
+    Dangling,
 }
 
 pub struct Machine<'db, M> {
@@ -180,6 +217,10 @@ pub struct Machine<'db, M> {
     /// (static=identity, observable). Plain mentions of `S` keep cloning
     /// the `forced` memo, unchanged.
     static_allocs: FxHashMap<ItemLoc, AllocId>,
+    /// The reserved never-live allocation behind `dangling`, minted once
+    /// per machine on the first call — every `dangling()` result compares
+    /// equal, and every deref of one is detected UB.
+    dangling_alloc: Option<AllocId>,
     next_alloc: u64,
 }
 
@@ -208,6 +249,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             next_frame_serial: 0,
             memory: FxHashMap::default(),
             static_allocs: FxHashMap::default(),
+            dangling_alloc: None,
             next_alloc: 0,
         }
     }
@@ -223,6 +265,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 kind: EvalErrorKind::NotConst,
                 message: format!("cycle detected while evaluating `{}`", loc.display_name()),
                 origin: root_origin(self.db, &loc),
+                notes: Vec::new(),
             });
         }
         if self.const_depth >= MAX_CONST_DEPTH {
@@ -230,6 +273,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 kind: EvalErrorKind::NotConst,
                 message: format!("constant evaluation exceeded {MAX_CONST_DEPTH} nested items"),
                 origin: root_origin(self.db, &loc),
+                notes: Vec::new(),
             });
         }
         self.forcing.push(loc.clone());
@@ -269,6 +313,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 kind: EvalErrorKind::NotConst,
                 message: "a pointer cannot leave compile-time evaluation".to_owned(),
                 origin,
+                notes: Vec::new(),
             });
         }
         Ok(value)
@@ -308,6 +353,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                     loc.display_name()
                 ),
                 origin: self.const_block_origin(loc, body),
+                notes: Vec::new(),
             });
         }
         self.forcing_blocks.push(key.clone());
@@ -366,6 +412,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 kind: EvalErrorKind::Trap,
                 message: format!("`{}` has no value", loc.display_name()),
                 origin: None,
+                notes: Vec::new(),
             });
         };
         // An item root executes outside any generic binder (a generic
@@ -497,6 +544,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 },
                 message: format!("stack overflow: recursion exceeded {MAX_FRAMES} frames"),
                 origin: root_origin(self.db, &loc),
+                notes: Vec::new(),
             });
         }
         let body = &self.lowered(&loc).bodies[body_id];
@@ -703,6 +751,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                                           this is a bug in the Must language server"
                                     .to_owned(),
                                 origin: None,
+                                notes: Vec::new(),
                             }
                         })?;
                         caller.locals.insert(dest, value);
@@ -724,6 +773,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                     kind: EvalErrorKind::Trap,
                     message: message.clone(),
                     origin: Some((loc, origin)),
+                    notes: Vec::new(),
                 });
             }
             // A const-check violation at initializer level. Forcing an
@@ -739,6 +789,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                         kind: EvalErrorKind::Trap,
                         message: message.clone(),
                         origin: Some((loc, origin)),
+                        notes: Vec::new(),
                     });
                 }
                 self.jump(*target);
@@ -816,6 +867,11 @@ impl<'db, M: Mode> Machine<'db, M> {
             ));
         };
         for elem in projection {
+            // Projecting into tracked-uninit: the structure was never
+            // written — detected UB (same judgement as `project_path`).
+            if matches!(current, Value::Uninit) {
+                return Err(self.uninit_read(loc, origin));
+            }
             current = match elem {
                 ResolvedProj::Field(index) => match current {
                     Value::Record { fields } => match fields.get(*index as usize) {
@@ -845,6 +901,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                                     *index,
                                 ),
                                 origin: Some((loc.clone(), origin)),
+                                notes: Vec::new(),
                             });
                         }
                         &values[*index as usize]
@@ -861,6 +918,15 @@ impl<'db, M: Mode> Machine<'db, M> {
                     self.follow_ptr_path(&allocation.value, path, loc, origin)?
                 }
             };
+        }
+        // The tracked-uninit read gate: a value-read may not carry poison
+        // into pure value land — a fresh heap element (or an aggregate
+        // containing one) reads as detected UB until it is written. This
+        // is THE gate that keeps `Value::Uninit` unobservable: `==`,
+        // `print`, and every other consumer only ever see values that
+        // passed through here.
+        if current.contains_uninit() {
+            return Err(self.uninit_read(loc, origin));
         }
         Ok(current.clone())
     }
@@ -912,6 +978,9 @@ impl<'db, M: Mode> Machine<'db, M> {
                         let allocation = self.allocation_for_deref(alloc, loc, origin)?;
                         let current =
                             self.follow_ptr_path(&allocation.value, &path, loc, origin)?;
+                        if matches!(current, Value::Uninit) {
+                            return Err(self.uninit_read(loc, origin));
+                        }
                         let Value::Array(values) = current else {
                             return Err(self.ill_typed("an array value", current, loc, origin));
                         };
@@ -923,6 +992,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                                     *index,
                                 ),
                                 origin: Some((loc.clone(), origin)),
+                                notes: Vec::new(),
                             });
                         }
                     }
@@ -937,6 +1007,9 @@ impl<'db, M: Mode> Machine<'db, M> {
                 ResolvedProj::Deref => {
                     let allocation = self.allocation_for_deref(alloc, loc, origin)?;
                     let current = self.follow_ptr_path(&allocation.value, &path, loc, origin)?;
+                    if matches!(current, Value::Uninit) {
+                        return Err(self.uninit_read(loc, origin));
+                    }
                     let Value::Ptr {
                         alloc: next_alloc,
                         path: next_path,
@@ -979,6 +1052,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 kind: EvalErrorKind::UndefinedBehavior,
                 message: "write through a pointer into read-only memory (a `static`)".to_owned(),
                 origin: Some((loc.clone(), origin)),
+                notes: Vec::new(),
             });
         }
         match project_path_mut(&mut allocation.value, &path) {
@@ -1016,8 +1090,21 @@ impl<'db, M: Mode> Machine<'db, M> {
                      with {len} elements"
                 ),
                 origin: Some((loc.clone(), origin)),
+                notes: Vec::new(),
             },
+            ProjectError::Uninit => self.uninit_read(loc, origin),
             ProjectError::Shape(detail) => self.internal_error(detail, Some((loc.clone(), origin))),
+        }
+    }
+
+    /// The tracked-uninit gate's error — detected UB, one message
+    /// everywhere ([`UNINIT_READ`]).
+    fn uninit_read(&self, loc: &ItemLoc, origin: ExprId) -> EvalError {
+        EvalError {
+            kind: EvalErrorKind::UndefinedBehavior,
+            message: UNINIT_READ.to_owned(),
+            origin: Some((loc.clone(), origin)),
+            notes: Vec::new(),
         }
     }
 
@@ -1045,7 +1132,9 @@ impl<'db, M: Mode> Machine<'db, M> {
                 kind: EvalErrorKind::Runtime,
                 message: hir::diag::index_out_of_bounds(len, index),
                 origin: Some((loc.clone(), origin)),
+                notes: Vec::new(),
             },
+            ProjectError::Uninit => this.uninit_read(loc, origin),
             ProjectError::Shape(detail) => this.internal_error(detail, Some((loc.clone(), origin))),
         };
         let frame = self.frames.last_mut().expect("frame still live");
@@ -1166,6 +1255,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                     kind: EvalErrorKind::Runtime,
                     message: format!("array length {count} is too large"),
                     origin: Some((loc.clone(), origin)),
+                    notes: Vec::new(),
                 })?;
                 Ok(Value::Array(vec![elem; count]))
             }
@@ -1186,6 +1276,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                         kind: EvalErrorKind::Runtime,
                         message: hir::diag::index_out_of_bounds(values.len() as u128, index),
                         origin: Some((loc.clone(), origin)),
+                        notes: Vec::new(),
                     });
                 }
                 Ok(values.swap_remove(index as usize))
@@ -1307,6 +1398,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                             live: true,
                             writable: false,
                             kind: AllocKind::Static,
+                            origin: None,
                         });
                         self.static_allocs.insert(item.clone(), alloc);
                         alloc
@@ -1371,6 +1463,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             live: true,
             writable: true,
             kind: AllocKind::Local,
+            origin: None,
         });
         let frame = self.frames.last_mut().expect("frame still live");
         frame.promoted.insert(local, alloc);
@@ -1399,6 +1492,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             kind: EvalErrorKind::UndefinedBehavior,
             message: message.to_owned(),
             origin: Some((loc.clone(), origin)),
+            notes: Vec::new(),
         };
         let Some(allocation) = self.memory.get(&alloc) else {
             // A pointer from a different machine run (the const-escape
@@ -1418,6 +1512,14 @@ impl<'db, M: Mode> Machine<'db, M> {
                 // one can never dangle this way; the arm only keeps the
                 // match total.
                 AllocKind::Static => ub("use after free — this allocation was already freed"),
+                // A freed heap allocation: the classic use-after-free,
+                // with the birth site attached.
+                AllocKind::Heap => {
+                    let mut err = ub("use after free — this allocation was already freed");
+                    err.notes = allocation.allocated_here();
+                    err
+                }
+                AllocKind::Dangling => ub("dangling pointer — this pointer was never valid"),
             });
         }
         Ok(allocation)
@@ -1443,6 +1545,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                     kind: EvalErrorKind::Runtime,
                     message,
                     origin: Some((loc.clone(), origin)),
+                    notes: Vec::new(),
                 };
                 Ok(match op {
                     Add => Value::Int(
@@ -1502,6 +1605,12 @@ impl<'db, M: Mode> Machine<'db, M> {
                     && let Some(alloc) = frame.promoted.get(&place.local)
                     && let Some(allocation) = self.memory.get(alloc)
                 {
+                    // The tracked-uninit read gate (see `read_place`): a
+                    // promoted local's storage is real memory, so `copy`
+                    // can have planted poison in it.
+                    if allocation.value.contains_uninit() {
+                        return Err(self.uninit_read(loc, origin));
+                    }
                     return Ok(allocation.value.clone());
                 }
                 frame
@@ -1551,6 +1660,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                                   before instantiation"
                             .to_owned(),
                         origin: Some((loc.clone(), origin)),
+                        notes: Vec::new(),
                     })?,
             }),
         }
@@ -1573,21 +1683,35 @@ impl<'db, M: Mode> Machine<'db, M> {
         loc: &ItemLoc,
         origin: ExprId,
     ) -> Result<Value, EvalError> {
-        let [arg] = args.as_slice() else {
-            return Err(self.internal_error(
-                format!("builtin `{}` takes 1 argument", builtin.name()),
-                Some((loc.clone(), origin)),
-            ));
-        };
-        let Value::Str(text) = arg else {
-            return Err(self.ill_typed("a `str` argument", arg, loc, origin));
+        // Arity is checker-guaranteed (`ArgCountMismatch` traps before the
+        // call); a mismatch reaching execution is an invariant violation.
+        let expect_args = |this: &Self, n: usize| {
+            if args.len() == n {
+                Ok(())
+            } else {
+                Err(this.internal_error(
+                    format!(
+                        "builtin `{}` takes {n} argument(s), got {}",
+                        builtin.name(),
+                        args.len()
+                    ),
+                    Some((loc.clone(), origin)),
+                ))
+            }
         };
         match builtin {
-            Builtin::Panic => Err(EvalError {
-                kind: EvalErrorKind::Panic,
-                message: text.clone(),
-                origin: Some((loc.clone(), origin)),
-            }),
+            Builtin::Panic => {
+                expect_args(self, 1)?;
+                let Value::Str(text) = &args[0] else {
+                    return Err(self.ill_typed("a `str` argument", &args[0], loc, origin));
+                };
+                Err(EvalError {
+                    kind: EvalErrorKind::Panic,
+                    message: text.clone(),
+                    origin: Some((loc.clone(), origin)),
+                    notes: Vec::new(),
+                })
+            }
             // Defense in depth: const-check plants a trap at every `print`
             // call it can see in a const context, so this refusal is
             // normally shadowed — it stays as the machine's own guarantee
@@ -1596,11 +1720,384 @@ impl<'db, M: Mode> Machine<'db, M> {
                 kind: EvalErrorKind::NotConst,
                 message: hir::diag::side_effect_call_in_const(builtin.name()),
                 origin: Some((loc.clone(), origin)),
+                notes: Vec::new(),
             }),
             Builtin::Print => {
+                expect_args(self, 1)?;
+                let Value::Str(text) = &args[0] else {
+                    return Err(self.ill_typed("a `str` argument", &args[0], loc, origin));
+                };
                 self.mode.print(text)?;
                 Ok(Value::Unit)
             }
+            // The eager const fence (ruled C04), machine side — the same
+            // defense-in-depth split as `print`: const-check plants the
+            // trap the editor already showed, this refusal is the
+            // machine's own guarantee that const evaluation never touches
+            // the heap (relaxing it later is a grant; the reverse would be
+            // a retraction).
+            Builtin::AllocArray | Builtin::DeallocArray if self.const_depth > 0 => Err(EvalError {
+                kind: EvalErrorKind::NotConst,
+                message: hir::diag::heap_call_in_const(builtin.name()),
+                origin: Some((loc.clone(), origin)),
+                notes: Vec::new(),
+            }),
+            Builtin::AllocArray => {
+                expect_args(self, 1)?;
+                self.builtin_alloc_array(&args[0], loc, origin)
+            }
+            Builtin::DeallocArray => {
+                expect_args(self, 2)?;
+                self.builtin_dealloc_array(&args[0], &args[1], loc, origin)
+            }
+            Builtin::Offset => {
+                expect_args(self, 2)?;
+                self.builtin_offset(&args[0], &args[1], loc, origin)
+            }
+            Builtin::Copy => {
+                expect_args(self, 3)?;
+                self.builtin_copy(&args[0], &args[1], &args[2], loc, origin)
+            }
+            Builtin::Dangling => {
+                expect_args(self, 0)?;
+                Ok(self.builtin_dangling())
+            }
+        }
+    }
+
+    /// `alloc_array::<T>(n)`: one fresh heap allocation of `n`
+    /// tracked-uninit elements — MIR carries no type argument (erasure
+    /// doctrine: the machine allocates `n` uninit ELEMENTS whatever `T`
+    /// is; only the checker ever needed `T`). Returns the result-shaped
+    /// `AllocResult` value: always `Ok(head pointer)` here — the
+    /// interpreter cannot meaningfully OOM, the `Err` arm exists for
+    /// signature stability (codegen-era fallible alloc).
+    ///
+    /// `n == 0` is a defined TRAP (A05): allocators are not
+    /// required to handle zero-size requests — restrictive now, loosenable
+    /// later, and never UB. A consequence worth writing down: no zero-size
+    /// allocation can ever exist, so `dealloc_array` never legally sees
+    /// `n == 0`.
+    fn builtin_alloc_array(
+        &mut self,
+        n: &Value,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<Value, EvalError> {
+        let Value::Int(n) = n else {
+            return Err(self.ill_typed("a `usize` element count", n, loc, origin));
+        };
+        if *n == 0 {
+            return Err(EvalError {
+                kind: EvalErrorKind::Runtime,
+                message: "cannot allocate zero elements: zero-size allocation support \
+                          is reserved"
+                    .to_owned(),
+                origin: Some((loc.clone(), origin)),
+                notes: Vec::new(),
+            });
+        }
+        let n = usize::try_from(*n).map_err(|_| EvalError {
+            kind: EvalErrorKind::Runtime,
+            message: format!("allocation of {n} elements is too large"),
+            origin: Some((loc.clone(), origin)),
+            notes: Vec::new(),
+        })?;
+        let alloc = self.fresh_alloc(Allocation {
+            value: Value::Array(vec![Value::Uninit; n]),
+            live: true,
+            writable: true,
+            kind: AllocKind::Heap,
+            // The birth site: the blame the heap-UB notes point back at.
+            origin: Some((loc.clone(), origin)),
+        });
+        // The head pointer: element 0 of the allocation.
+        Ok(Value::Variant {
+            decl: hir::alloc_result_loc(loc.file),
+            index: 0,
+            name: "Ok".to_owned(),
+            payload: vec![Value::Ptr {
+                alloc,
+                path: vec![PathElem::Index(0)],
+            }],
+        })
+    }
+
+    /// `dealloc_array::<T>(p, n)`: exact-match free (ruled A03/A04). Every
+    /// contract violation is detected UB with its own message — and, where
+    /// an allocation exists to blame, an "allocated here" note. Wrong-TYPE
+    /// dealloc is undetectable under erasure (no runtime `T` exists) and
+    /// accepted as such.
+    fn builtin_dealloc_array(
+        &mut self,
+        p: &Value,
+        n: &Value,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<Value, EvalError> {
+        let Value::Ptr { alloc, path } = p else {
+            return Err(self.ill_typed("a raw pointer", p, loc, origin));
+        };
+        let Value::Int(count) = n else {
+            return Err(self.ill_typed("a `usize` element count", n, loc, origin));
+        };
+        let ub = |message: String, notes: Vec<EvalNote>| EvalError {
+            kind: EvalErrorKind::UndefinedBehavior,
+            message,
+            origin: Some((loc.clone(), origin)),
+            notes,
+        };
+        let Some(allocation) = self.memory.get(alloc) else {
+            return Err(ub(
+                "dangling pointer — it does not point into this execution's memory".to_owned(),
+                Vec::new(),
+            ));
+        };
+        // Kind first: freeing a local or a static is a category error
+        // whether or not the allocation is still live.
+        if !matches!(allocation.kind, AllocKind::Heap) {
+            return Err(ub(
+                "`dealloc_array` of a pointer that does not point to a heap allocation".to_owned(),
+                Vec::new(),
+            ));
+        }
+        if !allocation.live {
+            return Err(ub(
+                "double free — this allocation was already freed".to_owned(),
+                allocation.allocated_here(),
+            ));
+        }
+        // Head check: the pointer `alloc_array` returned addresses element
+        // 0; anything else (an `offset` result, an interior element) does
+        // not name the allocation.
+        if path.as_slice() != [PathElem::Index(0)] {
+            return Err(ub(
+                "`dealloc_array` of a pointer that is not the head of its allocation \
+                 — it points inside it"
+                    .to_owned(),
+                allocation.allocated_here(),
+            ));
+        }
+        let len = match &allocation.value {
+            Value::Array(values) => values.len() as u128,
+            other => {
+                let other = other.display();
+                return Err(self.internal_error(
+                    format!("a heap allocation held `{other}`, not an array"),
+                    Some((loc.clone(), origin)),
+                ));
+            }
+        };
+        if *count != len {
+            return Err(ub(
+                format!(
+                    "`dealloc_array` with the wrong element count — this allocation \
+                     has {len} element(s), but {count} were passed"
+                ),
+                allocation.allocated_here(),
+            ));
+        }
+        // The frame-pop-kills-locals mechanism, applied to heap: the id is
+        // never reused, so every surviving pointer into this allocation is
+        // recognizably dangling forever (that is the whole double-free /
+        // use-after-free detection story).
+        let allocation = self.memory.get_mut(alloc).expect("checked just above");
+        allocation.live = false;
+        Ok(Value::Unit)
+    }
+
+    /// `offset(p, i)`: pointer to element (head-index + i) of the same
+    /// allocation. Minting is UNCHECKED per the shipped rule — no bounds
+    /// judgement here; an out-of-range result is detected UB at its first
+    /// deref, exactly like `&raw mut a[i]` past the end. The one shape the
+    /// abstract machine cannot represent — advancing a pointer that does
+    /// not address an array element (a lone local, a record field) — is
+    /// refused as detected UB at the call (with `i == 0` as the harmless
+    /// identity, matching `ptr.add(0)`).
+    fn builtin_offset(
+        &mut self,
+        p: &Value,
+        i: &Value,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<Value, EvalError> {
+        let Value::Ptr { alloc, path } = p else {
+            return Err(self.ill_typed("a raw pointer", p, loc, origin));
+        };
+        let Value::Int(i) = i else {
+            return Err(self.ill_typed("a `usize` offset", i, loc, origin));
+        };
+        if *i == 0 {
+            return Ok(Value::Ptr {
+                alloc: *alloc,
+                path: path.clone(),
+            });
+        }
+        let mut path = path.clone();
+        match path.last_mut() {
+            Some(PathElem::Index(index)) => {
+                // Saturating on purpose: an offset past `u64::MAX` cannot
+                // name a real element of any allocation, so the saturated
+                // address is out of bounds at every deref — the ordinary
+                // detected-UB story, no extra failure mode.
+                *index = u64::try_from(*i)
+                    .ok()
+                    .and_then(|i| index.checked_add(i))
+                    .unwrap_or(u64::MAX);
+                Ok(Value::Ptr {
+                    alloc: *alloc,
+                    path,
+                })
+            }
+            _ => Err(EvalError {
+                kind: EvalErrorKind::UndefinedBehavior,
+                message: "`offset` of a pointer that does not address an array element".to_owned(),
+                origin: Some((loc.clone(), origin)),
+                notes: Vec::new(),
+            }),
+        }
+    }
+
+    /// `copy(src, dst, n)`: element-count bulk copy, memmove semantics —
+    /// the source range is read out in full before the destination is
+    /// written, so overlap (any overlap, same allocation included) is
+    /// DEFINED, not UB. Deliberately bypasses the tracked-uninit read gate:
+    /// `copy` transports poison silently (a copy of a partially-written
+    /// buffer must not lie); only reading an element AS A VALUE traps.
+    /// Liveness, writability and range validity are checked exactly like
+    /// derefs — violations are detected UB.
+    fn builtin_copy(
+        &mut self,
+        src: &Value,
+        dst: &Value,
+        n: &Value,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<Value, EvalError> {
+        let Value::Int(n) = n else {
+            return Err(self.ill_typed("a `usize` element count", n, loc, origin));
+        };
+        let n = *n;
+        // A zero-length copy is valid through ANY pointers — dangling
+        // included (Rust's rule, and what lets a growing container copy
+        // its 0 elements out of the never-allocated `dangling()` buffer
+        // without a special case).
+        if n == 0 {
+            if !matches!(src, Value::Ptr { .. }) {
+                return Err(self.ill_typed("a raw pointer", src, loc, origin));
+            }
+            if !matches!(dst, Value::Ptr { .. }) {
+                return Err(self.ill_typed("a raw pointer", dst, loc, origin));
+            }
+            return Ok(Value::Unit);
+        }
+        // Read the source range out in full first (the memmove trick), and
+        // range-check the destination through the same shared judgement.
+        let elements = self.copy_range(src, n, "source", loc, origin)?.to_vec();
+        self.copy_range(dst, n, "destination", loc, origin)?;
+        let Value::Ptr { alloc, path } = dst else {
+            unreachable!("copy_range verified the pointer shape");
+        };
+        let Some(PathElem::Index(head)) = path.last() else {
+            unreachable!("copy_range verified the element shape");
+        };
+        let head = *head as usize;
+        // Writability mirrors `write_through` — the one write-side check
+        // `copy_range` (a read judgement) doesn't make.
+        let allocation = self.memory.get_mut(alloc).expect("checked by copy_range");
+        if !allocation.writable {
+            return Err(EvalError {
+                kind: EvalErrorKind::UndefinedBehavior,
+                message: "write through a pointer into read-only memory (a `static`)".to_owned(),
+                origin: Some((loc.clone(), origin)),
+                notes: Vec::new(),
+            });
+        }
+        let parent = &path[..path.len() - 1];
+        let slot = match project_path_mut(&mut allocation.value, parent) {
+            Ok(slot) => slot,
+            Err(error) => return Err(self.ptr_path_error(error, loc, origin)),
+        };
+        let Value::Array(values) = slot else {
+            unreachable!("copy_range verified the array shape");
+        };
+        for (offset, element) in elements.into_iter().enumerate() {
+            values[head + offset] = element;
+        }
+        Ok(Value::Unit)
+    }
+
+    /// The shared `copy` range judgement: `p` must be a live pointer
+    /// addressing an array element, and `n` elements starting there must
+    /// sit inside the array — out of range on either side is detected UB
+    /// (deref-like on both ends, the same UB-detection spirit as A03/A04).
+    /// Returns the `n` source elements (clones — the read-before-write
+    /// that makes overlap defined).
+    fn copy_range(
+        &self,
+        p: &Value,
+        n: u128,
+        role: &str,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<&[Value], EvalError> {
+        let Value::Ptr { alloc, path } = p else {
+            return Err(self.ill_typed("a raw pointer", p, loc, origin));
+        };
+        let allocation = self.allocation_for_deref(*alloc, loc, origin)?;
+        let Some(PathElem::Index(head)) = path.last() else {
+            return Err(EvalError {
+                kind: EvalErrorKind::UndefinedBehavior,
+                message: format!("`copy` {role} pointer does not address an array element"),
+                origin: Some((loc.clone(), origin)),
+                notes: Vec::new(),
+            });
+        };
+        let parent = &path[..path.len() - 1];
+        let value = self.follow_ptr_path(&allocation.value, parent, loc, origin)?;
+        let Value::Array(values) = value else {
+            return Err(self.ill_typed("an array value", value, loc, origin));
+        };
+        let len = values.len() as u128;
+        let head = *head as u128;
+        if head.checked_add(n).is_none_or(|end| end > len) {
+            return Err(EvalError {
+                kind: EvalErrorKind::UndefinedBehavior,
+                message: format!(
+                    "`copy` out of bounds — the {role} names {n} element(s) from \
+                     index {head}, but the array has {len}"
+                ),
+                origin: Some((loc.clone(), origin)),
+                notes: allocation.allocated_here(),
+            });
+        }
+        Ok(&values[head as usize..(head + n) as usize])
+    }
+
+    /// `dangling::<T>()`: the reserved never-live pointer (there is no
+    /// null) — minted once per machine, so every `dangling()` compares
+    /// equal, and `allocation_for_deref` reports every deref as "never
+    /// valid". Shaped like a heap head pointer (element 0 of an
+    /// empty never-live array) so `offset` arithmetic on it mints
+    /// (unchecked, as always) instead of erroring.
+    fn builtin_dangling(&mut self) -> Value {
+        let alloc = match self.dangling_alloc {
+            Some(alloc) => alloc,
+            None => {
+                let alloc = self.fresh_alloc(Allocation {
+                    value: Value::Array(Vec::new()),
+                    live: false,
+                    writable: false,
+                    kind: AllocKind::Dangling,
+                    origin: None,
+                });
+                self.dangling_alloc = Some(alloc);
+                alloc
+            }
+        };
+        Value::Ptr {
+            alloc,
+            path: vec![PathElem::Index(0)],
         }
     }
 
@@ -1621,6 +2118,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 kind: EvalErrorKind::NotConst,
                 message: "constant evaluation ran out of fuel".to_owned(),
                 origin: root_origin(self.db, loc),
+                notes: Vec::new(),
             });
         }
         Ok(())
@@ -1635,6 +2133,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 "internal error: {detail} — this is a bug in the Must language server"
             ),
             origin,
+            notes: Vec::new(),
         }
     }
 
@@ -1656,6 +2155,9 @@ fn project_path<'v>(slot: &'v Value, path: &[PathElem]) -> Result<&'v Value, Pro
     let mut current = slot;
     for elem in path {
         current = match (elem, current) {
+            // Stepping INTO uninitialized memory: its structure was never
+            // written — detected UB, not a shape violation.
+            (_, Value::Uninit) => return Err(ProjectError::Uninit),
             (PathElem::Field(index), Value::Record { fields }) => {
                 let len = fields.len();
                 match fields.get(*index as usize) {
@@ -1700,6 +2202,10 @@ fn project_path_mut<'v>(
     let mut current = slot;
     for elem in path {
         current = match (elem, current) {
+            // Stepping INTO uninitialized memory — see `project_path`.
+            // (A path ENDING at an uninit slot succeeds: the write
+            // replaces the poison — that is how elements get initialized.)
+            (_, Value::Uninit) => return Err(ProjectError::Uninit),
             (PathElem::Field(index), Value::Record { fields }) => {
                 let len = fields.len();
                 match fields.get_mut(*index as usize) {
@@ -1770,11 +2276,20 @@ enum ResolvedProj {
 
 /// Why a place projection failed. Out-of-bounds element steps are
 /// classified by the caller (an ordinary runtime trap for the program's
-/// own `[i]` steps, detected UB for a pointer's stored path); everything
-/// else means a value the checker should have refused was projected
-/// through — an internal error.
+/// own `[i]` steps, detected UB for a pointer's stored path); a step that
+/// lands on tracked-uninit is detected UB (projecting into a value that
+/// was never written is reading its structure); everything else means a
+/// value the checker should have refused was projected through — an
+/// internal error.
 enum ProjectError {
-    OutOfBounds { len: u128, index: u128 },
+    OutOfBounds {
+        len: u128,
+        index: u128,
+    },
+    /// A NON-final step landed on [`Value::Uninit`]: the walk would read
+    /// structure that was never written (a final slot of `Uninit` is
+    /// fine — reads gate on it afterwards, writes replace it).
+    Uninit,
     Shape(String),
 }
 
@@ -1787,6 +2302,8 @@ fn project_mut<'v>(
     let mut current = slot;
     for elem in projection {
         match (elem, current) {
+            // Stepping INTO uninitialized memory — see `project_path`.
+            (_, Value::Uninit) => return Err(ProjectError::Uninit),
             (ResolvedProj::Field(index), Value::Record { fields }) => {
                 let index = *index as usize;
                 let len = fields.len();
@@ -1873,6 +2390,8 @@ fn value_ty(value: &Value) -> hir::Ty {
         // anyway — its allocation lives here): `{error}` demotes it from
         // console-eval parameters, the variables panel still shows it.
         Value::Fn(_) | Value::Builtin(_) | Value::Tuple(_) | Value::Ptr { .. } => hir::Ty::Error,
+        // Machine-internal poison: no surface type exists for it.
+        Value::Uninit => hir::Ty::Error,
     }
 }
 

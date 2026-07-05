@@ -9,13 +9,19 @@
 //!
 //! Inside a const context the only calls allowed are direct calls of items
 //! whose initializer is a `const fn` literal, direct calls of `const fn`
-//! literals themselves, and the builtin `panic` — const evaluation permits
-//! no side effect except panicking. Everything else is rejected
-//! conservatively: const-ness is not part of function types (yet), so for a
-//! parameter, a let-bound value, or any other expression it is simply not
-//! known — even when a human can see what the value must be. For the same
-//! reason no wrappers around an item's root expression are peeled: only a
-//! literal `const fn` initializer makes an item const-callable.
+//! literals themselves, and the builtins that perform no I/O and allocate
+//! nothing: `panic` only ends the evaluation, the address primitives are
+//! pure, and a copy writes only through pointers whose targets already
+//! exist in const memory. The refusals name their own reason — `print` has
+//! an effect, and the allocating pair (`alloc_array`/`dealloc_array`) is
+//! held back by the eager const fence (C04) until an interning design
+//! lifts it.
+//! Everything else is rejected conservatively: const-ness is not part of
+//! function types (yet), so for a parameter, a let-bound value, or any
+//! other expression it is simply not known — even when a human can see
+//! what the value must be. For the same reason no wrappers around an
+//! item's root expression are peeled: only a literal `const fn`
+//! initializer makes an item const-callable.
 
 use base_db::Db;
 use la_arena::ArenaMap;
@@ -39,6 +45,14 @@ pub enum ConstCheckDiagnostic {
     /// A call to a side-effecting builtin (`print`). `panic` is the one
     /// side effect const contexts allow, so it never lands here.
     SideEffectCall { callee: ExprId, builtin: Builtin },
+    /// A call to a heap builtin (`alloc_array`/`dealloc_array`) in a const
+    /// context — the eager const fence (C04): const-built heap values wait
+    /// for interning (C06), and refusing at the call keeps the later
+    /// relaxation a grant, not a retraction. The pointer-escape rule in
+    /// `eval` stays as the backstop. The non-allocating builtins are NOT
+    /// fenced: the address primitives are pure, and a copy writes only
+    /// through pointers whose targets already exist in const memory.
+    HeapCall { callee: ExprId, builtin: Builtin },
     /// A call to a value whose const-ness cannot be known: a parameter, a
     /// let-bound value, an arbitrary expression. Conservative by design —
     /// const-ness is not part of function types, so even a value provably
@@ -53,6 +67,7 @@ impl ConstCheckDiagnostic {
             ConstCheckDiagnostic::NonConstFnCall { callee, .. }
             | ConstCheckDiagnostic::NonConstFnLiteralCall { callee }
             | ConstCheckDiagnostic::SideEffectCall { callee, .. }
+            | ConstCheckDiagnostic::HeapCall { callee, .. }
             | ConstCheckDiagnostic::ValueCall { callee } => *callee,
         }
     }
@@ -69,6 +84,9 @@ impl ConstCheckDiagnostic {
             }
             ConstCheckDiagnostic::SideEffectCall { builtin, .. } => {
                 diag::side_effect_call_in_const(builtin.name())
+            }
+            ConstCheckDiagnostic::HeapCall { builtin, .. } => {
+                diag::heap_call_in_const(builtin.name())
             }
             ConstCheckDiagnostic::ValueCall { .. } => diag::VALUE_CALL_IN_CONST.to_owned(),
         }
@@ -294,10 +312,24 @@ impl CheckCtx<'_> {
             // user function — always legal in a const context (like
             // record literals, which it erases to at runtime).
             Some(Resolution::TypeItem(_)) => {}
-            // The one side effect const contexts allow.
-            Some(Resolution::Builtin(Builtin::Panic)) => {}
+            // The one side effect const contexts allow — and the pointer
+            // builtins that allocate nothing: `offset`/`dangling` are pure
+            // and `copy` writes only through pointers whose targets already
+            // exist in const memory (would-be UB there is a deterministic
+            // detected trap; the escape rule guards the results).
+            Some(Resolution::Builtin(
+                Builtin::Panic | Builtin::Offset | Builtin::Copy | Builtin::Dangling,
+            )) => {}
             Some(Resolution::Builtin(builtin @ Builtin::Print)) => {
                 self.diagnostics.push(ConstCheckDiagnostic::SideEffectCall {
+                    callee,
+                    builtin: *builtin,
+                });
+            }
+            // The eager const fence (C04): heap allocation waits for the
+            // interning design.
+            Some(Resolution::Builtin(builtin @ (Builtin::AllocArray | Builtin::DeallocArray))) => {
+                self.diagnostics.push(ConstCheckDiagnostic::HeapCall {
                     callee,
                     builtin: *builtin,
                 });

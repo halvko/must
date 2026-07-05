@@ -287,12 +287,34 @@ impl LowerCtx<'_> {
                 InferenceDiagnostic::AssignThroughImmutablePointer { target, .. } => {
                     self.assign_traps.insert(*target, diag.message());
                 }
+                // A flavor-polymorphic builtin (`offset`/`copy`) applied
+                // to a non-pointer: the diagnostic squiggles the argument,
+                // but the operation that cannot execute is the call.
+                InferenceDiagnostic::BuiltinExpectsRawPtr { call, .. } => {
+                    self.call_traps.insert(*call, diag.message());
+                }
+                // The name itself is the value that cannot be produced,
+                // like `TypeNotValue`.
+                InferenceDiagnostic::BuiltinNotFirstClass { expr, .. } => {
+                    self.value_traps.insert(*expr, diag.message());
+                }
             }
         }
-        // Unsafe-check findings land on the deref expression itself — the
-        // operation (read or write) that must not run outside `unsafe`.
         for diag in self.unsafe_diagnostics {
-            self.unsafe_traps.insert(diag.expr(), diag.message());
+            match diag {
+                // Deref findings land on the deref expression itself — the
+                // operation (read or write) that must not run outside
+                // `unsafe`.
+                hir::UnsafeCheckDiagnostic::DerefOutsideUnsafe { .. } => {
+                    self.unsafe_traps.insert(diag.expr(), diag.message());
+                }
+                // Unsafe-builtin findings land on the call — the call is
+                // the operation that must not execute, so it traps like
+                // any broken call (arguments still evaluated for effects).
+                hir::UnsafeCheckDiagnostic::BuiltinCallOutsideUnsafe { call, .. } => {
+                    self.call_traps.insert(*call, diag.message());
+                }
+            }
         }
         // Const-check diagnostics are reported on the *callee* (the
         // squiggle sits there), but the operation that must not execute is

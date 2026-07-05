@@ -652,7 +652,59 @@ interpreter happens to give every `&raw C` its own temporary (`&raw C ==
 unspecified: a compiler may merge or split immutable copies. Compare
 static-derived addresses; never const-derived ones.
 
-Still reserved: `unsafe fn` and heap allocation.
+Still reserved: `unsafe fn`.
+
+== Heap allocation
+
+The heap is built out of raw pointers, not a new kind of value: five
+builtins, and everything above them — containers, arenas, growth — is
+ordinary Must code (`examples/heap.must` is that library, twice over: a
+growable vector and a typed arena).
+
+- `alloc_array::<T>(n)` is safe and result-shaped. It returns
+  `AllocResult::<T>`, a compiler-provided `enum { Ok(&raw mut T), Err }`,
+  so every allocation site says what it does when memory runs out (the
+  interpreter's own allocator never answers `Err`; allocators written over
+  it do). Fresh elements are *uninitialized*: reading one before its first
+  write is detected UB, not a zero. `alloc_array(0)` is a trap — a refused
+  request, defined behaviour.
+- `dealloc_array(p, n)` is `unsafe` and exact-match: `p` is the head
+  pointer `alloc_array` returned and `n` its element count. A non-head
+  pointer, a wrong count, a local or a `static`, and a double free are
+  each detected UB, with an "allocated here" note at the allocation's
+  birth site. Not freeing is a leak, and a leak is not UB.
+- `offset(p, i)` is safe and unchecked, exactly like `&raw mut a[i]`:
+  minting an out-of-range address is fine, dereferencing it is detected
+  UB.
+- `copy(src, dst, n)` is `unsafe`, counts elements, and is memmove-shaped:
+  overlapping ranges are defined, uninitialized elements copy silently,
+  out of range on either side is detected UB, and a zero-length copy is
+  valid through any pointer.
+- `dangling::<T>()` is safe: a `&raw mut T` that was never valid, the
+  stand-in for "no buffer yet" (there is no null). Any deref is detected
+  UB.
+
+There is no `realloc`: growth is alloc, copy, dealloc, composed by the
+container. Allocation never happens at compile time: under a const context
+`alloc_array` and `dealloc_array` are refused eagerly; `offset`, `copy` and
+`dangling` allocate nothing, so they are const-legal wherever the values
+they touch already are.
+
+```must
+static main = fn () -> () {
+    match alloc_array::<usize>(2) {
+        AllocResult::Ok(p) => {
+            let q = offset(p, 1);
+            unsafe {
+                p.* = 1;
+                q.* = 2;
+            };
+            unsafe { dealloc_array(p, 2); };
+        }
+        AllocResult::Err => print("out of memory"),
+    };
+};
+```
 
 == Arrays
 

@@ -65,10 +65,11 @@ must-lsp run examples/functions.must -e 'fib(20)'   # any expression in file sco
 `examples/` has a short tour beyond `hello.must` — records and named types
 (`records.must`), the tag-free variant-parameter state-machine pattern
 (`state_machine.must`), loops and mutability (`loops.must`), functions,
-recursion, and higher-order calls (`functions.must`), and compile-time
-evaluation (`compile_time.must`) — plus `errors.must`, an intentionally
-broken file pairing each diagnostic with the exact message
-`must-lsp check` prints for it.
+recursion, and higher-order calls (`functions.must`), compile-time evaluation
+(`compile_time.must`), generics (`generics.must`), fixed-size arrays
+(`arrays.must`), raw pointers (`pointers.must`) and the heap built on top of
+them (`heap.must`) — plus `errors.must`, an intentionally broken file pairing
+each diagnostic with the exact message `must-lsp check` prints for it.
 
 Programs run even when they don't typecheck: execution proceeds until it
 reaches something broken, then crashes with the same message the editor

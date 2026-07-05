@@ -680,26 +680,71 @@ fn builtin_type_items(edit_range: TextRange) -> Vec<CompletionItem> {
         .collect()
 }
 
-/// `print`/`panic` — the builtin functions (mirrors
-/// [`hir::scopes::Builtin`]'s name set and `hir::infer`'s signatures for
-/// them).
+/// The builtin functions (mirrors [`hir::scopes::Builtin`]'s name set and
+/// `hir::infer`'s signatures for them). The generic and
+/// flavor-polymorphic ones have no ONE `hir::Ty`; their detail strings
+/// spell the scheme by hand and a same-arity placeholder fn type drives
+/// the call snippet (its `{error}` params never render — only the arity is
+/// consumed).
 fn builtin_fn_items(edit_range: TextRange, expected: Option<&hir::Ty>) -> Vec<CompletionItem> {
+    let placeholder_fn = |arity: usize| {
+        hir::Ty::fn_type(
+            std::iter::repeat_n(hir::Ty::Error, arity).collect(),
+            hir::Ty::Error,
+        )
+    };
     [
-        ("print", hir::Ty::fn_type(vec![hir::Ty::Str], hir::Ty::Unit)),
+        (
+            "print",
+            hir::Ty::fn_type(vec![hir::Ty::Str], hir::Ty::Unit),
+            None,
+        ),
         (
             "panic",
             hir::Ty::fn_type(vec![hir::Ty::Str], hir::Ty::Never),
+            None,
+        ),
+        (
+            "alloc_array",
+            placeholder_fn(1),
+            Some("fn::<T>(usize) -> AllocResult::<T>"),
+        ),
+        (
+            "dealloc_array",
+            placeholder_fn(2),
+            Some("unsafe fn::<T>(&raw mut T, usize)"),
+        ),
+        (
+            "offset",
+            placeholder_fn(2),
+            Some("fn(&raw [mut] T, usize) -> &raw [mut] T"),
+        ),
+        (
+            "copy",
+            placeholder_fn(3),
+            Some("unsafe fn(&raw [mut] T, &raw mut T, usize)"),
+        ),
+        (
+            "dangling",
+            placeholder_fn(0),
+            Some("fn::<T>() -> &raw mut T"),
         ),
     ]
     .into_iter()
-    .map(|(name, ty)| {
-        let tier = type_tier(Some(&ty), expected);
+    .map(|(name, ty, detail)| {
+        let has_real_type = detail.is_none();
+        let tier = if has_real_type {
+            type_tier(Some(&ty), expected)
+        } else {
+            type_tier(None, expected)
+        };
+        let detail = detail.map(str::to_owned).unwrap_or_else(|| ty.display());
         let mut candidate = completion_item(
             name,
             CompletionItemKind::Function,
             Provenance::Builtin,
             tier,
-            Some(ty.display()),
+            Some(detail),
             edit_range,
         );
         if let hir::Ty::Fn(f) = &ty {

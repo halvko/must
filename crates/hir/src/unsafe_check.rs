@@ -20,8 +20,10 @@
 //! (squiggle text == trap text, single-render preserved).
 
 use base_db::Db;
+use la_arena::ArenaMap;
 
 use crate::body::{Body, ExprData, ExprId, Stmt, body};
+use crate::scopes::{Builtin, Resolution, resolutions};
 use crate::{ItemId, diag};
 
 /// Range-free (keyed by HIR ids); ranges are attached by the diagnostics
@@ -31,12 +33,18 @@ pub enum UnsafeCheckDiagnostic {
     /// A raw-pointer deref (read or write) outside any `unsafe { ... }`
     /// block. The squiggle (and MIR's trap) lands on the deref expression.
     DerefOutsideUnsafe { expr: ExprId },
+    /// A call of an unsafe builtin (`dealloc_array`, `copy` — see
+    /// [`Builtin::requires_unsafe`]) outside any `unsafe { ... }` block.
+    /// The squiggle (and MIR's trap) lands on the call expression: the
+    /// call is the operation that must not run.
+    BuiltinCallOutsideUnsafe { call: ExprId, builtin: Builtin },
 }
 
 impl UnsafeCheckDiagnostic {
     pub fn expr(&self) -> ExprId {
         match self {
             UnsafeCheckDiagnostic::DerefOutsideUnsafe { expr } => *expr,
+            UnsafeCheckDiagnostic::BuiltinCallOutsideUnsafe { call, .. } => *call,
         }
     }
 
@@ -47,6 +55,9 @@ impl UnsafeCheckDiagnostic {
             UnsafeCheckDiagnostic::DerefOutsideUnsafe { .. } => {
                 diag::DEREF_REQUIRES_UNSAFE.to_owned()
             }
+            UnsafeCheckDiagnostic::BuiltinCallOutsideUnsafe { builtin, .. } => {
+                diag::builtin_call_requires_unsafe(builtin.name())
+            }
         }
     }
 }
@@ -56,6 +67,7 @@ pub fn unsafe_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<UnsafeCheckD
     let body = body(db, item);
     let mut ctx = CheckCtx {
         body,
+        resolutions: resolutions(db, item),
         diagnostics: Vec::new(),
     };
     if let Some(root) = body.root {
@@ -66,6 +78,7 @@ pub fn unsafe_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<UnsafeCheckD
 
 struct CheckCtx<'db> {
     body: &'db Body,
+    resolutions: &'db ArenaMap<ExprId, Resolution>,
     diagnostics: Vec<UnsafeCheckDiagnostic>,
 }
 
@@ -88,6 +101,25 @@ impl CheckCtx<'_> {
                 }
             }
             ExprData::Call { callee, args } => {
+                // The unsafe builtins: freeing invalidates every pointer
+                // into the allocation, and `copy` writes through a raw
+                // pointer — misuse of either is UB, so the CALL needs the
+                // marker, exactly like a deref. The callee may be a bare
+                // name or a turbofish mention of one.
+                let callee_name = match &self.body.exprs[*callee] {
+                    ExprData::GenericApp { base, .. } => *base,
+                    _ => *callee,
+                };
+                if !in_unsafe
+                    && let Some(Resolution::Builtin(builtin)) = self.resolutions.get(callee_name)
+                    && builtin.requires_unsafe()
+                {
+                    self.diagnostics
+                        .push(UnsafeCheckDiagnostic::BuiltinCallOutsideUnsafe {
+                            call: expr,
+                            builtin: *builtin,
+                        });
+                }
                 self.check_expr(*callee, in_unsafe);
                 for &arg in args {
                     self.check_expr(arg, in_unsafe);

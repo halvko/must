@@ -5687,3 +5687,367 @@ static f = fn {
         "#]],
     );
 }
+
+// ---- the heap builtins --------------------------------------------------
+
+#[test]
+fn alloc_array_types_as_the_result_enum() {
+    check_infer(
+        r#"
+static f = fn {
+    let r = alloc_array::<usize>(2);
+};
+"#,
+        expect![[r#"
+            12..55 'fn {     let r = ...': fn()
+            15..55 '{     let r = all...': ()
+            25..26 'r': AllocResult::<usize>
+            29..49 'alloc_array::<usize>': fn(usize) -> AllocResult::<usize>
+            29..52 'alloc_array::<usi...': AllocResult::<usize>
+            50..51 '2': usize
+        "#]],
+    );
+}
+
+#[test]
+fn alloc_result_ok_payload_binds_the_pointer_type() {
+    check_infer(
+        r#"
+static f = fn () -> usize {
+    match alloc_array::<usize>(2) {
+        AllocResult::Ok(p) => unsafe { p.* },
+        AllocResult::Err => 0,
+    }
+};
+"#,
+        expect![[r#"
+            12..149 'fn () -> usize { ...': fn() -> usize
+            27..149 '{     match alloc...': usize
+            33..147 'match alloc_array...': usize
+            39..59 'alloc_array::<usize>': fn(usize) -> AllocResult::<usize>
+            39..62 'alloc_array::<usi...': AllocResult::<usize>
+            60..61 '2': usize
+            89..90 'p': &raw mut usize
+            95..109 'unsafe { p.* }': usize
+            102..109 '{ p.* }': usize
+            104..105 'p': &raw mut usize
+            104..107 'p.*': usize
+            139..140 '0': usize
+        "#]],
+    );
+}
+
+#[test]
+fn match_on_alloc_result_must_cover_the_err_arm() {
+    // The result shape has teeth: the `Err` arm exists in the type even
+    // though the interpreter never produces it.
+    check_diagnostics(
+        r#"
+static f = fn () -> () {
+    match alloc_array::<usize>(1) {
+        AllocResult::Ok(p) => { },
+    }
+};
+"#,
+        expect![[r#"
+            30..35: this `match` does not cover `AllocResult::Err`
+        "#]],
+    );
+}
+
+#[test]
+fn dealloc_array_infers_its_type_argument_from_the_pointer() {
+    check_infer(
+        r#"
+static f = fn (p: &raw mut str) {
+    unsafe { dealloc_array(p, 1) };
+};
+"#,
+        expect![[r#"
+            12..72 'fn (p: &raw mut s...': fn(&raw mut str)
+            16..17 'p': &raw mut str
+            33..72 '{     unsafe { de...': ()
+            39..69 'unsafe { dealloc_...': ()
+            46..69 '{ dealloc_array(p...': ()
+            48..61 'dealloc_array': fn(&raw mut str, usize)
+            48..67 'dealloc_array(p, 1)': ()
+            62..63 'p': &raw mut str
+            65..66 '1': usize
+        "#]],
+    );
+}
+
+#[test]
+fn dealloc_array_outside_unsafe_is_rejected() {
+    check_diagnostics(
+        r#"
+static f = fn (p: &raw mut usize) {
+    dealloc_array(p, 1);
+};
+"#,
+        expect![[r#"
+            41..60: calling `dealloc_array` requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn copy_outside_unsafe_is_rejected() {
+    check_diagnostics(
+        r#"
+static f = fn (p: &raw usize, q: &raw mut usize) {
+    copy(p, q, 1);
+};
+"#,
+        expect![[r#"
+            56..69: calling `copy` requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn turbofished_dealloc_outside_unsafe_is_rejected_too() {
+    check_diagnostics(
+        r#"
+static f = fn (p: &raw mut usize) {
+    dealloc_array::<usize>(p, 1);
+};
+"#,
+        expect![[r#"
+            41..69: calling `dealloc_array` requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn alloc_offset_and_dangling_need_no_unsafe() {
+    // Allocating cannot UB, minting addresses never checks validity, and
+    // a dangling pointer only hurts when dereferenced — none of the three
+    // needs the marker.
+    check_diagnostics(
+        r#"
+static f = fn (p: &raw mut usize) {
+    let r = alloc_array::<usize>(1);
+    let q = offset(p, 1);
+    let d = dangling::<usize>();
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn offset_preserves_the_pointer_flavor() {
+    check_infer(
+        r#"
+static f = fn (s: &raw usize, m: &raw mut usize) {
+    let a = offset(s, 1);
+    let b = offset(m, 1);
+};
+"#,
+        expect![[r#"
+            12..105 'fn (s: &raw usize...': fn(&raw usize, &raw mut usize)
+            16..17 's': &raw usize
+            31..32 'm': &raw mut usize
+            50..105 '{     let a = off...': ()
+            60..61 'a': &raw usize
+            64..76 'offset(s, 1)': &raw usize
+            71..72 's': &raw usize
+            74..75 '1': usize
+            86..87 'b': &raw mut usize
+            90..102 'offset(m, 1)': &raw mut usize
+            97..98 'm': &raw mut usize
+            100..101 '1': usize
+        "#]],
+    );
+}
+
+#[test]
+fn copy_requires_a_mutable_destination() {
+    check_diagnostics(
+        r#"
+static f = fn (p: &raw usize, q: &raw usize) {
+    unsafe { copy(p, q, 1) };
+};
+"#,
+        expect![[r#"
+            69..70: type mismatch: expected `&raw mut usize`, found `&raw usize`
+        "#]],
+    );
+}
+
+#[test]
+fn copy_source_may_be_either_flavor_but_pointees_must_agree() {
+    check_diagnostics(
+        r#"
+static f = fn (p: &raw str, q: &raw mut usize) {
+    unsafe { copy(p, q, 1) };
+};
+"#,
+        expect![[r#"
+            71..72: type mismatch: expected `&raw mut str`, found `&raw mut usize`
+        "#]],
+    );
+}
+
+#[test]
+fn offset_of_a_non_pointer_is_rejected() {
+    check_diagnostics(
+        r#"
+static f = fn {
+    let a = offset(4, 1);
+};
+"#,
+        expect![[r#"
+            36..37: `offset` expects a raw pointer (`&raw T` or `&raw mut T`) here, found `usize`
+        "#]],
+    );
+}
+
+#[test]
+fn offset_is_not_a_first_class_value() {
+    // Its pointer parameter accepts both flavors, so there is no one fn
+    // type for a `let` to bind.
+    check_diagnostics(
+        r#"
+static f = fn {
+    let g = offset;
+};
+"#,
+        expect![[r#"
+            29..35: `offset` must be called directly; its pointer parameter accepts both `&raw T` and `&raw mut T`, so it has no one function type to be a value at
+        "#]],
+    );
+}
+
+#[test]
+fn heap_calls_are_rejected_in_const_contexts() {
+    // The eager const fence (C04): both heap builtins refuse at check
+    // time; `offset`/`copy`/`dangling` are deliberately not fenced.
+    check_diagnostics(
+        r#"
+static a = alloc_array::<usize>(1);
+static b = const fn () -> () { unsafe { dealloc_array(dangling::<usize>(), 0) } };
+static ok = const {
+    let d = dangling::<usize>();
+    unsafe { offset(d, 1) };
+    1
+};
+"#,
+        expect![[r#"
+            12..32: cannot allocate during compile-time evaluation: const-built heap values wait for an interning design (this item's initializer is a const context at 1..7)
+            77..90: cannot deallocate during compile-time evaluation: const-built heap values wait for an interning design (this `const fn` is always a const context at 48..53)
+        "#]],
+    );
+}
+
+#[test]
+fn raw_pointer_fields_in_type_declarations_lower() {
+    // The declaration side: `&raw mut T` is a legal field type in
+    // a `type` declaration, rigid params included.
+    check_infer(
+        r#"
+type HeapVec = struct::<T> { ptr: &raw mut T, len: usize, cap: usize };
+static f = fn (v: HeapVec::<str>) {
+    let p = v.ptr;
+};
+"#,
+        expect![[r#"
+            84..129 'fn (v: HeapVec::<...': fn(HeapVec::<str>)
+            88..89 'v': HeapVec::<str>
+            107..129 '{     let p = v.p...': ()
+            117..118 'p': &raw mut str
+            121..122 'v': HeapVec::<str>
+            121..126 'v.ptr': &raw mut str
+        "#]],
+    );
+}
+
+#[test]
+fn non_raw_reference_fields_in_type_declarations_stay_rejected() {
+    check_diagnostics(
+        r#"
+static x = 4;
+type Bad = struct { r: &x };
+"#,
+        expect![[r#"
+            35..39: expected a type for field `r`
+            38..39: expected an expression
+            39..40: expected `,`
+            39..40: expected a type for field `x`
+        "#]],
+    );
+}
+
+#[test]
+fn alloc_result_can_be_named_constructed_and_returned() {
+    // The compiler-provided enum is an ordinary nominal enum: nameable in
+    // annotations, constructible through variant paths, widened
+    // variant → enum at the return boundary.
+    check_diagnostics(
+        r#"
+static maybe = fn::<T>(p: &raw mut T, full: bool) -> AllocResult::<T> {
+    if full {
+        AllocResult::<T>::Err
+    } else {
+        AllocResult::<T>::Ok(p)
+    }
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn user_declarations_shadow_the_builtin_alloc_result() {
+    // The `print` precedent, applied to the type namespace: a file
+    // declaring its own `AllocResult` sees its own everywhere.
+    check_infer(
+        r#"
+type AllocResult = struct { tag: usize };
+static f = fn () -> AllocResult {
+    AllocResult(struct { tag: 1 })
+};
+"#,
+        expect![[r#"
+            54..113 'fn () -> AllocRes...': fn() -> AllocResult
+            75..113 '{     AllocResult...': AllocResult
+            81..92 'AllocResult': fn(struct { tag: usize }) -> AllocResult
+            81..111 'AllocResult(struc...': AllocResult
+            93..110 'struct { tag: 1 }': struct { tag: usize }
+            107..108 '1': usize
+        "#]],
+    );
+}
+
+#[test]
+fn dangling_infers_from_the_expected_pointer_type() {
+    check_infer(
+        r#"
+static f = fn {
+    let p: &raw mut str = dangling();
+};
+"#,
+        expect![[r#"
+            12..56 'fn {     let p: &...': fn()
+            15..56 '{     let p: &raw...': ()
+            25..26 'p': &raw mut str
+            43..51 'dangling': fn() -> &raw mut str
+            43..53 'dangling()': &raw mut str
+        "#]],
+    );
+}
+
+#[test]
+fn unpinned_generic_builtin_mentions_ask_for_a_turbofish() {
+    check_diagnostics(
+        r#"
+static f = fn {
+    let r = alloc_array(1);
+};
+"#,
+        expect![[r#"
+            29..40: cannot infer the type parameter `T` of `alloc_array`; write `alloc_array::<...>` to specify it
+        "#]],
+    );
+}
