@@ -29,6 +29,9 @@
   never per instantiation.
 - **X14** User-visible field and member order is definition order. Internal name-sorted
   canonicalization is an identity device and must never leak.
+- **X15** Naming doctrine. A capability is named for what you can do with a value (`send`,
+  `forget`), never for what the value is. An adjective does not extend: there is no adjective
+  for "cannot be sent" anyone would guess.
 - **X16** Diagnostics have no stable codes. A severity word, free text and a caret are the whole
   contract. Warnings never affect exit status.
 

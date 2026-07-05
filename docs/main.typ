@@ -572,10 +572,13 @@ Honest restrictions, all diagnosed:
 
 == Raw pointers and unsafe
 
-Raw pointers come in two types: `&raw T` (shared) and `&raw mut T`
-(mutable). An address is taken with `&raw place` / `&raw mut place`, where a
-place is a variable or a field chain — there is no address-of a temporary.
-A pointer is followed with the postfix deref `p.*`; there is **no
+Raw pointers reach places all the way down. The types are `&raw T`
+(shared) and `&raw mut T` (mutable). An address is taken with `&raw place` /
+`&raw mut place`, and a place is now the full grammar: a variable, a chain
+of its fields and elements (`r.a`, `a[i]`, `a[i][j]`), a `static` or `const`
+item (a `const` use's own copy), or a chain rooted in a deref (`p.*.x` — a
+place reached *through* a pointer). There is no address-of a temporary. A
+pointer is followed with the postfix deref `p.*`; there is **no
 auto-deref**, so `p.*` is the only way a pointer is ever read or written.
 
 ```must
@@ -589,39 +592,67 @@ static main = fn () -> usize {
 
 Forming a pointer is safe; *following* one is not. Every deref — read or
 write — must sit inside an `unsafe { ... }` block, a lexical checker region
-within a function (`dereferencing a raw pointer requires an `unsafe { ... }`
-block` otherwise). `&raw mut place` additionally requires the root binding
-to be `mut` — the existing transitivity rule verbatim — and blames the root
-with the same "make it `mut`" quick fix an assignment would; `&raw place`
-(shared) needs no `mut`. `&raw mut` of a `static` is rejected: `static mut`
-stays deferred.
+within a function; the message otherwise is `dereferencing a raw pointer
+requires an `unsafe { ... }` block`. The deref rule covers the new places
+evenhandedly: an assignment target like `p.*.x` *is* a deref write, and so
+is the `p.*` inside `&raw mut p.*.x` — computing an address through a
+pointer follows one first. `&raw mut place` additionally requires the root
+binding to be `mut` — the existing transitivity rule verbatim — and blames
+the root with the same "make it `mut`" quick fix an assignment would; `&raw
+place` (shared) needs no `mut`. `&raw mut` of a `static` is rejected:
+`static mut` stays deferred.
 
-Unsafe is legal in const contexts — pointers may be used freely during
-compile-time evaluation — but a pointer can never *leave* it: a memoized
-initializer whose value contains a pointer is `a pointer cannot leave
-compile-time evaluation`. Statics and consts differ through a pointer just
-as they do everywhere else, now *observably*: a `static` names one place, so
-every `&raw S` is the same address (`&raw S == &raw S` is `true`); a `const`
-is copied into each use, so every `&raw C` addresses its own copy
-(`&raw C == &raw C` is `false`). This is the same identity-vs-copy rule the
-const chapter states, made visible.
+Writes through pointers are judged on the pointer, never on a binding. The
+target of an assignment may be any deref-rooted chain — `p.* = v;`,
+`p.*.x = v;`, even `p.*.xs[i] = v;` — and the judgment is the GOVERNING
+pointer: the receiver of the chain's outermost deref must be `&raw mut T`.
+Writing through a shared `&raw T` is rejected (`cannot assign through
+`&raw T`: writing needs a `&raw mut` pointer`), and so is `&raw mut p.*.x`
+through a shared pointer — minting a mutating address must not launder the
+shared flavor into a write permission. `p` itself never needs to be a `mut`
+binding — writing through it reassigns nothing — and derefs deeper in the
+chain are ordinary *reads*, whose pointers' flavors don't matter. A
+deref-rooted address is the original allocation's address with the path
+extended — `&raw mut p.*.x` hands out the very place `p` points to, one
+field in; no copy is materialized on the way.
 
 `&raw x` on a local is the address of that frame slot, for that frame's
 lifetime — and no longer. Nothing here promises stable addresses for locals
 beyond their frame's life, nor address preservation across copies: copying a
 value copies the pointer bits, never the pointee's identity. Return a
 `&raw mut x` past the frame that owns `x` and a later deref is a dangling
-pointer. The interpreter *detects* that and traps deterministically
-(`error[UndefinedBehavior]: dangling pointer — the local it pointed to no
-longer exists (its frame has returned)`), but that detection is interpreter
-quality, not a language guarantee: the program is undefined behavior, and a
-later backend may do anything with it. Detected-UB traps make the
-interpreter a good teacher; they do not make the code correct. A pointer
-value never renders as a number either — `&raw <opaque>`, because no integer
-addresses exist to leak.
+pointer. The interpreter *detects* the misuse cases and traps
+deterministically. Address-taking itself never bounds-checks — `&raw mut
+a[i + 1]` mints silently even past the end — so validity is judged where
+the pointer is *used*: every deref first checks liveness and the pointer's
+stored path, and a write through one mutates the pointee in place, so
+pointers into it survive the write, exactly like real memory. The traps: a
+deref after the owning frame returned (`error[UndefinedBehavior]: dangling
+pointer — the local it pointed to no longer exists (its frame has
+returned)`), a deref of an address minted out of bounds
+(`error[UndefinedBehavior]: out-of-bounds pointer — it points to element 5
+of an array with 2 elements`), a write into read-only memory
+(`error[UndefinedBehavior]: write through a pointer into read-only memory
+(a `static`)`). But that detection is interpreter quality, not a language
+guarantee: the program is undefined behavior, and a later backend may do
+anything with it. Detected-UB traps make the interpreter a good teacher;
+they do not make the code correct. A pointer value never renders as a
+number either — `&raw <opaque>`, because no integer addresses exist to
+leak.
 
-Reserved: writes through a pointee field (`p.*.x = ...`), `&raw` of
-field/element chains beyond the first hop, and `unsafe fn`.
+Unsafe is legal in const contexts — pointers may be used freely during
+compile-time evaluation — but a pointer can never *leave* it: a memoized
+initializer whose value contains a pointer is `a pointer cannot leave
+compile-time evaluation`. Statics and consts differ through a pointer just
+as they do everywhere else, now *observably*: a `static` names one place, so
+every `&raw S` is the same address (`&raw S == &raw S` is `true`) — that
+half is a language promise. A `const` is copied into each use, and the
+interpreter happens to give every `&raw C` its own temporary (`&raw C ==
+&raw C` is `false`), but const-mention identity is deliberately
+unspecified: a compiler may merge or split immutable copies. Compare
+static-derived addresses; never const-derived ones.
+
+Still reserved: `unsafe fn` and heap allocation.
 
 == Arrays
 

@@ -1944,7 +1944,7 @@ fn generic_widening_injects_the_tag() {
 }
 
 #[test]
-fn addr_of_deref_and_ptr_store_lower_to_memory_ops() {
+fn addr_of_deref_and_deref_store_lower_to_place_ops() {
     check_mir(
         r#"
 static s = 7;
@@ -1983,7 +1983,7 @@ static main = fn() -> usize {
                 _3 = _2
                 _4 = &raw static s
                 _5 = _4
-                store _3.* = 2
+                _3.* = 2
                 _6 = _3.*
                 _7 = _5.*
                 _8 = Add(_6, _7)
@@ -2025,6 +2025,149 @@ static main = fn() -> usize {
                 _4 = trap "dereferencing a raw pointer requires an `unsafe { ... }` block" -> bb1
               bb1:
                 _0 = _4
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn through_pointer_writes_lower_to_deref_projected_places() {
+    check_mir(
+        r#"
+static main = fn() {
+    let mut r = struct { x: 1, buf: [1, 2] };
+    let p = &raw mut r;
+    let i = 1;
+    unsafe {
+        p.*.x = 2;
+        p.*.buf[i] = 3;
+    }
+};
+"#,
+        expect![[r#"
+            item main:
+            fn b0() -> () {
+              _0: ()  // return
+              _1: [usize; 2]
+              _2: struct { buf: [usize; 2], x: usize }
+              _3: struct { buf: [usize; 2], x: usize }  // r
+              _4: &raw mut struct { buf: [usize; 2], x: usize }
+              _5: &raw mut struct { buf: [usize; 2], x: usize }  // p
+              _6: usize  // i
+              bb0:
+                _1 = [1, 2]
+                _2 = { buf: _1, x: 1 }
+                _3 = _2
+                _4 = &raw mut _3
+                _5 = _4
+                _6 = 1
+                _5.*.1 = 2
+                _5.*.0[_6] = 3
+                _0 = ()
+                return
+            }
+            fn b1() -> fn() {
+              _0: fn()  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn mid_chain_deref_write_reads_the_inner_pointer_then_stores() {
+    check_mir(
+        r#"
+static main = fn() {
+    let mut x = 1;
+    let mut p = &raw mut x;
+    let pp = &raw mut p;
+    unsafe { pp.*.* = 7; }
+};
+"#,
+        expect![[r#"
+            item main:
+            fn b0() -> () {
+              _0: ()  // return
+              _1: usize  // x
+              _2: &raw mut usize
+              _3: &raw mut usize  // p
+              _4: &raw mut &raw mut usize
+              _5: &raw mut &raw mut usize  // pp
+              _6: &raw mut usize
+              bb0:
+                _1 = 1
+                _2 = &raw mut _1
+                _3 = _2
+                _4 = &raw mut _3
+                _5 = _4
+                _6 = _5.*
+                _6.* = 7
+                _0 = ()
+                return
+            }
+            fn b1() -> fn() {
+              _0: fn()  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn addr_of_array_element_and_through_deref_lower_without_promotion_of_the_pointer() {
+    check_mir(
+        r#"
+static main = fn() -> usize {
+    let mut a = [1, 2];
+    let e = &raw mut a[0];
+    let mut r = struct { x: 1 };
+    let p = &raw mut r;
+    unsafe {
+        let q = &raw mut p.*.x;
+        q.*
+    }
+};
+"#,
+        expect![[r#"
+            item main:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: [usize; 2]
+              _2: [usize; 2]  // a
+              _3: &raw mut usize
+              _4: &raw mut usize  // e
+              _5: struct { x: usize }
+              _6: struct { x: usize }  // r
+              _7: &raw mut struct { x: usize }
+              _8: &raw mut struct { x: usize }  // p
+              _9: &raw mut usize
+              _10: &raw mut usize  // q
+              _11: usize
+              bb0:
+                _1 = [1, 2]
+                _2 = _1
+                _3 = &raw mut _2[0]
+                _4 = _3
+                _5 = { x: 1 }
+                _6 = _5
+                _7 = &raw mut _6
+                _8 = _7
+                _9 = &raw mut _8.*.0
+                _10 = _9
+                _11 = _10.*
+                _0 = _11
                 return
             }
             fn b1() -> fn() -> usize {

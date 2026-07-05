@@ -94,10 +94,12 @@ pub struct LocalData {
     /// The binding this local was created for (debugger provenance).
     pub binding: Option<BindingId>,
     /// Whether the local's address is taken somewhere in the body
-    /// ([`Rvalue::AddrOf`] names it as a place base) — the two-tier locals
-    /// fact: only addressable locals are ever promoted into the
-    /// interpreter's abstract memory; everything else stays on the plain
-    /// per-frame value map, so pointer-free bodies pay nothing.
+    /// ([`Rvalue::AddrOf`] names it as the base of a place that does NOT
+    /// lead with a deref — a deref-rooted `&raw mut p.*.x` only *reads*
+    /// its root, so it marks nothing) — the two-tier locals fact: only
+    /// addressable locals are ever promoted into the interpreter's
+    /// abstract memory; everything else stays on the plain per-frame
+    /// value map, so pointer-free bodies pay nothing.
     pub addressable: bool,
 }
 
@@ -114,15 +116,19 @@ pub struct Statement {
     pub origin: ExprId,
 }
 
-/// A writable location: a local, optionally projected into by a chain of
-/// field indices and computed element indices. Field steps use the same
-/// canonical sorted field order as [`Ty::Record`] and
-/// [`AggregateKind::Record`] — the write-side twin of [`Rvalue::Field`]
-/// (reads stay operand-based; only writes need to name a nested
-/// destination). Field *names* are resolved to indices at lowering, like
-/// every other projection; element indices stay operands, evaluated at the
-/// write (and bounds-checked there — an out-of-range write is an ordinary
-/// trap, never silent corruption).
+/// A location: a local, optionally projected into by a chain of field
+/// indices, computed element indices, and pointer derefs. Field steps use
+/// the same canonical sorted field order as [`Ty::Record`] and
+/// [`AggregateKind::Record`]; field *names* are resolved to indices at
+/// lowering, like every other projection. Element indices stay operands,
+/// evaluated where the place is used (and bounds-checked there — an
+/// out-of-range element step is an ordinary trap, never silent
+/// corruption). A [`ProjElem::Deref`] step follows a raw pointer: the
+/// place stops naming this frame's storage and names the pointee's
+/// allocation instead — liveness (and, for writes, writability) is checked
+/// when the place is actually read or written, and a violation there is
+/// detected UB, not a trap. Places appear as assignment destinations, as
+/// [`Operand::Copy`] sources, and as the operand of [`Rvalue::AddrOf`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Place {
     pub local: LocalId,
@@ -137,8 +143,14 @@ pub enum ProjElem {
     /// A record field, by canonical sorted-field index.
     Field(u32),
     /// An array element, by a computed `usize` index — bounds-checked when
-    /// the write executes (the read side is [`Rvalue::Index`]).
+    /// the place is read or written.
     Index(Operand),
+    /// Follow the raw pointer the place names so far: the rest of the
+    /// projection continues inside the pointee's allocation. Lowering only
+    /// emits this as the *leading* element (everything below the outermost
+    /// deref of a source chain is an ordinary read that produces the
+    /// pointer), but the machine resolves it at any position.
+    Deref,
 }
 
 impl From<LocalId> for Place {
@@ -152,19 +164,12 @@ impl From<LocalId> for Place {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatementKind {
-    Assign {
-        dest: Place,
-        rvalue: Rvalue,
-    },
-    /// `p.* = value;` — a store through a raw pointer. Not an
-    /// [`StatementKind::Assign`]: the destination is a *pointer value*, not
-    /// a [`Place`] of this frame — the machine resolves it against its
-    /// abstract memory (liveness and writability checked at the store, UB
-    /// on violation).
-    PtrStore {
-        ptr: Operand,
-        value: Operand,
-    },
+    /// The one write. A destination whose projection contains a
+    /// [`ProjElem::Deref`] is a store *through a raw pointer* (`p.* = v;`,
+    /// `p.*.x = v;`): the machine resolves it against its abstract memory,
+    /// with liveness and writability checked at the store — the misuse
+    /// cases are detected UB, not silent corruption.
+    Assign { dest: Place, rvalue: Rvalue },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,29 +234,36 @@ pub enum Rvalue {
         const_args: Vec<Operand>,
     },
     /// `&raw place` / `&raw mut place` of a local (or a temp holding a
-    /// `const` use's copy): a pointer to the place — the local plus the
-    /// projection's field path, element-granular. Executing it promotes
-    /// the local into the machine's abstract memory (first time only); the
-    /// resulting value is `(AllocId, path)`, never an integer.
+    /// `const` use's copy, or a temp holding a pointer for a deref-rooted
+    /// place like `&raw mut p.*.x`): a pointer to the place — the root
+    /// plus the projection's element-granular path. Executing it promotes
+    /// the root local into the machine's abstract memory (first
+    /// address-taking only) — *unless* the projection leads with a
+    /// [`ProjElem::Deref`], in which case the root already holds a pointer
+    /// and the result is that pointer with the extended path: no
+    /// intermediate materialization, no new allocation (that is the whole
+    /// point of `&raw`). Validity of the minted address is NOT checked
+    /// here (element steps are not bounds-checked at address-taking, per
+    /// the deref-time-validity rule) — an out-of-range address mints
+    /// silently and every later deref of it is detected UB. The resulting
+    /// value is `(AllocId, path)`, never an integer.
     AddrOf {
         mutable: bool,
         place: Place,
     },
-    /// `&raw S[.field...]` of a `static` item: the item's ONE place —
-    /// minted once per machine run in the static-allocation table, so
-    /// every `&raw S` is the same address (static=identity, observable).
-    /// Always shared (`&raw mut S` is rejected upstream — `static mut`
-    /// stays deferred); the allocation is read-only.
+    /// `&raw S[.field | [index]]...` of a `static` item: the item's ONE
+    /// place — minted once per machine run in the static-allocation table,
+    /// so every `&raw S` is the same address (static=identity,
+    /// observable). Always shared (`&raw mut S` is rejected upstream —
+    /// `static mut` stays deferred); the allocation is read-only.
     AddrOfStatic {
         item: ItemLoc,
-        /// Field path into the static's value, canonical sorted order —
-        /// same scheme as [`Place::projection`].
-        projection: Vec<u32>,
+        /// Path into the static's value — same scheme (and same
+        /// no-validity-check-at-minting rule) as [`Place::projection`];
+        /// never contains [`ProjElem::Deref`] (a deref-rooted chain lowers
+        /// through a pointer temp instead).
+        projection: Vec<ProjElem>,
     },
-    /// `p.*` — a read through a raw pointer. Liveness is checked at the
-    /// deref (a dead allocation is detected UB), then the pointee (or the
-    /// pointed-to element) is copied out.
-    Deref(Operand),
     /// The variant → enum widening conversion: takes a *variant-typed*
     /// (tag-free payload) value and injects the tag, producing an
     /// *enum-typed* (tagged) value. This op is the only place a tag is
@@ -285,7 +297,13 @@ pub enum AggregateKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operand {
-    Copy(LocalId),
+    /// Read a place's current value (a copy — Must values are copied at
+    /// every read). Usually a bare local; a projected place reads the
+    /// nested field/element, and a [`ProjElem::Deref`] step reads through
+    /// a raw pointer (liveness checked there — a dead allocation is
+    /// detected UB — then the pointee, or the pointed-to element, is
+    /// copied out).
+    Copy(Place),
     Const(Const),
 }
 

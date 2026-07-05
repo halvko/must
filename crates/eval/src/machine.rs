@@ -551,16 +551,26 @@ impl<'db, M: Mode> Machine<'db, M> {
                     // ordinary trap, never silent corruption).
                     let projection =
                         self.resolve_projection(&loc, body, &dest.projection, stmt.origin)?;
-                    self.write_place(&loc, body, dest.local, &projection, value, stmt.origin)?;
-                }
-                // A store through a raw pointer: resolved against abstract
-                // memory, with liveness and writability checked right here
-                // — the misuse cases are detected UB, not silent
-                // corruption.
-                StatementKind::PtrStore { ptr, value } => {
-                    let ptr = self.eval_operand(&loc, body, ptr, stmt.origin)?;
-                    let value = self.eval_operand(&loc, body, value, stmt.origin)?;
-                    self.ptr_store(ptr, value, &loc, stmt.origin)?;
+                    // A destination whose projection derefs is a store
+                    // through a raw pointer: resolved against abstract
+                    // memory, with liveness and writability checked right
+                    // there — the misuse cases are detected UB, not
+                    // silent corruption.
+                    if projection
+                        .iter()
+                        .any(|elem| matches!(elem, ResolvedProj::Deref))
+                    {
+                        self.write_through(
+                            &loc,
+                            body,
+                            dest.local,
+                            &projection,
+                            value,
+                            stmt.origin,
+                        )?;
+                    } else {
+                        self.write_place(&loc, body, dest.local, &projection, value, stmt.origin)?;
+                    }
                 }
             }
             let frame = self.frames.last_mut().expect("frame still live");
@@ -745,9 +755,10 @@ impl<'db, M: Mode> Machine<'db, M> {
     }
 
     /// Evaluate a place projection's element-index operands, producing the
-    /// value-walkable form [`write_place`] consumes. Field steps pass
-    /// through; index steps evaluate to their `usize` value (bounds are
-    /// checked later, at the write, where the array's length is known).
+    /// value-walkable form the place readers/writers consume. Field and
+    /// deref steps pass through; index steps evaluate to their `usize`
+    /// value (bounds are checked later, where the place is used and the
+    /// array's length is known).
     fn resolve_projection(
         &mut self,
         loc: &ItemLoc,
@@ -766,8 +777,248 @@ impl<'db, M: Mode> Machine<'db, M> {
                     };
                     Ok(ResolvedProj::Index(index))
                 }
+                ProjElem::Deref => Ok(ResolvedProj::Deref),
             })
             .collect()
+    }
+
+    /// Read a projected place's current value: the root local
+    /// (promoted-aware), then field/element steps — and across a
+    /// [`ResolvedProj::Deref`], the pointee (liveness checked first: a
+    /// dead allocation is detected UB; then the pointer's own stored path
+    /// is validated — an address minted past the end of an array is
+    /// detected UB at this, its first use). The place's own element steps
+    /// are the source program's `[i]`, so THEIR bounds failures are
+    /// ordinary runtime traps, exactly like `a[i]` reads.
+    fn read_place(
+        &self,
+        loc: &ItemLoc,
+        body: &MirBody,
+        local: LocalId,
+        projection: &[ResolvedProj],
+        origin: ExprId,
+    ) -> Result<Value, EvalError> {
+        let frame = self.frames.last();
+        // The promoted tier first (empty in pointer-free bodies): an
+        // address-taken local's current value lives in its allocation.
+        let root = frame.and_then(|frame| {
+            if !frame.promoted.is_empty()
+                && let Some(alloc) = frame.promoted.get(&local)
+            {
+                return self.memory.get(alloc).map(|allocation| &allocation.value);
+            }
+            frame.locals.get(local)
+        });
+        let Some(mut current) = root else {
+            return Err(self.internal_error(
+                format!("read of uninitialized {}", local_name(body, local)),
+                Some((loc.clone(), origin)),
+            ));
+        };
+        for elem in projection {
+            current = match elem {
+                ResolvedProj::Field(index) => match current {
+                    Value::Record { fields } => match fields.get(*index as usize) {
+                        Some((_, field)) => field,
+                        None => {
+                            return Err(self.internal_error(
+                                format!(
+                                    "record field index {index} out of range \
+                                     ({} elements)",
+                                    fields.len()
+                                ),
+                                Some((loc.clone(), origin)),
+                            ));
+                        }
+                    },
+                    other => {
+                        return Err(self.ill_typed("a record value", other, loc, origin));
+                    }
+                },
+                ResolvedProj::Index(index) => match current {
+                    Value::Array(values) => {
+                        if *index >= values.len() as u128 {
+                            return Err(EvalError {
+                                kind: EvalErrorKind::Runtime,
+                                message: hir::diag::index_out_of_bounds(
+                                    values.len() as u128,
+                                    *index,
+                                ),
+                                origin: Some((loc.clone(), origin)),
+                            });
+                        }
+                        &values[*index as usize]
+                    }
+                    other => {
+                        return Err(self.ill_typed("an array value", other, loc, origin));
+                    }
+                },
+                ResolvedProj::Deref => {
+                    let Value::Ptr { alloc, path } = current else {
+                        return Err(self.ill_typed("a raw pointer", current, loc, origin));
+                    };
+                    let allocation = self.allocation_for_deref(*alloc, loc, origin)?;
+                    self.follow_ptr_path(&allocation.value, path, loc, origin)?
+                }
+            };
+        }
+        Ok(current.clone())
+    }
+
+    /// Resolve a place to an abstract-memory location `(allocation,
+    /// element path)` without touching the final slot — the shared engine
+    /// behind `&raw` minting and pointer-routed stores. A place with no
+    /// deref addresses the root local's own storage: the local is
+    /// promoted into memory (first address-taking only). A deref instead
+    /// READS the pointer the leading steps name and continues inside its
+    /// allocation, path extended — nothing promoted, nothing
+    /// materialized: the result carries the ORIGINAL allocation's
+    /// identity. Mid-chain derefs read memory, so their liveness (and
+    /// stored-path) UB checks apply on the way.
+    fn resolve_place_alloc(
+        &mut self,
+        loc: &ItemLoc,
+        body: &MirBody,
+        local: LocalId,
+        projection: &[ResolvedProj],
+        mode: PathMode,
+        origin: ExprId,
+    ) -> Result<(AllocId, Vec<PathElem>), EvalError> {
+        let split = projection
+            .iter()
+            .position(|elem| matches!(elem, ResolvedProj::Deref));
+        let (mut alloc, mut path, rest) = match split {
+            None => {
+                let alloc = self.promote_local(local, body, loc, origin)?;
+                (alloc, Vec::new(), projection)
+            }
+            Some(split) => {
+                let ptr = self.read_place(loc, body, local, &projection[..split], origin)?;
+                let Value::Ptr { alloc, path } = ptr else {
+                    return Err(self.ill_typed("a raw pointer", &ptr, loc, origin));
+                };
+                (alloc, path, &projection[split + 1..])
+            }
+        };
+        for elem in rest {
+            match elem {
+                ResolvedProj::Field(index) => path.push(PathElem::Field(*index)),
+                ResolvedProj::Index(index) => {
+                    if mode == PathMode::Store {
+                        // The program's own checked `[i]` step: bounds
+                        // judged against the current element (liveness
+                        // and the pointer's stored path are checked on
+                        // the way — both UB judgements).
+                        let allocation = self.allocation_for_deref(alloc, loc, origin)?;
+                        let current =
+                            self.follow_ptr_path(&allocation.value, &path, loc, origin)?;
+                        let Value::Array(values) = current else {
+                            return Err(self.ill_typed("an array value", current, loc, origin));
+                        };
+                        if *index >= values.len() as u128 {
+                            return Err(EvalError {
+                                kind: EvalErrorKind::Runtime,
+                                message: hir::diag::index_out_of_bounds(
+                                    values.len() as u128,
+                                    *index,
+                                ),
+                                origin: Some((loc.clone(), origin)),
+                            });
+                        }
+                    }
+                    let index = u64::try_from(*index).map_err(|_| {
+                        self.internal_error(
+                            format!("array index {index} overflows a pointer path"),
+                            Some((loc.clone(), origin)),
+                        )
+                    })?;
+                    path.push(PathElem::Index(index));
+                }
+                ResolvedProj::Deref => {
+                    let allocation = self.allocation_for_deref(alloc, loc, origin)?;
+                    let current = self.follow_ptr_path(&allocation.value, &path, loc, origin)?;
+                    let Value::Ptr {
+                        alloc: next_alloc,
+                        path: next_path,
+                    } = current
+                    else {
+                        return Err(self.ill_typed("a raw pointer", current, loc, origin));
+                    };
+                    alloc = *next_alloc;
+                    path = next_path.clone();
+                }
+            }
+        }
+        Ok((alloc, path))
+    }
+
+    /// Store through a pointer-routed place (a projection containing a
+    /// deref): resolve to `(allocation, path)`, then the store-time
+    /// checks — liveness (a dead allocation is detected UB), writability
+    /// (a static's allocation is read-only — a write into one is detected
+    /// UB), and the pointer's stored path (an address minted out of
+    /// bounds: detected UB). The store mutates the pointee IN PLACE, so
+    /// interior pointers into the overwritten value survive it — exactly
+    /// real-memory behavior, same as whole-local overwrites of promoted
+    /// locals.
+    fn write_through(
+        &mut self,
+        loc: &ItemLoc,
+        body: &MirBody,
+        local: LocalId,
+        projection: &[ResolvedProj],
+        value: Value,
+        origin: ExprId,
+    ) -> Result<(), EvalError> {
+        let (alloc, path) =
+            self.resolve_place_alloc(loc, body, local, projection, PathMode::Store, origin)?;
+        self.allocation_for_deref(alloc, loc, origin)?;
+        let allocation = self.memory.get_mut(&alloc).expect("checked just above");
+        if !allocation.writable {
+            return Err(EvalError {
+                kind: EvalErrorKind::UndefinedBehavior,
+                message: "write through a pointer into read-only memory (a `static`)".to_owned(),
+                origin: Some((loc.clone(), origin)),
+            });
+        }
+        match project_path_mut(&mut allocation.value, &path) {
+            Ok(slot) => {
+                *slot = value;
+                Ok(())
+            }
+            Err(error) => Err(self.ptr_path_error(error, loc, origin)),
+        }
+    }
+
+    /// Navigate a pointer's stored path inside a (live) allocation's
+    /// value, classifying failures: out-of-range element steps are
+    /// detected UB (the address was minted past the end of an array —
+    /// address-taking never bounds-checks, the deref is where validity is
+    /// judged), shape mismatches are internal errors.
+    fn follow_ptr_path<'v>(
+        &self,
+        value: &'v Value,
+        path: &[PathElem],
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<&'v Value, EvalError> {
+        project_path(value, path).map_err(|error| self.ptr_path_error(error, loc, origin))
+    }
+
+    /// The UB/internal split for failures along a pointer's STORED path —
+    /// deterministic, like every detected-UB message.
+    fn ptr_path_error(&self, error: ProjectError, loc: &ItemLoc, origin: ExprId) -> EvalError {
+        match error {
+            ProjectError::OutOfBounds { len, index } => EvalError {
+                kind: EvalErrorKind::UndefinedBehavior,
+                message: format!(
+                    "out-of-bounds pointer — it points to element {index} of an array \
+                     with {len} elements"
+                ),
+                origin: Some((loc.clone(), origin)),
+            },
+            ProjectError::Shape(detail) => self.internal_error(detail, Some((loc.clone(), origin))),
+        }
     }
 
     /// Store `value` into the place on the topmost frame: the whole local
@@ -1018,40 +1269,34 @@ impl<'db, M: Mode> Machine<'db, M> {
                     other => Err(self.ill_typed("a record or payload value", &other, loc, origin)),
                 }
             }
-            // `&raw [mut] local[.field...]`: promote the local into
-            // abstract memory (first address-taking only; after that the
-            // allocation IS the local) and mint the pointer — an
-            // (AllocId, path) pair, never a number. Element steps would
-            // evaluate their index here; nothing mints them yet
-            // (array-element address-of is reserved), but the conversion
-            // is total regardless.
+            // `&raw [mut] place`: resolve the place to `(allocation,
+            // path)` and mint the pointer — an (AllocId, path) pair, never
+            // a number. A plain local root is promoted into abstract
+            // memory (first address-taking only; after that the allocation
+            // IS the local); a deref-rooted place (`&raw mut p.*.x`)
+            // instead reads the pointer and extends its path — the
+            // ORIGINAL allocation's identity, no intermediate
+            // materialization, no promotion. Element steps are NOT
+            // bounds-checked here (validity is judged at the deref): an
+            // out-of-range address mints silently, and every later deref
+            // of it is detected UB.
             Rvalue::AddrOf { place, .. } => {
-                let alloc = self.promote_local(place.local, body, loc, origin)?;
-                let mut path = Vec::with_capacity(place.projection.len());
-                for elem in &place.projection {
-                    match elem {
-                        ProjElem::Field(index) => path.push(PathElem::Field(*index)),
-                        ProjElem::Index(op) => {
-                            let value = self.eval_operand(loc, body, op, origin)?;
-                            let Value::Int(index) = value else {
-                                return Err(self.ill_typed("a `usize` index", &value, loc, origin));
-                            };
-                            let index = u64::try_from(index).map_err(|_| {
-                                self.internal_error(
-                                    format!("array index {index} overflows a pointer path"),
-                                    Some((loc.clone(), origin)),
-                                )
-                            })?;
-                            path.push(PathElem::Index(index));
-                        }
-                    }
-                }
+                let projection = self.resolve_projection(loc, body, &place.projection, origin)?;
+                let (alloc, path) = self.resolve_place_alloc(
+                    loc,
+                    body,
+                    place.local,
+                    &projection,
+                    PathMode::Mint,
+                    origin,
+                )?;
                 Ok(Value::Ptr { alloc, path })
             }
-            // `&raw S[.field...]`: the static's ONE allocation, minted
-            // read-only on first mention — so two `&raw S` are the same
-            // address (static=identity, observable). Plain `S` mentions
-            // keep cloning the memo, unchanged.
+            // `&raw S[.field | [index]]...`: the static's ONE allocation,
+            // minted read-only on first mention — so two `&raw S` are the
+            // same address (static=identity, observable). Plain `S`
+            // mentions keep cloning the memo, unchanged. Element steps
+            // append unchecked, like every address-taking.
             Rvalue::AddrOfStatic { item, projection } => {
                 let alloc = match self.static_allocs.get(item) {
                     Some(&alloc) => alloc,
@@ -1067,19 +1312,32 @@ impl<'db, M: Mode> Machine<'db, M> {
                         alloc
                     }
                 };
-                Ok(Value::Ptr {
-                    alloc,
-                    path: projection.iter().map(|&i| PathElem::Field(i)).collect(),
-                })
-            }
-            // `p.*`: validity is checked at the deref — a dead allocation
-            // is detected UB, deterministically.
-            Rvalue::Deref(op) => {
-                let value = self.eval_operand(loc, body, op, origin)?;
-                let Value::Ptr { alloc, path } = value else {
-                    return Err(self.ill_typed("a raw pointer", &value, loc, origin));
-                };
-                self.ptr_read(alloc, &path, loc, origin)
+                let resolved = self.resolve_projection(loc, body, projection, origin)?;
+                let mut path = Vec::with_capacity(resolved.len());
+                for elem in &resolved {
+                    match elem {
+                        ResolvedProj::Field(index) => path.push(PathElem::Field(*index)),
+                        ResolvedProj::Index(index) => {
+                            let index = u64::try_from(*index).map_err(|_| {
+                                self.internal_error(
+                                    format!("array index {index} overflows a pointer path"),
+                                    Some((loc.clone(), origin)),
+                                )
+                            })?;
+                            path.push(PathElem::Index(index));
+                        }
+                        // Deref-rooted chains lower through a pointer temp
+                        // (`Rvalue::AddrOf`), never through the static
+                        // form.
+                        ResolvedProj::Deref => {
+                            return Err(self.internal_error(
+                                "a deref projection reached `&raw` of a static".to_owned(),
+                                Some((loc.clone(), origin)),
+                            ));
+                        }
+                    }
+                }
+                Ok(Value::Ptr { alloc, path })
             }
         }
     }
@@ -1124,48 +1382,6 @@ impl<'db, M: Mode> Machine<'db, M> {
         self.next_alloc += 1;
         self.memory.insert(alloc, allocation);
         alloc
-    }
-
-    /// Read through a pointer: liveness first (a dead allocation is
-    /// detected UB), then the element-granular path selects the value.
-    fn ptr_read(
-        &self,
-        alloc: AllocId,
-        path: &[PathElem],
-        loc: &ItemLoc,
-        origin: ExprId,
-    ) -> Result<Value, EvalError> {
-        let allocation = self.allocation_for_deref(alloc, loc, origin)?;
-        project_path(&allocation.value, path)
-            .cloned()
-            .map_err(|detail| self.internal_error(detail, Some((loc.clone(), origin))))
-    }
-
-    /// Write through a pointer: liveness, then writability (a static's
-    /// allocation is read-only — a write into one is detected UB), then
-    /// the path names the slot.
-    fn ptr_store(
-        &mut self,
-        ptr: Value,
-        value: Value,
-        loc: &ItemLoc,
-        origin: ExprId,
-    ) -> Result<(), EvalError> {
-        let Value::Ptr { alloc, path } = ptr else {
-            return Err(self.ill_typed("a raw pointer", &ptr, loc, origin));
-        };
-        self.allocation_for_deref(alloc, loc, origin)?;
-        let allocation = self.memory.get_mut(&alloc).expect("checked just above");
-        if !allocation.writable {
-            return Err(EvalError {
-                kind: EvalErrorKind::UndefinedBehavior,
-                message: "write through a pointer into read-only memory (a `static`)".to_owned(),
-                origin: Some((loc.clone(), origin)),
-            });
-        }
-        project_path_mut(&mut allocation.value, &path)
-            .map(|slot| *slot = value)
-            .map_err(|detail| self.internal_error(detail, Some((loc.clone(), origin))))
     }
 
     /// The liveness gate every deref (read or write) passes through. A
@@ -1268,24 +1484,32 @@ impl<'db, M: Mode> Machine<'db, M> {
         origin: ExprId,
     ) -> Result<Value, EvalError> {
         match op {
-            Operand::Copy(local) => {
+            Operand::Copy(place) => {
+                // A projected place (a deref read `p.*`, or a nested
+                // field/element): index operands evaluate first, then the
+                // walk — deref steps carry the UB checks.
+                if !place.projection.is_empty() {
+                    let projection =
+                        self.resolve_projection(loc, body, &place.projection, origin)?;
+                    return self.read_place(loc, body, place.local, &projection, origin);
+                }
                 let frame = self.frames.last();
                 // The promoted tier first (empty in pointer-free bodies —
                 // one branch, no behavior change): an address-taken
                 // local's current value lives in its allocation.
                 if let Some(frame) = frame
                     && !frame.promoted.is_empty()
-                    && let Some(alloc) = frame.promoted.get(local)
+                    && let Some(alloc) = frame.promoted.get(&place.local)
                     && let Some(allocation) = self.memory.get(alloc)
                 {
                     return Ok(allocation.value.clone());
                 }
                 frame
-                    .and_then(|frame| frame.locals.get(*local))
+                    .and_then(|frame| frame.locals.get(place.local))
                     .cloned()
                     .ok_or_else(|| {
                         self.internal_error(
-                            format!("read of uninitialized {}", local_name(body, *local)),
+                            format!("read of uninitialized {}", local_name(body, place.local)),
                             Some((loc.clone(), origin)),
                         )
                     })
@@ -1423,10 +1647,12 @@ impl<'db, M: Mode> Machine<'db, M> {
 }
 
 /// Navigate a pointer's element-granular path to the value it names.
-/// Errors are internal-error details (the caller attaches the origin): a
-/// path/shape mismatch means a pointer the type system should have refused
-/// was materialized.
-fn project_path<'v>(slot: &'v Value, path: &[PathElem]) -> Result<&'v Value, String> {
+/// Out-of-bounds element steps are structured (a pointer minted past the
+/// end of an array — address-taking never bounds-checks — is detected UB
+/// at its first deref); a shape mismatch means a pointer the type system
+/// should have refused was materialized — an internal error. The caller
+/// classifies (see `Machine::ptr_path_error`).
+fn project_path<'v>(slot: &'v Value, path: &[PathElem]) -> Result<&'v Value, ProjectError> {
     let mut current = slot;
     for elem in path {
         current = match (elem, current) {
@@ -1435,35 +1661,31 @@ fn project_path<'v>(slot: &'v Value, path: &[PathElem]) -> Result<&'v Value, Str
                 match fields.get(*index as usize) {
                     Some((_, field)) => field,
                     None => {
-                        return Err(format!(
+                        return Err(ProjectError::Shape(format!(
                             "record field index {index} out of range ({len} elements)"
-                        ));
+                        )));
                     }
                 }
             }
-            // No pointer INTO an array element can be minted yet (array-
-            // element address-of is reserved), but the path machinery is
-            // already array-aware for when it lands.
             (PathElem::Index(index), Value::Array(values)) => {
-                let len = values.len();
-                match values.get(*index as usize) {
+                let len = values.len() as u128;
+                let index = *index as u128;
+                match values.get(index as usize) {
                     Some(element) => element,
-                    None => {
-                        return Err(format!("array index {index} out of range ({len} elements)"));
-                    }
+                    None => return Err(ProjectError::OutOfBounds { len, index }),
                 }
             }
             (PathElem::Index(_), other) => {
-                return Err(format!(
+                return Err(ProjectError::Shape(format!(
                     "expected an array value to project into, found `{}`",
                     other.display()
-                ));
+                )));
             }
             (PathElem::Field(_), other) => {
-                return Err(format!(
+                return Err(ProjectError::Shape(format!(
                     "expected a record value to project into, found `{}`",
                     other.display()
-                ));
+                )));
             }
         };
     }
@@ -1471,7 +1693,10 @@ fn project_path<'v>(slot: &'v Value, path: &[PathElem]) -> Result<&'v Value, Str
 }
 
 /// [`project_path`], mutably — the store side.
-fn project_path_mut<'v>(slot: &'v mut Value, path: &[PathElem]) -> Result<&'v mut Value, String> {
+fn project_path_mut<'v>(
+    slot: &'v mut Value,
+    path: &[PathElem],
+) -> Result<&'v mut Value, ProjectError> {
     let mut current = slot;
     for elem in path {
         current = match (elem, current) {
@@ -1480,36 +1705,53 @@ fn project_path_mut<'v>(slot: &'v mut Value, path: &[PathElem]) -> Result<&'v mu
                 match fields.get_mut(*index as usize) {
                     Some((_, field)) => field,
                     None => {
-                        return Err(format!(
+                        return Err(ProjectError::Shape(format!(
                             "record field index {index} out of range ({len} elements)"
-                        ));
+                        )));
                     }
                 }
             }
             (PathElem::Index(index), Value::Array(values)) => {
-                let len = values.len();
-                match values.get_mut(*index as usize) {
-                    Some(element) => element,
-                    None => {
-                        return Err(format!("array index {index} out of range ({len} elements)"));
-                    }
+                let len = values.len() as u128;
+                let index = *index as u128;
+                if index >= len {
+                    return Err(ProjectError::OutOfBounds { len, index });
                 }
+                &mut values[index as usize]
             }
             (PathElem::Index(_), other) => {
-                return Err(format!(
+                return Err(ProjectError::Shape(format!(
                     "expected an array value to project into, found `{}`",
                     other.display()
-                ));
+                )));
             }
             (PathElem::Field(_), other) => {
-                return Err(format!(
+                return Err(ProjectError::Shape(format!(
                     "expected a record value to project into, found `{}`",
                     other.display()
-                ));
+                )));
             }
         };
     }
     Ok(current)
+}
+
+/// How `Machine::resolve_place_alloc` treats the place's own element
+/// steps.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PathMode {
+    /// `&raw` address-taking: validity is a deref-time judgement (never a
+    /// minting-time one, so stricter checks can be added later without
+    /// breaking programs), so element steps append UNCHECKED. An
+    /// out-of-range address mints silently; every later deref of it is
+    /// detected UB.
+    Mint,
+    /// A store destination: the source-level `[i]` steps are the
+    /// program's own checked indexing, so they bounds-check during
+    /// resolution — an ordinary runtime trap, exactly like `a[i] = v;`
+    /// and symmetric with the `p.*[i]` read — while the pointer's stored
+    /// path stays a deref-time UB judgement.
+    Store,
 }
 
 /// One resolved step of a place projection: index operands already
@@ -1521,12 +1763,16 @@ enum ResolvedProj {
     /// the bounds check compares honestly (a `usize` conversion would have
     /// to invent a verdict for huge indices).
     Index(u128),
+    /// Follow the raw pointer at the current position: the rest of the
+    /// place continues inside the pointee's allocation.
+    Deref,
 }
 
-/// Why a place projection failed. Out-of-bounds element writes are
-/// ordinary runtime traps (the program's fault, deterministically
-/// reported); everything else means a value the checker should have
-/// refused was written through — an internal error.
+/// Why a place projection failed. Out-of-bounds element steps are
+/// classified by the caller (an ordinary runtime trap for the program's
+/// own `[i]` steps, detected UB for a pointer's stored path); everything
+/// else means a value the checker should have refused was projected
+/// through — an internal error.
 enum ProjectError {
     OutOfBounds { len: u128, index: u128 },
     Shape(String),
@@ -1571,6 +1817,13 @@ fn project_mut<'v>(
                     "expected an array value to assign into, found `{}`",
                     other.display()
                 )));
+            }
+            // Deref-containing destinations route through
+            // `Machine::write_through`, never here.
+            (ResolvedProj::Deref, _) => {
+                return Err(ProjectError::Shape(
+                    "a deref projection reached a frame-local write".to_owned(),
+                ));
             }
         }
     }

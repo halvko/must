@@ -26,6 +26,10 @@ const C = 7;
 
 static main = fn () -> () {
     // --- static = one address, const = a copy per mention ---
+    // Only the STATIC half is a language promise. Const-mention identity is
+    // unspecified: the interpreter happens to give every `&raw C` its own
+    // temporary, but a compiler is free to merge or split immutable copies —
+    // never compare const-derived addresses and expect a particular answer.
     if &raw S == &raw S {
         print("static: &raw S == &raw S is true — one place, one address");
     } else {
@@ -83,6 +87,8 @@ static main = fn () -> () {
 // anything at all with it. Detected-UB traps make the interpreter a good
 // teacher; they do not make the code correct.
 //
-// Reserved: writes through a pointee field (`p.*.x = ...`), taking
-// `&raw` of a field element chain beyond the first hop, and
-// `unsafe fn`.
+// Writes through pointee fields (`p.*.x = ...`), pointers into array
+// elements (`&raw mut a[i]`), and address-of through a deref
+// (`unsafe { &raw mut p.*.x }` — computing an address through a pointer is
+// itself a deref, so it needs `unsafe`) all work. Still reserved:
+// `unsafe fn` and heap allocation.

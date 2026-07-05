@@ -50,9 +50,6 @@ fn render_body(id: BodyId, body: &MirBody, out: &mut String) {
                 StatementKind::Assign { dest, rvalue } => {
                     let _ = writeln!(out, "    {} = {}", place(dest), render_rvalue(rvalue));
                 }
-                StatementKind::PtrStore { ptr, value } => {
-                    let _ = writeln!(out, "    store {}.* = {}", operand(ptr), operand(value));
-                }
             }
         }
         let _ = writeln!(out, "    {}", render_terminator(&data.terminator.kind));
@@ -103,12 +100,9 @@ fn render_rvalue(rvalue: &Rvalue) -> String {
         }
         Rvalue::AddrOfStatic { item, projection } => {
             let mut path = format!("&raw static {}", item.display_name());
-            for index in projection {
-                let _ = write!(path, ".{index}");
-            }
+            path.push_str(&projection_suffix(projection));
             path
         }
-        Rvalue::Deref(op) => format!("{}.*", operand(op)),
         Rvalue::Instantiate { item, const_args } => {
             let args = const_args
                 .iter()
@@ -194,7 +188,7 @@ fn render_terminator(kind: &TerminatorKind) -> String {
 
 fn operand(op: &Operand) -> String {
     match op {
-        Operand::Copy(l) => local(*l),
+        Operand::Copy(p) => place(p),
         Operand::Const(c) => match c {
             Const::Unit => "()".to_owned(),
             Const::Int(v) => v.to_string(),
@@ -215,10 +209,16 @@ fn local(id: LocalId) -> String {
 
 /// `_1` for a whole local, `_1.0.2` through a field-index projection (the
 /// same dotted spelling `Rvalue::Field` reads render with), `_1[_2]`
-/// through an element projection.
+/// through an element projection, `_1.*` through a pointer deref.
 fn place(p: &Place) -> String {
     let mut out = local(p.local);
-    for elem in &p.projection {
+    out.push_str(&projection_suffix(&p.projection));
+    out
+}
+
+fn projection_suffix(projection: &[ProjElem]) -> String {
+    let mut out = String::new();
+    for elem in projection {
         match elem {
             ProjElem::Field(index) => {
                 let _ = write!(out, ".{index}");
@@ -226,6 +226,7 @@ fn place(p: &Place) -> String {
             ProjElem::Index(op) => {
                 let _ = write!(out, "[{}]", operand(op));
             }
+            ProjElem::Deref => out.push_str(".*"),
         }
     }
     out

@@ -5053,12 +5053,82 @@ fn addr_of_a_non_place_errors() {
 }
 
 #[test]
-fn addr_of_through_a_deref_is_reserved() {
+fn addr_of_through_a_deref_works_inside_unsafe() {
+    check_diagnostics(
+        "static main = fn { let mut x = 1; let p = &raw mut x; let q = unsafe { &raw mut p.* }; };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn addr_of_through_a_deref_still_requires_unsafe() {
+    // The deref rule is uniform: the deref inside an `&raw` place needs
+    // `unsafe` like any other deref site.
     check_diagnostics(
         "static main = fn { let mut x = 1; let p = &raw mut x; let q = &raw mut p.*; };",
         expect![[r#"
-            62..74: taking the address of a pointer's target is not supported yet
             71..74: dereferencing a raw pointer requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn addr_of_mut_through_a_shared_pointer_errors() {
+    check_diagnostics(
+        r#"
+static main = fn {
+    let mut r = struct { a: 1 };
+    let p = &raw r;
+    let q = unsafe { &raw mut p.*.a };
+};
+"#,
+        expect![[r#"
+            94..108: cannot take `&raw mut` through `&raw struct { a: usize }`: minting a mutating address needs a `&raw mut` pointer
+        "#]],
+    );
+}
+
+#[test]
+fn addr_of_shared_through_any_pointer_is_fine() {
+    check_diagnostics(
+        r#"
+static main = fn {
+    let mut r = struct { a: 1 };
+    let p = &raw r;
+    let q = unsafe { &raw p.*.a };
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn addr_of_through_a_deref_types_as_the_projected_pointee() {
+    check_infer(
+        r#"
+static main = fn {
+    let mut r = struct { a: 1, b: 2 };
+    let p = &raw mut r;
+    let q = unsafe { &raw mut p.*.a };
+};
+"#,
+        expect![[r#"
+            15..123 'fn {     let mut ...': fn()
+            18..123 '{     let mut r =...': ()
+            32..33 'r': struct { a: usize, b: usize }
+            36..57 'struct { a: 1, b:...': struct { a: usize, b: usize }
+            48..49 '1': usize
+            54..55 '2': usize
+            67..68 'p': &raw mut struct { a: usize, b: usize }
+            71..81 '&raw mut r': &raw mut struct { a: usize, b: usize }
+            80..81 'r': struct { a: usize, b: usize }
+            91..92 'q': &raw mut usize
+            95..120 'unsafe { &raw mut...': &raw mut usize
+            102..120 '{ &raw mut p.*.a }': &raw mut usize
+            104..118 '&raw mut p.*.a': &raw mut usize
+            113..114 'p': &raw mut struct { a: usize, b: usize }
+            113..116 'p.*': struct { a: usize, b: usize }
+            113..118 'p.*.a': usize
         "#]],
     );
 }
@@ -5102,12 +5172,42 @@ fn deref_write_through_a_shared_pointer_errors() {
 }
 
 #[test]
-fn deref_write_into_a_pointee_field_is_reserved() {
+fn deref_write_into_a_pointee_field_works() {
     check_diagnostics(
         "static main = fn { let mut r = struct { a: 1 }; let p = &raw mut r; unsafe { p.*.a = 2; } };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn deref_write_into_a_pointee_field_through_a_shared_pointer_errors() {
+    // The chain's outermost deref governs: `p` is shared, so the write is
+    // refused at the pointer's flavor — same message as `p.* = v;`.
+    check_diagnostics(
+        "static main = fn { let mut r = struct { a: 1 }; let p = &raw r; unsafe { p.*.a = 2; } };",
         expect![[r#"
-            77..80: assigning to a field through a raw pointer is not supported yet
+            73..76: cannot assign through `&raw struct { a: usize }`: writing needs a `&raw mut` pointer
         "#]],
+    );
+}
+
+#[test]
+fn deref_write_into_a_pointee_field_still_requires_unsafe() {
+    check_diagnostics(
+        "static main = fn { let mut r = struct { a: 1 }; let p = &raw mut r; p.*.a = 2; };",
+        expect![[r#"
+            68..71: dereferencing a raw pointer requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn deref_write_needs_no_mut_binding_on_the_pointer() {
+    // `p` itself is not `mut` — writing through it does not reassign it,
+    // for projected targets exactly like for `p.* = v;`.
+    check_diagnostics(
+        "static main = fn { let mut r = struct { a: 1 }; let p = &raw mut r; unsafe { p.*.a = 2; }; let x = p; };",
+        expect![[r#""#]],
     );
 }
 
@@ -5475,7 +5575,7 @@ fn array_valued_const_param_rejected_at_declaration() {
 }
 
 #[test]
-fn addr_of_whole_array_works_element_reserved() {
+fn addr_of_whole_array_and_element_work() {
     check_diagnostics(
         r#"
 static f = fn {
@@ -5484,8 +5584,41 @@ static f = fn {
     let q = &raw mut a[0];
 };
 "#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn addr_of_array_element_types_as_element_pointer() {
+    check_infer(
+        r#"
+static f = fn {
+    let mut a = [1, 2];
+    let q = &raw mut a[0];
+};
+"#,
         expect![[r#"
-            92..105: taking the address of an array element is not supported yet
+            12..69 'fn {     let mut ...': fn()
+            15..69 '{     let mut a =...': ()
+            29..30 'a': [usize; 2]
+            33..39 '[1, 2]': [usize; 2]
+            34..35 '1': usize
+            37..38 '2': usize
+            49..50 'q': &raw mut usize
+            53..66 '&raw mut a[0]': &raw mut usize
+            62..63 'a': [usize; 2]
+            62..66 'a[0]': usize
+            64..65 '0': usize
+        "#]],
+    );
+}
+
+#[test]
+fn addr_of_mut_of_an_element_still_requires_a_mut_root() {
+    check_diagnostics(
+        "static f = fn { let a = [1, 2]; let q = &raw mut a[0]; };",
+        expect![[r#"
+            49..50: cannot take `&raw mut` of `a[_]`: `a` is not declared `mut` (`a` is declared without `mut` here at 20..21)
         "#]],
     );
 }

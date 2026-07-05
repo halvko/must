@@ -6638,6 +6638,111 @@ fn deref_write_target_parses() {
 }
 
 #[test]
+fn deref_projected_write_target_parses() {
+    check(
+        "static f = fn { p.*.a = 5; };",
+        expect![[r#"
+            SOURCE_FILE@0..29
+              STATIC_ITEM@0..29
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..28
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..28
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    ASSIGN_STMT@16..26
+                      FIELD_EXPR@16..21
+                        DEREF_EXPR@16..19
+                          PATH_EXPR@16..17
+                            NAME_REF@16..17
+                              IDENT@16..17 "p"
+                          DOT@17..18 "."
+                          STAR@18..19 "*"
+                        DOT@19..20 "."
+                        NAME_REF@20..21
+                          IDENT@20..21 "a"
+                      WHITESPACE@21..22 " "
+                      EQ@22..23 "="
+                      WHITESPACE@23..24 " "
+                      LITERAL@24..25
+                        INT_NUMBER@24..25 "5"
+                      SEMICOLON@25..26 ";"
+                    WHITESPACE@26..27 " "
+                    R_BRACE@27..28 "}"
+                SEMICOLON@28..29 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn addr_of_element_and_through_deref_places_parse() {
+    check(
+        "static f = fn { &raw mut a[0] == &raw mut p.*.x };",
+        expect![[r#"
+            SOURCE_FILE@0..50
+              STATIC_ITEM@0..50
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..49
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..49
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    BIN_EXPR@16..47
+                      ADDR_OF_EXPR@16..29
+                        AMP@16..17 "&"
+                        RAW_KW@17..20 "raw"
+                        WHITESPACE@20..21 " "
+                        MUT_KW@21..24 "mut"
+                        WHITESPACE@24..25 " "
+                        INDEX_EXPR@25..29
+                          PATH_EXPR@25..26
+                            NAME_REF@25..26
+                              IDENT@25..26 "a"
+                          L_BRACKET@26..27 "["
+                          LITERAL@27..28
+                            INT_NUMBER@27..28 "0"
+                          R_BRACKET@28..29 "]"
+                      WHITESPACE@29..30 " "
+                      EQ2@30..32 "=="
+                      WHITESPACE@32..33 " "
+                      ADDR_OF_EXPR@33..47
+                        AMP@33..34 "&"
+                        RAW_KW@34..37 "raw"
+                        WHITESPACE@37..38 " "
+                        MUT_KW@38..41 "mut"
+                        WHITESPACE@41..42 " "
+                        FIELD_EXPR@42..47
+                          DEREF_EXPR@42..45
+                            PATH_EXPR@42..43
+                              NAME_REF@42..43
+                                IDENT@42..43 "p"
+                            DOT@43..44 "."
+                            STAR@44..45 "*"
+                          DOT@45..46 "."
+                          NAME_REF@46..47
+                            IDENT@46..47 "x"
+                    WHITESPACE@47..48 " "
+                    R_BRACE@48..49 "}"
+                SEMICOLON@49..50 ";"
+        "#]],
+    );
+}
+
+#[test]
 fn unsafe_block_parses() {
     check(
         "static f = fn { unsafe { p.* } };",

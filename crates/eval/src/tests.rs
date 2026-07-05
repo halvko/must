@@ -1926,8 +1926,10 @@ static main = fn() -> usize {
 
 #[test]
 fn addr_of_a_const_takes_the_address_of_each_use_copy() {
-    // const=copied, now observable: each `&raw c` mention points at its
-    // own copy, so two of them are different addresses.
+    // const=copied: the interpreter happens to give each `&raw c` mention
+    // its own temporary, so two of them compare unequal. Const-mention
+    // identity is deliberately unspecified — this pins today's interpreter
+    // behaviour, not a language promise.
     check_run(
         r#"
 const c = 7;
@@ -2085,6 +2087,397 @@ static main = fn() -> &raw usize {
         "main()",
         expect![[r#"
             => &raw <opaque>
+        "#]],
+    );
+}
+
+// ---- raw pointers, through-pointer places ----
+
+#[test]
+fn through_pointer_field_write_is_visible_afterward() {
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut r = struct { a: 1, b: 2 };
+    let p = &raw mut r;
+    unsafe { p.*.a = 40; }
+    r.a + r.b
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 42
+        "#]],
+    );
+}
+
+#[test]
+fn through_pointer_field_chain_writes_the_nested_field() {
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut r = struct { inner: struct { v: 1 }, other: 2 };
+    let p = &raw mut r;
+    unsafe { p.*.inner.v = 40; }
+    r.inner.v + r.other
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 42
+        "#]],
+    );
+}
+
+#[test]
+fn through_pointer_element_reads_and_writes() {
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut a = [1, 2, 3];
+    let p = &raw mut a;
+    unsafe { p.*[1] = 9; }
+    unsafe { a[0] + p.*[1] }
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 10
+        "#]],
+    );
+}
+
+#[test]
+fn through_pointer_element_write_out_of_bounds_is_an_ordinary_trap() {
+    // The `[i]` step is the program's own checked indexing — an ordinary
+    // runtime trap with the same message as `a[i]`, symmetric with the
+    // `p.*[i]` read. (Pointers MINTED out of bounds are the UB case; a
+    // compile-time-known OOB index would be the planted squiggle trap
+    // instead — same message either way.)
+    check_run(
+        r#"
+static main = fn() {
+    let mut a = [1, 2];
+    let p = &raw mut a;
+    let i = 5;
+    unsafe { p.*[i] = 0; }
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[Runtime]: index out of bounds: the length is 2 but the index is 5
+        "#]],
+    );
+}
+
+#[test]
+fn chained_deref_writes_through_a_pointer_to_a_pointer() {
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut x = 1;
+    let mut p = &raw mut x;
+    let pp = &raw mut p;
+    unsafe { pp.*.* = 7; }
+    x
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 7
+        "#]],
+    );
+}
+
+#[test]
+fn deref_in_the_middle_of_a_write_chain_composes() {
+    // `p.*.q.*.v = 5;` — the OUTERMOST deref governs the store; the inner
+    // one is an ordinary read that fetches the interior pointer.
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut inner = struct { v: 1 };
+    let mut outer = struct { q: &raw mut inner };
+    let p = &raw mut outer;
+    unsafe { p.*.q.*.v = 5; }
+    inner.v
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 5
+        "#]],
+    );
+}
+
+#[test]
+fn through_pointer_mixed_chain_with_elements_and_fields() {
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut r = struct { buf: [struct { v: 1 }, struct { v: 2 }] };
+    let p = &raw mut r;
+    unsafe { p.*.buf[1].v = 9; }
+    unsafe { p.*.buf[0].v + p.*.buf[1].v }
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 10
+        "#]],
+    );
+}
+
+#[test]
+fn addr_of_array_element_writes_through_to_the_array() {
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut a = [1, 2, 3];
+    let p = &raw mut a[1];
+    unsafe { p.* = 20; }
+    a[0] + a[1] + a[2]
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 24
+        "#]],
+    );
+}
+
+#[test]
+fn addr_of_out_of_bounds_element_mints_silently_and_derefs_as_ub() {
+    // Address-taking never bounds-checks (validity is a deref-time
+    // judgement): the out-of-range address mints fine, the deref is
+    // detected UB.
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut a = [1, 2];
+    let i = 5;
+    let p = &raw mut a[i];
+    unsafe { p.* }
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[UndefinedBehavior]: out-of-bounds pointer — it points to element 5 of an array with 2 elements
+        "#]],
+    );
+}
+
+#[test]
+fn out_of_bounds_pointer_traps_deterministically() {
+    // Same program, two fresh machines: identical trap kind and message —
+    // the determinism pin for the new UB wording.
+    let text = r#"
+static main = fn() -> usize {
+    let mut a = [1, 2];
+    let i = 5;
+    let p = &raw mut a[i];
+    unsafe { p.* = 9; a[0] }
+};
+static entrypoint = (main());
+"#;
+    let render = || {
+        let db = RootDatabase::default();
+        let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+        let entry_item = *hir::file_item_ids(&db, file)
+            .iter()
+            .find(|&&it| it.name(&db) == "entrypoint")
+            .expect("entrypoint item exists");
+        let mut machine = Machine::new(&db, RunMode { out: Vec::new() });
+        match machine.eval_root(&hir::item_loc(&db, entry_item)) {
+            Ok(value) => format!("=> {}", value.display()),
+            Err(err) => format!("error[{:?}]: {}", err.kind, err.message),
+        }
+    };
+    let first = render();
+    let second = render();
+    assert_eq!(first, second);
+    assert!(
+        first.starts_with("error[UndefinedBehavior]: out-of-bounds pointer"),
+        "expected detected UB, got: {first}"
+    );
+}
+
+#[test]
+fn addr_of_through_a_deref_is_double_indirection_free() {
+    // `&raw mut p.*.a` carries the ORIGINAL allocation's identity with an
+    // extended path — no intermediate materialization, so it is the same
+    // address `&raw mut r.a` mints.
+    check_run(
+        r#"
+static main = fn() -> bool {
+    let mut r = struct { a: 1, b: 2 };
+    let p = &raw mut r;
+    unsafe { &raw mut p.*.a == &raw mut r.a }
+};
+"#,
+        "main()",
+        expect![[r#"
+            => true
+        "#]],
+    );
+}
+
+#[test]
+fn addr_of_through_a_deref_writes_the_original_place() {
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut r = struct { a: 1, b: 2 };
+    let p = &raw mut r;
+    let q = unsafe { &raw mut p.*.a };
+    unsafe { q.* = 40; }
+    r.a + r.b
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 42
+        "#]],
+    );
+}
+
+#[test]
+fn dangling_interior_element_pointer_is_detected_ub() {
+    // Interior pointers die with their frame's allocation — the liveness
+    // story covers extended paths with no extra machinery.
+    check_run(
+        r#"
+static make = fn() -> &raw mut usize {
+    let mut a = [1, 2];
+    &raw mut a[0]
+};
+static main = fn() -> usize {
+    let p = make();
+    unsafe { p.* }
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[UndefinedBehavior]: dangling pointer — the local it pointed to no longer exists (its frame has returned)
+        "#]],
+    );
+}
+
+#[test]
+fn dangling_pointer_from_addr_of_through_deref_is_detected_ub() {
+    check_run(
+        r#"
+static make = fn() -> &raw mut usize {
+    let mut r = struct { a: 1 };
+    let p = &raw mut r;
+    unsafe { &raw mut p.*.a }
+};
+static main = fn() -> usize {
+    let p = make();
+    unsafe { p.* }
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[UndefinedBehavior]: dangling pointer — the local it pointed to no longer exists (its frame has returned)
+        "#]],
+    );
+}
+
+#[test]
+fn interior_pointer_survives_through_pointer_whole_value_overwrite() {
+    // Direct overwrites (`r = ...`) pinned this first; the same
+    // invariant holds when the overwrite itself goes through a pointer:
+    // `p.* = ...` writes INTO the allocation, so the interior pointer
+    // sees the new field.
+    check_run(
+        r#"
+static main = fn() -> usize {
+    let mut r = struct { a: 1, b: 2 };
+    let pa = &raw mut r.a;
+    let p = &raw mut r;
+    unsafe { p.* = struct { a: 3, b: 4 }; }
+    unsafe { pa.* }
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 3
+        "#]],
+    );
+}
+
+#[test]
+fn through_pointer_write_into_a_static_is_rejected_at_the_flavor() {
+    // A static only hands out shared `&raw`, so the write is refused
+    // statically (the squiggle's message, re-fired as a trap) — extended
+    // paths do not open a route around the read-only allocation.
+    check_run(
+        r#"
+static s = struct { a: 1 };
+static main = fn() {
+    let p = &raw s;
+    unsafe { p.*.a = 2; }
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[Trap]: cannot assign through `&raw struct { a: usize }`: writing needs a `&raw mut` pointer
+        "#]],
+    );
+}
+
+#[test]
+fn through_pointer_field_write_outside_unsafe_traps() {
+    check_run(
+        r#"
+static main = fn() {
+    let mut r = struct { a: 1 };
+    let p = &raw mut r;
+    p.*.a = 2;
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[Trap]: dereferencing a raw pointer requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn mid_chain_deref_outside_unsafe_traps() {
+    // The INNER deref of `pp.*.* = 7;` is an ordinary read — it needs
+    // `unsafe` like every deref site, even when the outer one is the
+    // store.
+    check_run(
+        r#"
+static main = fn() {
+    let mut x = 1;
+    let mut p = &raw mut x;
+    let pp = &raw mut p;
+    pp.*.* = 7;
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[Trap]: dereferencing a raw pointer requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn through_pointer_writes_work_inside_const_evaluation() {
+    check_const(
+        r#"
+static v = {
+    let mut r = struct { a: 1, b: 2 };
+    let p = &raw mut r;
+    unsafe { p.*.a = 40; }
+    r.a + r.b
+};
+"#,
+        expect![[r#"
+            v = 42
         "#]],
     );
 }

@@ -272,21 +272,19 @@ impl LowerCtx<'_> {
                 // A broken address-of: keyed on the WHOLE `&raw` expression
                 // (the squiggle may sit on the root name inside it, but the
                 // value that cannot be produced is the pointer).
-                InferenceDiagnostic::AddrOfNonPlace { expr }
-                | InferenceDiagnostic::AddrOfDerefUnsupported { expr } => {
-                    self.value_traps.insert(*expr, diag.message());
-                }
-                InferenceDiagnostic::AddrOfIndexUnsupported { expr } => {
+                InferenceDiagnostic::AddrOfNonPlace { expr } => {
                     self.value_traps.insert(*expr, diag.message());
                 }
                 InferenceDiagnostic::AddrOfMutImmutable { addr_of, .. }
-                | InferenceDiagnostic::AddrOfMutItem { addr_of, .. } => {
+                | InferenceDiagnostic::AddrOfMutItem { addr_of, .. }
+                | InferenceDiagnostic::AddrOfMutThroughImmutablePointer { addr_of, .. } => {
                     self.value_traps.insert(*addr_of, diag.message());
                 }
                 // Writes through pointers the checker rejected: keyed on
-                // the target (the deref), like the other assign traps.
-                InferenceDiagnostic::AssignThroughImmutablePointer { target, .. }
-                | InferenceDiagnostic::AssignThroughPointerField { target } => {
+                // the governing deref (the target itself for `p.* = v;`,
+                // the chain's outermost deref for `p.*.x = v;`), like the
+                // other assign traps.
+                InferenceDiagnostic::AssignThroughImmutablePointer { target, .. } => {
                     self.assign_traps.insert(*target, diag.message());
                 }
             }
@@ -393,7 +391,7 @@ impl LowerCtx<'_> {
                 },
                 expr,
             );
-            return Operand::Copy(dest);
+            return Operand::Copy(dest.into());
         }
         op
     }
@@ -471,7 +469,7 @@ impl LowerCtx<'_> {
                                     },
                                     expr,
                                 );
-                                Operand::Copy(dest)
+                                Operand::Copy(dest.into())
                             }
                             // No const params: the instance's value IS the
                             // item's value (type args are type-level only),
@@ -556,7 +554,7 @@ impl LowerCtx<'_> {
                         },
                         expr,
                     );
-                    return Operand::Copy(dest);
+                    return Operand::Copy(dest.into());
                 }
                 let callee_op = self.lower_expr(b, *callee);
                 let arg_ops: Vec<Operand> =
@@ -605,7 +603,7 @@ impl LowerCtx<'_> {
                     expr,
                 );
                 b.current = next;
-                Operand::Copy(dest)
+                Operand::Copy(dest.into())
             }
             ExprData::Bin { op, lhs, rhs } => {
                 let l = self.lower_expr(b, *lhs);
@@ -616,7 +614,7 @@ impl LowerCtx<'_> {
                 };
                 let dest = b.temp(self.ty(expr));
                 b.push_assign(dest, Rvalue::BinaryOp(*op, l, r), expr);
-                Operand::Copy(dest)
+                Operand::Copy(dest.into())
             }
             ExprData::If {
                 condition,
@@ -653,7 +651,7 @@ impl LowerCtx<'_> {
                 }
                 b.terminate(TerminatorKind::Goto { target: join }, expr);
                 b.current = join;
-                Operand::Copy(dest)
+                Operand::Copy(dest.into())
             }
             ExprData::Block { stmts, tail } => {
                 for stmt in stmts {
@@ -684,7 +682,7 @@ impl LowerCtx<'_> {
                                     self.bind_binding_pattern(
                                         b,
                                         *pat,
-                                        &Operand::Copy(local),
+                                        &Operand::Copy(local.into()),
                                         *init,
                                     );
                                 }
@@ -773,7 +771,7 @@ impl LowerCtx<'_> {
                     },
                     expr,
                 );
-                Operand::Copy(dest)
+                Operand::Copy(dest.into())
             }
             // `receiver.field` lowers to a positional projection: the
             // receiver's record type is already resolved by inference, so
@@ -789,7 +787,7 @@ impl LowerCtx<'_> {
                     Some(index) => {
                         let dest = b.temp(self.ty(expr));
                         b.push_assign(dest, Rvalue::Field { base, index }, expr);
-                        Operand::Copy(dest)
+                        Operand::Copy(dest.into())
                     }
                     // No such field, or not a (known) record at all:
                     // `NoSuchField`/`FieldOnUnknownType` already seeded a
@@ -815,7 +813,7 @@ impl LowerCtx<'_> {
                     },
                     expr,
                 );
-                Operand::Copy(dest)
+                Operand::Copy(dest.into())
             }
             // `[e; N]`: the element evaluates once, the count operand is a
             // compile-time value by checking (a broken count is a pending
@@ -826,7 +824,7 @@ impl LowerCtx<'_> {
                 let count = self.lower_expr(b, *count);
                 let dest = b.temp(self.ty(expr));
                 b.push_assign(dest, Rvalue::Repeat { elem, count }, expr);
-                Operand::Copy(dest)
+                Operand::Copy(dest.into())
             }
             // `a[i]`: base and index evaluate, then the element is read
             // with a runtime bounds check (an ordinary trap, not UB). A
@@ -857,7 +855,7 @@ impl LowerCtx<'_> {
                             },
                             expr,
                         );
-                        Operand::Copy(dest)
+                        Operand::Copy(dest.into())
                     }
                     _ => Operand::Const(Const::Unit),
                 }
@@ -886,7 +884,7 @@ impl LowerCtx<'_> {
                                 },
                                 expr,
                             );
-                            Operand::Copy(dest)
+                            Operand::Copy(dest.into())
                         } else {
                             let body_id = self.synth_ctor_body(expr, &variant, &payload_tys);
                             Operand::Const(Const::Fn(body_id))
@@ -943,8 +941,11 @@ impl LowerCtx<'_> {
                 }
                 self.lower_addr_of(b, expr, *mutable, *place)
             }
-            // `p.*` — a read through the pointer. Outside `unsafe` the
-            // operation must not run at all: the trap replaces the load
+            // `p.*` — a read through the pointer: a place-based load,
+            // `Copy` of the pointer local's place extended with a `Deref`
+            // step (materialized into a temp right here, so the read
+            // happens at this statement, in source order). Outside `unsafe`
+            // the operation must not run at all: the trap replaces the load
             // (the receiver still evaluates for its effects), carrying the
             // squiggle's exact message.
             ExprData::Deref { receiver } => {
@@ -954,9 +955,17 @@ impl LowerCtx<'_> {
                 }
                 match self.ty(*receiver) {
                     Ty::RawPtr { .. } => {
+                        let root = self.operand_root_local(b, op, *receiver);
                         let dest = b.temp(self.ty(expr));
-                        b.push_assign(dest, Rvalue::Deref(op), expr);
-                        Operand::Copy(dest)
+                        b.push_assign(
+                            dest,
+                            Rvalue::Use(Operand::Copy(Place {
+                                local: root,
+                                projection: vec![crate::ProjElem::Deref],
+                            })),
+                            expr,
+                        );
+                        Operand::Copy(dest.into())
                     }
                     // Not a pointer (`DerefNonPointer`/`FieldOnUnknownType`
                     // seeded a value trap, or the receiver diverges/was
@@ -1011,7 +1020,7 @@ impl LowerCtx<'_> {
                 b.terminate(TerminatorKind::Goto { target: header }, expr);
                 b.loop_frames.pop();
                 b.current = exit;
-                Operand::Copy(dest)
+                Operand::Copy(dest.into())
             }
             ExprData::Break { value } => {
                 let op = match value {
@@ -1075,7 +1084,7 @@ impl LowerCtx<'_> {
         // payload extraction re-reads it.
         let scrut_local = b.temp(self.ty(scrutinee));
         b.push_assign(scrut_local, Rvalue::Use(scrut_op), scrutinee);
-        let scrut = Operand::Copy(scrut_local);
+        let scrut = Operand::Copy(scrut_local.into());
 
         match self.ty(scrutinee) {
             // The dispatch is keyed on the DECLARATION alone: variant
@@ -1201,7 +1210,7 @@ impl LowerCtx<'_> {
             }
         }
         b.current = join;
-        Operand::Copy(dest)
+        Operand::Copy(dest.into())
     }
 
     /// The no-dispatch lowering: run the first covering arm straight-line
@@ -1263,7 +1272,7 @@ impl LowerCtx<'_> {
             b.terminate(TerminatorKind::Goto { target: join }, expr);
         }
         b.current = join;
-        Operand::Copy(dest)
+        Operand::Copy(dest.into())
     }
 
     /// How an arm participates in dispatch: a variant arm (keyed by index,
@@ -1383,7 +1392,7 @@ impl LowerCtx<'_> {
                     binding: None,
                     addressable: false,
                 });
-                self.bind_binding_pattern(b, pat, &Operand::Copy(local), origin);
+                self.bind_binding_pattern(b, pat, &Operand::Copy(local.into()), origin);
                 local
             }
             // A hole lowers as `Bind` (see `LowerCtx::lower_binding_pattern`
@@ -1482,7 +1491,7 @@ impl LowerCtx<'_> {
     fn lower_name_ref(&mut self, b: &mut BodyBuilder, expr: ExprId, name: &str) -> Operand {
         match self.resolutions.get(expr) {
             Some(Resolution::Local(binding)) => match b.local_for_binding.get(binding) {
-                Some(&local) => Operand::Copy(local),
+                Some(&local) => Operand::Copy(local.into()),
                 // A local of an enclosing function: a capture. The MIR
                 // diagnostic *is* the upstream diagnostic the trap borrows.
                 None => {
@@ -1570,37 +1579,12 @@ impl LowerCtx<'_> {
             self.trap(b, target, message);
             return;
         }
-        // `p.* = value;` — a store through a raw pointer. The pointer
-        // evaluates like any read; outside `unsafe` the store is replaced
-        // by a trap (the write must not happen), same for a target whose
-        // read-typing failed (non-pointer receiver — its value trap
-        // carries the message).
-        if let ExprData::Deref { receiver } = &self.body.exprs[target] {
-            let receiver = *receiver;
-            let ptr_op = self.lower_expr(b, receiver);
-            if let Some(message) = self.value_traps.get(&target).cloned() {
-                self.trap(b, target, message);
-                return;
-            }
-            if let Some(message) = self.unsafe_traps.get(&target).cloned() {
-                self.trap(b, target, message);
-                return;
-            }
-            // A broken receiver (not a `RawPtr` — `{error}`-typed, its own
-            // story upstream) skips the write, like the field path's
-            // missing-index case.
-            if let Ty::RawPtr { .. } = self.ty(receiver) {
-                b.blocks[b.current].statements.push(Statement {
-                    kind: StatementKind::PtrStore {
-                        ptr: ptr_op,
-                        value: value_op,
-                    },
-                    origin: value,
-                });
-            }
-            return;
-        }
-        if let ExprData::Field { .. } | ExprData::Index { .. } = &self.body.exprs[target] {
+        // Place-chain targets — field/element chains, and stores through a
+        // raw pointer (`p.* = v;`, `p.*.x = v;`, `p.*[i] = v;`): one walk
+        // handles them all.
+        if let ExprData::Field { .. } | ExprData::Index { .. } | ExprData::Deref { .. } =
+            &self.body.exprs[target]
+        {
             self.lower_field_assign_target(b, target, value, value_op);
             return;
         }
@@ -1714,7 +1698,10 @@ impl LowerCtx<'_> {
         value_op: Operand,
     ) {
         // The chain's field-access and index expressions, outermost first;
-        // `root` is the non-projection expression at its base.
+        // `root` is the non-projection expression at its base. The walk
+        // stops at a deref: that deref is the chain's OUTERMOST one — the
+        // one governing the write (everything beneath it, deeper derefs
+        // included, is an ordinary *read* that produces the pointer).
         let mut chain = Vec::new();
         let mut root = target;
         loop {
@@ -1729,6 +1716,64 @@ impl LowerCtx<'_> {
                 }
                 _ => break,
             }
+        }
+        // A deref roots the chain (`p.* = v;`, `p.*.x = v;`, `p.*[i] = v;`):
+        // the store goes through the raw pointer — a new root whose
+        // legality is the pointer's `&raw mut`-ness, not any binding's
+        // `mut`-ness. The pointer (the deref's receiver) evaluates like any
+        // read — deeper derefs inside it are ordinary loads with their own
+        // unsafe gating — and the store's place is a pointer-rooted temp
+        // with a leading `Deref` projection; liveness and writability are
+        // the machine's store-time checks.
+        if let ExprData::Deref { receiver } = &self.body.exprs[root] {
+            let receiver = *receiver;
+            let deref = root;
+            // The write was rejected on the governing deref (a shared
+            // pointer): trap with the squiggle's exact text — the write
+            // must not happen.
+            if let Some(message) = self.assign_traps.get(&deref).cloned() {
+                self.trap(b, deref, message);
+                return;
+            }
+            let ptr_op = self.lower_expr(b, receiver);
+            // A broken deref (non-pointer receiver — its value trap
+            // carries the message), or one outside `unsafe`: the store is
+            // replaced by the trap (the pointer still evaluated for its
+            // effects).
+            if let Some(message) = self.value_traps.get(&deref).cloned() {
+                self.trap(b, deref, message);
+                return;
+            }
+            if let Some(message) = self.unsafe_traps.get(&deref).cloned() {
+                self.trap(b, deref, message);
+                return;
+            }
+            // A broken link above the deref (unknown field, non-record
+            // receiver, non-array base, compile-time OOB): pending value
+            // traps from the target's read-typing, innermost first.
+            for &link in chain.iter().rev() {
+                if let Some(message) = self.value_traps.get(&link).cloned() {
+                    self.trap(b, link, message);
+                    return;
+                }
+            }
+            // A broken receiver (not a `RawPtr` — `{error}`-typed, its own
+            // story upstream) skips the write, like the field path's
+            // missing-index case.
+            if !matches!(self.ty(receiver), Ty::RawPtr { .. }) {
+                return;
+            }
+            let local = self.operand_root_local(b, ptr_op, receiver);
+            // `{error}`-typed links skip the write silently, keeping
+            // lowering total, like the name-rooted path's missing-index
+            // case.
+            let Some(projection) =
+                self.lower_place_projection(b, &chain, Some(crate::ProjElem::Deref))
+            else {
+                return;
+            };
+            b.push_assign(Place { local, projection }, Rvalue::Use(value_op), value);
+            return;
         }
         // Inference rejected the root as an assignment target (immutable
         // binding, item, builtin): trap with the squiggle's exact text.
@@ -1870,8 +1915,8 @@ impl LowerCtx<'_> {
 
     /// Lower `&raw [mut] place` for the accepted place shapes (everything
     /// else was diagnosed and value-trapped upstream): the chain's field
-    /// indices resolve exactly like a field-assign target's, then the root
-    /// decides the flavor —
+    /// and element steps resolve exactly like a field-assign target's,
+    /// then the root decides the flavor —
     ///
     /// - a **local**: [`Rvalue::AddrOf`] of its place, and the local is
     ///   marked `addressable` (the two-tier promotion fact);
@@ -1879,7 +1924,15 @@ impl LowerCtx<'_> {
     ///   machine-wide allocation, so every `&raw S` is the same address;
     /// - a **`const` item**: the value is copied into a fresh temp and the
     ///   temp's address is taken — const=copied, now observable (each
-    ///   `&raw C` mention is its own address, honestly).
+    ///   `&raw C` mention is its own address, honestly);
+    /// - a **deref** (`&raw mut p.*.x`): the pointer (the deref's
+    ///   receiver) evaluates as an ordinary read, and the result is that
+    ///   pointer — the ORIGINAL allocation's identity — with the extended
+    ///   path: no intermediate materialization, no new allocation. Nothing
+    ///   is promoted (the root local's *value* is read, not its slot
+    ///   addressed), and nothing is bounds-checked at minting — validity
+    ///   is a deref-time judgement, so an out-of-range address mints
+    ///   silently and every later deref of it is detected UB.
     fn lower_addr_of(
         &mut self,
         b: &mut BodyBuilder,
@@ -1887,60 +1940,100 @@ impl LowerCtx<'_> {
         mutable: bool,
         place: ExprId,
     ) -> Operand {
-        // The chain's field-access expressions, outermost first; `root` is
-        // the non-field expression at its base.
+        // The chain's field-access and index expressions, outermost first;
+        // `root` is the expression at its base. Like an assignment
+        // target's walk, it stops at a deref — the OUTERMOST one, whose
+        // pointer the minted address extends.
         let mut chain = Vec::new();
         let mut root = place;
-        while let ExprData::Field { receiver, .. } = &self.body.exprs[root] {
-            chain.push(root);
-            root = *receiver;
+        loop {
+            match &self.body.exprs[root] {
+                ExprData::Field { receiver, .. } => {
+                    chain.push(root);
+                    root = *receiver;
+                }
+                ExprData::Index { base, .. } => {
+                    chain.push(root);
+                    root = *base;
+                }
+                _ => break,
+            }
         }
-        // A broken link in the chain (unknown field, non-record receiver):
-        // pending value traps from the operand's read-typing.
+        // A deref-rooted place: the pointer reads like any expression
+        // (deeper derefs inside it are ordinary loads with their own
+        // unsafe gating), then the address is that pointer, path-extended.
+        if let ExprData::Deref { receiver } = &self.body.exprs[root] {
+            let receiver = *receiver;
+            let deref = root;
+            let ptr_op = self.lower_expr(b, receiver);
+            // A broken deref (non-pointer receiver), or one outside
+            // `unsafe` (the deref rule is uniform — the place's own deref
+            // included): trap with the squiggle's exact message.
+            if let Some(message) = self.value_traps.get(&deref).cloned() {
+                return self.trap(b, deref, message);
+            }
+            if let Some(message) = self.unsafe_traps.get(&deref).cloned() {
+                return self.trap(b, deref, message);
+            }
+            // Broken links above the deref: pending value traps from the
+            // operand's read-typing, innermost first.
+            for &link in chain.iter().rev() {
+                if let Some(message) = self.value_traps.get(&link).cloned() {
+                    return self.trap(b, link, message);
+                }
+            }
+            // `{error}`-typed receiver, silently broken upstream: the
+            // pointer value is never observable — keep lowering total.
+            if !matches!(self.ty(receiver), Ty::RawPtr { .. }) {
+                return Operand::Const(Const::Unit);
+            }
+            let local = self.operand_root_local(b, ptr_op, receiver);
+            let Some(projection) =
+                self.lower_place_projection(b, &chain, Some(crate::ProjElem::Deref))
+            else {
+                return Operand::Const(Const::Unit);
+            };
+            let dest = b.temp(self.ty(expr));
+            b.push_assign(
+                dest,
+                Rvalue::AddrOf {
+                    mutable,
+                    place: Place { local, projection },
+                },
+                expr,
+            );
+            return Operand::Copy(dest.into());
+        }
+        // A broken link in the chain (unknown field, non-record receiver,
+        // non-array base): pending value traps from the operand's
+        // read-typing.
         for &link in std::iter::once(&root).chain(chain.iter().rev()) {
             if let Some(message) = self.value_traps.get(&link).cloned() {
                 return self.trap(b, link, message);
             }
         }
-        // Innermost projection first, exactly like a field-assign place.
-        let mut projection = Vec::with_capacity(chain.len());
-        for &field_expr in chain.iter().rev() {
-            let ExprData::Field { receiver, name } = &self.body.exprs[field_expr] else {
-                unreachable!("chain holds only field expressions");
-            };
-            match self.field_index(*receiver, name) {
-                Some(index) => projection.push(index),
-                // `{error}`-typed receiver, silently broken upstream: the
-                // pointer value is never observable — keep lowering total.
-                None => return Operand::Const(Const::Unit),
-            }
-        }
         let ExprData::NameRef(name) = &self.body.exprs[root] else {
-            // Non-place roots were diagnosed (`AddrOfNonPlace` /
-            // `AddrOfDerefUnsupported`) and trapped by the wrapper; a
-            // missing root is a parse error.
+            // Non-place roots were diagnosed (`AddrOfNonPlace`) and
+            // trapped by the wrapper; a missing root is a parse error.
             return Operand::Const(Const::Unit);
         };
         match self.resolutions.get(root) {
             Some(Resolution::Local(binding)) => match b.local_for_binding.get(binding) {
                 Some(&local) => {
                     b.locals[local].addressable = true;
+                    let Some(projection) = self.lower_place_projection(b, &chain, None) else {
+                        return Operand::Const(Const::Unit);
+                    };
                     let dest = b.temp(self.ty(expr));
                     b.push_assign(
                         dest,
                         Rvalue::AddrOf {
                             mutable,
-                            place: Place {
-                                local,
-                                projection: projection
-                                    .into_iter()
-                                    .map(crate::ProjElem::Field)
-                                    .collect(),
-                            },
+                            place: Place { local, projection },
                         },
                         expr,
                     );
-                    Operand::Copy(dest)
+                    Operand::Copy(dest.into())
                 }
                 // A local of an enclosing function: the same unsupported
                 // capture the read path reports.
@@ -1977,6 +2070,9 @@ impl LowerCtx<'_> {
                     .unwrap_or(hir::Constness::Static);
                 match constness {
                     hir::Constness::Static => {
+                        let Some(projection) = self.lower_place_projection(b, &chain, None) else {
+                            return Operand::Const(Const::Unit);
+                        };
                         let dest = b.temp(self.ty(expr));
                         b.push_assign(
                             dest,
@@ -1986,7 +2082,7 @@ impl LowerCtx<'_> {
                             },
                             expr,
                         );
-                        Operand::Copy(dest)
+                        Operand::Copy(dest.into())
                     }
                     hir::Constness::Const => {
                         // The address of THIS use's copy: materialize the
@@ -1994,6 +2090,9 @@ impl LowerCtx<'_> {
                         let copy = b.temp(self.ty(root));
                         b.locals[copy].addressable = true;
                         b.push_assign(copy, Rvalue::Use(Operand::Const(Const::Item(loc))), root);
+                        let Some(projection) = self.lower_place_projection(b, &chain, None) else {
+                            return Operand::Const(Const::Unit);
+                        };
                         let dest = b.temp(self.ty(expr));
                         b.push_assign(
                             dest,
@@ -2001,15 +2100,12 @@ impl LowerCtx<'_> {
                                 mutable,
                                 place: Place {
                                     local: copy,
-                                    projection: projection
-                                        .into_iter()
-                                        .map(crate::ProjElem::Field)
-                                        .collect(),
+                                    projection,
                                 },
                             },
                             expr,
                         );
-                        Operand::Copy(dest)
+                        Operand::Copy(dest.into())
                     }
                 }
             }
@@ -2025,6 +2121,40 @@ impl LowerCtx<'_> {
             // Justified by the unresolved-name diagnostic.
             None => self.trap(b, root, hir::diag::unresolved_name(name)),
         }
+    }
+
+    /// Resolve a place chain's links (outermost first, as the target/place
+    /// walks collect them) into projection elements, innermost first —
+    /// field names to canonical indices, index expressions to operands
+    /// (evaluated here, innermost first). `lead` prepends a
+    /// [`crate::ProjElem::Deref`] for pointer-rooted places. `None` when a
+    /// link is `{error}`-typed (silently broken upstream): the caller
+    /// skips the operation and keeps lowering total.
+    fn lower_place_projection(
+        &mut self,
+        b: &mut BodyBuilder,
+        chain: &[ExprId],
+        lead: Option<crate::ProjElem>,
+    ) -> Option<Vec<crate::ProjElem>> {
+        let mut projection = Vec::with_capacity(chain.len() + lead.is_some() as usize);
+        projection.extend(lead);
+        for &link in chain.iter().rev() {
+            match &self.body.exprs[link] {
+                ExprData::Field { receiver, name } => {
+                    let index = self.field_index(*receiver, name)?;
+                    projection.push(crate::ProjElem::Field(index));
+                }
+                ExprData::Index { base, index } => {
+                    if !matches!(self.ty(*base), Ty::Array { .. }) {
+                        return None;
+                    }
+                    let index_op = self.lower_expr(b, *index);
+                    projection.push(crate::ProjElem::Index(index_op));
+                }
+                _ => unreachable!("chain holds only projection expressions"),
+            }
+        }
+        Some(projection)
     }
 
     /// Synthesize the body of a first-class variant constructor
@@ -2049,7 +2179,7 @@ impl LowerCtx<'_> {
             });
             b.params.push(local);
         }
-        let ops = b.params.iter().map(|&p| Operand::Copy(p)).collect();
+        let ops = b.params.iter().map(|&p| Operand::Copy(p.into())).collect();
         let ret = b.ret;
         b.push_assign(
             ret,
@@ -2068,6 +2198,21 @@ impl LowerCtx<'_> {
         })
     }
 
+    /// The local a place-rooted operation (a deref read, a deref-rooted
+    /// write or address-of) uses as its root: the operand's own local when
+    /// it already is a bare local read, otherwise a fresh temp (typed as
+    /// `expr`'s type) holding the operand's value.
+    fn operand_root_local(&mut self, b: &mut BodyBuilder, op: Operand, expr: ExprId) -> LocalId {
+        if let Operand::Copy(place) = &op
+            && place.projection.is_empty()
+        {
+            return place.local;
+        }
+        let temp = b.temp(self.ty(expr));
+        b.push_assign(temp, Rvalue::Use(op), expr);
+        temp
+    }
+
     /// Emit a trap producing `expr`'s value and continue in a fresh block.
     fn trap(&mut self, b: &mut BodyBuilder, expr: ExprId, message: String) -> Operand {
         let dest = b.temp(self.ty(expr));
@@ -2081,7 +2226,7 @@ impl LowerCtx<'_> {
             expr,
         );
         b.current = target;
-        Operand::Copy(dest)
+        Operand::Copy(dest.into())
     }
 
     /// Lower one turbofish const argument's value expression to its own

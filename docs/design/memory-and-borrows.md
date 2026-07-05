@@ -14,7 +14,14 @@
   fine to hold, and only a use of it is detected UB. Stricter creation-time rules can be
   added later; the reverse cannot.
 - **M08** Taking a raw pointer is safe; every consuming operation on one is gated by
-  `unsafe`, so safe code may create a dangling raw pointer but cannot use one.
+  `unsafe`, so safe code may create a dangling raw pointer but cannot use one. A raw
+  pointer minted through a deref (`&raw mut p.*.f`) is likewise safe to create.
+
+### Ruled, not built
+
+- **M18** Interior mutability in v1 is an immutable handle containing a raw mutable pointer,
+  with the pointer flavour governing write-through. Long term, a nominal exclusivity-exempt
+  cell type.
 
 ## Discarded
 
