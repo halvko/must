@@ -171,13 +171,13 @@ static f = fn (n: usize) -> () {
     #[test]
     fn renders_parse_error_with_fix_help() {
         check_render(
-            "static f = fn 42;",
+            "static f = fn true;",
             expect![[r#"
                 error: function bodies are blocks; wrap this expression in `{ }`
                   --> test.must:1:15
                   |
-                1 | static f = fn 42;
-                  |               ^^
+                1 | static f = fn true;
+                  |               ^^^^
                    = help: Wrap in `{ }`
 
             "#]],
@@ -212,14 +212,14 @@ static f = fn (n: usize) -> () {
         // A hole-named item is a warning, not an error: rendered with the
         // "warning" severity word and counted separately in the summary.
         let mut host = ide::AnalysisHost::new();
-        let file = host.create_file("test.must".to_owned(), "static _ = 5;".to_owned());
+        let file = host.create_file("test.must".to_owned(), "static _ = true;".to_owned());
         let analysis = host.snapshot();
-        let rendered = super::render("test.must", "static _ = 5;", &analysis.diagnostics(file));
+        let rendered = super::render("test.must", "static _ = true;", &analysis.diagnostics(file));
         expect_test::expect![[r#"
             warning: this item binds nothing and its value cannot be used
               --> test.must:1:8
               |
-            1 | static _ = 5;
+            1 | static _ = true;
               |        ^
 
         "#]]

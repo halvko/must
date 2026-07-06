@@ -32,18 +32,18 @@ fn check_mir(text: &str, expect: Expect) {
 #[test]
 fn const_initializer_lowers_to_a_const_body() {
     check_mir(
-        "static example = 4 + 5;",
+        "static example: usize = 4 + 5;",
         expect![[r#"
-        item example:
-        fn b0() -> usize {
-          _0: usize  // return
-          _1: usize
-          bb0:
-            _1 = Add(4, 5)
-            _0 = _1
-            return
-        }
-    "#]],
+            item example:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: usize
+              bb0:
+                _1 = Add(4, 5)
+                _0 = _1
+                return
+            }
+        "#]],
     );
 }
 
@@ -276,8 +276,8 @@ fn unresolved_name_traps_and_lowering_continues() {
 fn use_of_a_duplicated_name_traps() {
     check_mir(
         r#"
-static name = 1;
-static name = 2;
+static name: usize = 1;
+static name: usize = 2;
 static use_it = fn { let v = name; };
 "#,
         expect![[r#"
@@ -394,23 +394,23 @@ fn not_callable_traps_instead_of_calling() {
     check_mir(
         "static main = fn { 5(1); };",
         expect![[r#"
-        item main:
-        fn b0() -> () {
-          _0: ()  // return
-          _1: {error}
-          bb0:
-            _1 = trap "expression of type `usize` is not callable" -> bb1
-          bb1:
-            _0 = ()
-            return
-        }
-        fn b1() -> fn() {
-          _0: fn()  // return
-          bb0:
-            _0 = fn b0
-            return
-        }
-    "#]],
+            item main:
+            fn b0() -> () {
+              _0: ()  // return
+              _1: {error}
+              bb0:
+                _1 = trap "expression of type `{number}` is not callable" -> bb1
+              bb1:
+                _0 = ()
+                return
+            }
+            fn b1() -> fn() {
+              _0: fn()  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
     );
 }
 
@@ -458,19 +458,19 @@ fn missing_operand_traps() {
     check_mir(
         "static x = 1 + ;",
         expect![[r#"
-        item x:
-        fn b0() -> usize {
-          _0: usize  // return
-          _1: {error}
-          _2: usize
-          bb0:
-            _1 = trap "syntax error: missing expression" -> bb1
-          bb1:
-            _2 = Add(1, _1)
-            _0 = _2
-            return
-        }
-    "#]],
+            item x:
+            fn b0() -> {error} {
+              _0: {error}  // return
+              _1: {error}
+              _2: {error}
+              bb0:
+                _1 = trap "syntax error: missing expression" -> bb1
+              bb1:
+                _2 = Add((), _1)
+                _0 = _2
+                return
+            }
+        "#]],
     );
 }
 
@@ -522,7 +522,7 @@ fn unannotated_items_lower_with_inferred_signatures() {
     // its body; the use lowers to a direct call, no trap.
     check_mir(
         r#"
-static double = fn (n) { n * 2 }
+static double = fn (n: usize) { n * 2 }
 static main = fn { double(2); };
 "#,
         expect![[r#"
@@ -613,7 +613,7 @@ fn hole_pattern_locals_are_unnamed_but_still_assigned() {
     // `_` binds nothing (no ` // <name>` comment), but the initializer and
     // the argument are still lowered and evaluated for their effects.
     check_mir(
-        r#"static f = fn (_: usize) { let _ = 4 + 5; };"#,
+        r#"static f = fn (_: usize) { let _: usize = 4 + 5; };"#,
         expect![[r#"
             item f:
             fn b0(_1: usize) -> () {
@@ -768,7 +768,7 @@ fn assignment_to_a_captured_local_is_diagnosed_and_trapped() {
     // Mirrors `capture_is_diagnosed_and_trapped`: writing to a local of an
     // enclosing function is exactly as unsupported as reading it.
     check_mir(
-        "static f = fn () -> usize { let mut a = 1; let g = fn () -> usize { a = 2; 0 }; g() };",
+        "static f = fn () -> usize { let mut a: usize = 1; let g = fn () -> usize { a = 2; 0 }; g() };",
         expect![[r#"
             item f:
             fn b0() -> usize {
@@ -799,7 +799,7 @@ fn assignment_to_a_captured_local_is_diagnosed_and_trapped() {
                 _0 = fn b1
                 return
             }
-            mir diagnostic at 68..69: `a` is a local of an enclosing function; captures are not supported yet
+            mir diagnostic at 75..76: `a` is a local of an enclosing function; captures are not supported yet
         "#]],
     );
 }
@@ -900,7 +900,7 @@ static r = fn { struct { y: g(), x: f() } };
 #[test]
 fn record_field_access_lowers_to_a_positional_projection() {
     check_mir(
-        r#"static f = fn { let p = struct { x: 1, y: 2 }; p.y };"#,
+        r#"static f = fn { let p: struct { x: usize, y: usize } = struct { x: 1, y: 2 }; p.y };"#,
         expect![[r#"
             item f:
             fn b0() -> usize {
@@ -931,18 +931,18 @@ fn field_access_on_a_nonexistent_field_still_traps() {
     // exactly as trapped as before — the diagnostic just isn't
     // `UnsupportedRecord` anymore.
     check_mir(
-        r#"static f = fn { let p = struct { x: 1 }; p.y };"#,
+        r#"static f = fn { let p = struct { x: "s" }; p.y };"#,
         expect![[r#"
             item f:
             fn b0() -> {error} {
               _0: {error}  // return
-              _1: struct { x: usize }
-              _2: struct { x: usize }  // p
+              _1: struct { x: str }
+              _2: struct { x: str }  // p
               _3: {error}
               bb0:
-                _1 = { x: 1 }
+                _1 = { x: "s" }
                 _2 = _1
-                _3 = trap "no field `y` on `struct { x: usize }`" -> bb1
+                _3 = trap "no field `y` on `struct { x: str }`" -> bb1
               bb1:
                 _0 = _3
                 return
@@ -1627,7 +1627,7 @@ fn breakless_loop_has_an_unreachable_exit() {
     // (like the continuation after a diverging call), and the code after
     // the loop lowers into it so the CFG stays total.
     check_mir(
-        "static f = fn { loop { }; 1 };",
+        "static f = fn -> usize { loop { }; 1 };",
         expect![[r#"
             item f:
             fn b0() -> usize {
@@ -1703,7 +1703,7 @@ static f = fn (skip: bool) -> usize {
 #[test]
 fn break_outside_loop_traps_with_the_diagnostic() {
     check_mir(
-        "static f = fn { break 1; };",
+        "static f = fn { break \"x\"; };",
         expect![[r#"
             item f:
             fn b0() -> () {
@@ -1947,7 +1947,7 @@ fn generic_widening_injects_the_tag() {
 fn addr_of_deref_and_deref_store_lower_to_place_ops() {
     check_mir(
         r#"
-static s = 7;
+static s: usize = 7;
 static main = fn() -> usize {
     let mut x = 1;
     let p = &raw mut x;
@@ -2005,7 +2005,7 @@ fn deref_outside_unsafe_lowers_to_a_trap_not_a_load() {
     check_mir(
         r#"
 static main = fn() -> usize {
-    let mut x = 1;
+    let mut x: usize = 1;
     let p = &raw mut x;
     p.*
 };
@@ -2042,7 +2042,7 @@ fn through_pointer_writes_lower_to_deref_projected_places() {
     check_mir(
         r#"
 static main = fn() {
-    let mut r = struct { x: 1, buf: [1, 2] };
+    let mut r: struct { x: usize, buf: [usize; 2] } = struct { x: 1, buf: [1, 2] };
     let p = &raw mut r;
     let i = 1;
     unsafe {
@@ -2088,7 +2088,7 @@ fn mid_chain_deref_write_reads_the_inner_pointer_then_stores() {
     check_mir(
         r#"
 static main = fn() {
-    let mut x = 1;
+    let mut x: usize = 1;
     let mut p = &raw mut x;
     let pp = &raw mut p;
     unsafe { pp.*.* = 7; }
@@ -2130,7 +2130,7 @@ fn addr_of_array_element_and_through_deref_lower_without_promotion_of_the_pointe
     check_mir(
         r#"
 static main = fn() -> usize {
-    let mut a = [1, 2];
+    let mut a: [usize; 2] = [1, 2];
     let e = &raw mut a[0];
     let mut r = struct { x: 1 };
     let p = &raw mut r;
@@ -2187,7 +2187,7 @@ fn array_literal_index_and_element_assign_lower() {
     check_mir(
         r#"
 static f = fn {
-    let mut a = [1, 2, 3];
+    let mut a: [usize; 3] = [1, 2, 3];
     let x = a[1];
     a[2] = x;
 };
@@ -2224,7 +2224,7 @@ fn array_repeat_and_nested_index_assign_lower() {
     check_mir(
         r#"
 static f = fn {
-    let mut m = [[0; 2]; 2];
+    let mut m: [[usize; 2]; 2] = [[0; 2]; 2];
     m[0][1] = 5;
 };
 "#,
@@ -2256,7 +2256,7 @@ static f = fn {
 #[test]
 fn compile_time_out_of_bounds_lowers_to_a_trap() {
     check_mir(
-        "static f = fn { let a = [1, 2]; let x = a[2]; };",
+        "static f = fn { let a: [usize; 2] = [1, 2]; let x = a[2]; };",
         expect![[r#"
             item f:
             fn b0() -> () {
@@ -2369,6 +2369,45 @@ fn heap_alloc_in_initializer_gets_a_conditional_const_trap() {
                 _1 = call builtin alloc_array(1) -> bb2
               bb2:
                 _0 = _1
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn unary_minus_on_a_literal_folds_and_on_a_value_lowers_to_a_neg() {
+    // `-n` is a real runtime operation (`Neg`); `-128` folds into the
+    // typed constant — the positive magnitude never materializes, which
+    // is what lets `i8::MIN` exist at all.
+    check_mir(
+        "static f = fn (n: i8) -> i8 { if n == -128 { -n } else { n } };",
+        expect![[r#"
+            item f:
+            fn b0(_1: i8) -> i8 {
+              _0: i8  // return
+              _1: i8  // param n
+              _2: bool
+              _3: i8
+              _4: i8
+              bb0:
+                _2 = Eq(_1, -128)
+                if _2 -> [then: bb1, else: bb2]
+              bb1:
+                _4 = Neg(_1)
+                _3 = _4
+                goto -> bb3
+              bb2:
+                _3 = _1
+                goto -> bb3
+              bb3:
+                _0 = _3
+                return
+            }
+            fn b1() -> fn(i8) -> i8 {
+              _0: fn(i8) -> i8  // return
+              bb0:
+                _0 = fn b0
                 return
             }
         "#]],

@@ -2,7 +2,7 @@ use crate::{AnalysisHost, FilePosition};
 use base_db::SourceFile;
 use syntax::TextSize;
 
-const BROKEN: &str = "static = 1;";
+const BROKEN: &str = "static = true;";
 
 /// Splits a fixture on `$0` (the cursor). Panics if absent.
 fn fixture(text: &str) -> (crate::Analysis, SourceFile, FilePosition) {
@@ -228,16 +228,16 @@ static main = fn() {
 
 #[test]
 fn non_block_fn_body_diagnostic_carries_wrap_fix() {
-    let (analysis, file, _pos) = fixture("static f = fn 42$0;");
+    let (analysis, file, _pos) = fixture("static f = fn true$0;");
     let diagnostics = analysis.diagnostics(file);
     assert_eq!(diagnostics.len(), 1);
     let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
     assert_eq!(fix.label, "Wrap in `{ }`");
-    // Insert "{ " before `42` (offset 14) and " }" after it (offset 16).
+    // Insert "{ " before `true` (offset 14) and " }" after it (offset 18).
     assert_eq!(fix.edits.len(), 2);
     assert_eq!(u32::from(fix.edits[0].edit.range.start()), 14);
     assert_eq!(fix.edits[0].edit.insert, "{ ");
-    assert_eq!(u32::from(fix.edits[1].edit.range.start()), 16);
+    assert_eq!(u32::from(fix.edits[1].edit.range.start()), 18);
     assert_eq!(fix.edits[1].edit.insert, " }");
 }
 
@@ -246,7 +246,7 @@ fn missing_semicolon_diagnostic_carries_insert_fix() {
     let (analysis, file, _pos) = fixture(
         r#"
 static name = fn {
-    let f = fn { 42 }$0
+    let f = fn { "" }$0
     f()
 }
 "#,
@@ -500,7 +500,7 @@ fn diagnostics_include_const_check_findings() {
 fn assign_to_immutable_squiggles_the_lhs_name_with_related_info() {
     // The squiggle sits on the assignment's LHS use of `x`; the related
     // hint points back at the `let`'s binding name, where `mut` is missing.
-    let src = "static f = fn { let x = 1; x = 2; };";
+    let src = "static f = fn { let x: usize = 1; x = 2; };";
     let (analysis, file, _pos) = fixture(&format!("{src}$0"));
     let diagnostics = analysis.diagnostics(file);
     let errors: Vec<_> = diagnostics
@@ -512,9 +512,9 @@ fn assign_to_immutable_squiggles_the_lhs_name_with_related_info() {
         errors[0].message,
         "cannot assign to `x`: it is not declared `mut`"
     );
-    // The LHS use (offset 27), not the declaration (offset 20).
+    // The LHS use (offset 34), not the declaration (offset 20).
     assert_eq!(&src[errors[0].range], "x");
-    assert_eq!(u32::from(errors[0].range.start()), 27);
+    assert_eq!(u32::from(errors[0].range.start()), 34);
     assert_eq!(errors[0].related.len(), 1);
     assert_eq!(
         errors[0].related[0].message,
@@ -529,7 +529,7 @@ fn field_assign_to_immutable_root_offers_the_make_mut_fix() {
     // Same machinery as the plain-assignment case: the squiggle sits on
     // the ROOT name inside the place, the message carries the field path,
     // and the fix inserts `mut ` at the binding's declaration.
-    let src = "static f = fn { let p = struct { x: 1 }; p.x = 2; };";
+    let src = "static f = fn { let p: struct { x: usize } = struct { x: 1 }; p.x = 2; };";
     let (analysis, file, _pos) = fixture(&format!("{src}$0"));
     let diagnostics = analysis.diagnostics(file);
     let errors: Vec<_> = diagnostics
@@ -541,9 +541,9 @@ fn field_assign_to_immutable_root_offers_the_make_mut_fix() {
         errors[0].message,
         "cannot assign to `p.x`: `p` is not declared `mut`"
     );
-    // The root `p` inside the place (offset 41), not the whole `p.x`.
+    // The root `p` inside the place (offset 62), not the whole `p.x`.
     assert_eq!(&src[errors[0].range], "p");
-    assert_eq!(u32::from(errors[0].range.start()), 41);
+    assert_eq!(u32::from(errors[0].range.start()), 62);
     let fix = errors[0].fix.as_ref().expect("diagnostic has a fix");
     assert_eq!(fix.label, "Make `p` mutable");
     assert_eq!(fix.edits.len(), 1);
@@ -627,7 +627,7 @@ fn hover_const_block_shows_its_value() {
 #[test]
 fn hover_item_shows_const_value() {
     check_hover(
-        "static exa$0mple = 4 + 5;",
+        "static exa$0mple: usize = 4 + 5;",
         "```must\nexample: usize = 9\n```",
     );
 }
@@ -637,7 +637,7 @@ fn hover_item_shows_record_const_value() {
     // Records const-evaluate: `Value::Record` displays like the type
     // does, field by field, in the same canonical (sorted) order.
     check_hover(
-        "static po$0int = struct { y: 2, x: 1 };",
+        "static po$0int: struct { x: usize, y: usize } = struct { y: 2, x: 1 };",
         "```must\npoint: struct { x: usize, y: usize } = { x: 1, y: 2 }\n```",
     );
 }
@@ -685,7 +685,7 @@ fn unused_static_with_panicking_initializer_is_reported_at_check_time() {
 
 #[test]
 fn hole_named_item_dead_code_warning_surfaces_through_ide() {
-    let (analysis, file, _pos) = fixture("static _ = 5;$0");
+    let (analysis, file, _pos) = fixture("static _: usize = 5;$0");
     let diagnostics = analysis.diagnostics(file);
     assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
     assert_eq!(
@@ -744,7 +744,7 @@ fn a_closed_file_analyzes_again_on_the_same_handle() {
     host.set_file_text(file, BROKEN.to_owned());
     assert_eq!(host.snapshot().diagnostics(file).len(), 1);
 
-    host.set_file_text(file, "static a = 1;".to_owned());
+    host.set_file_text(file, "static a: usize = 1;".to_owned());
     assert_eq!(host.snapshot().diagnostics(file), vec![]);
 }
 
@@ -752,7 +752,7 @@ fn a_closed_file_analyzes_again_on_the_same_handle() {
 fn if_branch_mismatch_hint_points_to_other_branch() {
     let src = r#"
 static f = fn (n: usize) -> () {
-    let x = if n == 0 { 1 } else { "one" };
+    let x = if n == 0 { n } else { "one" };
     print("done");
 }
 "#;
@@ -767,7 +767,7 @@ static f = fn (n: usize) -> () {
     // The hint points at the value-producing tail expression `1`, not the
     // whole `{ 1 }` block.
     let hint_text = &src[mismatch.related[0].range];
-    assert_eq!(hint_text, "1");
+    assert_eq!(hint_text, "n");
 }
 
 #[test]
@@ -778,7 +778,7 @@ fn related_locations_get_companion_hint_diagnostics() {
     // the underline on hover.
     let src = r#"
 static f = fn (n: usize) -> () {
-    let x = if n == 0 { 0 } else { "" };
+    let x = if n == 0 { n } else { "" };
     print(x);
 }
 "#;
@@ -788,7 +788,7 @@ static f = fn (n: usize) -> () {
         .iter()
         .find(|d| d.severity == crate::Severity::Error)
         .expect("expected the type mismatch");
-    assert_eq!(&src[error.range], "0");
+    assert_eq!(&src[error.range], "n");
     let hints: Vec<_> = diagnostics
         .iter()
         .filter(|d| d.severity == crate::Severity::Info)
@@ -843,7 +843,7 @@ fn let_annotation_mismatch_on_agreeing_if_branches_blames_annotation_not_then_br
     // the annotation, not a spurious IfBranchMismatch blaming the then-branch.
     let src = r#"
 static f = fn (n: usize) -> () {
-    let x: str = if n == 0 { 1 } else { 0 };
+    let x: str = if n == 0 { n } else { n + 1 };
     print("done");
 }
 "#;
@@ -876,7 +876,7 @@ static f = fn (n: usize) -> () {
 fn hover_record_typed_binding() {
     // The record type renders canonically (sorted fields) on the binding.
     check_hover(
-        r#"static f = fn { let p$0 = struct { y: "s", x: 1 }; };"#,
+        r#"static f = fn { let p$0 = struct { y: "s", x: { let n: usize = 1; n } }; };"#,
         "```must\np: struct { x: usize, y: str }\n```",
     );
 }
@@ -884,7 +884,7 @@ fn hover_record_typed_binding() {
 #[test]
 fn hover_field_access_shows_the_field_type() {
     check_hover(
-        r#"static f = fn { let p = struct { x: 1 }; let y = p.x$0; };"#,
+        r#"static f = fn { let p: struct { x: usize } = struct { x: 1 }; let y = p.x$0; };"#,
         "```must\nx: usize\n```",
     );
 }
@@ -903,7 +903,7 @@ fn record_expression_evaluates_cleanly() {
     // Records are typed structurally and have a MIR/eval story
     // (aggregates and field projections) — the "not yet" diagnostic is
     // gone, and a record initializer is exactly as clean as any other.
-    let (analysis, file, _pos) = fixture("static p = struct { x: 1 };$0");
+    let (analysis, file, _pos) = fixture("static p = struct { x: { let n: usize = 1; n } };$0");
     let diagnostics = analysis.diagnostics(file);
     assert_eq!(diagnostics, Vec::new(), "diagnostics: {diagnostics:?}");
 }
@@ -1392,7 +1392,7 @@ fn hover_on_break_keyword_is_none() {
 #[test]
 fn hover_record_destructured_binding_definition() {
     check_hover(
-        r#"static f = fn { let struct { x$0, y } = struct { x: 1, y: "s" }; };"#,
+        r#"static f = fn { let struct { x$0, y }: struct { x: usize, y: str } = struct { x: 1, y: "s" }; };"#,
         "```must\nx: usize\n```",
     );
 }
@@ -1408,7 +1408,7 @@ fn hover_record_destructured_binding_use() {
 #[test]
 fn hover_record_destructure_rename_shows_the_new_name() {
     check_hover(
-        r#"static f = fn { let struct { x as alpha } = struct { x: 1 }; let b = alpha$0; };"#,
+        r#"static f = fn { let struct { x as alpha }: struct { x: usize } = struct { x: 1 }; let b = alpha$0; };"#,
         "```must\nalpha: usize\n```",
     );
 }
@@ -1416,7 +1416,7 @@ fn hover_record_destructure_rename_shows_the_new_name() {
 #[test]
 fn hover_mut_field_binding_shows_mut() {
     check_hover(
-        r#"static f = fn { let struct { mut x$0 } = struct { x: 1 }; x = 2; };"#,
+        r#"static f = fn { let struct { mut x$0 }: struct { x: usize } = struct { x: 1 }; x = 2; };"#,
         "```must\nmut x: usize\n```",
     );
 }
@@ -1527,7 +1527,7 @@ fn completions_expression_position_ranks_locals_items_builtins_keywords() {
 type Shape = struct { r: usize };
 static area = fn (r: usize) -> usize { r * r };
 static main = fn {
-    let x = 1;
+    let x: usize = 1;
     print(x$0);
 };
 "#,
@@ -1543,6 +1543,7 @@ static main = fn {
             copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
             dangling Function (fn::<T>() -> &raw mut T)
             dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
+            offset Function (unsafe fn(&raw [mut] T, isize) -> &raw [mut] T)
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -1566,7 +1567,7 @@ fn completions_mutable_local_carries_mut_in_detail() {
     check_completions(
         r#"
 static main = fn {
-    let mut x = 1;
+    let mut x: usize = 1;
     print($0);
 };
 "#,
@@ -1579,6 +1580,7 @@ static main = fn {
             copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
             dangling Function (fn::<T>() -> &raw mut T)
             dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
+            offset Function (unsafe fn(&raw [mut] T, isize) -> &raw [mut] T)
             panic Function (fn(str) -> !)
             print Function (fn(str))
             const Keyword
@@ -1605,8 +1607,17 @@ static make_point = fn (x: usize) -> $0 { x };
             AllocResult Enum (enum { Ok(&raw mut T), Err })
             Point Struct (struct { x: usize, y: usize })
             bool Keyword
+            i16 Keyword
+            i32 Keyword
+            i64 Keyword
+            i8 Keyword
+            isize Keyword
             str Keyword
             string Keyword
+            u16 Keyword
+            u32 Keyword
+            u64 Keyword
+            u8 Keyword
             usize Keyword
             fn Keyword
             struct Keyword
@@ -1805,7 +1816,7 @@ fn completions_dot_field_access_on_record_local() {
     check_completions(
         r#"
 static f = fn {
-    let p = struct { x: 1, y: 2 };
+    let p: struct { x: usize, y: usize } = struct { x: 1, y: 2 };
     p.$0
 };
 "#,
@@ -2077,7 +2088,7 @@ static f = fn {
 };
 "#,
         expect_test::expect![[r#"
-            y Variable (usize)
+            y Variable ({number})
             y Field (usize)
         "#]],
     );
@@ -2160,6 +2171,7 @@ static main = fn (s: str, n: usize) {
             copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
             dangling Function (fn::<T>() -> &raw mut T)
             dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
+            offset Function (unsafe fn(&raw [mut] T, isize) -> &raw [mut] T)
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -2198,6 +2210,7 @@ static main = fn {
             copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
             dangling Function (fn::<T>() -> &raw mut T)
             dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
+            offset Function (unsafe fn(&raw [mut] T, isize) -> &raw [mut] T)
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -2234,6 +2247,7 @@ static main = fn {
             copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
             dangling Function (fn::<T>() -> &raw mut T)
             dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
+            offset Function (unsafe fn(&raw [mut] T, isize) -> &raw [mut] T)
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -2273,6 +2287,7 @@ static main = fn (p: Point, n: usize) {
             copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
             dangling Function (fn::<T>() -> &raw mut T)
             dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
+            offset Function (unsafe fn(&raw [mut] T, isize) -> &raw [mut] T)
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -2377,6 +2392,7 @@ static main = fn {
             copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
             dangling Function (fn::<T>() -> &raw mut T)
             dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
+            offset Function (unsafe fn(&raw [mut] T, isize) -> &raw [mut] T)
             panic Function (fn(str) -> !)
             print Function (fn(str))
             const Keyword
@@ -2599,7 +2615,7 @@ fn completions_record_pattern_let_destructure_field_names() {
     // A `let struct { … }` destructure completes the field names of the
     // initializer's record type, with the field's own type as detail.
     check_completions(
-        r#"static f = fn { let struct { $0 } = struct { x: 1, y: "s" }; };"#,
+        r#"static f = fn { let struct { $0 }: struct { x: usize, y: str } = struct { x: 1, y: "s" }; };"#,
         expect_test::expect![[r#"
             x Field (usize)
             y Field (str)
@@ -2643,7 +2659,7 @@ fn completions_record_pattern_excludes_already_bound_fields() {
     // A field named earlier in the same pattern is dropped; only the
     // still-unbound fields are offered.
     check_completions(
-        r#"static f = fn { let struct { x, $0 } = struct { x: 1, y: 2, z: 3 }; };"#,
+        r#"static f = fn { let struct { x, $0 }: struct { x: usize, y: usize, z: usize } = struct { x: 1, y: 2, z: 3 }; };"#,
         expect_test::expect![[r#"
             y Field (usize)
             z Field (usize)
@@ -2836,7 +2852,7 @@ fn hover_shows_generic_variant_instance() {
 #[test]
 fn hover_raw_pointer_binding_shows_the_pointer_type() {
     check_hover(
-        "static main = fn { let mut x = 1; let p$0 = &raw mut x; };",
+        "static main = fn { let mut x: usize = 1; let p$0 = &raw mut x; };",
         "```must\np: &raw mut usize\n```",
     );
 }
@@ -2854,7 +2870,7 @@ fn hover_deref_receiver_shows_the_pointer_type() {
 #[test]
 fn hover_array_local() {
     check_hover(
-        r#"static main = fn { let a = [1, 2, 3]; let x = a$0[0]; };"#,
+        r#"static main = fn { let a: [usize; 3] = [1, 2, 3]; let x = a$0[0]; };"#,
         "```must\na: [usize; 3]\n```",
     );
 }
@@ -2862,7 +2878,7 @@ fn hover_array_local() {
 #[test]
 fn hover_array_binding_definition() {
     check_hover(
-        r#"static main = fn { let m$0 = [[1, 2], [3, 4]]; let x = m[0][1]; };"#,
+        r#"static main = fn { let m$0: [[usize; 2]; 2] = [[1, 2], [3, 4]]; let x = m[0][1]; };"#,
         "```must\nm: [[usize; 2]; 2]\n```",
     );
 }
@@ -2905,4 +2921,19 @@ fn highlights_survive_array_syntax() {
             56..57 "0" Number
         "#]],
     );
+}
+
+#[test]
+fn hover_unpinned_number_renders_as_number() {
+    // A literal no defining use ever pinned hovers as `{number}` — never a
+    // silently-defaulted type.
+    check_hover(
+        "static f = fn { let n$0 = 3; };",
+        "```must\nn: {number}\n```",
+    );
+}
+
+#[test]
+fn hover_sized_integer_binding_shows_its_width() {
+    check_hover("static f = fn { let n$0: u8 = 3; };", "```must\nn: u8\n```");
 }

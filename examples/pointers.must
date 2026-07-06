@@ -16,8 +16,8 @@
 // `&raw C` addresses its own fresh copy. Pointer equality makes the
 // difference observable — the sharpest one-line demo of the whole
 // static-vs-const distinction.
-static S = 7;
-const C = 7;
+static S: usize = 7;
+const C: usize = 7;
 
 // `&raw mut p` requires a `mut` root: you may only mint a mutating pointer
 // to something you could already assign to. `&raw x` (shared) needs no
@@ -45,7 +45,7 @@ static main = fn () -> () {
     // `x` is a `mut` local; `p` points at it. The write `p.* = 42;` goes
     // through the pointer into `x`'s storage, so reading `x` afterward sees
     // 42. Both the write and any read are dereferences, hence `unsafe`.
-    let mut x = 1;
+    let mut x: usize = 1;
     let p = &raw mut x;
     unsafe { p.* = 42; };
     if x == 42 {
@@ -66,7 +66,7 @@ static main = fn () -> () {
     };
 
     // --- a pointer to a field addresses just that element ---
-    let mut r = struct { a: 1, b: 2 };
+    let mut r: struct { a: usize, b: usize } = struct { a: 1, b: 2 };
     let pa = &raw mut r.a;
     unsafe { pa.* = 10; };
     if r.a + r.b == 12 {

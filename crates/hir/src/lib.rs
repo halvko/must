@@ -33,8 +33,9 @@ pub use scopes::{
     Resolution, TypeScope, alloc_result_loc, expr_scopes, file_scope, resolutions, type_scope,
 };
 pub use ty::{
-    ConstArgValue, FnTy, GenericArg, NamedTy, Ty, VariantTy, enum_variants, signature,
-    substitute_args, type_underlying, type_underlying_for, variant_payloads_for, widens_to,
+    ConstArgValue, FnTy, GenericArg, IntKind, IntValue, NamedTy, Ty, VariantTy, enum_variants,
+    signature, substitute_args, type_underlying, type_underlying_for, variant_payloads_for,
+    widens_to,
 };
 pub use unsafe_check::UnsafeCheckDiagnostic;
 
@@ -677,9 +678,15 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                                 })
                                 .into_iter()
                                 .collect(),
-                            Cause::Operator(bin_expr) => ast_for_expr(*bin_expr)
-                                .and_then(ast::BinExpr::cast)
-                                .and_then(|bin| bin.op_token())
+                            Cause::Operator(op_expr) => ast_for_expr(*op_expr)
+                                .and_then(|node| {
+                                    ast::BinExpr::cast(node.clone())
+                                        .and_then(|bin| bin.op_token())
+                                        .or_else(|| {
+                                            ast::NegExpr::cast(node)
+                                                .and_then(|neg| neg.minus_token())
+                                        })
+                                })
                                 .map(|op| RelatedInfo {
                                     file,
                                     range: op.text_range(),
@@ -1575,10 +1582,28 @@ fn const_annotation_arg_error(
         Some(ast::Expr::Literal(lit)) => {
             let found = match lit.kind()? {
                 ast::LiteralKind::Int(token) => {
-                    if token.text().replace('_', "").parse::<u128>().is_err() {
+                    let Ok(value) = token.text().replace('_', "").parse::<u128>() else {
                         return Some(diag::INT_LITERAL_TOO_LARGE.to_owned());
-                    }
-                    Ty::Int
+                    };
+                    // An integer literal type-checks against ANY declared
+                    // integer type (literal typing is inferred, never
+                    // defaulted) — but must fit its range.
+                    let expected = ty::lower_const_decl_ty(db, target.file, declared);
+                    return match expected {
+                        Ty::Int(kind) => {
+                            let fits = i128::try_from(value)
+                                .ok()
+                                .and_then(|v| IntValue::new(kind, v))
+                                .is_some();
+                            (!fits).then(|| format!("`{value}` does not fit in `{}`", kind.name()))
+                        }
+                        expected if expected.contains_error() => None,
+                        expected => Some(format!(
+                            "type mismatch: expected `{}`, found `{}`",
+                            expected.display(),
+                            Ty::UnresolvedNumber.display()
+                        )),
+                    };
                 }
                 ast::LiteralKind::Str(_) => Ty::Str,
                 ast::LiteralKind::Bool(_) => Ty::Bool,
@@ -1654,7 +1679,7 @@ fn array_len_expr_error(
             }
             let own_declared = TypeRef::from_ast(binder.const_param_ty(&name)?.clone());
             let found = ty::lower_const_decl_ty(db, file, &own_declared);
-            if found.contains_error() || found == Ty::Int {
+            if found.contains_error() || found == Ty::Int(ty::IntKind::Usize) {
                 return None;
             }
             Some(format!(

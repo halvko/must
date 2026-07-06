@@ -7317,3 +7317,115 @@ fn index_assign_statement() {
         "#]],
     );
 }
+
+#[test]
+fn unary_minus_parses_as_a_neg_expr() {
+    check(
+        "static x: i32 = -5;",
+        expect![[r#"
+            SOURCE_FILE@0..19
+              STATIC_ITEM@0..19
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                COLON@8..9 ":"
+                WHITESPACE@9..10 " "
+                PATH_TYPE@10..13
+                  NAME_REF@10..13
+                    IDENT@10..13 "i32"
+                WHITESPACE@13..14 " "
+                EQ@14..15 "="
+                WHITESPACE@15..16 " "
+                NEG_EXPR@16..18
+                  MINUS@16..17 "-"
+                  LITERAL@17..18
+                    INT_NUMBER@17..18 "5"
+                SEMICOLON@18..19 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn unary_minus_binds_tighter_than_binary_operators_but_looser_than_postfix() {
+    // `-a.b + c` is `(-(a.b)) + c`: the operand is a primary expression
+    // plus its postfix chain, and the negation is an ordinary operand of
+    // the sum.
+    check(
+        "static x: i32 = -a.b + c;",
+        expect![[r#"
+            SOURCE_FILE@0..25
+              STATIC_ITEM@0..25
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                COLON@8..9 ":"
+                WHITESPACE@9..10 " "
+                PATH_TYPE@10..13
+                  NAME_REF@10..13
+                    IDENT@10..13 "i32"
+                WHITESPACE@13..14 " "
+                EQ@14..15 "="
+                WHITESPACE@15..16 " "
+                BIN_EXPR@16..24
+                  NEG_EXPR@16..20
+                    MINUS@16..17 "-"
+                    FIELD_EXPR@17..20
+                      PATH_EXPR@17..18
+                        NAME_REF@17..18
+                          IDENT@17..18 "a"
+                      DOT@18..19 "."
+                      NAME_REF@19..20
+                        IDENT@19..20 "b"
+                  WHITESPACE@20..21 " "
+                  PLUS@21..22 "+"
+                  WHITESPACE@22..23 " "
+                  PATH_EXPR@23..24
+                    NAME_REF@23..24
+                      IDENT@23..24 "c"
+                SEMICOLON@24..25 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn unary_minus_can_carry_a_break_value() {
+    check(
+        "static x: i32 = loop { break -1; };",
+        expect![[r#"
+            SOURCE_FILE@0..35
+              STATIC_ITEM@0..35
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                COLON@8..9 ":"
+                WHITESPACE@9..10 " "
+                PATH_TYPE@10..13
+                  NAME_REF@10..13
+                    IDENT@10..13 "i32"
+                WHITESPACE@13..14 " "
+                EQ@14..15 "="
+                WHITESPACE@15..16 " "
+                LOOP_EXPR@16..34
+                  LOOP_KW@16..20 "loop"
+                  WHITESPACE@20..21 " "
+                  BLOCK_EXPR@21..34
+                    L_BRACE@21..22 "{"
+                    WHITESPACE@22..23 " "
+                    EXPR_STMT@23..32
+                      BREAK_EXPR@23..31
+                        BREAK_KW@23..28 "break"
+                        WHITESPACE@28..29 " "
+                        NEG_EXPR@29..31
+                          MINUS@29..30 "-"
+                          LITERAL@30..31
+                            INT_NUMBER@30..31 "1"
+                      SEMICOLON@31..32 ";"
+                    WHITESPACE@32..33 " "
+                    R_BRACE@33..34 "}"
+                SEMICOLON@34..35 ";"
+        "#]],
+    );
+}

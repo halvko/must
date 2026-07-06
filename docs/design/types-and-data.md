@@ -2,6 +2,12 @@
 
 ## Conclusions
 
+- **T01** Integers are `i`/`u` × 8/16/32/64 plus `usize`/`isize`. Literal typing is inferred:
+  an unresolved literal renders `{number}` and is never defaulted, and one with no defining
+  use is a diagnostic asking for an annotation. No suffixes, no implicit conversions, no
+  mixed-width arithmetic.
+- **T02** Overflow traps everywhere, runtime included. One semantics, no debug/release split,
+  so a program's meaning never depends on its build profile. Wrapping is spelled explicitly.
 - **T09** `==`/`!=` are builtin in v1 and permitted on any type; the checker only requires the
   operands to agree. Structurally defined for records (over canonically sorted fields),
   arrays, tuples, variants, raw pointers and function values.
@@ -40,6 +46,10 @@
 
 ## Discarded
 
+- **Wrap on overflow**, and **a debug/release split** — the latter makes a program's meaning
+  depend on its build profile. **T02**
+- **Literal defaulting to a fallback integer type** — a literal's type is always something
+  someone wrote or inference proved. **Literal suffixes** — not now. **T01**
 - **Implicit copies with copy-on-write or refcounting** — refcount traffic plus hidden
   allocator and dealloc calls on write-after-share: a de facto runtime woven through generated
   code. **Implicit eager deep copies** — `let s2 = s;` on a megabyte string becomes a hidden
@@ -61,3 +71,5 @@
 - **Modules land** — the join plurality vote, `let mut` widening and per-file inference are
   observable rules that were never ruled. Per-file solving is invisible in a single-file world
   and will shape or break programs once modules exist. **T04 T11 T12**
+- **Integer conversions** land when a customer names itself. **Variadic generics** stay
+  parked; the first customer is interpolation. **T01 T15**

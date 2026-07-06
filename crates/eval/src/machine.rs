@@ -823,7 +823,15 @@ impl<'db, M: Mode> Machine<'db, M> {
                 ProjElem::Field(index) => Ok(ResolvedProj::Field(*index)),
                 ProjElem::Index(op) => {
                     let value = self.eval_operand(loc, body, op, origin)?;
-                    let Value::Int(index) = value else {
+                    // The checker pins index positions to `usize`; any other
+                    // kind here means an already-diagnosed program running in
+                    // deferred-error mode — trap as ill-typed rather than
+                    // silently widening a mistyped index.
+                    let index = match &value {
+                        Value::Int(iv) => iv.usize_payload(),
+                        _ => None,
+                    };
+                    let Some(index) = index else {
                         return Err(self.ill_typed("a `usize` index", &value, loc, origin));
                     };
                     Ok(ResolvedProj::Index(index))
@@ -1207,6 +1215,10 @@ impl<'db, M: Mode> Machine<'db, M> {
                 let r = self.eval_operand(loc, body, r, origin)?;
                 self.eval_bin_op(*op, l, r, loc, origin)
             }
+            Rvalue::UnaryNeg(op) => {
+                let v = self.eval_operand(loc, body, op, origin)?;
+                self.eval_unary_neg(v, loc, origin)
+            }
             Rvalue::Aggregate {
                 kind: AggregateKind::Record(names),
                 ops,
@@ -1245,7 +1257,12 @@ impl<'db, M: Mode> Machine<'db, M> {
             Rvalue::Repeat { elem, count } => {
                 let elem = self.eval_operand(loc, body, elem, origin)?;
                 let count = self.eval_operand(loc, body, count, origin)?;
-                let Value::Int(count) = count else {
+                // The checker pins repeat counts to `usize`; a wrong kind is
+                // deferred-error mode — trap ill-typed, don't launder.
+                let Some(count) = (match &count {
+                    Value::Int(iv) => iv.usize_payload(),
+                    _ => None,
+                }) else {
                     return Err(self.ill_typed("a `usize` repeat count", &count, loc, origin));
                 };
                 if self.const_depth > 0 {
@@ -1268,7 +1285,12 @@ impl<'db, M: Mode> Machine<'db, M> {
                 let Value::Array(mut values) = base else {
                     return Err(self.ill_typed("an array value", &base, loc, origin));
                 };
-                let Value::Int(index) = index else {
+                // The checker pins index positions to `usize`; a wrong kind
+                // is deferred-error mode — trap ill-typed, don't launder.
+                let Some(index) = (match &index {
+                    Value::Int(iv) => iv.usize_payload(),
+                    _ => None,
+                }) else {
                     return Err(self.ill_typed("a `usize` index", &index, loc, origin));
                 };
                 if index >= values.len() as u128 {
@@ -1538,44 +1560,109 @@ impl<'db, M: Mode> Machine<'db, M> {
             Add | Sub | Mul | Div | Lt | Le | Gt | Ge => {
                 let (Value::Int(l), Value::Int(r)) = (&l, &r) else {
                     let bad = if matches!(l, Value::Int(_)) { &r } else { &l };
-                    return Err(self.ill_typed("`usize` operands", bad, loc, origin));
+                    return Err(self.ill_typed("integer operands", bad, loc, origin));
                 };
                 let (l, r) = (*l, *r);
+                // Same-type by checking; the left operand's kind is the
+                // operation's type. A mismatched kind is deferred-error mode
+                // (an already-diagnosed program) — trap ill-typed rather
+                // than compute a nonsense pairing.
+                if l.kind() != r.kind() {
+                    return Err(self.ill_typed("integer operands", &Value::Int(r), loc, origin));
+                }
+                let kind = l.kind();
                 let runtime = |message: String| EvalError {
                     kind: EvalErrorKind::Runtime,
                     message,
                     origin: Some((loc.clone(), origin)),
                     notes: Vec::new(),
                 };
-                Ok(match op {
-                    Add => Value::Int(
-                        l.checked_add(r)
-                            .ok_or_else(|| runtime("attempt to add with overflow".to_owned()))?,
-                    ),
-                    Sub => {
-                        Value::Int(l.checked_sub(r).ok_or_else(|| {
-                            runtime("attempt to subtract with overflow".to_owned())
-                        })?)
+                // Overflow = trap (runtime-error class, div-by-zero
+                // precedent): arithmetic runs through the checked [`Number`]
+                // surface, so an out-of-range result is `None` — the message
+                // names the operation and the type. Signed edge cases
+                // (`i::MIN / -1`) fall out of the same check.
+                let arith =
+                    |symbol: &str, result: Option<hir::IntValue>| -> Result<Value, EvalError> {
+                        match result {
+                            Some(iv) => Ok(Value::Int(iv)),
+                            None => Err(runtime(format!(
+                                "arithmetic overflow: `{} {symbol} {}` does not fit in `{}`",
+                                l.to_i128(),
+                                r.to_i128(),
+                                kind.name()
+                            ))),
+                        }
+                    };
+                match op {
+                    Add => arith("+", l.checked_add(r)),
+                    Sub => arith("-", l.checked_sub(r)),
+                    Mul => arith("*", l.checked_mul(r)),
+                    Div => {
+                        if r.to_i128() == 0 {
+                            return Err(runtime("attempt to divide by zero".to_owned()));
+                        }
+                        arith("/", l.checked_div(r))
                     }
-                    Mul => {
-                        Value::Int(l.checked_mul(r).ok_or_else(|| {
-                            runtime("attempt to multiply with overflow".to_owned())
-                        })?)
-                    }
-                    Div => Value::Int(
-                        l.checked_div(r)
-                            .ok_or_else(|| runtime("attempt to divide by zero".to_owned()))?,
-                    ),
-                    Lt => Value::Bool(l < r),
-                    Le => Value::Bool(l <= r),
-                    Gt => Value::Bool(l > r),
-                    Ge => Value::Bool(l >= r),
+                    Lt => Ok(Value::Bool(l.to_i128() < r.to_i128())),
+                    Le => Ok(Value::Bool(l.to_i128() <= r.to_i128())),
+                    Gt => Ok(Value::Bool(l.to_i128() > r.to_i128())),
+                    Ge => Ok(Value::Bool(l.to_i128() >= r.to_i128())),
                     Eq | Ne => unreachable!(),
+                }
+            }
+            // Equality is structural, on operands inference agreed about —
+            // with arithmetic's same-kind check: a mixed-kind integer
+            // pairing (deferred-error mode) traps ill-typed, never silently
+            // unequal.
+            Eq | Ne => {
+                if let (Value::Int(l), Value::Int(r)) = (&l, &r) {
+                    if l.kind() != r.kind() {
+                        return Err(self.ill_typed(
+                            "integer operands",
+                            &Value::Int(*r),
+                            loc,
+                            origin,
+                        ));
+                    }
+                }
+                Ok(Value::Bool(if matches!(op, Eq) { l == r } else { l != r }))
+            }
+        }
+    }
+
+    /// `-x`: negate in the wide carrier, then range-check against the
+    /// operand's own type — on unsigned types every non-zero operand
+    /// traps (the overflow rule), and the signed minimum traps too.
+    fn eval_unary_neg(
+        &mut self,
+        v: Value,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<Value, EvalError> {
+        let Value::Int(iv) = &v else {
+            return Err(self.ill_typed("an integer operand", &v, loc, origin));
+        };
+        match iv.checked_neg() {
+            Some(result) => Ok(Value::Int(result)),
+            None => {
+                // A negative operand renders parenthesized (`-(-128)`),
+                // never as a confusing `--128`.
+                let operand = if iv.to_i128() < 0 {
+                    format!("({})", iv.to_i128())
+                } else {
+                    iv.to_i128().to_string()
+                };
+                Err(EvalError {
+                    kind: EvalErrorKind::Runtime,
+                    message: format!(
+                        "arithmetic overflow: `-{operand}` does not fit in `{}`",
+                        iv.kind().name()
+                    ),
+                    origin: Some((loc.clone(), origin)),
+                    notes: Vec::new(),
                 })
             }
-            // Equality is structural, on operands inference agreed about.
-            Eq => Ok(Value::Bool(l == r)),
-            Ne => Ok(Value::Bool(l != r)),
         }
     }
 
@@ -1754,6 +1841,10 @@ impl<'db, M: Mode> Machine<'db, M> {
                 expect_args(self, 2)?;
                 self.builtin_add(&args[0], &args[1], loc, origin)
             }
+            Builtin::Offset => {
+                expect_args(self, 2)?;
+                self.builtin_offset(&args[0], &args[1], loc, origin)
+            }
             Builtin::Copy => {
                 expect_args(self, 3)?;
                 self.builtin_copy(&args[0], &args[1], &args[2], loc, origin)
@@ -1784,10 +1875,16 @@ impl<'db, M: Mode> Machine<'db, M> {
         loc: &ItemLoc,
         origin: ExprId,
     ) -> Result<Value, EvalError> {
-        let Value::Int(n) = n else {
+        // The checker pins this count to `usize`; any other kind is an
+        // already-diagnosed program in deferred-error mode — trap ill-typed
+        // rather than launder a mistyped count.
+        let Some(n) = (match n {
+            Value::Int(iv) => iv.usize_payload(),
+            _ => None,
+        }) else {
             return Err(self.ill_typed("a `usize` element count", n, loc, origin));
         };
-        if *n == 0 {
+        if n == 0 {
             return Err(EvalError {
                 kind: EvalErrorKind::Runtime,
                 message: "cannot allocate zero elements: zero-size allocation support \
@@ -1797,7 +1894,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 notes: Vec::new(),
             });
         }
-        let n = usize::try_from(*n).map_err(|_| EvalError {
+        let n = usize::try_from(n).map_err(|_| EvalError {
             kind: EvalErrorKind::Runtime,
             message: format!("allocation of {n} elements is too large"),
             origin: Some((loc.clone(), origin)),
@@ -1838,7 +1935,12 @@ impl<'db, M: Mode> Machine<'db, M> {
         let Value::Ptr { alloc, path } = p else {
             return Err(self.ill_typed("a raw pointer", p, loc, origin));
         };
-        let Value::Int(count) = n else {
+        // The checker pins this count to `usize`; a wrong kind is
+        // deferred-error mode — trap ill-typed, don't launder.
+        let Some(count) = (match n {
+            Value::Int(iv) => iv.usize_payload(),
+            _ => None,
+        }) else {
             return Err(self.ill_typed("a `usize` element count", n, loc, origin));
         };
         let ub = |message: String, notes: Vec<EvalNote>| EvalError {
@@ -1888,7 +1990,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 ));
             }
         };
-        if *count != len {
+        if count != len {
             return Err(ub(
                 format!(
                     "`dealloc_array` with the wrong element count — this allocation \
@@ -1924,10 +2026,15 @@ impl<'db, M: Mode> Machine<'db, M> {
         let Value::Ptr { alloc, path } = p else {
             return Err(self.ill_typed("a raw pointer", p, loc, origin));
         };
-        let Value::Int(i) = i else {
+        // The checker pins `add`'s index to `usize`; a wrong kind is
+        // deferred-error mode — trap ill-typed, don't launder.
+        let Some(i) = (match i {
+            Value::Int(iv) => iv.usize_payload(),
+            _ => None,
+        }) else {
             return Err(self.ill_typed("a `usize` count", i, loc, origin));
         };
-        if *i == 0 {
+        if i == 0 {
             return Ok(Value::Ptr {
                 alloc: *alloc,
                 path: path.clone(),
@@ -1940,7 +2047,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 // name a real element of any allocation, so the saturated
                 // address is out of bounds at every deref — the ordinary
                 // detected-UB story, no extra failure mode.
-                *index = u64::try_from(*i)
+                *index = u64::try_from(i)
                     .ok()
                     .and_then(|i| index.checked_add(i))
                     .unwrap_or(u64::MAX);
@@ -1952,6 +2059,67 @@ impl<'db, M: Mode> Machine<'db, M> {
             _ => Err(EvalError {
                 kind: EvalErrorKind::UndefinedBehavior,
                 message: "`add` of a pointer that does not address an array element".to_owned(),
+                origin: Some((loc.clone(), origin)),
+                notes: Vec::new(),
+            }),
+        }
+    }
+
+    /// `offset(p, i)`: the signed sibling of [`Self::builtin_add`] —
+    /// element arithmetic both directions. Minting stays unchecked
+    /// *upward* (validity past the end is a deref-time judgement, exactly
+    /// like `add`), but a result index below the allocation's start
+    /// (index < 0) is detected UB at the call: the abstract machine has no
+    /// representation for an address before element 0 — the same
+    /// precondition class as `add`'s non-array-element rule.
+    fn builtin_offset(
+        &mut self,
+        p: &Value,
+        i: &Value,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<Value, EvalError> {
+        let Value::Ptr { alloc, path } = p else {
+            return Err(self.ill_typed("a raw pointer", p, loc, origin));
+        };
+        // The checker pins `offset`'s argument to `isize`; a wrong kind is
+        // deferred-error mode — trap ill-typed, don't launder.
+        let Some(i) = (match i {
+            Value::Int(iv) => iv.isize_payload(),
+            _ => None,
+        }) else {
+            return Err(self.ill_typed("an `isize` count", i, loc, origin));
+        };
+        if i == 0 {
+            return Ok(Value::Ptr {
+                alloc: *alloc,
+                path: path.clone(),
+            });
+        }
+        let mut path = path.clone();
+        match path.last_mut() {
+            Some(PathElem::Index(index)) => {
+                let result = i128::from(*index) + i;
+                if result < 0 {
+                    return Err(EvalError {
+                        kind: EvalErrorKind::UndefinedBehavior,
+                        message: "`offset` result points below the start of the allocation"
+                            .to_owned(),
+                        origin: Some((loc.clone(), origin)),
+                        notes: Vec::new(),
+                    });
+                }
+                // Saturating upward, like `add`: a past-`u64::MAX` address
+                // is out of bounds at every deref.
+                *index = u64::try_from(result).unwrap_or(u64::MAX);
+                Ok(Value::Ptr {
+                    alloc: *alloc,
+                    path,
+                })
+            }
+            _ => Err(EvalError {
+                kind: EvalErrorKind::UndefinedBehavior,
+                message: "`offset` of a pointer that does not address an array element".to_owned(),
                 origin: Some((loc.clone(), origin)),
                 notes: Vec::new(),
             }),
@@ -1974,10 +2142,14 @@ impl<'db, M: Mode> Machine<'db, M> {
         loc: &ItemLoc,
         origin: ExprId,
     ) -> Result<Value, EvalError> {
-        let Value::Int(n) = n else {
+        // The checker pins this count to `usize`; a wrong kind is
+        // deferred-error mode — trap ill-typed, don't launder.
+        let Some(n) = (match n {
+            Value::Int(iv) => iv.usize_payload(),
+            _ => None,
+        }) else {
             return Err(self.ill_typed("a `usize` element count", n, loc, origin));
         };
-        let n = *n;
         // A zero-length copy is valid through ANY pointers — dangling
         // included (Rust's rule, and what lets a growing container copy
         // its 0 elements out of the never-allocated `dangling()` buffer
@@ -2357,7 +2529,7 @@ fn project_mut<'v>(
 fn value_ty(value: &Value) -> hir::Ty {
     match value {
         Value::Unit => hir::Ty::Unit,
-        Value::Int(_) => hir::Ty::Int,
+        Value::Int(iv) => hir::Ty::Int(iv.kind()),
         Value::Str(_) => hir::Ty::Str,
         Value::Bool(_) => hir::Ty::Bool,
         Value::Record { fields } => hir::Ty::record(

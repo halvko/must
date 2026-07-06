@@ -126,6 +126,9 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
             compute_expr_scopes(body, scopes, *lhs, scope);
             compute_expr_scopes(body, scopes, *rhs, scope);
         }
+        ExprData::Neg { operand } => {
+            compute_expr_scopes(body, scopes, *operand, scope);
+        }
         ExprData::If {
             condition,
             then_branch,
@@ -269,10 +272,16 @@ pub enum Builtin {
     /// pointer that does not address an array element with `i > 0` is
     /// detected UB at the call. Flavor-preserving (`&raw mut` in →
     /// `&raw mut` out) — a checker special case, not expressible as one
-    /// `fn` type. Takes a `usize`; the name `offset` is reserved for a
-    /// future signed (`isize`) variant, mirroring Rust's `add`/`offset`
-    /// split.
+    /// `fn` type. Takes a `usize`; [`Builtin::Offset`] is the signed
+    /// sibling, mirroring Rust's `add`/`offset` split.
     Add,
+    /// `offset(p, i)` — the signed sibling of [`Builtin::Add`]: element
+    /// arithmetic in both directions, `i: isize`. UNSAFE like `add`, with
+    /// one extra precondition: a result index below the allocation's start
+    /// (index < 0) is detected UB at the call (the abstract machine cannot
+    /// represent it — the same class as `add`'s non-array-element rule).
+    /// Everything else mirrors `add`, flavor preservation included.
+    Offset,
     /// `copy(src, dst, n)` — element-count bulk copy, memmove semantics
     /// (overlap is DEFINED). UNSAFE (writes through a raw pointer).
     /// Copying an uninitialized element propagates the marker silently —
@@ -292,6 +301,7 @@ impl Builtin {
             "alloc_array" => Some(Builtin::AllocArray),
             "dealloc_array" => Some(Builtin::DeallocArray),
             "add" => Some(Builtin::Add),
+            "offset" => Some(Builtin::Offset),
             "copy" => Some(Builtin::Copy),
             "dangling" => Some(Builtin::Dangling),
             _ => None,
@@ -305,6 +315,7 @@ impl Builtin {
             Builtin::AllocArray => "alloc_array",
             Builtin::DeallocArray => "dealloc_array",
             Builtin::Add => "add",
+            Builtin::Offset => "offset",
             Builtin::Copy => "copy",
             Builtin::Dangling => "dangling",
         }
@@ -317,7 +328,10 @@ impl Builtin {
     /// writes through a raw pointer, and `add` on a pointer that does not
     /// address an array element (with `i > 0`) is detected UB at the call.
     pub fn requires_unsafe(self) -> bool {
-        matches!(self, Builtin::DeallocArray | Builtin::Copy | Builtin::Add)
+        matches!(
+            self,
+            Builtin::DeallocArray | Builtin::Copy | Builtin::Add | Builtin::Offset
+        )
     }
 }
 

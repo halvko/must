@@ -29,7 +29,7 @@ mod tests;
 
 use base_db::Db;
 use hir::body::BinOp;
-use hir::{BindingId, Builtin, ExprId, ItemId, ItemLoc, Ty};
+use hir::{BindingId, Builtin, ExprId, IntValue, ItemId, ItemLoc, Ty};
 use la_arena::{Arena, Idx};
 
 pub type LocalId = Idx<LocalData>;
@@ -176,6 +176,11 @@ pub enum StatementKind {
 pub enum Rvalue {
     Use(Operand),
     BinaryOp(BinOp, Operand, Operand),
+    /// `-x` — unary negation of an integer. The operand's [`IntValue`]
+    /// carries its own width, so the machine range-checks the result at
+    /// the operation (an overflow — unsigned non-zero, or the signed
+    /// minimum — is an ordinary runtime trap; eager in const contexts).
+    UnaryNeg(Operand),
     /// Builds a compound value from its parts. `ops` line up with
     /// `kind`'s canonical field order — for [`AggregateKind::Record`],
     /// sorted by name, matching [`Ty::Record`]'s canonical order. Lowering
@@ -310,7 +315,11 @@ pub enum Operand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Const {
     Unit,
-    Int(u128),
+    /// A typed integer constant: inference resolved every literal's width
+    /// (an unresolved or out-of-range literal traps instead), so the
+    /// constant carries it — the typed-memory philosophy applied to
+    /// scalars.
+    Int(IntValue),
     Str(String),
     Bool(bool),
     /// The value of a top-level item, const-evaluated lazily on first use.

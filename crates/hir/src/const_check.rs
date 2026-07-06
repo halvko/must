@@ -162,6 +162,9 @@ impl CheckCtx<'_> {
                 self.check_expr(*lhs, in_const);
                 self.check_expr(*rhs, in_const);
             }
+            // Arithmetic is const-legal; overflow in a const context is the
+            // eager trap the machine raises (div-by-zero precedent).
+            ExprData::Neg { operand } => self.check_expr(*operand, in_const),
             ExprData::If {
                 condition,
                 then_branch,
@@ -318,7 +321,7 @@ impl CheckCtx<'_> {
             // exist in const memory (would-be UB there is a deterministic
             // detected trap; the escape rule guards the results).
             Some(Resolution::Builtin(
-                Builtin::Panic | Builtin::Add | Builtin::Copy | Builtin::Dangling,
+                Builtin::Panic | Builtin::Add | Builtin::Offset | Builtin::Copy | Builtin::Dangling,
             )) => {}
             Some(Resolution::Builtin(builtin @ Builtin::Print)) => {
                 self.diagnostics.push(ConstCheckDiagnostic::SideEffectCall {

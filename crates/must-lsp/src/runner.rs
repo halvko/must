@@ -359,9 +359,9 @@ static main = fn {
             r#"
 static __must_entry = 7;
 "#,
-            "1 + 2",
+            "true",
             expect_test::expect![[r#"
-                => 3
+                => true
             "#]],
         );
     }
@@ -372,9 +372,24 @@ static __must_entry = 7;
             r#"
 static main = fn { print(
 "#,
-            "1",
+            "true",
             expect_test::expect![[r#"
-                => 1
+                => true
+            "#]],
+        );
+    }
+
+    #[test]
+    fn entry_number_literals_have_no_defining_use() {
+        // Never-default: a bare `1 + 2` entry pins its literals nowhere, so
+        // the evaluation reports the no-defining-use diagnostic rather than
+        // guessing a type — the honest REPL answer.
+        check(
+            "",
+            "1 + 2",
+            expect_test::expect![[r#"
+                error: cannot infer the type of this number: it has no defining use — add a type annotation
+                  --> entry expression
             "#]],
         );
     }

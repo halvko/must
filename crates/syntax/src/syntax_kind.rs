@@ -126,6 +126,7 @@ pub enum SyntaxKind {
     ARRAY_TYPE,
     ARRAY_EXPR,
     INDEX_EXPR,
+    NEG_EXPR,
     ERROR,
 }
 

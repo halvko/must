@@ -218,6 +218,15 @@ impl Constraints {
                 true
             }
             (Ty::Infer(var), ty) | (ty, Ty::Infer(var)) => {
+                // A NUMBER-CLASS variable resolves only to an integer
+                // scalar type (a defining use); anything else is an
+                // ordinary mismatch. `Ty::Error` stays infectious and
+                // silent, exactly as for plain variables.
+                if matches!(table.probe_value(var), TyVarValue::UnknownNumber)
+                    && !matches!(ty, Ty::Int(_) | Ty::Error)
+                {
+                    return false;
+                }
                 if occurs(table, var, &ty) {
                     return false;
                 }
@@ -233,9 +242,11 @@ impl Constraints {
             (Ty::Error, _) | (_, Ty::Error) => true,
             (Ty::Unit, Ty::Unit)
             | (Ty::Never, Ty::Never)
-            | (Ty::Int, Ty::Int)
             | (Ty::Str, Ty::Str)
             | (Ty::Bool, Ty::Bool) => true,
+            // Same-kind only: `u8` never unifies with `u32` — no implicit
+            // mixing, an ordinary type mismatch (no conversions in v1).
+            (Ty::Int(k1), Ty::Int(k2)) => k1 == k2,
             (Ty::Fn(f1), Ty::Fn(f2)) => {
                 f1.params.len() == f2.params.len() && {
                     let params_ok = f1
@@ -416,7 +427,11 @@ impl Constraints {
                     .collect();
                 let mut tally: Vec<(Family, usize)> = Vec::new();
                 for (_, ty) in &leaves {
-                    if matches!(ty, Ty::Infer(_) | Ty::Error) {
+                    // A leaf with ANY undetermined part doesn't vote: two
+                    // `[{number}; 2]`s must end up unified (the tie-them-
+                    // together path below), never counted as two distinct
+                    // families.
+                    if ty.contains_infer() || matches!(ty, Ty::Error) {
                         continue;
                     }
                     let family = family_of(ty);
@@ -506,9 +521,27 @@ impl Constraints {
             match resolve_shallow(table, &witness.ty) {
                 Ty::Error => {}
                 // Still free (a cross-scope or in-group variable): adopt
-                // the expected type.
-                Ty::Infer(_) => {
-                    self.unify(table, &witness.ty, &expected, None);
+                // the expected type. A NUMBER variable is a real leaf,
+                // not a silent adopter: agreeing with an integer winner
+                // makes it a sibling ("this branch has type …" hints stay
+                // honest — the leaf now IS that type), and refusing a
+                // non-integer winner is an ordinary culprit (`{number}`
+                // against the winner), with the variable poisoned so the
+                // literal doesn't also report a no-defining-use error.
+                Ty::Infer(var) => {
+                    let is_number = matches!(table.probe_value(var), TyVarValue::UnknownNumber);
+                    if self.unify(table, &witness.ty, &expected, None) {
+                        if is_number {
+                            siblings.push(Cause::Branch(witness.blame));
+                        }
+                    } else {
+                        // The culprit's honest type, resolved BEFORE the var
+                        // is poisoned to `{error}`: a number var reads
+                        // `{number}`, any other still-free variable reads `_`.
+                        let actual = resolve_finished(table, &witness.ty);
+                        table.union_value(var, TyVarValue::Known(Ty::Error));
+                        culprits.push((witness, actual));
+                    }
                 }
                 actual => {
                     if self.unify(table, &witness.ty, &expected, None) {
@@ -545,14 +578,22 @@ impl Constraints {
                 // The leaves agree with each other and only contradict the
                 // context: one diagnostic on the whole (flattened)
                 // construct, not a squiggle per leaf.
+                let actual = resolve_finished(table, &culprits[0].1);
+                for (witness, _) in &culprits {
+                    poison_unresolved_number(table, &witness.ty);
+                }
                 diagnostics.push(InferenceDiagnostic::AllBranchesMismatch {
                     expr: join.expr,
                     expected: expected.clone(),
-                    actual: culprits[0].1.clone(),
+                    actual,
                     reasons: compose_reasons(&expected_causes, &[]),
                 });
             } else {
                 for (witness, actual) in culprits {
+                    // Render nested unpinned numbers as `{number}` first,
+                    // then poison them: this mismatch is their whole story.
+                    let actual = resolve_finished(table, &actual);
+                    poison_unresolved_number(table, &witness.ty);
                     diagnostics.push(InferenceDiagnostic::TypeMismatch {
                         expr: witness.blame,
                         expected: expected.clone(),
@@ -594,7 +635,7 @@ fn family_of(ty: &Ty) -> Family {
 /// The tie diagnostic: the first leaf against the first one that concretely
 /// disagrees with it (for a plain `if` that is then vs. else).
 fn push_tie_mismatch(leaves: &[(ExprId, Ty)], diagnostics: &mut Vec<InferenceDiagnostic>) {
-    let concrete = |ty: &Ty| !matches!(ty, Ty::Infer(_) | Ty::Error);
+    let concrete = |ty: &Ty| !ty.contains_infer() && !matches!(ty, Ty::Error);
     let Some((first, first_ty)) = leaves.iter().find(|(_, ty)| concrete(ty)) else {
         return;
     };
@@ -633,18 +674,64 @@ pub(crate) fn resolve_shallow(table: &mut InPlaceUnificationTable<TyVar>, ty: &T
     while let Ty::Infer(var) = ty {
         match table.probe_value(var) {
             TyVarValue::Known(known) => ty = known,
-            TyVarValue::Unknown => break,
+            TyVarValue::Unknown | TyVarValue::UnknownNumber => break,
         }
     }
     ty
+}
+
+/// Whether `ty` resolves (shallowly) to a still-unbound NUMBER-CLASS
+/// variable — the "this is an unpinned integer literal" predicate.
+pub(crate) fn is_unresolved_number(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty) -> bool {
+    matches!(
+        resolve_shallow(table, ty),
+        Ty::Infer(var) if matches!(table.probe_value(var), TyVarValue::UnknownNumber)
+    )
+}
+
+/// Bind every still-unbound NUMBER-CLASS variable anywhere inside `ty` to
+/// `{error}` — used after a mismatch was already reported against it, so
+/// the literal(s) that minted them don't pile no-defining-use diagnostics
+/// on top (errors are infectious and silent).
+pub(crate) fn poison_unresolved_number(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty) {
+    match resolve_shallow(table, ty) {
+        Ty::Infer(var) => {
+            if matches!(table.probe_value(var), TyVarValue::UnknownNumber) {
+                table.union_value(var, TyVarValue::Known(Ty::Error));
+            }
+        }
+        Ty::Fn(f) => {
+            for param in &f.params {
+                poison_unresolved_number(table, param);
+            }
+            poison_unresolved_number(table, &f.ret);
+        }
+        Ty::RawPtr { pointee, .. } => poison_unresolved_number(table, &pointee),
+        Ty::Array { elem, .. } => poison_unresolved_number(table, &elem),
+        Ty::Record(rec) => {
+            for (_, field) in &rec.fields {
+                poison_unresolved_number(table, field);
+            }
+        }
+        Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
+            for arg in &args {
+                if let GenericArg::Ty(ty) = arg {
+                    poison_unresolved_number(table, ty);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 pub(crate) fn resolve_fully(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty) -> Ty {
     match ty {
         Ty::Infer(var) => match table.probe_value(*var) {
             TyVarValue::Known(known) => resolve_fully(table, &known),
-            // Canonicalize so equal results stay equal across runs.
-            TyVarValue::Unknown => Ty::Infer(table.find(*var)),
+            // Canonicalize so equal results stay equal across runs. The
+            // number flavor stays in the table here — `resolve_finished`
+            // is the one place it becomes a rendered `{number}`.
+            TyVarValue::Unknown | TyVarValue::UnknownNumber => Ty::Infer(table.find(*var)),
         },
         Ty::Fn(f) => {
             let params = f.params.iter().map(|p| resolve_fully(table, p)).collect();
@@ -665,6 +752,67 @@ pub(crate) fn resolve_fully(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty)
         }),
         Ty::Variant(variant) => Ty::Variant(VariantTy {
             args: resolve_args_fully(table, &variant.args),
+            ..variant.clone()
+        }),
+        other => other.clone(),
+    }
+}
+
+/// [`resolve_fully`], additionally rendering still-unbound NUMBER-CLASS
+/// variables into the table-free [`Ty::UnresolvedNumber`] sentinel — the
+/// resolution `infer`'s finish pass applies to everything a consumer will
+/// *display* (hover, diagnostics, inlays): an unpinned literal reads
+/// `{number}`, never `_`. Purely a rendering step (it reads the table's
+/// number-class flavor and rewrites it into the sentinel); it mutates
+/// nothing.
+pub(crate) fn resolve_finished(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty) -> Ty {
+    let resolved = resolve_fully(table, ty);
+    render_unresolved_numbers(table, &resolved)
+}
+
+fn render_unresolved_numbers(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty) -> Ty {
+    match ty {
+        Ty::Infer(var) => match table.probe_value(*var) {
+            TyVarValue::UnknownNumber => Ty::UnresolvedNumber,
+            _ => ty.clone(),
+        },
+        Ty::Fn(f) => Ty::fn_type(
+            f.params
+                .iter()
+                .map(|p| render_unresolved_numbers(table, p))
+                .collect(),
+            render_unresolved_numbers(table, &f.ret),
+        ),
+        Ty::RawPtr { mutable, pointee } => {
+            Ty::raw_ptr(*mutable, render_unresolved_numbers(table, pointee))
+        }
+        Ty::Array { elem, len } => Ty::array(render_unresolved_numbers(table, elem), len.clone()),
+        Ty::Record(rec) => Ty::record(
+            rec.fields
+                .iter()
+                .map(|(name, ty)| (name.clone(), render_unresolved_numbers(table, ty)))
+                .collect(),
+        ),
+        Ty::Named(named) => Ty::Named(NamedTy {
+            decl: named.decl.clone(),
+            args: named
+                .args
+                .iter()
+                .map(|arg| match arg {
+                    GenericArg::Ty(ty) => GenericArg::Ty(render_unresolved_numbers(table, ty)),
+                    GenericArg::Const(value) => GenericArg::Const(value.clone()),
+                })
+                .collect(),
+        }),
+        Ty::Variant(variant) => Ty::Variant(VariantTy {
+            args: variant
+                .args
+                .iter()
+                .map(|arg| match arg {
+                    GenericArg::Ty(ty) => GenericArg::Ty(render_unresolved_numbers(table, ty)),
+                    GenericArg::Const(value) => GenericArg::Const(value.clone()),
+                })
+                .collect(),
             ..variant.clone()
         }),
         other => other.clone(),
@@ -694,7 +842,7 @@ fn occurs(table: &mut InPlaceUnificationTable<TyVar>, var: TyVar, ty: &Ty) -> bo
             }
             match table.probe_value(*other) {
                 TyVarValue::Known(known) => occurs(table, var, &known),
-                TyVarValue::Unknown => false,
+                TyVarValue::Unknown | TyVarValue::UnknownNumber => false,
             }
         }
         Ty::Fn(f) => f.params.iter().any(|p| occurs(table, var, p)) || occurs(table, var, &f.ret),

@@ -202,7 +202,7 @@ effects means no *observable* effects — mutating a binding in a private
 frame that no one else can see is fine:
 
 ```must
-static x = const { let mut n = 1; n = n + 1; n };
+static x = const { let mut n: usize = 1; n = n + 1; n };
 ```
 
 `static mut` does not exist (deferred until there is a story for it): a
@@ -656,7 +656,7 @@ Still reserved: `unsafe fn`.
 
 == Heap allocation
 
-The heap is built out of raw pointers, not a new kind of value: five
+The heap is built out of raw pointers, not a new kind of value: six
 builtins, and everything above them — containers, arenas, growth — is
 ordinary Must code (`examples/heap.must` is that library, twice over: a
 growable vector and a typed arena).
@@ -677,8 +677,11 @@ growable vector and a typed arena).
   unchecked, like `&raw mut a[i]` — an out-of-range result derefs to
   detected UB — but advancing a pointer that does not address an array
   element, with `i > 0`, is detected UB at the call itself, which is why
-  it needs `unsafe` before any deref. The name `offset` is reserved for a
-  future signed variant.
+  it needs `unsafe` before any deref.
+- `offset(p, i)` is `add`'s signed sibling: `unsafe`, takes an `isize`,
+  and moves either direction. Minting past the end stays unchecked, like
+  `add`; a result before the allocation's start (index `< 0`) is detected
+  UB at the call, since no address before element 0 exists to mint.
 - `copy(src, dst, n)` is `unsafe`, counts elements, and is memmove-shaped:
   overlapping ranges are defined, uninitialized elements copy silently,
   out of range on either side is detected UB, and a zero-length copy is
@@ -689,9 +692,9 @@ growable vector and a typed arena).
 
 There is no `realloc`: growth is alloc, copy, dealloc, composed by the
 container. Allocation never happens at compile time: under a const context
-`alloc_array` and `dealloc_array` are refused eagerly; `add`, `copy` and
-`dangling` allocate nothing, so they are const-legal wherever the values
-they touch already are.
+`alloc_array` and `dealloc_array` are refused eagerly; `add`, `offset`,
+`copy` and `dangling` allocate nothing, so they are const-legal wherever
+the values they touch already are.
 
 ```must
 static main = fn () -> () {

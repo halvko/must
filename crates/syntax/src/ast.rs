@@ -267,6 +267,10 @@ ast_node!(
     /// element write). Chains like field access.
     IndexExpr: INDEX_EXPR
 );
+ast_node!(
+    /// `-x` — unary minus on a number.
+    NegExpr: NEG_EXPR
+);
 
 ast_enum!(
     Expr: FnLiteral,
@@ -289,7 +293,8 @@ ast_enum!(
     BreakExpr,
     ContinueExpr,
     ArrayExpr,
-    IndexExpr
+    IndexExpr,
+    NegExpr
 );
 ast_enum!(
     /// A pattern: a match-arm pattern (`VariantPat`/`WildcardPat`/`RestPat`)
@@ -1085,6 +1090,16 @@ impl IndexExpr {
     /// The index expression (between the brackets).
     pub fn index(&self) -> Option<Expr> {
         children(&self.syntax).nth(1)
+    }
+}
+
+impl NegExpr {
+    /// The negated operand.
+    pub fn expr(&self) -> Option<Expr> {
+        child(&self.syntax)
+    }
+    pub fn minus_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, MINUS)
     }
 }
 

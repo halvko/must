@@ -95,6 +95,7 @@ fn let_hole_pattern_binds_nothing() {
     check_diagnostics(
         "static f = fn { let _ = 5; let x = _; };",
         expect![[r#"
+            24..25: cannot infer the type of this number: it has no defining use — add a type annotation
             35..36: expected an expression
         "#]],
     );
@@ -124,6 +125,7 @@ fn hole_named_static_item_gets_dead_code_warning() {
         "static _ = 5;",
         expect![[r#"
             7..8: this item binds nothing and its value cannot be used
+            11..12: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -134,13 +136,14 @@ fn hole_named_const_item_gets_dead_code_warning() {
         "const _ = 5;",
         expect![[r#"
             6..7: this item binds nothing and its value cannot be used
+            10..11: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
 
 #[test]
 fn named_item_gets_no_dead_code_warning() {
-    check_diagnostics("static x = 5;", expect![[r#""#]]);
+    check_diagnostics("static x: usize = 5;", expect![[r#""#]]);
 }
 
 #[test]
@@ -152,6 +155,7 @@ fn broken_item_with_missing_name_gets_no_dead_code_warning() {
         "static = 5;",
         expect![[r#"
             7..8: expected a name for the item
+            9..10: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -163,8 +167,8 @@ fn infer_let_hole_pattern() {
         expect![[r#"
             11..28 'fn { let _ = 5; }': fn()
             14..28 '{ let _ = 5; }': ()
-            20..21 '_': usize
-            24..25 '5': usize
+            20..21 '_': {number}
+            24..25 '5': {number}
         "#]],
     );
 }
@@ -288,7 +292,7 @@ fn binexpr_operands_must_be_int() {
     check_diagnostics(
         r#"static x = 1 + "two";"#,
         expect![[r#"
-            15..20: type mismatch: expected `usize`, found `str` (`+` requires `usize` operands at 13..14)
+            15..20: type mismatch: expected `{number}`, found `str` (`+` requires `{number}` operands at 13..14)
         "#]],
     );
 }
@@ -315,14 +319,15 @@ fn non_block_fn_body_one_diagnostic_and_inference_still_works() {
         "static f = fn 42;",
         expect![[r#"
             14..16: function bodies are blocks; wrap this expression in `{ }`
+            14..16: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
     // …and the tree keeps the intent: types are still inferred inside.
     check_infer(
         "static f = fn 42;",
         expect![[r#"
-            11..16 'fn 42': fn() -> usize
-            14..16 '42': usize
+            11..16 'fn 42': fn() -> {number}
+            14..16 '42': {number}
         "#]],
     );
 }
@@ -507,6 +512,7 @@ static name = fn {
 }
 "#,
         expect![[r#"
+            15..17: cannot infer the type of this number: it has no defining use — add a type annotation
             32..36: `name` is defined multiple times (first defined here at 8..12)
         "#]],
     );
@@ -522,7 +528,7 @@ static name = fn {
 };
 "#,
         expect![[r#"
-            15..16 '1': usize
+            15..16 '1': {number}
             32..56 'fn {     let v = ...': fn()
             35..56 '{     let v = nam...': ()
             45..46 'v': {error}
@@ -535,20 +541,20 @@ static name = fn {
 fn local_shadow_of_a_duplicated_name_keeps_its_type() {
     check_infer(
         r#"
-static name = 1;
+static name: usize = 1;
 static name = fn {
     let name = "x";
     let n = name;
 };
 "#,
         expect![[r#"
-            15..16 '1': usize
-            32..76 'fn {     let name...': fn()
-            35..76 '{     let name = ...': ()
-            45..49 'name': str
-            52..55 '"x"': str
-            65..66 'n': str
-            69..73 'name': str
+            22..23 '1': usize
+            39..83 'fn {     let name...': fn()
+            42..83 '{     let name = ...': ()
+            52..56 'name': str
+            59..62 '"x"': str
+            72..73 'n': str
+            76..80 'name': str
         "#]],
     );
 }
@@ -559,11 +565,11 @@ fn cross_item_use_of_unannotated_item_infers() {
     // the use in `b` sees `usize` — and the *real* type error surfaces.
     check_diagnostics(
         r#"
-static a = 42 + 52;
+static a = { let n: usize = 42; n + 52 };
 static b = fn { print(a); };
 "#,
         expect![[r#"
-            43..44: type mismatch: expected `str`, found `usize`
+            65..66: type mismatch: expected `str`, found `usize`
         "#]],
     );
 }
@@ -603,39 +609,40 @@ static main = fn { print(is_even(4)); };
 }
 
 #[test]
-fn unannotated_recursion_with_unannotated_params_infers() {
-    // Even the params and return come out of the body: `n < 2` forces
-    // usize, the call commits `fib` to fn(usize) -> usize.
+fn unannotated_recursion_infers_from_a_param_annotation() {
+    // The return type still comes out of the body; the param annotation is
+    // the one defining use the literals hang off (literal typing is never
+    // defaulted, so a fully-unannotated recursive fn now needs one).
     check_infer(
         r#"
-static fib = fn (n) { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } };
+static fib = fn (n: usize) { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } };
 static use_it: usize = fib(10);
 "#,
         expect![[r#"
-            14..72 'fn (n) { if n < 2...': fn(usize) -> usize
+            14..79 'fn (n: usize) { i...': fn(usize) -> usize
             18..19 'n': usize
-            21..72 '{ if n < 2 { n } ...': usize
-            23..70 'if n < 2 { n } el...': usize
-            26..27 'n': usize
-            26..31 'n < 2': bool
-            30..31 '2': usize
-            32..37 '{ n }': usize
-            34..35 'n': usize
-            43..70 '{ fib(n - 1) + fi...': usize
-            45..48 'fib': fn(usize) -> usize
-            45..55 'fib(n - 1)': usize
-            45..68 'fib(n - 1) + fib(...': usize
-            49..50 'n': usize
-            49..54 'n - 1': usize
-            53..54 '1': usize
-            58..61 'fib': fn(usize) -> usize
-            58..68 'fib(n - 2)': usize
-            62..63 'n': usize
-            62..67 'n - 2': usize
-            66..67 '2': usize
-            97..100 'fib': fn(usize) -> usize
-            97..104 'fib(10)': usize
-            101..103 '10': usize
+            28..79 '{ if n < 2 { n } ...': usize
+            30..77 'if n < 2 { n } el...': usize
+            33..34 'n': usize
+            33..38 'n < 2': bool
+            37..38 '2': usize
+            39..44 '{ n }': usize
+            41..42 'n': usize
+            50..77 '{ fib(n - 1) + fi...': usize
+            52..55 'fib': fn(usize) -> usize
+            52..62 'fib(n - 1)': usize
+            52..75 'fib(n - 1) + fib(...': usize
+            56..57 'n': usize
+            56..61 'n - 1': usize
+            60..61 '1': usize
+            65..68 'fib': fn(usize) -> usize
+            65..75 'fib(n - 2)': usize
+            69..70 'n': usize
+            69..74 'n - 2': usize
+            73..74 '2': usize
+            104..107 'fib': fn(usize) -> usize
+            104..111 'fib(10)': usize
+            108..110 '10': usize
         "#]],
     );
 }
@@ -650,7 +657,7 @@ fn caller_pins_callee_params() {
     // with `_`s either way: the per-item query never sees group tables.)
     check_diagnostics(
         r#"
-static double = fn (n) { n + n };
+static double = fn (n: usize) { n + n };
 static apply = fn (f, a) { f(a) };
 static main = fn { apply(double, 2) };
 "#,
@@ -658,30 +665,30 @@ static main = fn { apply(double, 2) };
     );
     check_infer(
         r#"
-static double = fn (n) { n + n };
+static double = fn (n: usize) { n + n };
 static apply = fn (f, a) { f(a) };
 static main = fn { apply(double, 2) };
 "#,
         expect![[r#"
-            17..33 'fn (n) { n + n }': fn(usize) -> usize
+            17..40 'fn (n: usize) { n...': fn(usize) -> usize
             21..22 'n': usize
-            24..33 '{ n + n }': usize
-            26..27 'n': usize
-            26..31 'n + n': usize
-            30..31 'n': usize
-            50..68 'fn (f, a) { f(a) }': fn(fn(_) -> _, _) -> _
-            54..55 'f': fn(_) -> _
-            57..58 'a': _
-            60..68 '{ f(a) }': _
-            62..63 'f': fn(_) -> _
-            62..66 'f(a)': _
+            31..40 '{ n + n }': usize
+            33..34 'n': usize
+            33..38 'n + n': usize
+            37..38 'n': usize
+            57..75 'fn (f, a) { f(a) }': fn(fn(_) -> _, _) -> _
+            61..62 'f': fn(_) -> _
             64..65 'a': _
-            84..107 'fn { apply(double...': fn() -> usize
-            87..107 '{ apply(double, 2) }': usize
-            89..94 'apply': fn(fn(usize) -> usize, usize) -> usize
-            89..105 'apply(double, 2)': usize
-            95..101 'double': fn(usize) -> usize
-            103..104 '2': usize
+            67..75 '{ f(a) }': _
+            69..70 'f': fn(_) -> _
+            69..73 'f(a)': _
+            71..72 'a': _
+            91..114 'fn { apply(double...': fn() -> usize
+            94..114 '{ apply(double, 2) }': usize
+            96..101 'apply': fn(fn(usize) -> usize, usize) -> usize
+            96..112 'apply(double, 2)': usize
+            102..108 'double': fn(usize) -> usize
+            110..111 '2': usize
         "#]],
     );
 }
@@ -704,9 +711,10 @@ static main = fn { id; };
 #[test]
 fn conflicting_group_commitments_need_annotations() {
     // Calling `x` commits it to fn(usize) -> usize, but x's own body (`y`)
-    // makes it usize: the group's commitments contradict each other, so the
-    // signatures are poisoned to `{error}` rather than silently publishing
-    // the guessed one.
+    // makes it a number: the group's commitments contradict each other, so
+    // the signatures are poisoned to `{error}` rather than silently
+    // publishing the guessed one — and neither use can tell which type the
+    // item has, so both ask for an annotation.
     check_diagnostics(
         r#"
 static c = true;
@@ -716,6 +724,7 @@ static x = y;
         expect![[r#"
             47..48: cannot infer the type of `x` across items; add a type annotation to its definition (defined here at 62..63)
             47..48: cannot call a value in a const context; whether it is a `const fn` is not known from its type (this item's initializer is a const context at 18..24)
+            66..67: cannot infer the type of `y` across items; add a type annotation to its definition (defined here at 25..26)
         "#]],
     );
 }
@@ -728,30 +737,30 @@ fn holes_in_let_and_params_infer_from_context() {
         r#"
 static f = fn {
     let x: _ = 5;
-    let y = x + 1;
+    let y: usize = x + 1;
 }
-static g = fn (p: _) { p + 1 };
-static h = fn (_: _) { 5 };
+static g = fn (p: _) -> usize { p + 1 };
+static h = fn (_: _) -> usize { 5 };
 "#,
         expect![[r#"
-            12..55 'fn {     let x: _...': fn()
-            15..55 '{     let x: _ = ...': ()
+            12..62 'fn {     let x: _...': fn()
+            15..62 '{     let x: _ = ...': ()
             25..26 'x': usize
             32..33 '5': usize
             43..44 'y': usize
-            47..48 'x': usize
-            47..52 'x + 1': usize
-            51..52 '1': usize
-            67..86 'fn (p: _) { p + 1 }': fn(usize) -> usize
-            71..72 'p': usize
-            77..86 '{ p + 1 }': usize
-            79..80 'p': usize
-            79..84 'p + 1': usize
-            83..84 '1': usize
-            99..114 'fn (_: _) { 5 }': fn(_) -> usize
-            103..104 '_': _
-            109..114 '{ 5 }': usize
-            111..112 '5': usize
+            54..55 'x': usize
+            54..59 'x + 1': usize
+            58..59 '1': usize
+            74..102 'fn (p: _) -> usiz...': fn(usize) -> usize
+            78..79 'p': usize
+            93..102 '{ p + 1 }': usize
+            95..96 'p': usize
+            95..100 'p + 1': usize
+            99..100 '1': usize
+            115..139 'fn (_: _) -> usiz...': fn(_) -> usize
+            119..120 '_': _
+            134..139 '{ 5 }': usize
+            136..137 '5': usize
         "#]],
     );
 }
@@ -763,28 +772,30 @@ fn hole_annotated_item_infers_together_with_its_group() {
     // bodies — so the use in main sees bool, not a silent `{error}`.
     check_diagnostics(
         r#"
-static even: _ = fn (n) { if n == 0 { true } else { odd(n - 1) } };
+static even: _ = fn (n: usize) { if n == 0 { true } else { odd(n - 1) } };
 static odd = fn (n: _) { if n == 0 { false } else { even(n - 1) } };
 static main = fn { print(even(4)); };
 "#,
         expect![[r#"
-            163..170: type mismatch: expected `str`, found `bool`
+            170..177: type mismatch: expected `str`, found `bool`
         "#]],
     );
 }
 
 #[test]
 fn hole_annotated_item_signature_flows_to_dependents() {
-    // `static x: _ = 5;` publishes the group-inferred signature: the use
-    // in main sees `usize` (and only the print mismatch) instead of the
-    // diagnostics being swallowed by a silent `{error}`.
+    // `static x: _ = true;` publishes the group-inferred signature: the use
+    // in main sees `bool` (and only the print mismatch) instead of the
+    // diagnostics being swallowed by a silent `{error}`. (The initializer is
+    // a bool because number literals are never defaulted — a bare `5` has no
+    // defining use to pin it.)
     check_diagnostics(
         r#"
-static x: _ = 5;
+static x: _ = true;
 static main = fn { print(x); };
 "#,
         expect![[r#"
-            43..44: type mismatch: expected `str`, found `usize`
+            46..47: type mismatch: expected `str`, found `bool`
         "#]],
     );
 }
@@ -909,7 +920,7 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            69..74: `if` branches have incompatible types: `usize` vs `str`; add a type annotation to decide between them (this branch has type `usize` at 58..59)
+            58..59: type mismatch: expected `str`, found `{number}` (this branch has type `str` at 69..74)
         "#]],
     );
 }
@@ -924,7 +935,7 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            63..64: type mismatch: expected `str`, found `usize` (expected `str` because of this annotation at 45..48)
+            63..64: type mismatch: expected `str`, found `{number}` (expected `str` because of this annotation at 45..48)
         "#]],
     );
     check_diagnostics(
@@ -951,7 +962,7 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            58..59: type mismatch: expected `str`, found `usize` (this call requires `str` at 79..84) (this argument needs to be `str` at 85..86)
+            58..59: type mismatch: expected `str`, found `{number}` (this call requires `str` at 79..84) (this argument needs to be `str` at 85..86)
         "#]],
     );
     // Else branch is the culprit — squiggle on the literal, hint at print call.
@@ -963,7 +974,7 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            70..71: type mismatch: expected `str`, found `usize` (this call requires `str` at 79..84) (this argument needs to be `str` at 85..86)
+            70..71: type mismatch: expected `str`, found `{number}` (this call requires `str` at 79..84) (this argument needs to be `str` at 85..86)
         "#]],
     );
 }
@@ -981,7 +992,7 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            94..95: type mismatch: expected `str`, found `usize` (this call requires `str` at 105..110) (this argument needs to be `str` at 111..112)
+            94..95: type mismatch: expected `str`, found `{number}` (this call requires `str` at 105..110) (this argument needs to be `str` at 111..112)
         "#]],
     );
 }
@@ -1040,7 +1051,7 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            82..83: type mismatch: expected `str`, found `usize` (this branch has type `str` at 58..60) (this branch has type `str` at 93..95)
+            82..83: type mismatch: expected `str`, found `{number}` (this branch has type `str` at 58..60) (this branch has type `str` at 93..95)
         "#]],
     );
 }
@@ -1059,7 +1070,8 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            94..96: type mismatch: expected `usize`, found `str` (this branch has type `usize` at 70..71) (this branch has type `usize` at 81..82)
+            70..71: type mismatch: expected `str`, found `{number}` (this branch has type `str` at 94..96)
+            81..82: type mismatch: expected `str`, found `{number}` (this branch has type `str` at 94..96)
         "#]],
     );
 }
@@ -1079,7 +1091,7 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            75..76: type mismatch: expected `str`, found `usize` (expected `str` because of this annotation at 45..48)
+            75..76: type mismatch: expected `str`, found `{number}` (expected `str` because of this annotation at 45..48)
         "#]],
     );
     check_diagnostics(
@@ -1090,7 +1102,7 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            88..89: type mismatch: expected `str`, found `usize` (expected `str` because of this annotation at 45..48)
+            88..89: type mismatch: expected `str`, found `{number}` (expected `str` because of this annotation at 45..48)
         "#]],
     );
     check_diagnostics(
@@ -1101,7 +1113,7 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            103..104: type mismatch: expected `str`, found `usize` (expected `str` because of this annotation at 45..48)
+            103..104: type mismatch: expected `str`, found `{number}` (expected `str` because of this annotation at 45..48)
         "#]],
     );
 }
@@ -1158,7 +1170,8 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            89..92: `if` branches have incompatible types: `usize` vs `str`; add a type annotation to decide between them (this branch has type `usize` at 78..79)
+            78..79: type mismatch: expected `str`, found `{number}` (this branch has type `str` at 89..92)
+            96..97: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -1178,7 +1191,7 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            109..112: `if` branches have incompatible types: `usize` vs `str`; add a type annotation to decide between them (this branch has type `usize` at 98..99)
+            98..99: type mismatch: expected `str`, found `{number}` (this branch has type `str` at 109..112)
         "#]],
     );
 }
@@ -1191,7 +1204,7 @@ fn call_argument_join_resolves_against_the_parameter_type() {
     check_diagnostics(
         r#"static f = fn (n: usize) -> () { print(if n == 0 { "s" } else { 1 }); };"#,
         expect![[r#"
-            64..65: type mismatch: expected `str`, found `usize`
+            64..65: type mismatch: expected `str`, found `{number}`
         "#]],
     );
 }
@@ -1209,7 +1222,7 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            98..99: type mismatch: expected `str`, found `usize` (expected `str` because of this annotation at 45..48)
+            98..99: type mismatch: expected `str`, found `{number}` (expected `str` because of this annotation at 45..48)
         "#]],
     );
     // And when the surviving leaves all agree, the nest is clean.
@@ -1267,7 +1280,7 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            101..103: `if` branches have incompatible types: `usize` vs `str`; add a type annotation to decide between them (this branch has type `usize` at 58..91)
+            58..91: type mismatch: expected `str`, found `{number}` (this branch has type `str` at 101..103)
         "#]],
     );
 }
@@ -1286,8 +1299,7 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            63..97: type mismatch: expected `str`, found `usize` (expected `str` because of this annotation at 45..48)
-            89..91: `if` branches have incompatible types: `usize` vs `str`; add a type annotation to decide between them (this branch has type `usize` at 78..79)
+            78..79: type mismatch: expected `str`, found `{number}` (this branch has type `str` at 89..91)
         "#]],
     );
 }
@@ -1311,11 +1323,11 @@ fn group_member_signature_not_overridden_by_use() {
     // `g`'s signature to `str` — the mismatch belongs at the call site.
     check_diagnostics(
         r#"
-static g = fn (c: bool) { if c { 1 } else { 2 } };
-static main = fn { print(g(true)); };
+static g = fn (c: bool, n: usize) { if c { n } else { 2 } };
+static main = fn { print(g(true, 3)); };
 "#,
         expect![[r#"
-            77..84: type mismatch: expected `str`, found `usize`
+            87..97: type mismatch: expected `str`, found `usize`
         "#]],
     );
 }
@@ -1374,7 +1386,7 @@ fn equality_operands_must_agree() {
     check_diagnostics(
         r#"static x: bool = 1 == "one";"#,
         expect![[r#"
-            22..27: type mismatch: expected `usize`, found `str` (this operand has type `usize` at 17..18)
+            22..27: type mismatch: expected `{number}`, found `str` (this operand has type `{number}` at 17..18)
         "#]],
     );
 }
@@ -1424,9 +1436,9 @@ fn const_block_is_transparent_for_typing() {
     check_infer(
         "static x = const { 5 };",
         expect![[r#"
-            11..22 'const { 5 }': usize
-            17..22 '{ 5 }': usize
-            19..20 '5': usize
+            11..22 'const { 5 }': {number}
+            17..22 '{ 5 }': {number}
+            19..20 '5': {number}
         "#]],
     );
 }
@@ -1473,7 +1485,9 @@ fn directly_called_const_fn_literal_is_allowed() {
 fn panic_is_allowed_in_const_contexts() {
     check_diagnostics(
         r#"static x: usize = if 1 == 2 { panic("impossible") } else { 5 };"#,
-        expect![[r#""#]],
+        expect![[r#"
+            21..22: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
     );
 }
 
@@ -1624,13 +1638,13 @@ fn assignment_infers_value_against_the_bindings_type() {
     check_infer(
         "static f = fn { let mut x = 1; x = 2; x };",
         expect![[r#"
-            11..41 'fn { let mut x = ...': fn() -> usize
-            14..41 '{ let mut x = 1; ...': usize
-            24..25 'x': usize
-            28..29 '1': usize
-            31..32 'x': usize
-            35..36 '2': usize
-            38..39 'x': usize
+            11..41 'fn { let mut x = ...': fn() -> {number}
+            14..41 '{ let mut x = 1; ...': {number}
+            24..25 'x': {number}
+            28..29 '1': {number}
+            31..32 'x': {number}
+            35..36 '2': {number}
+            38..39 'x': {number}
         "#]],
     );
 }
@@ -1642,7 +1656,7 @@ fn assignment_value_must_match_the_bindings_type() {
     check_diagnostics(
         r#"static f = fn { let mut x = 1; x = "no"; };"#,
         expect![[r#"
-            35..39: type mismatch: expected `usize`, found `str` (`x` was inferred to have type `usize` from its initializer at 24..25)
+            35..39: type mismatch: expected `{number}`, found `str` (`x` was inferred to have type `{number}` from its initializer at 24..25)
         "#]],
     );
 }
@@ -1662,6 +1676,7 @@ fn assignment_to_an_immutable_let_is_rejected() {
     check_diagnostics(
         "static f = fn { let x = 1; x = 2; };",
         expect![[r#"
+            24..25: cannot infer the type of this number: it has no defining use — add a type annotation
             27..28: cannot assign to `x`: it is not declared `mut` (`x` is declared without `mut` here at 20..21)
         "#]],
     );
@@ -1723,13 +1738,15 @@ fn mutation_is_allowed_in_const_contexts() {
     // No const-check rule rejects local mutation; only calls are restricted.
     check_diagnostics(
         "static x = const { let mut n = 1; n = n + 1; n };",
-        expect![[""]],
+        expect![[r#"
+            31..32: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
     );
 }
 
 #[test]
 fn assign_to_immutable_let_offers_a_make_mutable_fix() {
-    let text = "static f = fn { let x = 1; x = 2; };";
+    let text = "static f = fn { let x: usize = 1; x = 2; };";
     let db = RootDatabase::default();
     let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
     let diagnostics = crate::file_diagnostics(&db, file);
@@ -1764,7 +1781,7 @@ fn assign_to_immutable_param_offers_a_make_mutable_fix() {
 fn mut_on_hole_offers_a_remove_mut_fix() {
     // Validation's "`mut` has no effect on `_`" error carries a fix that
     // deletes the `mut` keyword and the whitespace up to the hole.
-    let text = "static f = fn { let mut _ = 1; };";
+    let text = "static f = fn { let mut _: usize = 1; };";
     let db = RootDatabase::default();
     let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
     let diagnostics = crate::file_diagnostics(&db, file);
@@ -1800,9 +1817,9 @@ fn record_literal_infers_structurally() {
         expect![[r#"
             11..50 'fn { let p = stru...': fn()
             14..50 '{ let p = struct ...': ()
-            20..21 'p': struct { x: usize, y: str }
-            24..47 'struct { x: 1, y:...': struct { x: usize, y: str }
-            36..37 '1': usize
+            20..21 'p': struct { x: {number}, y: str }
+            24..47 'struct { x: 1, y:...': struct { x: {number}, y: str }
+            36..37 '1': {number}
             42..45 '"s"': str
         "#]],
     );
@@ -1868,6 +1885,7 @@ fn record_literal_extra_field() {
         r#"static f = fn { let p: struct { x: usize } = struct { x: 1, z: 2 }; };"#,
         expect![[r#"
             60..61: no field `z` in expected type `struct { x: usize }`
+            63..64: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -1877,7 +1895,7 @@ fn record_literal_against_non_record_expectation() {
     check_diagnostics(
         r#"static f = fn { let n: usize = struct { x: 1 }; };"#,
         expect![[r#"
-            31..46: type mismatch: expected `usize`, found `struct { x: usize }` (expected `usize` because of this annotation at 23..28)
+            31..46: type mismatch: expected `usize`, found `struct { x: {error} }` (expected `usize` because of this annotation at 23..28)
         "#]],
     );
 }
@@ -1889,12 +1907,12 @@ fn field_access_infers_the_field_type() {
         expect![[r#"
             11..55 'fn { let p = stru...': fn()
             14..55 '{ let p = struct ...': ()
-            20..21 'p': struct { x: usize }
-            24..39 'struct { x: 1 }': struct { x: usize }
-            36..37 '1': usize
-            45..46 'y': usize
-            49..50 'p': struct { x: usize }
-            49..52 'p.x': usize
+            20..21 'p': struct { x: {number} }
+            24..39 'struct { x: 1 }': struct { x: {number} }
+            36..37 '1': {number}
+            45..46 'y': {number}
+            49..50 'p': struct { x: {number} }
+            49..52 'p.x': {number}
         "#]],
     );
 }
@@ -1904,7 +1922,8 @@ fn field_access_unknown_field() {
     check_diagnostics(
         r#"static f = fn { let p = struct { x: 1 }; p.z; };"#,
         expect![[r#"
-            43..44: no field `z` on `struct { x: usize }`
+            36..37: cannot infer the type of this number: it has no defining use — add a type annotation
+            43..44: no field `z` on `struct { x: {number} }`
         "#]],
     );
 }
@@ -1914,7 +1933,8 @@ fn field_access_on_non_record() {
     check_diagnostics(
         r#"static f = fn { let n = 1; n.x; };"#,
         expect![[r#"
-            29..30: no field `x` on `usize`
+            24..25: cannot infer the type of this number: it has no defining use — add a type annotation
+            27..28: cannot determine the type of this expression; add a type annotation
         "#]],
     );
 }
@@ -1988,7 +2008,7 @@ fn if_branches_with_mismatched_records_report_branch_mismatch() {
     check_diagnostics(
         r#"static f = fn (c: bool) { if c { struct { x: 1 } } else { struct { x: "s" } } };"#,
         expect![[r#"
-            58..75: `if` branches have incompatible types: `struct { x: usize }` vs `struct { x: str }`; add a type annotation to decide between them (this branch has type `struct { x: usize }` at 33..48)
+            33..48: type mismatch: expected `struct { x: str }`, found `struct { x: {number} }` (this branch has type `struct { x: str }` at 58..75)
         "#]],
     );
 }
@@ -1997,7 +2017,10 @@ fn if_branches_with_mismatched_records_report_branch_mismatch() {
 fn record_literal_in_initializer_is_const_clean() {
     // Record construction is not a call: const-checking has nothing to say
     // about a pure record literal in an item initializer.
-    check_diagnostics(r#"static p = struct { x: 1, y: "s" };"#, expect![[r#""#]]);
+    check_diagnostics(
+        r#"static p = struct { x: { let n: usize = 1; n }, y: "s" };"#,
+        expect![[r#""#]],
+    );
 }
 
 #[test]
@@ -2106,6 +2129,7 @@ static Foo = 5;
 "#,
         expect![[r#"
             40..43: `Foo` is defined multiple times (first defined here at 6..9)
+            46..47: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -2130,6 +2154,7 @@ static five = 5;
 type Foo = struct { a: 5, b, c: missing, d: five };
 "#,
         expect![[r#"
+            15..16: cannot infer the type of this number: it has no defining use — add a type annotation
             41..42: expected a type for field `a`
             44..45: expected a type for field `b`
             50..57: unknown type `missing`
@@ -2220,7 +2245,7 @@ type Foo = struct { x: usize };
 static p = Foo(5);
 "#,
         expect![[r#"
-            48..49: type mismatch: expected `struct { x: usize }`, found `usize` (expected `struct { x: usize }` because of `Foo`'s declaration at 6..9)
+            48..49: type mismatch: expected `struct { x: usize }`, found `{number}` (expected `struct { x: usize }` because of `Foo`'s declaration at 6..9)
         "#]],
     );
 }
@@ -2235,6 +2260,7 @@ static q = Foo();
 "#,
         expect![[r#"
             44..67: `Foo` takes exactly one argument (its underlying `struct` value), found 2 (`Foo` is defined here at 6..9)
+            65..66: cannot infer the type of this number: it has no defining use — add a type annotation
             80..85: `Foo` takes exactly one argument (its underlying `struct` value), found 0 (`Foo` is defined here at 6..9)
         "#]],
     );
@@ -2251,7 +2277,7 @@ static a: Foo = struct { x: 1 };
 static b: struct { x: usize } = Foo(struct { x: 1 });
 "#,
         expect![[r#"
-            49..64: type mismatch: expected `Foo`, found `struct { x: usize }`; `Foo` is a distinct type — construct it with `Foo(...)` (expected `Foo` because of this annotation at 43..46)
+            49..64: type mismatch: expected `Foo`, found `struct { x: {error} }`; `Foo` is a distinct type — construct it with `Foo(...)` (expected `Foo` because of this annotation at 43..46)
             98..118: type mismatch: expected `struct { x: usize }`, found `Foo` (expected `struct { x: usize }` because of this annotation at 76..95)
         "#]],
     );
@@ -2295,7 +2321,7 @@ type Foo = struct { x: usize };
 static eq = Foo(struct { x: 1 }) == struct { x: 1 };
 "#,
         expect![[r#"
-            69..84: type mismatch: expected `Foo`, found `struct { x: usize }`; `Foo` is a distinct type — construct it with `Foo(...)` (this operand has type `Foo` at 45..65)
+            69..84: type mismatch: expected `Foo`, found `struct { x: {error} }`; `Foo` is a distinct type — construct it with `Foo(...)` (this operand has type `Foo` at 45..65)
         "#]],
     );
 }
@@ -2611,6 +2637,7 @@ static five = 5;
 static x = five::Circle;
 "#,
         expect![[r#"
+            15..16: cannot infer the type of this number: it has no defining use — add a type annotation
             29..41: `five` is not a type; only an `enum` type has `::` variants
         "#]],
     );
@@ -2638,6 +2665,7 @@ static s = Shape(3);
 "#,
         expect![[r#"
             49..57: `Shape` is an `enum`; construct it through one of its variants (`Shape::<variant>(...)`) (`Shape` is defined here at 6..11)
+            55..56: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -2731,7 +2759,7 @@ static f = fn {
 };
 "#,
         expect![[r#"
-            99..100: type mismatch: expected `Shape`, found `usize` (`s` was inferred to have type `Shape` from its initializer at 73..74)
+            99..100: type mismatch: expected `Shape`, found `{number}` (`s` was inferred to have type `Shape` from its initializer at 73..74)
         "#]],
     );
 }
@@ -2831,7 +2859,8 @@ static f = fn (s: Shape, c: bool) {
 };
 "#,
         expect![[r#"
-            171..175: type mismatch: expected `usize`, found `str` (this branch has type `usize` at 145..146) (this branch has type `usize` at 208..209)
+            171..175: `if` branches have incompatible types: `usize` vs `str`; add a type annotation to decide between them (this branch has type `usize` at 145..146)
+            208..209: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -3360,12 +3389,12 @@ static f = fn {
             15..81 '{     loop {     ...': !
             21..79 'loop {         le...': !
             26..79 '{         let n =...': ()
-            40..41 'n': usize
-            44..61 'loop { break 1; }': usize
+            40..41 'n': {number}
+            44..61 'loop { break 1; }': {number}
             49..61 '{ break 1; }': ()
             51..58 'break 1': !
-            57..58 '1': usize
-            71..72 'n': usize
+            57..58 '1': {number}
+            71..72 'n': {number}
         "#]],
     );
 }
@@ -3376,6 +3405,7 @@ fn break_outside_loop_errors() {
         "static f = fn { break 1; };",
         expect![[r#"
             16..23: `break` outside of a loop: there is no enclosing `loop` to exit
+            22..23: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -3396,6 +3426,7 @@ fn dangling_break_at_top_level_errors() {
         "static x = break 1;",
         expect![[r#"
             11..18: `break` outside of a loop: there is no enclosing `loop` to exit
+            17..18: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -3415,6 +3446,7 @@ static f = fn {
 "#,
         expect![[r#"
             49..56: `break` outside of a loop: there is no enclosing `loop` to exit
+            55..56: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -3433,6 +3465,7 @@ static f = fn {
 "#,
         expect![[r#"
             52..59: `break` outside of a loop: there is no enclosing `loop` to exit
+            58..59: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -3465,10 +3498,10 @@ fn let_record_destructure_binds_correct_types() {
         expect![[r#"
             11..64 'fn { let struct {...': fn()
             14..64 '{ let struct { x,...': ()
-            29..30 'x': usize
+            29..30 'x': {number}
             32..33 'y': str
-            38..61 'struct { x: 1, y:...': struct { x: usize, y: str }
-            50..51 '1': usize
+            38..61 'struct { x: 1, y:...': struct { x: {number}, y: str }
+            50..51 '1': {number}
             56..59 '"s"': str
         "#]],
     );
@@ -3480,6 +3513,7 @@ fn let_record_destructure_rename_binds_only_the_new_name() {
     check_diagnostics(
         r#"static f = fn { let struct { x as a } = struct { x: 1 }; let b = a; let c = x; };"#,
         expect![[r#"
+            52..53: cannot infer the type of this number: it has no defining use — add a type annotation
             76..77: unresolved name `x`
         "#]],
     );
@@ -3491,6 +3525,8 @@ fn let_record_destructure_missing_field_without_rest_errors() {
         r#"static f = fn { let struct { x } = struct { x: 1, y: 2 }; };"#,
         expect![[r#"
             20..32: pattern does not mention field `y`; add `..` to ignore it
+            47..48: cannot infer the type of this number: it has no defining use — add a type annotation
+            53..54: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -3501,6 +3537,9 @@ fn let_record_destructure_missing_several_fields_without_rest_errors() {
         r#"static f = fn { let struct { x } = struct { x: 1, y: 2, z: 3 }; };"#,
         expect![[r#"
             20..32: pattern does not mention fields `y`, `z`; add `..` to ignore them
+            47..48: cannot infer the type of this number: it has no defining use — add a type annotation
+            53..54: cannot infer the type of this number: it has no defining use — add a type annotation
+            59..60: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -3509,7 +3548,10 @@ fn let_record_destructure_missing_several_fields_without_rest_errors() {
 fn let_record_destructure_with_rest_ignores_missing_fields() {
     check_diagnostics(
         r#"static f = fn { let struct { x, .. } = struct { x: 1, y: 2 }; };"#,
-        expect![[r#""#]],
+        expect![[r#"
+            51..52: cannot infer the type of this number: it has no defining use — add a type annotation
+            57..58: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
     );
 }
 
@@ -3518,8 +3560,10 @@ fn let_record_destructure_unknown_field_errors() {
     check_diagnostics(
         r#"static f = fn { let struct { x, z } = struct { x: 1, y: 2 }; };"#,
         expect![[r#"
-            20..35: no field `z` on `struct { x: usize, y: usize }`
+            20..35: no field `z` on `struct { x: {number}, y: {number} }`
             20..35: pattern does not mention field `y`; add `..` to ignore it
+            50..51: cannot infer the type of this number: it has no defining use — add a type annotation
+            56..57: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -3624,6 +3668,7 @@ fn newtype_destructure_unknown_type_errors() {
         r#"static f = fn { let Bogus(struct { x }) = 1; };"#,
         expect![[r#"
             20..39: `Bogus` does not name a type
+            42..43: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -3635,7 +3680,8 @@ fn record_destructure_unknown_field_still_types_it_as_error_not_cascading() {
     check_diagnostics(
         r#"static f = fn { let struct { x, z, .. } = struct { x: 1 }; let n: usize = z; };"#,
         expect![[r#"
-            20..39: no field `z` on `struct { x: usize }`
+            20..39: no field `z` on `struct { x: {number} }`
+            54..55: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -3644,7 +3690,10 @@ fn record_destructure_unknown_field_still_types_it_as_error_not_cascading() {
 fn per_binding_mut_in_record_pattern_allows_assignment() {
     check_diagnostics(
         r#"static f = fn { let struct { mut x, y } = struct { x: 1, y: 2 }; x = 3; };"#,
-        expect![[r#""#]],
+        expect![[r#"
+            54..55: cannot infer the type of this number: it has no defining use — add a type annotation
+            60..61: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
     );
 }
 
@@ -3653,6 +3702,8 @@ fn record_pattern_binding_without_mut_is_immutable() {
     check_diagnostics(
         r#"static f = fn { let struct { x, y } = struct { x: 1, y: 2 }; x = 3; };"#,
         expect![[r#"
+            50..51: cannot infer the type of this number: it has no defining use — add a type annotation
+            56..57: cannot infer the type of this number: it has no defining use — add a type annotation
             61..62: cannot assign to `x`: it is not declared `mut` (`x` is declared without `mut` here at 29..30)
         "#]],
     );
@@ -3664,6 +3715,7 @@ fn let_mut_on_a_destructuring_pattern_is_a_syntax_error() {
         r#"static f = fn { let mut struct { x } = struct { x: 1 }; };"#,
         expect![[r#"
             20..36: `mut` applies to individual bindings in a destructuring pattern
+            51..52: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -3682,7 +3734,9 @@ fn field_assign_on_a_mut_root_is_clean() {
 fn nested_field_assign_on_a_mut_root_is_clean() {
     check_diagnostics(
         r#"static f = fn { let mut p = struct { a: struct { b: 1 } }; p.a.b = 2; };"#,
-        expect![[r#""#]],
+        expect![[r#"
+            52..53: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
     );
 }
 
@@ -3703,7 +3757,7 @@ fn field_assign_on_an_immutable_root_blames_the_root() {
 fn field_assign_to_immutable_root_offers_the_make_mut_fix() {
     // Same machinery as a plain assignment to an immutable binding: the
     // insert-`mut` fix anchors at the binding's declaration.
-    let text = "static f = fn { let p = struct { x: 1 }; p.x = 2; };";
+    let text = "static f = fn { let p: struct { x: usize } = struct { x: 1 }; p.x = 2; };";
     let db = RootDatabase::default();
     let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
     let diagnostics = crate::file_diagnostics(&db, file);
@@ -3741,7 +3795,8 @@ fn unknown_field_in_an_assign_target_reports_no_such_field() {
     check_diagnostics(
         r#"static f = fn { let mut p = struct { x: 1 }; p.y = 2; };"#,
         expect![[r#"
-            47..48: no field `y` on `struct { x: usize }`
+            40..41: cannot infer the type of this number: it has no defining use — add a type annotation
+            47..48: no field `y` on `struct { x: {number} }`
         "#]],
     );
 }
@@ -3751,7 +3806,8 @@ fn field_assign_through_a_non_record_reports_no_such_field() {
     check_diagnostics(
         r#"static f = fn { let mut n = 1; n.x = 2; };"#,
         expect![[r#"
-            33..34: no field `x` on `usize`
+            28..29: cannot infer the type of this number: it has no defining use — add a type annotation
+            31..32: cannot determine the type of this expression; add a type annotation
         "#]],
     );
 }
@@ -3816,16 +3872,16 @@ fn non_const_fn_literal_call_offers_no_fix() {
     // A directly-called plain `fn` literal has no named declaration to
     // edit — nothing to offer.
     check_diagnostics(
-        "static f = const { (fn { 1 })() };",
+        "static f = const { (fn () -> usize { 1 })() };",
         expect![[r#"
-            20..28: cannot call this `fn` literal in a const context; marking it `const fn` would allow this (this `const` block is a const context at 11..16)
+            20..40: cannot call this `fn` literal in a const context; marking it `const fn` would allow this (this `const` block is a const context at 11..16)
         "#]],
     );
     let db = RootDatabase::default();
     let file = SourceFile::new(
         &db,
         "test.must".to_owned(),
-        "static f = const { (fn { 1 })() };".to_owned(),
+        "static f = const { (fn () -> usize { 1 })() };".to_owned(),
     );
     let diagnostics = crate::file_diagnostics(&db, file);
     assert_eq!(diagnostics.len(), 1);
@@ -3972,7 +4028,6 @@ fn expectation_for_bare_let_initializer_is_its_own_type() {
         expect![[r#"
             14..31 'fn { let x = 5; }': fn()
             17..31 '{ let x = 5; }': ()
-            27..28 '5': usize
         "#]],
     );
 }
@@ -4168,7 +4223,7 @@ fn rigid_param_field_access_call_and_arithmetic_error_ordinarily() {
         expect![[r#"
             42..47: no field `field` on `T`
             57..58: expression of type `T` is not callable
-            70..71: type mismatch: expected `usize`, found `T` (`+` requires `usize` operands at 72..73)
+            70..71: type mismatch: expected `{number}`, found `T` (`+` requires `{number}` operands at 72..73)
         "#]],
     );
 }
@@ -4365,6 +4420,7 @@ fn generic_arg_kind_mismatches() {
         "static id = fn::<T>(x: T) -> T { x };\nstatic g = fn () -> usize { id::<42>(4) };",
         expect![[r#"
             66..74: `T` is a type parameter; write a type
+            71..73: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
     // ...and a type where a const param is declared.
@@ -4556,7 +4612,7 @@ fn fn_typed_const_param_smuggled_in_a_record_is_rejected_too() {
             35..37: expected `,`
             38..43: expected `,`
             44..45: expected `,`
-            60..61: type mismatch: expected `usize`, found `usize` (expected `usize` because of this return type at 49..57)
+            60..61: type mismatch: expected `usize`, found `{number}` (expected `usize` because of this return type at 49..57)
         "#]],
     );
 }
@@ -4638,6 +4694,7 @@ fn generic_type_arity_mismatch_blames_the_use_site() {
          static main = fn () { let p = Pair::<usize, str>(struct { a: 1, b: 2 }); };",
         expect![[r#"
             70..88: `Pair` takes 1 generic argument, found 2 (declared here at 5..9)
+            101..102: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -4672,12 +4729,12 @@ fn annotation_hole_arg_is_pinned_by_the_initializer() {
         expect![[r#"
             54..111 'fn () { let p: Pa...': fn()
             60..111 '{ let p: Pair::<_...': ()
-            66..67 'p': Pair::<usize>
-            81..85 'Pair': fn(struct { a: usize, b: usize }) -> Pair::<usize>
-            81..108 'Pair(struct { a: ...': Pair::<usize>
-            86..107 'struct { a: 1, b:...': struct { a: usize, b: usize }
-            98..99 '1': usize
-            104..105 '2': usize
+            66..67 'p': Pair::<{number}>
+            81..85 'Pair': fn(struct { a: {number}, b: {number} }) -> Pair::<{number}>
+            81..108 'Pair(struct { a: ...': Pair::<{number}>
+            86..107 'struct { a: 1, b:...': struct { a: {number}, b: {number} }
+            98..99 '1': {number}
+            104..105 '2': {number}
         "#]],
     );
 }
@@ -4912,6 +4969,7 @@ fn kind_mismatches_on_a_generic_type_mention() {
             87..92: `N` is a const parameter; write a value (a literal, or `const <expr>`)
             96..111: `T` is a type parameter; write a type
             96..111: `N` is a const parameter; write a value (a literal, or `const <expr>`)
+            102..103: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -5001,6 +5059,7 @@ fn addr_of_mut_requires_a_mut_root() {
     check_diagnostics(
         "static main = fn { let x = 1; let p = &raw mut x; };",
         expect![[r#"
+            27..28: cannot infer the type of this number: it has no defining use — add a type annotation
             47..48: cannot take `&raw mut` of `x`: it is not declared `mut` (`x` is declared without `mut` here at 23..24)
         "#]],
     );
@@ -5011,6 +5070,7 @@ fn addr_of_mut_of_a_field_blames_the_root() {
     check_diagnostics(
         "static main = fn { let r = struct { a: 1 }; let p = &raw mut r.a; };",
         expect![[r#"
+            39..40: cannot infer the type of this number: it has no defining use — add a type annotation
             61..62: cannot take `&raw mut` of `r.a`: `r` is not declared `mut` (`r` is declared without `mut` here at 23..24)
         "#]],
     );
@@ -5020,7 +5080,9 @@ fn addr_of_mut_of_a_field_blames_the_root() {
 fn addr_of_shared_needs_no_mut() {
     check_diagnostics(
         "static main = fn { let x = 1; let p = &raw x; };",
-        expect![[r#""#]],
+        expect![[r#"
+            27..28: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
     );
 }
 
@@ -5029,6 +5091,8 @@ fn addr_of_mut_of_a_static_is_reserved() {
     check_diagnostics(
         "static s = 7;\nstatic main = fn { let p = &raw mut s; };",
         expect![[r#"
+            11..12: cannot infer the type of this number: it has no defining use — add a type annotation
+            50..51: cannot infer the type of `s` across items; add a type annotation to its definition (defined here at 7..8)
             50..51: cannot take `&raw mut` of `s`: `static mut` is not supported yet (`s` is defined here at 7..8)
         "#]],
     );
@@ -5038,7 +5102,12 @@ fn addr_of_mut_of_a_static_is_reserved() {
 fn addr_of_shared_of_items_is_fine() {
     check_diagnostics(
         "static s = 7;\nconst c = 8;\nstatic main = fn { let p = &raw s; let q = &raw c; };",
-        expect![[r#""#]],
+        expect![[r#"
+            11..12: cannot infer the type of this number: it has no defining use — add a type annotation
+            24..25: cannot infer the type of this number: it has no defining use — add a type annotation
+            59..60: cannot infer the type of `s` across items; add a type annotation to its definition (defined here at 7..8)
+            75..76: cannot infer the type of `c` across items; add a type annotation to its definition (defined here at 20..21)
+        "#]],
     );
 }
 
@@ -5048,6 +5117,7 @@ fn addr_of_a_non_place_errors() {
         "static main = fn { let p = &raw 5; };",
         expect![[r#"
             27..33: `&raw` can only take the address of a variable, one of its fields, or a `static`
+            32..33: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -5056,7 +5126,9 @@ fn addr_of_a_non_place_errors() {
 fn addr_of_through_a_deref_works_inside_unsafe() {
     check_diagnostics(
         "static main = fn { let mut x = 1; let p = &raw mut x; let q = unsafe { &raw mut p.* }; };",
-        expect![[r#""#]],
+        expect![[r#"
+            31..32: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
     );
 }
 
@@ -5067,6 +5139,7 @@ fn addr_of_through_a_deref_still_requires_unsafe() {
     check_diagnostics(
         "static main = fn { let mut x = 1; let p = &raw mut x; let q = &raw mut p.*; };",
         expect![[r#"
+            31..32: cannot infer the type of this number: it has no defining use — add a type annotation
             71..74: dereferencing a raw pointer requires an `unsafe { ... }` block
         "#]],
     );
@@ -5083,7 +5156,8 @@ static main = fn {
 };
 "#,
         expect![[r#"
-            94..108: cannot take `&raw mut` through `&raw struct { a: usize }`: minting a mutating address needs a `&raw mut` pointer
+            48..49: cannot infer the type of this number: it has no defining use — add a type annotation
+            94..108: cannot take `&raw mut` through `&raw struct { a: {number} }`: minting a mutating address needs a `&raw mut` pointer
         "#]],
     );
 }
@@ -5098,7 +5172,9 @@ static main = fn {
     let q = unsafe { &raw p.*.a };
 };
 "#,
-        expect![[r#""#]],
+        expect![[r#"
+            48..49: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
     );
 }
 
@@ -5115,20 +5191,20 @@ static main = fn {
         expect![[r#"
             15..123 'fn {     let mut ...': fn()
             18..123 '{     let mut r =...': ()
-            32..33 'r': struct { a: usize, b: usize }
-            36..57 'struct { a: 1, b:...': struct { a: usize, b: usize }
-            48..49 '1': usize
-            54..55 '2': usize
-            67..68 'p': &raw mut struct { a: usize, b: usize }
-            71..81 '&raw mut r': &raw mut struct { a: usize, b: usize }
-            80..81 'r': struct { a: usize, b: usize }
-            91..92 'q': &raw mut usize
-            95..120 'unsafe { &raw mut...': &raw mut usize
-            102..120 '{ &raw mut p.*.a }': &raw mut usize
-            104..118 '&raw mut p.*.a': &raw mut usize
-            113..114 'p': &raw mut struct { a: usize, b: usize }
-            113..116 'p.*': struct { a: usize, b: usize }
-            113..118 'p.*.a': usize
+            32..33 'r': struct { a: {number}, b: {number} }
+            36..57 'struct { a: 1, b:...': struct { a: {number}, b: {number} }
+            48..49 '1': {number}
+            54..55 '2': {number}
+            67..68 'p': &raw mut struct { a: {number}, b: {number} }
+            71..81 '&raw mut r': &raw mut struct { a: {number}, b: {number} }
+            80..81 'r': struct { a: {number}, b: {number} }
+            91..92 'q': &raw mut {number}
+            95..120 'unsafe { &raw mut...': &raw mut {number}
+            102..120 '{ &raw mut p.*.a }': &raw mut {number}
+            104..118 '&raw mut p.*.a': &raw mut {number}
+            113..114 'p': &raw mut struct { a: {number}, b: {number} }
+            113..116 'p.*': struct { a: {number}, b: {number} }
+            113..118 'p.*.a': {number}
         "#]],
     );
 }
@@ -5156,6 +5232,7 @@ fn deref_write_outside_unsafe_errors() {
     check_diagnostics(
         "static main = fn { let mut x = 1; let p = &raw mut x; p.* = 2; };",
         expect![[r#"
+            31..32: cannot infer the type of this number: it has no defining use — add a type annotation
             54..57: dereferencing a raw pointer requires an `unsafe { ... }` block
         "#]],
     );
@@ -5166,7 +5243,8 @@ fn deref_write_through_a_shared_pointer_errors() {
     check_diagnostics(
         "static main = fn { let mut x = 1; let p = &raw x; unsafe { p.* = 2; } };",
         expect![[r#"
-            59..62: cannot assign through `&raw usize`: writing needs a `&raw mut` pointer
+            31..32: cannot infer the type of this number: it has no defining use — add a type annotation
+            59..62: cannot assign through `&raw {number}`: writing needs a `&raw mut` pointer
         "#]],
     );
 }
@@ -5175,7 +5253,9 @@ fn deref_write_through_a_shared_pointer_errors() {
 fn deref_write_into_a_pointee_field_works() {
     check_diagnostics(
         "static main = fn { let mut r = struct { a: 1 }; let p = &raw mut r; unsafe { p.*.a = 2; } };",
-        expect![[r#""#]],
+        expect![[r#"
+            43..44: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
     );
 }
 
@@ -5186,7 +5266,8 @@ fn deref_write_into_a_pointee_field_through_a_shared_pointer_errors() {
     check_diagnostics(
         "static main = fn { let mut r = struct { a: 1 }; let p = &raw r; unsafe { p.*.a = 2; } };",
         expect![[r#"
-            73..76: cannot assign through `&raw struct { a: usize }`: writing needs a `&raw mut` pointer
+            43..44: cannot infer the type of this number: it has no defining use — add a type annotation
+            73..76: cannot assign through `&raw struct { a: {number} }`: writing needs a `&raw mut` pointer
         "#]],
     );
 }
@@ -5196,6 +5277,7 @@ fn deref_write_into_a_pointee_field_still_requires_unsafe() {
     check_diagnostics(
         "static main = fn { let mut r = struct { a: 1 }; let p = &raw mut r; p.*.a = 2; };",
         expect![[r#"
+            43..44: cannot infer the type of this number: it has no defining use — add a type annotation
             68..71: dereferencing a raw pointer requires an `unsafe { ... }` block
         "#]],
     );
@@ -5207,7 +5289,9 @@ fn deref_write_needs_no_mut_binding_on_the_pointer() {
     // for projected targets exactly like for `p.* = v;`.
     check_diagnostics(
         "static main = fn { let mut r = struct { a: 1 }; let p = &raw mut r; unsafe { p.*.a = 2; }; let x = p; };",
-        expect![[r#""#]],
+        expect![[r#"
+            43..44: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
     );
 }
 
@@ -5224,7 +5308,7 @@ fn raw_pointer_unification_is_exact_no_mut_mixing() {
     check_diagnostics(
         "static f = fn(p: &raw usize) {};\nstatic main = fn { let mut x = 1; f(&raw mut x); };",
         expect![[r#"
-            69..79: type mismatch: expected `&raw usize`, found `&raw mut usize`
+            69..79: type mismatch: expected `&raw usize`, found `&raw mut {error}`
         "#]],
     );
 }
@@ -5234,7 +5318,7 @@ fn raw_pointer_unification_is_exact_no_shared_to_mut() {
     check_diagnostics(
         "static f = fn(p: &raw mut usize) {};\nstatic main = fn { let x = 1; f(&raw x); };",
         expect![[r#"
-            69..75: type mismatch: expected `&raw mut usize`, found `&raw usize`
+            69..75: type mismatch: expected `&raw mut usize`, found `&raw {error}`
         "#]],
     );
 }
@@ -5244,7 +5328,7 @@ fn raw_pointer_pointee_must_match_exactly() {
     check_diagnostics(
         r#"static main = fn { let mut x = 1; let p: &raw mut str = &raw mut x; };"#,
         expect![[r#"
-            56..66: type mismatch: expected `&raw mut str`, found `&raw mut usize` (expected `&raw mut str` because of this annotation at 41..53)
+            56..66: type mismatch: expected `&raw mut str`, found `&raw mut {error}` (expected `&raw mut str` because of this annotation at 41..53)
         "#]],
     );
 }
@@ -5254,7 +5338,7 @@ fn raw_pointer_does_not_coerce_to_pointee() {
     check_diagnostics(
         "static main = fn { let mut x = 1; let y: usize = &raw mut x; };",
         expect![[r#"
-            49..59: type mismatch: expected `usize`, found `&raw mut usize` (expected `usize` because of this annotation at 41..46)
+            49..59: type mismatch: expected `usize`, found `&raw mut {error}` (expected `usize` because of this annotation at 41..46)
         "#]],
     );
 }
@@ -5264,7 +5348,8 @@ fn deref_of_a_non_pointer_errors() {
     check_diagnostics(
         "static main = fn { let x = 1; unsafe { x.*; } };",
         expect![[r#"
-            39..42: type `usize` cannot be dereferenced
+            27..28: cannot infer the type of this number: it has no defining use — add a type annotation
+            39..40: cannot determine the type of this expression; add a type annotation
         "#]],
     );
 }
@@ -5273,7 +5358,9 @@ fn deref_of_a_non_pointer_errors() {
 fn pointer_equality_is_legal_and_safe() {
     check_diagnostics(
         "static main = fn() -> bool { let mut x = 1; &raw mut x == &raw mut x };",
-        expect![[r#""#]],
+        expect![[r#"
+            41..42: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
     );
 }
 
@@ -5286,14 +5373,14 @@ fn array_literal_and_index_infer() {
         expect![[r#"
             11..50 'fn { let a = [1, ...': fn()
             14..50 '{ let a = [1, 2, ...': ()
-            20..21 'a': [usize; 3]
-            24..33 '[1, 2, 3]': [usize; 3]
-            25..26 '1': usize
-            28..29 '2': usize
-            31..32 '3': usize
-            39..40 'x': usize
-            43..44 'a': [usize; 3]
-            43..47 'a[0]': usize
+            20..21 'a': [{number}; 3]
+            24..33 '[1, 2, 3]': [{number}; 3]
+            25..26 '1': {number}
+            28..29 '2': {number}
+            31..32 '3': {number}
+            39..40 'x': {number}
+            43..44 'a': [{number}; 3]
+            43..47 'a[0]': {number}
             45..46 '0': usize
         "#]],
     );
@@ -5316,12 +5403,12 @@ static f = fn {
         expect![[r#"
             12..169 'fn {     let r = ...': fn()
             15..169 '{     let r = str...': ()
-            25..26 'r': struct { data: [usize; 2], len: usize }
-            29..60 'struct { data: [1...': struct { data: [usize; 2], len: usize }
+            25..26 'r': struct { data: [usize; 2], len: {number} }
+            29..60 'struct { data: [1...': struct { data: [usize; 2], len: {number} }
             44..50 '[1, 2]': [usize; 2]
             45..46 '1': usize
             48..49 '2': usize
-            57..58 '2': usize
+            57..58 '2': {number}
             70..71 'a': [struct { x: usize }; 2]
             100..134 '[struct { x: 1 },...': [struct { x: usize }; 2]
             101..116 'struct { x: 1 }': struct { x: usize }
@@ -5329,7 +5416,7 @@ static f = fn {
             118..133 'struct { x: 2 }': struct { x: usize }
             130..131 '2': usize
             144..145 'n': usize
-            148..149 'r': struct { data: [usize; 2], len: usize }
+            148..149 'r': struct { data: [usize; 2], len: {number} }
             148..154 'r.data': [usize; 2]
             148..157 'r.data[0]': usize
             148..166 'r.data[0] + a[1].x': usize
@@ -5380,7 +5467,8 @@ fn array_elements_vote_without_an_annotation() {
     check_diagnostics(
         r#"static f = fn { let a = [1, 2, "three"]; };"#,
         expect![[r#"
-            31..38: type mismatch: expected `usize`, found `str` (this branch has type `usize` at 25..26) (this branch has type `usize` at 28..29)
+            25..26: type mismatch: expected `str`, found `{number}` (this branch has type `str` at 31..38)
+            28..29: type mismatch: expected `str`, found `{number}` (this branch has type `str` at 31..38)
         "#]],
     );
 }
@@ -5408,6 +5496,7 @@ fn index_must_be_usize() {
     check_diagnostics(
         r#"static f = fn { let a = [1, 2]; let x = a["nope"]; };"#,
         expect![[r#"
+            25..26: cannot infer the type of this number: it has no defining use — add a type annotation
             42..48: type mismatch: expected `usize`, found `str`
         "#]],
     );
@@ -5418,6 +5507,7 @@ fn compile_time_out_of_bounds_is_reported() {
     check_diagnostics(
         "static f = fn { let a = [1, 2]; let x = a[2]; };",
         expect![[r#"
+            25..26: cannot infer the type of this number: it has no defining use — add a type annotation
             40..44: index out of bounds: the length is 2 but the index is 2
         "#]],
     );
@@ -5428,7 +5518,8 @@ fn index_on_non_array_is_reported() {
     check_diagnostics(
         "static f = fn { let x = 5; let y = x[0]; };",
         expect![[r#"
-            35..39: type `usize` cannot be indexed
+            24..25: cannot infer the type of this number: it has no defining use — add a type annotation
+            35..36: cannot determine the type of this expression; add a type annotation
         "#]],
     );
 }
@@ -5438,6 +5529,7 @@ fn index_assign_requires_mut_root() {
     check_diagnostics(
         "static f = fn { let a = [1, 2]; a[0] = 5; };",
         expect![[r#"
+            25..26: cannot infer the type of this number: it has no defining use — add a type annotation
             32..33: cannot assign to `a[_]`: `a` is not declared `mut` (`a` is declared without `mut` here at 20..21)
         "#]],
     );
@@ -5447,7 +5539,9 @@ fn index_assign_requires_mut_root() {
 fn index_assign_to_mut_binding_is_fine() {
     check_diagnostics(
         "static f = fn { let mut a = [1, 2]; a[0] = 5; print(\"\"); };",
-        expect![[r#""#]],
+        expect![[r#"
+            29..30: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
     );
 }
 
@@ -5525,9 +5619,9 @@ fn array_repeat_infers_and_repeat_count_forms() {
         expect![[r#"
             11..33 'fn { let a = [0; ...': fn()
             14..33 '{ let a = [0; 4]; }': ()
-            20..21 'a': [usize; 4]
-            24..30 '[0; 4]': [usize; 4]
-            25..26 '0': usize
+            20..21 'a': [{number}; 4]
+            24..30 '[0; 4]': [{number}; 4]
+            25..26 '0': {number}
             28..29 '4': usize
         "#]],
     );
@@ -5538,6 +5632,7 @@ fn array_repeat_with_variable_count_rejected() {
     check_diagnostics(
         "static f = fn (n: usize) { let a = [0; n]; };",
         expect![[r#"
+            36..37: cannot infer the type of this number: it has no defining use — add a type annotation
             39..40: a type's const argument must be a literal or a const parameter name
         "#]],
     );
@@ -5548,6 +5643,7 @@ fn array_repeat_with_const_block_count_rejected() {
     check_diagnostics(
         "static f = fn { let a = [0; const { 2 }]; };",
         expect![[r#"
+            25..26: cannot infer the type of this number: it has no defining use — add a type annotation
             28..39: a `const { ... }` block cannot parameterize a type; pass the value through a generic function's const parameter instead
         "#]],
     );
@@ -5584,7 +5680,9 @@ static f = fn {
     let q = &raw mut a[0];
 };
 "#,
-        expect![[r#""#]],
+        expect![[r#"
+            34..35: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
     );
 }
 
@@ -5600,14 +5698,14 @@ static f = fn {
         expect![[r#"
             12..69 'fn {     let mut ...': fn()
             15..69 '{     let mut a =...': ()
-            29..30 'a': [usize; 2]
-            33..39 '[1, 2]': [usize; 2]
-            34..35 '1': usize
-            37..38 '2': usize
-            49..50 'q': &raw mut usize
-            53..66 '&raw mut a[0]': &raw mut usize
-            62..63 'a': [usize; 2]
-            62..66 'a[0]': usize
+            29..30 'a': [{number}; 2]
+            33..39 '[1, 2]': [{number}; 2]
+            34..35 '1': {number}
+            37..38 '2': {number}
+            49..50 'q': &raw mut {number}
+            53..66 '&raw mut a[0]': &raw mut {number}
+            62..63 'a': [{number}; 2]
+            62..66 'a[0]': {number}
             64..65 '0': usize
         "#]],
     );
@@ -5618,6 +5716,7 @@ fn addr_of_mut_of_an_element_still_requires_a_mut_root() {
     check_diagnostics(
         "static f = fn { let a = [1, 2]; let q = &raw mut a[0]; };",
         expect![[r#"
+            25..26: cannot infer the type of this number: it has no defining use — add a type annotation
             49..50: cannot take `&raw mut` of `a[_]`: `a` is not declared `mut` (`a` is declared without `mut` here at 20..21)
         "#]],
     );
@@ -5920,7 +6019,8 @@ static f = fn {
 };
 "#,
         expect![[r#"
-            42..43: `add` expects a raw pointer (`&raw T` or `&raw mut T`) here, found `usize`
+            42..43: `add` expects a raw pointer (`&raw T` or `&raw mut T`) here, found `{number}`
+            42..43: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -5977,6 +6077,7 @@ static ok = const {
         expect![[r#"
             12..32: cannot allocate during compile-time evaluation: const-built heap values wait for an interning design (this item's initializer is a const context at 1..7)
             77..90: cannot deallocate during compile-time evaluation: const-built heap values wait for an interning design (this `const fn` is always a const context at 48..53)
+            203..204: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -6011,6 +6112,7 @@ static x = 4;
 type Bad = struct { r: &x };
 "#,
         expect![[r#"
+            12..13: cannot infer the type of this number: it has no defining use — add a type annotation
             35..39: expected a type for field `r`
             38..39: expected an expression
             39..40: expected `,`
@@ -6088,6 +6190,421 @@ static f = fn {
 "#,
         expect![[r#"
             29..40: cannot infer the type parameter `T` of `alloc_array`; write `alloc_array::<...>` to specify it
+        "#]],
+    );
+}
+
+// --- Integer types: the i/u × 8/16/32/64 menu plus usize/isize ---
+
+#[test]
+fn every_integer_type_annotates_and_infers() {
+    check_infer(
+        r#"
+static f = fn (
+    a: i8, b: i16, c: i32, d: i64,
+    e: u8, g: u16, h: u32, i: u64,
+    j: usize, k: isize,
+) {};
+"#,
+        expect![[r#"
+            12..115 'fn (     a: i8, b...': fn(i8, i16, i32, i64, u8, u16, u32, u64, usize, isize)
+            21..22 'a': i8
+            28..29 'b': i16
+            36..37 'c': i32
+            44..45 'd': i64
+            56..57 'e': u8
+            63..64 'g': u16
+            71..72 'h': u32
+            79..80 'i': u64
+            91..92 'j': usize
+            101..102 'k': isize
+            113..115 '{}': ()
+        "#]],
+    );
+}
+
+#[test]
+fn literal_pins_through_an_annotation() {
+    check_infer(
+        "static f = fn { let x: u8 = 7; };",
+        expect![[r#"
+            11..32 'fn { let x: u8 = ...': fn()
+            14..32 '{ let x: u8 = 7; }': ()
+            20..21 'x': u8
+            28..29 '7': u8
+        "#]],
+    );
+}
+
+#[test]
+fn literal_pins_through_a_parameter_type() {
+    check_infer(
+        r#"
+static g = fn (n: u16) {};
+static f = fn { g(3); };
+"#,
+        expect![[r#"
+            12..26 'fn (n: u16) {}': fn(u16)
+            16..17 'n': u16
+            24..26 '{}': ()
+            39..51 'fn { g(3); }': fn()
+            42..51 '{ g(3); }': ()
+            44..45 'g': fn(u16)
+            44..48 'g(3)': ()
+            46..47 '3': u16
+        "#]],
+    );
+}
+
+#[test]
+fn index_position_pins_usize() {
+    check_infer(
+        r#"static f = fn (a: [u8; 4]) -> u8 { a[1] };"#,
+        expect![[r#"
+            11..41 'fn (a: [u8; 4]) -...': fn([u8; 4]) -> u8
+            15..16 'a': [u8; 4]
+            33..41 '{ a[1] }': u8
+            35..36 'a': [u8; 4]
+            35..39 'a[1]': u8
+            37..38 '1': usize
+        "#]],
+    );
+}
+
+#[test]
+fn repeat_count_pins_usize_and_the_element_pins_through_the_annotation() {
+    check_infer(
+        r#"static f = fn { let a: [u8; 3] = [0; 3]; };"#,
+        expect![[r#"
+            11..42 'fn { let a: [u8; ...': fn()
+            14..42 '{ let a: [u8; 3] ...': ()
+            20..21 'a': [u8; 3]
+            33..39 '[0; 3]': [u8; 3]
+            34..35 '0': u8
+            37..38 '3': usize
+        "#]],
+    );
+}
+
+#[test]
+fn alloc_count_pins_usize() {
+    check_infer(
+        r#"static f = fn { let r = alloc_array::<u8>(4); };"#,
+        expect![[r#"
+            11..47 'fn { let r = allo...': fn()
+            14..47 '{ let r = alloc_a...': ()
+            20..21 'r': AllocResult::<u8>
+            24..41 'alloc_array::<u8>': fn(usize) -> AllocResult::<u8>
+            24..44 'alloc_array::<u8>(4)': AllocResult::<u8>
+            42..43 '4': usize
+        "#]],
+    );
+}
+
+#[test]
+fn typed_operand_pins_the_other_side() {
+    check_infer(
+        r#"static f = fn (n: u32) -> u32 { n + 1 };"#,
+        expect![[r#"
+            11..39 'fn (n: u32) -> u3...': fn(u32) -> u32
+            15..16 'n': u32
+            30..39 '{ n + 1 }': u32
+            32..33 'n': u32
+            32..37 'n + 1': u32
+            36..37 '1': u32
+        "#]],
+    );
+}
+
+#[test]
+fn number_variables_merge_then_a_late_use_pins_the_whole_chain() {
+    // `1`, `2` and the intermediates share one NUMBER variable; the final
+    // `i64` annotation is the one defining use — it pins them all.
+    check_infer(
+        r#"
+static f = fn {
+    let a = 1;
+    let b = a + 2;
+    let c: i64 = b;
+};
+"#,
+        expect![[r#"
+            12..72 'fn {     let a = ...': fn()
+            15..72 '{     let a = 1; ...': ()
+            25..26 'a': i64
+            29..30 '1': i64
+            40..41 'b': i64
+            44..45 'a': i64
+            44..49 'a + 2': i64
+            48..49 '2': i64
+            59..60 'c': i64
+            68..69 'b': i64
+        "#]],
+    );
+}
+
+#[test]
+fn unpinned_number_renders_as_number_and_reports_no_defining_use() {
+    check_infer(
+        "static f = fn { let n = 3; };",
+        expect![[r#"
+            11..28 'fn { let n = 3; }': fn()
+            14..28 '{ let n = 3; }': ()
+            20..21 'n': {number}
+            24..25 '3': {number}
+        "#]],
+    );
+    check_diagnostics(
+        "static f = fn { let n = 3; };",
+        expect![[r#"
+            24..25: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
+    );
+}
+
+#[test]
+fn unannotated_static_number_reports_no_defining_use_too() {
+    // The same never-default rule at item level: the definition carries
+    // the number diagnostic; uses see an undetermined signature.
+    check_diagnostics(
+        "static x = 3;",
+        expect![[r#"
+            11..12: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
+    );
+    check_diagnostics(
+        "static x = 3;\nstatic f = fn { let y = x; };",
+        expect![[r#"
+            11..12: cannot infer the type of this number: it has no defining use — add a type annotation
+            38..39: cannot infer the type of `x` across items; add a type annotation to its definition (defined here at 7..8)
+        "#]],
+    );
+}
+
+#[test]
+fn literal_out_of_range_for_its_resolved_type() {
+    check_diagnostics(
+        "static a: u8 = 300;",
+        expect![[r#"
+            15..18: `300` does not fit in `u8`
+        "#]],
+    );
+    check_diagnostics("static b: u8 = 255;", expect![[r#""#]]);
+}
+
+#[test]
+fn negative_literal_in_an_unsigned_type_is_a_range_error() {
+    check_diagnostics(
+        "static a: u32 = -1;",
+        expect![[r#"
+            17..18: `-1` does not fit in `u32`
+        "#]],
+    );
+    // `-0` is the one negation every unsigned type holds.
+    check_diagnostics("static b: u32 = -0;", expect![[r#""#]]);
+}
+
+#[test]
+fn i64_min_fits_and_one_below_does_not() {
+    check_diagnostics("static min: i64 = -9223372036854775808;", expect![[r#""#]]);
+    check_diagnostics(
+        "static below: i64 = -9223372036854775809;",
+        expect![[r#"
+            21..40: `-9223372036854775809` does not fit in `i64`
+        "#]],
+    );
+    check_diagnostics(
+        "static above: i64 = 9223372036854775808;",
+        expect![[r#"
+            20..39: `9223372036854775808` does not fit in `i64`
+        "#]],
+    );
+}
+
+#[test]
+fn i8_range_edges_respect_the_sign() {
+    check_diagnostics("static min: i8 = -128;", expect![[r#""#]]);
+    check_diagnostics(
+        "static plus: i8 = 128;",
+        expect![[r#"
+            18..21: `128` does not fit in `i8`
+        "#]],
+    );
+}
+
+#[test]
+fn mixed_integer_types_are_an_ordinary_mismatch() {
+    // No implicit conversions: `u8 + u32` doesn't unify, and no cast
+    // syntax exists to bridge them.
+    check_diagnostics(
+        "static f = fn (a: u8, b: u32) -> u8 { a + b };",
+        expect![[r#"
+            42..43: type mismatch: expected `u8`, found `u32` (`+` requires `u8` operands at 40..41)
+        "#]],
+    );
+}
+
+#[test]
+fn unary_minus_types_as_its_operand() {
+    check_infer(
+        "static f = fn (n: i32) -> i32 { -n };",
+        expect![[r#"
+            11..36 'fn (n: i32) -> i3...': fn(i32) -> i32
+            15..16 'n': i32
+            30..36 '{ -n }': i32
+            32..34 '-n': i32
+            33..34 'n': i32
+        "#]],
+    );
+    // Legal syntax on unsigned operands (traps at runtime unless zero).
+    check_diagnostics("static f = fn (n: u8) -> u8 { -n };", expect![[r#""#]]);
+}
+
+#[test]
+fn offset_builtin_takes_an_isize_and_preserves_the_flavor() {
+    check_infer(
+        r#"
+static f = fn (p: &raw mut u8, i: isize) -> &raw mut u8 {
+    unsafe { offset(p, i) }
+};
+"#,
+        expect![[r#"
+            12..88 'fn (p: &raw mut u...': fn(&raw mut u8, isize) -> &raw mut u8
+            16..17 'p': &raw mut u8
+            32..33 'i': isize
+            57..88 '{     unsafe { of...': &raw mut u8
+            63..86 'unsafe { offset(p...': &raw mut u8
+            70..86 '{ offset(p, i) }': &raw mut u8
+            72..84 'offset(p, i)': &raw mut u8
+            79..80 'p': &raw mut u8
+            82..83 'i': isize
+        "#]],
+    );
+    // The literal pins to `isize` through the parameter position.
+    check_infer(
+        r#"
+static f = fn (p: &raw u8) -> &raw u8 {
+    unsafe { offset(p, 1) }
+};
+"#,
+        expect![[r#"
+            12..70 'fn (p: &raw u8) -...': fn(&raw u8) -> &raw u8
+            16..17 'p': &raw u8
+            39..70 '{     unsafe { of...': &raw u8
+            45..68 'unsafe { offset(p...': &raw u8
+            52..68 '{ offset(p, 1) }': &raw u8
+            54..66 'offset(p, 1)': &raw u8
+            61..62 'p': &raw u8
+            64..65 '1': isize
+        "#]],
+    );
+}
+
+#[test]
+fn offset_outside_unsafe_is_rejected() {
+    check_diagnostics(
+        r#"
+static f = fn (p: &raw mut u8, i: isize) {
+    let q = offset(p, i);
+};
+"#,
+        expect![[r#"
+            56..68: calling `offset` requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn offset_index_must_be_isize() {
+    check_diagnostics(
+        r#"
+static f = fn (p: &raw mut u8, n: usize) {
+    let q = unsafe { offset(p, n) };
+};
+"#,
+        expect![[r#"
+            75..76: type mismatch: expected `isize`, found `usize`
+        "#]],
+    );
+}
+
+#[test]
+fn generic_call_with_only_a_bare_literal_reports_the_number_not_the_param() {
+    // The only information about `T` is an unpinned literal: an unresolved
+    // number is not a type, and the actionable diagnostic is the literal's
+    // own annotate-me error — not a cannot-infer-`T` on top.
+    check_diagnostics(
+        r#"
+static id = fn::<T>(x: T) -> T { x };
+static f = fn { let y = id(3); };
+"#,
+        expect![[r#"
+            66..67: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
+    );
+}
+
+#[test]
+fn turbofish_pins_a_literal_argument_through_the_type_param() {
+    check_infer(
+        r#"
+static id = fn::<T>(x: T) -> T { x };
+static f = fn { let y = id::<u8>(3); };
+"#,
+        expect![[r#"
+            13..37 'fn::<T>(x: T) -> ...': fn(T) -> T
+            21..22 'x': T
+            32..37 '{ x }': T
+            34..35 'x': T
+            50..77 'fn { let y = id::...': fn()
+            53..77 '{ let y = id::<u8...': ()
+            59..60 'y': u8
+            63..71 'id::<u8>': fn(u8) -> u8
+            63..74 'id::<u8>(3)': u8
+            72..73 '3': u8
+        "#]],
+    );
+}
+
+#[test]
+fn const_param_declared_with_a_sized_type_checks_literal_range() {
+    // A const param may use any integer type; the written argument is
+    // range-checked against it like any pinned literal.
+    check_diagnostics(
+        r#"
+type Buf = struct::<const N: u8> { len: usize };
+static b: Buf::<300> = Buf::<300>(struct { len: 1 });
+"#,
+        expect![[r#"
+            66..69: `300` does not fit in `u8`
+            79..82: `300` does not fit in `u8`
+        "#]],
+    );
+}
+
+#[test]
+fn match_on_an_integer_scrutinee_requires_a_catch_all_uniformly() {
+    // Integers are open-domain for every width — same rule `usize` always
+    // had, extended uniformly.
+    check_diagnostics(
+        r#"
+static f = fn (n: u8) -> str {
+    match n {
+        _ => "something",
+    }
+};
+"#,
+        expect![[r#""#]],
+    );
+    check_diagnostics(
+        r#"
+static f = fn (n: i16) -> str {
+    match n {
+    }
+};
+"#,
+        expect![[r#"
+            37..42: this `match` does not cover every possible `i16`; add a `_` arm
         "#]],
     );
 }

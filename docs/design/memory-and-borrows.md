@@ -10,13 +10,13 @@
   copies the bits, so interior pointers survive a whole-value overwrite and do not follow
   copies of the container. Pointers display opaquely, never as a number. This is why byte
   layout could be deferred: v1 never observes it.
-- **M02** Validity is checked at deref, not at offset creation; stricter creation-time
-  rules can be added later, the reverse cannot. `add` saturates, so a one-past-the-end
-  pointer is fine to hold.
-- **M03** The operations, all element-counted: allocate, free, `add(p, usize)`, `copy`
-  (memmove semantics), `dangling`. `unsafe` is required for a raw deref, pointer
-  arithmetic, freeing and copying; taking a raw borrow, comparing pointers, `dangling` and
-  allocating are safe.
+- **M02** Validity is checked at deref, not at offset creation; stricter creation-time rules
+  can be added later, the reverse cannot. Stepping saturates, so a one-past-the-end pointer is
+  fine to hold.
+- **M03** The operations, all element-counted: allocate, free, `add(p, usize)`,
+  `offset(p, isize)`, `copy` (memmove semantics), `dangling`. `unsafe` is required for a raw
+  deref, pointer arithmetic, freeing and copying; taking a raw borrow, comparing pointers,
+  `dangling` and allocating are safe.
 - **M08** Taking a raw pointer is safe; every consuming operation on one is gated by
   `unsafe`, so safe code may create a dangling raw pointer but cannot use one. A raw
   pointer minted through a deref (`&raw mut p.*.f`) is likewise safe to create.

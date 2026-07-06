@@ -267,6 +267,15 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
     if p.at(AMP) && p.nth(1) == RAW_KW {
         return Some(addr_of_expr(p));
     }
+    // `-x` — unary minus on numbers. Same operand tier as `&raw`: a primary
+    // expression plus its postfix chain, so `-a.b` negates the field and
+    // `-x + y` stays a sum of the negation.
+    if p.at(MINUS) {
+        let m = p.start();
+        p.bump(MINUS);
+        expr_bp(p, 7);
+        return Some(m.complete(p, NEG_EXPR));
+    }
     let m = match p.current() {
         INT_NUMBER | STRING | TRUE_KW | FALSE_KW => {
             let m = p.start();
@@ -683,7 +692,7 @@ fn unsafe_block_expr(p: &mut Parser<'_>) -> CompletedMarker {
 fn at_expr_start(p: &Parser<'_>) -> bool {
     match p.current() {
         INT_NUMBER | STRING | TRUE_KW | FALSE_KW | IDENT | L_PAREN | L_BRACE | L_BRACKET
-        | FN_KW | IF_KW | MATCH_KW | LOOP_KW | BREAK_KW | CONTINUE_KW | UNSAFE_KW => true,
+        | FN_KW | IF_KW | MATCH_KW | LOOP_KW | BREAK_KW | CONTINUE_KW | UNSAFE_KW | MINUS => true,
         CONST_KW => matches!(p.nth(1), FN_KW | L_BRACE),
         STRUCT_KW | ENUM_KW => at_type_literal_body(p),
         AMP => p.nth(1) == RAW_KW,

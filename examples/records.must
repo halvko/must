@@ -8,8 +8,10 @@
 
 // A plain record type is structural: no name, exact field match required —
 // `struct { x: usize, y: usize }` and `struct { y: usize, x: usize }` are
-// the same type, field order doesn't matter.
-static origin_plain = struct { x: 0, y: 0 };
+// the same type, field order doesn't matter. (The annotation is what pins
+// the `0`s to `usize`: a number literal's type is inferred from a defining
+// use, never defaulted.)
+static origin_plain: struct { x: usize, y: usize } = struct { x: 0, y: 0 };
 
 static sum_pair = origin_plain.x + origin_plain.y;
 
@@ -37,3 +39,12 @@ static same_point = moved == Point(struct { x: 5, y: 0 });
 // same representation as a bare `struct { x: usize, y: usize }` — hover
 // `moved` in the editor and the type still reads `Point`; only the checker
 // keeps `Point` and the bare shape apart.
+
+static f = fn(r: struct { a: usize, b: str }) -> ! {
+
+    loop {}
+}
+
+static main = fn {
+    f(struct {a: 8, b: "11"})
+}

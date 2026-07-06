@@ -264,6 +264,13 @@ impl LowerCtx<'_> {
                 // compile-time only, like `NeedsAnnotation` — the value
                 // itself runs fine (it has no elements to be wrong about).
                 InferenceDiagnostic::EmptyArrayNeedsAnnotation { .. } => {}
+                // A literal with no width (no defining use) or one that
+                // doesn't fit its resolved width: the value cannot be
+                // produced — a value trap right on the literal.
+                InferenceDiagnostic::CannotInferNumberType { expr }
+                | InferenceDiagnostic::IntLiteralOutOfRange { expr, .. } => {
+                    self.value_traps.insert(*expr, diag.message());
+                }
                 // An array value in a const-arg position: like `FnConstArg`
                 // above, the mention's value refuses.
                 InferenceDiagnostic::ArrayConstArg { expr } => {
@@ -423,7 +430,22 @@ impl LowerCtx<'_> {
         match &body.exprs[expr] {
             // Justified by the parse errors of the broken source.
             ExprData::Missing => self.trap(b, expr, "syntax error: missing expression".to_owned()),
-            ExprData::Literal(LiteralData::Int(Some(value))) => Operand::Const(Const::Int(*value)),
+            // The literal's width comes from inference. Anything else — an
+            // unresolved number (no defining use), a mismatch recovery, an
+            // out-of-range literal — carries a value trap already; the
+            // placeholder is never observed.
+            ExprData::Literal(LiteralData::Int(Some(value))) => match self.ty(expr) {
+                // Out-of-range for the kind is unrepresentable (`IntValue::new`
+                // returns `None`); such a literal already carries a value trap
+                // (`IntLiteralOutOfRange`), so this placeholder is never
+                // observed.
+                Ty::Int(kind) => i128::try_from(*value)
+                    .ok()
+                    .and_then(|value| hir::IntValue::new(kind, value))
+                    .map(|iv| Operand::Const(Const::Int(iv)))
+                    .unwrap_or(Operand::Const(Const::Unit)),
+                _ => Operand::Const(Const::Unit),
+            },
             // Justified by the equally-worded literal diagnostic.
             ExprData::Literal(LiteralData::Int(None)) => {
                 self.trap(b, expr, hir::diag::INT_LITERAL_TOO_LARGE.to_owned())
@@ -637,6 +659,45 @@ impl LowerCtx<'_> {
                 let dest = b.temp(self.ty(expr));
                 b.push_assign(dest, Rvalue::BinaryOp(*op, l, r), expr);
                 Operand::Copy(dest.into())
+            }
+            // `-x`. A literal directly underneath folds into the constant
+            // (the range check already judged the SIGNED value: `-128`
+            // fits `i8` even though `+128` would not, so the positive
+            // magnitude must never materialize).
+            ExprData::Neg { operand } => {
+                let operand = *operand;
+                if let ExprData::Literal(LiteralData::Int(Some(value))) = &body.exprs[operand] {
+                    // The literal's own trap (out of range, no defining
+                    // use) fires here — the operand is not lowered
+                    // separately.
+                    if let Some(message) = self.value_traps.get(&operand).cloned() {
+                        return self.trap(b, operand, message);
+                    }
+                    return match self.ty(expr) {
+                        // The range check already judged the SIGNED value, so
+                        // the negated result fits by construction; an
+                        // unrepresentable leftover is value-trapped upstream
+                        // and the placeholder never observed.
+                        Ty::Int(kind) => i128::try_from(*value)
+                            .ok()
+                            .map(|v| -v)
+                            .and_then(|value| hir::IntValue::new(kind, value))
+                            .map(|iv| Operand::Const(Const::Int(iv)))
+                            .unwrap_or(Operand::Const(Const::Unit)),
+                        // Diagnosed and trapped by the wrapper.
+                        _ => Operand::Const(Const::Unit),
+                    };
+                }
+                let op = self.lower_expr(b, operand);
+                match self.ty(expr) {
+                    Ty::Int(_) => {
+                        let dest = b.temp(self.ty(expr));
+                        b.push_assign(dest, Rvalue::UnaryNeg(op), expr);
+                        Operand::Copy(dest.into())
+                    }
+                    // Not an integer (diagnosed upstream): never observed.
+                    _ => Operand::Const(Const::Unit),
+                }
             }
             ExprData::If {
                 condition,

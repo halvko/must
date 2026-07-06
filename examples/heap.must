@@ -1,5 +1,5 @@
-// The heap, built on raw pointers. Five builtins and nothing else —
-// `alloc_array::<T>(n)`, `dealloc_array(p, n)`, `add(p, i)`,
+// The heap, built on raw pointers. Six builtins and nothing else —
+// `alloc_array::<T>(n)`, `dealloc_array(p, n)`, `add(p, i)`, `offset(p, i)`,
 // `copy(src, dst, n)`, `dangling::<T>()` — everything above them
 // (containers, arenas, growth) is ordinary library code written in Must,
 // and this file is that library, twice over: a growable `HeapVec` and a
@@ -34,8 +34,8 @@
 //   detected UB at the CALL (with `i == 0` the harmless identity). That
 //   real precondition is why it needs the `unsafe` marker even before any
 //   deref. It preserves the pointer's flavor (`&raw mut` in, `&raw mut`
-//   out). The name `offset` is reserved for a future signed (`isize`)
-//   variant, mirroring Rust's `add`/`offset` split.
+//   out). `offset(p, i)` is `add`'s signed (`isize`) sibling, moving
+//   either direction — unused below, this file only ever walks forward.
 // - `copy(src, dst, n)` is UNSAFE, element-count, and memmove-shaped:
 //   overlapping ranges are DEFINED, uninitialized elements copy silently
 //   (only reading them as values traps), out of range on either side is
@@ -231,10 +231,8 @@ static main = fn () -> () {
 
 // What this file deliberately does NOT contain: a leak report or `forget`
 // (deferred — allocation origins already land, so the report is cheap to
-// add when a customer appears), a signed `offset` (the `isize` twin of the
-// `add` used above — reserved for when Must gains signed integers, mirroring
-// Rust's `add`/`offset` split), `realloc`/in-place
-// growth (growth is alloc+copy+dealloc, composed by the container),
-// `size_of`/byte views/pointer casts (the layout era), and any
-// allocator-vtable machinery (generic containers over allocators wait for
-// traits — the containers above are concrete on purpose).
+// add when a customer appears), `realloc`/in-place growth (growth is
+// alloc+copy+dealloc, composed by the container), `size_of`/byte
+// views/pointer casts (the layout era), and any allocator-vtable
+// machinery (generic containers over allocators wait for traits — the
+// containers above are concrete on purpose).

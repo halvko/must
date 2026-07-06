@@ -63,6 +63,7 @@ fn render_rvalue(rvalue: &Rvalue) -> String {
         Rvalue::BinaryOp(bin_op, l, r) => {
             format!("{bin_op:?}({}, {})", operand(l), operand(r))
         }
+        Rvalue::UnaryNeg(op) => format!("Neg({})", operand(op)),
         Rvalue::Aggregate {
             kind: AggregateKind::Record(fields),
             ops,
@@ -191,7 +192,7 @@ fn operand(op: &Operand) -> String {
         Operand::Copy(p) => place(p),
         Operand::Const(c) => match c {
             Const::Unit => "()".to_owned(),
-            Const::Int(v) => v.to_string(),
+            Const::Int(v) => v.to_i128().to_string(),
             Const::Str(s) => format!("{s:?}"),
             Const::Bool(b) => b.to_string(),
             Const::Item(loc) => format!("item {}", loc.display_name()),

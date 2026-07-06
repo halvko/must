@@ -660,24 +660,27 @@ fn type_item_rhs_items(edit_range: TextRange) -> Vec<CompletionItem> {
     .collect()
 }
 
-/// `usize`/`str`/`string`/`bool` — the nameable builtin types (mirrors
-/// [`hir::ty::builtin_type_by_name`]'s name set). Rendered with the keyword
-/// kind (they're not declarations to navigate to) but the builtin sort
-/// tier.
+/// The integer types plus `str`/`string`/`bool` — the nameable builtin
+/// types (mirrors [`hir::ty::builtin_type_by_name`]'s name set). Rendered
+/// with the keyword kind (they're not declarations to navigate to) but the
+/// builtin sort tier.
 fn builtin_type_items(edit_range: TextRange) -> Vec<CompletionItem> {
-    ["usize", "str", "string", "bool"]
-        .iter()
-        .map(|w| {
-            completion_item(
-                *w,
-                CompletionItemKind::Keyword,
-                Provenance::Builtin,
-                TYPE_TIER_NONE,
-                None,
-                edit_range,
-            )
-        })
-        .collect()
+    [
+        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize", "str", "string",
+        "bool",
+    ]
+    .iter()
+    .map(|w| {
+        completion_item(
+            *w,
+            CompletionItemKind::Keyword,
+            Provenance::Builtin,
+            TYPE_TIER_NONE,
+            None,
+            edit_range,
+        )
+    })
+    .collect()
 }
 
 /// The builtin functions (mirrors [`hir::scopes::Builtin`]'s name set and
@@ -718,6 +721,11 @@ fn builtin_fn_items(edit_range: TextRange, expected: Option<&hir::Ty>) -> Vec<Co
             "add",
             placeholder_fn(2),
             Some("unsafe fn(&raw [mut] T, usize) -> &raw [mut] T"),
+        ),
+        (
+            "offset",
+            placeholder_fn(2),
+            Some("unsafe fn(&raw [mut] T, isize) -> &raw [mut] T"),
         ),
         (
             "copy",

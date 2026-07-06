@@ -930,7 +930,7 @@ mod tests {
 
     use super::*;
 
-    const BROKEN: &str = "static = 1;";
+    const BROKEN: &str = "static = true;";
 
     fn uri(s: &str) -> lsp_types::Uri {
         s.parse().unwrap()

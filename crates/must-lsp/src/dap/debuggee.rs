@@ -520,7 +520,7 @@ impl<W: Write + Clone> Debuggee<W> {
             if matches!(
                 ty,
                 hir::Ty::Unit
-                    | hir::Ty::Int
+                    | hir::Ty::Int(_)
                     | hir::Ty::Str
                     | hir::Ty::Bool
                     | hir::Ty::Fn(_)

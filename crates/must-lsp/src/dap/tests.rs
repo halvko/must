@@ -269,7 +269,7 @@ fn breakpoint_hit_inspect_and_resume() {
 fn record_local_expands_into_fields() {
     let program = fixture(
         "rec",
-        "static main = fn {\n    let p = struct { x: 1, y: 2 };\n    print(\"done\");\n};\n",
+        "static main = fn {\n    let p: struct { x: usize, y: usize } = struct { x: 1, y: 2 };\n    print(\"done\");\n};\n",
     );
     let messages = run_session(&[
         ("initialize", json!({})),
@@ -340,7 +340,7 @@ fn mutated_field_shows_its_new_value_in_locals() {
     // expansion machinery as an untouched one.
     let program = fixture(
         "mutrec",
-        "static main = fn {\n    let mut p = struct { x: 1, y: 2 };\n    p.x = 10;\n    print(\"done\");\n};\n",
+        "static main = fn {\n    let mut p: struct { x: usize, y: usize } = struct { x: 1, y: 2 };\n    p.x = 10;\n    print(\"done\");\n};\n",
     );
     let messages = run_session(&[
         ("initialize", json!({})),
@@ -933,7 +933,7 @@ fn named_typed_local_displays_its_record_value() {
 fn array_local_expands_into_elements() {
     let program = fixture(
         "arr",
-        "static main = fn {\n    let a = [10, 20, 30];\n    print(\"done\");\n};\n",
+        "static main = fn {\n    let a: [usize; 3] = [10, 20, 30];\n    print(\"done\");\n};\n",
     );
     let messages = run_session(&[
         ("initialize", json!({})),

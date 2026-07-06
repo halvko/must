@@ -79,9 +79,9 @@ fn check_const_blocks(text: &str, expect: Expect) {
 fn arithmetic_and_literals_const_evaluate() {
     check_const(
         r#"
-static example = 4 + 5;
+static example: usize = 4 + 5;
 static greeting = "hi";
-static truth = 1 < 2;
+static truth = example < 20;
 "#,
         expect![[r#"
             example = 9
@@ -146,12 +146,12 @@ fn panic_in_const_is_an_error() {
 fn division_by_zero_and_overflow_are_runtime_errors() {
     check_const(
         r#"
-static div = 1 / 0;
-static sub = 0 - 1;
+static div: usize = 1 / 0;
+static sub: usize = 0 - 1;
 "#,
         expect![[r#"
             div = error[Runtime]: attempt to divide by zero
-            sub = error[Runtime]: attempt to subtract with overflow
+            sub = error[Runtime]: arithmetic overflow: `0 - 1` does not fit in `usize`
         "#]],
     );
 }
@@ -426,7 +426,11 @@ static entrypoint = (main(20));
     assert_eq!(machine.frames().len(), 2);
     assert_eq!(
         machine.frame_named_locals(1),
-        vec![("n".to_owned(), hir::Ty::Int, Value::Int(20))]
+        vec![(
+            "n".to_owned(),
+            hir::Ty::Int(hir::IntKind::Usize),
+            Value::Int(hir::IntValue::Usize(20)),
+        )]
     );
     assert_eq!(
         machine.frame_origin(1),
@@ -459,8 +463,16 @@ static entrypoint = (main(20));
     assert_eq!(
         machine.frame_named_locals(1),
         vec![
-            ("n".to_owned(), hir::Ty::Int, Value::Int(20)),
-            ("doubled".to_owned(), hir::Ty::Int, Value::Int(42))
+            (
+                "n".to_owned(),
+                hir::Ty::Int(hir::IntKind::Usize),
+                Value::Int(hir::IntValue::Usize(20)),
+            ),
+            (
+                "doubled".to_owned(),
+                hir::Ty::Int(hir::IntKind::Usize),
+                Value::Int(hir::IntValue::Usize(42)),
+            ),
         ]
     );
     assert!(matches!(machine.step(), Ok(StepEvent::Progress))); // ret = doubled
@@ -475,7 +487,7 @@ static entrypoint = (main(20));
         Some((hir::item_loc(&db, entry), entry_body.root.unwrap()))
     );
     match machine.step() {
-        Ok(StepEvent::Done(value)) => assert_eq!(value, Value::Int(42)),
+        Ok(StepEvent::Done(value)) => assert_eq!(value, Value::Int(hir::IntValue::Usize(42))),
         Ok(StepEvent::Progress) | Err(_) => panic!("expected Done(42)"),
     }
     assert!(machine.frames().is_empty());
@@ -628,7 +640,7 @@ fn const_block_evaluates_to_its_inner_value() {
     check_run(
         r#"
 static main = fn {
-    let y = const { 2 + 3 };
+    let y: usize = const { 2 + 3 };
     y
 }
 "#,
@@ -659,7 +671,7 @@ static entrypoint = (f() + f());
         .expect("entrypoint item exists");
     let mut machine = Machine::new(&db, RunMode { out: Vec::new() });
     let result = machine.eval_root(&hir::item_loc(&db, entry_item));
-    assert_eq!(result, Ok(crate::Value::Int(10)));
+    assert_eq!(result, Ok(crate::Value::Int(hir::IntValue::Usize(10))));
     assert_eq!(machine.const_block_evaluations(), 1);
 }
 
@@ -708,7 +720,7 @@ static cyc: usize = const { cyc };
 fn mutation_of_a_let_binding_is_visible_to_later_reads() {
     check_run(
         "",
-        "(fn { let mut x = 1; x = x + 2; x })()",
+        "(fn { let mut x: usize = 1; x = x + 2; x })()",
         expect![[r#"
             => 3
         "#]],
@@ -732,7 +744,7 @@ fn assigning_to_an_immutable_binding_traps_at_runtime() {
     // the message the editor shows as a squiggle.
     check_run(
         "",
-        "(fn { let x = 1; x = 2; x })()",
+        "(fn { let x: usize = 1; x = 2; x })()",
         expect![[r#"
             error[Trap]: cannot assign to `x`: it is not declared `mut`
         "#]],
@@ -757,7 +769,7 @@ fn illegal_assignment_in_an_unevaluated_branch_does_not_crash() {
 fn field_assignment_mutates_the_record() {
     check_run(
         "",
-        "(fn { let mut p = struct { x: 1, y: 2 }; p.x = 10; p.x + p.y })()",
+        "(fn { let mut p: struct { x: usize, y: usize } = struct { x: 1, y: 2 }; p.x = 10; p.x + p.y })()",
         expect![[r#"
             => 12
         "#]],
@@ -771,7 +783,8 @@ fn nested_field_assignment_writes_through_both_levels() {
     check_run(
         "",
         "(fn {
-            let mut p = struct { inner: struct { a: 1, b: 2 }, c: 3 };
+            let mut p: struct { inner: struct { a: usize, b: usize }, c: usize } =
+                struct { inner: struct { a: 1, b: 2 }, c: 3 };
             p.inner.b = 20;
             p.inner.a + p.inner.b + p.c
         })()",
@@ -826,7 +839,7 @@ fn field_assignment_to_an_immutable_root_traps_at_runtime() {
     // binding, exactly as the editor shows it.
     check_run(
         "",
-        "(fn { let p = struct { x: 1 }; p.x = 2; p.x })()",
+        "(fn { let p: struct { x: usize } = struct { x: 1 }; p.x = 2; p.x })()",
         expect![[r#"
             error[Trap]: cannot assign to `p.x`: `p` is not declared `mut`
         "#]],
@@ -874,7 +887,7 @@ static x = double(21);
 fn record_construction_and_field_access() {
     check_run(
         "",
-        "(fn { let p = struct { x: 1, y: 2 }; p.x + p.y })()",
+        "(fn { let p: struct { x: usize, y: usize } = struct { x: 1, y: 2 }; p.x + p.y })()",
         expect![[r#"
             => 3
         "#]],
@@ -885,7 +898,7 @@ fn record_construction_and_field_access() {
 fn nested_records_construct_and_project() {
     check_run(
         "",
-        r#"(fn { let a = struct { b: struct { c: 5 } }; a.b.c })()"#,
+        r#"(fn { let a: struct { b: struct { c: usize } } = struct { b: struct { c: 5 } }; a.b.c })()"#,
         expect![[r#"
             => 5
         "#]],
@@ -896,7 +909,7 @@ fn nested_records_construct_and_project() {
 fn records_const_evaluate() {
     check_const(
         r#"
-static p = struct { x: 1, y: 2 };
+static p: struct { x: usize, y: usize } = struct { x: 1, y: 2 };
 static sum = p.x + p.y;
 "#,
         expect![[r#"
@@ -910,7 +923,7 @@ static sum = p.x + p.y;
 fn shorthand_fields_evaluate() {
     check_run(
         "",
-        r#"(fn { let x = 5; let y = 6; let p = struct { x, y }; p.x + p.y })()"#,
+        r#"(fn { let x: usize = 5; let y: usize = 6; let p = struct { x, y }; p.x + p.y })()"#,
         expect![[r#"
             => 11
         "#]],
@@ -921,21 +934,21 @@ fn shorthand_fields_evaluate() {
 fn record_equality_is_structural_both_ways() {
     check_run(
         "",
-        r#"(struct { x: 1 } == struct { x: 1 })"#,
+        r#"(fn { let one: usize = 1; struct { x: one } == struct { x: one } })()"#,
         expect![[r#"
             => true
         "#]],
     );
     check_run(
         "",
-        r#"(struct { x: 1 } == struct { x: 2 })"#,
+        r#"(fn { let one: usize = 1; let two: usize = 2; struct { x: one } == struct { x: two } })()"#,
         expect![[r#"
             => false
         "#]],
     );
     check_run(
         "",
-        r#"(struct { x: 1 } != struct { x: 2 })"#,
+        r#"(fn { let one: usize = 1; let two: usize = 2; struct { x: one } != struct { x: two } })()"#,
         expect![[r#"
             => true
         "#]],
@@ -949,7 +962,7 @@ fn field_access_on_a_nonexistent_field_still_traps_at_runtime() {
     // (the earlier message, unchanged).
     check_run(
         "",
-        r#"(fn { let p = struct { x: 1 }; p.y })()"#,
+        r#"(fn { let p: struct { x: usize } = struct { x: 1 }; p.y })()"#,
         expect![[r#"
             error[Trap]: no field `y` on `struct { x: usize }`
         "#]],
@@ -1338,7 +1351,7 @@ fn bare_break_carries_unit() {
     check_run(
         r#"
 static f = fn () {
-    let mut i = 0;
+    let mut i: usize = 0;
     loop {
         if i == 3 { break; };
         i = i + 1;
@@ -1383,11 +1396,11 @@ fn nested_loops_inner_break_stays_inner() {
     check_run(
         r#"
 static grid = fn () -> usize {
-    let mut total = 0;
-    let mut row = 0;
+    let mut total: usize = 0;
+    let mut row: usize = 0;
     loop {
         if row == 3 { break total; };
-        let mut col = 0;
+        let mut col: usize = 0;
         total = total + loop {
             if col == 4 { break col; };
             col = col + 1;
@@ -1452,7 +1465,7 @@ fn infinite_loop_in_a_const_block_runs_out_of_fuel() {
 fn let_record_destructure_evaluates() {
     check_run(
         "",
-        r#"(fn { let struct { x, y } = struct { x: 1, y: 2 }; x + y })()"#,
+        r#"(fn { let struct { x, y }: struct { x: usize, y: usize } = struct { x: 1, y: 2 }; x + y })()"#,
         expect![[r#"
             => 3
         "#]],
@@ -1463,7 +1476,7 @@ fn let_record_destructure_evaluates() {
 fn let_record_destructure_rename_evaluates() {
     check_run(
         "",
-        r#"(fn { let struct { x as a, y as b } = struct { x: 1, y: 2 }; a + b })()"#,
+        r#"(fn { let struct { x as a, y as b }: struct { x: usize, y: usize } = struct { x: 1, y: 2 }; a + b })()"#,
         expect![[r#"
             => 3
         "#]],
@@ -1474,7 +1487,7 @@ fn let_record_destructure_rename_evaluates() {
 fn let_record_destructure_rest_evaluates() {
     check_run(
         "",
-        r#"(fn { let struct { x, .. } = struct { x: 1, y: 2, z: 3 }; x })()"#,
+        r#"(fn { let struct { x, .. }: struct { x: usize, y: usize, z: usize } = struct { x: 1, y: 2, z: 3 }; x })()"#,
         expect![[r#"
             => 1
         "#]],
@@ -1510,7 +1523,7 @@ static add = fn (Point(struct { x, y })) -> usize { x + y };
 fn record_destructure_in_const_context_evaluates() {
     check_const(
         r#"
-static p = struct { x: 3, y: 4 };
+static p: struct { x: usize, y: usize } = struct { x: 3, y: 4 };
 static sum = const fn () -> usize {
     let struct { x, y } = p;
     x + y
@@ -1527,7 +1540,7 @@ static sum = const fn () -> usize {
 fn per_binding_mut_record_destructure_evaluates() {
     check_run(
         "",
-        r#"(fn { let struct { mut x, y } = struct { x: 1, y: 2 }; x = x + y; x })()"#,
+        r#"(fn { let struct { mut x, y }: struct { x: usize, y: usize } = struct { x: 1, y: 2 }; x = x + y; x })()"#,
         expect![[r#"
             => 3
         "#]],
@@ -1617,7 +1630,7 @@ fn const_arg_may_reference_a_const_item() {
     // TR06's ruled spelling: a non-literal const argument is written with
     // the `const` prefix — `rep::<const LEN>` reads the const item.
     check_const(
-        "static rep = const fn::<const N: usize>(x: usize) -> usize { x * N };\nconst LEN = 3;\nstatic y = rep::<const LEN>(14);",
+        "static rep = const fn::<const N: usize>(x: usize) -> usize { x * N };\nconst LEN: usize = 3;\nstatic y = rep::<const LEN>(14);",
         expect![[r#"
             rep = fn
             LEN = 3
@@ -1740,7 +1753,7 @@ fn generic_frame_shows_const_params_as_named_locals() {
     }
     let locals = machine.frame_named_locals(1);
     assert_eq!(locals[0].0, "N");
-    assert_eq!(locals[0].2, crate::Value::Int(3));
+    assert_eq!(locals[0].2, crate::Value::Int(hir::IntValue::Usize(3)));
     assert!(
         locals.iter().any(|(name, _, _)| name == "x"),
         "the ordinary param is still listed: {locals:?}"
@@ -1828,7 +1841,7 @@ fn pointer_to_a_field_reads_and_writes_that_element() {
     check_run(
         r#"
 static main = fn() -> usize {
-    let mut r = struct { a: 1, b: 2 };
+    let mut r: struct { a: usize, b: usize } = struct { a: 1, b: 2 };
     let pa = &raw mut r.a;
     unsafe { pa.* = 10; }
     r.a + r.b
@@ -1849,7 +1862,7 @@ fn interior_pointer_survives_whole_value_overwrite() {
     check_run(
         r#"
 static main = fn() -> usize {
-    let mut r = struct { a: 1, b: 2 };
+    let mut r: struct { a: usize, b: usize } = struct { a: 1, b: 2 };
     let pa = &raw mut r.a;
     r = struct { a: 3, b: 4 };
     unsafe { pa.* }
@@ -1867,7 +1880,7 @@ fn pointee_field_reads_chain() {
     check_run(
         r#"
 static main = fn() -> usize {
-    let mut r = struct { a: 1, b: 2 };
+    let mut r: struct { a: usize, b: usize } = struct { a: 1, b: 2 };
     let p = &raw mut r;
     unsafe { p.*.a + p.*.b }
 };
@@ -1901,7 +1914,7 @@ static main = fn() -> usize {
 fn two_addr_of_the_same_static_are_the_same_address() {
     check_run(
         r#"
-static s = 7;
+static s: usize = 7;
 static main = fn() -> bool {
     let a = &raw s;
     let b = &raw s;
@@ -1919,7 +1932,7 @@ static main = fn() -> bool {
 fn deref_of_a_static_pointer_reads_the_static() {
     check_run(
         r#"
-static s = struct { a: 40, b: 2 };
+static s: struct { a: usize, b: usize } = struct { a: 40, b: 2 };
 static main = fn() -> usize {
     let pa = &raw s.a;
     let pb = &raw s.b;
@@ -1941,7 +1954,7 @@ fn addr_of_a_const_takes_the_address_of_each_use_copy() {
     // behaviour, not a language promise.
     check_run(
         r#"
-const c = 7;
+const c: usize = 7;
 static main = fn() -> bool { &raw c == &raw c };
 "#,
         "main()",
@@ -1956,7 +1969,7 @@ fn two_addr_of_the_same_local_are_equal() {
     check_run(
         r#"
 static main = fn() -> bool {
-    let mut x = 1;
+    let mut x: usize = 1;
     &raw mut x == &raw mut x
 };
 "#,
@@ -2024,7 +2037,7 @@ fn pointers_work_inside_const_evaluation() {
     check_const(
         r#"
 static v = {
-    let mut x = 1;
+    let mut x: usize = 1;
     let p = &raw mut x;
     unsafe { p.* = 41; }
     x + 1
@@ -2041,7 +2054,7 @@ fn a_pointer_cannot_leave_const_evaluation() {
     check_const(
         r#"
 static p = {
-    let mut x = 1;
+    let mut x: usize = 1;
     &raw mut x
 };
 "#,
@@ -2056,7 +2069,7 @@ fn a_pointer_inside_a_record_cannot_leave_const_evaluation_either() {
     check_const(
         r#"
 static p = {
-    let mut x = 1;
+    let mut x: usize = 1;
     struct { ptr: &raw mut x }
 };
 "#,
@@ -2071,10 +2084,10 @@ fn a_pointer_cannot_leave_a_const_block() {
     check_const_blocks(
         r#"
 static main = fn() -> usize {
-    const { let mut y = 1; let p = &raw mut y; unsafe { p.* } }
+    const { let mut y: usize = 1; let p = &raw mut y; unsafe { p.* } }
 };
 static bad = fn() {
-    const { let mut y = 1; &raw mut y };
+    const { let mut y: usize = 1; &raw mut y };
 };
 "#,
         expect![[r#"
@@ -2107,7 +2120,7 @@ fn through_pointer_field_write_is_visible_afterward() {
     check_run(
         r#"
 static main = fn() -> usize {
-    let mut r = struct { a: 1, b: 2 };
+    let mut r: struct { a: usize, b: usize } = struct { a: 1, b: 2 };
     let p = &raw mut r;
     unsafe { p.*.a = 40; }
     r.a + r.b
@@ -2166,9 +2179,9 @@ fn through_pointer_element_write_out_of_bounds_is_an_ordinary_trap() {
     check_run(
         r#"
 static main = fn() {
-    let mut a = [1, 2];
+    let mut a: [usize; 2] = [1, 2];
     let p = &raw mut a;
-    let i = 5;
+    let i: usize = 5;
     unsafe { p.*[i] = 0; }
 };
 "#,
@@ -2224,7 +2237,7 @@ fn through_pointer_mixed_chain_with_elements_and_fields() {
     check_run(
         r#"
 static main = fn() -> usize {
-    let mut r = struct { buf: [struct { v: 1 }, struct { v: 2 }] };
+    let mut r: struct { buf: [struct { v: usize }; 2] } = struct { buf: [struct { v: 1 }, struct { v: 2 }] };
     let p = &raw mut r;
     unsafe { p.*.buf[1].v = 9; }
     unsafe { p.*.buf[0].v + p.*.buf[1].v }
@@ -2319,7 +2332,7 @@ fn addr_of_through_a_deref_is_double_indirection_free() {
     check_run(
         r#"
 static main = fn() -> bool {
-    let mut r = struct { a: 1, b: 2 };
+    let mut r: struct { a: usize, b: usize } = struct { a: 1, b: 2 };
     let p = &raw mut r;
     unsafe { &raw mut p.*.a == &raw mut r.a }
 };
@@ -2336,7 +2349,7 @@ fn addr_of_through_a_deref_writes_the_original_place() {
     check_run(
         r#"
 static main = fn() -> usize {
-    let mut r = struct { a: 1, b: 2 };
+    let mut r: struct { a: usize, b: usize } = struct { a: 1, b: 2 };
     let p = &raw mut r;
     let q = unsafe { &raw mut p.*.a };
     unsafe { q.* = 40; }
@@ -2377,7 +2390,7 @@ fn dangling_pointer_from_addr_of_through_deref_is_detected_ub() {
     check_run(
         r#"
 static make = fn() -> &raw mut usize {
-    let mut r = struct { a: 1 };
+    let mut r: struct { a: usize } = struct { a: 1 };
     let p = &raw mut r;
     unsafe { &raw mut p.*.a }
 };
@@ -2402,7 +2415,7 @@ fn interior_pointer_survives_through_pointer_whole_value_overwrite() {
     check_run(
         r#"
 static main = fn() -> usize {
-    let mut r = struct { a: 1, b: 2 };
+    let mut r: struct { a: usize, b: usize } = struct { a: 1, b: 2 };
     let pa = &raw mut r.a;
     let p = &raw mut r;
     unsafe { p.* = struct { a: 3, b: 4 }; }
@@ -2423,7 +2436,7 @@ fn through_pointer_write_into_a_static_is_rejected_at_the_flavor() {
     // paths do not open a route around the read-only allocation.
     check_run(
         r#"
-static s = struct { a: 1 };
+static s: struct { a: usize } = struct { a: 1 };
 static main = fn() {
     let p = &raw s;
     unsafe { p.*.a = 2; }
@@ -2441,7 +2454,7 @@ fn through_pointer_field_write_outside_unsafe_traps() {
     check_run(
         r#"
 static main = fn() {
-    let mut r = struct { a: 1 };
+    let mut r: struct { a: usize } = struct { a: 1 };
     let p = &raw mut r;
     p.*.a = 2;
 };
@@ -2461,7 +2474,7 @@ fn mid_chain_deref_outside_unsafe_traps() {
     check_run(
         r#"
 static main = fn() {
-    let mut x = 1;
+    let mut x: usize = 1;
     let mut p = &raw mut x;
     let pp = &raw mut p;
     pp.*.* = 7;
@@ -2479,7 +2492,7 @@ fn through_pointer_writes_work_inside_const_evaluation() {
     check_const(
         r#"
 static v = {
-    let mut r = struct { a: 1, b: 2 };
+    let mut r: struct { a: usize, b: usize } = struct { a: 1, b: 2 };
     let p = &raw mut r;
     unsafe { p.*.a = 40; }
     r.a + r.b
@@ -2498,9 +2511,9 @@ fn arrays_build_read_and_write() {
     check_run(
         r#"
 static main = fn () -> usize {
-    let mut a = [1, 2, 3];
+    let mut a: [usize; 3] = [1, 2, 3];
     a[0] = 10;
-    let m = [[1, 2], [3, 4]];
+    let m: [[usize; 2]; 2] = [[1, 2], [3, 4]];
     a[0] + a[2] + m[1][0]
 };
 "#,
@@ -2516,14 +2529,14 @@ fn arrays_const_evaluate_and_freeze_into_statics() {
     check_const(
         r#"
 static table = const {
-    let mut t = [0; 4];
+    let mut t: [usize; 4] = [0; 4];
     t[0] = 1;
     t[1] = 2;
     t[3] = t[0] + t[1];
     t
 };
-static row = struct { name: "row", cells: [1, 2, 3] };
-static grid = [struct { x: 1 }, struct { x: 2 }];
+static row: struct { name: str, cells: [usize; 3] } = struct { name: "row", cells: [1, 2, 3] };
+static grid: [struct { x: usize }; 2] = [struct { x: 1 }, struct { x: 2 }];
 "#,
         expect![[r#"
             table = [1, 2, 0, 3]
@@ -2642,7 +2655,7 @@ fn arrays_of_records_mutate_in_place() {
     check_run(
         r#"
 static main = fn () -> usize {
-    let mut pts = [struct { x: 1, y: 2 }, struct { x: 3, y: 4 }];
+    let mut pts: [struct { x: usize, y: usize }; 2] = [struct { x: 1, y: 2 }, struct { x: 3, y: 4 }];
     pts[1].x = 30;
     pts[1].x + pts[0].y
 };
@@ -2657,7 +2670,7 @@ static main = fn () -> usize {
 #[test]
 fn huge_const_array_repeat_runs_out_of_fuel() {
     check_const(
-        "static big = [0; 4_000_000_000];",
+        "static big: [usize; 4_000_000_000] = [0; 4_000_000_000];",
         expect![[r#"
             big = error[NotConst]: constant evaluation ran out of fuel
         "#]],
@@ -2671,8 +2684,8 @@ fn empty_array_and_equality() {
 static main = fn () -> bool {
     let a: [usize; 0] = [];
     let b: [usize; 0] = [];
-    let c = [1, 2];
-    let d = [1, 2];
+    let c: [usize; 2] = [1, 2];
+    let d: [usize; 2] = [1, 2];
     a == b == (c == d)
 };
 "#,
@@ -2894,7 +2907,7 @@ fn heap_dealloc_of_local_is_detected_ub() {
     check_run(
         r#"
 static main = fn () -> () {
-    let mut x = 4;
+    let mut x: usize = 4;
     unsafe { dealloc_array(&raw mut x, 1) };
 };
 "#,
@@ -3067,7 +3080,7 @@ fn copy_overlap_is_defined_memmove_semantics() {
     check_run(
         r#"
 static main = fn () -> bool {
-    let mut a = [1, 2, 3, 4, 5];
+    let mut a: [usize; 5] = [1, 2, 3, 4, 5];
     let p = &raw mut a[0];
     unsafe { copy(p, add(p, 1), 4) };
     a == [1, 1, 2, 3, 4]
@@ -3118,8 +3131,8 @@ fn copy_out_of_bounds_source_is_detected_ub() {
     check_run(
         r#"
 static main = fn () -> () {
-    let a = [1, 2];
-    let mut b = [0, 0, 0];
+    let a: [usize; 2] = [1, 2];
+    let mut b: [usize; 3] = [0, 0, 0];
     unsafe { copy(&raw a[0], &raw mut b[0], 3) };
 };
 "#,
@@ -3135,8 +3148,8 @@ fn copy_out_of_bounds_destination_is_detected_ub() {
     check_run(
         r#"
 static main = fn () -> () {
-    let a = [1, 2, 3];
-    let mut b = [0, 0];
+    let a: [usize; 3] = [1, 2, 3];
+    let mut b: [usize; 2] = [0, 0];
     unsafe { copy(&raw a[0], &raw mut b[0], 3) };
 };
 "#,
@@ -3524,6 +3537,273 @@ static main = fn () -> () {
         "main()",
         expect![[r#"
             error[UndefinedBehavior]: read of uninitialized memory — this element was never written
+        "#]],
+    );
+}
+
+// --- Integer types: typed arithmetic, overflow traps, unary minus, offset ---
+
+#[test]
+fn typed_arithmetic_overflow_traps_name_the_operation_and_type() {
+    // Const contexts get the eager error (div-by-zero precedent); the
+    // message names the operation and the type.
+    check_const(
+        r#"
+static add8: u8 = 250 + 10;
+static sub8: u8 = 3 - 5;
+static mul8: u8 = 16 * 16;
+static ok8: u8 = 250 + 5;
+"#,
+        expect![[r#"
+            add8 = error[Runtime]: arithmetic overflow: `250 + 10` does not fit in `u8`
+            sub8 = error[Runtime]: arithmetic overflow: `3 - 5` does not fit in `u8`
+            mul8 = error[Runtime]: arithmetic overflow: `16 * 16` does not fit in `u8`
+            ok8 = 255
+        "#]],
+    );
+}
+
+#[test]
+fn signed_overflow_edges_trap() {
+    check_const(
+        r#"
+static div_min: i8 = -128 / -1;
+static neg_min: i8 = const { let m: i8 = -128; -m };
+static ok: i8 = -128 / 1;
+"#,
+        expect![[r#"
+            div_min = error[Runtime]: arithmetic overflow: `-128 / -1` does not fit in `i8`
+            neg_min = error[Runtime]: arithmetic overflow: `-(-128)` does not fit in `i8`
+            ok = -128
+        "#]],
+    );
+}
+
+#[test]
+fn arithmetic_overflow_traps_at_runtime_too() {
+    check_run(
+        r#"
+static bump = fn (n: u8) -> u8 { n + 10 };
+"#,
+        "bump(250)",
+        expect![[r#"
+            error[Runtime]: arithmetic overflow: `250 + 10` does not fit in `u8`
+        "#]],
+    );
+}
+
+#[test]
+fn unary_minus_evaluates_on_signed_and_traps_on_unsigned_nonzero() {
+    check_run(
+        r#"
+static negate = fn (n: i32) -> i32 { -n };
+"#,
+        "negate(41) + 83",
+        expect![[r#"
+            => 42
+        "#]],
+    );
+    check_run(
+        r#"
+static negate = fn (n: u8) -> u8 { -n };
+"#,
+        "negate(0)",
+        expect![[r#"
+            => 0
+        "#]],
+    );
+    check_run(
+        r#"
+static negate = fn (n: u8) -> u8 { -n };
+"#,
+        "negate(1)",
+        expect![[r#"
+            error[Runtime]: arithmetic overflow: `-1` does not fit in `u8`
+        "#]],
+    );
+}
+
+#[test]
+fn i64_min_negation_traps() {
+    check_run(
+        r#"
+static negate = fn (n: i64) -> i64 { -n };
+static min: i64 = -9223372036854775808;
+"#,
+        "negate(min)",
+        expect![[r#"
+            error[Runtime]: arithmetic overflow: `-(-9223372036854775808)` does not fit in `i64`
+        "#]],
+    );
+}
+
+#[test]
+fn each_width_wraps_its_own_range() {
+    // The same value overflows a narrow type and fits a wide one.
+    check_const(
+        r#"
+static narrow: i16 = 300 * 300;
+static wide: i32 = 300 * 300;
+"#,
+        expect![[r#"
+            narrow = error[Runtime]: arithmetic overflow: `300 * 300` does not fit in `i16`
+            wide = 90000
+        "#]],
+    );
+}
+
+#[test]
+fn offset_moves_both_directions() {
+    check_run(
+        r#"
+static main = fn () -> usize {
+    let mut a: [usize; 3] = [10, 20, 30];
+    let p = &raw mut a[1];
+    unsafe {
+        let forward = offset(p, 1);
+        let back = offset(p, -1);
+        forward.* + back.*
+    }
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 40
+        "#]],
+    );
+}
+
+#[test]
+fn offset_below_the_start_is_detected_ub_at_the_call() {
+    check_run(
+        r#"
+static main = fn () -> usize {
+    let mut a: [usize; 3] = [10, 20, 30];
+    let p = &raw mut a[1];
+    unsafe { offset(p, -2).* }
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[UndefinedBehavior]: `offset` result points below the start of the allocation
+        "#]],
+    );
+}
+
+#[test]
+fn offset_past_the_end_mints_silently_and_derefs_as_ub_like_add() {
+    check_run(
+        r#"
+static main = fn () -> usize {
+    let mut a: [usize; 2] = [1, 2];
+    let p = &raw mut a[0];
+    unsafe { offset(p, 5).* }
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[UndefinedBehavior]: out-of-bounds pointer — it points to element 5 of an array with 2 elements
+        "#]],
+    );
+}
+
+#[test]
+fn offset_by_zero_is_the_identity() {
+    check_run(
+        r#"
+static main = fn () -> bool {
+    let mut x: u8 = 7;
+    let p = &raw mut x;
+    unsafe { offset(p, 0) == p }
+};
+"#,
+        "main()",
+        expect![[r#"
+            => true
+        "#]],
+    );
+}
+
+#[test]
+fn typed_values_freeze_into_statics_per_width() {
+    check_const(
+        r#"
+static a: u8 = 200;
+static b: i8 = -100;
+static c: isize = -5;
+"#,
+        expect![[r#"
+            a = 200
+            b = -100
+            c = -5
+        "#]],
+    );
+}
+
+#[test]
+fn wrong_kind_builtin_count_is_intercepted_at_the_argument() {
+    // Defense-in-depth: the count/index builtins now require the exact
+    // checker-pinned kind (`usize` for the alloc/copy/`add` counts, `isize`
+    // for `offset`), trapping a wrong kind ill-typed rather than laundering
+    // it. That trap is not reachable from source, though: the checker pins
+    // each of these argument positions to its kind, so a wrong-kind
+    // argument (here a `u8` where `alloc_array` wants `usize`) is
+    // value-trapped AT THE ARGUMENT — with the ordinary type-mismatch
+    // message — before the builtin ever runs. This test pins that
+    // interception (the same reason the sibling `ProjElem::Index`
+    // tightening ships without a builtin-arm test): a mistyped builtin
+    // count traps cleanly, never launders and never panics the machine.
+    check_run(
+        r#"
+static main = fn () -> () {
+    let n: u8 = 3;
+    match alloc_array::<usize>(n) {
+        AllocResult::Ok(p) => { unsafe { dealloc_array(p, 3); }; }
+        AllocResult::Err => {}
+    };
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[Trap]: type mismatch: expected `usize`, found `u8`
+        "#]],
+    );
+}
+
+#[test]
+fn mixed_kind_integer_equality_is_intercepted_at_the_operand() {
+    // The same no-laundering discipline as the arithmetic ops: the checker
+    // requires `==`/`!=` operands to agree, so a mixed-kind pairing (a `u8`
+    // against a `usize`) is an ordinary mismatch on the culprit operand, and
+    // the machine replays it as a value trap before the operands ever meet.
+    // The operator's own same-kind check (the machine arms for `eval_bin_op`
+    // equality) stays behind it as defense in depth, unreachable from source
+    // — the same reason the sibling builtin-count tightening ships with an
+    // interception test and no builtin-arm test.
+    check_run(
+        r#"
+static main = fn () -> bool {
+    let x: u8 = 1;
+    let y: usize = 1;
+    x == y
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[Trap]: type mismatch: expected `u8`, found `usize`
+        "#]],
+    );
+    check_run(
+        r#"
+static main = fn () -> bool {
+    let x: u8 = 1;
+    let y: usize = 1;
+    x != y
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[Trap]: type mismatch: expected `u8`, found `usize`
         "#]],
     );
 }

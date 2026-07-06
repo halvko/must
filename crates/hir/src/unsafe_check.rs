@@ -129,6 +129,7 @@ impl CheckCtx<'_> {
                 self.check_expr(*lhs, in_unsafe);
                 self.check_expr(*rhs, in_unsafe);
             }
+            ExprData::Neg { operand } => self.check_expr(*operand, in_unsafe),
             ExprData::If {
                 condition,
                 then_branch,

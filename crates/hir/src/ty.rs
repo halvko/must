@@ -10,16 +10,269 @@ use crate::item_tree::{ConstArgRef, GenericArgRef, GenericParamKind, TypeRef, ty
 use crate::scopes::{Resolution, type_scope};
 use crate::{ItemId, ItemLoc};
 
+/// One of the integer scalar types: signed/unsigned × 8/16/32/64 bits,
+/// plus the pointer-sized pair. `usize` remains the index/count type
+/// everywhere (indexing, array lengths, alloc counts); the interpreter
+/// models `usize`/`isize` as 64-bit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IntKind {
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
+    Usize,
+    Isize,
+}
+
+impl IntKind {
+    pub const ALL: [IntKind; 10] = [
+        IntKind::I8,
+        IntKind::I16,
+        IntKind::I32,
+        IntKind::I64,
+        IntKind::U8,
+        IntKind::U16,
+        IntKind::U32,
+        IntKind::U64,
+        IntKind::Usize,
+        IntKind::Isize,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            IntKind::I8 => "i8",
+            IntKind::I16 => "i16",
+            IntKind::I32 => "i32",
+            IntKind::I64 => "i64",
+            IntKind::U8 => "u8",
+            IntKind::U16 => "u16",
+            IntKind::U32 => "u32",
+            IntKind::U64 => "u64",
+            IntKind::Usize => "usize",
+            IntKind::Isize => "isize",
+        }
+    }
+
+    pub fn is_signed(self) -> bool {
+        matches!(
+            self,
+            IntKind::I8 | IntKind::I16 | IntKind::I32 | IntKind::I64 | IntKind::Isize
+        )
+    }
+
+    pub fn by_name(name: &str) -> Option<IntKind> {
+        IntKind::ALL
+            .iter()
+            .copied()
+            .find(|kind| kind.name() == name)
+    }
+}
+
+/// The checked-arithmetic surface an [`IntValue`] variant's carrier must
+/// offer — the ONLY way the interpreter touches a typed integer's value, so
+/// the "value fits its kind" invariant can never be violated by an
+/// operation (every op is a primitive `checked_*`, and every result is a
+/// right-sized primitive again). Implemented for the Rust primitives
+/// `u8`..`i64` via the macro below; `usize`/`isize` reuse the 64-bit impls
+/// (the interpreter's pointer width is 64 bits, see `IntKind`).
+pub(crate) trait Number: Copy {
+    fn checked_add(self, rhs: Self) -> Option<Self>;
+    fn checked_sub(self, rhs: Self) -> Option<Self>;
+    fn checked_mul(self, rhs: Self) -> Option<Self>;
+    fn checked_div(self, rhs: Self) -> Option<Self>;
+    fn checked_neg(self) -> Option<Self>;
+    /// The value widened to the interpreter's `i128` carrier — lossless for
+    /// every implementor (all fit in `i128`), used for display and for the
+    /// same-kind comparison the machine runs.
+    fn to_i128(self) -> i128;
+    /// The value narrowed from the `i128` carrier, or `None` when it does
+    /// not fit — the range check that makes an out-of-range [`IntValue`]
+    /// unrepresentable.
+    fn from_i128(value: i128) -> Option<Self>;
+}
+
+macro_rules! impl_number {
+    ($($t:ty),*) => {$(
+        impl Number for $t {
+            fn checked_add(self, rhs: Self) -> Option<Self> { <$t>::checked_add(self, rhs) }
+            fn checked_sub(self, rhs: Self) -> Option<Self> { <$t>::checked_sub(self, rhs) }
+            fn checked_mul(self, rhs: Self) -> Option<Self> { <$t>::checked_mul(self, rhs) }
+            fn checked_div(self, rhs: Self) -> Option<Self> { <$t>::checked_div(self, rhs) }
+            fn checked_neg(self) -> Option<Self> { <$t>::checked_neg(self) }
+            fn to_i128(self) -> i128 { self as i128 }
+            fn from_i128(value: i128) -> Option<Self> { <$t>::try_from(value).ok() }
+        }
+    )*};
+}
+
+impl_number!(i8, i16, i32, i64, u8, u16, u32, u64);
+
+/// The ONE canonical `(variant, carrier)` list behind [`IntValue`]: the
+/// enum itself and EVERY dispatch over it (kind, construction, widening,
+/// negation, the binary ops) are generated from this list, so a future kind
+/// (`u128`, `i128`) is added here and nowhere else — the moment it enters
+/// the list, every dispatch grows its arm in the same expansion, and
+/// [`IntValue::new`]'s generated match on [`IntKind`] refuses to compile
+/// until the kind exists there too (and vice versa: a new [`IntKind`]
+/// variant makes that match non-exhaustive). No generated dispatch carries
+/// a bare `_` arm, so a variant can never silently fall through to a wrong
+/// answer.
+macro_rules! with_int_value_variants {
+    ($m:ident) => {
+        $m! {
+            (I8, i8),
+            (I16, i16),
+            (I32, i32),
+            (I64, i64),
+            (U8, u8),
+            (U16, u16),
+            (U32, u32),
+            (U64, u64),
+            (Usize, u64),
+            (Isize, i64)
+        }
+    };
+}
+
+macro_rules! declare_int_value {
+    ($(($variant:ident, $carrier:ty)),* $(,)?) => {
+        /// A typed integer value — the carrier both `mir::Const` and
+        /// `eval::Value` use: the machine's typed-memory philosophy applied
+        /// to scalars (every runtime integer knows its width). One variant
+        /// per [`IntKind`], each holding its right-sized carrier, so "the
+        /// value fits its kind" is a STRUCTURAL invariant — an out-of-range
+        /// value is simply unrepresentable. `usize`/`isize` map to the
+        /// 64-bit carriers (the interpreter's pointer width). All
+        /// construction from a wide `i128` goes through the one fallible
+        /// [`IntValue::new`], and all arithmetic through the checked
+        /// `Number` surface, so neither can produce an out-of-range value.
+        /// Generated — variants and all dispatch — from the single
+        /// `with_int_value_variants` list.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum IntValue {
+            $($variant($carrier),)*
+        }
+
+        impl IntValue {
+            /// The integer type of this value.
+            pub fn kind(self) -> IntKind {
+                match self {
+                    $(IntValue::$variant(_) => IntKind::$variant,)*
+                }
+            }
+
+            /// The value widened to the interpreter's `i128` carrier —
+            /// lossless, for display and same-kind comparison.
+            pub fn to_i128(self) -> i128 {
+                match self {
+                    $(IntValue::$variant(v) => Number::to_i128(v),)*
+                }
+            }
+
+            /// The one fallible construction from a wide value: `Some` iff
+            /// `value` fits `kind`, otherwise `None` (the value is
+            /// unrepresentable at that width). This is where literal range
+            /// checking lands.
+            pub fn new(kind: IntKind, value: i128) -> Option<IntValue> {
+                Some(match kind {
+                    $(IntKind::$variant => IntValue::$variant(Number::from_i128(value)?),)*
+                })
+            }
+
+            /// `-self`, or `None` on overflow (every non-zero unsigned
+            /// operand, and the signed minimum) — the checked negation the
+            /// machine's unary `-` runs.
+            pub fn checked_neg(self) -> Option<IntValue> {
+                Some(match self {
+                    $(IntValue::$variant(v) => IntValue::$variant(Number::checked_neg(v)?),)*
+                })
+            }
+
+            declare_int_value_binops! {
+                [$(($variant, $carrier)),*]
+                checked_add checked_sub checked_mul checked_div
+            }
+        }
+    };
+}
+
+/// The checked binary ops, each dispatching a `Number` op over two
+/// SAME-KIND [`IntValue`]s and re-wrapping the result in that variant.
+/// Mixed kinds (impossible in a checked program — the machine traps them
+/// ill-typed before calling these) yield `None`. The mismatch arms
+/// enumerate every left-hand variant from the same canonical list as the
+/// same-kind arms — no bare `_` arm — so a variant added to the list gets
+/// its same-kind arm in the same expansion and can never be misreported as
+/// a mismatch/overflow.
+macro_rules! declare_int_value_binops {
+    ([$(($variant:ident, $carrier:ty)),*]) => {};
+    ([$(($variant:ident, $carrier:ty)),*] $name:ident $($rest:ident)*) => {
+        pub fn $name(self, rhs: IntValue) -> Option<IntValue> {
+            Some(match (self, rhs) {
+                $(
+                    (IntValue::$variant(a), IntValue::$variant(b)) => {
+                        IntValue::$variant(Number::$name(a, b)?)
+                    }
+                )*
+                $(
+                    (IntValue::$variant(_), _) => return None,
+                )*
+            })
+        }
+        declare_int_value_binops! { [$(($variant, $carrier)),*] $($rest)* }
+    };
+}
+
+with_int_value_variants!(declare_int_value);
+
+impl IntValue {
+    // The kind-pinned extractors live OUTSIDE the generated dispatch on
+    // purpose: each names exactly one variant, and every other kind —
+    // including any future one — must keep answering `None` (the checker
+    // pins these argument positions; a wrong kind is deferred-error mode).
+
+    /// The payload if this is the `usize` kind, widened for index/count
+    /// arithmetic — `None` for every other kind, which the pinning builtins
+    /// trap (`add`'s index, the alloc/copy counts, repeat counts, indexing).
+    pub fn usize_payload(self) -> Option<u128> {
+        match self {
+            IntValue::Usize(v) => Some(u128::from(v)),
+            _ => None,
+        }
+    }
+
+    /// The payload if this is the `isize` kind, widened for offset
+    /// arithmetic — `None` for every other kind; `offset`'s argument pins
+    /// this.
+    pub fn isize_payload(self) -> Option<i128> {
+        match self {
+            IntValue::Isize(v) => Some(i128::from(v)),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
     /// An unresolved inference variable. Appears in [`crate::infer::InferenceResult`]
     /// only when inference couldn't pin the type down (rendered as `_`).
     Infer(TyVar),
+    /// An integer literal's NUMBER-CLASS inference variable that no
+    /// defining use ever pinned. Appears only in *finished*
+    /// [`crate::infer::InferenceResult`]s (during inference the number
+    /// flavor lives in the unification table — see
+    /// [`TyVarValue::UnknownNumber`]); rendered as `{number}`. Never
+    /// defaulted: the unresolved case is a diagnostic, not a silent pick.
+    UnresolvedNumber,
     Unit,
     /// `!`: the bottom type; coerces to any expected type.
     Never,
-    /// `usize` — the only integer type so far.
-    Int,
+    /// One of the integer scalar types (`usize`, `u8`, `i64`, ...).
+    Int(IntKind),
     Str,
     Bool,
     Fn(Arc<FnTy>),
@@ -285,7 +538,7 @@ impl Ty {
     /// (`Pair::<_>` is undetermined until the arg resolves).
     pub fn contains_infer(&self) -> bool {
         match self {
-            Ty::Infer(_) => true,
+            Ty::Infer(_) | Ty::UnresolvedNumber => true,
             Ty::Fn(f) => f.ret.contains_infer() || f.params.iter().any(Ty::contains_infer),
             Ty::RawPtr { pointee, .. } => pointee.contains_infer(),
             // The length is never an inference variable (const args are
@@ -372,9 +625,10 @@ impl Ty {
     pub fn display(&self) -> String {
         match self {
             Ty::Infer(_) => "_".to_owned(),
+            Ty::UnresolvedNumber => "{number}".to_owned(),
             Ty::Unit => "()".to_owned(),
             Ty::Never => "!".to_owned(),
-            Ty::Int => "usize".to_owned(),
+            Ty::Int(kind) => kind.name().to_owned(),
             Ty::Str => "str".to_owned(),
             Ty::Bool => "bool".to_owned(),
             Ty::Error => "{error}".to_owned(),
@@ -464,6 +718,13 @@ impl UnifyKey for TyVar {
 pub enum TyVarValue {
     Known(Ty),
     Unknown,
+    /// A NUMBER-CLASS variable: still unknown, but restricted to unify
+    /// only with integer scalar types ([`Ty::Int`]) and other number
+    /// variables — the type an integer literal gets until a defining use
+    /// (annotation, parameter type, index position, typed operand, ...)
+    /// pins it. The restriction is enforced in `Constraints::unify`; the
+    /// flavor survives unions through [`UnifyValue::unify_values`] below.
+    UnknownNumber,
 }
 
 impl UnifyValue for TyVarValue {
@@ -480,6 +741,11 @@ impl UnifyValue for TyVarValue {
             // unified them structurally (it resolves vars before unioning),
             // so keeping either is fine.
             (TyVarValue::Known(t), _) | (_, TyVarValue::Known(t)) => TyVarValue::Known(t.clone()),
+            // Number-ness is infectious across var↔var merges: a plain
+            // variable unified with a number variable is a number variable.
+            (TyVarValue::UnknownNumber, _) | (_, TyVarValue::UnknownNumber) => {
+                TyVarValue::UnknownNumber
+            }
             (TyVarValue::Unknown, TyVarValue::Unknown) => TyVarValue::Unknown,
         })
     }
@@ -488,8 +754,10 @@ impl UnifyValue for TyVarValue {
 /// The nameable builtin types. Also the authority for "is this type name
 /// known?" — diagnostics use `is_none` to report unknown type names.
 pub fn builtin_type_by_name(name: &str) -> Option<Ty> {
+    if let Some(kind) = IntKind::by_name(name) {
+        return Some(Ty::Int(kind));
+    }
     match name {
-        "usize" => Some(Ty::Int),
         "str" | "string" => Some(Ty::Str),
         "bool" => Some(Ty::Bool),
         _ => None,
@@ -863,7 +1131,7 @@ pub fn enum_variants<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<Vec<(Str
 /// outside any inference context (declarations).
 fn erase_infer(ty: &Ty) -> Ty {
     match ty {
-        Ty::Infer(_) => Ty::Error,
+        Ty::Infer(_) | Ty::UnresolvedNumber => Ty::Error,
         Ty::Fn(f) => Ty::fn_type(
             f.params.iter().map(erase_infer).collect(),
             erase_infer(&f.ret),

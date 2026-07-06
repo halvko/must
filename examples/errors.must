@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 12 errors and 1 warning.
+// exactly: found 14 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -41,7 +41,7 @@ static describe_shape = fn (s: Shape) -> str {
 //    writes.
 //    error: cannot assign to `x`: it is not declared `mut`
 static reassign_immutable = fn () -> usize {
-    let x = 1;
+    let x: usize = 1;
     x = 2;
     x
 };
@@ -72,10 +72,10 @@ static shadow_variant = fn (s: Shape) -> str {
 
 // 8. Rigid-parameter misuse: inside a generic body a type param `T`
 //    unifies only with itself, so `x + 1` is rejected the same way it
-//    would be for any other non-`usize` type — no caller's instantiation
+//    would be for any other non-integer type — no caller's instantiation
 //    ever makes `T` support an operation the body wasn't checked against.
 //    (See `generics.must` for what a rigid `T` *does* support.)
-//    error: type mismatch: expected `usize`, found `T`
+//    error: type mismatch: expected `{number}`, found `T`
 static rigid_add_one = fn::<T>(x: T) -> T {
     let y = x + 1;
     x
@@ -108,8 +108,9 @@ static deref_outside_unsafe = fn () -> usize {
 //     would.
 //     error: cannot take `&raw mut` of `x`: it is not declared `mut`
 //     quick fix offered: "Make `x` mutable"
-static addr_of_non_mut = fn () -> () {
-    let x = 1;
+static addr_of_non_mut = fn () {
+    let x: usize = 1;
+    print("hello");
     let p = &raw mut x;
 };
 
@@ -127,6 +128,21 @@ static wrong_const_len: Buf::<8> = Buf::<9>(struct { len: 1 });
 //     the block yielding `&raw mut x` is rejected.
 //     error: constant evaluation failed: a pointer cannot leave compile-time evaluation
 static pointer_escaping_const = const {
-    let mut x = 1;
+    let mut x: usize = 1;
     &raw mut x
 };
+
+// 14. A number with no defining use: an integer literal's type is entirely
+//     inferred — an annotation, a parameter type, an index position, or an
+//     already-typed operand pins it — and NEVER defaulted. Nothing here says
+//     what `5` is, so the literal itself is the error.
+//     error: cannot infer the type of this number: it has no defining use — add a type annotation
+static ambiguous_number = fn () -> () {
+    let n = 5;
+};
+
+// 15. A literal outside its type's range: the defining use (the `u8`
+//     annotation) resolves the literal's type, and the value is then
+//     range-checked right there — `300` needs more than 8 bits.
+//     error: `300` does not fit in `u8`
+static too_big_for_u8: u8 = 300;

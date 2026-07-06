@@ -19,14 +19,15 @@ use crate::body::{
     body,
 };
 use crate::constraint::{
-    self, Cause, Constraints, Join, Witness, resolve_args_fully, resolve_fully,
+    self, Cause, Constraints, Join, Witness, is_unresolved_number, poison_unresolved_number,
+    resolve_args_fully, resolve_finished, resolve_fully,
 };
 use crate::item_tree::{Constness, GenericParamData, GenericParamKind, TypeDeclData};
 use crate::scopes::{Builtin, Resolution, resolutions, type_scope};
 use crate::ty::{
-    ConstArgValue, GenericArg, NamedTy, ParamScope, Ty, TyVar, TyVarValue, VariantTy,
-    builtin_type_by_name, enum_variants, generic_param_scope, lower_type_ref_in, signature,
-    signature_needs_annotation, substitute_args, type_underlying_for,
+    ConstArgValue, GenericArg, IntKind, IntValue, NamedTy, ParamScope, Ty, TyVar, TyVarValue,
+    VariantTy, builtin_type_by_name, enum_variants, generic_param_scope, lower_type_ref_in,
+    signature, signature_needs_annotation, substitute_args, type_underlying_for,
 };
 use crate::{ItemId, ItemLoc, Severity, TypeRef, item_loc};
 
@@ -530,6 +531,26 @@ pub enum InferenceDiagnostic {
         /// non-literal value.
         is_block: bool,
     },
+    /// An integer literal whose NUMBER-CLASS variable no defining use ever
+    /// pinned (never defaulted — T01): annotate. The squiggle
+    /// lands on the literal; the type renders `{number}` everywhere.
+    CannotInferNumberType {
+        /// The literal expression.
+        expr: ExprId,
+    },
+    /// A literal that does not fit the integer type its defining use
+    /// resolved it to (`300` in `u8`; `-1` in any unsigned type). Reported
+    /// at resolution, range-checked with the sign applied (`-128` fits
+    /// `i8`).
+    IntLiteralOutOfRange {
+        /// The literal expression (carries the squiggle and the trap).
+        expr: ExprId,
+        /// The literal as written, minus applied (`"-129"`), so the
+        /// message renders without the body in hand.
+        literal: String,
+        /// The resolved integer type.
+        ty: Ty,
+    },
     /// `p.*` where `p` is not a raw pointer.
     DerefNonPointer {
         /// The deref expression.
@@ -701,6 +722,8 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::CannotInferGenericParam { expr, .. }
             | InferenceDiagnostic::FnConstArg { expr }
             | InferenceDiagnostic::TypeConstArgUnsupported { expr, .. }
+            | InferenceDiagnostic::CannotInferNumberType { expr }
+            | InferenceDiagnostic::IntLiteralOutOfRange { expr, .. }
             | InferenceDiagnostic::DerefNonPointer { expr, .. }
             | InferenceDiagnostic::IndexNonArray { expr, .. }
             | InferenceDiagnostic::IndexOutOfBounds { expr, .. }
@@ -1064,6 +1087,14 @@ impl InferenceDiagnostic {
                     crate::diag::TYPE_CONST_ARG_NOT_LITERAL.to_owned()
                 }
             }
+            InferenceDiagnostic::CannotInferNumberType { .. } => {
+                "cannot infer the type of this number: it has no defining use — \
+                 add a type annotation"
+                    .to_owned()
+            }
+            InferenceDiagnostic::IntLiteralOutOfRange { literal, ty, .. } => {
+                format!("`{literal}` does not fit in `{}`", ty.display())
+            }
             InferenceDiagnostic::DerefNonPointer { ty, .. } => {
                 format!("type `{}` cannot be dereferenced", ty.display())
             }
@@ -1242,6 +1273,28 @@ pub(crate) struct InferCtx<'a, 'db> {
     /// it, [`Self::finish`] reports
     /// [`InferenceDiagnostic::EmptyArrayNeedsAnnotation`].
     pending_empty_arrays: Vec<(ExprId, Ty)>,
+    /// Every integer literal, with its NUMBER-CLASS variable: after the
+    /// whole traversal (joins included), [`Self::finish`] range-checks each
+    /// against its resolved type — or reports the no-defining-use
+    /// diagnostic when nothing ever pinned it (never defaulted — T01).
+    pending_number_literals: Vec<PendingNumberLiteral>,
+    /// Literals directly under a unary minus (`-5`): their range check
+    /// applies the sign (`-128` fits `i8`; plain `128` does not). Filled by
+    /// the [`crate::body::ExprData::Neg`] arm before its operand is
+    /// visited.
+    negated_literals: rustc_hash::FxHashSet<ExprId>,
+}
+
+/// One integer literal awaiting its post-traversal range/pinned check.
+struct PendingNumberLiteral {
+    /// The literal expression.
+    expr: ExprId,
+    /// The literal's magnitude as written.
+    value: u128,
+    /// Whether a direct unary minus negates it.
+    negated: bool,
+    /// The literal's NUMBER-CLASS variable.
+    var: Ty,
 }
 
 /// One instantiation of a generic item's scheme at a mention: which fresh
@@ -1293,6 +1346,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             own_item: None,
             pending_instantiations: Vec::new(),
             pending_empty_arrays: Vec::new(),
+            pending_number_literals: Vec::new(),
+            negated_literals: rustc_hash::FxHashSet::default(),
         }
     }
 
@@ -1327,15 +1382,26 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let pending = std::mem::take(&mut self.pending_instantiations);
         for instantiation in pending {
             for (param, var) in instantiation.params {
-                if resolve_fully(self.table, &var).contains_infer() {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::CannotInferGenericParam {
-                            expr: instantiation.expr,
-                            item: instantiation.item.clone(),
-                            param,
-                        });
+                if !resolve_fully(self.table, &var).contains_infer() {
+                    continue;
                 }
+                // A type param whose only information is a bare literal
+                // resolves to an unresolved NUMBER variable: an unresolved
+                // number is not a type, so the param stays undetermined —
+                // but the actionable diagnostic is the literal's own
+                // no-defining-use error (annotate the number), reported by
+                // the pass below; repeating it as a cannot-infer-`T` here
+                // would be noise.
+                if is_unresolved_number(self.table, &var) {
+                    continue;
+                }
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::CannotInferGenericParam {
+                        expr: instantiation.expr,
+                        item: instantiation.item.clone(),
+                        param,
+                    });
             }
         }
         // Empty array literals whose element type nothing ever pinned —
@@ -1348,12 +1414,61 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     .push(InferenceDiagnostic::EmptyArrayNeedsAnnotation { expr });
             }
         }
+        // Integer literals, after every join and axiom has spoken: a pinned
+        // literal is range-checked against its resolved type (sign
+        // applied); a never-pinned one is the no-defining-use diagnostic —
+        // never a silent default. One diagnostic per merged variable (a
+        // chain of literals that all share one unpinned number reads best
+        // with one squiggle, on the first).
+        let pending = std::mem::take(&mut self.pending_number_literals);
+        let mut reported_number_roots: Vec<TyVar> = Vec::new();
+        for literal in pending {
+            match constraint::resolve_shallow(self.table, &literal.var) {
+                Ty::Int(kind) => {
+                    let fits = i128::try_from(literal.value)
+                        .ok()
+                        .map(|value| if literal.negated { -value } else { value })
+                        .and_then(|value| IntValue::new(kind, value))
+                        .is_some();
+                    if !fits {
+                        let rendered = if literal.negated {
+                            format!("-{}", literal.value)
+                        } else {
+                            literal.value.to_string()
+                        };
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::IntLiteralOutOfRange {
+                                expr: literal.expr,
+                                literal: rendered,
+                                ty: Ty::Int(kind),
+                            });
+                    }
+                }
+                Ty::Infer(var)
+                    if matches!(self.table.probe_value(var), TyVarValue::UnknownNumber) =>
+                {
+                    let root = self.table.find(var);
+                    if !reported_number_roots.contains(&root) {
+                        reported_number_roots.push(root);
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::CannotInferNumberType {
+                                expr: literal.expr,
+                            });
+                    }
+                }
+                // Poisoned (a mismatch already told the story), or some
+                // other broken resolution: silent.
+                _ => {}
+            }
+        }
         let mut result = std::mem::take(&mut self.result);
         for (_, ty) in result.type_of_expr.iter_mut() {
-            *ty = resolve_fully(self.table, ty);
+            *ty = resolve_finished(self.table, ty);
         }
         for (_, ty) in result.type_of_binding.iter_mut() {
-            *ty = resolve_fully(self.table, ty);
+            *ty = resolve_finished(self.table, ty);
         }
         // `VariantTy`s persisted outside any `Ty` carry generic args of
         // their own — resolve them too, both for MIR (payload substitution
@@ -1376,28 +1491,28 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::AllBranchesMismatch {
                     expected, actual, ..
                 } => {
-                    *expected = resolve_fully(self.table, expected);
-                    *actual = resolve_fully(self.table, actual);
+                    *expected = resolve_finished(self.table, expected);
+                    *actual = resolve_finished(self.table, actual);
                 }
                 InferenceDiagnostic::NotCallable { ty, .. } => {
-                    *ty = resolve_fully(self.table, ty);
+                    *ty = resolve_finished(self.table, ty);
                 }
                 InferenceDiagnostic::IfBranchMismatch {
                     then_ty, else_ty, ..
                 } => {
-                    *then_ty = resolve_fully(self.table, then_ty);
-                    *else_ty = resolve_fully(self.table, else_ty);
+                    *then_ty = resolve_finished(self.table, then_ty);
+                    *else_ty = resolve_finished(self.table, else_ty);
                 }
                 InferenceDiagnostic::RecordLitMissingFields { fields, .. } => {
                     for (_, ty) in fields.iter_mut() {
-                        *ty = resolve_fully(self.table, ty);
+                        *ty = resolve_finished(self.table, ty);
                     }
                 }
                 InferenceDiagnostic::RecordLitExtraField { expected, .. } => {
-                    *expected = resolve_fully(self.table, expected);
+                    *expected = resolve_finished(self.table, expected);
                 }
                 InferenceDiagnostic::NoSuchField { receiver_ty, .. } => {
-                    *receiver_ty = resolve_fully(self.table, receiver_ty);
+                    *receiver_ty = resolve_finished(self.table, receiver_ty);
                 }
                 InferenceDiagnostic::MatchWithoutCatchAll { scrutinee, .. }
                 | InferenceDiagnostic::NonEnumScrutineeVariantPat { scrutinee, .. }
@@ -1406,14 +1521,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     reason: UnreachableReason::OtherVariant { scrutinee },
                     ..
                 } => {
-                    *scrutinee = resolve_fully(self.table, scrutinee);
+                    *scrutinee = resolve_finished(self.table, scrutinee);
                 }
                 InferenceDiagnostic::PatUnknownField { record_ty, .. } => {
-                    *record_ty = resolve_fully(self.table, record_ty);
+                    *record_ty = resolve_finished(self.table, record_ty);
                 }
                 InferenceDiagnostic::PatMissingFields { fields, .. } => {
                     for (_, ty) in fields.iter_mut() {
-                        *ty = resolve_fully(self.table, ty);
+                        *ty = resolve_finished(self.table, ty);
                     }
                 }
                 InferenceDiagnostic::PatNotRecord { ty, .. }
@@ -1421,16 +1536,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::IndexNonArray { ty, .. }
                 | InferenceDiagnostic::AssignThroughImmutablePointer { ty, .. }
                 | InferenceDiagnostic::AddrOfMutThroughImmutablePointer { ty, .. } => {
-                    *ty = resolve_fully(self.table, ty);
+                    *ty = resolve_finished(self.table, ty);
                 }
                 InferenceDiagnostic::PatNamedTypeMismatch {
                     expected, actual, ..
                 } => {
-                    *expected = resolve_fully(self.table, expected);
-                    *actual = resolve_fully(self.table, actual);
+                    *expected = resolve_finished(self.table, expected);
+                    *actual = resolve_finished(self.table, actual);
                 }
                 InferenceDiagnostic::BuiltinExpectsRawPtr { found, .. } => {
-                    *found = resolve_fully(self.table, found);
+                    *found = resolve_finished(self.table, found);
                 }
                 InferenceDiagnostic::ArgCountMismatch { .. }
                 | InferenceDiagnostic::NeedsAnnotation { .. }
@@ -1470,11 +1585,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::IndexOutOfBounds { .. }
                 | InferenceDiagnostic::EmptyArrayNeedsAnnotation { .. }
                 | InferenceDiagnostic::ArrayConstArg { .. }
+                | InferenceDiagnostic::CannotInferNumberType { .. }
+                | InferenceDiagnostic::IntLiteralOutOfRange { .. }
                 | InferenceDiagnostic::BuiltinNotFirstClass { .. } => {}
             }
         }
         for (_, ty) in result.type_of_pat.iter_mut() {
-            *ty = resolve_fully(self.table, ty);
+            *ty = resolve_finished(self.table, ty);
         }
         // Expectations: resolve like `type_of_expr`, but *drop* what
         // doesn't resolve to a concrete type — an unbound variable means
@@ -1483,7 +1600,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // for why both must go).
         let recorded = std::mem::take(&mut result.expectation_of_expr);
         for (expr, ty) in recorded.iter() {
-            let resolved = resolve_fully(self.table, ty);
+            let resolved = resolve_finished(self.table, ty);
             if resolved.contains_infer() || resolved.contains_error() {
                 continue;
             }
@@ -1494,6 +1611,25 @@ impl<'a, 'db> InferCtx<'a, 'db> {
 
     fn fresh_var(&mut self) -> Ty {
         Ty::Infer(self.table.new_key(TyVarValue::Unknown))
+    }
+
+    /// A NUMBER-CLASS inference variable: unifies only with integer scalar
+    /// types and other number variables — what an integer literal (and an
+    /// arithmetic operand position) starts as.
+    fn fresh_number_var(&mut self) -> Ty {
+        Ty::Infer(self.table.new_key(TyVarValue::UnknownNumber))
+    }
+
+    /// Infer the arguments of an already-broken call freely, then silence
+    /// any still-free NUMBER variables among them: the call's own
+    /// diagnostic is the whole story — a literal argument must not pile a
+    /// no-defining-use error on top (errors are infectious and silent).
+    fn infer_args_broken(&mut self, args: &[ExprId]) {
+        for &arg in args {
+            let fresh = self.fresh_var();
+            self.infer_expr(arg, &fresh);
+            poison_unresolved_number(self.table, &fresh);
+        }
     }
 
     /// Infer `expr`; if `expected` is given, check against it (recording a
@@ -1522,7 +1658,22 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let sink = self.witness_sink.take();
         let ty = match &self.body.exprs[expr] {
             ExprData::Missing => Ty::Error,
-            ExprData::Literal(LiteralData::Int(_)) => Ty::Int,
+            // ENTIRELY INFERRED, never defaulted: the literal is a
+            // NUMBER-CLASS variable until a defining use pins it; `finish`
+            // range-checks the pinned ones and reports the never-pinned
+            // ones (no silent pick).
+            ExprData::Literal(LiteralData::Int(value)) => {
+                let var = self.fresh_number_var();
+                if let Some(value) = value {
+                    self.pending_number_literals.push(PendingNumberLiteral {
+                        expr,
+                        value: *value,
+                        negated: self.negated_literals.contains(&expr),
+                        var: var.clone(),
+                    });
+                }
+                var
+            }
             ExprData::Literal(LiteralData::Str(_)) => Ty::Str,
             ExprData::Literal(LiteralData::Bool(_)) => Ty::Bool,
             ExprData::NameRef(name) => match self.resolutions.get(expr) {
@@ -1633,12 +1784,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         cause,
                     );
                 }
-                // The flavor-polymorphic builtins (`add`, `copy`) are
-                // intercepted like construction heads: their callee has no
-                // one function type to infer, so the call itself is the
+                // The flavor-polymorphic builtins (`add`, `offset`, `copy`)
+                // are intercepted like construction heads: their callee has
+                // no one function type to infer, so the call itself is the
                 // special case (see `infer_builtin_special_call`).
-                if let Some(Resolution::Builtin(builtin @ (Builtin::Add | Builtin::Copy))) =
-                    self.resolutions.get(*callee)
+                if let Some(Resolution::Builtin(
+                    builtin @ (Builtin::Add | Builtin::Offset | Builtin::Copy),
+                )) = self.resolutions.get(*callee)
                 {
                     let builtin = *builtin;
                     return {
@@ -1653,7 +1805,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 match self.resolve_shallow(&callee_ty) {
                     // The callee's type is still being inferred (an
                     // in-group signature, e.g. mutual recursion): calling
-                    // it commits it to a function of this shape.
+                    // it commits it to a function of this shape. A
+                    // NUMBER-CLASS callee refuses the commitment — a
+                    // number is not callable.
                     Ty::Infer(var) => {
                         let params: Vec<Ty> = args.iter().map(|_| self.fresh_var()).collect();
                         let ret = self.fresh_var();
@@ -1663,15 +1817,18 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             }
                             ret
                         } else {
+                            self.result
+                                .diagnostics
+                                .push(InferenceDiagnostic::NotCallable {
+                                    expr: *callee,
+                                    ty: Ty::UnresolvedNumber,
+                                });
                             // The commitment contradicts what the callee's
                             // signature is already committed to: poison it
                             // so the member reports via the needs-annotation
                             // path instead of publishing a guess.
                             self.table.union_value(var, TyVarValue::Known(Ty::Error));
-                            for &arg in args {
-                                let arg_fresh = self.fresh_var();
-                                self.infer_expr(arg, &arg_fresh);
-                            }
+                            self.infer_args_broken(args);
                             Ty::Error
                         }
                     }
@@ -1701,10 +1858,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         f.ret.clone()
                     }
                     Ty::Error => {
-                        for &arg in args {
-                            let arg_fresh = self.fresh_var();
-                            self.infer_expr(arg, &arg_fresh);
-                        }
+                        self.infer_args_broken(args);
                         Ty::Error
                     }
                     // Evaluating the callee already diverges, so the call
@@ -1715,7 +1869,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             let arg_fresh = self.fresh_var();
                             // TODO: If we cannot infer the type of something, but we can see it's
                             // unreachable, it would be ok for it to be a warning rather than an
-                            // error
+                            // error (the no-defining-use error on an
+                            // unreachable literal argument stays one for the
+                            // same reason).
                             self.infer_expr(arg, &arg_fresh);
                         }
                         Ty::Never
@@ -1727,10 +1883,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 expr: *callee,
                                 ty: other,
                             });
-                        for &arg in args {
-                            let fresh_var = self.fresh_var();
-                            self.infer_expr(arg, &fresh_var);
-                        }
+                        self.infer_args_broken(args);
                         Ty::Error
                     }
                 }
@@ -1738,14 +1891,23 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             ExprData::Bin { op, lhs, rhs } => {
                 use crate::body::BinOp::*;
                 match op {
+                    // Arithmetic works on any ONE integer type: both
+                    // operands meet a shared NUMBER-CLASS variable — an
+                    // already-typed operand pins it (a defining use for a
+                    // literal on the other side), two literals stay an
+                    // unpinned number, and mixed types (`u8 + u32`) are an
+                    // ordinary mismatch (no implicit conversions).
                     Some(Add | Sub | Mul | Div) => {
-                        self.infer_expr_with(*lhs, &Ty::Int, Some(Cause::Operator(expr)));
-                        self.infer_expr_with(*rhs, &Ty::Int, Some(Cause::Operator(expr)));
-                        Ty::Int
+                        let operand = self.fresh_number_var();
+                        self.infer_expr_with(*lhs, &operand, Some(Cause::Operator(expr)));
+                        self.infer_expr_with(*rhs, &operand, Some(Cause::Operator(expr)));
+                        operand
                     }
+                    // Comparisons: same-type integer operands, `bool` out.
                     Some(Lt | Le | Gt | Ge) => {
-                        self.infer_expr_with(*lhs, &Ty::Int, Some(Cause::Operator(expr)));
-                        self.infer_expr_with(*rhs, &Ty::Int, Some(Cause::Operator(expr)));
+                        let operand = self.fresh_number_var();
+                        self.infer_expr_with(*lhs, &operand, Some(Cause::Operator(expr)));
+                        self.infer_expr_with(*rhs, &operand, Some(Cause::Operator(expr)));
                         Ty::Bool
                     }
                     // Equality works on any type; the operands just have to
@@ -1767,6 +1929,22 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         Ty::Error
                     }
                 }
+            }
+            // `-x`: number-classed like the binary operators — the operand
+            // pins the shared variable (or a defining use of the whole
+            // negation does). A literal directly underneath participates in
+            // range checking with the sign applied.
+            ExprData::Neg { operand } => {
+                let operand = *operand;
+                if matches!(
+                    self.body.exprs[operand],
+                    ExprData::Literal(LiteralData::Int(Some(_)))
+                ) {
+                    self.negated_literals.insert(operand);
+                }
+                let num = self.fresh_number_var();
+                self.infer_expr_with(operand, &num, Some(Cause::Operator(expr)));
+                num
             }
             ExprData::If {
                 condition,
@@ -2272,24 +2450,26 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         _ => {
                             // Deferral exists so axioms arriving later can
                             // pick the winner before witnesses are played
-                            // against each other — when every element
-                            // already resolves to ONE concrete type there
-                            // is nothing left to decide, and resolving
-                            // eagerly keeps the element type usable
-                            // *during* traversal (indexing is the array's
-                            // primary operation: `m[1][0]` / `pts[1].x`
-                            // on a nested literal must project right
-                            // away, which a deferred join can't offer).
-                            let resolved: Vec<Ty> = witnesses
-                                .iter()
-                                .map(|witness| resolve_fully(self.table, &witness.ty))
-                                .collect();
-                            let unanimous = !resolved[0].contains_infer()
-                                && !resolved[0].contains_error()
-                                && resolved.iter().all(|ty| *ty == resolved[0]);
-                            if unanimous {
-                                self.unify(&result, &resolved[0]);
+                            // against each other — when the elements
+                            // already AGREE (they all unify, unpinned
+                            // number literals included) there is nothing
+                            // left to decide, and resolving eagerly keeps
+                            // the element type usable *during* traversal
+                            // (indexing is the array's primary operation:
+                            // `m[1][0]` / `pts[1].x` on a nested literal
+                            // must project right away, which a deferred
+                            // join can't offer). Tried under a snapshot so
+                            // a disagreement leaves no trace and defers to
+                            // the blame-aware join solver.
+                            let snapshot = self.table.snapshot();
+                            let agree = witnesses.iter().all(|witness| {
+                                self.constraints
+                                    .unify(self.table, &result, &witness.ty, None)
+                            });
+                            if agree {
+                                self.table.commit(snapshot);
                             } else {
+                                self.table.rollback_to(snapshot);
                                 self.constraints.push_join(Join {
                                     expr,
                                     depth: self.scope_depth,
@@ -2310,8 +2490,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     _ => self.fresh_var(),
                 };
                 let elem_ty = self.infer_expr_with(element, &elem_expected, cause);
-                // The count is a `usize`...
-                self.infer_expr_with(count, &Ty::Int, None);
+                // The count is a `usize` (a defining use for a literal)...
+                self.infer_expr_with(count, &Ty::Int(IntKind::Usize), None);
                 // ...and it parameterizes the array's TYPE, so it is
                 // restricted to the annotation-representable const domain
                 // (a literal or a const-param read) — a computed count
@@ -2336,7 +2516,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 let index = *index;
                 let base_fresh = self.fresh_var();
                 let base_ty = self.infer_expr(base, &base_fresh);
-                self.infer_expr_with(index, &Ty::Int, None);
+                // Indexing pins `usize` — a defining use.
+                self.infer_expr_with(index, &Ty::Int(IntKind::Usize), None);
                 match self.resolve_shallow(&base_ty) {
                     Ty::Array { elem, len } => {
                         // Both the length and the index compile-time known
@@ -3300,7 +3481,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             self.infer_const_args_free(args);
             return builtin_type(builtin);
         }
-        if matches!(builtin, Builtin::Add | Builtin::Copy) {
+        if matches!(builtin, Builtin::Add | Builtin::Offset | Builtin::Copy) {
             self.result
                 .diagnostics
                 .push(InferenceDiagnostic::BuiltinNotFirstClass { expr, builtin });
@@ -3322,7 +3503,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         args: &[ExprId],
     ) -> Ty {
         let expected_arity = match builtin {
-            Builtin::Add => 2,
+            Builtin::Add | Builtin::Offset => 2,
             Builtin::Copy => 3,
             _ => unreachable!("not a flavor-polymorphic builtin"),
         };
@@ -3364,12 +3545,17 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         };
         match builtin {
             // `add(p, i)`: pointer to element `i` past `p`, same
-            // allocation, same flavor.
-            Builtin::Add => {
+            // allocation, same flavor. `offset(p, i)` is the signed
+            // sibling — element arithmetic both directions, `i: isize`.
+            Builtin::Add | Builtin::Offset => {
                 let ptr = ptr_arg(self, args[0]);
+                let index_ty = match builtin {
+                    Builtin::Add => Ty::Int(IntKind::Usize),
+                    _ => Ty::Int(IntKind::Isize),
+                };
                 self.infer_expr_with(
                     args[1],
-                    &Ty::Int,
+                    &index_ty,
                     Some(Cause::CallSite { call, arg: args[1] }),
                 );
                 match ptr {
@@ -3393,7 +3579,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 );
                 self.infer_expr_with(
                     args[2],
-                    &Ty::Int,
+                    &Ty::Int(IntKind::Usize),
                     Some(Cause::CallSite { call, arg: args[2] }),
                 );
                 Ty::Unit
@@ -4582,14 +4768,31 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 reasons.push(recorded);
             }
         }
+        // A still-free NUMBER variable on either side renders `{number}` —
+        // captured eagerly, because the variable is then poisoned to
+        // `{error}` below (the mismatch is the whole story; the literal
+        // that minted it must not pile a no-defining-use diagnostic on
+        // top), which would otherwise erase the honest rendering.
+        let expected_shown = if is_unresolved_number(self.table, expected) {
+            Ty::UnresolvedNumber
+        } else {
+            expected.clone()
+        };
+        let actual_shown = if is_unresolved_number(self.table, &actual) {
+            Ty::UnresolvedNumber
+        } else {
+            actual.clone()
+        };
         self.result
             .diagnostics
             .push(InferenceDiagnostic::TypeMismatch {
                 expr,
-                expected: expected.clone(),
-                actual,
+                expected: expected_shown,
+                actual: actual_shown,
                 reasons,
             });
+        poison_unresolved_number(self.table, &actual);
+        poison_unresolved_number(self.table, expected);
         expected.clone()
     }
 
@@ -4660,6 +4863,7 @@ fn builtin_type(builtin: Builtin) -> Ty {
         Builtin::AllocArray
         | Builtin::DeallocArray
         | Builtin::Add
+        | Builtin::Offset
         | Builtin::Copy
         | Builtin::Dangling => Ty::Error,
     }
@@ -4678,7 +4882,7 @@ fn builtin_generics(builtin: Builtin) -> Option<Vec<GenericParamData>> {
                 kind: GenericParamKind::Type,
             }])
         }
-        Builtin::Print | Builtin::Panic | Builtin::Add | Builtin::Copy => None,
+        Builtin::Print | Builtin::Panic | Builtin::Add | Builtin::Offset | Builtin::Copy => None,
     }
 }
 
@@ -4704,15 +4908,18 @@ fn builtin_scheme(builtin: Builtin, file: SourceFile) -> (ItemLoc, Ty) {
         // fallible at the SIGNATURE level for codegen-era OOM; the
         // interpreter itself never produces the `Err` arm.
         Builtin::AllocArray => Ty::fn_type(
-            vec![Ty::Int],
+            vec![Ty::Int(IntKind::Usize)],
             Ty::Named(NamedTy {
                 decl: crate::alloc_result_loc(file),
                 args: vec![GenericArg::Ty(t)],
             }),
         ),
-        Builtin::DeallocArray => Ty::fn_type(vec![Ty::raw_ptr(true, t), Ty::Int], Ty::Unit),
+        Builtin::DeallocArray => Ty::fn_type(
+            vec![Ty::raw_ptr(true, t), Ty::Int(IntKind::Usize)],
+            Ty::Unit,
+        ),
         Builtin::Dangling => Ty::fn_type(Vec::new(), Ty::raw_ptr(true, t)),
-        Builtin::Print | Builtin::Panic | Builtin::Add | Builtin::Copy => {
+        Builtin::Print | Builtin::Panic | Builtin::Add | Builtin::Offset | Builtin::Copy => {
             unreachable!("not a scheme-shaped builtin")
         }
     };

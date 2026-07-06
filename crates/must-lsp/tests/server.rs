@@ -257,7 +257,7 @@ fn quick_fix_wraps_fn_body_in_braces() {
     let mut client = TestClient::start();
     let file = uri("file:///fix.must");
 
-    client.open(&file, "static f = fn 42;");
+    client.open(&file, "static f = fn true;");
     let diags = client.next_diagnostics();
     assert_eq!(diags.diagnostics.len(), 1);
     let diag_range = diags.diagnostics[0].range;
@@ -286,10 +286,10 @@ fn quick_fix_wraps_fn_body_in_braces() {
         .expect("action has a workspace edit");
     let edits = &changes[&file];
     assert_eq!(edits.len(), 2);
-    // `42` spans columns 14..16 on line 0.
+    // `true` spans columns 14..18 on line 0.
     assert_eq!(edits[0].range.start, lsp_types::Position::new(0, 14));
     assert_eq!(edits[0].new_text, "{ ");
-    assert_eq!(edits[1].range.start, lsp_types::Position::new(0, 16));
+    assert_eq!(edits[1].range.start, lsp_types::Position::new(0, 18));
     assert_eq!(edits[1].new_text, " }");
 
     drop(client);
@@ -346,7 +346,7 @@ fn quick_fix_makes_an_immutable_binding_mutable() {
     let mut client = TestClient::start();
     let file = uri("file:///make-mut.must");
 
-    client.open(&file, "static f = fn { let x = 1; x = 2; };");
+    client.open(&file, "static f = fn { let x: usize = 1; x = 2; };");
     let diags = client.next_diagnostics();
     assert_eq!(diags.diagnostics.len(), 2); // the error + the companion hint
     let diag = diags
@@ -397,7 +397,7 @@ fn duplicate_definition_links_to_the_first_one() {
     let client = TestClient::start();
     let file = uri("file:///dup.must");
 
-    client.open(&file, "static name = 1;\nstatic name = 2;\n");
+    client.open(&file, "static name: usize = 1;\nstatic name: usize = 2;\n");
     let diags = client.next_diagnostics();
     // The error, plus a companion hint at the first definition.
     assert_eq!(diags.diagnostics.len(), 2);
@@ -451,7 +451,7 @@ fn semantic_tokens_over_protocol() {
     let mut client = TestClient::start();
     let file = uri("file:///tokens.must");
 
-    client.open(&file, "static x = 1;");
+    client.open(&file, "static x: usize = 1;");
     client.next_diagnostics();
 
     let response = client.request::<lsp_types::request::SemanticTokensFullRequest>(
@@ -470,7 +470,8 @@ fn semantic_tokens_over_protocol() {
         // delta_line, delta_start, length, token_type, modifiers
         (0, 0, 6, 3, 0), // `static`
         (0, 7, 1, 6, 3), // `x`: variable, declaration|static
-        (0, 2, 1, 4, 0), // `=`
+        (0, 3, 5, 8, 4), // `usize`: type, defaultLibrary
+        (0, 6, 1, 4, 0), // `=`
         (0, 2, 1, 2, 0), // `1`
     ];
     let actual: Vec<_> = tokens
@@ -606,10 +607,10 @@ fn diagnostics_carry_the_document_version() {
     let client = TestClient::start();
     let file = uri("file:///versioned.must");
 
-    client.open(&file, "static = 1;");
+    client.open(&file, "static = true;");
     assert_eq!(client.next_diagnostics().version, Some(0));
 
-    client.change(&file, 7, "static x = 1;");
+    client.change(&file, 7, "static x: usize = 1;");
     assert_eq!(client.next_diagnostics().version, Some(7));
 
     drop(client);
@@ -620,7 +621,7 @@ fn close_clears_diagnostics() {
     let client = TestClient::start();
     let file = uri("file:///broken.must");
 
-    client.open(&file, "static = 1;");
+    client.open(&file, "static = true;");
     assert_eq!(client.next_diagnostics().diagnostics.len(), 1);
 
     client.close(&file);
@@ -636,7 +637,7 @@ fn reopening_a_closed_file_resumes_diagnostics_and_edits() {
     let client = TestClient::start();
     let file = uri("file:///reopened.must");
 
-    client.open(&file, "static = 1;");
+    client.open(&file, "static = true;");
     assert_eq!(client.next_diagnostics().diagnostics.len(), 1);
     client.close(&file);
     assert_eq!(client.next_diagnostics().diagnostics, vec![]);
@@ -644,13 +645,13 @@ fn reopening_a_closed_file_resumes_diagnostics_and_edits() {
     // The server emptied this document's text on close; reopening has to
     // refill the parked input rather than answer from what is left of it,
     // which would be an empty file with no diagnostics.
-    client.open(&file, "static = 1;");
+    client.open(&file, "static = true;");
     let diags = client.next_diagnostics();
     assert_eq!(diags.uri, file);
     assert_eq!(diags.diagnostics.len(), 1);
 
     // Edits still land on the revived handle.
-    client.change(&file, 1, "static a = 1;");
+    client.change(&file, 1, "static a: usize = 1;");
     assert_eq!(client.next_diagnostics().diagnostics, vec![]);
 
     drop(client);
@@ -676,7 +677,7 @@ fn early_semantic_tokens_pull_errors_retryably_then_succeeds_after_open() {
     let err = resp.error.expect("early pull answers an error, not null");
     assert_eq!(err.code, -32801, "ContentModified, so the client retries");
 
-    client.open(&file, "static x = 1;");
+    client.open(&file, "static x: usize = 1;");
     client.next_diagnostics();
 
     let response = client.request::<lsp_types::request::SemanticTokensFullRequest>(params);
@@ -702,7 +703,7 @@ fn semantic_tokens_survive_close_and_reopen() {
         other => panic!("expected full tokens, got {other:?}"),
     };
 
-    client.open(&file, "static x = 1;");
+    client.open(&file, "static x: usize = 1;");
     client.next_diagnostics();
     let first =
         tokens(client.request::<lsp_types::request::SemanticTokensFullRequest>(params.clone()));
@@ -715,7 +716,7 @@ fn semantic_tokens_survive_close_and_reopen() {
     );
     client.next_diagnostics();
 
-    client.open(&file, "static x = 1;");
+    client.open(&file, "static x: usize = 1;");
     client.next_diagnostics();
     let second = tokens(client.request::<lsp_types::request::SemanticTokensFullRequest>(params));
     assert_eq!(first, second);
@@ -740,7 +741,7 @@ fn did_open_triggers_semantic_tokens_refresh_when_supported() {
     let client = TestClient::start_with(init);
     let file = uri("file:///refresh.must");
 
-    client.open(&file, "static x = 1;");
+    client.open(&file, "static x: usize = 1;");
 
     // Zed doesn't issue the initial token pull for reopened buffers until
     // an edit (zed#57651): the server must nudge it to re-pull as soon as
@@ -843,7 +844,7 @@ fn completion_over_protocol_returns_ranked_items_with_a_text_edit() {
 
     client.open(
         &file,
-        "static main = fn {\n    let x = 1;\n    print(x);\n}\n",
+        "static main = fn {\n    let x = \"hi\";\n    print(x);\n}\n",
     );
     client.next_diagnostics();
 
@@ -975,7 +976,7 @@ fn dot_triggered_completion_over_protocol_returns_field_items() {
 
     client.open(
         &file,
-        "type Point = struct { x: usize, y: usize };\nstatic main = fn {\n    let p = struct { x: 1, y: 2 };\n    p.\n}\n",
+        "type Point = struct { x: usize, y: usize };\nstatic main = fn {\n    let p = Point(struct { x: 1, y: 2 });\n    p.\n}\n",
     );
     client.next_diagnostics();
 

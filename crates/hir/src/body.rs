@@ -85,6 +85,13 @@ pub enum ExprData {
         lhs: ExprId,
         rhs: ExprId,
     },
+    /// `-x`: unary minus on a number. On a literal (`-5`) the negation
+    /// participates in the literal's range check (`-128` fits `i8`); on
+    /// unsigned operands it is legal syntax that traps at runtime unless
+    /// the operand is zero (the overflow rule).
+    Neg {
+        operand: ExprId,
+    },
     If {
         condition: ExprId,
         then_branch: ExprId,
@@ -543,6 +550,10 @@ impl LowerCtx {
                 let rhs = self.lower_opt_expr(it.rhs());
                 let op = it.op();
                 self.alloc_expr(ExprData::Bin { op, lhs, rhs }, it.syntax())
+            }
+            ast::Expr::NegExpr(it) => {
+                let operand = self.lower_opt_expr(it.expr());
+                self.alloc_expr(ExprData::Neg { operand }, it.syntax())
             }
             ast::Expr::ParenExpr(it) => {
                 // No HIR node for parens, but let position lookups through

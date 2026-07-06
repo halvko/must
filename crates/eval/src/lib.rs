@@ -23,12 +23,16 @@ use base_db::Db;
 use hir::{Builtin, ExprId, ItemId, ItemLoc};
 use mir::BodyId;
 
+pub use hir::IntValue;
 pub use machine::{ConstMode, Frame, Machine, Mode, RunMode, StepEvent};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     Unit,
-    Int(u128),
+    /// A typed integer: the value plus its width ([`hir::IntValue`]) —
+    /// element-granular typed memory applied to scalars, so every
+    /// arithmetic operation enforces the type's range right where it runs.
+    Int(IntValue),
     Str(String),
     Bool(bool),
     Fn(FnValue),
@@ -225,7 +229,7 @@ impl Value {
     pub fn display(&self) -> String {
         match self {
             Value::Unit => "()".to_owned(),
-            Value::Int(v) => v.to_string(),
+            Value::Int(v) => v.to_i128().to_string(),
             Value::Str(s) => format!("{s:?}"),
             Value::Bool(b) => b.to_string(),
             Value::Fn(_) => "fn".to_owned(),

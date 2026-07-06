@@ -26,8 +26,10 @@ static TABLE = const {
 };
 
 // Nested arrays are just arrays whose element type is itself an array:
-// `[[usize; 2]; 2]`. Indexing chains left to right, `grid[1][0]`.
-static grid = [[1, 2], [3, 4]];
+// `[[usize; 2]; 2]`. Indexing chains left to right, `grid[1][0]`. The
+// annotation is load-bearing: a number literal's type is entirely inferred
+// (never defaulted), and nothing else here says what these numbers are.
+static grid: [[usize; 2]; 2] = [[1, 2], [3, 4]];
 
 // A generic type carrying a const-param length: `Buf::<2>` fixes `N = 2`,
 // so its `data` field is exactly a `[usize; 2]`. `Buf::<2>` and `Buf::<3>`
@@ -51,7 +53,7 @@ static main = fn () -> () {
 
     // Index-assignment needs a `mut` root, exactly like field assignment;
     // mutability is transitive through the index.
-    let mut a = [1, 2, 3];
+    let mut a: [u8; 3] = [1, 2, 3];
     a[0] = 10;
     if a[0] + a[2] == 13 {
         print("index-assign: a[0] = 10 through a mut binding");
