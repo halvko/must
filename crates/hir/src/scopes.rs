@@ -264,11 +264,15 @@ pub enum Builtin {
     /// the head of a live heap allocation and `n` its alloc-time count;
     /// anything else is detected UB. Refused in const contexts.
     DeallocArray,
-    /// `offset(p, i)` — pointer to element `i` past `p`, within the same
-    /// allocation. SAFE (minting is unchecked; validity is judged at the
-    /// deref) and flavor-preserving (`&raw mut` in → `&raw mut` out) — a
-    /// checker special case, not expressible as one `fn` type.
-    Offset,
+    /// `add(p, i)` — pointer to element `i` past `p`, within the same
+    /// allocation. UNSAFE: it carries a real precondition — advancing a
+    /// pointer that does not address an array element with `i > 0` is
+    /// detected UB at the call. Flavor-preserving (`&raw mut` in →
+    /// `&raw mut` out) — a checker special case, not expressible as one
+    /// `fn` type. Takes a `usize`; the name `offset` is reserved for a
+    /// future signed (`isize`) variant, mirroring Rust's `add`/`offset`
+    /// split.
+    Add,
     /// `copy(src, dst, n)` — element-count bulk copy, memmove semantics
     /// (overlap is DEFINED). UNSAFE (writes through a raw pointer).
     /// Copying an uninitialized element propagates the marker silently —
@@ -287,7 +291,7 @@ impl Builtin {
             "panic" => Some(Builtin::Panic),
             "alloc_array" => Some(Builtin::AllocArray),
             "dealloc_array" => Some(Builtin::DeallocArray),
-            "offset" => Some(Builtin::Offset),
+            "add" => Some(Builtin::Add),
             "copy" => Some(Builtin::Copy),
             "dangling" => Some(Builtin::Dangling),
             _ => None,
@@ -300,18 +304,20 @@ impl Builtin {
             Builtin::Panic => "panic",
             Builtin::AllocArray => "alloc_array",
             Builtin::DeallocArray => "dealloc_array",
-            Builtin::Offset => "offset",
+            Builtin::Add => "add",
             Builtin::Copy => "copy",
             Builtin::Dangling => "dangling",
         }
     }
 
     /// Whether calling this builtin requires an enclosing
-    /// `unsafe { ... }` block — exactly the operations whose misuse is UB
-    /// even without a visible deref: freeing invalidates every pointer
-    /// into the allocation, and `copy` writes through a raw pointer.
+    /// `unsafe { ... }` block — exactly the operations that carry a
+    /// precondition whose violation is UB even without a visible deref:
+    /// freeing invalidates every pointer into the allocation, `copy`
+    /// writes through a raw pointer, and `add` on a pointer that does not
+    /// address an array element (with `i > 0`) is detected UB at the call.
     pub fn requires_unsafe(self) -> bool {
-        matches!(self, Builtin::DeallocArray | Builtin::Copy)
+        matches!(self, Builtin::DeallocArray | Builtin::Copy | Builtin::Add)
     }
 }
 

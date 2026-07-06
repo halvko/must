@@ -40,6 +40,8 @@
 - Type-producing `-> type` const functions are ruled in, unscheduled. They take only const
   arguments, so type-parametric families are expressible only through generic type
   declarations; the two features are complementary.
+- Introspection is the intended replacement for derive: const-evaluated code walking a
+  definition-ordered shape (X14). Nothing binds to it in v1.
 
 ## Discarded
 

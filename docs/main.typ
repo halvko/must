@@ -673,9 +673,12 @@ growable vector and a typed arena).
   pointer, a wrong count, a local or a `static`, and a double free are
   each detected UB, with an "allocated here" note at the allocation's
   birth site. Not freeing is a leak, and a leak is not UB.
-- `offset(p, i)` is safe and unchecked, exactly like `&raw mut a[i]`:
-  minting an out-of-range address is fine, dereferencing it is detected
-  UB.
+- `add(p, i)` is `unsafe` and takes a `usize`. Minting the address is
+  unchecked, like `&raw mut a[i]` — an out-of-range result derefs to
+  detected UB — but advancing a pointer that does not address an array
+  element, with `i > 0`, is detected UB at the call itself, which is why
+  it needs `unsafe` before any deref. The name `offset` is reserved for a
+  future signed variant.
 - `copy(src, dst, n)` is `unsafe`, counts elements, and is memmove-shaped:
   overlapping ranges are defined, uninitialized elements copy silently,
   out of range on either side is detected UB, and a zero-length copy is
@@ -686,7 +689,7 @@ growable vector and a typed arena).
 
 There is no `realloc`: growth is alloc, copy, dealloc, composed by the
 container. Allocation never happens at compile time: under a const context
-`alloc_array` and `dealloc_array` are refused eagerly; `offset`, `copy` and
+`alloc_array` and `dealloc_array` are refused eagerly; `add`, `copy` and
 `dangling` allocate nothing, so they are const-legal wherever the values
 they touch already are.
 
@@ -694,7 +697,7 @@ they touch already are.
 static main = fn () -> () {
     match alloc_array::<usize>(2) {
         AllocResult::Ok(p) => {
-            let q = offset(p, 1);
+            let q = unsafe { add(p, 1) };
             unsafe {
                 p.* = 1;
                 q.* = 2;

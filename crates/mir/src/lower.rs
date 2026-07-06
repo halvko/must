@@ -287,7 +287,7 @@ impl LowerCtx<'_> {
                 InferenceDiagnostic::AssignThroughImmutablePointer { target, .. } => {
                     self.assign_traps.insert(*target, diag.message());
                 }
-                // A flavor-polymorphic builtin (`offset`/`copy`) applied
+                // A flavor-polymorphic builtin (`add`/`copy`) applied
                 // to a non-pointer: the diagnostic squiggles the argument,
                 // but the operation that cannot execute is the call.
                 InferenceDiagnostic::BuiltinExpectsRawPtr { call, .. } => {

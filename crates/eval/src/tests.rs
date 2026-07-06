@@ -2698,12 +2698,12 @@ static main = fn () -> usize {
         AllocResult::Ok(p) => {
             unsafe {
                 p.* = 10;
-                let p1 = offset(p, 1);
+                let p1 = add(p, 1);
                 p1.* = 20;
-                let p2 = offset(p, 2);
+                let p2 = add(p, 2);
                 p2.* = 30;
             };
-            let sum = unsafe { p.* + offset(p, 1).* + offset(p, 2).* };
+            let sum = unsafe { p.* + add(p, 1).* + add(p, 2).* };
             unsafe { dealloc_array(p, 3); };
             sum
         }
@@ -2874,7 +2874,7 @@ fn heap_dealloc_of_interior_pointer_is_detected_ub() {
         r#"
 static main = fn () -> () {
     match alloc_array::<usize>(2) {
-        AllocResult::Ok(p) => unsafe { dealloc_array(offset(p, 1), 2) },
+        AllocResult::Ok(p) => unsafe { dealloc_array(add(p, 1), 2) },
         AllocResult::Err => (),
     }
 };
@@ -2961,14 +2961,14 @@ static main = fn () -> bool {
 }
 
 #[test]
-fn offset_stays_within_allocation_and_oob_deref_is_detected_ub() {
+fn add_stays_within_allocation_and_oob_deref_is_detected_ub() {
     // Minting past the end is silent (validity is a deref-time
     // judgement, same as `&raw mut a[i]`); the deref is where it traps.
     check_run(
         r#"
 static main = fn () -> usize {
     match alloc_array::<usize>(2) {
-        AllocResult::Ok(p) => unsafe { offset(p, 5).* },
+        AllocResult::Ok(p) => unsafe { add(p, 5).* },
         AllocResult::Err => 0,
     }
 };
@@ -2981,15 +2981,15 @@ static main = fn () -> usize {
 }
 
 #[test]
-fn offset_works_on_local_array_element_pointers() {
-    // `offset` is not heap-only: any pointer addressing an array element
+fn add_works_on_local_array_element_pointers() {
+    // `add` is not heap-only: any pointer addressing an array element
     // supports it — the stack-buffer story.
     check_run(
         r#"
 static main = fn () -> usize {
     let mut a = [10, 20, 30];
     let p = &raw a[0];
-    unsafe { offset(p, 2).* }
+    unsafe { add(p, 2).* }
 };
 "#,
         "main()",
@@ -3000,13 +3000,13 @@ static main = fn () -> usize {
 }
 
 #[test]
-fn offset_zero_is_identity_on_any_pointer() {
+fn add_zero_is_identity_on_any_pointer() {
     check_run(
         r#"
 static main = fn () -> usize {
     let mut x = 7;
     let p = &raw mut x;
-    unsafe { offset(p, 0).* }
+    unsafe { add(p, 0).* }
 };
 "#,
         "main()",
@@ -3017,7 +3017,7 @@ static main = fn () -> usize {
 }
 
 #[test]
-fn offset_of_non_element_pointer_is_detected_ub() {
+fn add_of_non_element_pointer_is_detected_ub() {
     // The one shape the abstract machine cannot represent: advancing a
     // pointer that doesn't address an array element (a lone local).
     check_run(
@@ -3025,12 +3025,12 @@ fn offset_of_non_element_pointer_is_detected_ub() {
 static main = fn () -> usize {
     let mut x = 7;
     let p = &raw mut x;
-    unsafe { offset(p, 1).* }
+    unsafe { add(p, 1).* }
 };
 "#,
         "main()",
         expect![[r#"
-            error[UndefinedBehavior]: `offset` of a pointer that does not address an array element
+            error[UndefinedBehavior]: `add` of a pointer that does not address an array element
         "#]],
     );
 }
@@ -3044,7 +3044,7 @@ static main = fn () -> usize {
     match alloc_array::<usize>(3) {
         AllocResult::Ok(p) => {
             unsafe { copy(&raw a[0], p, 3) };
-            let sum = unsafe { p.* + offset(p, 1).* + offset(p, 2).* };
+            let sum = unsafe { p.* + add(p, 1).* + add(p, 2).* };
             unsafe { dealloc_array(p, 3) };
             sum
         }
@@ -3069,7 +3069,7 @@ fn copy_overlap_is_defined_memmove_semantics() {
 static main = fn () -> bool {
     let mut a = [1, 2, 3, 4, 5];
     let p = &raw mut a[0];
-    unsafe { copy(p, offset(p, 1), 4) };
+    unsafe { copy(p, add(p, 1), 4) };
     a == [1, 1, 2, 3, 4]
 };
 "#,
@@ -3101,7 +3101,7 @@ static main = fn () -> usize {
     print("copy of a half-written buffer did not trap");
     let ok = unsafe { q.* };
     print("the initialized element arrived");
-    unsafe { offset(q, 1).* }
+    unsafe { add(q, 1).* }
 };
 "#,
         "main()",
@@ -3222,7 +3222,7 @@ static y: usize = { x(); 1 };
 }
 
 #[test]
-fn offset_copy_and_dangling_are_const_legal_on_locals() {
+fn add_copy_and_dangling_are_const_legal_on_locals() {
     // NOT fenced (they allocate nothing): pointer arithmetic and copies
     // over const-local storage work at compile time — the pointer-escape
     // rule stays the backstop for anything trying to leave.
@@ -3231,9 +3231,9 @@ fn offset_copy_and_dangling_are_const_legal_on_locals() {
 static x: usize = const {
     let mut a = [1, 2, 3];
     let p = &raw mut a[0];
-    unsafe { copy(p, offset(p, 1), 2); };
+    unsafe { copy(p, add(p, 1), 2); };
     let d = dangling::<usize>();
-    unsafe { offset(p, 1).* }
+    unsafe { add(p, 1).* }
 };
 "#,
         expect![[r#"
@@ -3259,7 +3259,7 @@ fn heap_pointer_cannot_escape_const_evaluation() {
 fn heapvec_push_growth_get_and_deinit_roundtrip() {
     // The proof program's core, as a machine test: growth (alloc + copy +
     // dealloc old) preserves elements across reallocation, checked get
-    // reads through `offset`, and one deinit frees the one live buffer.
+    // reads through `add`, and one deinit frees the one live buffer.
     check_run(
         r#"
 type HeapVec = struct::<T> { ptr: &raw mut T, len: usize, cap: usize };
@@ -3282,14 +3282,14 @@ static heapvec_push = fn::<T>(mut v: HeapVec::<T>, x: T) -> HeapVec::<T> {
         v.ptr = fresh;
         v.cap = new_cap;
     };
-    let slot = unsafe { offset(v.ptr, v.len) };
+    let slot = unsafe { add(v.ptr, v.len) };
     unsafe { slot.* = x; };
     v.len = v.len + 1;
     v
 };
 static heapvec_get = fn::<T>(v: HeapVec::<T>, i: usize) -> T {
     if i < v.len {
-        unsafe { offset(v.ptr, i).* }
+        unsafe { add(v.ptr, i).* }
     } else {
         panic("index out of bounds")
     }
@@ -3322,14 +3322,14 @@ static main = fn () -> usize {
 #[test]
 fn heapvec_get_out_of_bounds_panics_like_the_future_index_desugar() {
     // `heapvec_get` is written as EXACTLY the future `a[i]` desugar
-    // (check + panic + offset + deref) — past `len` it panics, an
+    // (check + panic + add + deref) — past `len` it panics, an
     // ordinary trap, never UB.
     check_run(
         r#"
 type HeapVec = struct::<T> { ptr: &raw mut T, len: usize, cap: usize };
 static heapvec_get = fn::<T>(v: HeapVec::<T>, i: usize) -> T {
     if i < v.len {
-        unsafe { offset(v.ptr, i).* }
+        unsafe { add(v.ptr, i).* }
     } else {
         panic("index out of bounds")
     }
@@ -3411,7 +3411,7 @@ static arena_alloc = fn::<T>(a: Arena::<T>, n: usize) -> AllocResult::<T> {
         AllocResult::<T>::Err
     } else {
         unsafe {
-            let p = offset(a.state.*.base, cursor);
+            let p = add(a.state.*.base, cursor);
             a.state.*.cursor = cursor + n;
             AllocResult::<T>::Ok(p)
         }
@@ -3427,7 +3427,7 @@ static main = fn () -> () {
     let a = arena_new::<usize>(4);
     match arena_alloc(a, 3) {
         AllocResult::Ok(p) => {
-            let last = unsafe { offset(p, 2) };
+            let last = unsafe { add(p, 2) };
             unsafe { last.* = 7; };
             print("carved 3 of 4");
         }
@@ -3466,7 +3466,7 @@ static main = fn () -> usize {
         AllocResult::Ok(p) => p,
         AllocResult::Err => panic("oom"),
     };
-    let carved = unsafe { offset(base, 1) };
+    let carved = unsafe { add(base, 1) };
     unsafe { dealloc_array(base, 2) };
     unsafe { carved.* }
 };

@@ -715,9 +715,9 @@ fn builtin_fn_items(edit_range: TextRange, expected: Option<&hir::Ty>) -> Vec<Co
             Some("unsafe fn::<T>(&raw mut T, usize)"),
         ),
         (
-            "offset",
+            "add",
             placeholder_fn(2),
-            Some("fn(&raw [mut] T, usize) -> &raw [mut] T"),
+            Some("unsafe fn(&raw [mut] T, usize) -> &raw [mut] T"),
         ),
         (
             "copy",

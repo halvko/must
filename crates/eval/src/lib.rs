@@ -113,8 +113,8 @@ pub enum PathElem {
     /// WITHOUT a bounds check — validity is a deref-time judgement — so
     /// an out-of-range step here is exactly what the deref-time
     /// out-of-bounds-pointer UB detection catches. The heap's
-    /// pointer-arithmetic builtins (`alloc_array`, `offset`) reuse this
-    /// same shape.
+    /// pointer-arithmetic builtins (`alloc_array`, `add`) reuse this same
+    /// shape.
     Index(u64),
 }
 

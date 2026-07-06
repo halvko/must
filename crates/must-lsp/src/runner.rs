@@ -406,14 +406,14 @@ static heapvec_push = fn::<T>(mut v: HeapVec::<T>, x: T) -> HeapVec::<T> {
         v.ptr = fresh;
         v.cap = new_cap;
     };
-    let slot = unsafe { offset(v.ptr, v.len) };
+    let slot = unsafe { add(v.ptr, v.len) };
     unsafe { slot.* = x; };
     v.len = v.len + 1;
     v
 };
 static heapvec_get = fn::<T>(v: HeapVec::<T>, i: usize) -> T {
     if i < v.len {
-        unsafe { offset(v.ptr, i).* }
+        unsafe { add(v.ptr, i).* }
     } else {
         panic("index out of bounds")
     }
@@ -493,7 +493,7 @@ static arena_alloc = fn::<T>(a: Arena::<T>, n: usize) -> AllocResult::<T> {
         AllocResult::<T>::Err
     } else {
         unsafe {
-            let p = offset(a.state.*.base, cursor);
+            let p = add(a.state.*.base, cursor);
             a.state.*.cursor = cursor + n;
             AllocResult::<T>::Ok(p)
         }

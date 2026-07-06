@@ -1538,11 +1538,11 @@ static main = fn {
             Shape Struct (struct { r: usize })
             area Function (fn(usize) -> usize)
             main Function (fn())
+            add Function (unsafe fn(&raw [mut] T, usize) -> &raw [mut] T)
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
             dangling Function (fn::<T>() -> &raw mut T)
             dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
-            offset Function (fn(&raw [mut] T, usize) -> &raw [mut] T)
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -1574,11 +1574,11 @@ static main = fn {
             x Variable (mut usize)
             AllocResult Enum (enum { Ok(&raw mut T), Err })
             main Function (fn())
+            add Function (unsafe fn(&raw [mut] T, usize) -> &raw [mut] T)
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
             dangling Function (fn::<T>() -> &raw mut T)
             dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
-            offset Function (fn(&raw [mut] T, usize) -> &raw [mut] T)
             panic Function (fn(str) -> !)
             print Function (fn(str))
             const Keyword
@@ -2155,11 +2155,11 @@ static main = fn (s: str, n: usize) {
             n Variable (usize)
             AllocResult Enum (enum { Ok(&raw mut T), Err })
             main Function (fn(str, usize))
+            add Function (unsafe fn(&raw [mut] T, usize) -> &raw [mut] T)
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
             dangling Function (fn::<T>() -> &raw mut T)
             dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
-            offset Function (fn(&raw [mut] T, usize) -> &raw [mut] T)
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -2193,11 +2193,11 @@ static main = fn {
             AllocResult Enum (enum { Ok(&raw mut T), Err })
             get_n Function (fn() -> usize)
             main Function (fn())
+            add Function (unsafe fn(&raw [mut] T, usize) -> &raw [mut] T)
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
             dangling Function (fn::<T>() -> &raw mut T)
             dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
-            offset Function (fn(&raw [mut] T, usize) -> &raw [mut] T)
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -2229,11 +2229,11 @@ static main = fn {
             panic Function (fn(str) -> !)
             AllocResult Enum (enum { Ok(&raw mut T), Err })
             main Function (fn())
+            add Function (unsafe fn(&raw [mut] T, usize) -> &raw [mut] T)
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
             dangling Function (fn::<T>() -> &raw mut T)
             dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
-            offset Function (fn(&raw [mut] T, usize) -> &raw [mut] T)
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -2268,11 +2268,11 @@ static main = fn (p: Point, n: usize) {
             AllocResult Enum (enum { Ok(&raw mut T), Err })
             Point Struct (struct { x: usize })
             main Function (fn(Point, usize))
+            add Function (unsafe fn(&raw [mut] T, usize) -> &raw [mut] T)
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
             dangling Function (fn::<T>() -> &raw mut T)
             dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
-            offset Function (fn(&raw [mut] T, usize) -> &raw [mut] T)
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -2372,11 +2372,11 @@ static main = fn {
             s Variable (str)
             AllocResult Enum (enum { Ok(&raw mut T), Err })
             main Function (fn())
+            add Function (unsafe fn(&raw [mut] T, usize) -> &raw [mut] T)
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
             dangling Function (fn::<T>() -> &raw mut T)
             dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
-            offset Function (fn(&raw [mut] T, usize) -> &raw [mut] T)
             panic Function (fn(str) -> !)
             print Function (fn(str))
             const Keyword

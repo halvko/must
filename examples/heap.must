@@ -1,5 +1,5 @@
 // The heap, built on raw pointers. Five builtins and nothing else —
-// `alloc_array::<T>(n)`, `dealloc_array(p, n)`, `offset(p, i)`,
+// `alloc_array::<T>(n)`, `dealloc_array(p, n)`, `add(p, i)`,
 // `copy(src, dst, n)`, `dangling::<T>()` — everything above them
 // (containers, arenas, growth) is ordinary library code written in Must,
 // and this file is that library, twice over: a growable `HeapVec` and a
@@ -27,9 +27,15 @@
 //   UB with its own message — double free, use after free, wrong count,
 //   interior pointer, freeing a local — each with an "allocated here" note
 //   pointing at the allocation's birth site.
-// - `offset(p, i)` is SAFE and unchecked, exactly like `&raw mut a[i]`:
-//   minting an out-of-range address is fine, dereferencing it is detected
-//   UB. It preserves the pointer's flavor (`&raw mut` in, `&raw mut` out).
+// - `add(p, i)` is UNSAFE and takes a `usize`. Minting the address is
+//   unchecked (like `&raw mut a[i]`) — an out-of-range result derefs to
+//   detected UB — but `add` carries its own precondition: advancing a
+//   pointer that does NOT address an array element, with `i > 0`, is
+//   detected UB at the CALL (with `i == 0` the harmless identity). That
+//   real precondition is why it needs the `unsafe` marker even before any
+//   deref. It preserves the pointer's flavor (`&raw mut` in, `&raw mut`
+//   out). The name `offset` is reserved for a future signed (`isize`)
+//   variant, mirroring Rust's `add`/`offset` split.
 // - `copy(src, dst, n)` is UNSAFE, element-count, and memmove-shaped:
 //   overlapping ranges are DEFINED, uninitialized elements copy silently
 //   (only reading them as values traps), out of range on either side is
@@ -87,20 +93,20 @@ static heapvec_push = fn::<T>(mut v: HeapVec::<T>, x: T) -> HeapVec::<T> {
     };
     // The first write into an uninitialized element IS its initialization.
     // (Assignment targets are places rooted at a name, so the computed
-    // address gets a `let` first — `offset(...).*  = x;` is not a place.)
-    let slot = unsafe { offset(v.ptr, v.len) };
+    // address gets a `let` first — `add(...).*  = x;` is not a place.)
+    let slot = unsafe { add(v.ptr, v.len) };
     unsafe { slot.* = x; };
     v.len = v.len + 1;
     v
 };
 
 // Checked indexing, written as EXACTLY the future `a[i]` desugar:
-// check + panic + offset + deref. When indexing becomes a library feature,
+// check + panic + add + deref. When indexing becomes a library feature,
 // `v[i]` will lower to this shape — the builtin `a[i]` must stay
 // semantically identical to it, and this fn is the identity's fixture.
 static heapvec_get = fn::<T>(v: HeapVec::<T>, i: usize) -> T {
     if i < v.len {
-        unsafe { offset(v.ptr, i).* }
+        unsafe { add(v.ptr, i).* }
     } else {
         panic("index out of bounds")
     }
@@ -147,7 +153,7 @@ static arena_alloc = fn::<T>(a: Arena::<T>, n: usize) -> AllocResult::<T> {
         AllocResult::<T>::Err
     } else {
         unsafe {
-            let p = offset(a.state.*.base, cursor);
+            let p = add(a.state.*.base, cursor);
             a.state.*.cursor = cursor + n;
             AllocResult::<T>::Ok(p)
         }
@@ -174,13 +180,13 @@ static main = fn () -> () {
         AllocResult::Ok(p) => {
             unsafe {
                 p.* = 10;
-                let p1 = offset(p, 1);
+                let p1 = add(p, 1);
                 p1.* = 20;
-                let p2 = offset(p, 2);
+                let p2 = add(p, 2);
                 p2.* = 30;
             };
-            if unsafe { offset(p, 2).* } == 30 {
-                print("roundtrip: wrote 3 elements through offset, read them back");
+            if unsafe { add(p, 2).* } == 30 {
+                print("roundtrip: wrote 3 elements through add, read them back");
             } else {
                 print("roundtrip: unexpected");
             };
@@ -210,7 +216,7 @@ static main = fn () -> () {
     let a = arena_new::<usize>(4);
     match arena_alloc(a, 3) {
         AllocResult::Ok(p) => {
-            let last = unsafe { offset(p, 2) };
+            let last = unsafe { add(p, 2) };
             unsafe { last.* = 7; };
             print("arena: carved 3 of 4 elements");
         }
@@ -225,8 +231,9 @@ static main = fn () -> () {
 
 // What this file deliberately does NOT contain: a leak report or `forget`
 // (deferred — allocation origins already land, so the report is cheap to
-// add when a customer appears), signed pointer arithmetic (Must has no
-// signed integers yet; a signed twin waits on them), `realloc`/in-place
+// add when a customer appears), a signed `offset` (the `isize` twin of the
+// `add` used above — reserved for when Must gains signed integers, mirroring
+// Rust's `add`/`offset` split), `realloc`/in-place
 // growth (growth is alloc+copy+dealloc, composed by the container),
 // `size_of`/byte views/pointer casts (the layout era), and any
 // allocator-vtable machinery (generic containers over allocators wait for

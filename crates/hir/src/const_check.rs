@@ -313,12 +313,12 @@ impl CheckCtx<'_> {
             // record literals, which it erases to at runtime).
             Some(Resolution::TypeItem(_)) => {}
             // The one side effect const contexts allow — and the pointer
-            // builtins that allocate nothing: `offset`/`dangling` are pure
+            // builtins that allocate nothing: `add`/`dangling` are pure
             // and `copy` writes only through pointers whose targets already
             // exist in const memory (would-be UB there is a deterministic
             // detected trap; the escape rule guards the results).
             Some(Resolution::Builtin(
-                Builtin::Panic | Builtin::Offset | Builtin::Copy | Builtin::Dangling,
+                Builtin::Panic | Builtin::Add | Builtin::Copy | Builtin::Dangling,
             )) => {}
             Some(Resolution::Builtin(builtin @ Builtin::Print)) => {
                 self.diagnostics.push(ConstCheckDiagnostic::SideEffectCall {

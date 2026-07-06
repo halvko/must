@@ -20,6 +20,9 @@
   the number.
 - **P11** The debugger runs in-process on the const-eval interpreter (X08): same MIR, same
   machine, same UB findings.
+- **P14** Roadmap: AoC puzzles, then a small embedded OS, then self-hosting. The embedded stage
+  makes bare-asm entrypoints, layer-0 purity, linker placement and volatile access scheduled
+  requirements.
 
 ## Discarded
 

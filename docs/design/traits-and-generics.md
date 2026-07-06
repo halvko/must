@@ -27,6 +27,11 @@
   shared mutable state, or a field of a type that opted out. Everything else crosses silently.
   Annotation inventory: one for the stdlib author, one per thread-safe allocator, zero for
   application code.
+- **TR12** No derive in v1. Copyability stays a builtin judgment (T08); the override of any
+  derived judgment is an `unsafe impl`-shaped, member-less, definition-site-only declaration,
+  the house pattern for every derived or marker judgment. `clone` for heap-owning types is
+  hand-written by ruling: it must read the stored allocator, so it is not derivable even in
+  principle. Introspection replaces derive.
 
 ## Discarded
 
@@ -53,6 +58,8 @@
   fails because a trait system is needed anyway; per-value granularity fails because a
   thread-safe allocator is a different type, never a constructor flag; and zero-annotation
   ergonomics turned out to be a shared baseline. **TR09**
+- **Macro-based derive** — introspection is preferred. **Trait-ising `==` in v1** — a bound in
+  half of all generic signatures to buy nothing v1 needs. **TR12**
 
 ## Re-evaluate when
 
@@ -63,5 +70,6 @@
 - **The stdlib grows higher-order functions** — the cheap moment for effect polymorphism;
   every HOF written at a fixed row meanwhile is migration debt. Foreclosure risk is near zero:
   rigidity transplanted, no new inference domain. **TR08**
+- **Derive replacement is designed** — introspection. **TR12**
 - **A `send` assertion form** is owed and unruled: the mitigation for the private-field semver
   hazard, which is inherent to derived-from-structure. **TR09**

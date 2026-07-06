@@ -5820,15 +5820,15 @@ static f = fn (p: &raw mut usize) {
 }
 
 #[test]
-fn alloc_offset_and_dangling_need_no_unsafe() {
-    // Allocating cannot UB, minting addresses never checks validity, and
-    // a dangling pointer only hurts when dereferenced — none of the three
-    // needs the marker.
+fn alloc_and_dangling_need_no_unsafe() {
+    // Allocating cannot UB and a dangling pointer only hurts when
+    // dereferenced — neither needs the marker. `add`, by contrast, now
+    // carries a real precondition, so it is wrapped in `unsafe` here.
     check_diagnostics(
         r#"
 static f = fn (p: &raw mut usize) {
     let r = alloc_array::<usize>(1);
-    let q = offset(p, 1);
+    let q = unsafe { add(p, 1) };
     let d = dangling::<usize>();
 };
 "#,
@@ -5837,27 +5837,48 @@ static f = fn (p: &raw mut usize) {
 }
 
 #[test]
-fn offset_preserves_the_pointer_flavor() {
-    check_infer(
+fn add_outside_unsafe_is_rejected() {
+    // `add` joins `dealloc_array`/`copy` as an unsafe builtin: advancing a
+    // pointer that does not address an array element (with `i > 0`) is
+    // detected UB at the call, so the call needs the marker.
+    check_diagnostics(
         r#"
-static f = fn (s: &raw usize, m: &raw mut usize) {
-    let a = offset(s, 1);
-    let b = offset(m, 1);
+static f = fn (p: &raw mut usize) {
+    let q = add(p, 1);
 };
 "#,
         expect![[r#"
-            12..105 'fn (s: &raw usize...': fn(&raw usize, &raw mut usize)
+            49..58: calling `add` requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn add_preserves_the_pointer_flavor() {
+    check_infer(
+        r#"
+static f = fn (s: &raw usize, m: &raw mut usize) {
+    let a = unsafe { add(s, 1) };
+    let b = unsafe { add(m, 1) };
+};
+"#,
+        expect![[r#"
+            12..121 'fn (s: &raw usize...': fn(&raw usize, &raw mut usize)
             16..17 's': &raw usize
             31..32 'm': &raw mut usize
-            50..105 '{     let a = off...': ()
+            50..121 '{     let a = uns...': ()
             60..61 'a': &raw usize
-            64..76 'offset(s, 1)': &raw usize
-            71..72 's': &raw usize
-            74..75 '1': usize
-            86..87 'b': &raw mut usize
-            90..102 'offset(m, 1)': &raw mut usize
-            97..98 'm': &raw mut usize
-            100..101 '1': usize
+            64..84 'unsafe { add(s, 1) }': &raw usize
+            71..84 '{ add(s, 1) }': &raw usize
+            73..82 'add(s, 1)': &raw usize
+            77..78 's': &raw usize
+            80..81 '1': usize
+            94..95 'b': &raw mut usize
+            98..118 'unsafe { add(m, 1) }': &raw mut usize
+            105..118 '{ add(m, 1) }': &raw mut usize
+            107..116 'add(m, 1)': &raw mut usize
+            111..112 'm': &raw mut usize
+            114..115 '1': usize
         "#]],
     );
 }
@@ -5891,31 +5912,50 @@ static f = fn (p: &raw str, q: &raw mut usize) {
 }
 
 #[test]
-fn offset_of_a_non_pointer_is_rejected() {
+fn add_of_a_non_pointer_is_rejected() {
     check_diagnostics(
         r#"
 static f = fn {
-    let a = offset(4, 1);
+    let a = unsafe { add(4, 1) };
 };
 "#,
         expect![[r#"
-            36..37: `offset` expects a raw pointer (`&raw T` or `&raw mut T`) here, found `usize`
+            42..43: `add` expects a raw pointer (`&raw T` or `&raw mut T`) here, found `usize`
         "#]],
     );
 }
 
 #[test]
-fn offset_is_not_a_first_class_value() {
+fn offset_is_a_free_identifier_after_the_rename() {
+    // `offset` is reserved for a future signed (`isize`) variant but binds
+    // NOTHING builtin today: a user item named `offset` is an ordinary
+    // item. It even works as a first-class value and needs no `unsafe` —
+    // neither of which the flavor-polymorphic `add` builtin could do —
+    // proving `offset` no longer resolves to a builtin.
+    check_diagnostics(
+        r#"
+static offset = fn (p: &raw mut usize) { };
+static main = fn (p: &raw mut usize) {
+    let g = offset;
+    offset(p);
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn add_is_not_a_first_class_value() {
     // Its pointer parameter accepts both flavors, so there is no one fn
     // type for a `let` to bind.
     check_diagnostics(
         r#"
 static f = fn {
-    let g = offset;
+    let g = add;
 };
 "#,
         expect![[r#"
-            29..35: `offset` must be called directly; its pointer parameter accepts both `&raw T` and `&raw mut T`, so it has no one function type to be a value at
+            29..32: `add` must be called directly; its pointer parameter accepts both `&raw T` and `&raw mut T`, so it has no one function type to be a value at
         "#]],
     );
 }
@@ -5923,14 +5963,14 @@ static f = fn {
 #[test]
 fn heap_calls_are_rejected_in_const_contexts() {
     // The eager const fence (C04): both heap builtins refuse at check
-    // time; `offset`/`copy`/`dangling` are deliberately not fenced.
+    // time; `add`/`copy`/`dangling` are deliberately not fenced.
     check_diagnostics(
         r#"
 static a = alloc_array::<usize>(1);
 static b = const fn () -> () { unsafe { dealloc_array(dangling::<usize>(), 0) } };
 static ok = const {
     let d = dangling::<usize>();
-    unsafe { offset(d, 1) };
+    unsafe { add(d, 1) };
     1
 };
 "#,

@@ -1750,9 +1750,9 @@ impl<'db, M: Mode> Machine<'db, M> {
                 expect_args(self, 2)?;
                 self.builtin_dealloc_array(&args[0], &args[1], loc, origin)
             }
-            Builtin::Offset => {
+            Builtin::Add => {
                 expect_args(self, 2)?;
-                self.builtin_offset(&args[0], &args[1], loc, origin)
+                self.builtin_add(&args[0], &args[1], loc, origin)
             }
             Builtin::Copy => {
                 expect_args(self, 3)?;
@@ -1868,7 +1868,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             ));
         }
         // Head check: the pointer `alloc_array` returned addresses element
-        // 0; anything else (an `offset` result, an interior element) does
+        // 0; anything else (an `add` result, an interior element) does
         // not name the allocation.
         if path.as_slice() != [PathElem::Index(0)] {
             return Err(ub(
@@ -1906,7 +1906,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         Ok(Value::Unit)
     }
 
-    /// `offset(p, i)`: pointer to element (head-index + i) of the same
+    /// `add(p, i)`: pointer to element (head-index + i) of the same
     /// allocation. Minting is UNCHECKED per the shipped rule — no bounds
     /// judgement here; an out-of-range result is detected UB at its first
     /// deref, exactly like `&raw mut a[i]` past the end. The one shape the
@@ -1914,7 +1914,7 @@ impl<'db, M: Mode> Machine<'db, M> {
     /// not address an array element (a lone local, a record field) — is
     /// refused as detected UB at the call (with `i == 0` as the harmless
     /// identity, matching `ptr.add(0)`).
-    fn builtin_offset(
+    fn builtin_add(
         &mut self,
         p: &Value,
         i: &Value,
@@ -1925,7 +1925,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             return Err(self.ill_typed("a raw pointer", p, loc, origin));
         };
         let Value::Int(i) = i else {
-            return Err(self.ill_typed("a `usize` offset", i, loc, origin));
+            return Err(self.ill_typed("a `usize` count", i, loc, origin));
         };
         if *i == 0 {
             return Ok(Value::Ptr {
@@ -1936,7 +1936,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         let mut path = path.clone();
         match path.last_mut() {
             Some(PathElem::Index(index)) => {
-                // Saturating on purpose: an offset past `u64::MAX` cannot
+                // Saturating on purpose: an `add` past `u64::MAX` cannot
                 // name a real element of any allocation, so the saturated
                 // address is out of bounds at every deref — the ordinary
                 // detected-UB story, no extra failure mode.
@@ -1951,7 +1951,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             }
             _ => Err(EvalError {
                 kind: EvalErrorKind::UndefinedBehavior,
-                message: "`offset` of a pointer that does not address an array element".to_owned(),
+                message: "`add` of a pointer that does not address an array element".to_owned(),
                 origin: Some((loc.clone(), origin)),
                 notes: Vec::new(),
             }),
@@ -2078,7 +2078,7 @@ impl<'db, M: Mode> Machine<'db, M> {
     /// null) — minted once per machine, so every `dangling()` compares
     /// equal, and `allocation_for_deref` reports every deref as "never
     /// valid". Shaped like a heap head pointer (element 0 of an
-    /// empty never-live array) so `offset` arithmetic on it mints
+    /// empty never-live array) so `add` arithmetic on it mints
     /// (unchecked, as always) instead of erroring.
     fn builtin_dangling(&mut self) -> Value {
         let alloc = match self.dangling_alloc {
