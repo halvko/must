@@ -4606,14 +4606,8 @@ fn fn_typed_const_param_smuggled_in_a_record_is_rejected_too() {
         expect![[r#"
             25..26: expected a type
             27..28: expected `,`
-            28..29: expected `,`
-            30..32: expected `,`
-            32..33: expected `,`
-            33..34: expected `,`
-            35..37: expected `,`
-            38..43: expected `,`
+            30..43: only a trait name can be a bound
             44..45: expected `,`
-            60..61: type mismatch: expected `usize`, found `{number}` (expected `usize` because of this return type at 49..57)
         "#]],
     );
 }
@@ -7397,6 +7391,594 @@ static a: struct { n: usize } = struct { n: 1 };
 "#,
         expect![[r#"
             45..46: record fields are defined with `=` (`name = value`); `:` annotates a type
+        "#]],
+    );
+}
+
+// ---- trait declarations: coherence, matching, bounds, resolution --------
+
+/// The proof shape: both impl homes, a bounded generic fn, a
+/// generic requirement, bound-directed and impl-directed calls, the
+/// qualified short form. Must be diagnostics-clean.
+const TRAIT_FIXTURE: &str = r#"
+trait Write = requires {
+    push: fn(s: str, w: Self) -> Self;
+};
+trait Display = requires {
+    fmt: fn::<W: Write>(w: W, x: Self) -> W;
+} with {
+    impl str {
+        fmt = fn::<W: Write>(w: W, x: str) -> W { w.push(x) };
+    }
+    impl usize {
+        fmt = fn::<W: Write>(w: W, x: usize) -> W { w.push("n") };
+    }
+};
+type Sink = struct { pushes: usize } with {
+    impl Write {
+        push = fn(s: str, w: Self) -> Self { Sink(struct { pushes = w.pushes + 1 }) };
+    }
+};
+type Point = struct { x: usize, y: usize } with {
+    impl Display {
+        fmt = fn::<W: Write>(w: W, p: Self) -> W {
+            let w = Display::fmt(w, p.x);
+            Display::fmt(w, p.y)
+        };
+    }
+};
+static show = fn::<T: Display>(x: T) -> usize {
+    let s = Sink(struct { pushes = 0 });
+    let s = x.fmt(s);
+    s.pushes
+};
+static main = fn() -> () {
+    let a = show::<usize>(1);
+    let b = show::<str>("s");
+    let c = show::<Point>(Point(struct { x = 1, y = 2 }));
+    let n: usize = 7;
+    let d = n.fmt(Sink(struct { pushes = 0 }));
+    let e = Display::fmt(Sink(struct { pushes = 0 }), "q");
+    let _ = a + b + c + d.pushes + e.pushes;
+};
+"#;
+
+#[test]
+fn trait_fixture_is_clean() {
+    check_diagnostics(TRAIT_FIXTURE, expect![[r#""#]]);
+}
+
+#[test]
+fn duplicate_impl_names_both_sites() {
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; } with {
+    impl usize { m = fn(x: usize) -> usize { 1 }; }
+    impl usize { m = fn(x: usize) -> usize { 2 }; }
+};
+"#,
+        expect![[r#"
+            117..122: duplicate impl of `D` for `usize` (first implemented here at 65..70)
+            125..126: duplicate member `m` (first defined here at 73..74)
+        "#]],
+    );
+}
+
+#[test]
+fn duplicate_impl_across_homes_names_both_sites() {
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; } with {
+    impl P { m = fn(x: Self) -> usize { 1 }; }
+};
+type P = struct { a: usize } with {
+    impl D { m = fn(x: Self) -> usize { 2 }; }
+};
+"#,
+        expect![[r#"
+            151..152: duplicate impl of `D` for `P` (first implemented here at 65..66)
+        "#]],
+    );
+}
+
+#[test]
+fn impl_missing_and_extra_members() {
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; } with {
+    impl usize { extra = fn(x: usize) -> usize { 1 }; }
+};
+"#,
+        expect![[r#"
+            65..70: this impl of `D` is missing the member `m` (required by the trait here at 22..23)
+            73..78: `D` has no requirement `extra` (declared here at 7..8)
+        "#]],
+    );
+}
+
+#[test]
+fn impl_member_signature_mismatch() {
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; } with {
+    impl usize { m = fn(x: usize) -> str { "s" }; }
+};
+"#,
+        expect![[r#"
+            73..74: member `m` does not match `D`'s requirement: expected `fn(usize) -> usize`, found `fn(usize) -> str` (required by the trait here at 22..23)
+        "#]],
+    );
+}
+
+#[test]
+fn impl_member_binder_mismatch() {
+    check_diagnostics(
+        r#"
+trait W = requires { p: fn(x: Self) -> usize; } with {
+    impl usize { p = fn(x: usize) -> usize { 1 }; }
+};
+trait D = requires { m: fn::<X: W>(v: X, x: Self) -> usize; } with {
+    impl usize { m = fn::<X>(v: X, x: usize) -> usize { 1 }; }
+};
+"#,
+        expect![[r#"
+            197..198: member `m`'s generic binder does not match `D`'s requirement (arity, kinds and bounds must agree) (required by the trait here at 132..133)
+        "#]],
+    );
+}
+
+#[test]
+fn unknown_trait_in_bound_and_impl_head() {
+    check_diagnostics(
+        r#"
+static f = fn::<T: Nope>(x: T) -> usize { 1 };
+type P = struct { a: usize } with {
+    impl Missing { m = fn(x: Self) -> usize { 1 }; }
+};
+"#,
+        expect![[r#"
+            20..24: unknown trait `Nope`
+            93..100: unknown trait `Missing`
+        "#]],
+    );
+}
+
+#[test]
+fn bound_naming_a_type_is_not_a_trait() {
+    check_diagnostics(
+        r#"
+type P = struct { a: usize };
+static f = fn::<T: P>(x: T) -> usize { 1 };
+static g = fn::<T: usize>(x: T) -> usize { 1 };
+"#,
+        expect![[r#"
+            50..51: `P` is not a trait
+            94..99: `usize` is not a trait
+        "#]],
+    );
+}
+
+#[test]
+fn trait_side_impl_head_resolution_errors() {
+    check_diagnostics(
+        r#"
+trait D = requires { } with {
+    impl Unknown { };
+    impl D { };
+};
+type V = struct::<T> { a: T };
+trait E = requires { } with {
+    impl V { };
+};
+"#,
+        expect![[r#"
+            40..47: unknown type `Unknown`
+            62..63: `D` is a trait; an impl in a trait's `with`-chain names the IMPLEMENTING type
+            142..143: impls for generic types are not supported yet
+        "#]],
+    );
+}
+
+#[test]
+fn unsatisfied_bound_at_instantiation() {
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; };
+type P = struct { a: usize };
+static f = fn::<T: D>(x: T) -> usize { x.m() };
+static main = fn() -> () {
+    let a = f::<P>(P(struct { a = 1 }));
+    let _ = a;
+};
+"#,
+        expect![[r#"
+            167..173: the bound `T: D` is not satisfied here: `P` does not implement `D`
+        "#]],
+    );
+}
+
+#[test]
+fn unsatisfied_bound_on_structural_type() {
+    // Structural types implement nothing (TR03: impls attach to nominal
+    // types only), so a record can never satisfy a bound.
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; };
+static f = fn::<T: D>(x: T) -> usize { x.m() };
+static main = fn() -> () {
+    let a = f(struct { q: usize = 1 });
+    let _ = a;
+};
+"#,
+        expect![[r#"
+            137..138: the bound `T: D` is not satisfied here: `struct { q: usize }` does not implement `D`
+        "#]],
+    );
+}
+
+#[test]
+fn bound_forwarding_requires_the_bound() {
+    // `g` forwards its unbounded `T` into `f`'s bounded param: the bound
+    // is unsatisfied AT g's call of f — bodies check against bounds.
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; } with {
+    impl usize { m = fn(x: usize) -> usize { x }; }
+};
+static f = fn::<T: D>(x: T) -> usize { x.m() };
+static g = fn::<T>(x: T) -> usize { f(x) };
+"#,
+        expect![[r#"
+            195..196: the bound `T: D` is not satisfied here: `T` does not implement `D`
+        "#]],
+    );
+}
+
+#[test]
+fn ambiguous_member_and_qualified_disambiguation() {
+    check_diagnostics(
+        r#"
+trait A = requires { m: fn(x: Self) -> usize; } with { impl usize { m = fn(x: usize) -> usize { 1 }; } };
+trait B = requires { m: fn(x: Self) -> usize; } with { impl usize { m = fn(x: usize) -> usize { 2 }; } };
+static main = fn() -> () {
+    let n: usize = 4;
+    let x = n.m();
+    let y = A::m(n);
+    let _ = x + y;
+};
+"#,
+        expect![[r#"
+            274..279: `m` is ambiguous: `A` and `B` both provide it; write `Trait::m(...)` to pick one
+        "#]],
+    );
+}
+
+#[test]
+fn trait_member_shadows_field_under_call_syntax() {
+    // `s.m()` picks the trait member; bare `s.m` stays the field.
+    check_infer(
+        r#"
+trait D = requires { m: fn(x: Self) -> str; };
+type S = struct { m: usize } with {
+    impl D { m = fn(x: Self) -> str { "member" }; }
+};
+static f = fn(s: S) -> str { let a = s.m; s.m() };
+"#,
+        expect![[r#"
+            150..188 'fn(s: S) -> str {...': fn(S) -> str
+            153..154 's': S
+            166..188 '{ let a = s.m; s....': str
+            172..173 'a': usize
+            176..177 's': S
+            176..179 's.m': usize
+            181..182 's': S
+            181..184 's.m': fn(S) -> str
+            181..186 's.m()': str
+        "#]],
+    );
+}
+
+#[test]
+fn trait_names_are_not_values_or_types() {
+    check_diagnostics(
+        r#"
+trait D = requires { };
+static x = fn() -> usize { let a = D; 1 };
+static y = fn(p: D) -> usize { 1 };
+"#,
+        expect![[r#"
+            60..61: `D` is a trait, not a value
+            85..86: `D` is a trait; traits are bounds, not types — did you mean a bounded generic param (`T: D`)?
+        "#]],
+    );
+}
+
+#[test]
+fn qualified_member_value_and_named_self_reserved() {
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; } with {
+    impl usize { m = fn(x: usize) -> usize { x }; }
+};
+static a = fn() -> usize { let f = D::m; 1 };
+static b = fn() -> usize { let n: usize = 1; D::<usize>::m(n) };
+"#,
+        expect![[r#"
+            146..150: an impl-specific member value needs the named-Self form (`D::<Self = ...>::m`), which is not supported yet; call `D::m(...)` directly
+            202..215: the named-Self qualified form (`Trait::<Self = ...>::member`) is not supported yet; use the short form `Trait::member(...)`
+        "#]],
+    );
+}
+
+#[test]
+fn qualified_call_self_resolution_errors() {
+    // A rigid Self without the bound is an unsatisfied bound; a Self no
+    // argument determines cannot be inferred (the named-Self form that
+    // could spell it is reserved).
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; n: fn(k: usize) -> Self; } with {
+    impl usize { m = fn(x: usize) -> usize { x }; n = fn(k: usize) -> usize { k }; }
+};
+static a = fn::<T>(x: T) -> usize { D::m(x) };
+static b = fn() -> usize { let v = D::n(3); 1 };
+"#,
+        expect![[r#"
+            205..212: the bound `T: D` is not satisfied here: `T` does not implement `D`
+            251..258: cannot infer `Self` for `D::n`: no argument determines the implementing type — annotate an argument
+        "#]],
+    );
+}
+
+#[test]
+fn bound_fn_value_reserved() {
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; } with {
+    impl usize { m = fn(x: usize) -> usize { x }; }
+};
+static f = fn::<T: D>(x: T) -> usize { x.m() };
+static main = fn() -> () {
+    let g = f::<usize>;
+    let _ = g(1);
+};
+"#,
+        expect![[r#"
+            198..208: `f` has bounds on its type parameters, so it cannot be used as a value yet; call it directly
+        "#]],
+    );
+}
+
+#[test]
+fn requirement_rules() {
+    check_diagnostics(
+        r#"
+trait D = requires {
+    m: fn(x: Self) -> usize;
+    m: fn(x: Self) -> str;
+    n: fn(x, y: usize) -> usize;
+};
+"#,
+        expect![[r#"
+            55..56: duplicate requirement `m`
+            82..83: requirement `n` must spell its full signature: every parameter and the return type
+        "#]],
+    );
+}
+
+#[test]
+fn no_member_in_bounds_on_rigid_receiver() {
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; };
+static f = fn::<T: D>(x: T) -> usize { x.q() };
+"#,
+        expect![[r#"
+            89..94: no field or member `q` on `T`
+        "#]],
+    );
+}
+
+#[test]
+fn trait_member_call_types_flow() {
+    // Bound-directed and impl-directed calls carry the requirement's
+    // instantiated types (the generic requirement's W pins from the
+    // argument).
+    check_infer(
+        r#"
+trait W = requires { push: fn(s: str, w: Self) -> Self; };
+trait D = requires { fmt: fn::<X: W>(w: X, v: Self) -> X; } with {
+    impl usize { fmt = fn::<X: W>(w: X, v: usize) -> X { w.push("n") }; }
+};
+type S = struct { c: usize } with {
+    impl W { push = fn(s: str, w: Self) -> Self { w }; }
+};
+static f = fn(n: usize) -> S { n.fmt(S(struct { c = 0 })) };
+"#,
+        expect![[r#"
+            311..359 'fn(n: usize) -> S...': fn(usize) -> S
+            314..315 'n': usize
+            329..359 '{ n.fmt(S(struct ...': S
+            331..332 'n': usize
+            331..336 'n.fmt': fn(S, usize) -> S
+            331..357 'n.fmt(S(struct { ...': S
+            337..338 'S': fn(struct { c: usize }) -> S
+            337..356 'S(struct { c = 0 })': S
+            339..355 'struct { c = 0 }': struct { c: usize }
+            352..353 '0': usize
+        "#]],
+    );
+}
+
+// ---- traits: nested-body reservation, variant Self, ambiguity errors --
+
+#[test]
+fn nested_fn_literal_cannot_use_enclosing_bounds() {
+    // The dictionary lives in the ROOT body: a nested literal would have
+    // to capture it — reserved (both the bound-directed call and the
+    // forwarding call forms).
+    check_diagnostics(
+        r#"
+trait Size = requires { size: fn(x: Self) -> usize; } with {
+    impl usize { size = fn(x: usize) -> usize { x }; }
+};
+static bounded = fn::<T: Size>(x: T) -> usize { x.size() };
+static outer = fn::<T: Size>(x: T) -> usize {
+    let f = fn(y: T) -> usize { y.size() };
+    let g = fn(y: T) -> usize { bounded(y) };
+    f(x) + g(x)
+};
+"#,
+        expect![[r#"
+            258..266: code nested inside a bounded fn (a nested fn literal or a `const` block) cannot use the enclosing bounds yet (it would have to capture the dictionary)
+            302..309: code nested inside a bounded fn (a nested fn literal or a `const` block) cannot use the enclosing bounds yet (it would have to capture the dictionary)
+        "#]],
+    );
+}
+
+#[test]
+fn const_block_cannot_use_enclosing_bounds() {
+    // A `const` block lowers to a separate body — the same
+    // captured-dictionary wall as a nested literal (the const-check
+    // rejection fires alongside).
+    check_diagnostics(
+        r#"
+trait Size = requires { size: fn(x: Self) -> usize; } with {
+    impl usize { size = fn(x: usize) -> usize { x }; }
+};
+static outer = fn::<T: Size>(x: T) -> usize { const { x.size() } };
+"#,
+        expect![[r#"
+            174..180: cannot call a value in a const context; whether it is a `const fn` is not known from its type (this `const` block is a const context at 166..171)
+            174..182: code nested inside a bounded fn (a nested fn literal or a `const` block) cannot use the enclosing bounds yet (it would have to capture the dictionary)
+        "#]],
+    );
+}
+
+#[test]
+fn qualified_variant_self_resolves_through_the_enum() {
+    // A variant-typed argument at a `Self` position determines `Self` as
+    // its ENUM (widened, so the tag is real) — the return type is the
+    // enum too, so a single-variant match is honestly non-exhaustive.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point } with {
+    impl Id { id = fn(x: Self) -> Self { Shape::Point }; }
+};
+trait Id = requires { id: fn(x: Self) -> Self; };
+static main = fn() -> () {
+    let c = Id::id(Shape::Circle(3));
+    let r = match c { ::Circle(n) => n };
+    let _ = r;
+};
+"#,
+        expect![[r#"
+            240..245: this `match` does not cover `Shape::Point`
+        "#]],
+    );
+}
+
+#[test]
+fn reserved_generic_trait_is_fully_non_live() {
+    // The reservation is real everywhere: the bound, the impl and the
+    // qualified use each carry their own diagnostic, and nothing
+    // dispatches through the reserved trait.
+    check_diagnostics(
+        r#"
+trait Gen = requires::<T> { get: fn(x: Self) -> usize; };
+type X = struct { a: usize } with {
+    impl Gen { get = fn(x: Self) -> usize { x.a }; }
+};
+static f = fn::<B: Gen>(x: B) -> usize { x.get() };
+static g = fn(x: X) -> usize { Gen::get(x) };
+"#,
+        expect![[r#"
+            21..26: generic traits are not supported yet
+            104..107: `Gen` is a reserved generic trait (generic traits are not supported yet); it cannot be implemented
+            170..173: `Gen` is a reserved generic trait (generic traits are not supported yet); it cannot be a bound
+            192..199: no field or member `get` on `B`
+            234..242: `Gen` is a reserved generic trait (generic traits are not supported yet) and cannot be used
+        "#]],
+    );
+}
+
+#[test]
+fn trait_member_vs_fn_field_call_is_ambiguous() {
+    // A dot-callable member beside an fn-typed field is an ambiguity
+    // ERROR under call syntax — silent shadowing would let a distant
+    // impl reroute existing field calls.
+    // The escapes both work: `(b.get)()` reaches the field, the
+    // qualified form reaches the trait member. Bare access stays the
+    // field; a NON-fn field keeps the sealed member-shadows-field rule.
+    check_diagnostics(
+        r#"
+trait Get = requires { get: fn(x: Self) -> usize; };
+type B = struct { get: fn() -> usize } with {
+    impl Get { get = fn(x: Self) -> usize { 100 }; }
+};
+type C = struct { get: usize } with {
+    impl Get { get = fn(x: Self) -> usize { 7 }; }
+};
+static f = fn(b: B) -> usize { b.get() };
+static escapes = fn(b: B, c: C) -> usize {
+    let field = (b.get)();
+    let member = Get::get(b);
+    let bare = b.get;
+    let nonfn = c.get();
+    field + member + bare() + nonfn
+};
+"#,
+        expect![[r#"
+            279..286: `get` is both a member and an fn-typed field of `B`; write `(value.get)(...)` to call the field, or `Get::get(...)` for the trait member
+        "#]],
+    );
+}
+
+#[test]
+fn inherent_member_vs_fn_field_call_is_ambiguous() {
+    check_diagnostics(
+        r#"
+type B = struct { get: fn() -> usize } with {
+    impl Self { get = fn(x: Self) -> usize { 100 }; }
+};
+static f = fn(b: B) -> usize { b.get() };
+"#,
+        expect![[r#"
+            135..142: `get` is both a member and an fn-typed field of `B`; write `(value.get)(...)` to call the field
+        "#]],
+    );
+}
+
+#[test]
+fn bounded_fn_as_value_reports_once() {
+    // The reservation is the whole story — no cannot-infer sibling.
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; } with {
+    impl usize { m = fn(x: usize) -> usize { x }; }
+};
+static bounded = fn::<T: D>(x: T) -> usize { x.m() };
+static main = fn() -> () {
+    let v = bounded;
+    let _ = v;
+};
+"#,
+        expect![[r#"
+            204..211: `bounded` has bounds on its type parameters, so it cannot be used as a value yet; call it directly
+        "#]],
+    );
+}
+
+#[test]
+fn builtin_type_as_type_side_impl_head_is_not_a_trait() {
+    check_diagnostics(
+        r#"
+type P = struct { a: usize } with {
+    impl usize { m = fn(x: Self) -> usize { 1 }; }
+};
+"#,
+        expect![[r#"
+            46..51: `usize` is not a trait
         "#]],
     );
 }

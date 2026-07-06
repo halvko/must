@@ -18,7 +18,14 @@
 - **T04** Variant widening is a runtime conversion over a tag-free variant representation: a
   variant-typed value carries no tag, and widening adds one. A plain `let` keeps the precise
   variant; an unannotated `let mut` widens to the enum at binding time, the one place
-  mutability changes a type rather than only permissions.
+  mutability changes a type rather than only permissions. Trait dispatch adds a second
+  widening site: every RECEIVER-LIKE `Self` position — a dot-call's receiver, and each
+  argument at a literal-`Self` position of a qualified short-form call — is inferred freely
+  first, widens to its enum if it came back a variant, and only THEN is checked against the
+  determined `Self`, so `Self` itself can never bind to a tag-free variant type (a variant has
+  no impls of its own to dispatch to). A NESTED `Self` position (inside a receiver-like
+  argument's own type, never the position itself) does not widen; a variant that reaches
+  there lands on the sound `NoTraitImpl` rather than silently picking its enum's impl.
 - **T23** The compiler-provided enums (`AllocResult`) are the prelude Must cannot write
   yet: ordinary declarations minted per file, user-shadowable and never duplicate-flagged.
   They go away when modules land.

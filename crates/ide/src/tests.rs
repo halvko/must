@@ -3058,3 +3058,158 @@ static use_it = fn() -> usize { A(struct { x = 1 }).get() };
         "#]],
     );
 }
+
+// ---- trait declarations: hover and goto ---------------------------------
+
+#[test]
+fn hover_on_bound_shows_the_trait() {
+    check_hover(
+        r#"
+trait Display = requires { fmt: fn(x: Self) -> str; };
+static f = fn::<T: Disp$0lay>(x: T) -> usize { 1 };
+"#,
+        "```must\ntrait Display = requires { fmt: fn(Self) -> str; }\n```",
+    );
+}
+
+#[test]
+fn hover_on_trait_decl_name() {
+    check_hover(
+        r#"
+trait Disp$0lay = requires { fmt: fn(x: Self) -> str; };
+"#,
+        "```must\ntrait Display = requires { fmt: fn(Self) -> str; }\n```",
+    );
+}
+
+#[test]
+fn hover_on_impl_head_shows_the_trait() {
+    check_hover(
+        r#"
+trait Show = requires { show: fn(x: Self) -> str; };
+type P = struct { a: usize } with {
+    impl Sh$0ow { show = fn(x: Self) -> str { "p" }; }
+};
+"#,
+        "```must\ntrait Show = requires { show: fn(Self) -> str; }\n```",
+    );
+}
+
+#[test]
+fn hover_on_trait_member_dot_call_shows_instantiated_signature() {
+    check_hover(
+        r#"
+trait D = requires { m: fn(x: Self) -> str; } with {
+    impl usize { m = fn(x: usize) -> str { "n" }; }
+};
+static f = fn(n: usize) -> str { n.m$0() };
+"#,
+        "```must\nm: fn(usize) -> str\n```",
+    );
+}
+
+#[test]
+fn hover_on_qualified_call_base_shows_the_trait() {
+    check_hover(
+        r#"
+trait D = requires { m: fn(x: Self) -> str; } with {
+    impl usize { m = fn(x: usize) -> str { "n" }; }
+};
+static f = fn(n: usize) -> str { D$0::m(n) };
+"#,
+        "```must\ntrait D = requires { m: fn(Self) -> str; }\n```",
+    );
+}
+
+#[test]
+fn hover_on_trait_impl_member_name_shows_signature() {
+    check_hover(
+        r#"
+trait D = requires { m: fn(x: Self) -> str; } with {
+    impl usize { m$0 = fn(x: usize) -> str { "n" }; }
+};
+"#,
+        "```must\nm: fn(usize) -> str\n```",
+    );
+}
+
+#[test]
+fn goto_bound_lands_on_the_trait_decl() {
+    check_goto(
+        r#"
+trait Display = requires { fmt: fn(x: Self) -> str; };
+static f = fn::<T: Displ$0ay>(x: T) -> usize { 1 };
+"#,
+        "Display",
+        0,
+    );
+}
+
+#[test]
+fn goto_impl_head_lands_on_the_trait_decl() {
+    check_goto(
+        r#"
+trait Show = requires { show: fn(x: Self) -> str; };
+type P = struct { a: usize } with {
+    impl Sh$0ow { show = fn(x: Self) -> str { "p" }; }
+};
+"#,
+        "Show",
+        0,
+    );
+}
+
+#[test]
+fn goto_impl_directed_dot_call_lands_on_the_impl_member() {
+    check_goto(
+        r#"
+trait D = requires { mem: fn(x: Self) -> str; } with {
+    impl usize { mem = fn(x: usize) -> str { "n" }; }
+};
+static f = fn(n: usize) -> str { n.mem$0() };
+"#,
+        // Occurrence 0 is the requirement, 1 is the impl member.
+        "mem",
+        1,
+    );
+}
+
+#[test]
+fn goto_bound_directed_dot_call_lands_on_the_requirement() {
+    check_goto(
+        r#"
+trait D = requires { m: fn(x: Self) -> str; };
+static f = fn::<T: D>(x: T) -> str { x.m$0() };
+"#,
+        "m",
+        0,
+    );
+}
+
+#[test]
+fn goto_qualified_member_lands_on_the_impl_member() {
+    check_goto(
+        r#"
+trait D = requires { mem: fn(x: Self) -> str; } with {
+    impl usize { mem = fn(x: usize) -> str { "n" }; }
+};
+static f = fn(n: usize) -> str { D::mem$0(n) };
+"#,
+        "mem",
+        1,
+    );
+}
+
+#[test]
+fn goto_qualified_call_base_lands_on_the_trait() {
+    check_goto(
+        r#"
+trait D = requires { m: fn(x: Self) -> str; } with {
+    impl usize { m = fn(x: usize) -> str { "n" }; }
+};
+static f = fn(n: usize) -> str { D$0::m(n) };
+"#,
+        "D",
+        0,
+    );
+}

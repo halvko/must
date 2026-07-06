@@ -1031,6 +1031,30 @@ pub(crate) fn lower_const_decl_ty(db: &dyn Db, file: SourceFile, type_ref: &Type
 /// non-member ids.
 pub fn member_self_ty(db: &dyn Db, item: ItemId<'_>) -> Option<Ty> {
     let owner = crate::member_owner(db, item)?;
+    // A TRAIT-side impl member's `Self` is the implementing type its
+    // element head names (a builtin scalar or a non-generic `type` item),
+    // not the owning trait.
+    if let Some((member_name, member_dis)) = item.member(db)
+        && crate::item_data(db, owner)
+            .as_ref()
+            .is_some_and(|data| matches!(data.kind, crate::item_tree::ItemKind::Trait))
+    {
+        let members = crate::item_tree::type_members(db, owner);
+        let data = members
+            .iter()
+            .find(|m| m.name == member_name && m.disambiguator == member_dis)?;
+        let crate::item_tree::MemberHome::TraitImpl { head } = &data.home else {
+            return Some(Ty::Error);
+        };
+        return Some(
+            match crate::traits::resolve_self_head(db, item.file(db), head) {
+                Some(key) => key.to_ty(),
+                // Unresolvable implementer: the impl head carries the
+                // diagnostic; the member's Self is broken.
+                None => Ty::Error,
+            },
+        );
+    }
     let owner_loc = crate::item_loc(db, owner);
     let member_loc = crate::item_loc(db, item);
     let generics = crate::item_data(db, owner)

@@ -5,7 +5,7 @@
 //! nothing downstream of name-level information re-runs.
 
 use base_db::{Db, SourceFile, parse};
-use syntax::ast;
+use syntax::ast::{self, AstNode as _};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct ItemTree {
@@ -43,6 +43,10 @@ pub struct GenericParamData {
     /// Empty when the name is missing (broken code).
     pub name: String,
     pub kind: GenericParamKind,
+    /// The `T: Display + Write` bounds, syntactic and in written order —
+    /// trait names stay [`TypeRef`]s here (resolution is a per-file
+    /// judgement, see `crate::traits`). Always empty for const params.
+    pub bounds: Vec<TypeRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -76,6 +80,10 @@ pub enum ItemKind {
     /// file-scope name, so saying `Value(Static)` here would answer a
     /// question the spelling never asked.
     Member,
+    /// `trait Name = requires { ... };` — a trait declaration. Not a type
+    /// (a trait classifies types, not values — bare trait names are
+    /// rejected in type position) and not a value.
+    Trait,
 }
 
 impl ItemKind {
@@ -83,7 +91,7 @@ impl ItemKind {
     pub fn constness(self) -> Option<Constness> {
         match self {
             ItemKind::Value(constness) => Some(constness),
-            ItemKind::Type | ItemKind::Member => None,
+            ItemKind::Type | ItemKind::Member | ItemKind::Trait => None,
         }
     }
 }
@@ -425,6 +433,18 @@ pub fn item_tree(db: &dyn Db, file: SourceFile) -> ItemTree {
                 type_ref: None,
                 generics: generics_from_type_literal(it.body()),
             },
+            ast::Item::TraitItem(it) => ItemData {
+                name: item.name().map(|n| n.text()).unwrap_or_default(),
+                // The requirement list lives in [`trait_requirements`],
+                // mirroring `type_decl`'s split. The reserved
+                // `requires::<...>` binder (generic traits) is recorded
+                // for arity honesty at mentions.
+                kind: ItemKind::Trait,
+                type_ref: None,
+                generics: generics_from_param_list(
+                    it.requires_def().and_then(|def| def.generic_param_list()),
+                ),
+            },
         })
         .collect();
     ItemTree { items }
@@ -556,12 +576,14 @@ fn generics_from_param_list(list: Option<ast::GenericParamList>) -> Vec<GenericP
             ast::GenericParam::TypeParam(it) => GenericParamData {
                 name: it.name().map(|n| n.text()).unwrap_or_default(),
                 kind: GenericParamKind::Type,
+                bounds: it.bounds().map(TypeRef::from_ast).collect(),
             },
             ast::GenericParam::ConstParam(it) => GenericParamData {
                 name: it.name().map(|n| n.text()).unwrap_or_default(),
                 kind: GenericParamKind::Const(
                     it.ty().map(TypeRef::from_ast).unwrap_or(TypeRef::Error),
                 ),
+                bounds: Vec::new(),
             },
         })
         .collect()
@@ -617,16 +639,30 @@ pub fn item_source(db: &dyn Db, item: crate::ItemId<'_>) -> Option<ast::Item> {
     None
 }
 
-// ---- inherent members ---------------------------------------------------
+// ---- members ------------------------------------------------------------
 
-/// One semantically-supported member of a type item's `with`-chain
-/// (`impl Self { name = fn(...) ... }`), range-free. Identity is
-/// `(name, disambiguator)` — NAME-KEYED, never positional: inserting a
-/// sibling member doesn't change any other member's identity.
+/// Which semantic home a minted member belongs to.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MemberHome {
+    /// An `impl Self { ... }` member of a type's chain.
+    Inherent,
+    /// A member of a trait-naming/implementer-naming impl element
+    /// (`impl Display { ... }` on a type, `impl usize { ... }` on a
+    /// trait). `head` is the element's written head name — the member's
+    /// item name is qualified `head::name` so members of sibling impls
+    /// never collide (name-keyed identity, one extra name segment).
+    TraitImpl { head: String },
+}
+
+/// One semantically-supported member of a `type`/`trait` item's
+/// `with`-chain, range-free. Identity is `(name, disambiguator)` —
+/// NAME-KEYED, never positional: inserting a sibling
+/// member doesn't change any other member's identity. For a trait-impl
+/// member the name is the QUALIFIED `head::member` spelling.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MemberData {
     pub name: String,
-    /// Which occurrence of `name` among the type's members (0-based) —
+    /// Which occurrence of `name` among the item's members (0-based) —
     /// duplicates are diagnosed, the first wins lookups.
     pub disambiguator: u32,
     /// The member's signature, synthesized from its defining fn literal's
@@ -636,38 +672,77 @@ pub struct MemberData {
     /// signatures are always annotation-derived, so dot-call resolution
     /// never needs inference to read a head).
     pub type_ref: Option<TypeRef>,
+    pub home: MemberHome,
+    /// The member's OWN generic binder (`fmt = fn::<W: Write>(...)`) —
+    /// live for trait-impl members (a requirement may be a generic fn);
+    /// always empty for inherent members (their binder is the owner's,
+    /// see [`crate::item_data`]).
+    pub generics: Vec<GenericParamData>,
+}
+
+impl MemberData {
+    /// The member's bare (unqualified) name — `fmt` for `Display::fmt`.
+    pub fn bare_name(&self) -> &str {
+        match &self.home {
+            MemberHome::Inherent => &self.name,
+            MemberHome::TraitImpl { head } => self
+                .name
+                .strip_prefix(head.as_str())
+                .and_then(|rest| rest.strip_prefix("::"))
+                .unwrap_or(&self.name),
+        }
+    }
 }
 
 /// The SIGNATURE side of the member query split: range-free member
-/// facts, one query per owning type item — a member BODY edit leaves this
-/// value unchanged, so sibling signatures (and every dot-call resolution)
-/// backdate behind it. Empty for non-type items.
+/// facts, one query per owning `type`/`trait` item — a member BODY edit
+/// leaves this value unchanged, so sibling signatures (and every dot-call
+/// resolution) backdate behind it. Empty for value items.
 #[salsa::tracked(returns(ref))]
 pub fn type_members<'db>(db: &'db dyn Db, item: crate::ItemId<'db>) -> Vec<MemberData> {
-    let Some(ast::Item::TypeItem(decl)) = item_source(db, item) else {
+    let Some(decl) = item_source(db, item) else {
         return Vec::new();
     };
     semantic_member_sources(&decl)
         .into_iter()
-        .map(|(name, disambiguator, member)| MemberData {
-            name,
-            disambiguator,
-            type_ref: type_ref_from_fn_literal(member.value()),
+        .map(|source| {
+            let generics = match &source.home {
+                MemberHome::Inherent => Vec::new(),
+                MemberHome::TraitImpl { .. } => match source.member.value() {
+                    Some(ast::Expr::FnLiteral(fn_lit)) => {
+                        generics_from_param_list(fn_lit.generic_param_list())
+                    }
+                    _ => Vec::new(),
+                },
+            };
+            MemberData {
+                name: source.name,
+                disambiguator: source.disambiguator,
+                type_ref: type_ref_from_fn_literal(source.member.value()),
+                home: source.home,
+                generics,
+            }
         })
         .collect()
 }
 
-/// Every member the current semantics MINTS an item for, in source order,
-/// each with its name-keyed disambiguator: the `=`-defined `fn`-literal
-/// members of `impl Self { ... }` elements sitting DIRECTLY in plain
-/// `with { ... }` groups (no binders, no clauses, no `unsafe`/`for` heads
-/// — everything else is parse-and-reserve and mints nothing).
-///
-/// The ONE enumeration both [`type_members`] and [`member_source`] go
-/// through, so identity always agrees between the range-free and the
-/// syntax side.
-pub fn semantic_member_sources(decl: &ast::TypeItem) -> Vec<(String, u32, ast::Member)> {
-    let mut seen: rustc_hash::FxHashMap<String, u32> = rustc_hash::FxHashMap::default();
+/// One minted member's syntax with its identity — what
+/// [`semantic_member_sources`] yields.
+pub struct MemberSource {
+    /// The member's item name (qualified for trait-impl members).
+    pub name: String,
+    pub disambiguator: u32,
+    pub member: ast::Member,
+    pub home: MemberHome,
+}
+
+/// Every semantically-live impl element of `decl`'s plain `with`-groups,
+/// in source order, with its home — the ONE with-chain element traversal
+/// shared by member minting ([`semantic_member_sources`]) and the impl
+/// index (`crate::traits::trait_impls` and its syntax lookups), so
+/// element identity and order can never disagree between the range-free
+/// and the syntax side.
+pub(crate) fn semantic_impl_elements(decl: &ast::Item) -> Vec<(ast::ImplElement, MemberHome)> {
     let mut out = Vec::new();
     for group in decl.with_groups() {
         // A group with binders or clauses is reserved wholesale: an
@@ -684,9 +759,39 @@ pub fn semantic_member_sources(decl: &ast::TypeItem) -> Vec<(String, u32, ast::M
             let ast::Element::ImplElement(impl_element) = element else {
                 continue;
             };
-            if !impl_element.is_self_head() {
-                continue;
-            }
+            let home = match syntax::semantic_member_context(impl_element.syntax()) {
+                Some(syntax::MemberContext::Inherent) => MemberHome::Inherent,
+                Some(syntax::MemberContext::TraitImpl) => {
+                    let Some(head) = syntax::impl_element_bare_head(&impl_element) else {
+                        continue;
+                    };
+                    MemberHome::TraitImpl { head: head.text() }
+                }
+                None => continue,
+            };
+            out.push((impl_element, home));
+        }
+    }
+    out
+}
+
+/// Every member the current semantics MINT an item for, in source
+/// order, each with its name-keyed disambiguator: the `=`-defined
+/// `fn`-literal members of semantically-live impl elements sitting
+/// DIRECTLY in plain `with { ... }` groups — `impl Self` on a type
+/// (inherent), `impl Trait` on a NON-generic type, `impl Type` on a
+/// non-generic trait (no binders, no clauses, no `unsafe`/`for` heads —
+/// everything else is parse-and-reserve and mints nothing).
+///
+/// The enumeration [`type_members`] and [`member_source`] go through —
+/// built on the same element traversal ([`semantic_impl_elements`]) as
+/// the impl index, so identity always agrees between the range-free and
+/// the syntax side.
+pub fn semantic_member_sources(decl: &ast::Item) -> Vec<MemberSource> {
+    let mut seen: rustc_hash::FxHashMap<String, u32> = rustc_hash::FxHashMap::default();
+    let mut out = Vec::new();
+    {
+        for (impl_element, home) in semantic_impl_elements(decl) {
             for member in impl_element.members() {
                 // Reserved spellings (`type`/`const` members) parse but
                 // mint nothing — validation flags them as not supported
@@ -708,8 +813,17 @@ pub fn semantic_member_sources(decl: &ast::TypeItem) -> Vec<(String, u32, ast::M
                 if name.is_empty() {
                     continue;
                 }
+                let name = match &home {
+                    MemberHome::Inherent => name,
+                    MemberHome::TraitImpl { head } => format!("{head}::{name}"),
+                };
                 let disambiguator = seen.entry(name.clone()).or_insert(0);
-                out.push((name.clone(), *disambiguator, member));
+                out.push(MemberSource {
+                    name: name.clone(),
+                    disambiguator: *disambiguator,
+                    member,
+                    home: home.clone(),
+                });
                 *disambiguator += 1;
             }
         }
@@ -722,11 +836,96 @@ pub fn semantic_member_sources(decl: &ast::TypeItem) -> Vec<(String, u32, ast::M
 pub fn member_source(db: &dyn Db, item: crate::ItemId<'_>) -> Option<ast::Member> {
     let (member_name, member_dis) = item.member(db)?;
     let owner = crate::member_owner(db, item)?;
-    let ast::Item::TypeItem(decl) = item_source(db, owner)? else {
-        return None;
-    };
+    let decl = item_source(db, owner)?;
     semantic_member_sources(&decl)
         .into_iter()
-        .find(|(name, dis, _)| *name == member_name && *dis == member_dis)
-        .map(|(_, _, member)| member)
+        .find(|source| source.name == member_name && source.disambiguator == member_dis)
+        .map(|source| source.member)
+}
+
+// ---- trait declarations -------------------------------------------------
+
+/// One requirement of a trait declaration (`fmt: fn::<W: Write>(w: W,
+/// x: Self) -> W;`), range-free. Identity is the position in
+/// [`trait_requirements`]'s list AND the name (first occurrence of a
+/// duplicated name wins lookups; the duplicate is diagnosed).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TraitRequirement {
+    pub name: String,
+    /// The requirement's signature, synthesized from the colon-declared
+    /// fn signature's annotations ([`type_ref_from_decl_signature`]);
+    /// `None` when it isn't fully written (the declaration site carries
+    /// the diagnostic).
+    pub sig: Option<TypeRef>,
+    /// The requirement's own generic binder (`fn::<W: Write>`), bounds
+    /// included.
+    pub generics: Vec<GenericParamData>,
+}
+
+/// The requirements a `trait` item declares, in source order — the
+/// trait-side counterpart of [`type_decl`], and the same incrementality
+/// firewall. Only live colon-declared fn-signature members enter;
+/// reserved spellings (defaults, associated types/consts) are skipped
+/// (validation carries their story). Empty for non-trait items.
+#[salsa::tracked(returns(ref))]
+pub fn trait_requirements<'db>(db: &'db dyn Db, item: crate::ItemId<'db>) -> Vec<TraitRequirement> {
+    let Some(ast::Item::TraitItem(decl)) = item_source(db, item) else {
+        return Vec::new();
+    };
+    let Some(requires) = decl.requires_def() else {
+        return Vec::new();
+    };
+    let mut out: Vec<TraitRequirement> = Vec::new();
+    for member in requires.members() {
+        if member.type_token().is_some()
+            || member.const_token().is_some()
+            || member.eq_token().is_some()
+            || member.colon_token().is_none()
+        {
+            continue;
+        }
+        let Some(name) = member.name() else {
+            continue;
+        };
+        let name = name.text();
+        if name.is_empty() || out.iter().any(|req| req.name == name) {
+            continue;
+        }
+        let (sig, generics) = match member.ty() {
+            Some(ast::Type::FnType(fn_type)) => (
+                type_ref_from_decl_signature(&fn_type),
+                generics_from_param_list(fn_type.generic_param_list()),
+            ),
+            _ => (None, Vec::new()),
+        };
+        out.push(TraitRequirement {
+            name,
+            sig,
+            generics,
+        });
+    }
+    out
+}
+
+/// Synthesize a [`TypeRef::Fn`] from a colon-declared member signature
+/// (`fn::<W: Write>(w: W, x: Self) -> W` — NAMED params, so the types
+/// come from the param list, not from bare child types). `None` unless
+/// every param is annotated and the return type is written (declarations
+/// have nothing to infer from), or when the signature carries the
+/// reserved `unsafe` marker.
+fn type_ref_from_decl_signature(fn_type: &ast::FnType) -> Option<TypeRef> {
+    if fn_type.unsafe_token().is_some() {
+        return None;
+    }
+    let params: Vec<TypeRef> = fn_type
+        .param_list()?
+        .params()
+        .map(|p| Some(TypeRef::from_ast(p.ty()?)))
+        .collect::<Option<_>>()?;
+    let ret = fn_type
+        .ret_type()
+        .and_then(|rt| rt.ty())
+        .map(|t| Box::new(TypeRef::from_ast(t)));
+    let type_ref = TypeRef::Fn { params, ret };
+    type_ref.is_fully_typed().then_some(type_ref)
 }

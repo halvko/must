@@ -365,8 +365,107 @@ type Box2 = struct::<T> { v: T } with {
 static hi = fn () -> str { Box2(struct { v = "hi" }).get() };
 ```
 
-Attaching an impl to anything but `Self` — a trait impl — parses but is not
-supported yet.
+Attaching an impl to anything but `Self` is a *trait impl* — its own
+section, next.
+
+== Traits
+
+A `trait` item declares a set of *requirements*: named, fully-signatured
+`fn`s an implementer must supply. A trait is a bound, never a type — it
+cannot be named as a value or written where a type is expected.
+
+```
+trait Write = requires {
+    push: fn(s: str, w: Self) -> Self;
+};
+```
+
+An impl lives in a `with`-chain, exactly like an inherent member, but its
+element is headed by the trait's name instead of `Self`. There are two
+homes for it. A *type-side* impl sits in the implementing type's own
+chain, headed by the trait:
+
+```
+type Sink = struct { pushes: usize } with {
+    impl Write {
+        push = fn(s: str, w: Self) -> Self {
+            print(s);
+            Sink(struct { pushes = w.pushes + 1 })
+        };
+    }
+};
+```
+
+A *trait-side* impl sits in the trait's own chain, headed by the
+implementing type — the only way to implement a trait for a builtin
+scalar, which has no declaration of its own to host a chain:
+
+```
+trait Display = requires {
+    fmt: fn::<W: Write>(w: W, x: Self) -> W;
+} with {
+    impl usize {
+        fmt = fn::<W: Write>(w: W, x: usize) -> W { w.push("n") };
+    }
+};
+```
+
+At most one impl per (trait, type) pair, whichever home it sits in — a
+second impl, in either home, is an error naming both sites. A requirement's
+binder may carry bounds of its own, composed with `+` like any other bound
+list — `Display`'s `fmt` is generic over its sink, `W: Write`, independent
+of the trait's own (here absent) generic parameters. A requirement declares
+a signature and no body, so each of its parameters is a plain `name: Type`:
+`mut` and destructuring patterns are refused there and belong to the impl
+that supplies the body.
+
+Inside a generic body, a bound re-opens exactly the bounded trait's
+members on the rigid receiver — an ordinary structural dot-call, "bound-
+directed" only in *how* the member is found, not in its calling
+convention:
+
+```
+static show = fn::<T: Display>(x: T) -> usize {
+    let s = Sink(struct { pushes = 0 });
+    let s = x.fmt(s);
+    s.pushes
+};
+```
+
+Outside a bound, a trait member is reached through the *qualified short
+form*, `Trait::member(args)`, with `Self` inferred from the arguments —
+`Display::fmt(w, p.x)` picks the `usize` impl because `p.x` is a `usize`:
+
+```
+type Point = struct { x: usize, y: usize } with {
+    impl Display {
+        fmt = fn::<W: Write>(w: W, p: Self) -> W {
+            let w = Display::fmt(w, p.x);
+            w.push(",")
+        };
+    }
+};
+
+static main = fn() -> usize {
+    show::<usize>(7) + show::<Point>(Point(struct { x = 1, y = 2 }))
+};
+```
+
+Dispatch is static only: every call above resolves to one impl at compile
+time, passed along as a dictionary of fn values under the hood. There is
+no `dyn` and no vtable.
+
+A trait declaration is non-generic today, and so is every implementing
+type — reserved for later: trait aliases (`trait Ord = Eq + PartialOrd`),
+generic traits and generic-type impls, supertrait clauses, default
+members, associated types and consts, `unsafe` traits and trait members,
+and marker impls (`impl Name;`). Also reserved: the named-Self qualified
+form `Trait::<Self = Type>::member(...)` (use the short form instead);
+using a bounded generic `fn` as a value; and using a bound from inside a
+`fn` literal or a `const { ... }` block nested in the bounded body (the
+dictionary lives in the enclosing body, out of a nested one's reach).
+Bounds on a `type` declaration's own binder are reserved too — only a
+member's own binder, or a generic `fn`'s, can carry them today.
 
 == Enums and variants
 

@@ -28,14 +28,19 @@ pub(crate) fn hover(
     let parent = token.parent()?;
 
     // A type name in annotation position: show the declaration. The
-    // variant segment of `p: Shape::Circle` shows the variant instead.
+    // variant segment of `p: Shape::Circle` shows the variant instead. A
+    // TRAIT name — a bound (`T: Display`) or a type-side impl head —
+    // shows the trait's requirements.
     if let Some(name_ref) = ast::NameRef::cast(parent.clone())
         && let Some(path_type) = name_ref.syntax().parent().and_then(ast::PathType::cast)
     {
         let base = path_type.name_ref()?;
-        let hir::Resolution::TypeItem(loc) = hir::file_scope(db, file).resolve(&base.text())?
-        else {
-            return None;
+        let loc = match hir::file_scope(db, file).resolve(&base.text())? {
+            hir::Resolution::TypeItem(loc) => loc,
+            hir::Resolution::TraitItem(loc) => {
+                return trait_item_hover(db, &loc, name_ref.syntax().text_range());
+            }
+            _ => return None,
         };
         if path_type.variant_name_ref().is_some_and(|v| v == name_ref) {
             return variant_hover(db, &loc, &name_ref.text(), name_ref.syntax().text_range());
@@ -103,6 +108,11 @@ pub(crate) fn hover(
             if let Some(hir::Resolution::TypeItem(ref loc)) = resolution {
                 return type_item_hover(db, loc.to_id(db), name_ref.syntax().text_range());
             }
+            // A trait name in expression position — the base of a
+            // qualified call (`Display::fmt(...)`): show the trait.
+            if let Some(hir::Resolution::TraitItem(ref loc)) = resolution {
+                return trait_item_hover(db, loc, name_ref.syntax().text_range());
+            }
             let ty = hir::infer::infer(db, item).type_of_expr.get(expr)?.clone();
             // A use of another item also shows that item's const value.
             let value = match resolution {
@@ -129,6 +139,14 @@ pub(crate) fn hover(
                 .is_some_and(|p| p.kind() == SyntaxKind::TYPE_ITEM)
             {
                 return type_item_hover(db, item, name.syntax().text_range());
+            }
+            if name
+                .syntax()
+                .parent()
+                .is_some_and(|p| p.kind() == SyntaxKind::TRAIT_ITEM)
+            {
+                let loc = hir::item_loc(db, item);
+                return trait_item_hover(db, &loc, name.syntax().text_range());
             }
             if name
                 .syntax()
@@ -191,6 +209,43 @@ fn type_item_hover(
         )
     } else {
         format!("```must\ntype {name}\n```")
+    };
+    Some(HoverResult { markup, range })
+}
+
+/// Hover for a `trait` item (on its declaration, a bound, an impl head or
+/// a qualified call's base): the requirement list, signatures rendered
+/// with `Self` and the requirement binders as written.
+fn trait_item_hover(
+    db: &RootDatabase,
+    loc: &hir::ItemLoc,
+    range: TextRange,
+) -> Option<HoverResult> {
+    let requirements = hir::trait_requirements(db, loc.to_id(db));
+    let name = loc.display_name();
+    let rendered: Vec<String> = requirements
+        .iter()
+        .map(|req| {
+            // `Self` renders through a display-only rigid param; the
+            // requirement's own binder params render by their names.
+            let self_ty = hir::Ty::Param(hir::ty::ParamTy {
+                item: loc.clone(),
+                index: u32::MAX,
+                name: std::sync::Arc::from("Self"),
+            });
+            let sig = hir::traits::lower_requirement_sig(db, loc.file, req, loc, self_ty)
+                .map(|ty| ty.display())
+                .unwrap_or_else(|| "fn(...)".to_owned());
+            format!("{}: {};", req.name, sig)
+        })
+        .collect();
+    let markup = if rendered.is_empty() {
+        format!("```must\ntrait {name} = requires {{}}\n```")
+    } else {
+        format!(
+            "```must\ntrait {name} = requires {{ {} }}\n```",
+            rendered.join(" ")
+        )
     };
     Some(HoverResult { markup, range })
 }

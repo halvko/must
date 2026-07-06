@@ -88,6 +88,10 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             }
         } else if let Some(type_item) = ast::TypeItem::cast(node.clone()) {
             reject_type_item_annotation(&type_item, &mut errors);
+        } else if let Some(trait_item) = ast::TraitItem::cast(node.clone()) {
+            validate_trait_item(&trait_item, &mut errors);
+        } else if let Some(type_param) = ast::TypeParam::cast(node.clone()) {
+            validate_type_param_bounds(&type_param, &mut errors);
         } else if let Some(enum_expr) = ast::EnumExpr::cast(node.clone()) {
             let names = enum_expr
                 .variants()
@@ -201,39 +205,81 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
     errors
 }
 
-/// Whether `node` sits inside the one semantically supported element
-/// context: a plain `with { ... }` group directly on a `type` declaration,
-/// inside an `impl Self { ... }` element that is a DIRECT child of the
-/// group (not under a reserved `unsafe`/`for` head — those wrap their
-/// payload in their own node, so the parent-cast below already excludes
-/// them). Everything outside this context is covered by its own single
-/// "not supported yet" reservation, so member-level checks stay quiet
-/// there.
-pub fn in_inherent_member_context(node: &SyntaxNode) -> bool {
-    let Some(impl_element) = node
-        .ancestors()
-        .find_map(ast::ImplElement::cast)
-        .filter(ast::ImplElement::is_self_head)
-    else {
-        return false;
-    };
-    let Some(group) = impl_element
+/// The semantically-supported member contexts: inherent members
+/// (`impl Self { ... }` in a type's plain group) and trait-impl
+/// members — a bare-name-headed impl element in a plain group of a
+/// NON-generic `type` declaration (type-side home) or of a `trait`
+/// declaration (trait-side home). Everything outside these contexts is
+/// covered by its own single "not supported yet" reservation, so
+/// member-level checks stay quiet there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberContext {
+    /// `impl Self { ... }` on a `type` declaration.
+    Inherent,
+    /// `impl Trait { ... }` on a type / `impl Type { ... }` on a trait.
+    TraitImpl,
+}
+
+/// The semantic member context enclosing `node`, or `None` in reserved
+/// territory (modifier heads, non-plain groups, generic-owner trait
+/// impls, requirement bodies — a requirement member is not an impl
+/// member).
+pub fn semantic_member_context(node: &SyntaxNode) -> Option<MemberContext> {
+    let impl_element = node.ancestors().find_map(ast::ImplElement::cast)?;
+    let group = impl_element
         .syntax()
         .parent()
         .and_then(ast::WithGroup::cast)
-        .filter(ast::WithGroup::is_plain)
-    else {
-        return false;
-    };
-    group
-        .syntax()
-        .parent()
-        .is_some_and(|p| ast::TypeItem::can_cast(p.kind()))
+        .filter(ast::WithGroup::is_plain)?;
+    let owner = group.syntax().parent()?;
+    if ast::TypeItem::can_cast(owner.kind()) {
+        if impl_element.is_self_head() {
+            return Some(MemberContext::Inherent);
+        }
+        if impl_element_bare_head(&impl_element).is_some() {
+            // Trait impls on a GENERIC type are reserved (generic-type
+            // impls); the element carries the reservation.
+            let owner_generic = ast::TypeItem::cast(owner)
+                .and_then(|it| it.body())
+                .is_some_and(|body| match body {
+                    ast::Expr::RecordExpr(record) => record.generic_param_list().is_some(),
+                    ast::Expr::EnumExpr(en) => en.generic_param_list().is_some(),
+                    _ => false,
+                });
+            return (!owner_generic).then_some(MemberContext::TraitImpl);
+        }
+        return None;
+    }
+    if ast::TraitItem::can_cast(owner.kind()) && impl_element_bare_head(&impl_element).is_some() {
+        // A RESERVED generic trait (`requires::<...>`) must not go
+        // semantically live through its chain — mirror of the
+        // generic-owner exclusion above (reserved for generic traits;
+        // nothing may silently depend on it being ignored).
+        let owner_generic = ast::TraitItem::cast(owner)
+            .and_then(|it| it.requires_def())
+            .is_some_and(|def| def.generic_param_list().is_some());
+        return (!owner_generic).then_some(MemberContext::TraitImpl);
+    }
+    None
+}
+
+/// The impl head when it is a bare name other than `Self` (`impl Display`,
+/// `impl usize`) — the trait-naming / implementer-naming element form.
+pub fn impl_element_bare_head(impl_element: &ast::ImplElement) -> Option<ast::NameRef> {
+    match impl_element.head()? {
+        ast::Type::PathType(path)
+            if path.generic_arg_list().is_none() && path.variant_name_ref().is_none() =>
+        {
+            let name = path.name_ref()?;
+            (name.text() != "Self").then_some(name)
+        }
+        _ => None,
+    }
 }
 
 /// The reservation checks for one attachment group: `with`-chains attach
-/// to `type` declarations only, and only the plain form is supported
-/// (no binders, no clauses).
+/// to `type` and `trait` declarations, not to `static` items, and only the
+/// plain form is supported (no binders, no clauses).
 fn validate_with_group(group: &ast::WithGroup, errors: &mut Vec<SyntaxError>) {
     let anchor = group
         .with_token()
@@ -245,7 +291,7 @@ fn validate_with_group(group: &ast::WithGroup, errors: &mut Vec<SyntaxError>) {
         .is_some_and(|p| ast::StaticItem::can_cast(p.kind()))
     {
         errors.push(SyntaxError {
-            message: "`with` attachment groups belong on `type` declarations only".to_owned(),
+            message: "`with` attachment groups do not belong on a `static` item".to_owned(),
             range: anchor,
             fix: None,
         });
@@ -272,53 +318,110 @@ fn validate_with_group(group: &ast::WithGroup, errors: &mut Vec<SyntaxError>) {
     }
 }
 
-/// The reservation checks for one `impl` element: only `impl Self { members }`
-/// is supported — anything with a non-`Self` head (a trait impl, a marker)
-/// is reserved, and `impl Self` requires a member body.
+/// The liveness/reservation checks for one `impl` element. Live forms:
+/// `impl Self { members }` on a type, `impl Trait { members }`
+/// on a non-generic type and `impl Type { members }` on a trait
+/// (the two homes of TR01). Reserved: marker (body-elided)
+/// impls, trait impls on generic types, non-bare heads, and everything
+/// under a modifier head or non-plain group (those carry their own
+/// reservations).
 fn validate_impl_element(impl_element: &ast::ImplElement, errors: &mut Vec<SyntaxError>) {
     let anchor = impl_element
         .head()
         .map(|head| head.syntax().text_range())
         .or_else(|| impl_element.impl_token().map(|t| t.text_range()))
         .unwrap_or_else(|| impl_element.syntax().text_range());
-    if !impl_element.is_self_head() {
-        // One honest reservation per element; its members stay unjudged.
+    let error = |errors: &mut Vec<SyntaxError>, message: &str| {
         errors.push(SyntaxError {
-            message: "trait impls are not supported yet; \
-                      only `impl Self { ... }` (inherent members) is"
-                .to_owned(),
+            message: message.to_owned(),
             range: anchor,
             fix: None,
         });
+    };
+    let Some(group) = impl_element
+        .syntax()
+        .parent()
+        .and_then(ast::WithGroup::cast)
+        .filter(ast::WithGroup::is_plain)
+    else {
+        // Under a modifier head or in a binder/clause group: the head's
+        // (or group's) own reservation covers the element.
+        return;
+    };
+    let Some(owner) = group.syntax().parent() else {
+        return;
+    };
+    let body_elided = impl_element.l_brace_token().is_none();
+    if ast::TraitItem::can_cast(owner.kind()) {
+        if impl_element.is_self_head() {
+            error(
+                errors,
+                "an impl in a trait's `with`-chain names the IMPLEMENTING type, not `Self`",
+            );
+            return;
+        }
+        if impl_element_bare_head(impl_element).is_none() {
+            error(
+                errors,
+                "an impl in a trait's `with`-chain must name its implementer with a bare \
+                 type name",
+            );
+            return;
+        }
+        if body_elided {
+            error(errors, "marker impls (`impl name;`) are not supported yet");
+            return;
+        }
+        if semantic_member_context(impl_element.syntax()) != Some(MemberContext::TraitImpl) {
+            // The owner is a RESERVED generic trait: nothing in its chain
+            // may go live (reserved for generic traits).
+            error(
+                errors,
+                "impls in a generic trait's `with`-chain are not supported yet \
+                 (generic traits are reserved)",
+            );
+        }
         return;
     }
-    if impl_element.l_brace_token().is_none() {
-        // `impl Self;` — a body-elided inherent impl declares nothing.
-        errors.push(SyntaxError {
-            message: "`impl Self` requires a member body (`{ ... }`)".to_owned(),
-            range: anchor,
-            fix: None,
-        });
+    if !ast::TypeItem::can_cast(owner.kind()) {
+        // `with` on a `static` item: the group's own rejection covers it.
+        return;
+    }
+    if impl_element.is_self_head() {
+        if body_elided {
+            // `impl Self;` — a body-elided inherent impl declares nothing.
+            error(errors, "`impl Self` requires a member body (`{ ... }`)");
+        }
+        return;
+    }
+    if impl_element_bare_head(impl_element).is_none() {
+        error(
+            errors,
+            "an impl head must be `Self` (inherent members) or a bare trait name",
+        );
+        return;
+    }
+    if body_elided {
+        error(errors, "marker impls (`impl name;`) are not supported yet");
+        return;
+    }
+    if semantic_member_context(impl_element.syntax()) != Some(MemberContext::TraitImpl) {
+        // A bare-head impl on a GENERIC type: reserved (generic-type impls).
+        error(errors, "trait impls on generic types are not supported yet");
     }
 }
 
-/// The member rules, applied only in the supported context (see
-/// [`in_inherent_member_context`]): members are `=`-defined `fn` literals;
-/// colon-declared members, type ascriptions, associated types/consts and
-/// non-`fn` values are rejected (declare-only inherent members are
-/// unimplementable promises; the rest is reserved).
-fn validate_member(member: &ast::Member, errors: &mut Vec<SyntaxError>) {
-    if !in_inherent_member_context(member.syntax()) {
-        return;
-    }
-    let range = member.syntax().text_range();
+/// The member rules for the reserved leading-keyword spellings, shared by
+/// every member context: `type Item ...;` and `const N: ...;` stay
+/// reserved. Returns `true` when one fired (the member is judged).
+fn reject_reserved_member_keywords(member: &ast::Member, errors: &mut Vec<SyntaxError>) -> bool {
     if let Some(token) = member.type_token() {
         errors.push(SyntaxError {
             message: "associated types are not supported yet".to_owned(),
             range: token.text_range(),
             fix: None,
         });
-        return;
+        return true;
     }
     if let Some(token) = member.const_token() {
         errors.push(SyntaxError {
@@ -326,14 +429,131 @@ fn validate_member(member: &ast::Member, errors: &mut Vec<SyntaxError>) {
             range: token.text_range(),
             fix: None,
         });
+        return true;
+    }
+    false
+}
+
+/// The rules for one REQUIREMENT member (a member of a trait's
+/// `requires { ... }` body): the live form is a colon-declared fn
+/// signature (`name: fn(...) -> R;`); equals-defined members (defaults),
+/// associated types/consts and `unsafe fn` signatures parse and are
+/// reserved.
+fn validate_requirement_member(member: &ast::Member, errors: &mut Vec<SyntaxError>) {
+    let range = member.syntax().text_range();
+    if reject_reserved_member_keywords(member, errors) {
+        return;
+    }
+    if let Some(eq) = member.eq_token() {
+        let end = member
+            .value()
+            .map(|value| value.syntax().text_range().end())
+            .unwrap_or_else(|| eq.text_range().end());
+        errors.push(SyntaxError {
+            message: "default members are not supported yet; a trait declares requirements \
+                      (`name: fn(...) -> ...;`)"
+                .to_owned(),
+            range: TextRange::new(eq.text_range().start(), end),
+            fix: None,
+        });
+        return;
+    }
+    if member.colon_token().is_none() {
+        errors.push(SyntaxError {
+            message: "a requirement declares its signature: `name: fn(...) -> ...;`".to_owned(),
+            range,
+            fix: None,
+        });
+        return;
+    }
+    match member.ty() {
+        Some(ast::Type::FnType(fn_type)) => {
+            if let Some(token) = fn_type.unsafe_token() {
+                errors.push(SyntaxError {
+                    message: "`unsafe` trait members are not supported yet".to_owned(),
+                    range: token.text_range(),
+                    fix: None,
+                });
+            }
+            reject_requirement_param_patterns(&fn_type, errors);
+        }
+        Some(other) => errors.push(SyntaxError {
+            message: "a requirement's signature must be an `fn` signature".to_owned(),
+            range: other.syntax().text_range(),
+            fix: None,
+        }),
+        // `name: ;` — the parse error covers it.
+        None => {}
+    }
+}
+
+/// A requirement DECLARES a signature; it has no body to bind anything in.
+/// The parameter grammar it shares with a fn literal ([`param_list`]) can
+/// still spell `mut` and a destructuring pattern, and both would be
+/// promises about an implementation the declaration does not contain: the
+/// binding mode and the shape a body picks apart are the implementer's
+/// business, one per impl. So a requirement's parameter is a plain
+/// `name: Type`, and everything else is refused here rather than silently
+/// ignored by the signature reader.
+fn reject_requirement_param_patterns(fn_type: &ast::FnType, errors: &mut Vec<SyntaxError>) {
+    let Some(list) = fn_type.param_list() else {
+        return;
+    };
+    for param in list.params() {
+        let Some(pat) = param.pat() else {
+            continue;
+        };
+        let plain = matches!(pat, ast::Pat::BindPat(_)) && param.mut_token().is_none();
+        if plain {
+            continue;
+        }
+        let start = param
+            .mut_token()
+            .map(|token| token.text_range().start())
+            .unwrap_or_else(|| pat.syntax().text_range().start());
+        errors.push(SyntaxError {
+            message: "a requirement's parameter is a plain `name: Type`".to_owned(),
+            range: TextRange::new(start, pat.syntax().text_range().end()),
+            fix: None,
+        });
+    }
+}
+
+/// The member rules, applied only in the supported contexts (see
+/// [`semantic_member_context`]): members are `=`-defined `fn` literals;
+/// colon-declared members, type ascriptions, associated types/consts and
+/// non-`fn` values are rejected (declare-only impl members are
+/// unimplementable promises; the rest is reserved).
+fn validate_member(member: &ast::Member, errors: &mut Vec<SyntaxError>) {
+    if member
+        .syntax()
+        .parent()
+        .is_some_and(|p| ast::RequiresDef::can_cast(p.kind()))
+    {
+        validate_requirement_member(member, errors);
+        return;
+    }
+    let Some(context) = semantic_member_context(member.syntax()) else {
+        return;
+    };
+    let range = member.syntax().text_range();
+    if reject_reserved_member_keywords(member, errors) {
         return;
     }
     match (member.colon_token(), member.eq_token()) {
         (Some(_), None) => {
+            let message = match context {
+                MemberContext::Inherent => {
+                    "a declare-only inherent member is an unimplementable promise; \
+                     define it: `name = fn(...) -> ... { ... };`"
+                }
+                MemberContext::TraitImpl => {
+                    "an impl member is defined with `=`; the colon-declared requirement \
+                     form belongs in the trait declaration"
+                }
+            };
             errors.push(SyntaxError {
-                message: "a declare-only inherent member is an unimplementable promise; \
-                          define it: `name = fn(...) -> ... { ... };`"
-                    .to_owned(),
+                message: message.to_owned(),
                 range,
                 fix: None,
             });
@@ -576,6 +796,118 @@ fn reject_type_item_annotation(type_item: &ast::TypeItem, errors: &mut Vec<Synta
     });
 }
 
+/// The reservation checks for one `trait` declaration: the live form
+/// is the plain non-generic `requires { ... }` constructor. Aliases,
+/// `unsafe requires`, `requires::<...>` binders and supertrait clauses
+/// parse cleanly and are reserved; a superset-parsed `: Type` annotation
+/// is rejected like a `type` item's.
+fn validate_trait_item(trait_item: &ast::TraitItem, errors: &mut Vec<SyntaxError>) {
+    if let Some(colon) = trait_item.colon_token() {
+        let end = trait_item
+            .ty()
+            .map(|ty| ty.syntax().text_range().end())
+            .unwrap_or_else(|| colon.text_range().end());
+        let range = TextRange::new(colon.text_range().start(), end);
+        errors.push(SyntaxError {
+            message: "a `trait` declaration takes no type annotation".to_owned(),
+            range,
+            fix: Some(Fix {
+                label: "Remove the annotation".to_owned(),
+                edits: vec![TextEdit {
+                    range,
+                    insert: String::new(),
+                }],
+            }),
+        });
+    }
+    if let Some(alias) = trait_item.trait_alias() {
+        errors.push(SyntaxError {
+            message: "trait aliases are not supported yet; \
+                      declare the trait with `requires { ... }`"
+                .to_owned(),
+            range: alias.syntax().text_range(),
+            fix: None,
+        });
+    }
+    let Some(requires) = trait_item.requires_def() else {
+        return;
+    };
+    if let Some(token) = requires.unsafe_token() {
+        errors.push(SyntaxError {
+            message: "`unsafe` traits are not supported yet".to_owned(),
+            range: token.text_range(),
+            fix: None,
+        });
+    }
+    if let Some(list) = requires.generic_param_list() {
+        errors.push(SyntaxError {
+            message: "generic traits are not supported yet".to_owned(),
+            range: list.syntax().text_range(),
+            fix: None,
+        });
+    }
+    for clause in requires.clauses() {
+        errors.push(SyntaxError {
+            message: "supertrait clauses are not supported yet".to_owned(),
+            range: clause.syntax().text_range(),
+            fix: None,
+        });
+    }
+}
+
+/// Bound-position rules on one generic type parameter (`T: Display`).
+/// Bounds are LIVE on fn binders (item fns, impl members, requirement
+/// signatures); a bound on a `type` declaration's `struct`/`enum` binder
+/// is reserved (bounded type declarations).
+/// Shape rules apply everywhere live: a bound is a bare trait name —
+/// turbofished bounds wait for generic traits, and nothing else can be a
+/// bound at all. (Whether the name IS a trait is hir's judgement.)
+fn validate_type_param_bounds(type_param: &ast::TypeParam, errors: &mut Vec<SyntaxError>) {
+    if type_param.colon_token().is_none() {
+        return;
+    }
+    let owner = type_param.syntax().parent().and_then(|list| list.parent());
+    if let Some(owner) = &owner {
+        // Reserved binder homes carry group-level reservations of their
+        // own (`with::<...>`, `requires::<...>`); a bound inside one adds
+        // no extra noise. A `type` declaration's binder is live grammar
+        // with reserved bounds — say so precisely.
+        if ast::WithGroup::can_cast(owner.kind()) || ast::RequiresDef::can_cast(owner.kind()) {
+            return;
+        }
+        if ast::RecordExpr::can_cast(owner.kind()) || ast::EnumExpr::can_cast(owner.kind()) {
+            errors.push(SyntaxError {
+                message: "bounds on a `type` declaration's binder are not supported yet".to_owned(),
+                range: type_param.syntax().text_range(),
+                fix: None,
+            });
+            return;
+        }
+    }
+    for bound in type_param.bounds() {
+        match &bound {
+            ast::Type::PathType(path)
+                if path.variant_name_ref().is_none() && path.generic_arg_list().is_none() => {}
+            ast::Type::PathType(path) if path.generic_arg_list().is_some() => {
+                errors.push(SyntaxError {
+                    message: "generic traits are not supported yet; \
+                              a bound is a bare trait name"
+                        .to_owned(),
+                    range: bound.syntax().text_range(),
+                    fix: None,
+                });
+            }
+            _ => {
+                errors.push(SyntaxError {
+                    message: "only a trait name can be a bound".to_owned(),
+                    range: bound.syntax().text_range(),
+                    fix: None,
+                });
+            }
+        }
+    }
+}
+
 /// `Circle(r)` with no leading `::` and no qualifying enum used to be a
 /// variant pattern (v1's bare shorthand); the owner retired it alongside
 /// removing bind-pattern reinterpretation (`Circle` gains this shorthand
@@ -627,14 +959,18 @@ fn reject_nested_generic_binder(fn_literal: &ast::FnLiteral, errors: &mut Vec<Sy
     {
         return;
     }
-    // A member's defining fn literal: the type's own binders already flow
-    // into the member, and member-own binders are reserved — a more
-    // precise message than the generic one below.
+    // A member's defining fn literal: a TRAIT-IMPL member carries its own
+    // binder (a requirement may be a generic fn — Display's `fmt` over
+    // `W: Write`), so the binder is live there. An INHERENT member's
+    // binder stays reserved — the type's own binders already flow in.
     if fn_literal
         .syntax()
         .parent()
         .is_some_and(|p| ast::Member::can_cast(p.kind()))
     {
+        if semantic_member_context(fn_literal.syntax()) == Some(MemberContext::TraitImpl) {
+            return;
+        }
         errors.push(SyntaxError {
             message: "generic members are not supported yet \
                       (the type's own binders are already in scope)"

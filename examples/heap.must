@@ -67,11 +67,12 @@
 // ---- a growable vector, concretely -------------------------------------
 // One buffer, a length, a capacity. No allocator parameter and no vtable:
 // this HeapVec talks to the platform heap builtins directly (generic
-// containers over pluggable allocators wait for traits). The VALUE is a
-// handle over the buffer: copying it copies the handle, not the elements,
-// and exactly one deinit per buffer is the caller's job — the interpreter
-// deterministically catches every double-free and use-after-free while
-// a move story is built.
+// containers over pluggable allocators wait for bounds on a `type`
+// declaration's own binder, still reserved). The VALUE is a handle over
+// the buffer: copying it copies the handle, not the elements, and exactly
+// one deinit per buffer is the caller's job — the interpreter
+// deterministically catches every double-free and use-after-free while a
+// move story is built.
 type HeapVec = struct::<T> { ptr: T.&raw mut, len: usize, cap: usize } with {
     impl Self {
         // Growth is not a primitive: it is alloc + copy + dealloc,
@@ -262,6 +263,6 @@ static main = fn () -> () {
 // add when a customer appears), `realloc`/in-place growth (growth is
 // alloc+copy+dealloc, composed by the container), `size_of`/byte
 // views/pointer casts (the layout era), and any allocator-vtable
-// machinery (generic containers over allocators wait for traits — the
-// containers above are concrete on purpose; `impl Self` members are
-// the first piece of that story: methods without any trait machinery).
+// machinery (generic containers over allocators wait for bounds on a
+// `type` declaration's own binder, still reserved — the containers
+// above are concrete on purpose).

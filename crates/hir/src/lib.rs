@@ -13,6 +13,7 @@ pub mod groups;
 pub mod infer;
 pub mod item_tree;
 pub mod scopes;
+pub mod traits;
 pub mod ty;
 pub mod unsafe_check;
 
@@ -27,11 +28,15 @@ pub use body::{BindingId, Body, BodySourceMap, ExprId, PatId, body_with_source_m
 pub use const_check::ConstCheckDiagnostic;
 pub use constraint::Cause;
 pub use infer::{InferenceDiagnostic, InferenceResult};
-pub use item_tree::{Constness, ItemKind, ItemTree, TypeDeclData, TypeRef, item_source, type_decl};
+pub use item_tree::{
+    Constness, ItemKind, ItemTree, MemberHome, TypeDeclData, TypeRef, item_source,
+    trait_requirements, type_decl,
+};
 pub use scopes::{
     ALLOC_RESULT_NAME, BUILTIN_DISAMBIGUATOR, Builtin, Duplicate, ExprScopes, FileScope,
     Resolution, TypeScope, alloc_result_loc, expr_scopes, file_scope, resolutions, type_scope,
 };
+pub use traits::{BoundSlot, bound_slots, dict_param_count};
 pub use ty::{
     ConstArgValue, FnTy, GenericArg, IntKind, IntValue, NamedTy, Ty, VariantTy, enum_variants,
     member_is_dot_callable, member_self_ty, signature, substitute_args, type_underlying,
@@ -169,17 +174,17 @@ pub fn checkable_item_at<'db>(
         .position(|n| n == item_node)?;
     let item = *file_item_ids(db, file).get(index)?;
     if let Some(member_node) = node.ancestors().find_map(ast::Member::cast)
-        && let Some(ast::Item::TypeItem(decl)) = item_source(db, item)
-        && let Some((name, dis, _)) = item_tree::semantic_member_sources(&decl)
+        && let Some(decl) = item_source(db, item)
+        && let Some(source) = item_tree::semantic_member_sources(&decl)
             .into_iter()
-            .find(|(_, _, m)| m.syntax() == member_node.syntax())
+            .find(|source| source.member.syntax() == member_node.syntax())
     {
         return Some(ItemId::new(
             db,
             file,
             item.name(db).clone(),
             item.disambiguator(db),
-            Some((name, dis)),
+            Some((source.name, source.disambiguator)),
         ));
     }
     Some(item)
@@ -220,10 +225,17 @@ pub fn item_data<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<item_tree::I
         let data = item_tree::type_members(db, owner)
             .iter()
             .find(|m| m.name == member_name && m.disambiguator == member_dis)?;
-        let generics = item_data(db, owner)
-            .as_ref()
-            .map(|owner_data| owner_data.generics.clone())
-            .unwrap_or_default();
+        // An INHERENT member's binder is the owner's (the type's params
+        // flow into member signatures and bodies); a TRAIT-IMPL member
+        // carries its OWN binder (a requirement may be a generic fn) —
+        // its owner is non-generic by the non-generic-trait rules.
+        let generics = match &data.home {
+            item_tree::MemberHome::Inherent => item_data(db, owner)
+                .as_ref()
+                .map(|owner_data| owner_data.generics.clone())
+                .unwrap_or_default(),
+            item_tree::MemberHome::TraitImpl { .. } => data.generics.clone(),
+        };
         return Some(item_tree::ItemData {
             name: data.name.clone(),
             kind: item_tree::ItemKind::Member,
@@ -239,6 +251,7 @@ pub fn item_data<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<item_tree::I
             generics: vec![item_tree::GenericParamData {
                 name: "T".to_owned(),
                 kind: item_tree::GenericParamKind::Type,
+                bounds: Vec::new(),
             }],
         });
     }
@@ -388,11 +401,20 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             continue;
         };
         let name = name_ref.text();
-        // Inside a `with`-chain, only the one semantically supported context
-        // (an `impl Self` member of a plain group) is judged — everything else
-        // is parse-and-reserve territory whose single reservation
-        // diagnostic already tells the story.
+        // Inside a `with`-chain, only the semantic member contexts are
+        // judged — everything else is parse-and-reserve territory whose
+        // single reservation diagnostic already tells the story.
         if in_reserved_with_region(path_type.syntax()) {
+            continue;
+        }
+        // Bound positions, supertrait clauses and alias RHS name TRAITS,
+        // not types — judged by the trait definition diagnostics, skipped
+        // by the type mirror.
+        if path_type.syntax().parent().is_some_and(|p| {
+            ast::TypeParam::can_cast(p.kind())
+                || ast::RequiresClause::can_cast(p.kind())
+                || ast::TraitAlias::can_cast(p.kind())
+        }) {
             continue;
         }
         // A PathType sitting in a CONST-argument position of an enclosing
@@ -666,6 +688,11 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     // Inherent members: definition-site rules that live on the range-free
     // member facts, with only the range attached here.
     member_definition_diagnostics(db, file, &mut diagnostics);
+
+    // Traits: requirement rules, bound-name resolution, impl-head
+    // resolution, coherence (duplicate impls) and impl-vs-requirement
+    // matching.
+    trait_definition_diagnostics(db, file, &mut diagnostics);
 
     let syntax_root = parse(db, file).syntax_node();
     for item in all_checkable_items(db, file) {
@@ -1388,19 +1415,20 @@ fn member_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mu
         if members.is_empty() {
             continue;
         }
-        let Some(ast::Item::TypeItem(decl)) = item_source(db, owner) else {
+        let Some(decl) = item_source(db, owner) else {
             continue;
         };
         let sources = item_tree::semantic_member_sources(&decl);
         let member_name_range = |name: &str, dis: u32| {
             sources
                 .iter()
-                .find(|(n, d, _)| n == name && *d == dis)
-                .map(|(_, _, member)| {
-                    member
+                .find(|source| source.name == name && source.disambiguator == dis)
+                .map(|source| {
+                    source
+                        .member
                         .name()
                         .map(|n| n.syntax().text_range())
-                        .unwrap_or_else(|| member.syntax().text_range())
+                        .unwrap_or_else(|| source.member.syntax().text_range())
                 })
         };
         for member in members {
@@ -1414,7 +1442,7 @@ fn member_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mu
                     message: format!(
                         "member `{}` must spell its full signature: \
                          every parameter and the return type",
-                        member.name
+                        member.bare_name()
                     ),
                     fix: None,
                     related: Vec::new(),
@@ -1433,11 +1461,380 @@ fn member_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mu
                 diagnostics.push(Diagnostic {
                     range,
                     severity: Severity::Error,
-                    message: format!("duplicate member `{}`", member.name),
+                    message: format!("duplicate member `{}`", member.bare_name()),
                     fix: None,
                     related,
                 });
             }
+        }
+    }
+}
+
+/// The name range of the requirement `name` in the trait declared at
+/// `trait_loc` — the "required here" related location.
+fn requirement_related(db: &dyn Db, trait_loc: &ItemLoc, name: &str) -> Vec<RelatedInfo> {
+    let Some(ast::Item::TraitItem(decl)) = item_source(db, trait_loc.to_id(db)) else {
+        return Vec::new();
+    };
+    let Some(requires) = decl.requires_def() else {
+        return Vec::new();
+    };
+    requires
+        .members()
+        .filter_map(|member| member.name())
+        .find(|n| n.text() == name)
+        .map(|n| {
+            vec![RelatedInfo {
+                file: trait_loc.file,
+                range: n.syntax().text_range(),
+                message: "required by the trait here".to_owned(),
+            }]
+        })
+        .unwrap_or_default()
+}
+
+/// Definition-site rules for the trait layer: requirement well-formedness,
+/// bound-name resolution in live binder positions, impl-head resolution,
+/// coherence (one impl per (trait, type) bucket — TR04, trivial
+/// ground-disjointness while everything is non-generic) and
+/// impl-vs-requirement matching (missing/extra members, signature and
+/// binder agreement).
+fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut Vec<Diagnostic>) {
+    // Requirements: duplicates and the fully-annotated rule.
+    for &item in file_item_ids(db, file) {
+        let Some(ast::Item::TraitItem(decl)) = item_source(db, item) else {
+            continue;
+        };
+        let Some(requires) = decl.requires_def() else {
+            continue;
+        };
+        // A reserved generic trait carries its own reservation; judging
+        // its requirements would be noise.
+        if requires.generic_param_list().is_some() {
+            continue;
+        }
+        let mut seen: Vec<String> = Vec::new();
+        for member in requires.members() {
+            if member.type_token().is_some()
+                || member.const_token().is_some()
+                || member.eq_token().is_some()
+            {
+                continue;
+            }
+            let Some(name_node) = member.name() else {
+                continue;
+            };
+            let name = name_node.text();
+            if name.is_empty() {
+                continue;
+            }
+            let range = name_node.syntax().text_range();
+            if seen.contains(&name) {
+                diagnostics.push(simple_error(
+                    range,
+                    format!("duplicate requirement `{name}`"),
+                ));
+                continue;
+            }
+            seen.push(name.clone());
+            // The fully-annotated rule: a requirement is a contract — every
+            // parameter and the return type must be written. (Reserved
+            // shapes — `unsafe fn`, non-fn signatures — carry validation's
+            // own story.)
+            if let Some(ast::Type::FnType(fn_type)) = member.ty()
+                && fn_type.unsafe_token().is_none()
+            {
+                let fully = item_tree::trait_requirements(db, item)
+                    .iter()
+                    .any(|req| req.name == name && req.sig.is_some());
+                if !fully {
+                    diagnostics.push(simple_error(
+                        range,
+                        format!(
+                            "requirement `{name}` must spell its full signature: \
+                             every parameter and the return type"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    // Bounds in live binder positions (fn literals and requirement
+    // signatures) must name traits.
+    for type_param in parse(db, file)
+        .syntax_node()
+        .descendants()
+        .filter_map(ast::TypeParam::cast)
+    {
+        let owner_kind = type_param
+            .syntax()
+            .parent()
+            .and_then(|list| list.parent())
+            .map(|owner| owner.kind());
+        let live = owner_kind
+            .is_some_and(|kind| ast::FnLiteral::can_cast(kind) || ast::FnType::can_cast(kind));
+        if !live {
+            // Reserved binder homes (type declarations, `with::<...>`,
+            // `requires::<...>`) carry their own reservations.
+            continue;
+        }
+        for bound in type_param.bounds() {
+            let ast::Type::PathType(path) = &bound else {
+                continue; // validation's shape errors cover it
+            };
+            if path.generic_arg_list().is_some() || path.variant_name_ref().is_some() {
+                continue; // validation's shape errors cover it
+            }
+            let Some(name_ref) = path.name_ref() else {
+                continue;
+            };
+            let name = name_ref.text();
+            let message = match file_scope(db, file).resolve(&name) {
+                // A RESERVED generic trait must not go semantically live
+                // through a bound (reserved for generic traits).
+                Some(Resolution::TraitItem(loc)) => traits::trait_is_generic(db, &loc).then(|| {
+                    format!(
+                        "`{name}` is a reserved generic trait \
+                         (generic traits are not supported yet); it cannot be a bound"
+                    )
+                }),
+                // Duplicate definitions carry the diagnostics.
+                Some(Resolution::Ambiguous(_)) => None,
+                Some(_) => Some(format!("`{name}` is not a trait")),
+                None => {
+                    if ty::builtin_type_by_name(&name).is_some() {
+                        Some(format!("`{name}` is not a trait"))
+                    } else {
+                        Some(format!("unknown trait `{name}`"))
+                    }
+                }
+            };
+            if let Some(message) = message {
+                diagnostics.push(simple_error(bound.syntax().text_range(), message));
+            }
+        }
+    }
+
+    // Impl sites: head resolution, member coverage and matching.
+    let impls = traits::trait_impls(db, file);
+    for site in &impls.sites {
+        let Some(element) = traits::impl_site_source(db, site) else {
+            continue;
+        };
+        let head_range = element
+            .head()
+            .map(|head| head.syntax().text_range())
+            .unwrap_or_else(|| element.syntax().text_range());
+        if site.type_side && site.trait_.is_none() {
+            let message = match file_scope(db, file).resolve(&site.head) {
+                // Resolvable, but reserved: the impl must not go live.
+                Some(Resolution::TraitItem(_)) => Some(format!(
+                    "`{}` is a reserved generic trait \
+                     (generic traits are not supported yet); it cannot be implemented",
+                    site.head
+                )),
+                Some(Resolution::Ambiguous(_)) => None,
+                Some(_) => Some(format!("`{}` is not a trait", site.head)),
+                None => {
+                    // A builtin TYPE name in a type-side head (`impl usize`
+                    // in a type's chain): not a trait — say so, matching
+                    // the bound-position wording.
+                    if ty::builtin_type_by_name(&site.head).is_some() {
+                        Some(format!("`{}` is not a trait", site.head))
+                    } else {
+                        Some(format!("unknown trait `{}`", site.head))
+                    }
+                }
+            };
+            if let Some(message) = message {
+                diagnostics.push(simple_error(head_range, message));
+            }
+            continue;
+        }
+        if !site.type_side && site.self_key.is_none() {
+            let message = match type_scope(db, file).resolve(&site.head) {
+                Some(Resolution::TypeItem(_)) => {
+                    // Resolvable but generic: reserved (generic-type impls).
+                    Some("impls for generic types are not supported yet".to_owned())
+                }
+                Some(Resolution::Ambiguous(_)) => None,
+                Some(_) | None => match file_scope(db, file).resolve(&site.head) {
+                    Some(Resolution::TraitItem(_)) => Some(format!(
+                        "`{}` is a trait; an impl in a trait's `with`-chain names the \
+                         IMPLEMENTING type",
+                        site.head
+                    )),
+                    Some(Resolution::Ambiguous(_)) => None,
+                    Some(_) => Some(format!("`{}` is not a type", site.head)),
+                    None => Some(format!("unknown type `{}`", site.head)),
+                },
+            };
+            if let Some(message) = message {
+                diagnostics.push(simple_error(head_range, message));
+            }
+            continue;
+        }
+        let (Some(trait_loc), Some(self_key)) = (&site.trait_, &site.self_key) else {
+            continue;
+        };
+        let requirements = item_tree::trait_requirements(db, trait_loc.to_id(db));
+        let owner_id = site.owner.to_id(db);
+        let members = item_tree::type_members(db, owner_id);
+        let site_members: Vec<&item_tree::MemberData> = members
+            .iter()
+            .filter(
+                |m| matches!(&m.home, item_tree::MemberHome::TraitImpl { head } if *head == site.head),
+            )
+            .collect();
+        let member_name_range = |qualified: &str, dis: u32| {
+            item_source(db, owner_id)
+                .map(|decl| item_tree::semantic_member_sources(&decl))
+                .unwrap_or_default()
+                .into_iter()
+                .find(|source| source.name == qualified && source.disambiguator == dis)
+                .map(|source| {
+                    source
+                        .member
+                        .name()
+                        .map(|n| n.syntax().text_range())
+                        .unwrap_or_else(|| source.member.syntax().text_range())
+                })
+        };
+        for req in requirements {
+            let qualified = format!("{}::{}", site.head, req.name);
+            let Some(member) = site_members.iter().find(|m| m.name == qualified) else {
+                diagnostics.push(Diagnostic {
+                    range: head_range,
+                    severity: Severity::Error,
+                    message: format!(
+                        "this impl of `{}` is missing the member `{}`",
+                        trait_loc.display_name(),
+                        req.name
+                    ),
+                    fix: None,
+                    related: requirement_related(db, trait_loc, &req.name),
+                });
+                continue;
+            };
+            // A member that isn't fully annotated already carries its own
+            // diagnostic; matching against a broken signature is noise.
+            if member.type_ref.is_none() {
+                continue;
+            }
+            let Some(range) = member_name_range(&member.name, member.disambiguator) else {
+                continue;
+            };
+            if !traits::binders_match(db, file, &req.generics, &member.generics) {
+                diagnostics.push(Diagnostic {
+                    range,
+                    severity: Severity::Error,
+                    message: format!(
+                        "member `{}`'s generic binder does not match `{}`'s requirement \
+                         (arity, kinds and bounds must agree)",
+                        req.name,
+                        trait_loc.display_name(),
+                    ),
+                    fix: None,
+                    related: requirement_related(db, trait_loc, &req.name),
+                });
+                continue;
+            }
+            // The signature must equal the requirement with `Self` (and
+            // the binder params, index-matched) substituted. A requirement
+            // that isn't fully written carries its own diagnostic.
+            let member_loc = ItemLoc {
+                file: site.owner.file,
+                name: site.owner.name.clone(),
+                disambiguator: site.owner.disambiguator,
+                member: Some((
+                    std::sync::Arc::from(member.name.as_str()),
+                    member.disambiguator,
+                )),
+            };
+            let Some(expected) =
+                traits::lower_requirement_sig(db, file, req, &member_loc, self_key.to_ty())
+            else {
+                continue;
+            };
+            let actual = ty::signature(db, member_loc.to_id(db));
+            if expected != actual && !expected.contains_error() && !actual.contains_error() {
+                diagnostics.push(Diagnostic {
+                    range,
+                    severity: Severity::Error,
+                    message: format!(
+                        "member `{}` does not match `{}`'s requirement: expected `{}`, \
+                         found `{}`",
+                        req.name,
+                        trait_loc.display_name(),
+                        expected.display(),
+                        actual.display()
+                    ),
+                    fix: None,
+                    related: requirement_related(db, trait_loc, &req.name),
+                });
+            }
+        }
+        for member in &site_members {
+            if !requirements
+                .iter()
+                .any(|req| req.name == member.bare_name())
+            {
+                let Some(range) = member_name_range(&member.name, member.disambiguator) else {
+                    continue;
+                };
+                diagnostics.push(Diagnostic {
+                    range,
+                    severity: Severity::Error,
+                    message: format!(
+                        "`{}` has no requirement `{}`",
+                        trait_loc.display_name(),
+                        member.bare_name()
+                    ),
+                    fix: None,
+                    related: declared_here(db, trait_loc),
+                });
+            }
+        }
+    }
+
+    // Coherence: at most one impl per (trait, self type) bucket.
+    for ((trait_loc, self_key), indices) in &impls.buckets {
+        if indices.len() < 2 {
+            continue;
+        }
+        let first = &impls.sites[indices[0]];
+        let first_related = traits::impl_site_source(db, first)
+            .map(|element| {
+                vec![RelatedInfo {
+                    file: first.owner.file,
+                    range: element
+                        .head()
+                        .map(|head| head.syntax().text_range())
+                        .unwrap_or_else(|| element.syntax().text_range()),
+                    message: "first implemented here".to_owned(),
+                }]
+            })
+            .unwrap_or_default();
+        for &later in &indices[1..] {
+            let site = &impls.sites[later];
+            let Some(element) = traits::impl_site_source(db, site) else {
+                continue;
+            };
+            diagnostics.push(Diagnostic {
+                range: element
+                    .head()
+                    .map(|head| head.syntax().text_range())
+                    .unwrap_or_else(|| element.syntax().text_range()),
+                severity: Severity::Error,
+                message: format!(
+                    "duplicate impl of `{}` for `{}`",
+                    trait_loc.display_name(),
+                    self_key.display()
+                ),
+                fix: None,
+                related: first_related.clone(),
+            });
         }
     }
 }
@@ -1499,12 +1896,22 @@ fn const_context_reason(
     })
 }
 
-/// Whether `node` sits inside a `with`-chain but OUTSIDE the one
-/// semantically supported context (an `impl Self` member of a plain
-/// group) — reserved territory the annotation mirror stays quiet about.
+/// Whether `node` sits inside a `with`-chain but OUTSIDE the semantic
+/// member contexts (inherent members, trait-impl members) — reserved
+/// territory the annotation mirror stays quiet about. Impl HEADS are also
+/// mirror-exempt (they name traits/implementers, judged by the trait
+/// definition diagnostics, not the type mirror).
 fn in_reserved_with_region(node: &syntax::SyntaxNode) -> bool {
+    if node
+        .ancestors()
+        .any(|n| ast::ImplElement::can_cast(n.kind()))
+        && !node.ancestors().any(|n| ast::Member::can_cast(n.kind()))
+    {
+        // Inside an impl element but outside any member: the head.
+        return true;
+    }
     node.ancestors().any(|n| ast::WithGroup::can_cast(n.kind()))
-        && !syntax::in_inherent_member_context(node)
+        && syntax::semantic_member_context(node).is_none()
 }
 
 /// The generic binder scoping a MEMBER context: the OWNER type
@@ -1545,9 +1952,34 @@ fn type_param_binding(path_type: &ast::PathType, name: &str) -> TypeParamBinding
         // A binder can sit on a fn literal or (for type declarations) on a
         // `struct`/`enum` literal — all three are climbed the same way. A
         // MEMBER context (climbing reaches a `with`-group) is scoped by
-        // the OWNER's binder, plus `Self`.
+        // the OWNER's binder, plus `Self`; a member fn literal's OWN
+        // binder (trait-impl members) and a requirement signature's
+        // (`fmt: fn::<W: Write>(...)`) sit closer in and are climbed
+        // first. A `requires` body binds `Self` too.
         let list = if let Some(fn_literal) = ast::FnLiteral::cast(ancestor.clone()) {
-            fn_literal.generic_param_list()
+            match fn_literal.generic_param_list() {
+                Some(list) => Some(list),
+                // A binder-less literal is transparent: the item-level (or
+                // owner) binder scopes it.
+                None => continue,
+            }
+        } else if let Some(fn_type) = ast::FnType::cast(ancestor.clone()) {
+            // Only requirement-signature fn types carry a binder; plain fn
+            // TYPES are transparent.
+            match fn_type.generic_param_list() {
+                Some(list) => Some(list),
+                None => continue,
+            }
+        } else if let Some(requires) = ast::RequiresDef::cast(ancestor.clone()) {
+            if name == "Self" {
+                return TypeParamBinding::Bound;
+            }
+            // The reserved `requires::<...>` binder still BINDS its names
+            // (so reserved code carries one reservation, not name noise).
+            match requires.generic_param_list() {
+                Some(list) => Some(list),
+                None => continue,
+            }
         } else if let Some(record) = ast::RecordExpr::cast(ancestor.clone()) {
             match record.generic_param_list() {
                 Some(list) => Some(list),
@@ -1644,9 +2076,14 @@ impl BinderInfo {
 /// binder are climbed through (the item-level binder scopes the whole
 /// body/declaration).
 fn enclosing_binder_info(node: &syntax::SyntaxNode) -> BinderInfo {
+    // `Self` is a bound type name inside any member/requirement context.
+    let self_in_scope = node
+        .ancestors()
+        .any(|n| ast::WithGroup::can_cast(n.kind()) || ast::RequiresDef::can_cast(n.kind()));
     for ancestor in node.ancestors() {
         // A MEMBER context: the OWNER's binder scopes member signatures
-        // and bodies, and `Self` is a bound type name of its own.
+        // and bodies (a member fn literal's OWN binder, and a requirement
+        // signature's, sit closer in and are climbed first).
         let member_context = ast::WithGroup::cast(ancestor.clone());
         let list = if let Some(group) = &member_context {
             match member_owner_binder_list(group) {
@@ -1659,6 +2096,21 @@ fn enclosing_binder_info(node: &syntax::SyntaxNode) -> BinderInfo {
             }
         } else if let Some(fn_literal) = ast::FnLiteral::cast(ancestor.clone()) {
             fn_literal.generic_param_list()
+        } else if let Some(fn_type) = ast::FnType::cast(ancestor.clone()) {
+            match fn_type.generic_param_list() {
+                Some(list) => Some(list),
+                // A plain fn TYPE is transparent.
+                None => continue,
+            }
+        } else if let Some(requires) = ast::RequiresDef::cast(ancestor.clone()) {
+            match requires.generic_param_list() {
+                Some(list) => Some(list),
+                None => {
+                    let mut info = BinderInfo::default();
+                    info.type_params.push("Self".to_owned());
+                    return info;
+                }
+            }
         } else if let Some(record) = ast::RecordExpr::cast(ancestor.clone()) {
             record.generic_param_list()
         } else if let Some(en) = ast::EnumExpr::cast(ancestor.clone()) {
@@ -1670,7 +2122,7 @@ fn enclosing_binder_info(node: &syntax::SyntaxNode) -> BinderInfo {
             continue;
         };
         let mut info = BinderInfo::default();
-        if member_context.is_some() {
+        if member_context.is_some() || self_in_scope {
             info.type_params.push("Self".to_owned());
         }
         for param in list.params() {
@@ -2034,6 +2486,11 @@ fn type_position_error(db: &dyn Db, file: SourceFile, name: &str) -> Option<Stri
                 return None;
             }
             match file_scope(db, file).resolve(name) {
+                // Traits are bounds, not types (TR05): the precise story.
+                Some(Resolution::TraitItem(_)) => Some(format!(
+                    "`{name}` is a trait; traits are bounds, not types — \
+                     did you mean a bounded generic param (`T: {name}`)?"
+                )),
                 // Also covers value-item duplicates: whichever way the
                 // ambiguity resolves, it is not a type.
                 Some(_) => Some(format!("`{name}` is not a type")),

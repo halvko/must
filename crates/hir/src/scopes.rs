@@ -243,6 +243,11 @@ pub enum Resolution {
     /// is forced to decide what a *type* means for it: a value use is an
     /// error, a call is a construction, a type position is a name hit.
     TypeItem(ItemLoc),
+    /// A `trait` item. Its own variant for the same reason as
+    /// [`Resolution::TypeItem`]: a trait is neither a value nor a type —
+    /// the legal positions are bounds, impl heads and the base of a
+    /// qualified member call (`Display::fmt(...)`).
+    TraitItem(ItemLoc),
     /// The name is defined by more than one item. Resolves to the first
     /// definition so navigation has a target, but no use can be given a
     /// meaning: inference types these as `{error}`, and the extra
@@ -395,6 +400,7 @@ impl FileScope {
             match entry.kind {
                 ItemKind::Value(_) | ItemKind::Member => Resolution::Item(entry.loc.clone()),
                 ItemKind::Type => Resolution::TypeItem(entry.loc.clone()),
+                ItemKind::Trait => Resolution::TraitItem(entry.loc.clone()),
             }
         })
     }
@@ -412,6 +418,7 @@ impl FileScope {
             let resolution = match entry.kind {
                 ItemKind::Value(_) | ItemKind::Member => Resolution::Item(entry.loc.clone()),
                 ItemKind::Type => Resolution::TypeItem(entry.loc.clone()),
+                ItemKind::Trait => Resolution::TraitItem(entry.loc.clone()),
             };
             Some((name.as_str(), resolution))
         })

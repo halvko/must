@@ -67,6 +67,8 @@ pub enum SyntaxKind {
     WITH_KW,
     IMPL_KW,
     FOR_KW,
+    TRAIT_KW,
+    REQUIRES_KW,
     ERROR_TOKEN,
 
     // Nodes
@@ -138,6 +140,10 @@ pub enum SyntaxKind {
     UNSAFE_ELEMENT,
     FOR_ELEMENT,
     MEMBER,
+    TRAIT_ITEM,
+    REQUIRES_DEF,
+    REQUIRES_CLAUSE,
+    TRAIT_ALIAS,
     ERROR,
 }
 
@@ -173,6 +179,8 @@ impl SyntaxKind {
             "with" => WITH_KW,
             "impl" => IMPL_KW,
             "for" => FOR_KW,
+            "trait" => TRAIT_KW,
+            "requires" => REQUIRES_KW,
             _ => return None,
         };
         Some(kw)

@@ -154,10 +154,10 @@ static too_big_for_u8: u8 = 300;
 //     error: record fields are defined with `=` (`name = value`); `:` annotates a type
 static old_spelling: struct { x: usize } = struct { x: 1 };
 
-// 17. Trait impls in a `with`-chain are parse-and-reserve: the sealed
-//     grammar parses whole (element boundaries are token-recognizable),
-//     but only `impl Self { ... }` inherent members are supported.
-//     error: trait impls are not supported yet; only `impl Self { ... }` (inherent members) is
+// 17. A trait-side `impl` names a trait that doesn't exist: the sealed
+//     grammar parses it whole (element boundaries are token-recognizable),
+//     but the impl needs an actual `trait` declaration to attach to.
+//     error: unknown trait `Display`
 type Reserved = struct { n: usize } with {
     impl Display {
         fmt = fn(r: Self) -> str { "reserved" };

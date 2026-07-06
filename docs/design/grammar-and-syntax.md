@@ -30,9 +30,12 @@
   `struct { x = x }`. The retired `name: value` spelling is a targeted error, never a silent
   reinterpretation.
 - **G13** Fields and members are separate namespaces, and the SYNTAX decides which one a name
-  reaches: call syntax resolves to a dot-callable member first and otherwise to the field,
-  a bare dot always reads the field, and `(b.len)()` is the escape that calls a fn-typed field
-  even when a member shares its name. There is no collision error at declaration — the getter
+  reaches: a bare dot always reads the field, and call syntax resolves to a dot-callable
+  member — inherent or trait-impl alike. A name reached by BOTH a dot-callable member and a
+  same-named fn-typed field is a call-site ambiguity error naming the field escape,
+  `(v.name)(...)`, and, when a trait member is the other candidate, the qualified escape
+  `Trait::name(...)` — an inherent member's own qualified spelling is itself still reserved,
+  so it names no second escape today. There is no collision error at declaration — the getter
   idiom is legal.
 - **G14** No auto-deref, ever, and no auto-ref. Resolution never reaches through a deref, so
   an outer name disappearing can never silently re-resolve; a pointer to a type with members
@@ -61,14 +64,15 @@
   **G06**
 - **`x: 1` record construction** — colon is has-type. **G12**
 - **A hard error on field/member collisions** — non-local under two impl homes, and it
-  outlaws the getter idiom. **G13**
+  outlaws the getter idiom. **Fall-through to a same-named field** — silent action at a
+  distance: a new trait impl could otherwise silently reroute an existing field call. **G13**
 - **Dot-calling a module-level fn (UFCS-style)** — only members resolve through the dot,
   so a call site can never be silently re-routed to a distant module fn; the diagnostic
   says to call it directly instead. **G13**
-- **`with`, `impl` and `for` as contextual keywords** — the attachment grammar needs them at
-  positions where an identifier is also legal, so they are full keywords like `raw` and
-  `unsafe`; an identifier with one of those names now dies in a parse cascade with no
-  reserved-word hint. **G13**
+- **`with`, `impl`, `for`, `trait` and `requires` as contextual keywords** — the attachment
+  and trait-declaration grammars need them at positions where an identifier is also legal, so
+  they are full keywords like `raw` and `unsafe`; an identifier with one of those names now
+  dies in a parse cascade with no reserved-word hint. **G13**
 - **Silent reinterpretation of a bare pattern name as a variant** — footgun. **G25**
 - **A null literal** — abstract memory has no address zero to spell. **Pointer ordering** —
   meaningless there. **G08**
@@ -79,10 +83,11 @@
 
 ## Re-evaluate when
 
-- **A member shadows a fn-typed FIELD of the same name** — then `r.f`, `r.f(1)` and `(r.f)(1)`
-  are three different well-typed meanings, and reordering a member's parameters can flip
-  `r.f(1)` between them silently. A shadow lint is the queued mitigation; the getter idiom
-  (a member over a plain data field) is the common case and stays clean. **G13**
+- **The field/member call ambiguity proves too noisy in practice** — strict-first chose a
+  hard error over silent fall-through precisely because a new trait impl reaching a type from
+  its own remote chain could otherwise reroute an existing field call; relaxing back to
+  member-wins-plus-a-lint is the named fallback if the error annoys more than it protects.
+  **G13**
 - **Shift operators land** — turbofish needs token-splitting against `>>`. **Floats
   land** — the defensive float grammar stops being free. **G06 G07**
 - **Tuples are built** — postfix turbofish on arbitrary expressions, construction,

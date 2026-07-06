@@ -444,7 +444,9 @@ pub fn body_with_source_map<'db>(db: &'db dyn Db, item: ItemId<'db>) -> (Body, B
     } else {
         match item_source(db, item) {
             Some(syntax::ast::Item::StaticItem(it)) => it.body().map(|expr| ctx.lower_expr(expr)),
-            Some(syntax::ast::Item::TypeItem(_)) | None => None,
+            // A `trait` item's RHS is a declaration too — read by
+            // `trait_requirements`, never lowered as a value.
+            Some(syntax::ast::Item::TypeItem(_) | syntax::ast::Item::TraitItem(_)) | None => None,
         }
     };
     (

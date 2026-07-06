@@ -87,13 +87,62 @@ pub struct InferenceResult {
     pub const_args_of_expr: ArenaMap<ExprId, Vec<(u32, ExprId)>>,
     /// Every dot-call (`recv.name(a, b)`) that resolved STRUCTURALLY to an
     /// inherent member (TR01: `name` is a member fn of recv's type whose
-    /// LAST parameter is Self-typed), keyed by the CALL expression and
-    /// mapping to the member's location. MIR lowers these as ordinary
-    /// direct calls of the member with the receiver appended as the LAST
-    /// argument (so the written arguments evaluate BEFORE the receiver
-    /// binds).
+    /// LAST parameter is Self-typed) — or to a trait-impl member
+    /// on a concrete receiver (impl-directed resolution) — keyed by the
+    /// CALL expression and mapping to the member's location. MIR lowers
+    /// these as ordinary direct calls of the member with the receiver
+    /// appended as the LAST argument (so the written arguments evaluate
+    /// BEFORE the receiver binds).
     pub member_of_expr: ArenaMap<ExprId, ItemLoc>,
+    /// Qualified short-form calls (`Display::fmt(w, x)`) whose inferred
+    /// `Self` resolved to a concrete implementer: the impl's member, keyed
+    /// by the CALL expression. Unlike [`Self::member_of_expr`] the
+    /// arguments are passed exactly as written (Self is an ordinary
+    /// parameter here — no receiver is appended).
+    pub qualified_member_of_expr: ArenaMap<ExprId, ItemLoc>,
+    /// Bound-directed member calls — `x.fmt(w)` on a rigid `T: Display`
+    /// receiver, or a qualified call whose `Self` resolved to a bounded
+    /// rigid param — keyed by the CALL expression. MIR lowers these as
+    /// indirect calls through the enclosing body's hidden dictionary
+    /// parameter (the erased dictionary-passing lowering).
+    pub bound_member_of_expr: ArenaMap<ExprId, BoundMemberCall>,
+    /// The dictionary operands each bounded instantiation needs, keyed by
+    /// the INSTANTIATION expression (the mention for path calls, the CALL
+    /// for dot-form and qualified calls), in canonical slot order
+    /// ([`crate::traits::bound_slots`]). MIR appends one operand per slot
+    /// per trait requirement.
+    pub bound_dicts_of_expr: ArenaMap<ExprId, Vec<DictEntry>>,
     pub diagnostics: Vec<InferenceDiagnostic>,
+}
+
+/// One bound-directed member call — see
+/// [`InferenceResult::bound_member_of_expr`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundMemberCall {
+    /// The bounded rigid param's index in the enclosing item's binder.
+    pub param_index: u32,
+    pub trait_: ItemLoc,
+    /// The requirement's index in the trait's declaration order.
+    pub member_index: u32,
+    /// Whether MIR appends the receiver as the last (written) argument —
+    /// true for dot-form calls, false for the qualified short form (whose
+    /// Self argument is written explicitly).
+    pub receiver_appended: bool,
+}
+
+/// One dictionary slot's resolution at an instantiation edge — see
+/// [`InferenceResult::bound_dicts_of_expr`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DictEntry {
+    /// The bound resolved to a concrete implementer: the impl's member
+    /// items, in trait-requirement order.
+    Impl(Vec<ItemLoc>),
+    /// The bound resolved to a rigid param of the enclosing binder that
+    /// carries the same bound: forward the caller's own dictionary.
+    Forward { param_index: u32, trait_: ItemLoc },
+    /// Unresolvable (unsatisfied, undetermined, or a broken impl) — the
+    /// call site carries a diagnostic and MIR traps the call.
+    Error,
 }
 
 /// Range-free (keyed by HIR ids); ranges are attached by the diagnostics
@@ -731,6 +780,112 @@ pub enum InferenceDiagnostic {
         /// The receiver's type, for the no-such-member half of the story.
         receiver_ty: Ty,
     },
+    /// A bare trait name in expression position: traits are neither
+    /// values nor types.
+    TraitNotValue {
+        /// The referencing expression (carries the squiggle).
+        expr: ExprId,
+        name: String,
+    },
+    /// A bound at an instantiation edge that the (solved) argument type
+    /// does not satisfy: no impl of the trait for the type, and — for a
+    /// rigid param — no matching bound on it.
+    UnsatisfiedBound {
+        /// The instantiation site (the mention or the call).
+        expr: ExprId,
+        /// The bounded param's declared name.
+        param: String,
+        /// The required trait.
+        trait_: ItemLoc,
+        /// The type the param was instantiated to.
+        ty: Ty,
+    },
+    /// A qualified short-form call whose inferred `Self` has no impl of
+    /// the trait.
+    NoTraitImpl {
+        /// The call expression (where MIR traps).
+        expr: ExprId,
+        trait_: ItemLoc,
+        ty: Ty,
+    },
+    /// Two (or more) traits both provide `name` for the receiver — spell
+    /// the trait: `Trait::name(...)`.
+    AmbiguousTraitMember {
+        /// The call expression (where MIR traps).
+        expr: ExprId,
+        name: String,
+        /// The display names of the competing traits, in file order.
+        traits: Vec<String>,
+    },
+    /// A qualified short-form call whose `Self` no argument determined.
+    CannotInferSelf {
+        /// The call expression (where MIR traps).
+        expr: ExprId,
+        /// The trait's display name.
+        trait_name: String,
+        member: String,
+    },
+    /// `Trait::member` used as a VALUE (not called directly): the
+    /// impl-specific fn value needs the named-Self form (TR01), which is
+    /// reserved.
+    QualifiedTraitMemberValue {
+        /// The path expression (carries the squiggle).
+        expr: ExprId,
+        trait_name: String,
+        member: String,
+    },
+    /// `Trait::<...>::member` — the named-Self qualified form (TR01),
+    /// reserved.
+    NamedSelfReserved {
+        /// The path expression.
+        expr: ExprId,
+    },
+    /// `Trait::name` where the trait declares no such requirement.
+    TraitHasNoMember {
+        /// The path expression (carries the squiggle).
+        expr: ExprId,
+        trait_: ItemLoc,
+        name: String,
+    },
+    /// A mention of a bound-carrying generic fn outside a direct call:
+    /// its value would need a captured dictionary, which is reserved.
+    BoundFnValue {
+        /// The mention expression.
+        expr: ExprId,
+        /// The item's display name.
+        name: String,
+    },
+    /// A use of a RESERVED generic trait (`requires::<...>`):
+    /// the reservation must not go semantically live.
+    GenericTraitReserved {
+        /// The referencing expression (carries the squiggle).
+        expr: ExprId,
+        /// The trait's display name.
+        name: String,
+    },
+    /// Call syntax where the name is BOTH a dot-callable member and an
+    /// fn-typed field of the receiver's type: an ambiguity error at the
+    /// call site — silent shadowing
+    /// at a distance would let a new impl reroute existing field calls.
+    /// Strict-first: relaxable to member-wins-plus-lint later.
+    MemberFieldCallAmbiguity {
+        /// The call expression (where MIR traps).
+        expr: ExprId,
+        name: String,
+        receiver_ty: Ty,
+        /// The trait providing the member — `None` for an inherent member
+        /// (whose qualified spelling is still reserved, so only the field
+        /// escape can be suggested).
+        trait_: Option<ItemLoc>,
+    },
+    /// A bound-directed use (a bound member call, or a call forwarding
+    /// the enclosing bounds) inside a fn literal NESTED in the bounded
+    /// fn: the literal would need to capture the enclosing dictionary,
+    /// which is reserved (the same capture wall as `BoundFnValue`).
+    NestedBoundUse {
+        /// The call expression (where MIR traps).
+        expr: ExprId,
+    },
 }
 
 /// Why an arm can never run — one message per cause, so the fix is named.
@@ -790,6 +945,18 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::MemberNotCalled { expr, .. }
             | InferenceDiagnostic::QualifiedMemberReserved { expr, .. }
             | InferenceDiagnostic::FieldNotCallable { expr, .. }
+            | InferenceDiagnostic::TraitNotValue { expr, .. }
+            | InferenceDiagnostic::UnsatisfiedBound { expr, .. }
+            | InferenceDiagnostic::NoTraitImpl { expr, .. }
+            | InferenceDiagnostic::AmbiguousTraitMember { expr, .. }
+            | InferenceDiagnostic::CannotInferSelf { expr, .. }
+            | InferenceDiagnostic::QualifiedTraitMemberValue { expr, .. }
+            | InferenceDiagnostic::NamedSelfReserved { expr }
+            | InferenceDiagnostic::TraitHasNoMember { expr, .. }
+            | InferenceDiagnostic::BoundFnValue { expr, .. }
+            | InferenceDiagnostic::GenericTraitReserved { expr, .. }
+            | InferenceDiagnostic::MemberFieldCallAmbiguity { expr, .. }
+            | InferenceDiagnostic::NestedBoundUse { expr }
             | InferenceDiagnostic::AddrOfNonPlace { expr } => *expr,
             InferenceDiagnostic::BuiltinExpectsRawPtr { arg, .. } => *arg,
             InferenceDiagnostic::AddrOfMutImmutable { root, .. }
@@ -1245,6 +1412,87 @@ impl InferenceDiagnostic {
                 "cannot assign through `{}`: writing needs a `.&raw mut` pointer",
                 ty.display()
             ),
+            InferenceDiagnostic::TraitNotValue { name, .. } => {
+                format!("`{name}` is a trait, not a value")
+            }
+            InferenceDiagnostic::UnsatisfiedBound {
+                param, trait_, ty, ..
+            } => format!(
+                "the bound `{param}: {trait}` is not satisfied here: `{ty}` does not \
+                 implement `{trait}`",
+                trait = trait_.display_name(),
+                ty = ty.display()
+            ),
+            InferenceDiagnostic::NoTraitImpl { trait_, ty, .. } => format!(
+                "`{}` does not implement `{}`",
+                ty.display(),
+                trait_.display_name()
+            ),
+            InferenceDiagnostic::AmbiguousTraitMember { name, traits, .. } => {
+                let list = traits
+                    .iter()
+                    .map(|t| format!("`{t}`"))
+                    .collect::<Vec<_>>()
+                    .join(" and ");
+                format!(
+                    "`{name}` is ambiguous: {list} both provide it; \
+                     write `Trait::{name}(...)` to pick one"
+                )
+            }
+            InferenceDiagnostic::CannotInferSelf {
+                trait_name, member, ..
+            } => format!(
+                "cannot infer `Self` for `{trait_name}::{member}`: no argument \
+                 determines the implementing type — annotate an argument"
+            ),
+            InferenceDiagnostic::QualifiedTraitMemberValue {
+                trait_name, member, ..
+            } => format!(
+                "an impl-specific member value needs the named-Self form \
+                 (`{trait_name}::<Self = ...>::{member}`), which is not supported yet; \
+                 call `{trait_name}::{member}(...)` directly"
+            ),
+            InferenceDiagnostic::NamedSelfReserved { .. } => {
+                "the named-Self qualified form (`Trait::<Self = ...>::member`) is not \
+                 supported yet; use the short form `Trait::member(...)`"
+                    .to_owned()
+            }
+            InferenceDiagnostic::TraitHasNoMember { trait_, name, .. } => {
+                format!("`{}` has no requirement `{name}`", trait_.display_name())
+            }
+            InferenceDiagnostic::BoundFnValue { name, .. } => format!(
+                "`{name}` has bounds on its type parameters, so it cannot be used as a \
+                 value yet; call it directly"
+            ),
+            InferenceDiagnostic::GenericTraitReserved { name, .. } => format!(
+                "`{name}` is a reserved generic trait (generic traits are not supported \
+                 yet) and cannot be used"
+            ),
+            InferenceDiagnostic::MemberFieldCallAmbiguity {
+                name,
+                receiver_ty,
+                trait_,
+                ..
+            } => {
+                let member_escape = match trait_ {
+                    Some(trait_) => format!(
+                        ", or `{trait}::{name}(...)` for the trait member",
+                        trait = trait_.display_name()
+                    ),
+                    None => String::new(),
+                };
+                format!(
+                    "`{name}` is both a member and an fn-typed field of `{recv}`; \
+                     write `(value.{name})(...)` to call the field{member_escape}",
+                    recv = receiver_ty.display()
+                )
+            }
+            InferenceDiagnostic::NestedBoundUse { .. } => {
+                "code nested inside a bounded fn (a nested fn literal or a `const` \
+                 block) cannot use the enclosing bounds yet (it would have to \
+                 capture the dictionary)"
+                    .to_owned()
+            }
         }
     }
 }
@@ -1371,6 +1619,36 @@ pub(crate) struct InferCtx<'a, 'db> {
     /// the [`crate::body::ExprData::Neg`] arm before its operand is
     /// visited.
     negated_literals: rustc_hash::FxHashSet<ExprId>,
+    /// Bound obligations from instantiation edges, resolved in
+    /// [`Self::finish`] once joins have solved: per KEY expression, in
+    /// canonical slot order (push order — see
+    /// [`crate::traits::bound_slots`]).
+    pending_obligations: Vec<PendingObligation>,
+    /// `const { ... }` nesting depth: a const block lowers to a separate
+    /// MIR body, so — like a nested fn literal — it cannot reach the root
+    /// body's dictionary parameters (see [`Self::in_nested_body`]).
+    const_block_depth: usize,
+    /// Every expression that is a `Call`'s callee — the direct-call set a
+    /// bound-carrying generic mention must be in (its VALUE would need a
+    /// captured dictionary, which is reserved).
+    direct_callees: rustc_hash::FxHashSet<ExprId>,
+}
+
+/// One `T: Trait` obligation at an instantiation edge, awaiting its
+/// post-solve resolution into a [`DictEntry`].
+struct PendingObligation {
+    /// The instantiation expression dictionary operands attach to (the
+    /// mention for path calls, the call for dot-form/qualified calls).
+    key: ExprId,
+    /// The param's instantiation (a fresh var, or the written arg).
+    var: Ty,
+    trait_: ItemLoc,
+    /// The bounded param's declared name, for diagnostics.
+    param_name: String,
+    /// Whether the edge sits in a NESTED body (a nested fn literal or a
+    /// `const` block): a Forward resolution there would need to capture
+    /// the root body's dictionary — reserved ([`InferenceDiagnostic::NestedBoundUse`]).
+    nested: bool,
 }
 
 /// One integer literal awaiting its post-traversal range/pinned check.
@@ -1436,6 +1714,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             pending_empty_arrays: Vec::new(),
             pending_number_literals: Vec::new(),
             negated_literals: rustc_hash::FxHashSet::default(),
+            pending_obligations: Vec::new(),
+            const_block_depth: 0,
+            direct_callees: body
+                .exprs
+                .iter()
+                .filter_map(|(_, data)| match data {
+                    ExprData::Call { callee, .. } => Some(*callee),
+                    _ => None,
+                })
+                .collect(),
         }
     }
 
@@ -1464,6 +1752,23 @@ impl<'a, 'db> InferCtx<'a, 'db> {
 
     fn finish(mut self) -> InferenceResult {
         self.solve();
+        // Bound obligations, after every join and axiom has spoken: each
+        // resolves into a dictionary entry — a concrete impl's member set,
+        // a forward of the enclosing binder's own dictionary, or an error
+        // (with the unsatisfied-bound diagnostic naming the bound, the
+        // type and the site). Push order per key IS canonical slot order.
+        let pending = std::mem::take(&mut self.pending_obligations);
+        for obligation in pending {
+            let entry = self.resolve_obligation(&obligation);
+            match self.result.bound_dicts_of_expr.get_mut(obligation.key) {
+                Some(entries) => entries.push(entry),
+                None => {
+                    self.result
+                        .bound_dicts_of_expr
+                        .insert(obligation.key, vec![entry]);
+                }
+            }
+        }
         // Instantiations the whole traversal (joins included) never pinned:
         // the mention-site sibling of `NeedsAnnotation` — the definition is
         // fine, this particular use just doesn't say which type it wants.
@@ -1600,7 +1905,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     *expected = resolve_finished(self.table, expected);
                 }
                 InferenceDiagnostic::NoSuchField { receiver_ty, .. }
-                | InferenceDiagnostic::NoSuchMember { receiver_ty, .. } => {
+                | InferenceDiagnostic::NoSuchMember { receiver_ty, .. }
+                | InferenceDiagnostic::MemberFieldCallAmbiguity { receiver_ty, .. } => {
                     *receiver_ty = resolve_finished(self.table, receiver_ty);
                 }
                 InferenceDiagnostic::FieldNotCallable {
@@ -1641,6 +1947,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
                 InferenceDiagnostic::BuiltinExpectsRawPtr { found, .. } => {
                     *found = resolve_finished(self.table, found);
+                }
+                InferenceDiagnostic::UnsatisfiedBound { ty, .. }
+                | InferenceDiagnostic::NoTraitImpl { ty, .. } => {
+                    *ty = resolve_finished(self.table, ty);
                 }
                 InferenceDiagnostic::ArgCountMismatch { .. }
                 | InferenceDiagnostic::NeedsAnnotation { .. }
@@ -1685,7 +1995,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::BuiltinNotFirstClass { .. }
                 | InferenceDiagnostic::NotDotCallable { .. }
                 | InferenceDiagnostic::MemberNotCalled { .. }
-                | InferenceDiagnostic::QualifiedMemberReserved { .. } => {}
+                | InferenceDiagnostic::QualifiedMemberReserved { .. }
+                | InferenceDiagnostic::TraitNotValue { .. }
+                | InferenceDiagnostic::AmbiguousTraitMember { .. }
+                | InferenceDiagnostic::CannotInferSelf { .. }
+                | InferenceDiagnostic::QualifiedTraitMemberValue { .. }
+                | InferenceDiagnostic::NamedSelfReserved { .. }
+                | InferenceDiagnostic::TraitHasNoMember { .. }
+                | InferenceDiagnostic::BoundFnValue { .. }
+                | InferenceDiagnostic::GenericTraitReserved { .. }
+                | InferenceDiagnostic::NestedBoundUse { .. } => {}
             }
         }
         for (_, ty) in result.type_of_pat.iter_mut() {
@@ -1705,6 +2024,122 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             result.expectation_of_expr.insert(expr, resolved);
         }
         result
+    }
+
+    /// Resolve one bound obligation after solving — see [`Self::finish`].
+    fn resolve_obligation(&mut self, obligation: &PendingObligation) -> DictEntry {
+        let resolved = resolve_fully(self.table, &obligation.var);
+        // Broken or undetermined: covered by their own diagnostics (a
+        // mismatch, cannot-infer, or the literal's no-defining-use).
+        if resolved.contains_error() || is_unresolved_number(self.table, &obligation.var) {
+            return DictEntry::Error;
+        }
+        if resolved.contains_infer() {
+            return DictEntry::Error;
+        }
+        // A rigid param: satisfied exactly when the enclosing binder gives
+        // it the same bound — the forwarding edge.
+        if let Ty::Param(param) = &resolved {
+            let own = self.own_item.as_ref().is_some_and(|own| param.item == *own);
+            if own
+                && let Some(data) = self.own_generics.get(param.index as usize)
+                && data.bounds.iter().any(|bound| {
+                    crate::traits::bound_trait(self.db, self.file, bound).as_ref()
+                        == Some(&obligation.trait_)
+                })
+            {
+                if obligation.nested {
+                    // Forwarding needs the root body's dictionary
+                    // parameters, out of reach from a nested body —
+                    // reserved (the captured-dictionary wall).
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::NestedBoundUse {
+                            expr: obligation.key,
+                        });
+                    return DictEntry::Error;
+                }
+                return DictEntry::Forward {
+                    param_index: param.index,
+                    trait_: obligation.trait_.clone(),
+                };
+            }
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::UnsatisfiedBound {
+                    expr: obligation.key,
+                    param: obligation.param_name.clone(),
+                    trait_: obligation.trait_.clone(),
+                    ty: resolved,
+                });
+            return DictEntry::Error;
+        }
+        let Some(self_key) = crate::traits::SelfKey::for_ty(&resolved) else {
+            // Structural types implement nothing (TR03).
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::UnsatisfiedBound {
+                    expr: obligation.key,
+                    param: obligation.param_name.clone(),
+                    trait_: obligation.trait_.clone(),
+                    ty: resolved,
+                });
+            return DictEntry::Error;
+        };
+        let impls = crate::traits::trait_impls(self.db, self.file);
+        let Some(site) = impls.impl_for(&obligation.trait_, &self_key) else {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::UnsatisfiedBound {
+                    expr: obligation.key,
+                    param: obligation.param_name.clone(),
+                    trait_: obligation.trait_.clone(),
+                    ty: resolved,
+                });
+            return DictEntry::Error;
+        };
+        match crate::traits::impl_dict_members(self.db, &obligation.trait_, site) {
+            Some(members) => DictEntry::Impl(members),
+            // A broken impl (missing members): the definition site carries
+            // the diagnostic; the call traps.
+            None => DictEntry::Error,
+        }
+    }
+
+    /// Whether inference currently sits inside a body that lowers
+    /// SEPARATELY from the item's root fn body (a nested fn literal, a
+    /// `const` block) — where the root's dictionary parameters are out of
+    /// reach.
+    fn in_nested_body(&self) -> bool {
+        self.scope_depth > 1 || self.const_block_depth > 0
+    }
+
+    /// Push the obligations of one bounded instantiation, keyed by
+    /// `key` (the mention or the call), in canonical slot order. `var_of`
+    /// maps a binder index to the param's instantiation.
+    fn push_bound_obligations(
+        &mut self,
+        key: ExprId,
+        generics: &[GenericParamData],
+        var_of: &FxHashMap<u32, Ty>,
+    ) {
+        let nested = self.in_nested_body();
+        for slot in crate::traits::bound_slots(self.db, self.file, generics) {
+            let Some(var) = var_of.get(&slot.param_index) else {
+                continue;
+            };
+            let param_name = generics
+                .get(slot.param_index as usize)
+                .map(|param| param.name.clone())
+                .unwrap_or_default();
+            self.pending_obligations.push(PendingObligation {
+                key,
+                var: var.clone(),
+                trait_: slot.trait_,
+                param_name,
+                nested,
+            });
+        }
     }
 
     fn fresh_var(&mut self) -> Ty {
@@ -1783,6 +2218,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     self.result
                         .diagnostics
                         .push(InferenceDiagnostic::TypeNotValue {
+                            expr,
+                            name: name.clone(),
+                        });
+                    Ty::Error
+                }
+                Some(Resolution::TraitItem(_)) => {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::TraitNotValue {
                             expr,
                             name: name.clone(),
                         });
@@ -1901,6 +2345,30 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         self.result.type_of_expr.insert(expr, ty.clone());
                         ty
                     };
+                }
+                // TR01 short form: `Trait::member(args...)` — intercepted
+                // before the callee is inferred (a bare `Trait::member`
+                // VALUE is the reserved named-Self territory; the direct
+                // call is the live spelling).
+                if let ExprData::VariantPath {
+                    base,
+                    variant,
+                    args: vp_args,
+                } = &self.body.exprs[*callee]
+                    && let Some(Resolution::TraitItem(trait_loc)) = self.resolutions.get(*base)
+                {
+                    let (callee, trait_loc, variant, vp_args) =
+                        (*callee, trait_loc.clone(), variant.clone(), vp_args.clone());
+                    return self.infer_qualified_trait_call(
+                        expr,
+                        callee,
+                        trait_loc,
+                        &variant,
+                        vp_args.as_deref(),
+                        args,
+                        expected,
+                        cause,
+                    );
                 }
                 // TR01 dot-call: `recv.name(a, b)` — but only the WRITTEN
                 // dot-call shape; `(recv.name)(...)` is an ordinary value
@@ -2216,7 +2684,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 // type, not a value" (the `NameRef` arm ran
                                 // on it); a second assignment-specific
                                 // squiggle on the same name adds nothing.
-                                Some(Resolution::TypeItem(_)) => None,
+                                // Same for a trait name.
+                                Some(Resolution::TypeItem(_) | Resolution::TraitItem(_)) => None,
                                 Some(Resolution::Builtin(builtin)) => {
                                     self.result.diagnostics.push(
                                         InferenceDiagnostic::AssignToBuiltin {
@@ -2263,10 +2732,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // in witness position. NOT transparent for the loop
                 // context: a `const` block is a compile-time unit of its
                 // own (MIR lowers it to a separate body), so a `break`
-                // inside it cannot exit a loop outside it.
+                // inside it cannot exit a loop outside it — and, for the
+                // same separate-body reason, it cannot reach the enclosing
+                // bounds' dictionary (`const_block_depth`).
                 self.witness_sink = sink;
                 let saved_loops = std::mem::take(&mut self.loop_sinks);
+                self.const_block_depth += 1;
                 let ty = self.infer_expr_with(*inner, expected, cause);
+                self.const_block_depth -= 1;
                 self.loop_sinks = saved_loops;
                 self.result.type_of_expr.insert(expr, ty.clone());
                 return ty;
@@ -3025,6 +3498,26 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let receiver_ty = self.infer_expr(receiver, &receiver_fresh);
         let resolved = self.resolve_shallow(&receiver_ty);
 
+        // A RIGID receiver: only its bounds can re-open members (TR07) —
+        // bound-directed resolution, lowered through the hidden
+        // dictionary.
+        if let Ty::Param(param) = &resolved
+            && !name.is_empty()
+        {
+            let param = param.clone();
+            let ty = self.infer_bound_member_dot_call(
+                expr,
+                callee,
+                receiver,
+                &receiver_ty,
+                &param,
+                name,
+                args,
+                &callee_expectation,
+            );
+            return self.finish_dot_call(expr, ty, expected, cause);
+        }
+
         // A named receiver (a variant-typed one reaches its ENUM's
         // members: the receiver widens — variant → enum, the sanctioned
         // conversion — into the Self argument, exactly as it would into
@@ -3039,15 +3532,19 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         };
         // Whether the receiver's type declares `name` as a FIELD — the
         // call-syntax fallback, and (when the member wins) the shadowed
-        // half of the shared dot.
+        // half of the shared dot. An FN-TYPED field could carry the call
+        // itself, so a dot-callable member beside one is an AMBIGUITY
+        // error — see `MemberFieldCallAmbiguity`.
         let mut named_has_field = false;
 
         if let Some(named) = &named_recv {
             let underlying = type_underlying_for(self.db, named);
-            named_has_field = matches!(
-                &underlying,
-                Some(Ty::Record(rec)) if rec.field_ty(name).is_some()
-            );
+            let field_ty = match &underlying {
+                Some(Ty::Record(rec)) => rec.field_ty(name).cloned(),
+                _ => None,
+            };
+            named_has_field = field_ty.is_some();
+            let named_fn_field = matches!(&field_ty, Some(Ty::Fn(_)));
             // A BROKEN declaration (neither a struct shape nor an enum):
             // its own diagnostic sits at the declaration site — fall
             // through to the field path, whose broken arm stays silent
@@ -3068,6 +3565,22 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             return self.finish_dot_call(expr, Ty::Error, expected, cause);
                         }
                         if crate::ty::member_is_dot_callable(self.db, member_id) {
+                            // A dot-callable member NEXT TO an fn-typed
+                            // field: refuse the call as ambiguous rather
+                            // than silently preferring either.
+                            if named_fn_field {
+                                self.result.diagnostics.push(
+                                    InferenceDiagnostic::MemberFieldCallAmbiguity {
+                                        expr,
+                                        name: name.to_owned(),
+                                        receiver_ty: Ty::Named(named.clone()),
+                                        trait_: None,
+                                    },
+                                );
+                                self.result.type_of_expr.insert(callee, Ty::Error);
+                                self.infer_args_broken(args);
+                                return self.finish_dot_call(expr, Ty::Error, expected, cause);
+                            }
                             let ret = self.infer_member_call(
                                 expr,
                                 callee,
@@ -3096,26 +3609,79 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             return self.finish_dot_call(expr, Ty::Error, expected, cause);
                         }
                     }
-                    // No member AND no field: the receiver's type just
-                    // doesn't have `name` — with statics deliberately
-                    // opted out, this is its own diagnostic (the
-                    // aggregator adds the "call `name(...)` instead" hint
-                    // when a module-level static exists).
-                    None if !named_has_field => {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::NoSuchMember {
-                                expr,
-                                name: name.to_owned(),
-                                receiver_ty: Ty::Named(named.clone()),
-                            });
-                        self.result.type_of_expr.insert(callee, Ty::Error);
-                        self.infer_args_broken(args);
-                        return self.finish_dot_call(expr, Ty::Error, expected, cause);
+                    // No inherent member: a TRAIT-impl member on the
+                    // concrete receiver resolves next (impl-directed TR01 —
+                    // members shadow fields under call syntax, trait
+                    // members included), then the field carries the call,
+                    // then `NoSuchMember`.
+                    None => {
+                        // The search runs on the ENUM for a variant-typed
+                        // receiver (`named_recv` already widened the decl);
+                        // the receiver-as-last-argument check then records
+                        // the ordinary variant→enum conversion.
+                        if let Some(ty) = self.infer_trait_member_dot_call(
+                            expr,
+                            callee,
+                            receiver,
+                            &receiver_ty,
+                            &Ty::Named(named.clone()),
+                            name,
+                            args,
+                            &callee_expectation,
+                            named_has_field,
+                            named_fn_field,
+                        ) {
+                            return self.finish_dot_call(expr, ty, expected, cause);
+                        }
+                        if !named_has_field {
+                            self.result
+                                .diagnostics
+                                .push(InferenceDiagnostic::NoSuchMember {
+                                    expr,
+                                    name: name.to_owned(),
+                                    receiver_ty: Ty::Named(named.clone()),
+                                });
+                            self.result.type_of_expr.insert(callee, Ty::Error);
+                            self.infer_args_broken(args);
+                            return self.finish_dot_call(expr, Ty::Error, expected, cause);
+                        }
                     }
-                    None => {}
                 }
             }
+        }
+
+        // A BUILTIN-typed receiver (`5.fmt(w)`, `"x".fmt(w)`): builtins
+        // have no fields and no inherent members, but trait impls reach
+        // them (`impl usize` in a trait's chain) — impl-directed
+        // resolution, then `NoSuchMember`.
+        if named_recv.is_none()
+            && !name.is_empty()
+            && matches!(resolved, Ty::Int(_) | Ty::Str | Ty::Bool)
+        {
+            if let Some(ty) = self.infer_trait_member_dot_call(
+                expr,
+                callee,
+                receiver,
+                &receiver_ty,
+                &resolved,
+                name,
+                args,
+                &callee_expectation,
+                false,
+                false,
+            ) {
+                return self.finish_dot_call(expr, ty, expected, cause);
+            }
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::NoSuchMember {
+                    expr,
+                    name: name.to_owned(),
+                    receiver_ty: resolved.clone(),
+                });
+            self.result.type_of_expr.insert(callee, Ty::Error);
+            self.infer_args_broken(args);
+            return self.finish_dot_call(expr, Ty::Error, expected, cause);
         }
 
         // The field path: the callee is an ordinary field access, judged
@@ -3231,6 +3797,41 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         }
         let inst = instantiate_scheme(&sig, &member_loc, &subst, &const_subst);
         self.result.member_of_expr.insert(expr, member_loc);
+        // Arity is checked by `finish_receiver_call`; the receiver IS the
+        // last argument, checked against the instantiated Self param —
+        // identical by construction for enum/struct-typed receivers (a
+        // plain unification that lets leftover inference variables
+        // flow), a WIDENING for variant-typed ones (the tag injection
+        // lands on the receiver expression like at any other check
+        // site).
+        self.finish_receiver_call(
+            expr,
+            callee,
+            receiver,
+            receiver_ty,
+            inst,
+            callee_expectation,
+            args,
+        )
+    }
+
+    /// The shared tail of every receiver-appending call resolution
+    /// (inherent, trait-impl and bound-directed dot-calls, once each has
+    /// resolved its own member and instantiated `inst`): check the
+    /// callee against `inst`, check arity, infer each written argument
+    /// against its param, then check the receiver against the LAST
+    /// param.
+    #[allow(clippy::too_many_arguments)]
+    fn finish_receiver_call(
+        &mut self,
+        expr: ExprId,
+        callee: ExprId,
+        receiver: ExprId,
+        receiver_ty: &Ty,
+        inst: Ty,
+        callee_expectation: &Ty,
+        args: &[ExprId],
+    ) -> Ty {
         let inst_ty = self.check(callee, inst.clone(), callee_expectation, None);
         self.result.type_of_expr.insert(callee, inst_ty);
         let Ty::Fn(f) = inst else {
@@ -3261,6 +3862,600 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             self.check(receiver, receiver_ty.clone(), last, None);
         }
         f.ret.clone()
+    }
+
+    /// The trait half of concrete-receiver dot-call resolution
+    /// (impl-directed, TR01 extended): find the unique trait providing
+    /// `name` for the receiver AND implemented for it, and call its impl
+    /// member. `None` when NO candidate exists — or when the member is
+    /// not dot-callable and a field can carry the call instead (the
+    /// caller falls through to fields / `NoSuchMember`); `Some` when the
+    /// call was handled — including its error outcomes (ambiguity with
+    /// another trait or with an fn-typed field, broken impls).
+    #[allow(clippy::too_many_arguments)]
+    fn infer_trait_member_dot_call(
+        &mut self,
+        expr: ExprId,
+        callee: ExprId,
+        receiver: ExprId,
+        receiver_ty: &Ty,
+        resolved: &Ty,
+        name: &str,
+        args: &[ExprId],
+        callee_expectation: &Ty,
+        has_field: bool,
+        fn_field: bool,
+    ) -> Option<Ty> {
+        let self_key = crate::traits::SelfKey::for_ty(resolved)?;
+        let candidates =
+            crate::traits::traits_providing_member(self.db, self.file, &self_key, name);
+        match candidates.len() {
+            0 => None,
+            1 => {
+                let (trait_loc, member_index) = candidates.into_iter().next().expect("len is 1");
+                let impls = crate::traits::trait_impls(self.db, self.file);
+                let site = impls
+                    .impl_for(&trait_loc, &self_key)
+                    .expect("candidates are filtered to implemented traits")
+                    .clone();
+                let member_loc = crate::traits::impl_dict_members(self.db, &trait_loc, &site)
+                    .and_then(|members| members.get(member_index as usize).cloned());
+                let Some(member_loc) = member_loc else {
+                    // The impl is missing this member: the definition site
+                    // carries the diagnostic; the call refuses.
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::NoTraitImpl {
+                            expr,
+                            trait_: trait_loc,
+                            ty: resolved.clone(),
+                        });
+                    self.result.type_of_expr.insert(callee, Ty::Error);
+                    self.infer_args_broken(args);
+                    return Some(Ty::Error);
+                };
+                // Judge dot-callability BEFORE committing, so the field
+                // interaction mirrors the inherent rules: a dot-callable
+                // member beside an fn-typed field is an ambiguity error
+                // (see `MemberFieldCallAmbiguity`), a non-dot-callable member beside
+                // any field lets the field carry the call.
+                let member_id = member_loc.to_id(self.db);
+                let sig = signature(self.db, member_id);
+                let self_ty = member_self_ty(self.db, member_id);
+                let dot_callable = matches!(
+                    (&sig, self_ty.as_ref()),
+                    (Ty::Fn(f), Some(self_ty)) if f.params.last() == Some(self_ty)
+                );
+                if dot_callable && fn_field {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::MemberFieldCallAmbiguity {
+                            expr,
+                            name: name.to_owned(),
+                            receiver_ty: resolved.clone(),
+                            trait_: Some(trait_loc),
+                        });
+                    self.result.type_of_expr.insert(callee, Ty::Error);
+                    self.infer_args_broken(args);
+                    return Some(Ty::Error);
+                }
+                if !dot_callable && has_field && !sig.contains_error() {
+                    return None;
+                }
+                Some(self.infer_impl_member_call(
+                    expr,
+                    callee,
+                    receiver,
+                    receiver_ty,
+                    member_loc,
+                    name,
+                    args,
+                    callee_expectation,
+                ))
+            }
+            _ => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::AmbiguousTraitMember {
+                        expr,
+                        name: name.to_owned(),
+                        traits: candidates
+                            .iter()
+                            .map(|(t, _)| t.display_name().to_owned())
+                            .collect(),
+                    });
+                self.result.type_of_expr.insert(callee, Ty::Error);
+                self.infer_args_broken(args);
+                Some(Ty::Error)
+            }
+        }
+    }
+
+    /// Call a TRAIT-IMPL member on a concrete receiver: like
+    /// [`Self::infer_member_call`], with the member's OWN binder
+    /// instantiated fresh (a dot-call spells no member turbofish) and its
+    /// bounds becoming obligations of this call.
+    #[allow(clippy::too_many_arguments)]
+    fn infer_impl_member_call(
+        &mut self,
+        expr: ExprId,
+        callee: ExprId,
+        receiver: ExprId,
+        receiver_ty: &Ty,
+        member_loc: ItemLoc,
+        name: &str,
+        args: &[ExprId],
+        callee_expectation: &Ty,
+    ) -> Ty {
+        let member_id = member_loc.to_id(self.db);
+        let sig = signature(self.db, member_id);
+        if sig.contains_error() {
+            // A broken member definition: the definition site carries the
+            // diagnostic; refusing here would double-report. The call
+            // still traps through the member-matching diagnostics.
+            self.result.type_of_expr.insert(callee, Ty::Error);
+            self.infer_args_broken(args);
+            return Ty::Error;
+        }
+        let self_ty = member_self_ty(self.db, member_id);
+        let dot_callable = matches!(
+            (&sig, self_ty.as_ref()),
+            (Ty::Fn(f), Some(self_ty)) if f.params.last() == Some(self_ty)
+        );
+        if !dot_callable {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::NotDotCallable {
+                    expr,
+                    name: name.to_owned(),
+                    member: member_loc,
+                });
+            self.result.type_of_expr.insert(callee, Ty::Error);
+            self.infer_args_broken(args);
+            return Ty::Error;
+        }
+        let generics = item_generics(self.db, member_id).to_vec();
+        let inst = self.instantiate_member_own_binder(expr, &member_loc, sig, &generics);
+        self.result.member_of_expr.insert(expr, member_loc);
+        self.finish_receiver_call(
+            expr,
+            callee,
+            receiver,
+            receiver_ty,
+            inst,
+            callee_expectation,
+            args,
+        )
+    }
+
+    /// Instantiate a member's OWN generic binder with fresh variables
+    /// (dot-calls and qualified calls spell no member turbofish), pushing
+    /// its bounds as obligations of `key` and its params for the
+    /// cannot-infer report. Requirement/impl-member const params have no
+    /// spelling at these call sites yet — left rigid (their exotic uses
+    /// surface as ordinary mismatches).
+    fn instantiate_member_own_binder(
+        &mut self,
+        key: ExprId,
+        member_loc: &ItemLoc,
+        sig: Ty,
+        generics: &[GenericParamData],
+    ) -> Ty {
+        if generics.is_empty() {
+            return sig;
+        }
+        let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
+        let mut pending: Vec<(String, Ty)> = Vec::new();
+        for (index, param) in generics.iter().enumerate() {
+            if matches!(param.kind, GenericParamKind::Type) {
+                let var = self.fresh_var();
+                pending.push((param.name.clone(), var.clone()));
+                subst.insert(index as u32, var);
+            }
+        }
+        if !sig.contains_error() && !pending.is_empty() {
+            self.pending_instantiations.push(PendingInstantiation {
+                expr: key,
+                item: member_loc.clone(),
+                params: pending,
+            });
+        }
+        self.push_bound_obligations(key, generics, &subst);
+        instantiate_scheme(&sig, member_loc, &subst, &FxHashMap::default())
+    }
+
+    /// A dot-call on a RIGID receiver: bound-directed resolution (TR07 —
+    /// bounds are the only re-opener). The call lowers as an indirect
+    /// call through the enclosing body's hidden dictionary parameter.
+    #[allow(clippy::too_many_arguments)]
+    fn infer_bound_member_dot_call(
+        &mut self,
+        expr: ExprId,
+        callee: ExprId,
+        receiver: ExprId,
+        receiver_ty: &Ty,
+        param: &crate::ty::ParamTy,
+        name: &str,
+        args: &[ExprId],
+        callee_expectation: &Ty,
+    ) -> Ty {
+        let own = self.own_item.as_ref().is_some_and(|own| param.item == *own);
+        let bounds = if own {
+            self.own_generics
+                .get(param.index as usize)
+                .map(|p| p.bounds.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let candidates =
+            crate::traits::bound_traits_providing_member(self.db, self.file, &bounds, name);
+        let (trait_loc, member_index) = match candidates.len() {
+            1 => candidates.into_iter().next().expect("len is 1"),
+            0 => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::NoSuchMember {
+                        expr,
+                        name: name.to_owned(),
+                        receiver_ty: Ty::Param(param.clone()),
+                    });
+                self.result.type_of_expr.insert(callee, Ty::Error);
+                self.infer_args_broken(args);
+                return Ty::Error;
+            }
+            _ => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::AmbiguousTraitMember {
+                        expr,
+                        name: name.to_owned(),
+                        traits: candidates
+                            .iter()
+                            .map(|(t, _)| t.display_name().to_owned())
+                            .collect(),
+                    });
+                self.result.type_of_expr.insert(callee, Ty::Error);
+                self.infer_args_broken(args);
+                return Ty::Error;
+            }
+        };
+        // A bound-directed call reads the ROOT body's dictionary
+        // parameters — out of reach from a nested fn literal or a `const`
+        // block (the captured-dictionary wall, reserved).
+        if self.in_nested_body() {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::NestedBoundUse { expr });
+            self.result.type_of_expr.insert(callee, Ty::Error);
+            self.infer_args_broken(args);
+            return Ty::Error;
+        }
+        let req = crate::item_tree::trait_requirements(self.db, trait_loc.to_id(self.db))
+            .get(member_index as usize)
+            .cloned();
+        let Some(req) = req else {
+            self.result.type_of_expr.insert(callee, Ty::Error);
+            self.infer_args_broken(args);
+            return Ty::Error;
+        };
+        let Some(sig_ref) = req.sig.clone() else {
+            // A requirement that isn't fully written: the trait carries
+            // the diagnostic.
+            self.result.type_of_expr.insert(callee, Ty::Error);
+            self.infer_args_broken(args);
+            return Ty::Error;
+        };
+        // Lower the requirement's signature with `Self` as the rigid
+        // receiver and the requirement's own binder fresh.
+        let (inst, var_of) = self.instantiate_requirement_sig(
+            expr,
+            &trait_loc,
+            &req,
+            &sig_ref,
+            Ty::Param(param.clone()),
+        );
+        self.push_bound_obligations(expr, &req.generics, &var_of);
+        let Ty::Fn(f) = &inst else {
+            self.result.type_of_expr.insert(callee, Ty::Error);
+            self.infer_args_broken(args);
+            return Ty::Error;
+        };
+        if f.params.last() != Some(&Ty::Param(param.clone())) {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::NotDotCallable {
+                    expr,
+                    name: name.to_owned(),
+                    member: trait_loc,
+                });
+            self.result.type_of_expr.insert(callee, Ty::Error);
+            self.infer_args_broken(args);
+            return Ty::Error;
+        }
+        self.result.bound_member_of_expr.insert(
+            expr,
+            BoundMemberCall {
+                param_index: param.index,
+                trait_: trait_loc,
+                member_index,
+                receiver_appended: true,
+            },
+        );
+        self.finish_receiver_call(
+            expr,
+            callee,
+            receiver,
+            receiver_ty,
+            inst,
+            callee_expectation,
+            args,
+        )
+    }
+
+    /// Lower a requirement's signature with `Self` bound to `self_ty` and
+    /// the requirement's own binder instantiated fresh; returns the
+    /// instantiated fn type and the binder-index → variable map (for
+    /// obligations). The fresh vars register for the cannot-infer report,
+    /// blamed on the trait.
+    fn instantiate_requirement_sig(
+        &mut self,
+        key: ExprId,
+        trait_loc: &ItemLoc,
+        req: &crate::item_tree::TraitRequirement,
+        sig_ref: &TypeRef,
+        self_ty: Ty,
+    ) -> (Ty, FxHashMap<u32, Ty>) {
+        let mut scope = crate::ty::ParamScope::default();
+        scope.types.insert("Self".to_owned(), self_ty);
+        let mut var_of: FxHashMap<u32, Ty> = FxHashMap::default();
+        let mut pending: Vec<(String, Ty)> = Vec::new();
+        for (index, gp) in req.generics.iter().enumerate() {
+            if !matches!(gp.kind, GenericParamKind::Type) || gp.name.is_empty() {
+                continue;
+            }
+            let var = self.fresh_var();
+            scope.types.insert(gp.name.clone(), var.clone());
+            pending.push((gp.name.clone(), var.clone()));
+            var_of.insert(index as u32, var);
+        }
+        if !pending.is_empty() {
+            self.pending_instantiations.push(PendingInstantiation {
+                expr: key,
+                item: trait_loc.clone(),
+                params: pending,
+            });
+        }
+        let inst = lower_type_ref_in(self.db, self.file, sig_ref, self.table, &scope);
+        (inst, var_of)
+    }
+
+    /// The qualified short form `Trait::member(args...)` (TR01): the
+    /// requirement's signature is the contract, `Self` is inferred from
+    /// the arguments, and resolution is impl-directed (concrete Self) or
+    /// bound-directed (rigid Self).
+    #[allow(clippy::too_many_arguments)]
+    fn infer_qualified_trait_call(
+        &mut self,
+        expr: ExprId,
+        callee: ExprId,
+        trait_loc: ItemLoc,
+        member: &str,
+        vp_args: Option<&[GenericArgData]>,
+        args: &[ExprId],
+        expected: &Ty,
+        cause: Option<Cause>,
+    ) -> Ty {
+        let callee_expectation = self.fresh_var();
+        self.result
+            .expectation_of_expr
+            .insert(callee, callee_expectation.clone());
+        // A RESERVED generic trait: nothing on it may go semantically
+        // live (reserved for generic traits).
+        if crate::traits::trait_is_generic(self.db, &trait_loc) {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::GenericTraitReserved {
+                    expr: callee,
+                    name: trait_loc.display_name().to_owned(),
+                });
+            self.result.type_of_expr.insert(callee, Ty::Error);
+            if let Some(vp_args) = vp_args {
+                self.infer_const_args_free(vp_args);
+            }
+            self.infer_args_broken(args);
+            return self.finish_dot_call(expr, Ty::Error, expected, cause);
+        }
+        if let Some(vp_args) = vp_args {
+            // `Trait::<...>::member(...)` — the named-Self form, reserved.
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::NamedSelfReserved { expr: callee });
+            self.result.type_of_expr.insert(callee, Ty::Error);
+            self.infer_const_args_free(vp_args);
+            self.infer_args_broken(args);
+            return self.finish_dot_call(expr, Ty::Error, expected, cause);
+        }
+        let requirements = crate::item_tree::trait_requirements(self.db, trait_loc.to_id(self.db));
+        let Some(member_index) = requirements.iter().position(|req| req.name == member) else {
+            if !member.is_empty() {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::TraitHasNoMember {
+                        expr: callee,
+                        trait_: trait_loc,
+                        name: member.to_owned(),
+                    });
+            }
+            self.result.type_of_expr.insert(callee, Ty::Error);
+            self.infer_args_broken(args);
+            return self.finish_dot_call(expr, Ty::Error, expected, cause);
+        };
+        let req = requirements[member_index].clone();
+        let Some(sig_ref) = req.sig.clone() else {
+            // The requirement isn't fully written: the trait carries the
+            // diagnostic.
+            self.result.type_of_expr.insert(callee, Ty::Error);
+            self.infer_args_broken(args);
+            return self.finish_dot_call(expr, Ty::Error, expected, cause);
+        };
+        let self_var = self.fresh_var();
+        let (inst, var_of) =
+            self.instantiate_requirement_sig(expr, &trait_loc, &req, &sig_ref, self_var.clone());
+        self.push_bound_obligations(expr, &req.generics, &var_of);
+        let inst_ty = self.check(callee, inst.clone(), &callee_expectation, None);
+        self.result.type_of_expr.insert(callee, inst_ty);
+        let Ty::Fn(f) = inst else {
+            self.result.type_of_expr.insert(callee, Ty::Error);
+            self.infer_args_broken(args);
+            return self.finish_dot_call(expr, Ty::Error, expected, cause);
+        };
+        if f.params.len() != args.len() {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::ArgCountMismatch {
+                    expr,
+                    expected: f.params.len(),
+                    found: args.len(),
+                });
+        }
+        // Arguments at literal-`Self` positions are RECEIVER-LIKE: they
+        // are inferred freely first, `Self` is determined from them
+        // (variants widening to their ENUM — never letting `Self` bind to
+        // a tag-free variant type), and then each is checked against the
+        // determined `Self` so the ordinary variant→enum conversion is
+        // recorded per argument. Everything else checks against its
+        // instantiated parameter directly.
+        let self_positions: Vec<bool> = match &sig_ref {
+            TypeRef::Fn { params, .. } => params
+                .iter()
+                .map(|param| matches!(param, TypeRef::Path(name) if name == "Self"))
+                .collect(),
+            _ => Vec::new(),
+        };
+        let mut self_args: Vec<(ExprId, Ty)> = Vec::new();
+        for (i, &arg) in args.iter().enumerate() {
+            if self_positions.get(i).copied().unwrap_or(false) {
+                let fresh = self.fresh_var();
+                let ty = self.infer_expr(arg, &fresh);
+                self_args.push((arg, ty));
+            } else {
+                let param_ty = f.params.get(i).cloned().unwrap_or(Ty::Error);
+                self.infer_expr_with(arg, &param_ty, Some(Cause::CallSite { call: expr, arg }));
+            }
+        }
+        for (_, ty) in &self_args {
+            if !matches!(self.resolve_shallow(&self_var), Ty::Infer(_)) {
+                break;
+            }
+            let candidate = match self.resolve_shallow(ty) {
+                Ty::Variant(variant) => Ty::Named(NamedTy {
+                    decl: variant.decl,
+                    args: variant.args,
+                }),
+                Ty::Infer(_) => continue,
+                other => other,
+            };
+            self.unify(&self_var, &candidate);
+        }
+        for (arg, ty) in &self_args {
+            self.check(
+                *arg,
+                ty.clone(),
+                &self_var,
+                Some(Cause::CallSite {
+                    call: expr,
+                    arg: *arg,
+                }),
+            );
+        }
+        // `Self` is inferred from the arguments (TR01's short form) —
+        // resolved eagerly, right after they were checked.
+        let self_resolved = self.resolve_shallow(&self_var);
+        match &self_resolved {
+            broken if broken.contains_error() => {}
+            Ty::Param(p) => {
+                let own = self.own_item.as_ref().is_some_and(|own| p.item == *own);
+                let has_bound = own
+                    && self.own_generics.get(p.index as usize).is_some_and(|data| {
+                        data.bounds.iter().any(|bound| {
+                            crate::traits::bound_trait(self.db, self.file, bound).as_ref()
+                                == Some(&trait_loc)
+                        })
+                    });
+                if has_bound {
+                    if self.in_nested_body() {
+                        // The dictionary lives in the ROOT body — nested
+                        // code would have to capture it (reserved).
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::NestedBoundUse { expr });
+                    } else {
+                        self.result.bound_member_of_expr.insert(
+                            expr,
+                            BoundMemberCall {
+                                param_index: p.index,
+                                trait_: trait_loc,
+                                member_index: member_index as u32,
+                                receiver_appended: false,
+                            },
+                        );
+                    }
+                } else {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::UnsatisfiedBound {
+                            expr,
+                            param: p.name.to_string(),
+                            trait_: trait_loc,
+                            ty: self_resolved.clone(),
+                        });
+                }
+            }
+            Ty::Infer(_) => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::CannotInferSelf {
+                        expr,
+                        trait_name: trait_loc.display_name().to_owned(),
+                        member: member.to_owned(),
+                    });
+            }
+            concrete => {
+                // NOTE: a VARIANT-typed Self can only still appear here
+                // when a nested-`Self` position (never a literal one — the
+                // receiver-like pass above widens those) pinned it — a
+                // variant has no impls of its own (`SelfKey::for_ty` is
+                // `None`), so it lands on the sound `NoTraitImpl` below.
+                let resolved_impl = crate::traits::SelfKey::for_ty(concrete).and_then(|key| {
+                    let impls = crate::traits::trait_impls(self.db, self.file);
+                    impls
+                        .impl_for(&trait_loc, &key)
+                        .cloned()
+                        .and_then(|site| {
+                            crate::traits::impl_dict_members(self.db, &trait_loc, &site)
+                        })
+                        .and_then(|members| members.get(member_index).cloned())
+                });
+                match resolved_impl {
+                    Some(member_loc) => {
+                        self.result
+                            .qualified_member_of_expr
+                            .insert(expr, member_loc);
+                    }
+                    None => {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::NoTraitImpl {
+                                expr,
+                                trait_: trait_loc,
+                                ty: concrete.clone(),
+                            });
+                    }
+                }
+            }
+        }
+        self.finish_dot_call(expr, f.ret.clone(), expected, cause)
     }
 
     /// Enforcement for a place-chain assignment target (`p.x = e;`,
@@ -3376,7 +4571,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     });
                 None
             }
-            Some(Resolution::TypeItem(_)) => None,
+            Some(Resolution::TypeItem(_) | Resolution::TraitItem(_)) => None,
             Some(Resolution::Builtin(builtin)) => {
                 self.result
                     .diagnostics
@@ -3456,11 +4651,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 });
                         }
                     }
-                    // A compile-time value, a type, a builtin: none of
-                    // them is a place.
+                    // A compile-time value, a type, a trait, a builtin:
+                    // none of them is a place.
                     Some(
                         Resolution::ConstParam(_)
                         | Resolution::TypeItem(_)
+                        | Resolution::TraitItem(_)
                         | Resolution::Builtin(_),
                     ) => {
                         self.result
@@ -3616,6 +4812,49 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         Ty::Error
                     }
                 }
+            }
+            // `Trait::member` as a bare VALUE (a called short form is
+            // intercepted in the `Call` arm and never reaches this):
+            // impl-specific member values are the named-Self form's
+            // territory — reserved.
+            Some(Resolution::TraitItem(loc)) => {
+                let loc = loc.clone();
+                if crate::traits::trait_is_generic(self.db, &loc) {
+                    // A RESERVED generic trait: nothing on it may go live.
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::GenericTraitReserved {
+                            expr,
+                            name: loc.display_name().to_owned(),
+                        });
+                } else if args.is_some() {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::NamedSelfReserved { expr });
+                } else if variant.is_empty() {
+                    // `Trait::` — the parse error covers it.
+                } else if crate::item_tree::trait_requirements(self.db, loc.to_id(self.db))
+                    .iter()
+                    .any(|req| req.name == variant)
+                {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::QualifiedTraitMemberValue {
+                            expr,
+                            trait_name: loc.display_name().to_owned(),
+                            member: variant.to_owned(),
+                        });
+                } else {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::TraitHasNoMember {
+                            expr,
+                            trait_: loc,
+                            name: variant.to_owned(),
+                        });
+                }
+                self.infer_const_args_free(args.unwrap_or(&[]));
+                Ty::Error
             }
             Some(
                 Resolution::Local(_)
@@ -3855,7 +5094,27 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         if !const_args.is_empty() {
             self.result.const_args_of_expr.insert(expr, const_args);
         }
-        if !sig.contains_error() && !pending.is_empty() {
+        // Bounds on the binder become obligations at this mention, keyed
+        // here (MIR appends the dictionary operands to the direct call
+        // whose callee this mention is). A bounded generic used as a VALUE
+        // would need a captured dictionary — reserved; the reservation is
+        // the WHOLE story for such a mention (no cannot-infer noise on
+        // params the reserved value was never going to determine).
+        let mut reserved_as_value = false;
+        if !crate::traits::bound_slots(self.db, self.file, generics).is_empty() {
+            if self.direct_callees.contains(&expr) {
+                self.push_bound_obligations(expr, generics, &subst);
+            } else {
+                reserved_as_value = true;
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::BoundFnValue {
+                        expr,
+                        name: loc.display_name().to_owned(),
+                    });
+            }
+        }
+        if !sig.contains_error() && !pending.is_empty() && !reserved_as_value {
             // A broken scheme (fully-annotated rule violated) is excluded:
             // the definition carries the diagnostic, and piling
             // cannot-infer noise on every mention would drown it.
@@ -3932,6 +5191,25 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         expr,
                         name: base_name.clone(),
                     });
+                self.infer_const_args_free(args);
+                Ty::Error
+            }
+            // `Display::<...>` — a turbofish on a trait is the named-Self
+            // form's position (TR01), reserved. A RESERVED generic trait's
+            // own reservation wins.
+            Some(Resolution::TraitItem(loc)) => {
+                if crate::traits::trait_is_generic(self.db, loc) {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::GenericTraitReserved {
+                            expr,
+                            name: loc.display_name().to_owned(),
+                        });
+                } else {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::NamedSelfReserved { expr });
+                }
                 self.infer_const_args_free(args);
                 Ty::Error
             }
@@ -5386,6 +6664,7 @@ fn builtin_generics(builtin: Builtin) -> Option<Vec<GenericParamData>> {
             Some(vec![GenericParamData {
                 name: "T".to_owned(),
                 kind: GenericParamKind::Type,
+                bounds: Vec::new(),
             }])
         }
         Builtin::Print | Builtin::Panic | Builtin::Add | Builtin::Offset | Builtin::Copy => None,

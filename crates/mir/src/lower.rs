@@ -46,6 +46,7 @@ pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
         unsafe_traps: FxHashMap::default(),
         nonexhaustive_traps: FxHashMap::default(),
         initializer_context: true,
+        dict_locals: Vec::new(),
     };
     ctx.seed_traps();
     let root = body.root.map(|root| {
@@ -117,6 +118,12 @@ struct LowerCtx<'db> {
     /// synthetic entry), so its const violations get conditional
     /// [`TerminatorKind::ConstTrap`]s instead of unconditional traps.
     initializer_context: bool,
+    /// The hidden dictionary parameters of the item's ROOT fn literal,
+    /// when its binder carries bounds: one entry per canonical slot
+    /// ([`hir::bound_slots`]), each with one local per trait requirement.
+    /// Bound-directed calls read these; recursion/forwarding copies them
+    /// onward.
+    dict_locals: Vec<(hir::BoundSlot, Vec<LocalId>)>,
 }
 
 impl LowerCtx<'_> {
@@ -323,6 +330,36 @@ impl LowerCtx<'_> {
                 | InferenceDiagnostic::QualifiedMemberReserved { expr, .. } => {
                     self.value_traps.insert(*expr, diag.message());
                 }
+                // A bare trait name (or a reserved trait-member value/
+                // named-Self form, or a bounded generic used as a value):
+                // the value cannot be produced.
+                InferenceDiagnostic::TraitNotValue { expr, .. }
+                | InferenceDiagnostic::QualifiedTraitMemberValue { expr, .. }
+                | InferenceDiagnostic::NamedSelfReserved { expr }
+                | InferenceDiagnostic::TraitHasNoMember { expr, .. }
+                | InferenceDiagnostic::BoundFnValue { expr, .. } => {
+                    self.value_traps.insert(*expr, diag.message());
+                }
+                // A use of a reserved generic trait: the referenced value/
+                // call cannot be produced (same call-vs-value split as the
+                // bound failures below).
+                // Bound-resolution failures: reported on the CALL for the
+                // dot-form/qualified sites (the call operation is what
+                // cannot execute) and on the MENTION for path calls (its
+                // value refuses before the call).
+                InferenceDiagnostic::UnsatisfiedBound { expr, .. }
+                | InferenceDiagnostic::NoTraitImpl { expr, .. }
+                | InferenceDiagnostic::AmbiguousTraitMember { expr, .. }
+                | InferenceDiagnostic::MemberFieldCallAmbiguity { expr, .. }
+                | InferenceDiagnostic::NestedBoundUse { expr }
+                | InferenceDiagnostic::GenericTraitReserved { expr, .. }
+                | InferenceDiagnostic::CannotInferSelf { expr, .. } => {
+                    if matches!(self.body.exprs[*expr], ExprData::Call { .. }) {
+                        self.call_traps.insert(*expr, diag.message());
+                    } else {
+                        self.value_traps.insert(*expr, diag.message());
+                    }
+                }
             }
         }
         for diag in self.unsafe_diagnostics {
@@ -396,10 +433,60 @@ impl LowerCtx<'_> {
     }
 
     fn lower_fn(&mut self, params: &[hir::body::Param], body_expr: ExprId, ret_ty: Ty) -> BodyId {
+        self.lower_fn_inner(params, body_expr, ret_ty, false)
+    }
+
+    /// [`Self::lower_fn`], optionally appending the hidden dictionary
+    /// parameters of the item's binder bounds (the erased
+    /// dictionary-passing lowering: one parameter per bound slot per
+    /// trait requirement, strictly after the written parameters — call
+    /// sites append the matching operands in the same canonical order).
+    fn lower_fn_inner(
+        &mut self,
+        params: &[hir::body::Param],
+        body_expr: ExprId,
+        ret_ty: Ty,
+        with_dicts: bool,
+    ) -> BodyId {
         let mut b = BodyBuilder::new(ret_ty, body_expr);
         for param in params {
             let local = self.alloc_pat_slot_local(&mut b, param.pat, body_expr);
             b.params.push(local);
+        }
+        if with_dicts {
+            let file = self.loc.file;
+            let slots = hir::bound_slots(self.db, file, self.own_generics);
+            for slot in slots {
+                let requirements = hir::trait_requirements(self.db, slot.trait_.to_id(self.db));
+                let param_data = self.own_generics.get(slot.param_index as usize);
+                let mut locals = Vec::with_capacity(requirements.len());
+                for req in requirements {
+                    // The local's type: the requirement's scheme at the
+                    // bound rigid param (display-only; the interpreter
+                    // never consults it).
+                    let self_ty = param_data
+                        .map(|param| {
+                            Ty::Param(hir::ty::ParamTy {
+                                item: self.loc.clone(),
+                                index: slot.param_index,
+                                name: std::sync::Arc::from(param.name.as_str()),
+                            })
+                        })
+                        .unwrap_or(Ty::Error);
+                    let ty = hir::traits::lower_requirement_sig(
+                        self.db,
+                        file,
+                        req,
+                        &slot.trait_,
+                        self_ty,
+                    )
+                    .unwrap_or(Ty::Error);
+                    let local = b.temp(ty);
+                    b.params.push(local);
+                    locals.push(local);
+                }
+                self.dict_locals.push((slot, locals));
+            }
         }
         let op = self.lower_expr(&mut b, body_expr);
         let ret = b.ret;
@@ -618,35 +705,87 @@ impl LowerCtx<'_> {
                     );
                     return Operand::Copy(dest.into());
                 }
-                // A dot-call resolved to an inherent member: the written
-                // arguments lower first and the RECEIVER is appended last,
-                // which is both the desugaring and the evaluation order.
-                // The callee field-access expression is never lowered as a
-                // value — it names a member, not a place.
-                let member =
-                    self.infer.member_of_expr.get(expr).cloned().and_then(|m| {
+                // A BOUND-DIRECTED member call (`x.fmt(w)` on a rigid
+                // `T: Display`, or a qualified call whose Self is a
+                // bounded rigid param): an indirect call through the
+                // enclosing body's hidden dictionary parameter — the
+                // erased dictionary-passing lowering.
+                if let Some(bound_call) = self.infer.bound_member_of_expr.get(expr).cloned() {
+                    let receiver = if bound_call.receiver_appended {
                         match &body.exprs[*callee] {
-                            ExprData::Field { receiver, .. } => Some((m, *receiver)),
+                            ExprData::Field { receiver, .. } => Some(*receiver),
                             _ => None,
                         }
+                    } else {
+                        None
+                    };
+                    let mut arg_ops: Vec<Operand> =
+                        args.iter().map(|&arg| self.lower_expr(b, arg)).collect();
+                    if let Some(receiver) = receiver {
+                        arg_ops.push(self.lower_expr(b, receiver));
+                    }
+                    return self.lower_resolved_member_call(
+                        b,
+                        expr,
+                        *callee,
+                        arg_ops,
+                        |this, _| {
+                            this.bound_member_callee(&bound_call).ok_or_else(|| {
+                                "cannot resolve the bound member here (broken bounds)".to_owned()
+                            })
+                        },
+                    );
+                }
+                // A qualified short-form call (`Display::fmt(w, x)`) whose
+                // Self resolved concretely: a direct call of the impl's
+                // member with the arguments exactly as written (no
+                // receiver is appended — Self is an ordinary parameter of
+                // the requirement's signature).
+                if let Some(member) = self.infer.qualified_member_of_expr.get(expr).cloned() {
+                    let arg_ops: Vec<Operand> =
+                        args.iter().map(|&arg| self.lower_expr(b, arg)).collect();
+                    return self.lower_resolved_member_call(b, expr, *callee, arg_ops, |_, _| {
+                        Ok(Operand::Const(Const::Item(member)))
                     });
-                let (callee_op, arg_ops) = match &member {
-                    Some((member, receiver)) => {
+                }
+                // A dot-call resolved to an inherent (or trait-impl)
+                // member (TR01): an ordinary direct call of the statically
+                // known member fn, with the receiver appended as the LAST
+                // argument — the written arguments evaluate FIRST, then
+                // the receiver binds (the sealed reason `self` is last) —
+                // and any dictionary operands of the member's own bounds
+                // after it. The callee field-access expression is never
+                // lowered as a value.
+                if let Some(member) = self.infer.member_of_expr.get(expr).cloned() {
+                    let receiver = match &body.exprs[*callee] {
+                        ExprData::Field { receiver, .. } => Some(*receiver),
+                        _ => None,
+                    };
+                    if let Some(receiver) = receiver {
                         let mut arg_ops: Vec<Operand> =
                             args.iter().map(|&arg| self.lower_expr(b, arg)).collect();
-                        arg_ops.push(self.lower_expr(b, *receiver));
-                        (
-                            self.member_callee_operand(b, expr, *callee, member, *receiver),
+                        arg_ops.push(self.lower_expr(b, receiver));
+                        let callee_expr = *callee;
+                        return self.lower_resolved_member_call(
+                            b,
+                            expr,
+                            callee_expr,
                             arg_ops,
-                        )
+                            |this, b| {
+                                Ok(this.member_callee_operand(
+                                    b,
+                                    expr,
+                                    callee_expr,
+                                    &member,
+                                    receiver,
+                                ))
+                            },
+                        );
                     }
-                    None => {
-                        let callee_op = self.lower_expr(b, *callee);
-                        let arg_ops: Vec<Operand> =
-                            args.iter().map(|&arg| self.lower_expr(b, arg)).collect();
-                        (callee_op, arg_ops)
-                    }
-                };
+                }
+                let callee_op = self.lower_expr(b, *callee);
+                let mut arg_ops: Vec<Operand> =
+                    args.iter().map(|&arg| self.lower_expr(b, arg)).collect();
                 // A call const-check rejected. Inside a `const fn` body or
                 // a `const` block the code is a const context under every
                 // execution, so the call is replaced by an unconditional
@@ -667,6 +806,14 @@ impl LowerCtx<'_> {
                 }
                 if let Some(message) = self.call_traps.get(&expr).cloned() {
                     return self.trap(b, expr, message);
+                }
+                // A direct call of a bounded generic fn: the mention's
+                // dictionary operands append after the written arguments
+                // (the hidden parameters the callee's root literal
+                // declared, in the same canonical order).
+                match self.dict_operands(*callee) {
+                    Ok(ops) => arg_ops.extend(ops),
+                    Err(message) => return self.trap(b, expr, message),
                 }
                 // Divergence comes from the *callee's* signature, not the
                 // call expression's type: inference recovers a mismatch with
@@ -1037,6 +1184,19 @@ impl LowerCtx<'_> {
                             Some(Resolution::Ambiguous(_)) => {
                                 self.trap(b, expr, hir::diag::defined_multiple_times(&name))
                             }
+                            // An unresolved TRAIT-member reference: the
+                            // CALL around it carries the precise
+                            // diagnostic (`CannotInferSelf`, `NoTraitImpl`,
+                            // ...) — this callee placeholder must not claim
+                            // the trait's declaration is broken (it isn't).
+                            Some(Resolution::TraitItem(_)) => self.trap(
+                                b,
+                                expr,
+                                format!(
+                                    "cannot resolve this member of `{name}` here \
+                                     (see the reported errors)"
+                                ),
+                            ),
                             // A broken `type` declaration: its own
                             // diagnostics sit at the declaration site
                             // (same reconciliation as a broken annotation
@@ -1116,9 +1276,13 @@ impl LowerCtx<'_> {
                 // A fn body is never the initializer's own const context: a
                 // plain body is runtime code (no const flags outside its
                 // `const` blocks), a `const fn` body is a const context
-                // under every execution.
+                // under every execution. The ITEM's fn literal (the root)
+                // additionally declares the hidden dictionary parameters
+                // of its binder's bounds.
+                let with_dicts = Some(expr) == self.body.root
+                    && hir::dict_param_count(self.db, self.loc.file, self.own_generics) > 0;
                 let saved = std::mem::replace(&mut self.initializer_context, false);
-                let body_id = self.lower_fn(params, *fn_body, ret_ty);
+                let body_id = self.lower_fn_inner(params, *fn_body, ret_ty, with_dicts);
                 self.initializer_context = saved;
                 Operand::Const(Const::Fn(body_id))
             }
@@ -1672,6 +1836,15 @@ impl LowerCtx<'_> {
                 .message();
                 self.trap(b, expr, message)
             }
+            // Same for a trait name (traits are not values either).
+            Some(Resolution::TraitItem(_)) => {
+                let message = InferenceDiagnostic::TraitNotValue {
+                    expr,
+                    name: name.to_owned(),
+                }
+                .message();
+                self.trap(b, expr, message)
+            }
             // Justified by the duplicate-definition diagnostics.
             Some(Resolution::Ambiguous(_)) => {
                 self.trap(b, expr, hir::diag::defined_multiple_times(name))
@@ -1765,6 +1938,14 @@ impl LowerCtx<'_> {
                 // the type-not-a-value diagnostic; trap with its message.
                 Some(Resolution::TypeItem(_)) => {
                     let message = InferenceDiagnostic::TypeNotValue {
+                        expr: target,
+                        name: name.clone(),
+                    }
+                    .message();
+                    self.trap(b, target, message);
+                }
+                Some(Resolution::TraitItem(_)) => {
+                    let message = InferenceDiagnostic::TraitNotValue {
                         expr: target,
                         name: name.clone(),
                     }
@@ -2021,6 +2202,14 @@ impl LowerCtx<'_> {
                 .message();
                 self.trap(b, root, message);
             }
+            Some(Resolution::TraitItem(_)) => {
+                let message = InferenceDiagnostic::TraitNotValue {
+                    expr: root,
+                    name: name.clone(),
+                }
+                .message();
+                self.trap(b, root, message);
+            }
             Some(Resolution::Builtin(builtin)) => {
                 let message = InferenceDiagnostic::AssignToBuiltin {
                     target: root,
@@ -2242,9 +2431,12 @@ impl LowerCtx<'_> {
             }
             // Non-places (const params, types, builtins) were diagnosed
             // and trapped by the wrapper; kept total regardless.
-            Some(Resolution::ConstParam(_) | Resolution::TypeItem(_) | Resolution::Builtin(_)) => {
-                Operand::Const(Const::Unit)
-            }
+            Some(
+                Resolution::ConstParam(_)
+                | Resolution::TypeItem(_)
+                | Resolution::TraitItem(_)
+                | Resolution::Builtin(_),
+            ) => Operand::Const(Const::Unit),
             // Justified by the unresolved-name diagnostic.
             None => self.trap(b, root, hir::diag::unresolved_name(name)),
         }
@@ -2367,6 +2559,122 @@ impl LowerCtx<'_> {
         self.initializer_context = saved;
         self.const_args.push((value, body_id));
         body_id
+    }
+
+    /// The dictionary operands an instantiation keyed at `key` appends to
+    /// its call: per canonical slot, per trait requirement, an impl
+    /// member's fn value ([`Const::Item`]) or a forwarded dictionary
+    /// parameter of the enclosing body. `Err` carries the trap message for
+    /// unresolvable entries (an unsatisfied/undetermined bound already
+    /// diagnosed upstream, or a broken impl whose definition site carries
+    /// the diagnostic).
+    fn dict_operands(&mut self, key: ExprId) -> Result<Vec<Operand>, String> {
+        let Some(entries) = self.infer.bound_dicts_of_expr.get(key) else {
+            return Ok(Vec::new());
+        };
+        let mut ops = Vec::new();
+        for entry in entries {
+            match entry {
+                hir::infer::DictEntry::Impl(members) => {
+                    for member in members {
+                        ops.push(Operand::Const(Const::Item(member.clone())));
+                    }
+                }
+                hir::infer::DictEntry::Forward {
+                    param_index,
+                    trait_,
+                } => {
+                    let locals = self
+                        .dict_locals
+                        .iter()
+                        .find(|(slot, _)| {
+                            slot.param_index == *param_index && slot.trait_ == *trait_
+                        })
+                        .map(|(_, locals)| locals.clone());
+                    match locals {
+                        Some(locals) => {
+                            for local in locals {
+                                ops.push(Operand::Copy(local.into()));
+                            }
+                        }
+                        None => {
+                            return Err("cannot forward the trait dictionary here (broken bounds)"
+                                .to_owned());
+                        }
+                    }
+                }
+                hir::infer::DictEntry::Error => {
+                    return Err(
+                        "cannot resolve a trait bound for this call (see the reported errors)"
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        Ok(ops)
+    }
+
+    /// The shared tail of every RESOLVED member-call lowering (bound-
+    /// directed, qualified, dot-form): the call-site traps, the
+    /// dictionary operands keyed at the CALL expression, the callee
+    /// operand (computed after the traps, so a trapped call never builds
+    /// one), then the `Call` terminator — divergence judged from the
+    /// callee expression's fn type, exactly like the default call path.
+    fn lower_resolved_member_call(
+        &mut self,
+        b: &mut BodyBuilder,
+        expr: ExprId,
+        callee: ExprId,
+        mut arg_ops: Vec<Operand>,
+        make_callee: impl FnOnce(&mut Self, &mut BodyBuilder) -> Result<Operand, String>,
+    ) -> Operand {
+        if let Some(message) = self.const_call_traps.get(&expr).cloned() {
+            if self.initializer_context {
+                let target = b.new_block();
+                b.terminate(TerminatorKind::ConstTrap { message, target }, expr);
+                b.current = target;
+            } else {
+                return self.trap(b, expr, message);
+            }
+        }
+        if let Some(message) = self.call_traps.get(&expr).cloned() {
+            return self.trap(b, expr, message);
+        }
+        match self.dict_operands(expr) {
+            Ok(ops) => arg_ops.extend(ops),
+            Err(message) => return self.trap(b, expr, message),
+        }
+        let callee_op = match make_callee(self, b) {
+            Ok(op) => op,
+            Err(message) => return self.trap(b, expr, message),
+        };
+        let diverges = matches!(
+            self.ty(callee),
+            Ty::Fn(f) if f.ret == Ty::Never
+        );
+        let dest = b.temp(self.ty(expr));
+        let next = b.new_block();
+        b.terminate(
+            TerminatorKind::Call {
+                callee: callee_op,
+                args: arg_ops,
+                dest,
+                target: (!diverges).then_some(next),
+            },
+            expr,
+        );
+        b.current = next;
+        Operand::Copy(dest.into())
+    }
+
+    /// The callee operand of a bound-directed member call: the enclosing
+    /// body's dictionary parameter for the call's slot and member.
+    fn bound_member_callee(&self, call: &hir::infer::BoundMemberCall) -> Option<Operand> {
+        self.dict_locals
+            .iter()
+            .find(|(slot, _)| slot.param_index == call.param_index && slot.trait_ == call.trait_)
+            .and_then(|(_, locals)| locals.get(call.member_index as usize))
+            .map(|&local| Operand::Copy(local.into()))
     }
 
     /// Binder index → dense const-only index (what [`Const::ConstParam`]

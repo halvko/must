@@ -13,7 +13,7 @@ fn check_const(text: &str, expect: Expect) {
     for &item in hir::file_item_ids(&db, file) {
         if hir::item_data(&db, item)
             .as_ref()
-            .is_some_and(|data| matches!(data.kind, hir::ItemKind::Type))
+            .is_some_and(|data| matches!(data.kind, hir::ItemKind::Type | hir::ItemKind::Trait))
         {
             continue;
         }
@@ -3962,6 +3962,235 @@ type Vecish = struct { len: usize } with {
         "Vecish(struct { len = 3 }).len() + Vecish(struct { len = 3 }).len",
         expect![[r#"
             => 16
+        "#]],
+    );
+}
+
+// ---- trait declarations: dictionary dispatch ----------------------------
+
+#[test]
+fn trait_dispatch_through_generic_fn() {
+    // One bounded generic fn, three implementers: trait-side impls (str,
+    // usize) and a type-side impl (Point) behave identically — the
+    // dictionary resolves per call site at the instantiation edge.
+    check_run(
+        r#"
+trait Write = requires {
+    push: fn(s: str, w: Self) -> Self;
+};
+trait Display = requires {
+    fmt: fn::<W: Write>(w: W, x: Self) -> W;
+} with {
+    impl str {
+        fmt = fn::<W: Write>(w: W, x: str) -> W { w.push(x) };
+    }
+    impl usize {
+        fmt = fn::<W: Write>(w: W, x: usize) -> W { w.push("num") };
+    }
+};
+type Sink = struct { pushes: usize } with {
+    impl Write {
+        push = fn(s: str, w: Self) -> Self {
+            print(s);
+            Sink(struct { pushes = w.pushes + 1 })
+        };
+    }
+};
+type Point = struct { x: usize, y: usize } with {
+    impl Display {
+        fmt = fn::<W: Write>(w: W, p: Self) -> W {
+            let w = Display::fmt(w, p.x);
+            let w = w.push(",");
+            Display::fmt(w, p.y)
+        };
+    }
+};
+static show = fn::<T: Display>(x: T) -> usize {
+    let s = Sink(struct { pushes = 0 });
+    let s = x.fmt(s);
+    s.pushes
+};
+static main = fn() -> usize {
+    let a = show::<str>("hi");
+    let b = show::<usize>(7);
+    let c = show::<Point>(Point(struct { x = 1, y = 2 }));
+    a + b + c
+};
+"#,
+        "main()",
+        expect![[r#"
+            hi
+            num
+            num
+            ,
+            num
+            => 5
+        "#]],
+    );
+}
+
+#[test]
+fn dictionary_forwarding_through_recursion() {
+    // `fmt_usize` recurses (forwarding its own dictionary) and is called
+    // from an impl member (forwarding the member's binder dictionary).
+    check_run(
+        r#"
+trait Write = requires { push: fn(s: str, w: Self) -> Self; };
+trait Display = requires { fmt: fn::<W: Write>(w: W, x: Self) -> W; } with {
+    impl usize {
+        fmt = fn::<W: Write>(w: W, x: usize) -> W { fmt_usize(w, x) };
+    }
+};
+static digit = fn(d: usize) -> str {
+    if d == 0 { "0" } else if d == 1 { "1" } else if d == 2 { "2" }
+    else if d == 3 { "3" } else if d == 4 { "4" } else { "5+" }
+};
+static fmt_usize = fn::<W: Write>(w: W, n: usize) -> W {
+    if n < 10 {
+        w.push(digit(n))
+    } else {
+        let w = fmt_usize(w, n / 10);
+        w.push(digit(n - (n / 10) * 10))
+    }
+};
+type Out = struct { c: usize } with {
+    impl Write {
+        push = fn(s: str, w: Self) -> Self { print(s); Out(struct { c = w.c + 1 }) };
+    }
+};
+static main = fn() -> usize {
+    let n: usize = 431;
+    let o = n.fmt(Out(struct { c = 0 }));
+    o.c
+};
+"#,
+        "main()",
+        expect![[r#"
+            4
+            3
+            1
+            => 3
+        "#]],
+    );
+}
+
+#[test]
+fn qualified_short_form_dispatches() {
+    check_run(
+        r#"
+trait D = requires { m: fn(x: Self) -> str; } with {
+    impl usize { m = fn(x: usize) -> str { "int" }; }
+    impl str { m = fn(x: str) -> str { x }; }
+};
+static main = fn() -> () {
+    let n: usize = 3;
+    print(D::m(n));
+    print(D::m("qq"));
+    print(n.m());
+};
+"#,
+        "main()",
+        expect![[r#"
+            int
+            qq
+            int
+            => ()
+        "#]],
+    );
+}
+
+#[test]
+fn unsatisfied_bound_traps_at_runtime() {
+    // Deferred-error mode: the broken call traps with the squiggle's text
+    // when it actually runs.
+    check_run(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; };
+type P = struct { a: usize };
+static f = fn::<T: D>(x: T) -> usize { x.m() };
+static main = fn() -> usize { f::<P>(P(struct { a = 1 })) };
+"#,
+        "main()",
+        expect![[r#"
+            error[Trap]: the bound `T: D` is not satisfied here: `P` does not implement `D`
+        "#]],
+    );
+}
+
+#[test]
+fn trait_impls_on_enums_and_variant_receivers() {
+    // A variant-typed receiver reaches its ENUM's trait impl through the
+    // sanctioned widening — dot-form and qualified short form alike.
+    check_run(
+        r#"
+type Shape = enum { Circle(usize), Point };
+trait D = requires { m: fn(x: Self) -> usize; } with {
+    impl Shape {
+        m = fn(x: Self) -> usize {
+            match x { ::Circle(r) => r, ::Point => 0 }
+        };
+    }
+};
+static main = fn() -> () {
+    let c = Shape::Circle(3);
+    if c.m() == 3 { print("dot ok") } else { print("bad") };
+    if D::m(Shape::Point) == 0 { print("qualified ok") } else { print("bad") };
+};
+"#,
+        "main()",
+        expect![[r#"
+            dot ok
+            qualified ok
+            => ()
+        "#]],
+    );
+}
+
+#[test]
+fn qualified_variant_self_widens_and_dispatches() {
+    // A variant-typed argument at a `Self` position widens to its enum,
+    // so the impl's returned tag is real and the match dispatches
+    // honestly.
+    check_run(
+        r#"
+type Shape = enum { Circle(usize), Point } with {
+    impl Id { id = fn(x: Self) -> Self { Shape::Point }; }
+};
+trait Id = requires { id: fn(x: Self) -> Self; };
+static main = fn() -> () {
+    let c = Id::id(Shape::Circle(3));
+    match c {
+        ::Circle(n) => { let _ = n; print("circle") },
+        ::Point => print("point — correct"),
+    };
+};
+"#,
+        "main()",
+        expect![[r#"
+            point — correct
+            => ()
+        "#]],
+    );
+}
+
+#[test]
+fn nested_bound_use_traps_with_the_reservation() {
+    // A check-time reservation and its deferred trap carry the same
+    // text at runtime (never an internal error).
+    check_run(
+        r#"
+trait Size = requires { size: fn(x: Self) -> usize; } with {
+    impl usize { size = fn(x: usize) -> usize { x }; }
+};
+static outer = fn::<T: Size>(x: T) -> usize {
+    let f = fn(y: T) -> usize { y.size() };
+    f(x)
+};
+static main = fn() -> usize { outer::<usize>(4) };
+"#,
+        "main()",
+        expect![[r#"
+            error[Trap]: code nested inside a bounded fn (a nested fn literal or a `const` block) cannot use the enclosing bounds yet (it would have to capture the dictionary)
         "#]],
     );
 }

@@ -221,8 +221,11 @@ fn classify_ident(
                 }
                 // A construction head (`Foo(...)`) — or a stray value use,
                 // which the diagnostics call out; either way the name *is*
-                // a type.
-                hir::Resolution::TypeItem(_) => Some((HlTag::Type, HlMods::NONE)),
+                // a type. A trait name (a qualified call's base) renders
+                // the same way.
+                hir::Resolution::TypeItem(_) | hir::Resolution::TraitItem(_) => {
+                    Some((HlTag::Type, HlMods::NONE))
+                }
                 // A const param reads like an immutable parameter.
                 hir::Resolution::ConstParam(_) => Some((HlTag::Parameter, HlMods::NONE)),
                 hir::Resolution::Builtin(_) => {

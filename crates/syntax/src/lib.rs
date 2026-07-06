@@ -17,7 +17,9 @@ use std::sync::Arc;
 pub use lexer::{Token, tokenize};
 pub use rowan::{TextRange, TextSize};
 pub use syntax_kind::SyntaxKind;
-pub use validation::{CAN_ONLY_ASSIGN_TO_A_VARIABLE, in_inherent_member_context};
+pub use validation::{
+    CAN_ONLY_ASSIGN_TO_A_VARIABLE, MemberContext, impl_element_bare_head, semantic_member_context,
+};
 
 /// The brace rule's wording. The grammar's recovery error and validation's
 /// fix-bearing error both report it, so the phrasing is shared and the

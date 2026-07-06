@@ -300,7 +300,15 @@ impl CheckCtx<'_> {
             }
             // A directly-called variant constructor (`Shape::Circle(3)`):
             // pure construction, like `Foo(...)` — always const-legal.
-            ExprData::VariantPath { .. } => {}
+            // A qualified TRAIT-member call (`Display::fmt(...)`) is not:
+            // its target is dictionary-directed, so its constness is
+            // unknowable statically — conservatively a value call.
+            ExprData::VariantPath { base, .. } => {
+                if matches!(self.resolutions.get(*base), Some(Resolution::TraitItem(_))) {
+                    self.diagnostics
+                        .push(ConstCheckDiagnostic::ValueCall { callee });
+                }
+            }
             // A turbofish callee (`f::<usize>(4)`) is judged by what its
             // base names — calling an instantiated generic `const fn` in a
             // const context is legal (evaluation is staged, but the RULE
@@ -339,6 +347,12 @@ impl CheckCtx<'_> {
             // user function — always legal in a const context (like
             // record literals, which it erases to at runtime).
             Some(Resolution::TypeItem(_)) => {}
+            // A trait member's constness is unknowable statically for now
+            // (dictionary-directed) — conservatively a value call. (A bare
+            // trait callee is broken anyway; same conservative verdict.)
+            Some(Resolution::TraitItem(_)) => self
+                .diagnostics
+                .push(ConstCheckDiagnostic::ValueCall { callee }),
             // The one side effect const contexts allow — and the pointer
             // builtins that allocate nothing: `add`/`dangling` are pure
             // and `copy` writes only through pointers whose targets already

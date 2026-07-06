@@ -300,9 +300,11 @@ ast_node!(
     WithClause: WITH_CLAUSE
 );
 ast_node!(
-    /// `impl ⟨head⟩ { member* }` or the body-elided `impl ⟨head⟩;`. Only
-    /// `impl Self { ... }` (inherent members) is supported; everything
-    /// else is parse-and-reserve.
+    /// `impl ⟨head⟩ { member* }` or the body-elided `impl ⟨head⟩;`.
+    /// `impl Self { ... }` (inherent members) and a bare trait/type name
+    /// (a trait impl, at the trait's or the self-type's head) are
+    /// supported; modifier heads, markers and generic-owner impls are
+    /// parse-and-reserve.
     ImplElement: IMPL_ELEMENT
 );
 ast_node!(
@@ -317,10 +319,31 @@ ast_node!(
 );
 ast_node!(
     /// One member of an impl body: `name = fn(...) -> R { ... };`
-    /// (equals-defines), `name: fn(...);` (colon-declares — rejected), and
-    /// the reserved `type Item = T;` / `const N: usize;` spellings
-    /// (distinguished by their leading keyword token).
+    /// (equals-defines), `name: fn(...);` (colon-declares — a trait's
+    /// requirement form; rejected in impl bodies), and the reserved
+    /// `type Item = T;` / `const N: usize;` spellings (distinguished by
+    /// their leading keyword token).
     Member: MEMBER
+);
+ast_node!(
+    /// `trait Name = requires { ... };` — a trait declaration (sealed
+    /// grammar, TR01). The RHS is a [`RequiresDef`] or a reserved
+    /// [`TraitAlias`].
+    TraitItem: TRAIT_ITEM
+);
+ast_node!(
+    /// `unsafe? requires ::<binders>? clause,* { member* }` — the trait
+    /// constructor. Only the plain non-generic form is supported; binders,
+    /// clauses and `unsafe` are parse-and-reserve.
+    RequiresDef: REQUIRES_DEF
+);
+ast_node!(
+    /// One supertrait clause: `Self: Bound + Bound` (reserved).
+    RequiresClause: REQUIRES_CLAUSE
+);
+ast_node!(
+    /// A trait-alias RHS: `Eq + PartialOrd` (reserved).
+    TraitAlias: TRAIT_ALIAS
 );
 
 ast_enum!(
@@ -377,7 +400,8 @@ ast_enum!(Stmt: LetStmt, AssignStmt, ExprStmt);
 ast_enum!(
     /// Any top-level item.
     Item: StaticItem,
-    TypeItem
+    TypeItem,
+    TraitItem
 );
 
 impl SourceFile {
@@ -394,13 +418,20 @@ impl Item {
         child(self.syntax())
     }
     /// The item's type annotation. Only `static`/`const` items have one; a
-    /// `type` item's annotation is superset-parsed junk (validation rejects
-    /// it), so it is never surfaced here.
+    /// `type`/`trait` item's annotation is superset-parsed junk (validation
+    /// rejects it), so it is never surfaced here.
     pub fn ty(&self) -> Option<Type> {
         match self {
             Item::StaticItem(it) => it.ty(),
-            Item::TypeItem(_) => None,
+            Item::TypeItem(_) | Item::TraitItem(_) => None,
         }
+    }
+
+    /// The attachment `with`-chain trailing the item, in source order —
+    /// meaningful on `type` and `trait` declarations (superset-parsed and
+    /// rejected on `static`/`const`).
+    pub fn with_groups(&self) -> impl Iterator<Item = WithGroup> + use<> {
+        children(self.syntax())
     }
 }
 
@@ -622,6 +653,73 @@ impl GenericParamList {
 impl TypeParam {
     pub fn name(&self) -> Option<Name> {
         child(&self.syntax)
+    }
+    /// The `: Bound + Bound` bounds, in source order (empty when unbounded).
+    pub fn bounds(&self) -> impl Iterator<Item = Type> + use<> {
+        children(&self.syntax)
+    }
+    pub fn colon_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, COLON)
+    }
+}
+
+impl TraitItem {
+    pub fn name(&self) -> Option<Name> {
+        child(&self.syntax)
+    }
+    /// The `requires` constructor, when the RHS is one.
+    pub fn requires_def(&self) -> Option<RequiresDef> {
+        child(&self.syntax)
+    }
+    /// The reserved alias RHS (`Eq + PartialOrd`), when the RHS is one.
+    pub fn trait_alias(&self) -> Option<TraitAlias> {
+        child(&self.syntax)
+    }
+    /// The attachment `with`-chain trailing the declaration, in source
+    /// order — the trait-side impl home (TR01).
+    pub fn with_groups(&self) -> impl Iterator<Item = WithGroup> + use<> {
+        children(&self.syntax)
+    }
+    /// A superset-parsed `: Type` annotation (validation rejects it).
+    pub fn colon_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, COLON)
+    }
+    pub fn ty(&self) -> Option<Type> {
+        child(&self.syntax)
+    }
+}
+
+impl RequiresDef {
+    pub fn requires_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, REQUIRES_KW)
+    }
+    /// The reserved `unsafe` head (`unsafe requires ...`).
+    pub fn unsafe_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, UNSAFE_KW)
+    }
+    /// The `::<...>` binder list (reserved: generic traits).
+    pub fn generic_param_list(&self) -> Option<GenericParamList> {
+        child(&self.syntax)
+    }
+    /// The reserved supertrait clauses.
+    pub fn clauses(&self) -> impl Iterator<Item = RequiresClause> + use<> {
+        children(&self.syntax)
+    }
+    /// The requirement members, in source order.
+    pub fn members(&self) -> impl Iterator<Item = Member> + use<> {
+        children(&self.syntax)
+    }
+}
+
+impl RequiresClause {
+    pub fn name_ref(&self) -> Option<NameRef> {
+        child(&self.syntax)
+    }
+}
+
+impl TraitAlias {
+    pub fn types(&self) -> impl Iterator<Item = Type> + use<> {
+        children(&self.syntax)
     }
 }
 
@@ -1054,6 +1152,20 @@ impl FnType {
     }
     pub fn ret_type(&self) -> Option<RetType> {
         child(&self.syntax)
+    }
+    /// The NAMED parameter list of a colon-declared member signature
+    /// (`alloc: fn(n: usize, v: Self) -> R;`) — only that grammar path
+    /// produces one; a plain fn TYPE has bare [`Self::param_types`].
+    pub fn param_list(&self) -> Option<ParamList> {
+        child(&self.syntax)
+    }
+    /// The `::<...>` binder of a colon-declared member signature.
+    pub fn generic_param_list(&self) -> Option<GenericParamList> {
+        child(&self.syntax)
+    }
+    /// The reserved `unsafe` marker of a colon-declared member signature.
+    pub fn unsafe_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, UNSAFE_KW)
     }
 }
 

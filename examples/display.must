@@ -1,0 +1,103 @@
+// The trait core, shown on two customers —
+// `Write` (a value-threading sink: no borrows exist, so a writer is
+// consumed and given back) and `Display` (allocation-free formatting: the
+// impl writes into whatever sink the CALLER chose).
+//
+// Everything here is static dispatch. Inside a generic body a bound call
+// (`x.fmt(s)`, `w.push(...)`) lowers through a hidden dictionary
+// parameter; at each concrete call site (`show::<usize>(42)`) the
+// compiler resolves the unique impl and passes its member set along.
+
+trait Write = requires {
+    push: fn(s: str, w: Self) -> Self;
+};
+
+// The trait-side impl home (TR01): impls for the builtin scalars live in
+// the trait's own `with`-chain — `usize` and `str` have no declaration of
+// their own to host them.
+trait Display = requires {
+    // A generic requirement: `fmt` is generic over the sink, with a bound
+    // on its own binder.
+    fmt: fn::<W: Write>(w: W, x: Self) -> W;
+} with {
+    impl str {
+        fmt = fn::<W: Write>(w: W, x: str) -> W { w.push(x) };
+    }
+    impl usize {
+        // Forwards its own `W: Write` bound into the helper below — the
+        // dictionary-forwarding edge.
+        fmt = fn::<W: Write>(w: W, x: usize) -> W { fmt_usize(w, x) };
+    }
+};
+
+// Digits render via `push`-ing "0".."9" (no int→str conversion exists;
+// the remainder is n - (n / 10) * 10 — no `%` operator either).
+static digit = fn(d: usize) -> str {
+    if d == 0 { "0" } else if d == 1 { "1" } else if d == 2 { "2" }
+    else if d == 3 { "3" } else if d == 4 { "4" } else if d == 5 { "5" }
+    else if d == 6 { "6" } else if d == 7 { "7" } else if d == 8 { "8" }
+    else { "9" }
+};
+
+static fmt_usize = fn::<W: Write>(w: W, n: usize) -> W {
+    if n < 10 {
+        w.push(digit(n))
+    } else {
+        // Recursion forwards the caller's own dictionary.
+        let w = fmt_usize(w, n / 10);
+        w.push(digit(n - (n / 10) * 10))
+    }
+};
+
+// A writer over the print hook: each pushed fragment prints on its own
+// line, and the sink counts what it wrote (value-threading: `push` gives
+// the advanced writer back).
+type Sink = struct { pushes: usize } with {
+    impl Write {
+        push = fn(s: str, w: Self) -> Self {
+            print(s);
+            Sink(struct { pushes = w.pushes + 1 })
+        };
+    }
+};
+
+// The type-side impl home: a user type's own `with`-chain implements the
+// trait. `Point` renders as `x`, `,`, `y` — via the qualified short form
+// `Display::fmt(...)`, whose `Self` is inferred from the argument
+// (`p.x: usize` picks the usize impl).
+type Point = struct { x: usize, y: usize } with {
+    impl Display {
+        fmt = fn::<W: Write>(w: W, p: Self) -> W {
+            let w = Display::fmt(w, p.x);
+            let w = w.push(",");
+            Display::fmt(w, p.y)
+        };
+    }
+};
+
+// A generic consumer: the bound re-opens exactly the trait's members on
+// the rigid `T` — `x.fmt(s)` is a bound-directed dot-call.
+static show = fn::<T: Display>(x: T) -> usize {
+    let s = Sink(struct { pushes = 0 });
+    let s = x.fmt(s);
+    s.pushes
+};
+
+static main = fn() -> () {
+    // One generic fn, three implementers — usize and str through the
+    // trait-side impls, Point through its type-side one.
+    let a = show::<usize>(42);
+    let b = show::<str>("hello");
+    let c = show::<Point>(Point(struct { x = 1, y = 23 }));
+    // Impl-directed dot-calls on concrete receivers work too (a builtin
+    // receiver reaches the trait-side impl)...
+    let seven: usize = 7;
+    let d = seven.fmt(Sink(struct { pushes = 0 }));
+    // ...as does the qualified short form outside any impl.
+    let e = Display::fmt(Sink(struct { pushes = 0 }), "bye");
+    if a == 2 { print("show(42): two digits") } else { print("unexpected") };
+    if b == 1 { print("show(\"hello\"): one fragment") } else { print("unexpected") };
+    if c == 4 { print("show(Point): x, comma, y") } else { print("unexpected") };
+    if d.pushes == 1 { print("7.fmt: one digit") } else { print("unexpected") };
+    if e.pushes == 1 { print("Display::fmt: one fragment") } else { print("unexpected") };
+};

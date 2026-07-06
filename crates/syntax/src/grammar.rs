@@ -19,6 +19,7 @@ fn at_expr_recovery(p: &Parser<'_>) -> bool {
             | STATIC_KW
             | CONST_KW
             | TYPE_KW
+            | TRAIT_KW
             | LET_KW
             | ELSE_KW
             | WITH_KW
@@ -31,8 +32,8 @@ pub(crate) fn source_file(p: &mut Parser<'_>) {
     let m = p.start();
     while !p.at(EOF) {
         match p.current() {
-            STATIC_KW | CONST_KW | TYPE_KW => item(p),
-            _ => p.err_and_bump("expected an item (`static`, `const` or `type`)"),
+            STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW => item(p),
+            _ => p.err_and_bump("expected an item (`static`, `const`, `type` or `trait`)"),
         }
     }
     m.complete(p, SOURCE_FILE);
@@ -42,19 +43,24 @@ fn item(p: &mut Parser<'_>) {
     let m = p.start();
     // `type Foo = expr;` shares the whole item shape with `static`/`const`
     // (superset parsing: a `: Type` annotation on a `type` item parses too;
-    // validation rejects it with a removal fix). Only the node kind differs.
-    let kind = if p.at(TYPE_KW) {
-        TYPE_ITEM
-    } else {
-        STATIC_ITEM
+    // validation rejects it with a removal fix). Only the node kind — and
+    // for `trait` items the RHS grammar — differs.
+    let kind = match p.current() {
+        TYPE_KW => TYPE_ITEM,
+        TRAIT_KW => TRAIT_ITEM,
+        _ => STATIC_ITEM,
     };
-    p.bump_any(); // STATIC_KW | CONST_KW | TYPE_KW
+    p.bump_any(); // STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW
     pattern(p, "expected a name for the item");
     if p.eat(COLON) {
         type_(p);
     }
     if p.eat(EQ) {
-        expr(p);
+        if kind == TRAIT_ITEM {
+            trait_rhs(p);
+        } else {
+            expr(p);
+        }
         // Attachment `with`-chains trail the RHS: `type X = struct { ... }
         // with { elements } with { ... };` (TR01). Parsed on any item
         // kind (superset — validation rejects them on `static`/`const`
@@ -77,14 +83,96 @@ fn item(p: &mut Parser<'_>) {
     m.complete(p, kind);
 }
 
+// ---- trait declarations (sealed trait-syntax grammar, TR01) ------------
+
+/// The RHS of a `trait` item: the `requires` constructor
+/// (`requires ::<binders>? clause,* { member* }`, optionally
+/// `unsafe`-headed) or a trait-alias composition (`Eq + PartialOrd` —
+/// parse-and-reserve). Only the plain non-generic `requires { ... }` form
+/// is semantically supported; binders, clauses, `unsafe` and aliases
+/// parse cleanly and are rejected by validation.
+fn trait_rhs(p: &mut Parser<'_>) {
+    if p.at(REQUIRES_KW) || (p.at(UNSAFE_KW) && p.nth(1) == REQUIRES_KW) {
+        requires_def(p);
+        return;
+    }
+    // Alias RHS: `Trait + Trait + ...` — reserved.
+    let m = p.start();
+    if p.at(IDENT) {
+        type_(p);
+        while p.eat(PLUS) {
+            type_(p);
+        }
+    } else {
+        p.error("expected `requires { ... }` or a trait-alias composition");
+    }
+    m.complete(p, TRAIT_ALIAS);
+}
+
+/// `unsafe? requires ::<binders>? clause,* { member* }` — the trait
+/// constructor. Clauses (`Self: Iterator`) constrain like a `with`
+/// clause; the brace holds the requirement members (the shared member
+/// grammar: colon-declares are the live form, equals-defines are
+/// reserved defaults).
+fn requires_def(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.eat(UNSAFE_KW);
+    p.bump(REQUIRES_KW);
+    if p.at(COLON2) && p.nth(1) == L_ANGLE {
+        generic_param_list(p);
+    }
+    // Supertrait clauses: `Self: Bound + Bound, ...` — each opens with an
+    // IDENT (the brace opens the member block, so the boundary is
+    // token-recognizable).
+    while p.at(IDENT) {
+        requires_clause(p);
+        if !p.at(L_BRACE) && !p.eat(COMMA) {
+            break;
+        }
+    }
+    if p.at(L_BRACE) {
+        p.bump(L_BRACE);
+        while !p.at(R_BRACE) && !p.at(EOF) {
+            if at_member_recovery(p) {
+                break;
+            }
+            let before = p.pos();
+            member(p);
+            if p.pos() == before {
+                p.err_and_bump("expected a member");
+            }
+        }
+        p.expect_after_prev(R_BRACE);
+    } else {
+        p.error("expected `{` followed by the trait's members");
+    }
+    m.complete(p, REQUIRES_DEF);
+}
+
+/// One supertrait clause: `Self: Bound + Bound` (parse-and-reserve).
+fn requires_clause(p: &mut Parser<'_>) {
+    let m = p.start();
+    name_ref(p);
+    if p.eat(COLON) {
+        type_(p);
+        while p.eat(PLUS) {
+            type_(p);
+        }
+    } else {
+        p.error("expected `:` after the clause's name");
+    }
+    m.complete(p, REQUIRES_CLAUSE);
+}
+
 // ---- attachment `with`-chains (sealed trait-syntax grammar, TR01) ------
 //
-// Only `with { impl Self { members } }` (inherent members) is
-// semantically supported; the FULL element grammar parses cleanly —
-// element boundaries recognizable from tokens alone, heads readable while
-// member bodies stay ordinary expressions — with everything else
-// rejected by validation ("not supported yet", the house
-// parse-and-reserve pattern).
+// `with { impl Self { members } }` (inherent members) and `with { impl
+// Trait { members } }` / `with { impl Type { members } }` (trait impls,
+// at either home) are semantically supported; the FULL element grammar
+// parses cleanly — element boundaries recognizable from tokens alone,
+// heads readable while member bodies stay ordinary expressions — with
+// modifier heads, markers and generic-owner impls rejected by validation
+// ("not supported yet", the house parse-and-reserve pattern).
 
 /// `with ::<binders>? clause,* { element* }` — one attachment group. The
 /// turbofish DECLARES fresh binders, a clause CONSTRAINS (`T: Bound`) or
@@ -155,14 +243,17 @@ fn element_block(p: &mut Parser<'_>) {
 /// keyword, so a copy of this list is only a chance for two copies to
 /// disagree.
 fn at_item_recovery(p: &Parser<'_>) -> bool {
-    matches!(p.current(), STATIC_KW | TYPE_KW | LET_KW | CONST_KW)
+    matches!(
+        p.current(),
+        STATIC_KW | TYPE_KW | TRAIT_KW | LET_KW | CONST_KW
+    )
 }
 
 /// The member-loop recovery set: like [`at_item_recovery`] minus the
 /// member-shaped keyword openers — `type Item ...;` and `const N: usize;`
 /// are (reserved) members, so those prefixes stay inside the body.
 fn at_member_recovery(p: &Parser<'_>) -> bool {
-    matches!(p.current(), STATIC_KW | LET_KW)
+    matches!(p.current(), STATIC_KW | TRAIT_KW | LET_KW)
         || (p.at(CONST_KW) && !(p.nth(1) == IDENT && p.nth(2) == COLON))
 }
 
@@ -203,9 +294,9 @@ fn element_or_group(p: &mut Parser<'_>) {
 }
 
 /// `impl ⟨head⟩ { member* }` (or the body-elided marker form
-/// `impl ⟨head⟩;`). The head is a type mention: `Self` (inherent — the one
-/// supported form), or, superset-parsed and rejected by validation, a trait
-/// name or marker.
+/// `impl ⟨head⟩;`). The head is a type mention: `Self` (inherent) or a
+/// bare trait/type name (a trait impl) is supported; a generic-owner
+/// name or a marker is superset-parsed and rejected by validation.
 fn impl_element(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(IMPL_KW);
@@ -244,6 +335,9 @@ fn impl_element(p: &mut Parser<'_>) {
 /// rejection to be the only error.
 fn member_decl_fn_signature(p: &mut Parser<'_>) {
     let m = p.start();
+    // `dealloc: unsafe fn(...)` — an unsafe-to-call requirement; parses
+    // into the FN_TYPE (reserved: validation rejects it for now).
+    p.eat(UNSAFE_KW);
     p.bump(FN_KW);
     if p.at(COLON2) && p.nth(1) == L_ANGLE {
         generic_param_list(p);
@@ -259,9 +353,10 @@ fn member_decl_fn_signature(p: &mut Parser<'_>) {
     m.complete(p, FN_TYPE);
 }
 
-/// One member of an impl body, the sealed member grammar: equals-defines
-/// (`name = fn(...) -> R { ... };`), colon-declares (`name: fn(...);` —
-/// parses, always rejected). `type Item = T;` and
+/// One member, the shared member grammar: equals-defines (`name =
+/// fn(...) -> R { ... };` — an impl-body member, or a reserved default in
+/// a requires body), colon-declares (`name: fn(...);` — a trait's
+/// requirement form; rejected in impl bodies). `type Item = T;` and
 /// `const N: usize;` members parse into the same node (reserved:
 /// associated types/consts), distinguished by their leading keyword token.
 fn member(p: &mut Parser<'_>) {
@@ -287,7 +382,7 @@ fn member(p: &mut Parser<'_>) {
         // The sealed colon-declare form spells NAMED params
         // (`alloc: fn(n: usize, v: Self) -> R;`), which the plain fn TYPE
         // grammar doesn't accept — parse a signature-shaped fn instead.
-        if p.at(FN_KW) {
+        if p.at(FN_KW) || (p.at(UNSAFE_KW) && p.nth(1) == FN_KW) {
             member_decl_fn_signature(p);
         } else {
             type_(p);
@@ -671,7 +766,7 @@ fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
         while !p.at(R_BRACE) && !p.at(EOF) {
             // Recover at the enclosing item, same as block statements:
             // an item keyword inside an arm list means the `}` is missing.
-            if matches!(p.current(), STATIC_KW | TYPE_KW)
+            if matches!(p.current(), STATIC_KW | TYPE_KW | TRAIT_KW)
                 || (p.at(CONST_KW) && !matches!(p.nth(1), FN_KW | L_BRACE))
             {
                 break;
@@ -1058,6 +1153,14 @@ fn generic_param(p: &mut Parser<'_>) {
     } else if matches!(p.current(), IDENT | HOLE) {
         let m = p.start();
         pattern(p, "expected a type parameter name");
+        // `T: Display + Debug` — bounds live where params are born (TR05:
+        // binder-position bounds, `+` composition).
+        if p.eat(COLON) {
+            type_(p);
+            while p.eat(PLUS) {
+                type_(p);
+            }
+        }
         m.complete(p, TYPE_PARAM);
     } else if !p.at(COMMA) && !p.at(R_ANGLE) {
         p.err_and_bump("expected a generic parameter");
@@ -1339,8 +1442,9 @@ fn block_expr(p: &mut Parser<'_>) -> CompletedMarker {
             // "expected `}`" report to the expect below. `const fn` and
             // `const {` are expressions, not a misplaced item, so only bail
             // here when the one-token lookahead rules those out. `type`
-            // never starts an expression, so it always means an item.
-            STATIC_KW | TYPE_KW => break,
+            // and `trait` never start an expression, so they always mean
+            // an item.
+            STATIC_KW | TYPE_KW | TRAIT_KW => break,
             CONST_KW if !matches!(p.nth(1), FN_KW | L_BRACE) => break,
             SEMICOLON => p.bump_any(),
             _ => {

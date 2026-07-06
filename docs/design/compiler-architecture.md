@@ -25,6 +25,11 @@
 - **X09** The interpreter is an oracle, not a spec. A detected-UB stop is a property of the
   interpreter, never a guarantee of the language; compiled Must may do anything with the same
   program.
+- **X11** The specialization-soundness law, both halves together: selection and codegen are
+  lifetime-erased, and every impl is always-applicable modulo lifetimes. Lifetimes reject
+  programs, never choose behaviours. This licenses monomorphization at codegen, makes the
+  borrow checker's whole output diagnostics, and forbids any rule that derives runtime
+  behaviour from region inference.
 - **X12** Strict first, relax later, over a reject-only core (ruled, not built). Relaxing is
   additive; tightening breaks code. Sugar may only recover what could have been written
   explicitly, and may never change behaviour.
@@ -46,6 +51,9 @@
   indices churn under edits. **X04 X13**
 - **SSA MIR** — user locals are ordinary mutable places. An SSA layer, if it comes, is a
   separate LIR below MIR. **X06**
+- **Lifetime-aware impl selection** — selection becomes inference-dependent, MIR stops being
+  erased, borrow check stops being a decl-level query, and selection and region inference
+  become a mutual fixpoint with no termination argument. **X11**
 - **Interpreter traps as language semantics** — refused in advance, so nobody reads them as
   behaviour codegen must reproduce. **X09**
 - **"Stricter now, relax later" as a universal rule** — it holds for programs and inverts for
@@ -60,3 +68,5 @@
   definition order does not exist at that boundary. Fix it then. **X14**
 - **Diagnostic codes get a customer** — a way to suppress a lint, or a way to reword without
   breaking anyone matching output. Message text is load-bearing today. **X16**
+- **Someone will pay for lifetime-aware selection** — the four costs under Discarded are the
+  price. **X11**

@@ -52,6 +52,11 @@ pub(crate) fn goto_definition(
     if let Some(path_type) = name_ref.syntax().parent().and_then(ast::PathType::cast) {
         let base = path_type.name_ref()?;
         let resolution = hir::file_scope(db, file).resolve(&base.text())?;
+        // A trait name — a bound (`T: Display`) or a type-side impl head
+        // (`impl Display`) — jumps to the trait declaration.
+        if let Resolution::TraitItem(loc) = &resolution {
+            return nav_to_item(db, loc);
+        }
         let Resolution::TypeItem(loc) = resolution else {
             // Builtin types have no source; a value item in type position
             // is not a definition to jump to (a diagnostic already says
@@ -64,8 +69,10 @@ pub(crate) fn goto_definition(
         return nav_to_item(db, &loc);
     }
 
-    // The field name of a dot-call that resolved to an inherent member:
-    // jump to the member's definition inside the type's `with`-chain.
+    // The field name of a dot-call that resolved to a member: jump to the
+    // member's definition inside the owning `with`-chain (impl-directed),
+    // or to the trait's requirement (bound-directed — the impl is only
+    // known per instantiation).
     if let Some(field_expr) = name_ref.syntax().parent().and_then(ast::FieldExpr::cast) {
         let item = hir::checkable_item_at(db, file, field_expr.syntax())?;
         let (_, source_map) = hir::body_with_source_map(db, item);
@@ -74,8 +81,12 @@ pub(crate) fn goto_definition(
             .parent()
             .filter(|p| ast::CallExpr::can_cast(p.kind()))?;
         let call_expr = source_map.expr_for_node(SyntaxNodePtr::new(&call))?;
-        let member = hir::infer::infer(db, item).member_of_expr.get(call_expr)?;
-        return nav_to_member(db, member);
+        let infer = hir::infer::infer(db, item);
+        if let Some(member) = infer.member_of_expr.get(call_expr) {
+            return nav_to_member(db, member);
+        }
+        let bound_call = infer.bound_member_of_expr.get(call_expr)?;
+        return nav_to_requirement(db, &bound_call.trait_, bound_call.member_index);
     }
 
     let path_expr = name_ref.syntax().parent().and_then(ast::PathExpr::cast)?;
@@ -87,10 +98,35 @@ pub(crate) fn goto_definition(
 
     // The second segment of `Shape::Circle`: inference resolved it against
     // the enum's declaration; jump to the variant inside the `type` item.
+    // The member segment of a qualified trait call (`Display::fmt`) jumps
+    // to the impl member the call resolved to, or to the trait's
+    // requirement when the resolution is bound-directed/unresolved.
     if path_expr.variant_name_ref().is_some_and(|v| v == name_ref) {
+        let infer = hir::infer::infer(db, item);
         let path = source_map.expr_for_node(SyntaxNodePtr::new(path_expr.syntax()))?;
-        let variant = hir::infer::infer(db, item).variant_of_expr.get(path)?;
-        return nav_to_variant(db, variant);
+        if let Some(variant) = infer.variant_of_expr.get(path) {
+            return nav_to_variant(db, variant);
+        }
+        let base_name = path_expr.name_ref()?;
+        if let Some(Resolution::TraitItem(trait_loc)) =
+            hir::file_scope(db, file).resolve(&base_name.text())
+        {
+            if let Some(call) = path_expr
+                .syntax()
+                .parent()
+                .filter(|p| ast::CallExpr::can_cast(p.kind()))
+                && let Some(call_expr) = source_map.expr_for_node(SyntaxNodePtr::new(&call))
+                && let Some(member) = infer.qualified_member_of_expr.get(call_expr)
+            {
+                return nav_to_member(db, member);
+            }
+            let requirements = hir::trait_requirements(db, trait_loc.to_id(db));
+            let index = requirements
+                .iter()
+                .position(|req| req.name == name_ref.text())?;
+            return nav_to_requirement(db, &trait_loc, index as u32);
+        }
+        return None;
     }
     // The first segment of `Shape::Circle` lowers as its own `NameRef`
     // expression on the segment's node; a single-segment path sits on the
@@ -118,9 +154,11 @@ pub(crate) fn goto_definition(
         // Ambiguous: jump to the first definition — better than going dead.
         // Type items navigate the same way (a construction call's head is a
         // reference to the declaration).
-        Resolution::Item(loc) | Resolution::Ambiguous(loc) | Resolution::TypeItem(loc) => {
-            nav_to_item(db, loc)
-        }
+        // A trait name (a qualified call's base) navigates like a type's.
+        Resolution::Item(loc)
+        | Resolution::Ambiguous(loc)
+        | Resolution::TypeItem(loc)
+        | Resolution::TraitItem(loc) => nav_to_item(db, loc),
         // A const param: jump to its declaration in the enclosing
         // binder (`const N: usize` in `fn::<...>`).
         Resolution::ConstParam(index) => {
@@ -148,6 +186,33 @@ pub(crate) fn goto_definition(
         // Builtins have no source to jump to.
         Resolution::Builtin(_) => None,
     }
+}
+
+/// Navigate to a trait's requirement (by declaration index): the
+/// requirement member node is the full range, its name the focus.
+fn nav_to_requirement(
+    db: &RootDatabase,
+    trait_loc: &hir::ItemLoc,
+    index: u32,
+) -> Option<NavigationTarget> {
+    let ast::Item::TraitItem(decl) = hir::item_source(db, trait_loc.to_id(db))? else {
+        return None;
+    };
+    let requirements = hir::trait_requirements(db, trait_loc.to_id(db));
+    let name = &requirements.get(index as usize)?.name;
+    let member = decl
+        .requires_def()?
+        .members()
+        .find(|member| member.name().is_some_and(|n| n.text() == *name))?;
+    let focus_range = member
+        .name()
+        .map(|n| n.syntax().text_range())
+        .unwrap_or_else(|| member.syntax().text_range());
+    Some(NavigationTarget {
+        file: trait_loc.file,
+        full_range: member.syntax().text_range(),
+        focus_range,
+    })
 }
 
 /// Navigate to a member's definition inside its type's `with`-chain: the
