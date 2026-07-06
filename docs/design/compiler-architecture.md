@@ -25,6 +25,9 @@
 - **X09** The interpreter is an oracle, not a spec. A detected-UB stop is a property of the
   interpreter, never a guarantee of the language; compiled Must may do anything with the same
   program.
+- **X12** Strict first, relax later, over a reject-only core (ruled, not built). Relaxing is
+  additive; tightening breaks code. Sugar may only recover what could have been written
+  explicitly, and may never change behaviour.
 - **X13** Declaration-site checking. A generic body is checked once against rigid parameters,
   never per instantiation.
 - **X14** User-visible field and member order is definition order. Internal name-sorted
@@ -45,9 +48,14 @@
   separate LIR below MIR. **X06**
 - **Interpreter traps as language semantics** — refused in advance, so nobody reads them as
   behaviour codegen must reproduce. **X09**
+- **"Stricter now, relax later" as a universal rule** — it holds for programs and inverts for
+  optimizations: more UB is the enabling direction for a compiler, so removing UB later
+  invalidates optimizations already shipped. **X12**
 
 ## Re-evaluate when
 
+- **An LIR is built** — rule the aliasing model first: removing UB later invalidates
+  optimizations already shipped. **X06 X12**
 - **Layout, tuples or FFI make field order observable** — MIR's order is name-sorted and
   definition order does not exist at that boundary. Fix it then. **X14**
 - **Diagnostic codes get a customer** — a way to suppress a lint, or a way to reword without

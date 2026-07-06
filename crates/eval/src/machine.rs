@@ -102,13 +102,13 @@ pub struct Frame {
     locals: ArenaMap<LocalId, Value>,
     /// The two-tier promotion map: locals whose address was taken, and the
     /// allocation each one moved into. Populated lazily at the first
-    /// `&raw` of a local (MIR statically marks the candidates — see
+    /// `.&raw` of a local (MIR statically marks the candidates — see
     /// `LocalData::addressable`); once promoted, every read/write of the
     /// local goes through the allocation, so writes through pointers and
     /// direct uses see one place. Empty in pointer-free bodies — the
     /// `is_empty` fast path keeps those executing exactly as before. The
     /// frame's allocations die (become detectably dangling) when the
-    /// frame returns: `&raw x` is the address of that frame slot, for that
+    /// frame returns: `x.&raw` is the address of that frame slot, for that
     /// frame's lifetime.
     promoted: FxHashMap<LocalId, AllocId>,
     /// Caller linkage: the local the return value lands in, and the block
@@ -137,7 +137,7 @@ struct Allocation {
     live: bool,
     /// `false` for statics: any write through a pointer into one is
     /// detected UB (unreachable from well-typed code — statics only hand
-    /// out shared `&raw` — but the memory model enforces it regardless).
+    /// out shared `.&raw` — but the memory model enforces it regardless).
     writable: bool,
     kind: AllocKind,
     /// The allocation's birth site — recorded for heap allocations (the
@@ -209,11 +209,11 @@ pub struct Machine<'db, M> {
     const_fuel: u64,
     next_frame_serial: u64,
     /// The typed abstract memory: every address-taken local and every
-    /// `&raw`-mentioned static lives here; nothing else ever does
+    /// `.&raw`-mentioned static lives here; nothing else ever does
     /// (pay-for-what-you-use, applied to the interpreter itself).
     memory: FxHashMap<AllocId, Allocation>,
     /// `static` items' one place each, minted read-only on the first
-    /// `&raw S` — so `&raw S == &raw S` holds across mentions
+    /// `S.&raw` — so `S.&raw == S.&raw` holds across mentions
     /// (static=identity, observable). Plain mentions of `S` keep cloning
     /// the `forced` memo, unchanged.
     static_allocs: FxHashMap<ItemLoc, AllocId>,
@@ -941,7 +941,7 @@ impl<'db, M: Mode> Machine<'db, M> {
 
     /// Resolve a place to an abstract-memory location `(allocation,
     /// element path)` without touching the final slot — the shared engine
-    /// behind `&raw` minting and pointer-routed stores. A place with no
+    /// behind `.&raw` minting and pointer-routed stores. A place with no
     /// deref addresses the root local's own storage: the local is
     /// promoted into memory (first address-taking only). A deref instead
     /// READS the pointer the leading steps name and continues inside its
@@ -1382,11 +1382,11 @@ impl<'db, M: Mode> Machine<'db, M> {
                     other => Err(self.ill_typed("a record or payload value", &other, loc, origin)),
                 }
             }
-            // `&raw [mut] place`: resolve the place to `(allocation,
+            // `place.&raw [mut]`: resolve the place to `(allocation,
             // path)` and mint the pointer — an (AllocId, path) pair, never
             // a number. A plain local root is promoted into abstract
             // memory (first address-taking only; after that the allocation
-            // IS the local); a deref-rooted place (`&raw mut p.*.x`)
+            // IS the local); a deref-rooted place (`p.*.x.&raw mut`)
             // instead reads the pointer and extends its path — the
             // ORIGINAL allocation's identity, no intermediate
             // materialization, no promotion. Element steps are NOT
@@ -1405,8 +1405,8 @@ impl<'db, M: Mode> Machine<'db, M> {
                 )?;
                 Ok(Value::Ptr { alloc, path })
             }
-            // `&raw S[.field | [index]]...`: the static's ONE allocation,
-            // minted read-only on first mention — so two `&raw S` are the
+            // `S[.field | [index]]....&raw`: the static's ONE allocation,
+            // minted read-only on first mention — so two `S.&raw` are the
             // same address (static=identity, observable). Plain `S`
             // mentions keep cloning the memo, unchanged. Element steps
             // append unchecked, like every address-taking.
@@ -1445,7 +1445,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                         // form.
                         ResolvedProj::Deref => {
                             return Err(self.internal_error(
-                                "a deref projection reached `&raw` of a static".to_owned(),
+                                "a deref projection reached `.&raw` of a static".to_owned(),
                                 Some((loc.clone(), origin)),
                             ));
                         }
@@ -1472,7 +1472,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             return Ok(alloc);
         }
         let Some(value) = frame.locals.remove(local) else {
-            // `&raw` of a local no `let` initialized: unreachable from real
+            // `.&raw` of a local no `let` initialized: unreachable from real
             // programs (a `let` always initializes); loud like other reads
             // of uninitialized slots.
             return Err(self.internal_error(
@@ -2011,7 +2011,7 @@ impl<'db, M: Mode> Machine<'db, M> {
     /// `add(p, i)`: pointer to element (head-index + i) of the same
     /// allocation. Minting is UNCHECKED per the shipped rule — no bounds
     /// judgement here; an out-of-range result is detected UB at its first
-    /// deref, exactly like `&raw mut a[i]` past the end. The one shape the
+    /// deref, exactly like `a[i].&raw mut` past the end. The one shape the
     /// abstract machine cannot represent — advancing a pointer that does
     /// not address an array element (a lone local, a record field) — is
     /// refused as detected UB at the call (with `i == 0` as the harmless
@@ -2418,7 +2418,7 @@ fn project_path_mut<'v>(
 /// steps.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PathMode {
-    /// `&raw` address-taking: validity is a deref-time judgement (never a
+    /// `.&raw` address-taking: validity is a deref-time judgement (never a
     /// minting-time one, so stricter checks can be added later without
     /// breaking programs), so element steps append UNCHECKED. An
     /// out-of-range address mints silently; every later deref of it is

@@ -125,6 +125,8 @@ pub enum SyntaxKind {
     RAW_PTR_TYPE,
     ADDR_OF_EXPR,
     DEREF_EXPR,
+    BORROW_EXPR,
+    BORROW_TYPE,
     UNSAFE_BLOCK_EXPR,
     ARRAY_TYPE,
     ARRAY_EXPR,

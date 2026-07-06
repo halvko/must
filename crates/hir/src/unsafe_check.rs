@@ -2,7 +2,7 @@
 //!
 //! The rule is exactly "operations whose misuse is UB": dereferencing a raw
 //! pointer — reading `p.*` or writing `p.* = v;` — must sit inside an
-//! `unsafe { ... }` block. Taking an address (`&raw x` / `&raw mut x`) is
+//! `unsafe { ... }` block. Taking an address (`x.&raw` / `x.&raw mut`) is
 //! safe (creating a pointer is harmless; the hazard is at the deref), and
 //! so is pointer comparison.
 //!
@@ -192,7 +192,7 @@ impl CheckCtx<'_> {
                 self.check_expr(*base, in_unsafe);
                 self.check_expr(*index, in_unsafe);
             }
-            // Taking `&raw` is safe (the hazard is at the deref); the place
+            // Taking `.&raw` is safe (the hazard is at the deref); the place
             // may still contain a deref of its own, which is judged as one.
             ExprData::AddrOf { place, .. } => self.check_expr(*place, in_unsafe),
             // THE unsafe operation: deref, read or write.

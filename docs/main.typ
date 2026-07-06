@@ -610,19 +610,23 @@ Honest restrictions, all diagnosed:
 
 == Raw pointers and unsafe
 
-Raw pointers reach places all the way down. The types are `&raw T`
-(shared) and `&raw mut T` (mutable). An address is taken with `&raw place` /
-`&raw mut place`, and a place is now the full grammar: a variable, a chain
+Raw pointers reach places all the way down. The types are `T.&raw`
+(shared) and `T.&raw mut` (mutable). An address is taken with `place.&raw` /
+`place.&raw mut`, and a place is now the full grammar: a variable, a chain
 of its fields and elements (`r.a`, `a[i]`, `a[i][j]`), a `static` or `const`
 item (a `const` use's own copy), or a chain rooted in a deref (`p.*.x` — a
 place reached *through* a pointer). There is no address-of a temporary. A
 pointer is followed with the postfix deref `p.*`; there is **no
 auto-deref**, so `p.*` is the only way a pointer is ever read or written.
+The old prefix spelling (`&raw place` / `&raw mut place`) is retired:
+writing it gets a targeted migration diagnostic pointing at the postfix
+form, not a silent reinterpretation. Plain `.&` / `.&mut`, with no `raw`,
+are reserved for safe borrows — not supported yet.
 
 ```must
 static main = fn () -> usize {
     let mut x = 1;
-    let p = &raw mut x;
+    let p = x.&raw mut;
     unsafe { p.* = 42; };
     x                       // 42
 };
@@ -633,60 +637,59 @@ write — must sit inside an `unsafe { ... }` block, a lexical checker region
 within a function; the message otherwise is `dereferencing a raw pointer
 requires an `unsafe { ... }` block`. The deref rule covers the new places
 evenhandedly: an assignment target like `p.*.x` *is* a deref write, and so
-is the `p.*` inside `&raw mut p.*.x` — computing an address through a
-pointer follows one first. `&raw mut place` additionally requires the root
+is the `p.*` inside `p.*.x.&raw mut` — computing an address through a
+pointer follows one first. `place.&raw mut` additionally requires the root
 binding to be `mut` — the existing transitivity rule verbatim — and blames
-the root with the same "make it `mut`" quick fix an assignment would; `&raw
-place` (shared) needs no `mut`. `&raw mut` of a `static` is rejected:
+the root with the same "make it `mut`" quick fix an assignment would;
+`place.&raw` (shared) needs no `mut`. `.&raw mut` of a `static` is rejected:
 `static mut` stays deferred.
 
 Writes through pointers are judged on the pointer, never on a binding. The
 target of an assignment may be any deref-rooted chain — `p.* = v;`,
 `p.*.x = v;`, even `p.*.xs[i] = v;` — and the judgment is the GOVERNING
-pointer: the receiver of the chain's outermost deref must be `&raw mut T`.
-Writing through a shared `&raw T` is rejected (`cannot assign through
-`&raw T`: writing needs a `&raw mut` pointer`), and so is `&raw mut p.*.x`
+pointer: the receiver of the chain's outermost deref must be `T.&raw mut`.
+Writing through a shared `T.&raw` is rejected (`cannot assign through
+`T.&raw`: writing needs a `.&raw mut` pointer`), and so is `p.*.x.&raw mut`
 through a shared pointer — minting a mutating address must not launder the
 shared flavor into a write permission. `p` itself never needs to be a `mut`
 binding — writing through it reassigns nothing — and derefs deeper in the
 chain are ordinary *reads*, whose pointers' flavors don't matter. A
 deref-rooted address is the original allocation's address with the path
-extended — `&raw mut p.*.x` hands out the very place `p` points to, one
+extended — `p.*.x.&raw mut` hands out the very place `p` points to, one
 field in; no copy is materialized on the way.
 
-`&raw x` on a local is the address of that frame slot, for that frame's
+`x.&raw` on a local is the address of that frame slot, for that frame's
 lifetime — and no longer. Nothing here promises stable addresses for locals
 beyond their frame's life, nor address preservation across copies: copying a
-value copies the pointer bits, never the pointee's identity. Return a
-`&raw mut x` past the frame that owns `x` and a later deref is a dangling
+value copies the pointer bits, never the pointee's identity. Return an
+`x.&raw mut` past the frame that owns `x` and a later deref is a dangling
 pointer. The interpreter *detects* the misuse cases and traps
-deterministically. Address-taking itself never bounds-checks — `&raw mut
-a[i + 1]` mints silently even past the end — so validity is judged where
-the pointer is *used*: every deref first checks liveness and the pointer's
-stored path, and a write through one mutates the pointee in place, so
-pointers into it survive the write, exactly like real memory. The traps: a
-deref after the owning frame returned (`error[UndefinedBehavior]: dangling
-pointer — the local it pointed to no longer exists (its frame has
-returned)`), a deref of an address minted out of bounds
-(`error[UndefinedBehavior]: out-of-bounds pointer — it points to element 5
-of an array with 2 elements`), a write into read-only memory
+deterministically. Address-taking itself never bounds-checks —
+`a[i + 1].&raw mut` mints silently even past the end — so validity is
+judged where the pointer is *used*: every deref first checks liveness and
+the pointer's stored path, and a write through one mutates the pointee in
+place, so pointers into it survive the write, exactly like real memory. The
+traps: a deref after the owning frame returned
+(`error[UndefinedBehavior]: dangling pointer — the local it pointed to no
+longer exists (its frame has returned)`), a deref of an address minted out
+of bounds (`error[UndefinedBehavior]: out-of-bounds pointer — it points to
+element 5 of an array with 2 elements`), a write into read-only memory
 (`error[UndefinedBehavior]: write through a pointer into read-only memory
 (a `static`)`). But that detection is interpreter quality, not a language
 guarantee: the program is undefined behavior, and a later backend may do
 anything with it. Detected-UB traps make the interpreter a good teacher;
 they do not make the code correct. A pointer value never renders as a
-number either — `&raw <opaque>`, because no integer addresses exist to
-leak.
+number either — `&raw <opaque>`, a fixed debug spelling, not source syntax.
 
 Unsafe is legal in const contexts — pointers may be used freely during
 compile-time evaluation — but a pointer can never *leave* it: a memoized
 initializer whose value contains a pointer is `a pointer cannot leave
 compile-time evaluation`. Statics and consts differ through a pointer just
 as they do everywhere else, now *observably*: a `static` names one place, so
-every `&raw S` is the same address (`&raw S == &raw S` is `true`) — that
+every `S.&raw` is the same address (`S.&raw == S.&raw` is `true`) — that
 half is a language promise. A `const` is copied into each use, and the
-interpreter happens to give every `&raw C` its own temporary (`&raw C ==
-&raw C` is `false`), but const-mention identity is deliberately
+interpreter happens to give every `C.&raw` its own temporary (`C.&raw ==
+C.&raw` is `false`), but const-mention identity is deliberately
 unspecified: a compiler may merge or split immutable copies. Compare
 static-derived addresses; never const-derived ones.
 
@@ -700,7 +703,7 @@ ordinary Must code (`examples/heap.must` is that library, twice over: a
 growable vector and a typed arena).
 
 - `alloc_array::<T>(n)` is safe and result-shaped. It returns
-  `AllocResult::<T>`, a compiler-provided `enum { Ok(&raw mut T), Err }`,
+  `AllocResult::<T>`, a compiler-provided `enum { Ok(T.&raw mut), Err }`,
   so every allocation site says what it does when memory runs out (the
   interpreter's own allocator never answers `Err`; allocators written over
   it do). Fresh elements are *uninitialized*: reading one before its first
@@ -712,7 +715,7 @@ growable vector and a typed arena).
   each detected UB, with an "allocated here" note at the allocation's
   birth site. Not freeing is a leak, and a leak is not UB.
 - `add(p, i)` is `unsafe` and takes a `usize`. Minting the address is
-  unchecked, like `&raw mut a[i]` — an out-of-range result derefs to
+  unchecked, like `a[i].&raw mut` — an out-of-range result derefs to
   detected UB — but advancing a pointer that does not address an array
   element, with `i > 0`, is detected UB at the call itself, which is why
   it needs `unsafe` before any deref.
@@ -724,7 +727,7 @@ growable vector and a typed arena).
   overlapping ranges are defined, uninitialized elements copy silently,
   out of range on either side is detected UB, and a zero-length copy is
   valid through any pointer.
-- `dangling::<T>()` is safe: a `&raw mut T` that was never valid, the
+- `dangling::<T>()` is safe: a `T.&raw mut` that was never valid, the
   stand-in for "no buffer yet" (there is no null). Any deref is detected
   UB.
 

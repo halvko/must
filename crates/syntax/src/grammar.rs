@@ -433,6 +433,27 @@ fn expr_bp(p: &mut Parser<'_>, min_bp: u8) -> Option<CompletedMarker> {
             lhs = m.complete(p, DEREF_EXPR);
             continue;
         }
+        // Postfix address-of `x.&raw` / `x.&raw mut` — the dual of `.*`,
+        // sitting in the same field-access tier so it chains greedily
+        // (`x.&raw mut.*`, `p.*.&raw mut`). The reserved safe borrows
+        // `x.&` / `x.&mut` (DOT AMP without `raw`) parse into their own node
+        // and are rejected by validation (parse-and-reserve). Lexed
+        // DOT AMP [raw] [mut]; checked before the plain field arm so the `.`
+        // never half-parses as a broken field access.
+        if p.at(DOT) && p.nth(1) == AMP {
+            let m = lhs.precede(p);
+            p.bump(DOT);
+            p.bump(AMP);
+            if p.at(RAW_KW) {
+                p.bump(RAW_KW);
+                p.eat(MUT_KW);
+                lhs = m.complete(p, ADDR_OF_EXPR);
+            } else {
+                p.eat(MUT_KW);
+                lhs = m.complete(p, BORROW_EXPR);
+            }
+            continue;
+        }
         // Indexing sits in the call/field tier too, so `a[0][1]`, `m[i].x`
         // and `f()[0]` all chain naturally. A `[` after an expression is
         // always an index — array *literals* only start expressions
@@ -505,15 +526,17 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
     if p.at(ENUM_KW) && at_type_literal_body(p) {
         return Some(enum_expr(p));
     }
-    // `&raw x` / `&raw mut x` — address-of. `&` alone is not an expression
+    // The RETIRED prefix `&raw x` / `&raw mut x` — kept only to emit the
+    // migration diagnostic (see `addr_of_expr`); the live spelling is
+    // postfix `x.&raw` / `x.&raw mut`. `&` alone is not an expression
     // starter (references are reserved), so the arm is gated on the `raw`
     // keyword following.
     if p.at(AMP) && p.nth(1) == RAW_KW {
         return Some(addr_of_expr(p));
     }
-    // `-x` — unary minus on numbers. Same operand tier as `&raw`: a primary
-    // expression plus its postfix chain, so `-a.b` negates the field and
-    // `-x + y` stays a sum of the negation.
+    // `-x` — unary minus on numbers. Same operand tier as the retired
+    // prefix `&raw`: a primary expression plus its postfix chain, so
+    // `-a.b` negates the field and `-x + y` stays a sum of the negation.
     if p.at(MINUS) {
         let m = p.start();
         p.bump(MINUS);
@@ -899,14 +922,17 @@ fn array_expr(p: &mut Parser<'_>) -> CompletedMarker {
     m.complete(p, ARRAY_EXPR)
 }
 
-/// `&raw x` / `&raw mut x` — address-of. The caller has already confirmed
-/// `p.at(AMP) && p.nth(1) == RAW_KW`. The operand parses with a binding
-/// power above every binary operator, so it takes exactly a primary
-/// expression plus its postfix chain (`&raw mut x.f`, and `&raw x == y`
-/// stays a comparison of the pointer) — a superset of the place
-/// expressions the language accepts; hir rejects non-places.
+/// The RETIRED prefix address-of `&raw x` / `&raw mut x`. The caller has
+/// already confirmed `p.at(AMP) && p.nth(1) == RAW_KW`. Raw borrows are now
+/// spelled postfix (`x.&raw` / `x.&raw mut`); the prefix form superset-parses
+/// into the same `ADDR_OF_EXPR` node (never a silent reinterpretation) so
+/// downstream keeps working, with a targeted migration diagnostic anchored on
+/// the leading `&`. The operand parses with a binding power above every
+/// binary operator, so it takes exactly a primary expression plus its postfix
+/// chain — a superset of the place expressions the language accepts.
 fn addr_of_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
+    p.error("raw borrows are spelled postfix: `x.&raw` / `x.&raw mut`");
     p.bump(AMP);
     p.bump(RAW_KW);
     p.eat(MUT_KW);
@@ -1386,36 +1412,70 @@ fn let_stmt(p: &mut Parser<'_>) {
 // ---- types ----
 
 fn type_(p: &mut Parser<'_>) {
-    match p.current() {
+    let Some(mut lhs) = type_core(p) else { return };
+    loop {
+        // Postfix raw pointer `T.&raw` / `T.&raw mut`, mirroring the
+        // expression-side postfix address-of, and the reserved safe
+        // reference types `T.&` / `T.&mut` (DOT AMP without `raw`, rejected
+        // by validation — parse-and-reserve). Chains the same way its
+        // expression dual does (`T.&raw mut.&raw`). Lexed DOT AMP [raw] [mut].
+        if p.at(DOT) && p.nth(1) == AMP {
+            let m = lhs.precede(p);
+            p.bump(DOT);
+            p.bump(AMP);
+            if p.at(RAW_KW) {
+                p.bump(RAW_KW);
+                p.eat(MUT_KW);
+                lhs = m.complete(p, RAW_PTR_TYPE);
+            } else {
+                p.eat(MUT_KW);
+                lhs = m.complete(p, BORROW_TYPE);
+            }
+            continue;
+        }
+        break;
+    }
+}
+
+/// The core (non-postfix) type. Returns `None` only when nothing was parsed
+/// (the `_ => error` arm), so the postfix loop in [`type_`] has no operand.
+fn type_core(p: &mut Parser<'_>) -> Option<CompletedMarker> {
+    let cm = match p.current() {
         L_PAREN => {
             let m = p.start();
             p.bump(L_PAREN);
             p.expect(R_PAREN, "`)` (only the unit type `()` is supported here)");
-            m.complete(p, UNIT_TYPE);
+            m.complete(p, UNIT_TYPE)
         }
         BANG => {
             let m = p.start();
             p.bump(BANG);
-            m.complete(p, NEVER_TYPE);
+            m.complete(p, NEVER_TYPE)
         }
-        // `&raw T` / `&raw mut T` — a raw pointer type. Without the `raw`
-        // keyword the `&` still parses as a reference type, which stays
-        // reserved ("references are not supported yet", see validation) —
-        // `&T`/`&mut T` are kept unclaimed for real references later.
+        // The RETIRED prefix raw pointer type `&raw T` / `&raw mut T`. Raw
+        // pointers are now spelled postfix (`T.&raw` / `T.&raw mut`); the
+        // prefix form superset-parses into the same `RAW_PTR_TYPE` node (never
+        // a silent reinterpretation) with a migration diagnostic.
         AMP if p.nth(1) == RAW_KW => {
             let m = p.start();
+            p.error("raw pointer types are spelled postfix: `T.&raw` / `T.&raw mut`");
             p.bump(AMP);
             p.bump(RAW_KW);
             p.eat(MUT_KW);
             type_(p);
-            m.complete(p, RAW_PTR_TYPE);
+            m.complete(p, RAW_PTR_TYPE)
         }
+        // Without the `raw` keyword the `&` parses as a reference type, which
+        // stays reserved ("references are not supported yet", see validation)
+        // — `&T`/`&mut T` are kept unclaimed for real references later. (Safe
+        // references will spell postfix `T.&`; the prefix `&T` reservation
+        // remains until the borrow round rules on it.)
         AMP => {
             let m = p.start();
             p.bump(AMP);
             p.eat(LIFETIME_IDENT);
             type_(p);
-            m.complete(p, REF_TYPE);
+            m.complete(p, REF_TYPE)
         }
         FN_KW => {
             let m = p.start();
@@ -1438,7 +1498,7 @@ fn type_(p: &mut Parser<'_>) {
             if p.at(THIN_ARROW) {
                 ret_type(p);
             }
-            m.complete(p, FN_TYPE);
+            m.complete(p, FN_TYPE)
         }
         IDENT => {
             let m = p.start();
@@ -1457,18 +1517,22 @@ fn type_(p: &mut Parser<'_>) {
                     p.error("expected a variant name after `::`");
                 }
             }
-            m.complete(p, PATH_TYPE);
+            m.complete(p, PATH_TYPE)
         }
         HOLE => {
             let m = p.start();
             p.bump(HOLE);
-            m.complete(p, HOLE_TYPE);
+            m.complete(p, HOLE_TYPE)
         }
         // Record types are introduced by `struct`; a bare `{` is not a type.
         STRUCT_KW => record_type(p),
         L_BRACKET => array_type(p),
-        _ => p.error("expected a type"),
-    }
+        _ => {
+            p.error("expected a type");
+            return None;
+        }
+    };
+    Some(cm)
 }
 
 /// `[T; N]` — a fixed-size array type. The length is a const argument in
@@ -1477,7 +1541,7 @@ fn type_(p: &mut Parser<'_>) {
 /// including `const { ... }`, which parses here (resilience) but is always
 /// rejected semantically (type identity lives on the eval-free path; see
 /// `hir`'s annotation mirror).
-fn array_type(p: &mut Parser<'_>) {
+fn array_type(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(L_BRACKET);
     type_(p);
@@ -1485,7 +1549,7 @@ fn array_type(p: &mut Parser<'_>) {
         array_len_arg(p);
     }
     p.expect_after_prev(R_BRACKET);
-    m.complete(p, ARRAY_TYPE);
+    m.complete(p, ARRAY_TYPE)
 }
 
 /// The length of an [`array_type`]: a `CONST_ARG` node, same shapes as a
@@ -1543,7 +1607,7 @@ fn array_len_arg(p: &mut Parser<'_>) {
 
 /// `struct { name: Type, name: Type, ... }` — a record type. Dispatched on the
 /// leading `struct` keyword; the `{` is expected (not guaranteed) afterwards.
-fn record_type(p: &mut Parser<'_>) {
+fn record_type(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(STRUCT_KW);
     if p.expect(L_BRACE, "`{`") {
@@ -1564,7 +1628,7 @@ fn record_type(p: &mut Parser<'_>) {
         }
         p.expect_after_prev(R_BRACE);
     }
-    m.complete(p, RECORD_TYPE);
+    m.complete(p, RECORD_TYPE)
 }
 
 /// A record-type field: `name: Type`. The name is a declaration, so it is

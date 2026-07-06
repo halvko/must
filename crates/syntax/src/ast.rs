@@ -233,14 +233,27 @@ ast_enum!(
 );
 
 ast_node!(
-    /// `&raw x` / `&raw mut x` — takes the address of a place, producing a
-    /// raw pointer. The operand superset-parses as any postfix chain; hir
-    /// restricts it to places (a variable, its fields, a `static`).
+    /// `x.&raw` / `x.&raw mut` — postfix address-of, the dual of `.*`:
+    /// takes the address of a place, producing a raw pointer, and chains
+    /// like field access. hir restricts the receiver to places (a variable,
+    /// a chain of its fields and elements, a `static`/`const` item, or a
+    /// chain rooted in a deref). The retired prefix spelling `&raw x`
+    /// superset-parses into this node too (with a migration diagnostic).
     AddrOfExpr: ADDR_OF_EXPR
 );
 ast_node!(
     /// `p.*` — postfix deref of a raw pointer; chains like field access.
     DerefExpr: DEREF_EXPR
+);
+ast_node!(
+    /// `x.&` / `x.&mut` — a postfix safe borrow, the dual of `.*`. Reserved
+    /// for the borrow round; validation rejects it (parse-and-reserve).
+    BorrowExpr: BORROW_EXPR
+);
+ast_node!(
+    /// `T.&` / `T.&mut` — a postfix safe reference type. Reserved for the
+    /// borrow round; validation rejects it (parse-and-reserve).
+    BorrowType: BORROW_TYPE
 );
 ast_node!(
     /// `unsafe { ... }` — a checker region: raw-pointer derefs are legal
@@ -249,7 +262,10 @@ ast_node!(
     UnsafeBlockExpr: UNSAFE_BLOCK_EXPR
 );
 ast_node!(
-    /// `&raw T` / `&raw mut T` — a raw pointer type.
+    /// `T.&raw` / `T.&raw mut` — a postfix raw pointer type, mirroring the
+    /// expression-side postfix address-of. The retired prefix spelling
+    /// `&raw T` superset-parses into this node too (with a migration
+    /// diagnostic).
     RawPtrType: RAW_PTR_TYPE
 );
 ast_node!(
@@ -322,6 +338,7 @@ ast_enum!(
     FieldExpr,
     AddrOfExpr,
     DerefExpr,
+    BorrowExpr,
     EnumExpr,
     MatchExpr,
     LoopExpr,
@@ -351,6 +368,7 @@ ast_enum!(
     PathType,
     RefType,
     RawPtrType,
+    BorrowType,
     HoleType,
     RecordType,
     ArrayType
@@ -1128,6 +1146,32 @@ impl DerefExpr {
     }
     pub fn star_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, STAR)
+    }
+}
+
+impl BorrowExpr {
+    /// The place being borrowed.
+    pub fn receiver(&self) -> Option<Expr> {
+        child(&self.syntax)
+    }
+    pub fn mut_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, MUT_KW)
+    }
+    pub fn is_mut(&self) -> bool {
+        self.mut_token().is_some()
+    }
+}
+
+impl BorrowType {
+    /// The referent type.
+    pub fn ty(&self) -> Option<Type> {
+        child(&self.syntax)
+    }
+    pub fn mut_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, MUT_KW)
+    }
+    pub fn is_mut(&self) -> bool {
+        self.mut_token().is_some()
     }
 }
 

@@ -5028,8 +5028,8 @@ fn raw_pointer_types_infer_and_display() {
         r#"
 static main = fn() -> usize {
     let mut x = 1;
-    let p = &raw mut x;
-    let q = &raw x;
+    let p = x.&raw mut;
+    let q = x.&raw;
     unsafe { p.* }
 };
 "#,
@@ -5038,15 +5038,15 @@ static main = fn() -> usize {
             29..114 '{     let mut x =...': usize
             43..44 'x': usize
             47..48 '1': usize
-            58..59 'p': &raw mut usize
-            62..72 '&raw mut x': &raw mut usize
-            71..72 'x': usize
-            82..83 'q': &raw usize
-            86..92 '&raw x': &raw usize
-            91..92 'x': usize
+            58..59 'p': usize.&raw mut
+            62..63 'x': usize
+            62..72 'x.&raw mut': usize.&raw mut
+            82..83 'q': usize.&raw
+            86..87 'x': usize
+            86..92 'x.&raw': usize.&raw
             98..112 'unsafe { p.* }': usize
             105..112 '{ p.* }': usize
-            107..108 'p': &raw mut usize
+            107..108 'p': usize.&raw mut
             107..110 'p.*': usize
         "#]],
     );
@@ -5055,10 +5055,10 @@ static main = fn() -> usize {
 #[test]
 fn addr_of_mut_requires_a_mut_root() {
     check_diagnostics(
-        "static main = fn { let x = 1; let p = &raw mut x; };",
+        "static main = fn { let x = 1; let p = x.&raw mut; };",
         expect![[r#"
             27..28: cannot infer the type of this number: it has no defining use — add a type annotation
-            47..48: cannot take `&raw mut` of `x`: it is not declared `mut` (`x` is declared without `mut` here at 23..24)
+            38..39: cannot take `.&raw mut` of `x`: it is not declared `mut` (`x` is declared without `mut` here at 23..24)
         "#]],
     );
 }
@@ -5066,10 +5066,10 @@ fn addr_of_mut_requires_a_mut_root() {
 #[test]
 fn addr_of_mut_of_a_field_blames_the_root() {
     check_diagnostics(
-        "static main = fn { let r = struct { a = 1 }; let p = &raw mut r.a; };",
+        "static main = fn { let r = struct { a = 1 }; let p = r.a.&raw mut; };",
         expect![[r#"
             40..41: cannot infer the type of this number: it has no defining use — add a type annotation
-            62..63: cannot take `&raw mut` of `r.a`: `r` is not declared `mut` (`r` is declared without `mut` here at 23..24)
+            53..54: cannot take `.&raw mut` of `r.a`: `r` is not declared `mut` (`r` is declared without `mut` here at 23..24)
         "#]],
     );
 }
@@ -5077,7 +5077,7 @@ fn addr_of_mut_of_a_field_blames_the_root() {
 #[test]
 fn addr_of_shared_needs_no_mut() {
     check_diagnostics(
-        "static main = fn { let x = 1; let p = &raw x; };",
+        "static main = fn { let x = 1; let p = x.&raw; };",
         expect![[r#"
             27..28: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
@@ -5087,11 +5087,11 @@ fn addr_of_shared_needs_no_mut() {
 #[test]
 fn addr_of_mut_of_a_static_is_reserved() {
     check_diagnostics(
-        "static s = 7;\nstatic main = fn { let p = &raw mut s; };",
+        "static s = 7;\nstatic main = fn { let p = s.&raw mut; };",
         expect![[r#"
             11..12: cannot infer the type of this number: it has no defining use — add a type annotation
-            50..51: cannot infer the type of `s` across items; add a type annotation to its definition (defined here at 7..8)
-            50..51: cannot take `&raw mut` of `s`: `static mut` is not supported yet (`s` is defined here at 7..8)
+            41..42: cannot infer the type of `s` across items; add a type annotation to its definition (defined here at 7..8)
+            41..42: cannot take `.&raw mut` of `s`: `static mut` is not supported yet (`s` is defined here at 7..8)
         "#]],
     );
 }
@@ -5099,12 +5099,12 @@ fn addr_of_mut_of_a_static_is_reserved() {
 #[test]
 fn addr_of_shared_of_items_is_fine() {
     check_diagnostics(
-        "static s = 7;\nconst c = 8;\nstatic main = fn { let p = &raw s; let q = &raw c; };",
+        "static s = 7;\nconst c = 8;\nstatic main = fn { let p = s.&raw; let q = c.&raw; };",
         expect![[r#"
             11..12: cannot infer the type of this number: it has no defining use — add a type annotation
             24..25: cannot infer the type of this number: it has no defining use — add a type annotation
-            59..60: cannot infer the type of `s` across items; add a type annotation to its definition (defined here at 7..8)
-            75..76: cannot infer the type of `c` across items; add a type annotation to its definition (defined here at 20..21)
+            54..55: cannot infer the type of `s` across items; add a type annotation to its definition (defined here at 7..8)
+            70..71: cannot infer the type of `c` across items; add a type annotation to its definition (defined here at 20..21)
         "#]],
     );
 }
@@ -5112,10 +5112,37 @@ fn addr_of_shared_of_items_is_fine() {
 #[test]
 fn addr_of_a_non_place_errors() {
     check_diagnostics(
-        "static main = fn { let p = &raw 5; };",
+        "static main = fn { let p = 3.&raw; };",
         expect![[r#"
-            27..33: `&raw` can only take the address of a variable, one of its fields, or a `static`
-            32..33: cannot infer the type of this number: it has no defining use — add a type annotation
+            27..28: cannot infer the type of this number: it has no defining use — add a type annotation
+            27..33: `.&raw` can only take the address of a variable, a chain of its fields and elements, a `static`/`const` item, or a chain rooted in a deref
+        "#]],
+    );
+}
+
+#[test]
+fn reserved_safe_borrow_expr_lowers_without_ice() {
+    // `.&`/`.&mut` parse-and-reserve like `unsafe fn` and non-raw `&x`
+    // reference types: validation rejects them, but the body still lowers
+    // (`BorrowExpr` -> `ExprData::Missing`) and infers past them cleanly.
+    check_diagnostics(
+        "static main = fn { let mut x = 1; let a = x.&; let b = x.&mut; };",
+        expect![[r#"
+            31..32: cannot infer the type of this number: it has no defining use — add a type annotation
+            42..45: safe borrows (`.&`, `.&mut`) are not supported yet
+            55..61: safe borrows (`.&`, `.&mut`) are not supported yet
+        "#]],
+    );
+}
+
+#[test]
+fn reserved_safe_borrow_type_lowers_without_ice() {
+    // `T.&`/`T.&mut` in a field type: validation rejects the reservation,
+    // and the field falls back to `TypeRef::Error` rather than panicking.
+    check_diagnostics(
+        "type Bad = struct { r: usize.& };",
+        expect![[r#"
+            23..30: safe borrows (`.&`, `.&mut`) are not supported yet
         "#]],
     );
 }
@@ -5123,7 +5150,7 @@ fn addr_of_a_non_place_errors() {
 #[test]
 fn addr_of_through_a_deref_works_inside_unsafe() {
     check_diagnostics(
-        "static main = fn { let mut x = 1; let p = &raw mut x; let q = unsafe { &raw mut p.* }; };",
+        "static main = fn { let mut x = 1; let p = x.&raw mut; let q = unsafe { p.*.&raw mut }; };",
         expect![[r#"
             31..32: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
@@ -5132,13 +5159,13 @@ fn addr_of_through_a_deref_works_inside_unsafe() {
 
 #[test]
 fn addr_of_through_a_deref_still_requires_unsafe() {
-    // The deref rule is uniform: the deref inside an `&raw` place needs
+    // The deref rule is uniform: the deref inside a `.&raw` place needs
     // `unsafe` like any other deref site.
     check_diagnostics(
-        "static main = fn { let mut x = 1; let p = &raw mut x; let q = &raw mut p.*; };",
+        "static main = fn { let mut x = 1; let p = x.&raw mut; let q = p.*.&raw mut; };",
         expect![[r#"
             31..32: cannot infer the type of this number: it has no defining use — add a type annotation
-            71..74: dereferencing a raw pointer requires an `unsafe { ... }` block
+            62..65: dereferencing a raw pointer requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -5149,13 +5176,13 @@ fn addr_of_mut_through_a_shared_pointer_errors() {
         r#"
 static main = fn {
     let mut r = struct { a = 1 };
-    let p = &raw r;
-    let q = unsafe { &raw mut p.*.a };
+    let p = r.&raw;
+    let q = unsafe { p.*.a.&raw mut };
 };
 "#,
         expect![[r#"
             49..50: cannot infer the type of this number: it has no defining use — add a type annotation
-            95..109: cannot take `&raw mut` through `&raw struct { a: {number} }`: minting a mutating address needs a `&raw mut` pointer
+            95..109: cannot take `.&raw mut` through `struct { a: {number} }.&raw`: minting a mutating address needs a `.&raw mut` pointer
         "#]],
     );
 }
@@ -5166,8 +5193,8 @@ fn addr_of_shared_through_any_pointer_is_fine() {
         r#"
 static main = fn {
     let mut r = struct { a = 1 };
-    let p = &raw r;
-    let q = unsafe { &raw p.*.a };
+    let p = r.&raw;
+    let q = unsafe { p.*.a.&raw };
 };
 "#,
         expect![[r#"
@@ -5182,8 +5209,8 @@ fn addr_of_through_a_deref_types_as_the_projected_pointee() {
         r#"
 static main = fn {
     let mut r = struct { a = 1, b = 2 };
-    let p = &raw mut r;
-    let q = unsafe { &raw mut p.*.a };
+    let p = r.&raw mut;
+    let q = unsafe { p.*.a.&raw mut };
 };
 "#,
         expect![[r#"
@@ -5193,16 +5220,16 @@ static main = fn {
             36..59 'struct { a = 1, b...': struct { a: {number}, b: {number} }
             49..50 '1': {number}
             56..57 '2': {number}
-            69..70 'p': &raw mut struct { a: {number}, b: {number} }
-            73..83 '&raw mut r': &raw mut struct { a: {number}, b: {number} }
-            82..83 'r': struct { a: {number}, b: {number} }
-            93..94 'q': &raw mut {number}
-            97..122 'unsafe { &raw mut...': &raw mut {number}
-            104..122 '{ &raw mut p.*.a }': &raw mut {number}
-            106..120 '&raw mut p.*.a': &raw mut {number}
-            115..116 'p': &raw mut struct { a: {number}, b: {number} }
-            115..118 'p.*': struct { a: {number}, b: {number} }
-            115..120 'p.*.a': {number}
+            69..70 'p': struct { a: {number}, b: {number} }.&raw mut
+            73..74 'r': struct { a: {number}, b: {number} }
+            73..83 'r.&raw mut': struct { a: {number}, b: {number} }.&raw mut
+            93..94 'q': {number}.&raw mut
+            97..122 'unsafe { p.*.a.&r...': {number}.&raw mut
+            104..122 '{ p.*.a.&raw mut }': {number}.&raw mut
+            106..107 'p': struct { a: {number}, b: {number} }.&raw mut
+            106..109 'p.*': struct { a: {number}, b: {number} }
+            106..111 'p.*.a': {number}
+            106..120 'p.*.a.&raw mut': {number}.&raw mut
         "#]],
     );
 }
@@ -5210,7 +5237,7 @@ static main = fn {
 #[test]
 fn deref_outside_unsafe_errors() {
     check_diagnostics(
-        "static main = fn() -> usize { let mut x = 1; let p = &raw mut x; p.* };",
+        "static main = fn() -> usize { let mut x = 1; let p = x.&raw mut; p.* };",
         expect![[r#"
             65..68: dereferencing a raw pointer requires an `unsafe { ... }` block
         "#]],
@@ -5220,7 +5247,7 @@ fn deref_outside_unsafe_errors() {
 #[test]
 fn deref_inside_unsafe_is_clean() {
     check_diagnostics(
-        "static main = fn() -> usize { let mut x = 1; let p = &raw mut x; unsafe { p.* } };",
+        "static main = fn() -> usize { let mut x = 1; let p = x.&raw mut; unsafe { p.* } };",
         expect![[r#""#]],
     );
 }
@@ -5228,7 +5255,7 @@ fn deref_inside_unsafe_is_clean() {
 #[test]
 fn deref_write_outside_unsafe_errors() {
     check_diagnostics(
-        "static main = fn { let mut x = 1; let p = &raw mut x; p.* = 2; };",
+        "static main = fn { let mut x = 1; let p = x.&raw mut; p.* = 2; };",
         expect![[r#"
             31..32: cannot infer the type of this number: it has no defining use — add a type annotation
             54..57: dereferencing a raw pointer requires an `unsafe { ... }` block
@@ -5239,10 +5266,10 @@ fn deref_write_outside_unsafe_errors() {
 #[test]
 fn deref_write_through_a_shared_pointer_errors() {
     check_diagnostics(
-        "static main = fn { let mut x = 1; let p = &raw x; unsafe { p.* = 2; } };",
+        "static main = fn { let mut x = 1; let p = x.&raw; unsafe { p.* = 2; } };",
         expect![[r#"
             31..32: cannot infer the type of this number: it has no defining use — add a type annotation
-            59..62: cannot assign through `&raw {number}`: writing needs a `&raw mut` pointer
+            59..62: cannot assign through `{number}.&raw`: writing needs a `.&raw mut` pointer
         "#]],
     );
 }
@@ -5250,7 +5277,7 @@ fn deref_write_through_a_shared_pointer_errors() {
 #[test]
 fn deref_write_into_a_pointee_field_works() {
     check_diagnostics(
-        "static main = fn { let mut r = struct { a = 1 }; let p = &raw mut r; unsafe { p.*.a = 2; } };",
+        "static main = fn { let mut r = struct { a = 1 }; let p = r.&raw mut; unsafe { p.*.a = 2; } };",
         expect![[r#"
             44..45: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
@@ -5262,10 +5289,10 @@ fn deref_write_into_a_pointee_field_through_a_shared_pointer_errors() {
     // The chain's outermost deref governs: `p` is shared, so the write is
     // refused at the pointer's flavor — same message as `p.* = v;`.
     check_diagnostics(
-        "static main = fn { let mut r = struct { a = 1 }; let p = &raw r; unsafe { p.*.a = 2; } };",
+        "static main = fn { let mut r = struct { a = 1 }; let p = r.&raw; unsafe { p.*.a = 2; } };",
         expect![[r#"
             44..45: cannot infer the type of this number: it has no defining use — add a type annotation
-            74..77: cannot assign through `&raw struct { a: {number} }`: writing needs a `&raw mut` pointer
+            74..77: cannot assign through `struct { a: {number} }.&raw`: writing needs a `.&raw mut` pointer
         "#]],
     );
 }
@@ -5273,7 +5300,7 @@ fn deref_write_into_a_pointee_field_through_a_shared_pointer_errors() {
 #[test]
 fn deref_write_into_a_pointee_field_still_requires_unsafe() {
     check_diagnostics(
-        "static main = fn { let mut r = struct { a = 1 }; let p = &raw mut r; p.*.a = 2; };",
+        "static main = fn { let mut r = struct { a = 1 }; let p = r.&raw mut; p.*.a = 2; };",
         expect![[r#"
             44..45: cannot infer the type of this number: it has no defining use — add a type annotation
             69..72: dereferencing a raw pointer requires an `unsafe { ... }` block
@@ -5286,7 +5313,7 @@ fn deref_write_needs_no_mut_binding_on_the_pointer() {
     // `p` itself is not `mut` — writing through it does not reassign it,
     // for projected targets exactly like for `p.* = v;`.
     check_diagnostics(
-        "static main = fn { let mut r = struct { a = 1 }; let p = &raw mut r; unsafe { p.*.a = 2; }; let x = p; };",
+        "static main = fn { let mut r = struct { a = 1 }; let p = r.&raw mut; unsafe { p.*.a = 2; }; let x = p; };",
         expect![[r#"
             44..45: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
@@ -5296,7 +5323,7 @@ fn deref_write_needs_no_mut_binding_on_the_pointer() {
 #[test]
 fn pointee_field_reads_work() {
     check_diagnostics(
-        "static main = fn() -> usize { let mut r = struct { a = 1, b = 2 }; let p = &raw mut r; unsafe { p.*.a + p.*.b } };",
+        "static main = fn() -> usize { let mut r = struct { a = 1, b = 2 }; let p = r.&raw mut; unsafe { p.*.a + p.*.b } };",
         expect![[r#""#]],
     );
 }
@@ -5304,9 +5331,9 @@ fn pointee_field_reads_work() {
 #[test]
 fn raw_pointer_unification_is_exact_no_mut_mixing() {
     check_diagnostics(
-        "static f = fn(p: &raw usize) {};\nstatic main = fn { let mut x = 1; f(&raw mut x); };",
+        "static f = fn(p: usize.&raw) {};\nstatic main = fn { let mut x = 1; f(x.&raw mut); };",
         expect![[r#"
-            69..79: type mismatch: expected `&raw usize`, found `&raw mut {error}`
+            69..79: type mismatch: expected `usize.&raw`, found `{error}.&raw mut`
         "#]],
     );
 }
@@ -5314,9 +5341,9 @@ fn raw_pointer_unification_is_exact_no_mut_mixing() {
 #[test]
 fn raw_pointer_unification_is_exact_no_shared_to_mut() {
     check_diagnostics(
-        "static f = fn(p: &raw mut usize) {};\nstatic main = fn { let x = 1; f(&raw x); };",
+        "static f = fn(p: usize.&raw mut) {};\nstatic main = fn { let x = 1; f(x.&raw); };",
         expect![[r#"
-            69..75: type mismatch: expected `&raw mut usize`, found `&raw {error}`
+            69..75: type mismatch: expected `usize.&raw mut`, found `{error}.&raw`
         "#]],
     );
 }
@@ -5324,9 +5351,9 @@ fn raw_pointer_unification_is_exact_no_shared_to_mut() {
 #[test]
 fn raw_pointer_pointee_must_match_exactly() {
     check_diagnostics(
-        r#"static main = fn { let mut x = 1; let p: &raw mut str = &raw mut x; };"#,
+        r#"static main = fn { let mut x = 1; let p: str.&raw mut = x.&raw mut; };"#,
         expect![[r#"
-            56..66: type mismatch: expected `&raw mut str`, found `&raw mut {error}` (expected `&raw mut str` because of this annotation at 41..53)
+            56..66: type mismatch: expected `str.&raw mut`, found `{error}.&raw mut` (expected `str.&raw mut` because of this annotation at 41..53)
         "#]],
     );
 }
@@ -5334,9 +5361,9 @@ fn raw_pointer_pointee_must_match_exactly() {
 #[test]
 fn raw_pointer_does_not_coerce_to_pointee() {
     check_diagnostics(
-        "static main = fn { let mut x = 1; let y: usize = &raw mut x; };",
+        "static main = fn { let mut x = 1; let y: usize = x.&raw mut; };",
         expect![[r#"
-            49..59: type mismatch: expected `usize`, found `&raw mut {error}` (expected `usize` because of this annotation at 41..46)
+            49..59: type mismatch: expected `usize`, found `{error}.&raw mut` (expected `usize` because of this annotation at 41..46)
         "#]],
     );
 }
@@ -5355,7 +5382,7 @@ fn deref_of_a_non_pointer_errors() {
 #[test]
 fn pointer_equality_is_legal_and_safe() {
     check_diagnostics(
-        "static main = fn() -> bool { let mut x = 1; &raw mut x == &raw mut x };",
+        "static main = fn() -> bool { let mut x = 1; x.&raw mut == x.&raw mut };",
         expect![[r#"
             41..42: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
@@ -5674,8 +5701,8 @@ fn addr_of_whole_array_and_element_work() {
         r#"
 static f = fn {
     let mut a = [1, 2];
-    let p = unsafe { (&raw mut a).* };
-    let q = &raw mut a[0];
+    let p = unsafe { (a.&raw mut).* };
+    let q = a[0].&raw mut;
 };
 "#,
         expect![[r#"
@@ -5690,7 +5717,7 @@ fn addr_of_array_element_types_as_element_pointer() {
         r#"
 static f = fn {
     let mut a = [1, 2];
-    let q = &raw mut a[0];
+    let q = a[0].&raw mut;
 };
 "#,
         expect![[r#"
@@ -5700,11 +5727,11 @@ static f = fn {
             33..39 '[1, 2]': [{number}; 2]
             34..35 '1': {number}
             37..38 '2': {number}
-            49..50 'q': &raw mut {number}
-            53..66 '&raw mut a[0]': &raw mut {number}
-            62..63 'a': [{number}; 2]
-            62..66 'a[0]': {number}
-            64..65 '0': usize
+            49..50 'q': {number}.&raw mut
+            53..54 'a': [{number}; 2]
+            53..57 'a[0]': {number}
+            53..66 'a[0].&raw mut': {number}.&raw mut
+            55..56 '0': usize
         "#]],
     );
 }
@@ -5712,10 +5739,10 @@ static f = fn {
 #[test]
 fn addr_of_mut_of_an_element_still_requires_a_mut_root() {
     check_diagnostics(
-        "static f = fn { let a = [1, 2]; let q = &raw mut a[0]; };",
+        "static f = fn { let a = [1, 2]; let q = a[0].&raw mut; };",
         expect![[r#"
             25..26: cannot infer the type of this number: it has no defining use — add a type annotation
-            49..50: cannot take `&raw mut` of `a[_]`: `a` is not declared `mut` (`a` is declared without `mut` here at 20..21)
+            40..41: cannot take `.&raw mut` of `a[_]`: `a` is not declared `mut` (`a` is declared without `mut` here at 20..21)
         "#]],
     );
 }
@@ -5824,10 +5851,10 @@ static f = fn () -> usize {
             39..59 'alloc_array::<usize>': fn(usize) -> AllocResult::<usize>
             39..62 'alloc_array::<usi...': AllocResult::<usize>
             60..61 '2': usize
-            89..90 'p': &raw mut usize
+            89..90 'p': usize.&raw mut
             95..109 'unsafe { p.* }': usize
             102..109 '{ p.* }': usize
-            104..105 'p': &raw mut usize
+            104..105 'p': usize.&raw mut
             104..107 'p.*': usize
             139..140 '0': usize
         "#]],
@@ -5856,19 +5883,19 @@ static f = fn () -> () {
 fn dealloc_array_infers_its_type_argument_from_the_pointer() {
     check_infer(
         r#"
-static f = fn (p: &raw mut str) {
+static f = fn (p: str.&raw mut) {
     unsafe { dealloc_array(p, 1) };
 };
 "#,
         expect![[r#"
-            12..72 'fn (p: &raw mut s...': fn(&raw mut str)
-            16..17 'p': &raw mut str
+            12..72 'fn (p: str.&raw m...': fn(str.&raw mut)
+            16..17 'p': str.&raw mut
             33..72 '{     unsafe { de...': ()
             39..69 'unsafe { dealloc_...': ()
             46..69 '{ dealloc_array(p...': ()
-            48..61 'dealloc_array': fn(&raw mut str, usize)
+            48..61 'dealloc_array': fn(str.&raw mut, usize)
             48..67 'dealloc_array(p, 1)': ()
-            62..63 'p': &raw mut str
+            62..63 'p': str.&raw mut
             65..66 '1': usize
         "#]],
     );
@@ -5878,7 +5905,7 @@ static f = fn (p: &raw mut str) {
 fn dealloc_array_outside_unsafe_is_rejected() {
     check_diagnostics(
         r#"
-static f = fn (p: &raw mut usize) {
+static f = fn (p: usize.&raw mut) {
     dealloc_array(p, 1);
 };
 "#,
@@ -5892,7 +5919,7 @@ static f = fn (p: &raw mut usize) {
 fn copy_outside_unsafe_is_rejected() {
     check_diagnostics(
         r#"
-static f = fn (p: &raw usize, q: &raw mut usize) {
+static f = fn (p: usize.&raw, q: usize.&raw mut) {
     copy(p, q, 1);
 };
 "#,
@@ -5906,7 +5933,7 @@ static f = fn (p: &raw usize, q: &raw mut usize) {
 fn turbofished_dealloc_outside_unsafe_is_rejected_too() {
     check_diagnostics(
         r#"
-static f = fn (p: &raw mut usize) {
+static f = fn (p: usize.&raw mut) {
     dealloc_array::<usize>(p, 1);
 };
 "#,
@@ -5923,7 +5950,7 @@ fn alloc_and_dangling_need_no_unsafe() {
     // carries a real precondition, so it is wrapped in `unsafe` here.
     check_diagnostics(
         r#"
-static f = fn (p: &raw mut usize) {
+static f = fn (p: usize.&raw mut) {
     let r = alloc_array::<usize>(1);
     let q = unsafe { add(p, 1) };
     let d = dangling::<usize>();
@@ -5940,7 +5967,7 @@ fn add_outside_unsafe_is_rejected() {
     // detected UB at the call, so the call needs the marker.
     check_diagnostics(
         r#"
-static f = fn (p: &raw mut usize) {
+static f = fn (p: usize.&raw mut) {
     let q = add(p, 1);
 };
 "#,
@@ -5954,27 +5981,27 @@ static f = fn (p: &raw mut usize) {
 fn add_preserves_the_pointer_flavor() {
     check_infer(
         r#"
-static f = fn (s: &raw usize, m: &raw mut usize) {
+static f = fn (s: usize.&raw, m: usize.&raw mut) {
     let a = unsafe { add(s, 1) };
     let b = unsafe { add(m, 1) };
 };
 "#,
         expect![[r#"
-            12..121 'fn (s: &raw usize...': fn(&raw usize, &raw mut usize)
-            16..17 's': &raw usize
-            31..32 'm': &raw mut usize
+            12..121 'fn (s: usize.&raw...': fn(usize.&raw, usize.&raw mut)
+            16..17 's': usize.&raw
+            31..32 'm': usize.&raw mut
             50..121 '{     let a = uns...': ()
-            60..61 'a': &raw usize
-            64..84 'unsafe { add(s, 1) }': &raw usize
-            71..84 '{ add(s, 1) }': &raw usize
-            73..82 'add(s, 1)': &raw usize
-            77..78 's': &raw usize
+            60..61 'a': usize.&raw
+            64..84 'unsafe { add(s, 1) }': usize.&raw
+            71..84 '{ add(s, 1) }': usize.&raw
+            73..82 'add(s, 1)': usize.&raw
+            77..78 's': usize.&raw
             80..81 '1': usize
-            94..95 'b': &raw mut usize
-            98..118 'unsafe { add(m, 1) }': &raw mut usize
-            105..118 '{ add(m, 1) }': &raw mut usize
-            107..116 'add(m, 1)': &raw mut usize
-            111..112 'm': &raw mut usize
+            94..95 'b': usize.&raw mut
+            98..118 'unsafe { add(m, 1) }': usize.&raw mut
+            105..118 '{ add(m, 1) }': usize.&raw mut
+            107..116 'add(m, 1)': usize.&raw mut
+            111..112 'm': usize.&raw mut
             114..115 '1': usize
         "#]],
     );
@@ -5984,12 +6011,12 @@ static f = fn (s: &raw usize, m: &raw mut usize) {
 fn copy_requires_a_mutable_destination() {
     check_diagnostics(
         r#"
-static f = fn (p: &raw usize, q: &raw usize) {
+static f = fn (p: usize.&raw, q: usize.&raw) {
     unsafe { copy(p, q, 1) };
 };
 "#,
         expect![[r#"
-            69..70: type mismatch: expected `&raw mut usize`, found `&raw usize`
+            69..70: type mismatch: expected `usize.&raw mut`, found `usize.&raw`
         "#]],
     );
 }
@@ -5998,12 +6025,12 @@ static f = fn (p: &raw usize, q: &raw usize) {
 fn copy_source_may_be_either_flavor_but_pointees_must_agree() {
     check_diagnostics(
         r#"
-static f = fn (p: &raw str, q: &raw mut usize) {
+static f = fn (p: str.&raw, q: usize.&raw mut) {
     unsafe { copy(p, q, 1) };
 };
 "#,
         expect![[r#"
-            71..72: type mismatch: expected `&raw mut str`, found `&raw mut usize`
+            71..72: type mismatch: expected `str.&raw mut`, found `usize.&raw mut`
         "#]],
     );
 }
@@ -6017,7 +6044,7 @@ static f = fn {
 };
 "#,
         expect![[r#"
-            42..43: `add` expects a raw pointer (`&raw T` or `&raw mut T`) here, found `{number}`
+            42..43: `add` expects a raw pointer (`T.&raw` or `T.&raw mut`) here, found `{number}`
             42..43: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
@@ -6032,8 +6059,8 @@ fn offset_is_a_free_identifier_after_the_rename() {
     // proving `offset` no longer resolves to a builtin.
     check_diagnostics(
         r#"
-static offset = fn (p: &raw mut usize) { };
-static main = fn (p: &raw mut usize) {
+static offset = fn (p: usize.&raw mut) { };
+static main = fn (p: usize.&raw mut) {
     let g = offset;
     offset(p);
 };
@@ -6053,7 +6080,7 @@ static f = fn {
 };
 "#,
         expect![[r#"
-            29..32: `add` must be called directly; its pointer parameter accepts both `&raw T` and `&raw mut T`, so it has no one function type to be a value at
+            29..32: `add` must be called directly; its pointer parameter accepts both `T.&raw` and `T.&raw mut`, so it has no one function type to be a value at
         "#]],
     );
 }
@@ -6082,11 +6109,11 @@ static ok = const {
 
 #[test]
 fn raw_pointer_fields_in_type_declarations_lower() {
-    // The declaration side: `&raw mut T` is a legal field type in
+    // The declaration side: `T.&raw mut` is a legal field type in
     // a `type` declaration, rigid params included.
     check_infer(
         r#"
-type HeapVec = struct::<T> { ptr: &raw mut T, len: usize, cap: usize };
+type HeapVec = struct::<T> { ptr: T.&raw mut, len: usize, cap: usize };
 static f = fn (v: HeapVec::<str>) {
     let p = v.ptr;
 };
@@ -6095,9 +6122,9 @@ static f = fn (v: HeapVec::<str>) {
             84..129 'fn (v: HeapVec::<...': fn(HeapVec::<str>)
             88..89 'v': HeapVec::<str>
             107..129 '{     let p = v.p...': ()
-            117..118 'p': &raw mut str
+            117..118 'p': str.&raw mut
             121..122 'v': HeapVec::<str>
-            121..126 'v.ptr': &raw mut str
+            121..126 'v.ptr': str.&raw mut
         "#]],
     );
 }
@@ -6124,7 +6151,7 @@ fn alloc_result_can_be_named_constructed_and_returned() {
     // variant → enum at the return boundary.
     check_diagnostics(
         r#"
-static maybe = fn::<T>(p: &raw mut T, full: bool) -> AllocResult::<T> {
+static maybe = fn::<T>(p: T.&raw mut, full: bool) -> AllocResult::<T> {
     if full {
         AllocResult::<T>::Err
     } else {
@@ -6163,15 +6190,15 @@ fn dangling_infers_from_the_expected_pointer_type() {
     check_infer(
         r#"
 static f = fn {
-    let p: &raw mut str = dangling();
+    let p: str.&raw mut = dangling();
 };
 "#,
         expect![[r#"
-            12..56 'fn {     let p: &...': fn()
-            15..56 '{     let p: &raw...': ()
-            25..26 'p': &raw mut str
-            43..51 'dangling': fn() -> &raw mut str
-            43..53 'dangling()': &raw mut str
+            12..56 'fn {     let p: s...': fn()
+            15..56 '{     let p: str....': ()
+            25..26 'p': str.&raw mut
+            43..51 'dangling': fn() -> str.&raw mut
+            43..53 'dangling()': str.&raw mut
         "#]],
     );
 }
@@ -6460,37 +6487,37 @@ fn unary_minus_types_as_its_operand() {
 fn offset_builtin_takes_an_isize_and_preserves_the_flavor() {
     check_infer(
         r#"
-static f = fn (p: &raw mut u8, i: isize) -> &raw mut u8 {
+static f = fn (p: u8.&raw mut, i: isize) -> u8.&raw mut {
     unsafe { offset(p, i) }
 };
 "#,
         expect![[r#"
-            12..88 'fn (p: &raw mut u...': fn(&raw mut u8, isize) -> &raw mut u8
-            16..17 'p': &raw mut u8
+            12..88 'fn (p: u8.&raw mu...': fn(u8.&raw mut, isize) -> u8.&raw mut
+            16..17 'p': u8.&raw mut
             32..33 'i': isize
-            57..88 '{     unsafe { of...': &raw mut u8
-            63..86 'unsafe { offset(p...': &raw mut u8
-            70..86 '{ offset(p, i) }': &raw mut u8
-            72..84 'offset(p, i)': &raw mut u8
-            79..80 'p': &raw mut u8
+            57..88 '{     unsafe { of...': u8.&raw mut
+            63..86 'unsafe { offset(p...': u8.&raw mut
+            70..86 '{ offset(p, i) }': u8.&raw mut
+            72..84 'offset(p, i)': u8.&raw mut
+            79..80 'p': u8.&raw mut
             82..83 'i': isize
         "#]],
     );
     // The literal pins to `isize` through the parameter position.
     check_infer(
         r#"
-static f = fn (p: &raw u8) -> &raw u8 {
+static f = fn (p: u8.&raw) -> u8.&raw {
     unsafe { offset(p, 1) }
 };
 "#,
         expect![[r#"
-            12..70 'fn (p: &raw u8) -...': fn(&raw u8) -> &raw u8
-            16..17 'p': &raw u8
-            39..70 '{     unsafe { of...': &raw u8
-            45..68 'unsafe { offset(p...': &raw u8
-            52..68 '{ offset(p, 1) }': &raw u8
-            54..66 'offset(p, 1)': &raw u8
-            61..62 'p': &raw u8
+            12..70 'fn (p: u8.&raw) -...': fn(u8.&raw) -> u8.&raw
+            16..17 'p': u8.&raw
+            39..70 '{     unsafe { of...': u8.&raw
+            45..68 'unsafe { offset(p...': u8.&raw
+            52..68 '{ offset(p, 1) }': u8.&raw
+            54..66 'offset(p, 1)': u8.&raw
+            61..62 'p': u8.&raw
             64..65 '1': isize
         "#]],
     );
@@ -6500,7 +6527,7 @@ static f = fn (p: &raw u8) -> &raw u8 {
 fn offset_outside_unsafe_is_rejected() {
     check_diagnostics(
         r#"
-static f = fn (p: &raw mut u8, i: isize) {
+static f = fn (p: u8.&raw mut, i: isize) {
     let q = offset(p, i);
 };
 "#,
@@ -6514,7 +6541,7 @@ static f = fn (p: &raw mut u8, i: isize) {
 fn offset_index_must_be_isize() {
     check_diagnostics(
         r#"
-static f = fn (p: &raw mut u8, n: usize) {
+static f = fn (p: u8.&raw mut, n: usize) {
     let q = unsafe { offset(p, n) };
 };
 "#,
@@ -7150,12 +7177,12 @@ type A = struct { x: usize } with {
 };
 static main = fn() -> usize {
     let mut a = A(struct { x = 1 });
-    let p = &raw mut a;
+    let p = a.&raw mut;
     p.get()
 };
 "#,
         expect![[r#"
-            203..206: no field `get` on `&raw mut A`
+            203..206: no field `get` on `A.&raw mut`
         "#]],
     );
 }

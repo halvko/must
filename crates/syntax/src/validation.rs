@@ -171,11 +171,29 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             validate_member(&member, &mut errors);
         } else if let Some(ref_type) = ast::RefType::cast(node.clone()) {
             // `&T`/`&mut T` stay unclaimed for real references — parse-and-
-            // reserve, the same pattern as `pub` fields. `&raw T` is a
+            // reserve, the same pattern as `pub` fields. `T.&raw` is a
             // distinct node (`RawPtrType`) and never lands here.
             errors.push(SyntaxError {
                 message: "references are not supported yet".to_owned(),
                 range: ref_type.syntax().text_range(),
+                fix: None,
+            });
+        } else if let Some(borrow_expr) = ast::BorrowExpr::cast(node.clone()) {
+            // `x.&` / `x.&mut` — the postfix safe borrows, duals of `.*`.
+            // Parse-and-reserve for the borrow round; `x.&raw` is a distinct
+            // node (`AddrOfExpr`) and never lands here.
+            errors.push(SyntaxError {
+                message: "safe borrows (`.&`, `.&mut`) are not supported yet".to_owned(),
+                range: borrow_expr.syntax().text_range(),
+                fix: None,
+            });
+        } else if let Some(borrow_type) = ast::BorrowType::cast(node.clone()) {
+            // `T.&` / `T.&mut` — the postfix safe reference types. Parse-and-
+            // reserve for the borrow round; `T.&raw` is a distinct node
+            // (`RawPtrType`) and never lands here.
+            errors.push(SyntaxError {
+                message: "safe borrows (`.&`, `.&mut`) are not supported yet".to_owned(),
+                range: borrow_type.syntax().text_range(),
                 fix: None,
             });
         }

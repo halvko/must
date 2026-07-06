@@ -95,7 +95,7 @@ pub struct LocalData {
     pub binding: Option<BindingId>,
     /// Whether the local's address is taken somewhere in the body
     /// ([`Rvalue::AddrOf`] names it as the base of a place that does NOT
-    /// lead with a deref — a deref-rooted `&raw mut p.*.x` only *reads*
+    /// lead with a deref — a deref-rooted `p.*.x.&raw mut` only *reads*
     /// its root, so it marks nothing) — the two-tier locals fact: only
     /// addressable locals are ever promoted into the interpreter's
     /// abstract memory; everything else stays on the plain per-frame
@@ -238,16 +238,16 @@ pub enum Rvalue {
         /// params claim no slot — they need nothing at runtime).
         const_args: Vec<Operand>,
     },
-    /// `&raw place` / `&raw mut place` of a local (or a temp holding a
+    /// `place.&raw` / `place.&raw mut` of a local (or a temp holding a
     /// `const` use's copy, or a temp holding a pointer for a deref-rooted
-    /// place like `&raw mut p.*.x`): a pointer to the place — the root
+    /// place like `p.*.x.&raw mut`): a pointer to the place — the root
     /// plus the projection's element-granular path. Executing it promotes
     /// the root local into the machine's abstract memory (first
     /// address-taking only) — *unless* the projection leads with a
     /// [`ProjElem::Deref`], in which case the root already holds a pointer
     /// and the result is that pointer with the extended path: no
     /// intermediate materialization, no new allocation (that is the whole
-    /// point of `&raw`). Validity of the minted address is NOT checked
+    /// point of `.&raw`). Validity of the minted address is NOT checked
     /// here (element steps are not bounds-checked at address-taking, per
     /// the deref-time-validity rule) — an out-of-range address mints
     /// silently and every later deref of it is detected UB. The resulting
@@ -256,10 +256,10 @@ pub enum Rvalue {
         mutable: bool,
         place: Place,
     },
-    /// `&raw S[.field | [index]]...` of a `static` item: the item's ONE
+    /// `S[.field | [index]]....&raw` of a `static` item: the item's ONE
     /// place — minted once per machine run in the static-allocation table,
-    /// so every `&raw S` is the same address (static=identity,
-    /// observable). Always shared (`&raw mut S` is rejected upstream —
+    /// so every `S.&raw` is the same address (static=identity,
+    /// observable). Always shared (`S.&raw mut` is rejected upstream —
     /// `static mut` stays deferred); the allocation is read-only.
     AddrOfStatic {
         item: ItemLoc,

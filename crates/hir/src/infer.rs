@@ -604,8 +604,8 @@ pub enum InferenceDiagnostic {
         expr: ExprId,
     },
     /// A flavor-polymorphic builtin (`add`, `copy`) applied to something
-    /// that is not a raw pointer. These builtins accept `&raw T` AND
-    /// `&raw mut T` in the same position, so the argument cannot be checked
+    /// that is not a raw pointer. These builtins accept `T.&raw` AND
+    /// `T.&raw mut` in the same position, so the argument cannot be checked
     /// against one expected type — the mismatch gets its own diagnostic.
     BuiltinExpectsRawPtr {
         /// The call expression (where MIR refuses the operation).
@@ -616,27 +616,27 @@ pub enum InferenceDiagnostic {
         found: Ty,
     },
     /// A flavor-polymorphic builtin (`add`, `copy`) mentioned without
-    /// being called. Its pointer parameter may be `&raw T` or `&raw mut T`,
+    /// being called. Its pointer parameter may be `T.&raw` or `T.&raw mut`,
     /// so it has no ONE function type to be a value at.
     BuiltinNotFirstClass {
         /// The referencing expression.
         expr: ExprId,
         builtin: Builtin,
     },
-    /// `&raw`/`&raw mut` of something that is not a place — the accepted
-    /// places are a variable, a chain of its fields, or a `static`
-    /// (`&raw` of a temporary is refused outright, dodging rvalue
-    /// promotion entirely).
+    /// `.&raw`/`.&raw mut` of something that is not a place — the accepted
+    /// places are a variable, a chain of its fields and elements, a
+    /// `static`/`const` item, or a chain rooted in a deref (`.&raw` of a
+    /// temporary is refused outright, dodging rvalue promotion entirely).
     AddrOfNonPlace {
         /// The address-of expression.
         expr: ExprId,
     },
-    /// `&raw mut p.*...` where the governing pointer (the receiver of the
-    /// place's outermost deref) is a shared `&raw T` — minting a mutating
-    /// address through it would launder the shared flavor into a write
-    /// permission. The write-side twin is
-    /// [`Self::AssignThroughImmutablePointer`]; `&raw` (shared) through
-    /// any pointer is fine.
+    /// `p.*.x.&raw mut` (a `.&raw mut` of a deref-rooted place) where the
+    /// governing pointer (the receiver of the place's outermost deref) is a
+    /// shared `T.&raw` — minting a mutating address through it would
+    /// launder the shared flavor into a write permission. The write-side
+    /// twin is [`Self::AssignThroughImmutablePointer`]; `.&raw` (shared)
+    /// through any pointer is fine.
     AddrOfMutThroughImmutablePointer {
         /// The whole address-of expression (carries the squiggle, and
         /// where MIR refuses the value).
@@ -644,7 +644,7 @@ pub enum InferenceDiagnostic {
         /// The governing pointer's (shared) type.
         ty: Ty,
     },
-    /// `&raw mut` of a place whose ROOT binding is not `mut` — the same
+    /// `.&raw mut` of a place whose ROOT binding is not `mut` — the same
     /// transitive-mutability rule assignments use: the root is what's
     /// judged, there is no per-field `mut`.
     AddrOfMutImmutable {
@@ -659,9 +659,9 @@ pub enum InferenceDiagnostic {
         /// The whole place as written (`x`, or `x.f.g` for a field chain).
         place: String,
     },
-    /// `&raw mut` of a top-level item: a `static` has one place but
+    /// `.&raw mut` of a top-level item: a `static` has one place but
     /// `static mut` stays deferred, and a `const` is copied into each use —
-    /// there is no place to hand out mutably either way. (`&raw` — shared —
+    /// there is no place to hand out mutably either way. (`.&raw` — shared —
     /// of both is fine: a static's one place, a const use's own copy.)
     AddrOfMutItem {
         /// The whole address-of expression (where MIR refuses the value).
@@ -673,7 +673,7 @@ pub enum InferenceDiagnostic {
     },
     /// `p.* = v;` (or `p.*.x = v;`, any deref-rooted chain) where the
     /// governing pointer — the receiver of the target's outermost deref —
-    /// is a `&raw T`: writing through a pointer requires `&raw mut T`.
+    /// is a `T.&raw`: writing through a pointer requires `T.&raw mut`.
     /// (`p` itself need not be a `mut` binding: writing through it does
     /// not reassign it. Derefs deeper in the chain are ordinary *reads*,
     /// so their pointers' flavors don't matter.)
@@ -1195,7 +1195,7 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::ArrayConstArg { .. } => crate::diag::ARRAY_CONST_ARG.to_owned(),
             InferenceDiagnostic::BuiltinExpectsRawPtr { builtin, found, .. } => {
                 format!(
-                    "`{}` expects a raw pointer (`&raw T` or `&raw mut T`) here, found `{}`",
+                    "`{}` expects a raw pointer (`T.&raw` or `T.&raw mut`) here, found `{}`",
                     builtin.name(),
                     found.display()
                 )
@@ -1203,45 +1203,46 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::BuiltinNotFirstClass { builtin, .. } => {
                 format!(
                     "`{}` must be called directly; its pointer parameter accepts both \
-                     `&raw T` and `&raw mut T`, so it has no one function type to be \
+                     `T.&raw` and `T.&raw mut`, so it has no one function type to be \
                      a value at",
                     builtin.name()
                 )
             }
             InferenceDiagnostic::AddrOfNonPlace { .. } => {
-                "`&raw` can only take the address of a variable, one of its fields, \
-                 or a `static`"
+                "`.&raw` can only take the address of a variable, a chain of its \
+                 fields and elements, a `static`/`const` item, or a chain rooted \
+                 in a deref"
                     .to_owned()
             }
             InferenceDiagnostic::AddrOfMutThroughImmutablePointer { ty, .. } => format!(
-                "cannot take `&raw mut` through `{}`: minting a mutating address \
-                 needs a `&raw mut` pointer",
+                "cannot take `.&raw mut` through `{}`: minting a mutating address \
+                 needs a `.&raw mut` pointer",
                 ty.display()
             ),
             InferenceDiagnostic::AddrOfMutImmutable { name, place, .. } => {
                 if place == name {
-                    format!("cannot take `&raw mut` of `{name}`: it is not declared `mut`")
+                    format!("cannot take `.&raw mut` of `{name}`: it is not declared `mut`")
                 } else {
                     // A field chain: the root binding carries the blame —
                     // mutability is transitive, exactly as for assignments.
-                    format!("cannot take `&raw mut` of `{place}`: `{name}` is not declared `mut`")
+                    format!("cannot take `.&raw mut` of `{place}`: `{name}` is not declared `mut`")
                 }
             }
             InferenceDiagnostic::AddrOfMutItem {
                 item, constness, ..
             } => match constness {
                 Constness::Static => format!(
-                    "cannot take `&raw mut` of `{}`: `static mut` is not supported yet",
+                    "cannot take `.&raw mut` of `{}`: `static mut` is not supported yet",
                     item.display_name()
                 ),
                 Constness::Const => format!(
-                    "cannot take `&raw mut` of `{}`: a `const` is copied into each use, \
+                    "cannot take `.&raw mut` of `{}`: a `const` is copied into each use, \
                      so there is no place to modify",
                     item.display_name()
                 ),
             },
             InferenceDiagnostic::AssignThroughImmutablePointer { ty, .. } => format!(
-                "cannot assign through `{}`: writing needs a `&raw mut` pointer",
+                "cannot assign through `{}`: writing needs a `.&raw mut` pointer",
                 ty.display()
             ),
         }
@@ -2148,7 +2149,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             // and writes through pointers (`p.* = v;`,
                             // `p.*.x = v;`): one walk judges them all. A
                             // deref makes a new root: the judgement there
-                            // is the pointer's `&raw mut`-ness, not any
+                            // is the pointer's `.&raw mut`-ness, not any
                             // binding's `mut`-ness (`p` itself need not be
                             // `mut` — writing through it does not reassign
                             // it).
@@ -2540,7 +2541,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     }
                 }
             }
-            // `&raw place` / `&raw mut place`: the operand reads like any
+            // `place.&raw` / `place.&raw mut`: the operand reads like any
             // expression (so field chains get their diagnostics on the
             // way), then the place rules are judged on its structure.
             ExprData::AddrOf { mutable, place } => {
@@ -2551,7 +2552,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 self.check_addr_of_place(expr, mutable, place);
                 Ty::raw_ptr(mutable, place_ty)
             }
-            // `p.*`: reads through the pointer — `&raw T` and `&raw mut T`
+            // `p.*`: reads through the pointer — `T.&raw` and `T.&raw mut`
             // both deref-read to `T` (writing is the assignment path's
             // judgement).
             ExprData::Deref { receiver } => {
@@ -3296,7 +3297,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let ExprData::NameRef(root_name) = &self.body.exprs[root] else {
             // A deref roots the chain (`p.* = e;`, `p.*.x = e;`): the
             // write goes through the pointer, so the judgement is the
-            // GOVERNING pointer's `&raw mut`-ness — the receiver of the
+            // GOVERNING pointer's `.&raw mut`-ness — the receiver of the
             // chain's outermost deref (derefs deeper down are ordinary
             // reads; their flavors don't matter). No binding-`mut` rule
             // applies: writing through a pointer reassigns nothing.
@@ -3389,18 +3390,18 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         }
     }
 
-    /// The place rules for `&raw place` / `&raw mut place`, judged on the
+    /// The place rules for `place.&raw` / `place.&raw mut`, judged on the
     /// operand's structure after it was read-typed: the accepted places
     /// are a variable, a chain of its fields and elements, a
     /// `static`/`const` item (a `const` use's own copy — const=copied,
-    /// now observable), or a deref-rooted chain (`&raw mut p.*.x` — a
+    /// now observable), or a deref-rooted chain (`p.*.x.&raw mut` — a
     /// pointer into the pointee, the original allocation's address with
     /// an extended path). The `mut` flavor additionally requires the ROOT
     /// binding to be `mut` — the same transitive-mutability rule
     /// assignments use — refuses items (`static mut` is deferred; a
     /// `const` has no place to hand out mutably), and, for deref-rooted
     /// places, requires the GOVERNING pointer (the outermost deref's
-    /// receiver) to be `&raw mut` itself.
+    /// receiver) to be `.&raw mut` itself.
     fn check_addr_of_place(&mut self, addr_of: ExprId, mutable: bool, place: ExprId) {
         let mut segments: Vec<String> = Vec::new();
         let mut root = place;
@@ -3471,10 +3472,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     Some(Resolution::Ambiguous(_)) | None => {}
                 }
             }
-            // `&raw [mut] p.*...`: a pointer into the pointee — the
+            // `p.*....&raw [mut]`: a pointer into the pointee — the
             // result is the original allocation's address with an
             // extended path. The `mut` flavor is judged on the GOVERNING
-            // pointer (this outermost deref's receiver): a shared `&raw T`
+            // pointer (this outermost deref's receiver): a shared `T.&raw`
             // must not launder into a write permission. Deeper derefs are
             // ordinary reads, already typed (and unsafe-checked) on their
             // own.
@@ -3985,7 +3986,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
 
     /// A direct call of a flavor-polymorphic builtin — the checker special
     /// case the ruled spec asks for: `add` preserves its pointer
-    /// argument's flavor (`&raw mut` in → `&raw mut` out) and `copy`
+    /// argument's flavor (`.&raw mut` in → `.&raw mut` out) and `copy`
     /// accepts either flavor for `src`, neither of which one `fn` type can
     /// say. Everything else about the call is the ordinary machinery
     /// (argument expectations with causes, arity as `ArgCountMismatch`).
@@ -4057,8 +4058,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
             }
             // `copy(src, dst, n)`: `src` may be either flavor, `dst` must
-            // be `&raw mut`, and the pointees must agree — `dst` is
-            // checked against `&raw mut <src's pointee>` so the mismatch
+            // be `.&raw mut`, and the pointees must agree — `dst` is
+            // checked against `<src's pointee>.&raw mut` so the mismatch
             // diagnostics are the ordinary type-mismatch ones.
             Builtin::Copy => {
                 let elem = self.fresh_var();

@@ -1536,16 +1536,16 @@ static main = fn {
         expect_test::expect![[r#"
             panic Function (fn(str) -> !)
             x Variable (usize)
-            AllocResult Enum (enum { Ok(&raw mut T), Err })
+            AllocResult Enum (enum { Ok(T.&raw mut), Err })
             Shape Struct (struct { r: usize })
             area Function (fn(usize) -> usize)
             main Function (fn())
-            add Function (unsafe fn(&raw [mut] T, usize) -> &raw [mut] T)
+            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
-            dangling Function (fn::<T>() -> &raw mut T)
-            dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
-            offset Function (unsafe fn(&raw [mut] T, isize) -> &raw [mut] T)
+            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
+            dangling Function (fn::<T>() -> T.&raw mut)
+            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
+            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -1575,14 +1575,14 @@ static main = fn {
 "#,
         expect_test::expect![[r#"
             x Variable (mut usize)
-            AllocResult Enum (enum { Ok(&raw mut T), Err })
+            AllocResult Enum (enum { Ok(T.&raw mut), Err })
             main Function (fn())
-            add Function (unsafe fn(&raw [mut] T, usize) -> &raw [mut] T)
+            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
-            dangling Function (fn::<T>() -> &raw mut T)
-            dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
-            offset Function (unsafe fn(&raw [mut] T, isize) -> &raw [mut] T)
+            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
+            dangling Function (fn::<T>() -> T.&raw mut)
+            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
+            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             panic Function (fn(str) -> !)
             print Function (fn(str))
             const Keyword
@@ -1606,7 +1606,7 @@ type Point = struct { x: usize, y: usize };
 static make_point = fn (x: usize) -> $0 { x };
 "#,
         expect_test::expect![[r#"
-            AllocResult Enum (enum { Ok(&raw mut T), Err })
+            AllocResult Enum (enum { Ok(T.&raw mut), Err })
             Point Struct (struct { x: usize, y: usize })
             bool Keyword
             i16 Keyword
@@ -2166,14 +2166,14 @@ static main = fn (s: str, n: usize) {
             s Variable (str)
             panic Function (fn(str) -> !)
             n Variable (usize)
-            AllocResult Enum (enum { Ok(&raw mut T), Err })
+            AllocResult Enum (enum { Ok(T.&raw mut), Err })
             main Function (fn(str, usize))
-            add Function (unsafe fn(&raw [mut] T, usize) -> &raw [mut] T)
+            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
-            dangling Function (fn::<T>() -> &raw mut T)
-            dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
-            offset Function (unsafe fn(&raw [mut] T, isize) -> &raw [mut] T)
+            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
+            dangling Function (fn::<T>() -> T.&raw mut)
+            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
+            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -2204,15 +2204,15 @@ static main = fn {
         expect_test::expect![[r#"
             get_s Function (fn() -> str)
             panic Function (fn(str) -> !)
-            AllocResult Enum (enum { Ok(&raw mut T), Err })
+            AllocResult Enum (enum { Ok(T.&raw mut), Err })
             get_n Function (fn() -> usize)
             main Function (fn())
-            add Function (unsafe fn(&raw [mut] T, usize) -> &raw [mut] T)
+            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
-            dangling Function (fn::<T>() -> &raw mut T)
-            dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
-            offset Function (unsafe fn(&raw [mut] T, isize) -> &raw [mut] T)
+            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
+            dangling Function (fn::<T>() -> T.&raw mut)
+            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
+            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -2242,14 +2242,14 @@ static main = fn {
         expect_test::expect![[r#"
             helper Function (fn() -> usize)
             panic Function (fn(str) -> !)
-            AllocResult Enum (enum { Ok(&raw mut T), Err })
+            AllocResult Enum (enum { Ok(T.&raw mut), Err })
             main Function (fn())
-            add Function (unsafe fn(&raw [mut] T, usize) -> &raw [mut] T)
+            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
-            dangling Function (fn::<T>() -> &raw mut T)
-            dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
-            offset Function (unsafe fn(&raw [mut] T, isize) -> &raw [mut] T)
+            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
+            dangling Function (fn::<T>() -> T.&raw mut)
+            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
+            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -2281,15 +2281,15 @@ static main = fn (p: Point, n: usize) {
             p Variable (Point)
             panic Function (fn(str) -> !)
             n Variable (usize)
-            AllocResult Enum (enum { Ok(&raw mut T), Err })
+            AllocResult Enum (enum { Ok(T.&raw mut), Err })
             Point Struct (struct { x: usize })
             main Function (fn(Point, usize))
-            add Function (unsafe fn(&raw [mut] T, usize) -> &raw [mut] T)
+            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
-            dangling Function (fn::<T>() -> &raw mut T)
-            dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
-            offset Function (unsafe fn(&raw [mut] T, isize) -> &raw [mut] T)
+            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
+            dangling Function (fn::<T>() -> T.&raw mut)
+            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
+            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             print Function (fn(str))
             const Keyword
             false Keyword
@@ -2387,14 +2387,14 @@ static main = fn {
 "#,
         expect_test::expect![[r#"
             s Variable (str)
-            AllocResult Enum (enum { Ok(&raw mut T), Err })
+            AllocResult Enum (enum { Ok(T.&raw mut), Err })
             main Function (fn())
-            add Function (unsafe fn(&raw [mut] T, usize) -> &raw [mut] T)
+            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
-            copy Function (unsafe fn(&raw [mut] T, &raw mut T, usize))
-            dangling Function (fn::<T>() -> &raw mut T)
-            dealloc_array Function (unsafe fn::<T>(&raw mut T, usize))
-            offset Function (unsafe fn(&raw [mut] T, isize) -> &raw [mut] T)
+            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
+            dangling Function (fn::<T>() -> T.&raw mut)
+            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
+            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             panic Function (fn(str) -> !)
             print Function (fn(str))
             const Keyword
@@ -2854,16 +2854,16 @@ fn hover_shows_generic_variant_instance() {
 #[test]
 fn hover_raw_pointer_binding_shows_the_pointer_type() {
     check_hover(
-        "static main = fn { let mut x: usize = 1; let p$0 = &raw mut x; };",
-        "```must\np: &raw mut usize\n```",
+        "static main = fn { let mut x: usize = 1; let p$0 = x.&raw mut; };",
+        "```must\np: usize.&raw mut\n```",
     );
 }
 
 #[test]
 fn hover_deref_receiver_shows_the_pointer_type() {
     check_hover(
-        "static main = fn() -> usize { let mut x = 1; let p = &raw mut x; unsafe { p$0.* } };",
-        "```must\np: &raw mut usize\n```",
+        "static main = fn() -> usize { let mut x = 1; let p = x.&raw mut; unsafe { p$0.* } };",
+        "```must\np: usize.&raw mut\n```",
     );
 }
 

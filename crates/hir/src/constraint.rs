@@ -259,7 +259,7 @@ impl Constraints {
             }
             // Exact and equational: same mutability, pointwise pointee. No
             // variance (nothing to be variant over without subtyping), and
-            // `&raw mut T` vs `&raw T` is FALSE — a future relaxation would
+            // `T.&raw mut` vs `T.&raw` is FALSE — a future relaxation would
             // be a shallow `widens_to` conversion, never unification.
             (
                 Ty::RawPtr {

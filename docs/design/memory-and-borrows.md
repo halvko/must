@@ -19,7 +19,7 @@
   `dangling` and allocating are safe.
 - **M08** Taking a raw pointer is safe; every consuming operation on one is gated by
   `unsafe`, so safe code may create a dangling raw pointer but cannot use one. A raw
-  pointer minted through a deref (`&raw mut p.*.f`) is likewise safe to create.
+  pointer minted through a deref (`p.*.f.&raw mut`) is likewise safe to create.
 
 ### Ruled, not built
 

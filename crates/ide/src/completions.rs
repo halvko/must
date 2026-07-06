@@ -717,27 +717,27 @@ fn builtin_fn_items(edit_range: TextRange, expected: Option<&hir::Ty>) -> Vec<Co
         (
             "dealloc_array",
             placeholder_fn(2),
-            Some("unsafe fn::<T>(&raw mut T, usize)"),
+            Some("unsafe fn::<T>(T.&raw mut, usize)"),
         ),
         (
             "add",
             placeholder_fn(2),
-            Some("unsafe fn(&raw [mut] T, usize) -> &raw [mut] T"),
+            Some("unsafe fn(T.&raw [mut], usize) -> T.&raw [mut]"),
         ),
         (
             "offset",
             placeholder_fn(2),
-            Some("unsafe fn(&raw [mut] T, isize) -> &raw [mut] T"),
+            Some("unsafe fn(T.&raw [mut], isize) -> T.&raw [mut]"),
         ),
         (
             "copy",
             placeholder_fn(3),
-            Some("unsafe fn(&raw [mut] T, &raw mut T, usize)"),
+            Some("unsafe fn(T.&raw [mut], T.&raw mut, usize)"),
         ),
         (
             "dangling",
             placeholder_fn(0),
-            Some("fn::<T>() -> &raw mut T"),
+            Some("fn::<T>() -> T.&raw mut"),
         ),
     ]
     .into_iter()

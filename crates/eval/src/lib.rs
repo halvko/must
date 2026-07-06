@@ -113,7 +113,7 @@ pub enum PathElem {
     /// A record field, by the canonical sorted-field index (the same order
     /// `Ty::Record` and `mir::Place::projection` use).
     Field(u32),
-    /// An array element (`&raw mut a[i]`, `&raw mut p.*.buf[i]`). Minted
+    /// An array element (`a[i].&raw mut`, `p.*.buf[i].&raw mut`). Minted
     /// WITHOUT a bounds check — validity is a deref-time judgement — so
     /// an out-of-range step here is exactly what the deref-time
     /// out-of-bounds-pointer UB detection catches. The heap's

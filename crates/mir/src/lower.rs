@@ -281,7 +281,7 @@ impl LowerCtx<'_> {
                 InferenceDiagnostic::ArrayConstArg { expr } => {
                     self.value_traps.insert(*expr, diag.message());
                 }
-                // A broken address-of: keyed on the WHOLE `&raw` expression
+                // A broken address-of: keyed on the WHOLE `.&raw` expression
                 // (the squiggle may sit on the root name inside it, but the
                 // value that cannot be produced is the pointer).
                 InferenceDiagnostic::AddrOfNonPlace { expr } => {
@@ -1055,7 +1055,7 @@ impl LowerCtx<'_> {
                     }
                 }
             }
-            // `&raw place` / `&raw mut place`. The diagnosed cases (not a
+            // `place.&raw` / `place.&raw mut`. The diagnosed cases (not a
             // place, immutable root, `static mut`, deref-rooted) are all
             // pending value traps on this expression — the placeholder is
             // never observed. The clean cases resolve the place like a
@@ -1846,7 +1846,7 @@ impl LowerCtx<'_> {
         }
         // A deref roots the chain (`p.* = v;`, `p.*.x = v;`, `p.*[i] = v;`):
         // the store goes through the raw pointer — a new root whose
-        // legality is the pointer's `&raw mut`-ness, not any binding's
+        // legality is the pointer's `.&raw mut`-ness, not any binding's
         // `mut`-ness. The pointer (the deref's receiver) evaluates like any
         // read — deeper derefs inside it are ordinary loads with their own
         // unsafe gating — and the store's place is a pointer-rooted temp
@@ -2040,7 +2040,7 @@ impl LowerCtx<'_> {
         }
     }
 
-    /// Lower `&raw [mut] place` for the accepted place shapes (everything
+    /// Lower `place.&raw [mut]` for the accepted place shapes (everything
     /// else was diagnosed and value-trapped upstream): the chain's field
     /// and element steps resolve exactly like a field-assign target's,
     /// then the root decides the flavor —
@@ -2048,11 +2048,11 @@ impl LowerCtx<'_> {
     /// - a **local**: [`Rvalue::AddrOf`] of its place, and the local is
     ///   marked `addressable` (the two-tier promotion fact);
     /// - a **`static` item**: [`Rvalue::AddrOfStatic`] — the item's one
-    ///   machine-wide allocation, so every `&raw S` is the same address;
+    ///   machine-wide allocation, so every `S.&raw` is the same address;
     /// - a **`const` item**: the value is copied into a fresh temp and the
     ///   temp's address is taken — const=copied, now observable (each
-    ///   `&raw C` mention is its own address, honestly);
-    /// - a **deref** (`&raw mut p.*.x`): the pointer (the deref's
+    ///   `C.&raw` mention is its own address, honestly);
+    /// - a **deref** (`p.*.x.&raw mut`): the pointer (the deref's
     ///   receiver) evaluates as an ordinary read, and the result is that
     ///   pointer — the ORIGINAL allocation's identity — with the extended
     ///   path: no intermediate materialization, no new allocation. Nothing

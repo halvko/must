@@ -1086,7 +1086,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 InferenceDiagnostic::AssignToImmutable { binding, name, .. }
                 | InferenceDiagnostic::AddrOfMutImmutable { binding, name, .. } => {
                     // Where `mut` is missing — also the anchor for the
-                    // insert-`mut` quick fix (assignments and `&raw mut`
+                    // insert-`mut` quick fix (assignments and `.&raw mut`
                     // judge the same transitive root).
                     source_map
                         .node_for_binding(*binding)

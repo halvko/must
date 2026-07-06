@@ -303,10 +303,10 @@ pub enum Ty {
     /// conversion preserves them); they are projected through
     /// [`variant_payloads_for`].
     Variant(VariantTy),
-    /// `&raw T` / `&raw mut T`: a raw pointer. Unifies exactly and
+    /// `T.&raw` / `T.&raw mut`: a raw pointer. Unifies exactly and
     /// equationally like everything else — same mutability, pointwise
     /// pointee — with NO variance (there is no subtyping to be variant
-    /// over) and no implicit `&raw mut T` → `&raw T` conversion in v1
+    /// over) and no implicit `T.&raw mut` → `T.&raw` conversion in v1
     /// (held open as a future shallow [`widens_to`] arm, house style,
     /// never subtyping).
     RawPtr {
@@ -646,9 +646,9 @@ impl Ty {
             }
             Ty::RawPtr { mutable, pointee } => {
                 if *mutable {
-                    format!("&raw mut {}", pointee.display())
+                    format!("{}.&raw mut", pointee.display())
                 } else {
-                    format!("&raw {}", pointee.display())
+                    format!("{}.&raw", pointee.display())
                 }
             }
             Ty::Array { elem, len } => {

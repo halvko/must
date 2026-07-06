@@ -12,7 +12,7 @@
 //
 // - `alloc_array::<T>(n)` is SAFE (allocating cannot be UB) and
 //   result-shaped: it returns `AllocResult::<T>`, a compiler-provided enum
-//   `Ok(&raw mut T) | Err`, so every allocation site says what it does
+//   `Ok(T.&raw mut) | Err`, so every allocation site says what it does
 //   when memory runs out. The interpreter itself can't meaningfully run
 //   out — its alloc never produces `Err` — but the signature is stable for
 //   compiled targets, and fallible ALLOCATORS built over it (the arena
@@ -29,12 +29,12 @@
 //   interior pointer, freeing a local — each with an "allocated here" note
 //   pointing at the allocation's birth site.
 // - `add(p, i)` is UNSAFE and takes a `usize`. Minting the address is
-//   unchecked (like `&raw mut a[i]`) — an out-of-range result derefs to
+//   unchecked (like `a[i].&raw mut`) — an out-of-range result derefs to
 //   detected UB — but `add` carries its own precondition: advancing a
 //   pointer that does NOT address an array element, with `i > 0`, is
 //   detected UB at the CALL (with `i == 0` the harmless identity). That
 //   real precondition is why it needs the `unsafe` marker even before any
-//   deref. It preserves the pointer's flavor (`&raw mut` in, `&raw mut`
+//   deref. It preserves the pointer's flavor (`.&raw mut` in, `.&raw mut`
 //   out). `offset(p, i)` is `add`'s signed (`isize`) sibling, moving
 //   either direction — unused below, this file only ever walks forward.
 // - `copy(src, dst, n)` is UNSAFE, element-count, and memmove-shaped:
@@ -42,7 +42,7 @@
 //   (only reading them as values traps), out of range on either side is
 //   detected UB. A zero-length copy is valid through any pointer,
 //   `dangling()` included.
-// - `dangling::<T>()` is SAFE: a `&raw mut T` that was never valid, the
+// - `dangling::<T>()` is SAFE: a `T.&raw mut` that was never valid, the
 //   stand-in for "no buffer yet" (there is no null). Any deref is detected
 //   UB.
 // - None of the heap ops run at compile time: `alloc_array` /
@@ -72,7 +72,7 @@
 // and exactly one deinit per buffer is the caller's job — the interpreter
 // deterministically catches every double-free and use-after-free while
 // a move story is built.
-type HeapVec = struct::<T> { ptr: &raw mut T, len: usize, cap: usize } with {
+type HeapVec = struct::<T> { ptr: T.&raw mut, len: usize, cap: usize } with {
     impl Self {
         // Growth is not a primitive: it is alloc + copy + dealloc,
         // composed here. `mut v` is a local copy (the shipped rule), so
@@ -147,11 +147,11 @@ static heapvec_new = fn::<T>() -> HeapVec::<T> {
 // bump cursor; individual dealloc is a no-op and the whole backing dies at
 // `a.deinit()`. The state lives on the heap too — an arena handle must
 // outlive the frame that made it, and a local's address dies with its
-// frame — so the handle is an immutable value containing a `&raw mut` to
+// frame — so the handle is an immutable value containing a `.&raw mut` to
 // the state: pointer flavor governs write-through, not binding mutability
 // (the interior-mutability pattern, already shipped semantics).
-type ArenaState = struct::<T> { base: &raw mut T, cap: usize, cursor: usize };
-type Arena = struct::<T> { state: &raw mut ArenaState::<T> } with {
+type ArenaState = struct::<T> { base: T.&raw mut, cap: usize, cursor: usize };
+type Arena = struct::<T> { state: ArenaState::<T>.&raw mut } with {
     impl Self {
         // The arena allocates in the SAME result shape as the builtin —
         // and unlike the builtin's, its `Err` arm is reachable today:
@@ -173,7 +173,7 @@ type Arena = struct::<T> { state: &raw mut ArenaState::<T> } with {
 
         // Individual free is deliberately nothing: arena memory dies all
         // at once.
-        dealloc = fn(p: &raw mut T, n: usize, a: Self) -> () { };
+        dealloc = fn(p: T.&raw mut, n: usize, a: Self) -> () { };
 
         deinit = fn(a: Self) -> () {
             unsafe {

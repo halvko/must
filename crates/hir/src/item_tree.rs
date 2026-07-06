@@ -108,7 +108,7 @@ pub enum TypeRef {
         ret: Option<Box<TypeRef>>,
     },
     Ref(Box<TypeRef>),
-    /// `&raw T` / `&raw mut T` — a raw pointer type.
+    /// `T.&raw` / `T.&raw mut` — a raw pointer type.
     RawPtr {
         mutable: bool,
         inner: Box<TypeRef>,
@@ -196,6 +196,9 @@ impl TypeRef {
                 },
                 None => TypeRef::Error,
             },
+            // `T.&` / `T.&mut` — reserved safe reference types (validation
+            // rejects them); a parse error covers the reservation.
+            ast::Type::BorrowType(_) => TypeRef::Error,
             ast::Type::PathType(it) => match it.generic_arg_list() {
                 Some(list) => match it.name_ref() {
                     Some(name) => TypeRef::Apply {
@@ -456,7 +459,7 @@ pub enum TypeDeclData {
 
 #[salsa::tracked(returns(ref))]
 pub fn type_decl<'db>(db: &'db dyn Db, item: crate::ItemId<'db>) -> Option<TypeDeclData> {
-    // The compiler-provided `AllocResult::<T> = enum { Ok(&raw mut T),
+    // The compiler-provided `AllocResult::<T> = enum { Ok(T.&raw mut),
     // Err }` (see `scopes::alloc_result_loc`): declared here, as syntax-
     // shaped data, so everything downstream (`enum_variants`, patterns,
     // widening, match lowering) runs the completely ordinary nominal-enum

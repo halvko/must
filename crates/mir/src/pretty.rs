@@ -96,6 +96,8 @@ fn render_rvalue(rvalue: &Rvalue) -> String {
         Rvalue::Index { base, index } => format!("{}[{}]", operand(base), operand(index)),
         Rvalue::Repeat { elem, count } => format!("[{}; {}]", operand(elem), operand(count)),
         Rvalue::AddrOf { mutable, place: p } => {
+            // MIR-IR debug notation, not source syntax — kept prefix; source
+            // spells this postfix (`place.&raw` / `place.&raw mut`).
             let flavor = if *mutable { "&raw mut" } else { "&raw" };
             format!("{flavor} {}", place(p))
         }

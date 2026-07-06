@@ -37,6 +37,11 @@
   Resurrecting as `.data` is right for the immutable case. Const contexts get a distinguished
   builtin const allocator, refused by const check outside them, so there is no
   comptime/runtime API gap. Target shape: `static TABLE = const { ...build a Vec... };`.
+- **C07** Const indexing (ruled, not built). Tuples get builtin const-required indexing as a
+  language item, with semantics and diagnostics pinned to the trait desugar so the interim
+  cannot drift from what the trait will mean. Out-of-range is an ordinary missing-impl error
+  at the mention site: bounds by coherence, not dependent const bounds and not value
+  predicates. Resolution is receiver-directed; const-ness never selects the trait.
 - Type-producing `-> type` const functions are ruled in, unscheduled. They take only const
   arguments, so type-parametric families are expressible only through generic type
   declarations; the two features are complementary.
@@ -57,6 +62,17 @@
   C06**
 - **Type-producing const fns instead of generic type declarations** — they take only const
   arguments, so `Option<T>`-shaped families are not expressible through them.
+- **Per-instantiation const indexing (Zig-shaped)** — abandons checked-once, keys inference by
+  instantiation, surfaces errors at sites the body's author never sees, and breaks per-body
+  blame. **A const-indexed associated-type family slot** — one `index` body would have to
+  return a different type per index, which is the previous option again or compiler magic.
+  **C07**
+- **Const-ness-directed bracket resolution** — refactoring `x[0]` into `let i = read(); x[i]`
+  would silently switch traits and change the result type. It also makes evaluability a
+  name-resolution question, against the rule that no impl head's target may require inference
+  or const eval. **C07**
+- **A homogeneous-tuple special case for runtime `t[i]`** — adding a differently-typed
+  component becomes an error at distant index sites. **C07**
 
 ## Re-evaluate when
 
@@ -66,3 +82,11 @@
   **Someone wants `Pair::<{ N + 1 }>`** — only together with a ruling on applicative versus
   generative instance identity (TR06); they are one question. **C05**
 - **`size_of` exists** — the zero-size contract strengthening (A05). **C04**
+- **The trait retrofit reaches const indexing** — it owes the trait shape,
+  bounds-as-coherence, projections carrying trait arguments, and impl-head pins. Tuple
+  nominality must be ruled before that step and may stay unruled during the builtin interim.
+  Under bounds-by-coherence the arity contract is implicit in the impl set, and missing-impl
+  errors are the worst-explained errors in trait systems; a bridge is deliberately deferred.
+  **C07**
+- **Const-sized arrays want both `arr[i]` and `arr[K]`** — the receiver-directed fence is
+  revisitable, not doctrine; homogeneous output moots the type-cliff argument. **C07**

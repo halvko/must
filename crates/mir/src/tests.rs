@@ -1950,8 +1950,8 @@ fn addr_of_deref_and_deref_store_lower_to_place_ops() {
 static s: usize = 7;
 static main = fn() -> usize {
     let mut x = 1;
-    let p = &raw mut x;
-    let q = &raw s;
+    let p = x.&raw mut;
+    let q = s.&raw;
     unsafe {
         p.* = 2;
         p.* + q.*
@@ -1970,10 +1970,10 @@ static main = fn() -> usize {
             fn b0() -> usize {
               _0: usize  // return
               _1: usize  // x
-              _2: &raw mut usize
-              _3: &raw mut usize  // p
-              _4: &raw usize
-              _5: &raw usize  // q
+              _2: usize.&raw mut
+              _3: usize.&raw mut  // p
+              _4: usize.&raw
+              _5: usize.&raw  // q
               _6: usize
               _7: usize
               _8: usize
@@ -2006,7 +2006,7 @@ fn deref_outside_unsafe_lowers_to_a_trap_not_a_load() {
         r#"
 static main = fn() -> usize {
     let mut x: usize = 1;
-    let p = &raw mut x;
+    let p = x.&raw mut;
     p.*
 };
 "#,
@@ -2015,8 +2015,8 @@ static main = fn() -> usize {
             fn b0() -> usize {
               _0: usize  // return
               _1: usize  // x
-              _2: &raw mut usize
-              _3: &raw mut usize  // p
+              _2: usize.&raw mut
+              _3: usize.&raw mut  // p
               _4: usize
               bb0:
                 _1 = 1
@@ -2043,7 +2043,7 @@ fn through_pointer_writes_lower_to_deref_projected_places() {
         r#"
 static main = fn() {
     let mut r: struct { x: usize, buf: [usize; 2] } = struct { x = 1, buf = [1, 2] };
-    let p = &raw mut r;
+    let p = r.&raw mut;
     let i = 1;
     unsafe {
         p.*.x = 2;
@@ -2058,8 +2058,8 @@ static main = fn() {
               _1: [usize; 2]
               _2: struct { buf: [usize; 2], x: usize }
               _3: struct { buf: [usize; 2], x: usize }  // r
-              _4: &raw mut struct { buf: [usize; 2], x: usize }
-              _5: &raw mut struct { buf: [usize; 2], x: usize }  // p
+              _4: struct { buf: [usize; 2], x: usize }.&raw mut
+              _5: struct { buf: [usize; 2], x: usize }.&raw mut  // p
               _6: usize  // i
               bb0:
                 _1 = [1, 2]
@@ -2089,8 +2089,8 @@ fn mid_chain_deref_write_reads_the_inner_pointer_then_stores() {
         r#"
 static main = fn() {
     let mut x: usize = 1;
-    let mut p = &raw mut x;
-    let pp = &raw mut p;
+    let mut p = x.&raw mut;
+    let pp = p.&raw mut;
     unsafe { pp.*.* = 7; }
 };
 "#,
@@ -2099,11 +2099,11 @@ static main = fn() {
             fn b0() -> () {
               _0: ()  // return
               _1: usize  // x
-              _2: &raw mut usize
-              _3: &raw mut usize  // p
-              _4: &raw mut &raw mut usize
-              _5: &raw mut &raw mut usize  // pp
-              _6: &raw mut usize
+              _2: usize.&raw mut
+              _3: usize.&raw mut  // p
+              _4: usize.&raw mut.&raw mut
+              _5: usize.&raw mut.&raw mut  // pp
+              _6: usize.&raw mut
               bb0:
                 _1 = 1
                 _2 = &raw mut _1
@@ -2131,11 +2131,11 @@ fn addr_of_array_element_and_through_deref_lower_without_promotion_of_the_pointe
         r#"
 static main = fn() -> usize {
     let mut a: [usize; 2] = [1, 2];
-    let e = &raw mut a[0];
+    let e = a[0].&raw mut;
     let mut r = struct { x = 1 };
-    let p = &raw mut r;
+    let p = r.&raw mut;
     unsafe {
-        let q = &raw mut p.*.x;
+        let q = p.*.x.&raw mut;
         q.*
     }
 };
@@ -2146,14 +2146,14 @@ static main = fn() -> usize {
               _0: usize  // return
               _1: [usize; 2]
               _2: [usize; 2]  // a
-              _3: &raw mut usize
-              _4: &raw mut usize  // e
+              _3: usize.&raw mut
+              _4: usize.&raw mut  // e
               _5: struct { x: usize }
               _6: struct { x: usize }  // r
-              _7: &raw mut struct { x: usize }
-              _8: &raw mut struct { x: usize }  // p
-              _9: &raw mut usize
-              _10: &raw mut usize  // q
+              _7: struct { x: usize }.&raw mut
+              _8: struct { x: usize }.&raw mut  // p
+              _9: usize.&raw mut
+              _10: usize.&raw mut  // q
               _11: usize
               bb0:
                 _1 = [1, 2]
@@ -2293,15 +2293,15 @@ fn heap_builtin_calls_lower_as_plain_builtin_calls() {
     // allocates `n` uninit elements whatever `T` was.
     check_mir(
         r#"
-static f = fn (p: &raw mut usize) -> () {
+static f = fn (p: usize.&raw mut) -> () {
     unsafe { dealloc_array(p, 1) };
 };
 "#,
         expect![[r#"
             item f:
-            fn b0(_1: &raw mut usize) -> () {
+            fn b0(_1: usize.&raw mut) -> () {
               _0: ()  // return
-              _1: &raw mut usize  // param p
+              _1: usize.&raw mut  // param p
               _2: ()
               bb0:
                 _2 = call builtin dealloc_array(_1, 1) -> bb1
@@ -2309,8 +2309,8 @@ static f = fn (p: &raw mut usize) -> () {
                 _0 = ()
                 return
             }
-            fn b1() -> fn(&raw mut usize) {
-              _0: fn(&raw mut usize)  // return
+            fn b1() -> fn(usize.&raw mut) {
+              _0: fn(usize.&raw mut)  // return
               bb0:
                 _0 = fn b0
                 return
@@ -2325,15 +2325,15 @@ fn unsafe_builtin_call_outside_unsafe_lowers_to_a_trap() {
     // squiggle's message (arguments still evaluated for their effects).
     check_mir(
         r#"
-static f = fn (p: &raw mut usize) -> () {
+static f = fn (p: usize.&raw mut) -> () {
     dealloc_array(p, 1);
 };
 "#,
         expect![[r#"
             item f:
-            fn b0(_1: &raw mut usize) -> () {
+            fn b0(_1: usize.&raw mut) -> () {
               _0: ()  // return
-              _1: &raw mut usize  // param p
+              _1: usize.&raw mut  // param p
               _2: ()
               bb0:
                 _2 = trap "calling `dealloc_array` requires an `unsafe { ... }` block" -> bb1
@@ -2341,8 +2341,8 @@ static f = fn (p: &raw mut usize) -> () {
                 _0 = ()
                 return
             }
-            fn b1() -> fn(&raw mut usize) {
-              _0: fn(&raw mut usize)  // return
+            fn b1() -> fn(usize.&raw mut) {
+              _0: fn(usize.&raw mut)  // return
               bb0:
                 _0 = fn b0
                 return

@@ -1814,7 +1814,7 @@ fn write_through_raw_mut_is_visible_through_the_local() {
         r#"
 static main = fn() -> usize {
     let mut x = 1;
-    let p = &raw mut x;
+    let p = x.&raw mut;
     unsafe { p.* = 42; }
     x
 };
@@ -1832,7 +1832,7 @@ fn pointer_to_a_field_reads_and_writes_that_element() {
         r#"
 static main = fn() -> usize {
     let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
-    let pa = &raw mut r.a;
+    let pa = r.a.&raw mut;
     unsafe { pa.* = 10; }
     r.a + r.b
 };
@@ -1853,7 +1853,7 @@ fn interior_pointer_survives_whole_value_overwrite() {
         r#"
 static main = fn() -> usize {
     let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
-    let pa = &raw mut r.a;
+    let pa = r.a.&raw mut;
     r = struct { a = 3, b = 4 };
     unsafe { pa.* }
 };
@@ -1871,7 +1871,7 @@ fn pointee_field_reads_chain() {
         r#"
 static main = fn() -> usize {
     let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
-    let p = &raw mut r;
+    let p = r.&raw mut;
     unsafe { p.*.a + p.*.b }
 };
 "#,
@@ -1888,7 +1888,7 @@ fn pointer_copies_alias_the_same_place() {
         r#"
 static main = fn() -> usize {
     let mut x = 1;
-    let p = &raw mut x;
+    let p = x.&raw mut;
     let q = p;
     unsafe { q.* = 9; p.* }
 };
@@ -1906,8 +1906,8 @@ fn two_addr_of_the_same_static_are_the_same_address() {
         r#"
 static s: usize = 7;
 static main = fn() -> bool {
-    let a = &raw s;
-    let b = &raw s;
+    let a = s.&raw;
+    let b = s.&raw;
     a == b
 };
 "#,
@@ -1924,8 +1924,8 @@ fn deref_of_a_static_pointer_reads_the_static() {
         r#"
 static s: struct { a: usize, b: usize } = struct { a = 40, b = 2 };
 static main = fn() -> usize {
-    let pa = &raw s.a;
-    let pb = &raw s.b;
+    let pa = s.a.&raw;
+    let pb = s.b.&raw;
     unsafe { pa.* + pb.* }
 };
 "#,
@@ -1938,14 +1938,14 @@ static main = fn() -> usize {
 
 #[test]
 fn addr_of_a_const_takes_the_address_of_each_use_copy() {
-    // const=copied: the interpreter happens to give each `&raw c` mention
+    // const=copied: the interpreter happens to give each `c.&raw` mention
     // its own temporary, so two of them compare unequal. Const-mention
     // identity is deliberately unspecified — this pins today's interpreter
     // behaviour, not a language promise.
     check_run(
         r#"
 const c: usize = 7;
-static main = fn() -> bool { &raw c == &raw c };
+static main = fn() -> bool { c.&raw == c.&raw };
 "#,
         "main()",
         expect![[r#"
@@ -1960,7 +1960,7 @@ fn two_addr_of_the_same_local_are_equal() {
         r#"
 static main = fn() -> bool {
     let mut x: usize = 1;
-    &raw mut x == &raw mut x
+    x.&raw mut == x.&raw mut
 };
 "#,
         "main()",
@@ -1974,9 +1974,9 @@ static main = fn() -> bool {
 fn dangling_deref_after_frame_return_is_detected_ub() {
     check_run(
         r#"
-static make = fn() -> &raw mut usize {
+static make = fn() -> usize.&raw mut {
     let mut x = 5;
-    &raw mut x
+    x.&raw mut
 };
 static main = fn() -> usize {
     let p = make();
@@ -1994,7 +1994,7 @@ static main = fn() -> usize {
 fn dangling_deref_traps_deterministically() {
     // Same program, two fresh machines: identical trap kind and message.
     let text = r#"
-static make = fn() -> &raw mut usize { let mut x = 5; &raw mut x };
+static make = fn() -> usize.&raw mut { let mut x = 5; x.&raw mut };
 static main = fn() -> usize { let p = make(); unsafe { p.* } };
 static entrypoint = (main());
 "#;
@@ -2028,7 +2028,7 @@ fn pointers_work_inside_const_evaluation() {
         r#"
 static v = {
     let mut x: usize = 1;
-    let p = &raw mut x;
+    let p = x.&raw mut;
     unsafe { p.* = 41; }
     x + 1
 };
@@ -2045,7 +2045,7 @@ fn a_pointer_cannot_leave_const_evaluation() {
         r#"
 static p = {
     let mut x: usize = 1;
-    &raw mut x
+    x.&raw mut
 };
 "#,
         expect![[r#"
@@ -2060,7 +2060,7 @@ fn a_pointer_inside_a_record_cannot_leave_const_evaluation_either() {
         r#"
 static p = {
     let mut x: usize = 1;
-    struct { ptr = &raw mut x }
+    struct { ptr = x.&raw mut }
 };
 "#,
         expect![[r#"
@@ -2074,10 +2074,10 @@ fn a_pointer_cannot_leave_a_const_block() {
     check_const_blocks(
         r#"
 static main = fn() -> usize {
-    const { let mut y: usize = 1; let p = &raw mut y; unsafe { p.* } }
+    const { let mut y: usize = 1; let p = y.&raw mut; unsafe { p.* } }
 };
 static bad = fn() {
-    const { let mut y: usize = 1; &raw mut y };
+    const { let mut y: usize = 1; y.&raw mut };
 };
 "#,
         expect![[r#"
@@ -2091,9 +2091,9 @@ static bad = fn() {
 fn deref_display_is_opaque_never_a_number() {
     check_run(
         r#"
-static main = fn() -> &raw usize {
+static main = fn() -> usize.&raw {
     let mut x = 1;
-    &raw x
+    x.&raw
 };
 "#,
         "main()",
@@ -2111,7 +2111,7 @@ fn through_pointer_field_write_is_visible_afterward() {
         r#"
 static main = fn() -> usize {
     let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
-    let p = &raw mut r;
+    let p = r.&raw mut;
     unsafe { p.*.a = 40; }
     r.a + r.b
 };
@@ -2129,7 +2129,7 @@ fn through_pointer_field_chain_writes_the_nested_field() {
         r#"
 static main = fn() -> usize {
     let mut r = struct { inner = struct { v = 1 }, other = 2 };
-    let p = &raw mut r;
+    let p = r.&raw mut;
     unsafe { p.*.inner.v = 40; }
     r.inner.v + r.other
 };
@@ -2147,7 +2147,7 @@ fn through_pointer_element_reads_and_writes() {
         r#"
 static main = fn() -> usize {
     let mut a = [1, 2, 3];
-    let p = &raw mut a;
+    let p = a.&raw mut;
     unsafe { p.*[1] = 9; }
     unsafe { a[0] + p.*[1] }
 };
@@ -2170,7 +2170,7 @@ fn through_pointer_element_write_out_of_bounds_is_an_ordinary_trap() {
         r#"
 static main = fn() {
     let mut a: [usize; 2] = [1, 2];
-    let p = &raw mut a;
+    let p = a.&raw mut;
     let i: usize = 5;
     unsafe { p.*[i] = 0; }
 };
@@ -2188,8 +2188,8 @@ fn chained_deref_writes_through_a_pointer_to_a_pointer() {
         r#"
 static main = fn() -> usize {
     let mut x = 1;
-    let mut p = &raw mut x;
-    let pp = &raw mut p;
+    let mut p = x.&raw mut;
+    let pp = p.&raw mut;
     unsafe { pp.*.* = 7; }
     x
 };
@@ -2209,8 +2209,8 @@ fn deref_in_the_middle_of_a_write_chain_composes() {
         r#"
 static main = fn() -> usize {
     let mut inner = struct { v = 1 };
-    let mut outer = struct { q = &raw mut inner };
-    let p = &raw mut outer;
+    let mut outer = struct { q = inner.&raw mut };
+    let p = outer.&raw mut;
     unsafe { p.*.q.*.v = 5; }
     inner.v
 };
@@ -2228,7 +2228,7 @@ fn through_pointer_mixed_chain_with_elements_and_fields() {
         r#"
 static main = fn() -> usize {
     let mut r: struct { buf: [struct { v: usize }; 2] } = struct { buf = [struct { v = 1 }, struct { v = 2 }] };
-    let p = &raw mut r;
+    let p = r.&raw mut;
     unsafe { p.*.buf[1].v = 9; }
     unsafe { p.*.buf[0].v + p.*.buf[1].v }
 };
@@ -2246,7 +2246,7 @@ fn addr_of_array_element_writes_through_to_the_array() {
         r#"
 static main = fn() -> usize {
     let mut a = [1, 2, 3];
-    let p = &raw mut a[1];
+    let p = a[1].&raw mut;
     unsafe { p.* = 20; }
     a[0] + a[1] + a[2]
 };
@@ -2268,7 +2268,7 @@ fn addr_of_out_of_bounds_element_mints_silently_and_derefs_as_ub() {
 static main = fn() -> usize {
     let mut a = [1, 2];
     let i = 5;
-    let p = &raw mut a[i];
+    let p = a[i].&raw mut;
     unsafe { p.* }
 };
 "#,
@@ -2287,7 +2287,7 @@ fn out_of_bounds_pointer_traps_deterministically() {
 static main = fn() -> usize {
     let mut a = [1, 2];
     let i = 5;
-    let p = &raw mut a[i];
+    let p = a[i].&raw mut;
     unsafe { p.* = 9; a[0] }
 };
 static entrypoint = (main());
@@ -2316,15 +2316,15 @@ static entrypoint = (main());
 
 #[test]
 fn addr_of_through_a_deref_is_double_indirection_free() {
-    // `&raw mut p.*.a` carries the ORIGINAL allocation's identity with an
+    // `p.*.a.&raw mut` carries the ORIGINAL allocation's identity with an
     // extended path — no intermediate materialization, so it is the same
-    // address `&raw mut r.a` mints.
+    // address `r.a.&raw mut` mints.
     check_run(
         r#"
 static main = fn() -> bool {
     let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
-    let p = &raw mut r;
-    unsafe { &raw mut p.*.a == &raw mut r.a }
+    let p = r.&raw mut;
+    unsafe { p.*.a.&raw mut == r.a.&raw mut }
 };
 "#,
         "main()",
@@ -2340,8 +2340,8 @@ fn addr_of_through_a_deref_writes_the_original_place() {
         r#"
 static main = fn() -> usize {
     let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
-    let p = &raw mut r;
-    let q = unsafe { &raw mut p.*.a };
+    let p = r.&raw mut;
+    let q = unsafe { p.*.a.&raw mut };
     unsafe { q.* = 40; }
     r.a + r.b
 };
@@ -2359,9 +2359,9 @@ fn dangling_interior_element_pointer_is_detected_ub() {
     // story covers extended paths with no extra machinery.
     check_run(
         r#"
-static make = fn() -> &raw mut usize {
+static make = fn() -> usize.&raw mut {
     let mut a = [1, 2];
-    &raw mut a[0]
+    a[0].&raw mut
 };
 static main = fn() -> usize {
     let p = make();
@@ -2379,10 +2379,10 @@ static main = fn() -> usize {
 fn dangling_pointer_from_addr_of_through_deref_is_detected_ub() {
     check_run(
         r#"
-static make = fn() -> &raw mut usize {
+static make = fn() -> usize.&raw mut {
     let mut r: struct { a: usize } = struct { a = 1 };
-    let p = &raw mut r;
-    unsafe { &raw mut p.*.a }
+    let p = r.&raw mut;
+    unsafe { p.*.a.&raw mut }
 };
 static main = fn() -> usize {
     let p = make();
@@ -2406,8 +2406,8 @@ fn interior_pointer_survives_through_pointer_whole_value_overwrite() {
         r#"
 static main = fn() -> usize {
     let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
-    let pa = &raw mut r.a;
-    let p = &raw mut r;
+    let pa = r.a.&raw mut;
+    let p = r.&raw mut;
     unsafe { p.* = struct { a = 3, b = 4 }; }
     unsafe { pa.* }
 };
@@ -2421,20 +2421,20 @@ static main = fn() -> usize {
 
 #[test]
 fn through_pointer_write_into_a_static_is_rejected_at_the_flavor() {
-    // A static only hands out shared `&raw`, so the write is refused
+    // A static only hands out shared `.&raw`, so the write is refused
     // statically (the squiggle's message, re-fired as a trap) — extended
     // paths do not open a route around the read-only allocation.
     check_run(
         r#"
 static s: struct { a: usize } = struct { a = 1 };
 static main = fn() {
-    let p = &raw s;
+    let p = s.&raw;
     unsafe { p.*.a = 2; }
 };
 "#,
         "main()",
         expect![[r#"
-            error[Trap]: cannot assign through `&raw struct { a: usize }`: writing needs a `&raw mut` pointer
+            error[Trap]: cannot assign through `struct { a: usize }.&raw`: writing needs a `.&raw mut` pointer
         "#]],
     );
 }
@@ -2445,7 +2445,7 @@ fn through_pointer_field_write_outside_unsafe_traps() {
         r#"
 static main = fn() {
     let mut r: struct { a: usize } = struct { a = 1 };
-    let p = &raw mut r;
+    let p = r.&raw mut;
     p.*.a = 2;
 };
 "#,
@@ -2465,8 +2465,8 @@ fn mid_chain_deref_outside_unsafe_traps() {
         r#"
 static main = fn() {
     let mut x: usize = 1;
-    let mut p = &raw mut x;
-    let pp = &raw mut p;
+    let mut p = x.&raw mut;
+    let pp = p.&raw mut;
     pp.*.* = 7;
 };
 "#,
@@ -2483,7 +2483,7 @@ fn through_pointer_writes_work_inside_const_evaluation() {
         r#"
 static v = {
     let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
-    let p = &raw mut r;
+    let p = r.&raw mut;
     unsafe { p.*.a = 40; }
     r.a + r.b
 };
@@ -2767,7 +2767,7 @@ static main = fn () -> bool {
     let mut a = [1, 2];
     match alloc_array::<usize>(2) {
         AllocResult::Ok(p) => {
-            unsafe { copy(p, &raw mut a[0], 2) };
+            unsafe { copy(p, a[0].&raw mut, 2) };
             let b = a;
             b == b
         }
@@ -2898,7 +2898,7 @@ fn heap_dealloc_of_local_is_detected_ub() {
         r#"
 static main = fn () -> () {
     let mut x: usize = 4;
-    unsafe { dealloc_array(&raw mut x, 1) };
+    unsafe { dealloc_array(x.&raw mut, 1) };
 };
 "#,
         "main()",
@@ -2966,7 +2966,7 @@ static main = fn () -> bool {
 #[test]
 fn add_stays_within_allocation_and_oob_deref_is_detected_ub() {
     // Minting past the end is silent (validity is a deref-time
-    // judgement, same as `&raw mut a[i]`); the deref is where it traps.
+    // judgement, same as `a[i].&raw mut`); the deref is where it traps.
     check_run(
         r#"
 static main = fn () -> usize {
@@ -2991,7 +2991,7 @@ fn add_works_on_local_array_element_pointers() {
         r#"
 static main = fn () -> usize {
     let mut a = [10, 20, 30];
-    let p = &raw a[0];
+    let p = a[0].&raw;
     unsafe { add(p, 2).* }
 };
 "#,
@@ -3008,7 +3008,7 @@ fn add_zero_is_identity_on_any_pointer() {
         r#"
 static main = fn () -> usize {
     let mut x = 7;
-    let p = &raw mut x;
+    let p = x.&raw mut;
     unsafe { add(p, 0).* }
 };
 "#,
@@ -3027,7 +3027,7 @@ fn add_of_non_element_pointer_is_detected_ub() {
         r#"
 static main = fn () -> usize {
     let mut x = 7;
-    let p = &raw mut x;
+    let p = x.&raw mut;
     unsafe { add(p, 1).* }
 };
 "#,
@@ -3046,7 +3046,7 @@ static main = fn () -> usize {
     let a = [1, 2, 3];
     match alloc_array::<usize>(3) {
         AllocResult::Ok(p) => {
-            unsafe { copy(&raw a[0], p, 3) };
+            unsafe { copy(a[0].&raw, p, 3) };
             let sum = unsafe { p.* + add(p, 1).* + add(p, 2).* };
             unsafe { dealloc_array(p, 3) };
             sum
@@ -3071,7 +3071,7 @@ fn copy_overlap_is_defined_memmove_semantics() {
         r#"
 static main = fn () -> bool {
     let mut a: [usize; 5] = [1, 2, 3, 4, 5];
-    let p = &raw mut a[0];
+    let p = a[0].&raw mut;
     unsafe { copy(p, add(p, 1), 4) };
     a == [1, 1, 2, 3, 4]
 };
@@ -3123,7 +3123,7 @@ fn copy_out_of_bounds_source_is_detected_ub() {
 static main = fn () -> () {
     let a: [usize; 2] = [1, 2];
     let mut b: [usize; 3] = [0, 0, 0];
-    unsafe { copy(&raw a[0], &raw mut b[0], 3) };
+    unsafe { copy(a[0].&raw, b[0].&raw mut, 3) };
 };
 "#,
         "main()",
@@ -3140,7 +3140,7 @@ fn copy_out_of_bounds_destination_is_detected_ub() {
 static main = fn () -> () {
     let a: [usize; 3] = [1, 2, 3];
     let mut b: [usize; 2] = [0, 0];
-    unsafe { copy(&raw a[0], &raw mut b[0], 3) };
+    unsafe { copy(a[0].&raw, b[0].&raw mut, 3) };
 };
 "#,
         "main()",
@@ -3159,8 +3159,8 @@ fn copy_of_zero_elements_is_legal_through_any_pointer() {
         r#"
 static main = fn () -> () {
     let mut a = [1];
-    unsafe { copy(dangling::<usize>(), &raw mut a[0], 0) };
-    unsafe { copy(&raw a[0], dangling::<usize>(), 0) };
+    unsafe { copy(dangling::<usize>(), a[0].&raw mut, 0) };
+    unsafe { copy(a[0].&raw, dangling::<usize>(), 0) };
 };
 "#,
         "main()",
@@ -3181,7 +3181,7 @@ static main = fn () -> () {
         AllocResult::Err => panic("oom"),
     };
     unsafe { dealloc_array(p, 2) };
-    unsafe { copy(&raw a[0], p, 2) };
+    unsafe { copy(a[0].&raw, p, 2) };
 };
 "#,
         "main()",
@@ -3233,7 +3233,7 @@ fn add_copy_and_dangling_are_const_legal_on_locals() {
         r#"
 static x: usize = const {
     let mut a = [1, 2, 3];
-    let p = &raw mut a[0];
+    let p = a[0].&raw mut;
     unsafe { copy(p, add(p, 1), 2); };
     let d = dangling::<usize>();
     unsafe { add(p, 1).* }
@@ -3265,7 +3265,7 @@ fn heapvec_push_growth_get_and_deinit_roundtrip() {
     // reads through `add`, and one deinit frees the one live buffer.
     check_run(
         r#"
-type HeapVec = struct::<T> { ptr: &raw mut T, len: usize, cap: usize };
+type HeapVec = struct::<T> { ptr: T.&raw mut, len: usize, cap: usize };
 static heapvec_new = fn::<T>() -> HeapVec::<T> {
     HeapVec::<T>(struct { ptr = dangling::<T>(), len = 0, cap = 0 })
 };
@@ -3329,7 +3329,7 @@ fn heapvec_get_out_of_bounds_panics_like_the_future_index_desugar() {
     // ordinary trap, never UB.
     check_run(
         r#"
-type HeapVec = struct::<T> { ptr: &raw mut T, len: usize, cap: usize };
+type HeapVec = struct::<T> { ptr: T.&raw mut, len: usize, cap: usize };
 static heapvec_get = fn::<T>(v: HeapVec::<T>, i: usize) -> T {
     if i < v.len {
         unsafe { add(v.ptr, i).* }
@@ -3361,7 +3361,7 @@ fn heapvec_double_deinit_is_detected_double_free() {
     // deterministically, with the allocation's birth site.
     check_run(
         r#"
-type HeapVec = struct::<T> { ptr: &raw mut T, len: usize, cap: usize };
+type HeapVec = struct::<T> { ptr: T.&raw mut, len: usize, cap: usize };
 static heapvec_deinit = fn::<T>(v: HeapVec::<T>) -> () {
     if v.cap != 0 {
         unsafe { dealloc_array(v.ptr, v.cap); };
@@ -3393,8 +3393,8 @@ fn arena_carves_and_exhaustion_produces_err() {
     // exhaustion is a value, not a trap.
     check_run(
         r#"
-type ArenaState = struct::<T> { base: &raw mut T, cap: usize, cursor: usize };
-type Arena = struct::<T> { state: &raw mut ArenaState::<T> };
+type ArenaState = struct::<T> { base: T.&raw mut, cap: usize, cursor: usize };
+type Arena = struct::<T> { state: ArenaState::<T>.&raw mut };
 static arena_new = fn::<T>(cap: usize) -> Arena::<T> {
     let state = match alloc_array::<ArenaState::<T>>(1) {
         AllocResult::Ok(p) => p,
@@ -3648,7 +3648,7 @@ fn offset_moves_both_directions() {
         r#"
 static main = fn () -> usize {
     let mut a: [usize; 3] = [10, 20, 30];
-    let p = &raw mut a[1];
+    let p = a[1].&raw mut;
     unsafe {
         let forward = offset(p, 1);
         let back = offset(p, -1);
@@ -3669,7 +3669,7 @@ fn offset_below_the_start_is_detected_ub_at_the_call() {
         r#"
 static main = fn () -> usize {
     let mut a: [usize; 3] = [10, 20, 30];
-    let p = &raw mut a[1];
+    let p = a[1].&raw mut;
     unsafe { offset(p, -2).* }
 };
 "#,
@@ -3686,7 +3686,7 @@ fn offset_past_the_end_mints_silently_and_derefs_as_ub_like_add() {
         r#"
 static main = fn () -> usize {
     let mut a: [usize; 2] = [1, 2];
-    let p = &raw mut a[0];
+    let p = a[0].&raw mut;
     unsafe { offset(p, 5).* }
 };
 "#,
@@ -3703,7 +3703,7 @@ fn offset_by_zero_is_the_identity() {
         r#"
 static main = fn () -> bool {
     let mut x: u8 = 7;
-    let p = &raw mut x;
+    let p = x.&raw mut;
     unsafe { offset(p, 0) == p }
 };
 "#,
@@ -3833,13 +3833,13 @@ type Cell = struct { v: usize } with {
         plus = fn(extra: usize, c: Self) -> usize { c.v + extra };
     }
 };
-static bump = fn(p: &raw mut Cell) -> usize {
+static bump = fn(p: Cell.&raw mut) -> usize {
     unsafe { p.* = Cell(struct { v = 99 }); };
     0
 };
 static main = fn() -> usize {
     let mut c = Cell(struct { v = 1 });
-    let p = &raw mut c;
+    let p = c.&raw mut;
     unsafe { p.* }.plus(bump(p))
 };
 "#,

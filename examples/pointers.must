@@ -1,9 +1,10 @@
-// Raw pointers: `&raw T` / `&raw mut T` types, taking an address
-// with `&raw x` / `&raw mut x`, and reading or writing through one with the
-// postfix deref `p.*`. There is NO auto-deref by design — a pointer is only
-// ever followed when you write `.*`, and every deref must sit inside an
-// `unsafe { ... }` block, the one place the checker asks you to vouch for
-// the pointer yourself.
+// Raw pointers: `T.&raw` / `T.&raw mut` types, taking an address
+// with `x.&raw` / `x.&raw mut`, and reading or writing through one with the
+// postfix deref `p.*`. Address-of is postfix too — the dual of `.*` — so a
+// pointer op always trails its place. There is NO auto-deref by design: a
+// pointer is only ever followed when you write `.*`, and every deref must
+// sit inside an `unsafe { ... }` block, the one place the checker asks you to
+// vouch for the pointer yourself.
 //
 // Run: must-lsp run examples/pointers.must
 //
@@ -11,34 +12,34 @@
 // deref value renders as `&raw <opaque>`, never a number), so this tour
 // computes with them and prints string *labels* for what it observed.
 
-// `static` = identity: `S` names one place, so every `&raw S` is the same
+// `static` = identity: `S` names one place, so every `S.&raw` is the same
 // address. `const` = copied: `C` is substituted into each use, so every
-// `&raw C` addresses its own fresh copy. Pointer equality makes the
+// `C.&raw` addresses its own fresh copy. Pointer equality makes the
 // difference observable — the sharpest one-line demo of the whole
 // static-vs-const distinction.
 static S: usize = 7;
 const C: usize = 7;
 
-// `&raw mut p` requires a `mut` root: you may only mint a mutating pointer
-// to something you could already assign to. `&raw x` (shared) needs no
+// `p.&raw mut` requires a `mut` root: you may only mint a mutating pointer
+// to something you could already assign to. `x.&raw` (shared) needs no
 // `mut`. Both are pure address-taking — no `unsafe` needed to *form* a
 // pointer, only to *follow* one.
 
 static main = fn () -> () {
     // --- static = one address, const = a copy per mention ---
     // Only the STATIC half is a language promise. Const-mention identity is
-    // unspecified: the interpreter happens to give every `&raw C` its own
+    // unspecified: the interpreter happens to give every `C.&raw` its own
     // temporary, but a compiler is free to merge or split immutable copies —
     // never compare const-derived addresses and expect a particular answer.
-    if &raw S == &raw S {
-        print("static: &raw S == &raw S is true — one place, one address");
+    if S.&raw == S.&raw {
+        print("static: S.&raw == S.&raw is true — one place, one address");
     } else {
         print("static: unexpected");
     };
-    if &raw C == &raw C {
+    if C.&raw == C.&raw {
         print("const: unexpected");
     } else {
-        print("const: &raw C == &raw C is false — each mention is its own copy");
+        print("const: C.&raw == C.&raw is false — each mention is its own copy");
     };
 
     // --- writing through a pointer, step by step ---
@@ -46,7 +47,7 @@ static main = fn () -> () {
     // through the pointer into `x`'s storage, so reading `x` afterward sees
     // 42. Both the write and any read are dereferences, hence `unsafe`.
     let mut x: usize = 1;
-    let p = &raw mut x;
+    let p = x.&raw mut;
     unsafe { p.* = 42; };
     if x == 42 {
         print("write-through: p.* = 42 updated the local x to 42");
@@ -67,18 +68,18 @@ static main = fn () -> () {
 
     // --- a pointer to a field addresses just that element ---
     let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
-    let pa = &raw mut r.a;
+    let pa = r.a.&raw mut;
     unsafe { pa.* = 10; };
     if r.a + r.b == 12 {
-        print("field pointer: &raw mut r.a wrote only r.a");
+        print("field pointer: r.a.&raw mut wrote only r.a");
     } else {
         print("field pointer: unexpected");
     };
 }
 
 // On the UB philosophy — this is the honest part. A pointer holds no
-// stable identity beyond the frame that owns its pointee: return `&raw mut
-// x` past the `fn` that declared `x` and the local is gone, so a later
+// stable identity beyond the frame that owns its pointee: return `x.&raw
+// mut` past the `fn` that declared `x` and the local is gone, so a later
 // `p.*` dereferences a dangling pointer. The interpreter *detects* that and
 // traps deterministically with `error[UndefinedBehavior]: dangling pointer
 // — the local it pointed to no longer exists (its frame has returned)`. But
@@ -88,7 +89,7 @@ static main = fn () -> () {
 // teacher; they do not make the code correct.
 //
 // Writes through pointee fields (`p.*.x = ...`), pointers into array
-// elements (`&raw mut a[i]`), and address-of through a deref
-// (`unsafe { &raw mut p.*.x }` — computing an address through a pointer is
+// elements (`a[i].&raw mut`), and address-of through a deref
+// (`unsafe { p.*.x.&raw mut }` — computing an address through a pointer is
 // itself a deref, so it needs `unsafe`) all work.
 // Still reserved: `unsafe fn`.

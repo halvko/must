@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 19 errors and 1 warning.
+// exactly: found 20 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -98,20 +98,20 @@ static compile_time_oob = fn () -> usize {
 //     error: dereferencing a raw pointer requires an `unsafe { ... }` block
 static deref_outside_unsafe = fn () -> usize {
     let mut x = 1;
-    let p = &raw mut x;
+    let p = x.&raw mut;
     p.*
 };
 
-// 11. `&raw mut` of a non-`mut` root: a mutating pointer may only be taken
+// 11. `.&raw mut` of a non-`mut` root: a mutating pointer may only be taken
 //     to something already assignable, so the mut-root rule blames the
 //     binding and offers the same "make it `mut`" quick fix an assignment
 //     would.
-//     error: cannot take `&raw mut` of `x`: it is not declared `mut`
+//     error: cannot take `.&raw mut` of `x`: it is not declared `mut`
 //     quick fix offered: "Make `x` mutable"
 static addr_of_non_mut = fn () {
     let x: usize = 1;
     print("hello");
-    let p = &raw mut x;
+    let p = x.&raw mut;
 };
 
 // 12. Const-param length mismatch: `Buf::<8>` and `Buf::<9>` are distinct
@@ -125,11 +125,11 @@ static wrong_const_len: Buf::<8> = Buf::<9>(struct { len = 1 });
 //     identity beyond the frame that owns their pointee, so one can never be
 //     the *result* of const evaluation — a static's value would outlive the
 //     frame it points into. The whole initializer is a const context, so
-//     the block yielding `&raw mut x` is rejected.
+//     the block yielding `x.&raw mut` is rejected.
 //     error: constant evaluation failed: a pointer cannot leave compile-time evaluation
 static pointer_escaping_const = const {
     let mut x: usize = 1;
-    &raw mut x
+    x.&raw mut
 };
 
 // 14. A number with no defining use: an integer literal's type is entirely
@@ -193,3 +193,13 @@ type Scaler = struct { n: usize } with {
 };
 static wrong_self_position = fn (s: Scaler) -> usize { s.scaled(2) };
 
+// 21. The retired PREFIX raw-borrow spelling: raw borrows (and raw pointer
+//     types) are now postfix — the dual of `.*` — so `&raw x` / `&raw mut x`
+//     get a targeted migration diagnostic rather than a silent
+//     reinterpretation. The postfix form is `x.&raw` / `x.&raw mut`.
+//     error: raw borrows are spelled postfix: `x.&raw` / `x.&raw mut`
+static retired_prefix_raw = fn () -> () {
+    let mut x: usize = 1;
+    let p = &raw mut x;
+    unsafe { p.* = 2; };
+};

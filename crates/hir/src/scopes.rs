@@ -257,7 +257,7 @@ pub enum Builtin {
     Panic,
     /// `alloc_array::<T>(n)` — one fresh heap allocation of `n`
     /// uninitialized elements. SAFE (allocating cannot UB); returns the
-    /// result-shaped [`ALLOC_RESULT_NAME`] enum (`Ok(&raw mut T)` /
+    /// result-shaped [`ALLOC_RESULT_NAME`] enum (`Ok(T.&raw mut)` /
     /// `Err`) — the interpreter never produces `Err` (it cannot
     /// meaningfully OOM), but the signature is stable for the codegen era.
     /// Refused in const contexts (heap values wait for an interning
@@ -270,8 +270,8 @@ pub enum Builtin {
     /// `add(p, i)` — pointer to element `i` past `p`, within the same
     /// allocation. UNSAFE: it carries a real precondition — advancing a
     /// pointer that does not address an array element with `i > 0` is
-    /// detected UB at the call. Flavor-preserving (`&raw mut` in →
-    /// `&raw mut` out) — a checker special case, not expressible as one
+    /// detected UB at the call. Flavor-preserving (`.&raw mut` in →
+    /// `.&raw mut` out) — a checker special case, not expressible as one
     /// `fn` type. Takes a `usize`; [`Builtin::Offset`] is the signed
     /// sibling, mirroring Rust's `add`/`offset` split.
     Add,
@@ -287,7 +287,7 @@ pub enum Builtin {
     /// Copying an uninitialized element propagates the marker silently —
     /// only reading one *as a value* traps.
     Copy,
-    /// `dangling::<T>()` — a `&raw mut T` that was never valid (one
+    /// `dangling::<T>()` — a `T.&raw mut` that was never valid (one
     /// reserved never-live allocation per machine). SAFE; any deref is
     /// detected UB.
     Dangling,
@@ -344,7 +344,7 @@ pub const BUILTIN_DISAMBIGUATOR: u32 = u32::MAX;
 
 /// The result-shaped return of `alloc_array` (and the library convention
 /// for fallible allocators built over it): a compiler-provided generic enum
-/// `AllocResult::<T> = enum { Ok(&raw mut T), Err }`. Provided per FILE —
+/// `AllocResult::<T> = enum { Ok(T.&raw mut), Err }`. Provided per FILE —
 /// resolution is per-file today, so each file sees "its" declaration; the
 /// identity scheme is the ordinary `ItemLoc` one with the reserved
 /// disambiguator, which keeps every downstream consumer (patterns, match
