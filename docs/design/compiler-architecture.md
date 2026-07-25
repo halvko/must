@@ -9,8 +9,13 @@
   malformed construct recovers rather than aborting the parse.
 - **X03** Superset-parse, then validate. A recognizable form parses into its real tree
   shape even where it is not legal, and is refused by a later check rather than by the
-  parser, so granting it later deletes a diagnostic and moves no grammar. ERROR nodes are
-  for genuinely malformed syntax only.
+  parser, so granting it later deletes a diagnostic and moves no grammar. A future-legal
+  form is RESERVED ("not supported yet"); a never-legal-but-recognizable one is CORRECTED.
+  When the verdict depends on what a name resolves to, stating it is hir's job, not syntax
+  validation's — a second segment's own turbofish (`Pair::first::<usize>`) is reserved on
+  a member, corrected on a variant, and the split cannot live in the parser (it does not
+  know which is which). Ownership in the tree must be structural (its own node), never
+  positional. ERROR nodes are for genuinely malformed syntax only.
 - **X04** Identity is range-free. `ItemLoc` is (file, name, disambiguator), never an arena
   index, so an edit above an item does not invalidate it. Nothing below the diagnostic boundary
   carries a range.

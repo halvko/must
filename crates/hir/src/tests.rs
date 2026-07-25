@@ -8638,6 +8638,288 @@ static main = fn() -> usize {
     );
 }
 
+// ---- second-segment generic arguments -----------------------------------
+//
+// A turbofish on a path's SECOND segment parses into a real node of its
+// own (`syntax`'s `MEMBER_GENERIC_ARGS`) and is refused HERE, by what the
+// segment names: a MEMBER's own binder is future-legal and reserved, a
+// VARIANT's arguments are the owner's and misplaced. The split cannot live
+// in the parser — it does not know which is which.
+
+#[test]
+fn member_own_generic_arguments_are_reserved() {
+    // The reserve voice: the form will become legal (member-own binders
+    // are declared future), so it says "not supported yet" rather than
+    // correcting the spelling.
+    check_diagnostics(
+        r#"
+type Measured = struct { n: usize } with {
+    impl Self { size = fn(m: Self) -> usize { m.n }; }
+};
+static main = fn() -> usize {
+    let f = Measured::size::<usize>;
+    0
+};
+"#,
+        expect![[r#"
+            144..167: a member's own generic arguments are not supported yet: arguments written on `Measured::size` cannot be applied here
+        "#]],
+    );
+}
+
+#[test]
+fn member_turbofish_on_an_unknown_base_is_still_one_diagnostic() {
+    // The cascade this whole area exists to prevent, checked end to end:
+    // `P::len::<usize>` on an undeclared `P` reports the unresolved NAME
+    // and nothing else — no parse errors (the list is real syntax now), no
+    // second complaint about the argument, and the statements around it
+    // are untouched.
+    check_diagnostics(
+        r#"
+static main = fn() -> usize {
+    let g = P::len::<usize>;
+    let n = 1;
+    n
+};
+"#,
+        expect![[r#"
+            43..44: unresolved name `P`
+        "#]],
+    );
+}
+
+#[test]
+fn member_own_generic_arguments_do_not_instantiate_the_owner() {
+    // The failure mode the ERROR node used to prevent structurally, now
+    // prevented by the tree itself: were `::<usize>` read as the OWNER's
+    // list, this program would be exactly `Pair::<usize>::first(p)` and
+    // would check CLEAN. It must not. One reservation, and the path
+    // produces no value.
+    check_diagnostics(
+        r#"
+type Pair = struct::<T> { a: T, b: T } with {
+    impl Self { first = fn(p: Self) -> T { p.a }; }
+};
+static main = fn() -> usize {
+    let p = Pair::<usize>(struct { a = 1, b = 2 });
+    Pair::first::<usize>(p)
+};
+"#,
+        expect![[r#"
+            188..208: a member's own generic arguments are not supported yet: arguments written on `Pair::first` cannot be applied here; if these are meant for `Pair`, write `Pair::<...>::first`
+        "#]],
+    );
+    // And the type side of the same claim: the callee is an error, not an
+    // instantiated `fn(Pair::<usize>) -> usize`.
+    check_infer(
+        r#"
+type Pair = struct::<T> { a: T, b: T } with {
+    impl Self { first = fn(p: Self) -> T { p.a }; }
+};
+static main = fn(p: Pair::<usize>) -> usize { Pair::first::<usize>(p) };
+"#,
+        expect![[r#"
+            116..173 'fn(p: Pair::<usiz...': fn(Pair::<usize>) -> usize
+            119..120 'p': Pair::<usize>
+            146..173 '{ Pair::first::<u...': {error}
+            148..168 'Pair::first::<usize>': {error}
+            148..171 'Pair::first::<usi...': {error}
+            169..170 'p': Pair::<usize>
+        "#]],
+    );
+}
+
+#[test]
+fn member_own_generic_arguments_no_hint_when_the_owner_list_is_already_written() {
+    // `Pair::<usize>::first::<usize>` already writes the owner's list — the
+    // `{owner}::<...>::{member}` hint has nothing left to suggest, so it
+    // must not repeat the user's own spelling back at them.
+    check_diagnostics(
+        r#"
+type Pair = struct::<T> { a: T, b: T } with {
+    impl Self { first = fn(p: Self) -> T { p.a }; }
+};
+static main = fn() -> usize {
+    let p = Pair::<usize>(struct { a = 1, b = 2 });
+    Pair::<usize>::first::<usize>(p)
+};
+"#,
+        expect![[r#"
+            188..217: a member's own generic arguments are not supported yet: arguments written on `Pair::first` cannot be applied here
+        "#]],
+    );
+}
+
+#[test]
+fn variant_own_generic_arguments_belong_to_the_owner() {
+    // A variant is a case of its enum and never gets a binder of its own,
+    // so this one is a CORRECTION (move them), not a reservation — the
+    // same tree, a different message, decided by what the segment names.
+    check_diagnostics(
+        r#"
+type Shape = enum::<T> { Circle(T), Point };
+static main = fn() -> usize {
+    let c = Shape::Circle::<usize>;
+    0
+};
+"#,
+        expect![[r#"
+            88..110: a variant has no generic arguments of its own: they belong to the owner — write `Shape::<...>::Circle`
+        "#]],
+    );
+}
+
+#[test]
+fn variant_own_generic_arguments_no_hint_on_a_non_generic_owner() {
+    // `Shape` has no binder at all, so `Shape::<...>::Circle` is not a fix —
+    // it is a second error ("Shape takes no generic arguments"). The hint
+    // must not steer the reader into it.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle, Point };
+static main = fn() -> usize {
+    let c = Shape::Circle::<usize>;
+    0
+};
+"#,
+        expect![[r#"
+            80..102: a variant has no generic arguments of its own: arguments written on `Shape::Circle` cannot be applied here
+        "#]],
+    );
+}
+
+#[test]
+fn variant_own_generic_arguments_no_hint_when_the_owner_list_is_already_written() {
+    // `Option::<usize>::Some::<bool>` already writes the owner's list — the
+    // hint has nothing left to suggest, so it must not echo the user's own
+    // spelling back.
+    check_diagnostics(
+        r#"
+type Option = enum::<T> { Some(T), None };
+static main = fn() -> usize {
+    let o = Option::<usize>::Some::<bool>;
+    0
+};
+"#,
+        expect![[r#"
+            86..115: a variant has no generic arguments of its own: arguments written on `Option::Some` cannot be applied here
+        "#]],
+    );
+}
+
+#[test]
+fn trait_member_own_generic_arguments_are_reserved_in_both_forms() {
+    // A trait requirement MAY already carry its own binder (`fmt::<W>`),
+    // so the trait side is where member generics will land first. Applying
+    // one at the use site is reserved in the value form and in the TR01
+    // short/named call forms alike — a call must not run with the written
+    // arguments quietly dropped.
+    check_diagnostics(
+        r#"
+trait D = requires { n: fn(k: usize) -> Self; } with {
+    impl usize { n = fn(k: usize) -> usize { k }; }
+};
+static value = fn() -> usize {
+    let f = D::<Self = usize>::n::<usize>;
+    0
+};
+static called = fn() -> usize { D::n::<usize>(3) };
+"#,
+        expect![[r#"
+            154..183: a member's own generic arguments are not supported yet: arguments written on `D::n` cannot be applied here
+            226..239: a member's own generic arguments are not supported yet: arguments written on `D::n` cannot be applied here
+        "#]],
+    );
+}
+
+#[test]
+fn member_own_generic_arguments_on_a_trait_declaring_its_own_binder() {
+    // Unlike an inherent member (whose own generics are refused at
+    // declaration), a trait requirement MAY already declare one
+    // (`fmt::<W: Write>`) — so the reservation here must not claim the
+    // member "has no binder of its own", and must not hint at
+    // `Display::<...>::fmt` (that spelling collides with the separately
+    // reserved generic-TRAIT form). Checked in both the value and the
+    // TR01 short-call forms.
+    check_diagnostics(
+        r#"
+trait Write = requires { push: fn(s: str, w: Self) -> Self; };
+trait Display = requires { fmt: fn::<W: Write>(w: W, x: Self) -> W; } with {
+    impl usize { fmt = fn::<W: Write>(w: W, x: usize) -> W { w }; }
+};
+static value = fn() -> usize {
+    let f = Display::fmt::<usize>;
+    0
+};
+static called = fn() -> usize { Display::fmt::<usize>(0, 1) };
+"#,
+        expect![[r#"
+            255..276: a member's own generic arguments are not supported yet: arguments written on `Display::fmt` cannot be applied here
+            319..340: a member's own generic arguments are not supported yet: arguments written on `Display::fmt` cannot be applied here
+        "#]],
+    );
+}
+
+#[test]
+fn member_own_generic_arguments_infer_the_owners_const_args_exactly_once() {
+    // Regression: the owner's turbofish const args used to be inferred
+    // TWICE on the trait path through this reservation —
+    // `trait_path_self_arg` types every const in `vp_args` regardless of
+    // whether it finds `Self`, so `reserve_member_own_args` /
+    // `infer_qualified_trait_call` must never re-infer them. One
+    // type-mismatch, not two, in both the value and called forms.
+    check_diagnostics(
+        r#"
+trait D = requires { n: fn(k: usize) -> Self; } with {
+    impl usize { n = fn(k: usize) -> usize { k }; }
+};
+static value = fn() -> usize {
+    let f = D::<const { 1 + true }>::n::<usize>;
+    0
+};
+static called = fn() -> usize { D::<const { 1 + true }>::n::<usize>(3) };
+"#,
+        expect![[r#"
+            154..189: `D` takes no generic arguments
+            154..189: a member's own generic arguments are not supported yet: arguments written on `D::n` cannot be applied here
+            170..174: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 168..169)
+            232..267: `D` takes no generic arguments
+            232..267: a member's own generic arguments are not supported yet: arguments written on `D::n` cannot be applied here
+            248..252: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 246..247)
+        "#]],
+    );
+}
+
+#[test]
+fn the_member_generic_program_the_future_will_make_legal() {
+    // The owner's own example, pinned as it behaves TODAY — the arc that
+    // lands member generics should have to change exactly these two lines
+    // and nothing else:
+    //
+    //   1. the DECLARATION's binder (`syntax::validation`'s reservation),
+    //   2. the USE site's arguments (this module's reservation).
+    //
+    // Both are diagnostics over a REAL parse: no ERROR nodes, no grammar
+    // change pending. Deleting them is the whole grant.
+    check_diagnostics(
+        r#"
+type Measured = struct { n: usize } with {
+    impl Self {
+        size = fn::<T>(m: Self, t: T) -> usize { m.n };
+    }
+};
+static main = fn() -> usize {
+    let f = Measured::size::<usize>;
+    0
+};
+"#,
+        expect![[r#"
+            77..82: generic members are not supported yet (the type's own binders are already in scope)
+            167..190: a member's own generic arguments are not supported yet: arguments written on `Measured::size` cannot be applied here
+        "#]],
+    );
+}
+
 #[test]
 fn named_self_call_pins_an_uninferable_self() {
     // The short form cannot infer `Self` when no argument mentions it;

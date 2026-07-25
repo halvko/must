@@ -60,10 +60,18 @@ pub enum ExprData {
         /// The second segment's text. Empty when broken (`Shape::` — the
         /// parse error covers it).
         variant: String,
-        /// The enum's written turbofish (`Option::<usize>::Some`), when
+        /// The OWNER's written turbofish (`Option::<usize>::Some`), when
         /// present — matched against the enum's binder during inference,
         /// exactly like a [`ExprData::GenericApp`]'s.
         args: Option<Vec<GenericArgData>>,
+        /// The SECOND segment's OWN written turbofish
+        /// (`Measured::size::<usize>`), when present — kept separate from
+        /// `args` all the way down, because it belongs to a binder the
+        /// second segment does not have YET: a member's own generic
+        /// arguments are reserved (inference states it), a variant's are a
+        /// mistake for the owner's. Neither may ever be spent on the
+        /// owner's binder, which is why the two lists never merge.
+        member_args: Option<Vec<GenericArgData>>,
     },
     /// `f::<usize, 42>` — a turbofish mention. The base is a real
     /// [`ExprData::NameRef`] allocated on the first segment's node (same
@@ -518,6 +526,32 @@ impl LowerCtx {
         }
     }
 
+    /// One written turbofish list, in source order. Type arguments stay
+    /// syntactic (`TypeRef`, range-free); const arguments are ordinary
+    /// expressions, allocated here so they resolve, type and evaluate like
+    /// any other expression; a named argument (`Self = Type`) keeps its
+    /// name for the semantic layer.
+    ///
+    /// Shared by every list a path can carry — the owner's and a second
+    /// segment's own — so the two differ only in WHERE they are stored,
+    /// never in how they are read.
+    fn lower_generic_args(&mut self, list: ast::GenericArgList) -> Vec<GenericArgData> {
+        list.args()
+            .map(|arg| match arg {
+                ast::GenericArg::TypeArg(ty_arg) => GenericArgData::Type(
+                    ty_arg.ty().map(TypeRef::from_ast).unwrap_or(TypeRef::Error),
+                ),
+                ast::GenericArg::ConstArg(const_arg) => {
+                    GenericArgData::Const(self.lower_opt_expr(const_arg.expr()))
+                }
+                ast::GenericArg::NamedArg(named) => GenericArgData::Named {
+                    name: named.name_ref().map(|n| n.text()).unwrap_or_default(),
+                    ty: named.ty().map(TypeRef::from_ast).unwrap_or(TypeRef::Error),
+                },
+            })
+            .collect()
+    }
+
     fn lower_expr(&mut self, expr: ast::Expr) -> ExprId {
         match expr {
             ast::Expr::Literal(it) => {
@@ -545,27 +579,20 @@ impl LowerCtx {
                 if let Some(arg_list) = it.generic_arg_list() {
                     let base =
                         self.alloc_expr(ExprData::NameRef(name_ref.text()), name_ref.syntax());
-                    let args: Vec<GenericArgData> = arg_list
-                        .args()
-                        .map(|arg| match arg {
-                            ast::GenericArg::TypeArg(ty_arg) => GenericArgData::Type(
-                                ty_arg.ty().map(TypeRef::from_ast).unwrap_or(TypeRef::Error),
-                            ),
-                            ast::GenericArg::ConstArg(const_arg) => {
-                                GenericArgData::Const(self.lower_opt_expr(const_arg.expr()))
-                            }
-                            ast::GenericArg::NamedArg(named) => GenericArgData::Named {
-                                name: named.name_ref().map(|n| n.text()).unwrap_or_default(),
-                                ty: named.ty().map(TypeRef::from_ast).unwrap_or(TypeRef::Error),
-                            },
-                        })
-                        .collect();
+                    let args = self.lower_generic_args(arg_list);
                     if let Some(variant) = it.variant_name_ref() {
+                        // `Pair::<usize>::first::<T>` — arguments on BOTH
+                        // segments. They stay two lists (see
+                        // `ExprData::VariantPath::member_args`).
+                        let member_args = it
+                            .member_generic_arg_list()
+                            .map(|list| self.lower_generic_args(list));
                         return self.alloc_expr(
                             ExprData::VariantPath {
                                 base,
                                 variant: variant.text(),
                                 args: Some(args),
+                                member_args,
                             },
                             it.syntax(),
                         );
@@ -580,11 +607,21 @@ impl LowerCtx {
                     let base =
                         self.alloc_expr(ExprData::NameRef(name_ref.text()), name_ref.syntax());
                     let variant = it.variant_name_ref().map(|n| n.text()).unwrap_or_default();
+                    // `Measured::size::<usize>` — the second segment's OWN
+                    // turbofish. Lowered for real (its const arguments are
+                    // ordinary expressions that must resolve and type like
+                    // any other), kept out of `args`, and reserved in
+                    // inference, which is the layer that knows whether the
+                    // segment names a member or a variant.
+                    let member_args = it
+                        .member_generic_arg_list()
+                        .map(|list| self.lower_generic_args(list));
                     return self.alloc_expr(
                         ExprData::VariantPath {
                             base,
                             variant,
                             args: None,
+                            member_args,
                         },
                         it.syntax(),
                     );

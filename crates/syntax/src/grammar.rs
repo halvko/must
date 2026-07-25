@@ -666,24 +666,14 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
                         p.bump(COLON2);
                         if p.at(IDENT) {
                             name_ref(p);
+                            member_generic_args(p);
                         } else {
                             p.error("expected a variant name after `::`");
                         }
                     }
                 } else if p.at(IDENT) {
                     name_ref(p);
-                    // `P::len::<usize>` — a turbofish on the SECOND
-                    // segment. Parsed cleanly into its own
-                    // `GENERIC_ARG_LIST` (parse-and-reserve, the house
-                    // pattern: validation rejects it, see
-                    // `PathExpr::member_generic_arg_list()`) rather than
-                    // refused here — generic arguments belong to the OWNER
-                    // (`Pair::<usize>::first`, `Shape::<usize>::A`), a
-                    // member's own binder is not applicable from here.
-                    if p.at(COLON2) && p.nth(1) == L_ANGLE {
-                        p.bump(COLON2);
-                        generic_arg_list(p);
-                    }
+                    member_generic_args(p);
                 } else {
                     p.error("expected a variant name after `::`");
                 }
@@ -1235,6 +1225,38 @@ fn generic_arg_list(p: &mut Parser<'_>) {
     }
     p.expect_after_prev(R_ANGLE);
     m.complete(p, GENERIC_ARG_LIST);
+}
+
+/// `::<usize>` written on a path's SECOND segment (`Pair::first::<usize>`,
+/// `Shape::Circle::<usize>`) — that segment's OWN generic arguments.
+///
+/// The list gets a node of its own so the TREE says whose arguments these
+/// are: the owner's turbofish is a direct `GENERIC_ARG_LIST` child of the
+/// `PATH_EXPR` (`Pair::<usize>::first`), the second segment's hangs one
+/// level down, inside `MEMBER_GENERIC_ARGS`. That is the whole structural
+/// difference, and it is what keeps `PathExpr::generic_arg_list()` meaning
+/// the OWNER's list — no consumer can read one as the other by accident.
+///
+/// Nothing is diagnosed here. `size::<usize>` on a member is FUTURE-LEGAL
+/// by declared intent (member-own binders are reserved, not rejected: one
+/// day `size = fn::<T>(m: Self, t: T) -> usize` will declare one and
+/// `Measured::size::<usize>` will apply it), so it parses as the tree it
+/// really is and hir states the reservation — granting it later deletes a
+/// diagnostic instead of changing the grammar. `Shape::Circle::<usize>`
+/// parses the same shape and gets hir's variant-flavored correction: the
+/// two readings differ by what the segment NAMES, which is not a question
+/// the parser can answer.
+///
+/// A no-op unless the two-token `COLON2 L_ANGLE` lookahead is there — the
+/// same unambiguous gate every other turbofish uses.
+fn member_generic_args(p: &mut Parser<'_>) {
+    if !(p.at(COLON2) && p.nth(1) == L_ANGLE) {
+        return;
+    }
+    let m = p.start();
+    p.bump(COLON2);
+    generic_arg_list(p);
+    m.complete(p, MEMBER_GENERIC_ARGS);
 }
 
 /// One turbofish argument. Disambiguated by form, not by the declaration

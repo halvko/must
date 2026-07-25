@@ -86,8 +86,13 @@ impl CheckCtx<'_> {
     fn check_expr(&mut self, expr: ExprId, in_unsafe: bool) {
         match &self.body.exprs[expr] {
             ExprData::Missing | ExprData::Literal(_) | ExprData::NameRef(_) => {}
-            ExprData::VariantPath { args, .. } => {
-                for arg in args.iter().flatten() {
+            // Both lists a path can carry — the owner's turbofish and a
+            // second segment's own — hold ordinary const-arg expressions,
+            // so both are walked (the reserved one still contains code).
+            ExprData::VariantPath {
+                args, member_args, ..
+            } => {
+                for arg in args.iter().flatten().chain(member_args.iter().flatten()) {
                     if let crate::body::GenericArgData::Const(value) = arg {
                         self.check_expr(*value, in_unsafe);
                     }

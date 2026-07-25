@@ -338,6 +338,16 @@ impl LowerCtx<'_> {
                 InferenceDiagnostic::MemberNotCalled { expr, .. } => {
                     self.value_traps.insert(*expr, diag.message());
                 }
+                // Generic arguments written on a path's SECOND segment —
+                // reserved on a member, misplaced on a variant. Either way
+                // the PATH is what cannot produce a value; in the called
+                // form the diagnostic already sits on the callee path, so
+                // the trap lands before the call, exactly like the
+                // member-value refusals below.
+                InferenceDiagnostic::MemberOwnGenericArgs { expr, .. }
+                | InferenceDiagnostic::VariantOwnGenericArgs { expr, .. } => {
+                    self.value_traps.insert(*expr, diag.message());
+                }
                 // A bare trait name (or a member value with no implementer
                 // named, one that would capture a dictionary, an associated
                 // type, a bounded generic used as a value, a named generic

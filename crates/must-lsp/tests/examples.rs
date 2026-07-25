@@ -342,23 +342,23 @@ fn errors_checks_dirty_with_the_documented_count() {
             214 |     const { if true { return 1; }; 0 }
                 |                       ^^^^^^^^
 
-            error: generic arguments belong to the owner, not the second segment: write `Owner::<...>::name` (a member's own generic arguments are not supported yet)
-              --> examples/errors.must:227:69
+            error: a member's own generic arguments are not supported yet: arguments written on `Measured::size` cannot be applied here
+              --> examples/errors.must:230:53
                 |
-            227 | static member_own_turbofish = fn () -> () { let f = Measured::size::<usize>; };
-                |                                                                     ^^^^^^^
+            230 | static member_own_turbofish = fn () -> () { let f = Measured::size::<usize>; };
+                |                                                     ^^^^^^^^^^^^^^^^^^^^^^^
 
             error: `len` is a field of `Sized`, not a member — fields are reached through a value: `value.len`
-              --> examples/errors.must:235:55
+              --> examples/errors.must:238:55
                 |
-            235 | static field_through_the_type = fn () -> () { let n = Sized::len; };
+            238 | static field_through_the_type = fn () -> () { let n = Sized::len; };
                 |                                                       ^^^^^^^^^^
-               = note: `Sized` is defined here (examples/errors.must:234:6)
+               = note: `Sized` is defined here (examples/errors.must:237:6)
 
             error: `Self` names the implementer, so it cannot be `_`: write the type (`Trait::<Self = Type>::member`), or use the short form `Trait::member(...)` where an argument determines `Self`
-              --> examples/errors.must:248:45
+              --> examples/errors.must:251:45
                 |
-            248 | static self_hole = fn (n: usize) -> usize { Countable::<Self = _>::count(n) };
+            251 | static self_hole = fn (n: usize) -> usize { Countable::<Self = _>::count(n) };
                 |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
             found 24 errors and 1 warning

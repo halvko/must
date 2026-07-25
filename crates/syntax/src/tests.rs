@@ -6832,6 +6832,289 @@ fn variant_path_still_parses_after_generics() {
     );
 }
 
+#[test]
+fn member_own_turbofish_parses_as_the_segments_own_list() {
+    // A turbofish on the SECOND segment gets a real node of its own —
+    // `MEMBER_GENERIC_ARGS`, holding the `::` and the list — and NO parse
+    // error. `P::len::<usize>` is future-legal by declared intent (member
+    // binders are reserved, not rejected), so the grammar parses the shape
+    // the language will keep and hir states the reservation; granting
+    // member generics later deletes a diagnostic and leaves this tree
+    // alone.
+    //
+    // Two regressions are pinned at once. The original bug: the `::` ended
+    // the statement and every leftover token became its own parse error —
+    // five of them, including a bogus "unresolved name `usize`". Its first
+    // fix: the list was consumed under an ERROR node, which said "malformed
+    // syntax" about a form that is merely not-yet-meaningful.
+    check(
+        "static s = fn { let g = P::len::<usize>; };",
+        expect![[r#"
+            SOURCE_FILE@0..43
+              STATIC_ITEM@0..43
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "s"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..42
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..42
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..40
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      BIND_PAT@20..21
+                        NAME@20..21
+                          IDENT@20..21 "g"
+                      WHITESPACE@21..22 " "
+                      EQ@22..23 "="
+                      WHITESPACE@23..24 " "
+                      PATH_EXPR@24..39
+                        NAME_REF@24..25
+                          IDENT@24..25 "P"
+                        COLON2@25..27 "::"
+                        NAME_REF@27..30
+                          IDENT@27..30 "len"
+                        MEMBER_GENERIC_ARGS@30..39
+                          COLON2@30..32 "::"
+                          GENERIC_ARG_LIST@32..39
+                            L_ANGLE@32..33 "<"
+                            TYPE_ARG@33..38
+                              PATH_TYPE@33..38
+                                NAME_REF@33..38
+                                  IDENT@33..38 "usize"
+                            R_ANGLE@38..39 ">"
+                      SEMICOLON@39..40 ";"
+                    WHITESPACE@40..41 " "
+                    R_BRACE@41..42 "}"
+                SEMICOLON@42..43 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn variant_own_turbofish_parses_the_same_shape() {
+    // `Shape::Circle::<usize>` is NOT future-legal — a variant never gets
+    // a binder of its own — but the parser cannot tell a variant from a
+    // member, and does not try: one shape, and hir splits the message by
+    // what the segment turned out to name.
+    check(
+        "static s = Shape::Circle::<usize>;",
+        expect![[r#"
+            SOURCE_FILE@0..34
+              STATIC_ITEM@0..34
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "s"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                PATH_EXPR@11..33
+                  NAME_REF@11..16
+                    IDENT@11..16 "Shape"
+                  COLON2@16..18 "::"
+                  NAME_REF@18..24
+                    IDENT@18..24 "Circle"
+                  MEMBER_GENERIC_ARGS@24..33
+                    COLON2@24..26 "::"
+                    GENERIC_ARG_LIST@26..33
+                      L_ANGLE@26..27 "<"
+                      TYPE_ARG@27..32
+                        PATH_TYPE@27..32
+                          NAME_REF@27..32
+                            IDENT@27..32 "usize"
+                      R_ANGLE@32..33 ">"
+                SEMICOLON@33..34 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn owner_and_member_turbofish_are_separate_nodes() {
+    // Both segments carrying arguments: the OWNER's list is a direct
+    // `GENERIC_ARG_LIST` child of the path, the member's hangs inside
+    // `MEMBER_GENERIC_ARGS`. That nesting is the whole mechanism — it is
+    // what makes `PathExpr::generic_arg_list()` structurally unable to
+    // return the member's list (see
+    // `path_accessors_keep_the_two_lists_apart`).
+    check(
+        "static s = Pair::<usize>::first::<T>;",
+        expect![[r#"
+            SOURCE_FILE@0..37
+              STATIC_ITEM@0..37
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "s"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                PATH_EXPR@11..36
+                  NAME_REF@11..15
+                    IDENT@11..15 "Pair"
+                  COLON2@15..17 "::"
+                  GENERIC_ARG_LIST@17..24
+                    L_ANGLE@17..18 "<"
+                    TYPE_ARG@18..23
+                      PATH_TYPE@18..23
+                        NAME_REF@18..23
+                          IDENT@18..23 "usize"
+                    R_ANGLE@23..24 ">"
+                  COLON2@24..26 "::"
+                  NAME_REF@26..31
+                    IDENT@26..31 "first"
+                  MEMBER_GENERIC_ARGS@31..36
+                    COLON2@31..33 "::"
+                    GENERIC_ARG_LIST@33..36
+                      L_ANGLE@33..34 "<"
+                      TYPE_ARG@34..35
+                        PATH_TYPE@34..35
+                          NAME_REF@34..35
+                            IDENT@34..35 "T"
+                      R_ANGLE@35..36 ">"
+                SEMICOLON@36..37 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn named_self_path_carries_a_member_turbofish_too() {
+    // The trait-qualified form composes: `Self = usize` is the TRAIT's
+    // argument (TR01), `::<usize>` after `m` is the member's own.
+    check(
+        "static x = D::<Self = usize>::m::<usize>(n);",
+        expect![[r#"
+            SOURCE_FILE@0..44
+              STATIC_ITEM@0..44
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                CALL_EXPR@11..43
+                  PATH_EXPR@11..40
+                    NAME_REF@11..12
+                      IDENT@11..12 "D"
+                    COLON2@12..14 "::"
+                    GENERIC_ARG_LIST@14..28
+                      L_ANGLE@14..15 "<"
+                      NAMED_ARG@15..27
+                        NAME_REF@15..19
+                          IDENT@15..19 "Self"
+                        WHITESPACE@19..20 " "
+                        EQ@20..21 "="
+                        WHITESPACE@21..22 " "
+                        PATH_TYPE@22..27
+                          NAME_REF@22..27
+                            IDENT@22..27 "usize"
+                      R_ANGLE@27..28 ">"
+                    COLON2@28..30 "::"
+                    NAME_REF@30..31
+                      IDENT@30..31 "m"
+                    MEMBER_GENERIC_ARGS@31..40
+                      COLON2@31..33 "::"
+                      GENERIC_ARG_LIST@33..40
+                        L_ANGLE@33..34 "<"
+                        TYPE_ARG@34..39
+                          PATH_TYPE@34..39
+                            NAME_REF@34..39
+                              IDENT@34..39 "usize"
+                        R_ANGLE@39..40 ">"
+                  ARG_LIST@40..43
+                    L_PAREN@40..41 "("
+                    PATH_EXPR@41..42
+                      NAME_REF@41..42
+                        IDENT@41..42 "n"
+                    R_PAREN@42..43 ")"
+                SEMICOLON@43..44 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn member_turbofish_reports_no_parse_error_and_the_rest_parses() {
+    // The property the cascade fix bought, kept without the ERROR node: a
+    // second-segment turbofish costs ZERO parse errors (it is well-formed
+    // syntax — hir is where it is refused), and the statements around it
+    // are untouched. If the `::` ever stops being consumed here, this
+    // fails long before the snapshots do.
+    for input in [
+        "static s = fn { let g = P::len::<usize>; let n = 1; };",
+        "static s = fn { let g = Shape::Circle::<usize>; let n = 1; };",
+        "static s = fn { let g = Pair::<usize>::first::<T>; let n = 1; };",
+        "static s = fn { let g = D::<Self = usize>::m::<usize>; let n = 1; };",
+        "static s = fn { let g = P::len::<const { 1 + 1 }>; let n = 1; };",
+    ] {
+        let parse = crate::parse(input);
+        assert_eq!(
+            parse.errors().len(),
+            0,
+            "`{input}` should parse clean, got {:?}",
+            parse.errors()
+        );
+        // The trailing `let n = 1;` really is there: recovery did not eat
+        // the rest of the block.
+        let dump = parse.debug_dump();
+        assert_eq!(
+            dump.matches("LET_STMT").count(),
+            2,
+            "`{input}` lost the following statement:\n{dump}"
+        );
+    }
+}
+
+#[test]
+fn path_accessors_keep_the_two_lists_apart() {
+    // The AST half of the separation: `generic_arg_list()` means the
+    // OWNER's list and cannot see a member's, `member_generic_arg_list()`
+    // means the second segment's and cannot see the owner's. This is what
+    // the ERROR node used to fake — anything that reads a path's arguments
+    // gets the owner's, and only code that asks for the member's gets
+    // those.
+    use crate::ast::{self, AstNode};
+    let path_of = |text: &str| {
+        crate::parse(text)
+            .syntax_node()
+            .descendants()
+            .find_map(ast::PathExpr::cast)
+            .expect("a path expression")
+    };
+    let owner_text =
+        |list: Option<ast::GenericArgList>| list.map(|list| list.syntax().text().to_string());
+
+    let member = path_of("static s = Measured::size::<usize>;");
+    assert_eq!(owner_text(member.generic_arg_list()), None);
+    assert_eq!(
+        owner_text(member.member_generic_arg_list()),
+        Some("<usize>".to_owned())
+    );
+
+    let owner = path_of("static s = Pair::<usize>::first;");
+    assert_eq!(
+        owner_text(owner.generic_arg_list()),
+        Some("<usize>".to_owned())
+    );
+    assert_eq!(owner_text(owner.member_generic_arg_list()), None);
+
+    let both = path_of("static s = Pair::<usize>::first::<T>;");
+    assert_eq!(
+        owner_text(both.generic_arg_list()),
+        Some("<usize>".to_owned())
+    );
+    assert_eq!(
+        owner_text(both.member_generic_arg_list()),
+        Some("<T>".to_owned())
+    );
+}
+
 // ---- generics: type-declaration binders ----
 
 #[test]
@@ -7019,66 +7302,6 @@ fn generic_enum_variant_path_expr() {
                       INT_NUMBER@33..34 "3"
                     R_PAREN@34..35 ")"
                 SEMICOLON@35..36 ";"
-        "#]],
-    );
-}
-
-#[test]
-fn member_own_turbofish_is_one_error_and_recovers() {
-    // `P::len::<usize>` used to end the statement at the second `::` and
-    // then produce a parse error per leftover token — five of them,
-    // including a bogus "unresolved name `usize`" from the argument being
-    // read as an expression. Now it parses cleanly into its own
-    // `GENERIC_ARG_LIST` (parse-and-reserve, the house pattern) and
-    // validation reports the reservation once, from
-    // `PathExpr::member_generic_arg_list()` — kept distinct from
-    // `generic_arg_list()`, which must keep reading the OWNER's list alone.
-    check(
-        "static s = fn { let g = P::len::<usize>; };",
-        expect![[r#"
-            SOURCE_FILE@0..43
-              STATIC_ITEM@0..43
-                STATIC_KW@0..6 "static"
-                WHITESPACE@6..7 " "
-                NAME@7..8
-                  IDENT@7..8 "s"
-                WHITESPACE@8..9 " "
-                EQ@9..10 "="
-                WHITESPACE@10..11 " "
-                FN_LITERAL@11..42
-                  FN_KW@11..13 "fn"
-                  WHITESPACE@13..14 " "
-                  BLOCK_EXPR@14..42
-                    L_BRACE@14..15 "{"
-                    WHITESPACE@15..16 " "
-                    LET_STMT@16..40
-                      LET_KW@16..19 "let"
-                      WHITESPACE@19..20 " "
-                      BIND_PAT@20..21
-                        NAME@20..21
-                          IDENT@20..21 "g"
-                      WHITESPACE@21..22 " "
-                      EQ@22..23 "="
-                      WHITESPACE@23..24 " "
-                      PATH_EXPR@24..39
-                        NAME_REF@24..25
-                          IDENT@24..25 "P"
-                        COLON2@25..27 "::"
-                        NAME_REF@27..30
-                          IDENT@27..30 "len"
-                        COLON2@30..32 "::"
-                        GENERIC_ARG_LIST@32..39
-                          L_ANGLE@32..33 "<"
-                          TYPE_ARG@33..38
-                            PATH_TYPE@33..38
-                              NAME_REF@33..38
-                                IDENT@33..38 "usize"
-                          R_ANGLE@38..39 ">"
-                      SEMICOLON@39..40 ";"
-                    WHITESPACE@40..41 " "
-                    R_BRACE@41..42 "}"
-                SEMICOLON@42..43 ";"
-            error 32..39: generic arguments belong to the owner, not the second segment: write `Owner::<...>::name` (a member's own generic arguments are not supported yet)
         "#]],
     );
 }

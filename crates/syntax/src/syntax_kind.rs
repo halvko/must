@@ -127,6 +127,7 @@ pub enum SyntaxKind {
     TYPE_ARG,
     CONST_ARG,
     NAMED_ARG,
+    MEMBER_GENERIC_ARGS,
     RAW_PTR_TYPE,
     ADDR_OF_EXPR,
     DEREF_EXPR,

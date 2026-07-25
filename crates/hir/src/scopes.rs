@@ -176,10 +176,18 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
         // The variant name is resolved against the enum during inference,
         // not lexically; only the base is a scoped reference — plus any
         // turbofish const-arg values, which are ordinary scoped
-        // expressions (same as a `GenericApp`'s).
-        ExprData::VariantPath { base, args, .. } => {
+        // expressions (same as a `GenericApp`'s). A SECOND segment's own
+        // arguments are semantically reserved but lexically ordinary:
+        // their names resolve here like anyone else's, so the reservation
+        // is the only thing standing between them and running.
+        ExprData::VariantPath {
+            base,
+            args,
+            member_args,
+            ..
+        } => {
             compute_expr_scopes(body, scopes, *base, scope);
-            for arg in args.iter().flatten() {
+            for arg in args.iter().flatten().chain(member_args.iter().flatten()) {
                 if let crate::body::GenericArgData::Const(value) = arg {
                     compute_expr_scopes(body, scopes, *value, scope);
                 }

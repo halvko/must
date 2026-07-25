@@ -233,6 +233,17 @@ ast_node!(
     /// nameable is a semantic question.
     NamedArg: NAMED_ARG
 );
+ast_node!(
+    /// `::<usize>` on a path's SECOND segment (`Pair::first::<usize>`,
+    /// `Shape::Circle::<usize>`) — that segment's OWN generic arguments,
+    /// wrapping the `::` and the [`GenericArgList`].
+    ///
+    /// The node exists so ownership is structural: the OWNER's turbofish is
+    /// a direct `GENERIC_ARG_LIST` child of the [`PathExpr`], a segment's
+    /// own list hangs in here, and no consumer can read one as the other.
+    /// Reaching it goes through [`PathExpr::member_generic_arg_list`].
+    MemberGenericArgs: MEMBER_GENERIC_ARGS
+);
 
 ast_enum!(
     /// One generic parameter: a bare type name or a `const` value binder.
@@ -966,29 +977,28 @@ impl PathExpr {
     pub fn colon2_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, COLON2)
     }
-    /// The turbofish argument list (`f::<usize, 42>`), when present; hir
-    /// lowers it and reports arity and position errors.
-    ///
-    /// Grammar-wise a `PathExpr` carries at most one `GENERIC_ARG_LIST`
-    /// child — the owner's turbofish OR a member's own (never both: the
-    /// member-own form is only reachable when the owner's is absent, see
-    /// `member_generic_arg_list`) — so this reads it only when it precedes
-    /// the second segment, or there is no second segment at all.
+    /// The OWNER's turbofish argument list — `f::<usize, 42>`, and the
+    /// leading list of a qualified path (`Pair::<usize>::first`,
+    /// `Display::<Self = Foo>::fmt`). Always the list applied to the FIRST
+    /// segment: a second segment's own arguments live one level down,
+    /// inside [`MemberGenericArgs`], so this direct-child lookup cannot
+    /// reach them.
     pub fn generic_arg_list(&self) -> Option<GenericArgList> {
-        let list = child::<GenericArgList>(&self.syntax)?;
-        let is_member_own = self.variant_name_ref().is_some_and(|variant| {
-            list.syntax().text_range().start() > variant.syntax().text_range().start()
-        });
-        (!is_member_own).then_some(list)
+        child(&self.syntax)
     }
-    /// A turbofish on the SECOND segment (`P::len::<usize>`), when present
-    /// — parse-and-reserve: generic arguments belong to the owner
-    /// (`generic_arg_list` above), not a member's own name, so
-    /// `syntax::validation` rejects this one outright.
+    /// The SECOND segment's own turbofish (`Pair::first::<usize>`), when
+    /// present — the arguments applied to the member/variant itself rather
+    /// than to its owner. Semantically reserved (hir states the
+    /// reservation), which is exactly why it must not be confused with
+    /// [`Self::generic_arg_list`].
     pub fn member_generic_arg_list(&self) -> Option<GenericArgList> {
-        let variant = self.variant_name_ref()?;
-        let list = child::<GenericArgList>(&self.syntax)?;
-        (list.syntax().text_range().start() > variant.syntax().text_range().start()).then_some(list)
+        child::<MemberGenericArgs>(&self.syntax)?.generic_arg_list()
+    }
+}
+
+impl MemberGenericArgs {
+    pub fn generic_arg_list(&self) -> Option<GenericArgList> {
+        child(&self.syntax)
     }
 }
 

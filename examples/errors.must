@@ -214,11 +214,14 @@ static return_in_const_block = fn () -> usize {
     const { if true { return 1; }; 0 }
 };
 
-// 23. A turbofish on a qualified member's OWN name: generic arguments
-//     belong to the owner (`Pair::<usize>::first`), and a member's own
-//     binder is not reachable from here yet. Reserved with ONE diagnostic
-//     — the list is consumed, so the rest of the expression still parses.
-//     error: generic arguments belong to the owner, not the second segment: write `Owner::<...>::name` (a member's own generic arguments are not supported yet)
+// 23. A turbofish on a qualified member's OWN name. The path is not
+//     malformed — it parses as the shape it will keep, with the arguments
+//     on the SEGMENT that was given them — it is RESERVED: members do not
+//     carry binders of their own yet. The day they do, this diagnostic
+//     goes away and nothing else moves. (On a VARIANT the same shape gets
+//     a different answer: a variant never gets a binder, so its arguments
+//     are the owner's, misplaced — `Shape::<usize>::Circle`.)
+//     error: a member's own generic arguments are not supported yet: arguments written on `Measured::size` cannot be applied here
 type Measured = struct { n: usize } with {
     impl Self {
         size = fn (m: Self) -> usize { m.n };

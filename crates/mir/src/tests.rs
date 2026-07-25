@@ -1334,6 +1334,58 @@ static s = Shape::Missing;
 }
 
 #[test]
+fn member_own_generic_args_traps_with_the_reservation() {
+    // Without the `MemberOwnGenericArgs` arm in `value_traps`, lowering
+    // falls through to the unrelated (and doubly wrong) "cannot use a
+    // variant" trap: `size` names a member, not a variant, and
+    // `Measured`'s declaration has no errors.
+    check_mir(
+        r#"
+type Measured = struct { n: usize } with {
+    impl Self { size = fn(m: Self) -> usize { m.n }; }
+};
+static s = Measured::size::<usize>;
+"#,
+        expect![[r#"
+            item Measured:
+            item s:
+            fn b0() -> {error} {
+              _0: {error}  // return
+              _1: {error}
+              bb0:
+                _1 = trap "a member's own generic arguments are not supported yet: arguments written on `Measured::size` cannot be applied here" -> bb1
+              bb1:
+                _0 = _1
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn variant_own_generic_args_traps_with_the_correction() {
+    check_mir(
+        r#"
+type Shape = enum::<T> { Circle(T), Point };
+static s = Shape::Circle::<usize>;
+"#,
+        expect![[r#"
+            item Shape:
+            item s:
+            fn b0() -> {error} {
+              _0: {error}  // return
+              _1: {error}
+              bb0:
+                _1 = trap "a variant has no generic arguments of its own: they belong to the owner — write `Shape::<...>::Circle`" -> bb1
+              bb1:
+                _0 = _1
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
 fn match_on_enum_lowers_to_switch_variant() {
     check_mir(
         r#"

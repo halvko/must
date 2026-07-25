@@ -955,6 +955,54 @@ pub enum InferenceDiagnostic {
         /// The call expression (where MIR traps).
         expr: ExprId,
     },
+    /// `Measured::size::<usize>` — generic arguments written on a MEMBER's
+    /// own name at a USE site. A RESERVATION, not a correction: it says
+    /// nothing about whether the member HAS a binder — an inherent
+    /// member's own generics are separately refused at declaration, while
+    /// a trait requirement may already declare one (`fmt::<W: Write>`) —
+    /// only that applying one here, on the second segment, is not
+    /// supported yet. The path parses as exactly the tree its future
+    /// meaning will keep; granting the use site deletes this diagnostic
+    /// and moves no grammar.
+    MemberOwnGenericArgs {
+        /// The path expression (carries the squiggle).
+        expr: ExprId,
+        /// The owner's display name — a type or a trait.
+        owner: String,
+        /// The member's name.
+        member: String,
+        /// Whether `{owner}::<...>::{member}` is worth hinting at: `owner`
+        /// is a type with a binder of its own to receive the arguments,
+        /// and the path does not already write one. False for a trait
+        /// (that spelling collides with the separately reserved
+        /// generic-trait form), a non-generic type (the hint would just
+        /// trade this diagnostic for "takes no generic arguments"), or a
+        /// path that already writes `{owner}::<...>::{member}` (nothing
+        /// left to suggest).
+        suggest_owner_list: bool,
+    },
+    /// `Shape::Circle::<usize>` — generic arguments written on a VARIANT.
+    /// A CORRECTION, not a reservation: a variant is a case of its enum
+    /// and never gets a binder of its own, so arguments written there are
+    /// the OWNER's, misplaced — the fix is to move them
+    /// (`Shape::<usize>::Circle`).
+    VariantOwnGenericArgs {
+        /// The path expression (carries the squiggle).
+        expr: ExprId,
+        /// The enum's display name.
+        owner: String,
+        /// The variant's name.
+        variant: String,
+        /// Whether `{owner}::<...>::{variant}` is worth hinting at: the
+        /// enum has a binder of its own to receive the arguments, and the
+        /// path does not already write one. False for a non-generic enum
+        /// (the hint would just trade this diagnostic for "takes no
+        /// generic arguments") or a path that already writes
+        /// `{owner}::<...>::{variant}` (nothing left to suggest) — the
+        /// same condition `MemberOwnGenericArgs`'s field of the same name
+        /// gates.
+        suggest_owner_list: bool,
+    },
 }
 
 /// Why a named generic argument is refused — see
@@ -1127,6 +1175,8 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::GenericTraitReserved { expr, .. }
             | InferenceDiagnostic::MemberCallAmbiguity { expr, .. }
             | InferenceDiagnostic::NestedBoundUse { expr }
+            | InferenceDiagnostic::MemberOwnGenericArgs { expr, .. }
+            | InferenceDiagnostic::VariantOwnGenericArgs { expr, .. }
             | InferenceDiagnostic::AddrOfNonPlace { expr } => *expr,
             InferenceDiagnostic::BuiltinExpectsRawPtr { arg, .. } => *arg,
             InferenceDiagnostic::AddrOfMutImmutable { root, .. }
@@ -1703,6 +1753,45 @@ impl InferenceDiagnostic {
                  capture the dictionary)"
                     .to_owned()
             }
+            InferenceDiagnostic::MemberOwnGenericArgs {
+                owner,
+                member,
+                suggest_owner_list,
+                ..
+            } => {
+                if *suggest_owner_list {
+                    format!(
+                        "a member's own generic arguments are not supported yet: \
+                         arguments written on `{owner}::{member}` cannot be applied \
+                         here; if these are meant for `{owner}`, write \
+                         `{owner}::<...>::{member}`"
+                    )
+                } else {
+                    format!(
+                        "a member's own generic arguments are not supported yet: \
+                         arguments written on `{owner}::{member}` cannot be applied here"
+                    )
+                }
+            }
+            InferenceDiagnostic::VariantOwnGenericArgs {
+                owner,
+                variant,
+                suggest_owner_list,
+                ..
+            } => {
+                if *suggest_owner_list {
+                    format!(
+                        "a variant has no generic arguments of its own: they \
+                         belong to the owner — write `{owner}::<...>::{variant}`"
+                    )
+                } else {
+                    format!(
+                        "a variant has no generic arguments of its own: \
+                         arguments written on `{owner}::{variant}` cannot be \
+                         applied here"
+                    )
+                }
+            }
         }
     }
 }
@@ -2264,6 +2353,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::TraitHasNoMember { .. }
                 | InferenceDiagnostic::BoundFnValue { .. }
                 | InferenceDiagnostic::GenericTraitReserved { .. }
+                | InferenceDiagnostic::MemberOwnGenericArgs { .. }
+                | InferenceDiagnostic::VariantOwnGenericArgs { .. }
                 | InferenceDiagnostic::NestedBoundUse { .. } => {}
             }
         }
@@ -2553,7 +2644,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 base,
                 variant,
                 args,
-            } => self.infer_variant_path(expr, *base, variant, args.as_deref()),
+                member_args,
+            } => self.infer_variant_path(
+                expr,
+                *base,
+                variant,
+                args.as_deref(),
+                member_args.as_deref(),
+            ),
             ExprData::GenericApp { base, args } => self.infer_generic_app(expr, *base, args),
             ExprData::Call {
                 callee,
@@ -2614,17 +2712,24 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     base,
                     variant,
                     args: vp_args,
+                    member_args,
                 } = &self.body.exprs[*callee]
                     && let Some(Resolution::TraitItem(trait_loc)) = self.resolutions.get(*base)
                 {
-                    let (callee, trait_loc, variant, vp_args) =
-                        (*callee, trait_loc.clone(), variant.clone(), vp_args.clone());
+                    let (callee, trait_loc, variant, vp_args, member_args) = (
+                        *callee,
+                        trait_loc.clone(),
+                        variant.clone(),
+                        vp_args.clone(),
+                        member_args.clone(),
+                    );
                     return self.infer_qualified_trait_call(
                         expr,
                         callee,
                         trait_loc,
                         &variant,
                         vp_args.as_deref(),
+                        member_args.as_deref(),
                         args,
                         expected,
                         cause,
@@ -4620,6 +4725,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         trait_loc: ItemLoc,
         member: &str,
         vp_args: Option<&[GenericArgData]>,
+        member_args: Option<&[GenericArgData]>,
         args: &[ExprId],
         expected: &Ty,
         cause: Option<Cause>,
@@ -4628,6 +4734,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         self.result
             .expectation_of_expr
             .insert(callee, callee_expectation.clone());
+        // The member's OWN arguments are reserved in the called form too
+        // (`Display::fmt::<W>(...)`); inferred once here so their const
+        // values have types, and never spent.
+        self.infer_const_args_free(member_args.unwrap_or(&[]));
         // A RESERVED generic trait: nothing on it may go semantically
         // live (reserved for generic traits).
         if crate::traits::trait_is_generic(self.db, &trait_loc) {
@@ -4655,6 +4765,24 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             self.infer_args_broken(args);
             return self.finish_dot_call(expr, Ty::Error, expected, cause);
         };
+        // `Display::fmt::<W>(...)` — the requirement's own binder applied
+        // at the use site. Reserved exactly as in the value form: the CALL
+        // is refused rather than run with the arguments dropped.
+        if member_args.is_some() {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::MemberOwnGenericArgs {
+                    expr: callee,
+                    owner: trait_loc.display_name().to_owned(),
+                    member: member.to_owned(),
+                    suggest_owner_list: false,
+                });
+            self.result.type_of_expr.insert(callee, Ty::Error);
+            // `vp_args`' consts are already typed: `trait_path_self_arg`
+            // above walked them regardless of whether it found `Self`.
+            self.infer_args_broken(args);
+            return self.finish_dot_call(expr, Ty::Error, expected, cause);
+        }
         let req = requirements[member_index].clone();
         let Some(sig_ref) = req.sig.clone() else {
             // The requirement isn't fully written: the trait carries the
@@ -5087,13 +5215,26 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// type name in expression position is an error (`TypeNotValue`), but
     /// as a variant path's base it is legal — the same interception idea
     /// as construction heads.
+    ///
+    /// `member_args` are the SECOND segment's own written arguments
+    /// (`Measured::size::<usize>`), which no path may spend yet. They are
+    /// never merged into `args`: the reservation is stated by what the
+    /// segment turned out to NAME — a member (future-legal, reserved) or a
+    /// variant (never legal, corrected) — which is precisely the question
+    /// this function answers and the parser cannot.
     fn infer_variant_path(
         &mut self,
         expr: ExprId,
         base: ExprId,
         variant: &str,
         args: Option<&[GenericArgData]>,
+        member_args: Option<&[GenericArgData]>,
     ) -> Ty {
+        // The second segment's own arguments are reserved on every path
+        // through this function, so their const values are inferred once,
+        // here, and never again: nothing below may consume them.
+        self.infer_const_args_free(member_args.unwrap_or(&[]));
+        let has_member_args = member_args.is_some();
         match self.resolutions.get(base) {
             Some(Resolution::TypeItem(loc)) => {
                 let loc = loc.clone();
@@ -5104,6 +5245,17 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     // `Type::member` naming an inherent member is the G13
                     // escape — the type's own member, as a plain fn value.
                     if let Some(member) = self.member_of(&loc, variant) {
+                        if has_member_args {
+                            let suggest_owner_list =
+                                args.is_none() && !item_generics(self.db, item).is_empty();
+                            return self.reserve_member_own_args(
+                                expr,
+                                &loc,
+                                variant,
+                                args,
+                                suggest_owner_list,
+                            );
+                        }
                         return self.infer_qualified_member_value(expr, &loc, member, args);
                     }
                     if self.push_trait_member_on_type(expr, &loc, variant) {
@@ -5149,6 +5301,23 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
                 match variants.iter().position(|(name, _)| name == variant) {
                     Some(index) => {
+                        // `Shape::Circle::<usize>` — a variant carries no
+                        // binder of its own and never will: the arguments
+                        // are the ENUM's, written one segment too late.
+                        if has_member_args {
+                            let suggest_owner_list =
+                                args.is_none() && !item_generics(self.db, item).is_empty();
+                            self.result.diagnostics.push(
+                                InferenceDiagnostic::VariantOwnGenericArgs {
+                                    expr,
+                                    owner: loc.display_name().to_owned(),
+                                    variant: variant.to_owned(),
+                                    suggest_owner_list,
+                                },
+                            );
+                            self.infer_const_args_free(args.unwrap_or(&[]));
+                            return Ty::Error;
+                        }
                         // Instantiate the ENUM mention: written turbofish
                         // args are checked, unwritten type params get fresh
                         // variables that the payload (or the expectation
@@ -5178,6 +5347,17 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         // win the name — they are the enum's own second
                         // segment).
                         if let Some(member) = self.member_of(&loc, variant) {
+                            if has_member_args {
+                                let suggest_owner_list =
+                                    args.is_none() && !item_generics(self.db, item).is_empty();
+                                return self.reserve_member_own_args(
+                                    expr,
+                                    &loc,
+                                    variant,
+                                    args,
+                                    suggest_owner_list,
+                                );
+                            }
                             return self.infer_qualified_member_value(expr, &loc, member, args);
                         }
                         if !self.push_trait_member_on_type(expr, &loc, variant) {
@@ -5224,6 +5404,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     self.no_such_trait_member(expr, &loc, variant);
                     return Ty::Error;
                 }
+                // `Display::fmt::<W>` — the requirement's OWN binder. A
+                // trait member may already declare one (`fmt::<W: Write>`),
+                // so this is the reservation's home ground: applying it at
+                // the use site is what is not supported yet. `args`' consts
+                // are already typed by `trait_path_self_arg` above, so `None`
+                // here (never re-infer them).
+                if has_member_args {
+                    return self.reserve_member_own_args(expr, &loc, variant, None, false);
+                }
                 match named_self {
                     Some(self_ty) => {
                         self.infer_named_self_member_value(expr, &loc, variant, self_ty)
@@ -5264,6 +5453,42 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 Ty::Error
             }
         }
+    }
+
+    /// State the member-own-binder reservation for a path whose second
+    /// segment named a MEMBER (`Measured::size::<usize>`,
+    /// `Display::fmt::<W>`) and stop: the value is refused rather than
+    /// produced with the arguments silently dropped.
+    ///
+    /// `suggest_owner_list` (see [`InferenceDiagnostic::MemberOwnGenericArgs`])
+    /// is the caller's to compute — it depends on whether `owner` has a
+    /// binder to receive the arguments and whether one is already written,
+    /// neither of which this function is positioned to judge for both its
+    /// callers (a trait owner is never generic here — `trait_is_generic`
+    /// filtered that above — so its call site always passes `false`).
+    ///
+    /// The OWNER's arguments are deliberately not judged here — the path is
+    /// already refused, and errors are infectious and silent — but their
+    /// const values are still inferred so every expression in the body has
+    /// a type.
+    fn reserve_member_own_args(
+        &mut self,
+        expr: ExprId,
+        owner: &ItemLoc,
+        member: &str,
+        args: Option<&[GenericArgData]>,
+        suggest_owner_list: bool,
+    ) -> Ty {
+        self.result
+            .diagnostics
+            .push(InferenceDiagnostic::MemberOwnGenericArgs {
+                expr,
+                owner: owner.display_name().to_owned(),
+                member: member.to_owned(),
+                suggest_owner_list,
+            });
+        self.infer_const_args_free(args.unwrap_or(&[]));
+        Ty::Error
     }
 
     /// `Point::len` — a qualified reference to an INHERENT member (the G13
