@@ -972,3 +972,37 @@ Const-param lengths connect arrays to generics: a generic function's `const
 N: usize` may be the length of a `[usize; N]` parameter, and a generic type
 may carry a `[usize; N]` field (`Buf::<2>` above). Not yet: a length
 accessor, and matching on arrays.
+
+== Running compiled modules
+
+A compiled module expects exactly one import, `must.print(ptr, len)`, and
+exports one function, `main` (the entry expression compiled in, chosen
+with `must-lsp compile -e <expression>`, default `main()`). Two tools in
+`tools/` run one: `wasm-run.mjs` from the command line, `playground.html`
+by opening it in a browser and dropping the file on it — `file://` works,
+no server needed. Neither is a WASI runtime: a general-purpose engine such
+as wasmtime or wasmer will not run these modules as-is.
+
+On a clean return both print the raw ABI result slots — a `.wasm` file
+carries no type information, so this is not the typed `Display`
+`must-lsp run` gives. On a trap both decode which one fired and why, from
+the module's `trap_code`/`panic_message_*` globals (also read by the
+differential test harness) and its `must.traps` custom section, which
+exists so a host with no access to the compiler can still name the trap.
+
+This backend has no heap and no raw pointers yet, so `examples/heap.must`
+and `examples/pointers.must` refuse to compile rather than miscompiling —
+there is nothing for either tool to run for those two examples.
+
+Monomorphization has refusals of its own. A program whose instantiations
+never bottom out — polymorphic recursion, where every call needs an
+instance the caller did not — is named after a fixed number of
+re-entries on the instantiation path. Those re-entries are counted
+across a whole mutual cycle rather than per item, so a cycle is caught
+about as early as direct self-recursion is — unless the cycle is long
+enough that the path reaches the depth cap before the re-entry count
+does, in which case it is refused under that cap's message instead. That
+cap is the next refusal: a call chain too deep to walk inside the stack
+budget the backend documents, recursive or not, is refused by depth
+alone. And a program that instantiates too many functions in total,
+however shallowly, is refused by count.

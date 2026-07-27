@@ -68,7 +68,11 @@ support library:
 
 ```sh
 must-lsp compile examples/display.must -o display.wasm
+node tools/wasm-run.mjs display.wasm
 ```
+
+`tools/playground.html` is the same thing with a UI: open it directly in a
+browser (`file://` works, no server) and drag the `.wasm` file onto it.
 
 The module imports exactly one thing, the platform effect `must.print`,
 and exports `main` plus its memory and its reporting globals (`trap_code`
@@ -145,6 +149,7 @@ crates/
   codegen-wasm/ the WebAssembly backend: monomorphization + code emission
   must-lsp/     the LSP binary: transport + main loop, plus `run`, `compile` and the runner
 editors/zed/ Zed extension (separate workspace; compiled to wasm by Zed)
+tools/       run a compiled `.wasm` module: wasm-run.mjs (Node CLI), playground.html (browser)
 ```
 
 Dependency rule: `syntax` knows nothing of salsa; `ide` knows nothing of

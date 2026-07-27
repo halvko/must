@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Must Wasm Playground</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #666666;
+    --border: #cccccc;
+    --panel: #f5f5f5;
+    --accent: #2b5fd9;
+    --ok: #1a7f37;
+    --err: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #1e1e1e;
+      --fg: #e6e6e6;
+      --muted: #9a9a9a;
+      --border: #444444;
+      --panel: #2a2a2a;
+      --accent: #7aa2ff;
+      --ok: #59c26a;
+      --err: #ff6b64;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    max-width: 46rem;
+    margin: 2rem auto;
+    padding: 0 1rem 3rem;
+    line-height: 1.5;
+  }
+  h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+  h2 { font-size: 1rem; margin-top: 2rem; color: var(--muted); }
+  code, pre {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+  }
+  .howto {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+  }
+  .howto pre { margin: 0.25rem 0 0; overflow-x: auto; }
+  #drop {
+    margin-top: 1.5rem;
+    border: 2px dashed var(--border);
+    border-radius: 8px;
+    padding: 2rem 1rem;
+    text-align: center;
+    color: var(--muted);
+    transition: border-color 0.1s, color 0.1s;
+  }
+  #drop.hover { border-color: var(--accent); color: var(--fg); }
+  #drop label {
+    color: var(--accent);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+  #picked { font-size: 0.85rem; color: var(--muted); margin-top: 0.5rem; min-height: 1.2em; }
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 1rem;
+    flex-wrap: wrap;
+  }
+  button {
+    font: inherit;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    padding: 0.4rem 1rem;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  pre.panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.75rem 1rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+    min-height: 2.5em;
+    max-height: 22rem;
+    overflow-y: auto;
+  }
+  #result.ok { color: var(--ok); }
+  #result.err { color: var(--err); }
+  .limits {
+    margin-top: 2rem;
+    font-size: 0.85rem;
+    color: var(--muted);
+    border-top: 1px solid var(--border);
+    padding-top: 1rem;
+  }
+</style>
+</head>
+<body>
+
+<h1>Must Wasm Playground</h1>
+<p>Run a WebAssembly module compiled by <code>must-lsp</code>, entirely in this page — no server, no install.</p>
+
+<div class="howto">
+  <strong>How to compile:</strong>
+  <pre>must-lsp compile examples/display.must -o display.wasm</pre>
+</div>
+
+<div id="drop">
+  Drop a <code>.wasm</code> file here, or <label>pick one<input type="file" id="file" accept=".wasm" hidden></label>
+  <div id="picked"></div>
+</div>
+
+<div class="controls">
+  <button id="run" disabled>Run</button>
+</div>
+
+<h2>must.print output</h2>
+<pre class="panel" id="output"></pre>
+
+<h2>Result</h2>
+<pre class="panel" id="result">Load a module to begin.</pre>
+
+<div class="limits">
+  <strong>Limits.</strong> This backend has no heap and no raw pointers yet —
+  programs using them (<code>examples/heap.must</code>, <code>examples/pointers.must</code>)
+  are refused at compile time, so there is nothing for this page to run for
+  those. The module's only import is <code>must.print</code>, not WASI, so a
+  general-purpose WASI runtime (wasmtime, wasmer, …) will <em>not</em> run
+  these modules as-is — a <code>--wasi</code> shim is future work. This page
+  supplies exactly the one import the module needs and nothing else.
+</div>
+
+<script src="must-wasm.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  // The compile/instantiate/run/decode engine — `runModule`, sharing the
+  // `must.traps` custom-section decoder — lives in ./must-wasm.js, loaded
+  // by the `<script src>` above; it's Node-`require`-able too, which is
+  // how crates/must-lsp/tests/wasm_tool_smoke.rs proves this same file
+  // against the current backend. Everything below is DOM wiring only.
+
+  const dropZone = document.getElementById("drop");
+  const fileInput = document.getElementById("file");
+  const pickedLabel = document.getElementById("picked");
+  const runButton = document.getElementById("run");
+  const outputPane = document.getElementById("output");
+  const resultPane = document.getElementById("result");
+
+  let currentBytes = null;
+
+  function setPicked(name, bytes) {
+    currentBytes = bytes;
+    pickedLabel.textContent = `Loaded ${name} (${bytes.byteLength} bytes)`;
+    runButton.disabled = false;
+    resultPane.textContent = "Ready. Press Run.";
+    resultPane.className = "";
+    outputPane.textContent = "";
+  }
+
+  async function handleFile(file) {
+    if (!file) return;
+    try {
+      const bytes = await file.arrayBuffer();
+      setPicked(file.name, bytes);
+    } catch (err) {
+      resultPane.textContent = `error: could not read the file: ${err.message}`;
+      resultPane.className = "err";
+    }
+  }
+
+  fileInput.addEventListener("change", (e) => handleFile(e.target.files[0]));
+
+  ["dragenter", "dragover"].forEach((evt) =>
+    dropZone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      dropZone.classList.add("hover");
+    }),
+  );
+  ["dragleave", "drop"].forEach((evt) =>
+    dropZone.addEventListener(evt, (e) => {
+      e.preventDefault();
+      dropZone.classList.remove("hover");
+    }),
+  );
+  dropZone.addEventListener("drop", (e) => {
+    const file = e.dataTransfer.files && e.dataTransfer.files[0];
+    handleFile(file);
+  });
+
+  runButton.addEventListener("click", async () => {
+    if (!currentBytes) return;
+    runButton.disabled = true;
+    outputPane.textContent = "";
+    resultPane.textContent = "Running…";
+    resultPane.className = "";
+    try {
+      const outcome = await runModule(currentBytes, (text) => {
+        outputPane.textContent += text;
+        outputPane.scrollTop = outputPane.scrollHeight;
+      });
+      if (outcome.ok) {
+        resultPane.className = "ok";
+        if (outcome.result.length === 0) {
+          resultPane.textContent = "() — ran to completion, no value (or the interpreter would print nothing for this result either)";
+        } else if (outcome.result.length === 1) {
+          resultPane.textContent = `${outcome.result[0]}  (raw i64 — this page has no type info to render it as bool/str/record; compare against \`must-lsp run\` for the typed value)`;
+        } else {
+          resultPane.textContent = `[${outcome.result.join(", ")}]  (raw i64 slots)`;
+        }
+      } else {
+        resultPane.className = "err";
+        const t = outcome.trap;
+        resultPane.textContent =
+          `trap [${t.kind}${t.exact ? ", exact" : ""}]: ${t.message}` +
+          (t.detail ? `\ndetail: ${t.detail}` : "");
+      }
+    } catch (err) {
+      resultPane.className = "err";
+      resultPane.textContent = `error: ${err.message}`;
+    } finally {
+      runButton.disabled = false;
+    }
+  });
+})();
+</script>
+
+</body>
+</html>
