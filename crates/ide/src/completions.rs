@@ -683,8 +683,8 @@ fn match_awaiting_arms(
         return None;
     }
     let r_brace = match_expr.r_brace_token()?;
-    let r_brace_indent = line_indent(real_text, r_brace.text_range().start()).len();
-    let match_indent = line_indent(real_text, match_start).len();
+    let r_brace_indent = syntax::line_indent(real_text, r_brace.text_range().start()).len();
+    let match_indent = syntax::line_indent(real_text, match_start).len();
     (l_brace.text_range().end() <= edit_range.start()
         && edit_range.end() <= r_brace.text_range().start()
         && r_brace_indent >= match_indent)
@@ -1548,12 +1548,6 @@ fn match_arm_items(
     items
 }
 
-/// One level of indentation. House style, as every example file writes it;
-/// there is no formatter to ask and no per-file detection — a generated arm
-/// list that disagreed with the file around it would be worse than one that
-/// disagrees with an unusual file.
-const INDENT_UNIT: &str = "    ";
-
 /// The whole arm list for an arm-less `match` over an enum: one gold
 /// snippet writing every variant as an arm, payload bindings and arm bodies
 /// as tab stops in document order.
@@ -1595,7 +1589,7 @@ fn match_template_items(
         return Vec::new();
     }
 
-    let indent = line_indent(real_text, awaiting.match_start);
+    let indent = syntax::line_indent(real_text, awaiting.match_start);
     // Type tier `0`, not [`TYPE_TIER_NONE`]: the arm list is the one answer
     // the grammar admits at this position regardless of what the position
     // *expects* a value to look like, so it must lead even when a typed
@@ -1623,20 +1617,6 @@ fn match_template_items(
         plain: match_template(variants, &indent, awaiting.shape, false),
     };
     vec![template]
-}
-
-/// The indentation of the line `offset` sits on — the leading run of spaces
-/// and tabs, copied verbatim as the arm list's own base. Only the base: a
-/// nested arm line adds [`INDENT_UNIT`] on top of it, which is always
-/// spaces, so a hard-tab file gets a hard-tab base under a spaces-indented
-/// body rather than hard tabs throughout.
-fn line_indent(text: &str, offset: TextSize) -> String {
-    let before = &text[..usize::from(offset)];
-    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
-    text[line_start..]
-        .chars()
-        .take_while(|c| *c == ' ' || *c == '\t')
-        .collect()
 }
 
 /// The arm-list text: one arm per variant, house-formatted, closing brace
@@ -1687,7 +1667,7 @@ fn match_template(
     let mut stop = 1;
     for (name, payload) in variants {
         out.push_str(indent);
-        out.push_str(INDENT_UNIT);
+        out.push_str(syntax::INDENT_UNIT);
         out.push_str("::");
         out.push_str(name);
         if snippet && !payload.is_empty() {

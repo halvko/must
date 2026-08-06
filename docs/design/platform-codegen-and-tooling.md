@@ -56,10 +56,10 @@
   scrutinee ranking that re-orders the expression set so enum-typed values
   lead, ordered by definition-scope distance (scope-chain hop count, not a
   hand-written tier list, so closures inherit the rule). Nothing is
-  suppressed. The template lives on an explicit invoke, not on a trigger
-  character. Snippets are indented absolutely, because the editor's
-  snippet path shifts by a tree-sitter result and the extension registers
-  no grammar.
+  suppressed. The template lives on an explicit invoke plus a quick fix on
+  the non-exhaustive-match diagnostic, not on a trigger character. Snippets
+  are indented absolutely, because the editor's snippet path shifts by a
+  tree-sitter result and the extension registers no grammar.
 - **P03** `print` emits exactly what it is given: `str` only, no newline, no formatting, no
   interpolation. The CLI runner writes to `stdout.lock()` — Rust's own line buffering, no
   per-call flush — and flushes it explicitly before a crash report and before a blocking
@@ -105,8 +105,8 @@
   linear memory** — address reuse makes use-after-free silently read new data, and the
   interpreter stops being a UB detector. **Handle/path fakes with no allocation table** —
   cannot represent heap allocations. **P11**
-- **`{` as a completion trigger character** — fired the template at the least wanted moment,
-  an opening function body chief among them; the template stays on explicit invoke. **P12**
+- **`{` as a completion trigger character** — fired the template at the least wanted moment;
+  replaced by the quick fix on the non-exhaustive-match diagnostic. **P12**
 
 ## Re-evaluate when
 

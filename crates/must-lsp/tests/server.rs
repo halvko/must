@@ -393,6 +393,66 @@ fn quick_fix_makes_an_immutable_binding_mutable() {
 }
 
 #[test]
+fn quick_fix_adds_missing_match_arms_attached_to_the_diagnostic() {
+    let mut client = TestClient::start();
+    let file = uri("file:///match-fix.must");
+
+    client.open(
+        &file,
+        "type Shape = enum { Circle(usize), Point };\n\
+         static f = fn (s: Shape) -> usize {\n    \
+         match s {\n        ::Circle(r) => r,\n    }\n\
+         };\n",
+    );
+    let diags = client.next_diagnostics();
+    assert_eq!(diags.diagnostics.len(), 1);
+    let diag = &diags.diagnostics[0];
+    assert_eq!(diag.message, "this `match` does not cover `Shape::Point`");
+
+    let response =
+        client.request::<lsp_types::request::CodeActionRequest>(lsp_types::CodeActionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+            range: diag.range,
+            context: lsp_types::CodeActionContext::default(),
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        });
+    let actions = response.expect("expected code actions");
+    assert_eq!(actions.len(), 1);
+    let lsp_types::CodeActionOrCommand::CodeAction(action) = &actions[0] else {
+        panic!("expected a code action, got {actions:?}");
+    };
+    assert_eq!(action.title, "Add missing match arms");
+    // The action arrives attached to the diagnostic it fixes — the
+    // `code_actions` handler carries the diagnostic through unchanged (see
+    // `Snapshot::code_actions`), so this is the same message/range pinned
+    // above, not just a similar one.
+    let attached = action
+        .diagnostics
+        .as_ref()
+        .expect("action carries its diagnostic");
+    assert_eq!(attached.len(), 1);
+    assert_eq!(attached[0].message, diag.message);
+    assert_eq!(attached[0].range, diag.range);
+
+    // Uri-keyed maps are the shape the LSP protocol mandates.
+    #[allow(clippy::mutable_key_type)]
+    let changes = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .expect("action has a workspace edit");
+    let edits = &changes[&file];
+    assert_eq!(edits.len(), 1);
+    assert_eq!(
+        edits[0].new_text,
+        "\n        ::Point => panic(\"unhandled ::Point\"),"
+    );
+
+    drop(client);
+}
+
+#[test]
 fn duplicate_definition_links_to_the_first_one() {
     let client = TestClient::start();
     let file = uri("file:///dup.must");

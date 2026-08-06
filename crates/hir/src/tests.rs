@@ -3034,6 +3034,331 @@ static f = fn (s: Shape) -> usize {
 }
 
 #[test]
+fn match_nonexhaustive_partial_coverage_offers_add_missing_arms_fix() {
+    // Partially-covered match: only the missing arm is added, as a pure
+    // insertion right after the last existing one — the buffer's own
+    // `\n    }` that follows is left untouched (so the insert carries no
+    // trailing newline of its own; adding one would leave a blank line).
+    let text = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => r,
+    }
+};
+"#;
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Add missing match arms");
+    assert_eq!(fix.edits.len(), 1);
+    assert_eq!(
+        fix.edits[0].insert,
+        "\n        ::Point => panic(\"unhandled ::Point\"),"
+    );
+    let last_arm_end = text.find("::Circle(r) => r,").unwrap() + "::Circle(r) => r,".len();
+    assert_eq!(u32::from(fix.edits[0].range.start()), last_arm_end as u32);
+    assert_eq!(
+        fix.edits[0].range.start(),
+        fix.edits[0].range.end(),
+        "a pure insertion"
+    );
+
+    // Applying the edit never introduces a new diagnostic: the generated
+    // arm's `panic(...)` body joins with the other arm's `usize` because
+    // `panic` types as `!`.
+    let mut patched = text.to_owned();
+    patched.insert_str(
+        usize::from(fix.edits[0].range.start()),
+        &fix.edits[0].insert,
+    );
+    let file = SourceFile::new(&db, "test.must".to_owned(), patched);
+    assert_eq!(crate::file_diagnostics(&db, file), vec![]);
+}
+
+#[test]
+fn match_last_arm_without_a_trailing_comma_gets_one_inserted() {
+    // A comma-less last arm is legal (grammar.rs's `match_arm`: nothing
+    // checks for a comma right before the arm list's own `}`) — inserting
+    // straight after it would otherwise glue two arms into unparseable
+    // text (`r        ::Point`).
+    let text = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => r
+    }
+};
+"#;
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(
+        fix.edits[0].insert,
+        ",\n        ::Point => panic(\"unhandled ::Point\"),"
+    );
+
+    let mut patched = text.to_owned();
+    patched.insert_str(
+        usize::from(fix.edits[0].range.start()),
+        &fix.edits[0].insert,
+    );
+    let file = SourceFile::new(&db, "test.must".to_owned(), patched);
+    assert_eq!(crate::file_diagnostics(&db, file), vec![]);
+}
+
+#[test]
+fn match_last_arm_ending_in_a_block_needs_no_comma_but_tolerates_one() {
+    // A `}`-bodied last arm never needs a comma either way (the grammar
+    // `eat`s one if present, between arms and before the list's own `}`
+    // alike) — prefixing one unconditionally whenever the last token isn't
+    // already a comma is therefore always safe, block-bodied or not.
+    let text = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) {
+    match s {
+        ::Circle(r) => { let _ = r; }
+    };
+};
+"#;
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(
+        fix.edits[0].insert,
+        ",\n        ::Point => panic(\"unhandled ::Point\"),"
+    );
+
+    let mut patched = text.to_owned();
+    patched.insert_str(
+        usize::from(fix.edits[0].range.start()),
+        &fix.edits[0].insert,
+    );
+    let file = SourceFile::new(&db, "test.must".to_owned(), patched);
+    assert_eq!(crate::file_diagnostics(&db, file), vec![]);
+}
+
+#[test]
+fn match_empty_arm_list_offers_add_all_variants_fix() {
+    // Empty arm list: `match s {}` — the checker's own non-exhaustive
+    // diagnostic covers it (every variant is "uncovered" when there are no
+    // arms at all), so the same fix construction handles it with no
+    // special-casing and no separate diagnostic.
+    let text = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) {
+    match s {};
+};
+"#;
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("this `match` does not cover")
+    );
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Add missing match arms");
+    assert_eq!(fix.edits.len(), 1);
+    assert_eq!(
+        fix.edits[0].insert,
+        "\n        ::Circle(v) => panic(\"unhandled ::Circle\"),\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20::Point => panic(\"unhandled ::Point\"),\n    "
+    );
+    let anchor = text.find("match s {").unwrap() + "match s {".len();
+    assert_eq!(u32::from(fix.edits[0].range.start()), anchor as u32);
+    assert_eq!(u32::from(fix.edits[0].range.end()), anchor as u32);
+}
+
+#[test]
+fn match_empty_arm_list_with_space_before_brace_still_gets_indented() {
+    // `match s { }` (a space, not touching braces) still has no line break
+    // between the anchor and `}` — the synthesized trailing newline keys
+    // on that, not on the anchor and `}` coinciding exactly.
+    let text = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) {
+    match s { };
+};
+"#;
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(
+        fix.edits[0].insert,
+        "\n        ::Circle(v) => panic(\"unhandled ::Circle\"),\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20::Point => panic(\"unhandled ::Point\"),\n    "
+    );
+
+    let mut patched = text.to_owned();
+    patched.insert_str(
+        usize::from(fix.edits[0].range.start()),
+        &fix.edits[0].insert,
+    );
+    let file = SourceFile::new(&db, "test.must".to_owned(), patched);
+    assert_eq!(crate::file_diagnostics(&db, file), vec![]);
+}
+
+#[test]
+fn match_add_missing_arms_fix_leaves_a_trailing_comment_alone() {
+    // A comment sitting between the last arm and `}` is never dropped: the
+    // insertion lands right after the last arm (trivia attaches to the
+    // following real token, not the arm), pushing the comment down rather
+    // than overwriting it — the tradeoff a range-replace would have had.
+    let text = "type Shape = enum { Circle(usize), Point };\n\
+                 static f = fn (s: Shape) -> usize {\n    \
+                 match s {\n        \
+                 ::Circle(r) => r,\n        \
+                 // keep me\n    \
+                 }\n\
+                 };\n";
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(
+        fix.edits[0].insert,
+        "\n        ::Point => panic(\"unhandled ::Point\"),"
+    );
+
+    let mut patched = text.to_owned();
+    patched.insert_str(
+        usize::from(fix.edits[0].range.start()),
+        &fix.edits[0].insert,
+    );
+    assert!(
+        patched.contains("// keep me"),
+        "the comment must survive the edit: {patched}"
+    );
+    let file = SourceFile::new(&db, "test.must".to_owned(), patched);
+    assert_eq!(crate::file_diagnostics(&db, file), vec![]);
+}
+
+#[test]
+fn match_add_missing_arms_fix_names_binders_by_payload_arity() {
+    // Unit / one-payload / two-payload variants, in declaration order:
+    // `::Point` gets no parens, `::Circle` gets one binder (`v`), `::Pair`
+    // gets one per field (`v1, v2`).
+    let text = r#"
+type Shape = enum { Point, Circle(usize), Pair(usize, str) };
+static f = fn (s: Shape) {
+    match s {};
+};
+"#;
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(
+        fix.edits[0].insert,
+        "\n        ::Point => panic(\"unhandled ::Point\"),\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20::Circle(v) => panic(\"unhandled ::Circle\"),\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20::Pair(v1, v2) => panic(\"unhandled ::Pair\"),\n    "
+    );
+}
+
+#[test]
+fn match_add_missing_arms_fix_projects_through_a_borrowed_scrutinee() {
+    // A borrowed enum scrutinee: match still dispatches on the enum behind
+    // the borrow (the projection lens), so the fix fires and computes the
+    // same missing-variant set as the unborrowed case.
+    let text = "type Shape = enum { Circle(usize), Point };\n\
+                 static f = fn::<@a>(s: Shape.&::<@a>) -> () {\n    \
+                 match s {\n        ::Circle(r) => { let _ = r; },\n    };\n\
+                 };\n";
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Add missing match arms");
+    assert_eq!(
+        fix.edits[0].insert,
+        "\n        ::Point => panic(\"unhandled ::Point\"),"
+    );
+}
+
+#[test]
+fn match_add_missing_arms_fix_on_a_variant_typed_scrutinee_covers_only_that_variant() {
+    // Variant-typed scrutinees only ever demand ONE variant (the
+    // scrutinee's own) — `uncovered` already reflects that, so the fix
+    // generates a single arm even though the enum has two.
+    let text = r#"
+type State = enum { Idle, Running(usize) };
+static f = fn (s: State::Running) {
+    match s {};
+};
+"#;
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(
+        fix.edits[0].insert,
+        "\n        ::Running(v) => panic(\"unhandled ::Running\"),\n    "
+    );
+}
+
+#[test]
+fn match_add_missing_arms_fix_avoids_shadowing_a_visible_local() {
+    // A `v` already visible at the match's own scope (a `let` right before
+    // it) is not shadowed by the generated payload binder — it gets
+    // suffixed until free instead.
+    let text = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) {
+    let v: usize = 1;
+    match s {};
+};
+"#;
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(
+        fix.edits[0].insert,
+        "\n        ::Circle(v_) => panic(\"unhandled ::Circle\"),\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20::Point => panic(\"unhandled ::Point\"),\n    "
+    );
+}
+
+#[test]
+fn match_without_catch_all_offers_no_fix() {
+    // The sibling diagnostic for a non-enum scrutinee with no `_`/binding
+    // arm: there is no variant list to enumerate, so no fix is offered
+    // (this fix is scoped to `NonExhaustiveMatch` only).
+    let text = r#"
+static f = fn (n: usize) -> usize {
+    match n { }
+};
+"#;
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("this `match` does not cover every possible")
+    );
+    assert!(diagnostics[0].fix.is_none());
+}
+
+#[test]
 fn match_wildcard_covers_everything() {
     check_diagnostics(
         r#"

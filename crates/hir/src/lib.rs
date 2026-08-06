@@ -1437,6 +1437,15 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                             }],
                         })
                 }
+                // "Add missing match arms" — one generated arm per name in
+                // `uncovered`. An empty arm list and a partially-covered one
+                // both fall out of the same path with no special-casing (see
+                // `match_arms_fix`'s doc comment).
+                InferenceDiagnostic::NonExhaustiveMatch {
+                    expr,
+                    decl,
+                    uncovered,
+                } => match_arms_fix(db, item, &syntax_root, source_map, *expr, decl, uncovered),
                 _ => None,
             };
             diagnostics.push(Diagnostic {
@@ -1603,6 +1612,163 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 
     diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
     diagnostics
+}
+
+/// The "Add missing match arms" quick fix, attached to
+/// [`InferenceDiagnostic::NonExhaustiveMatch`].
+///
+/// `uncovered` is already exactly the right set, in declaration order — the
+/// exhaustiveness pass in `infer_match` computed it as "every variant not
+/// reached by an arm", so a `match s {}` with zero arms and a `match` missing
+/// just the last variant both reduce to the same "insert these names" work
+/// here, and a variant-typed scrutinee's single-entry `uncovered` naturally
+/// yields a single arm — none of that needs special-casing in this
+/// function, only in the diagnostic that already computed it. `decl`
+/// (carried on the diagnostic) says which enum to look the variants' arity
+/// up in; borrowed and variant-typed scrutinees need no extra handling
+/// here because `infer_match` already resolved the dispatch before either
+/// field was populated.
+///
+/// The edit is a pure insertion right after the last existing arm, or
+/// right after `{` when there is none (the empty-arm-list case) — never a
+/// replacement, so nothing already in the file (a stray comment, unusual
+/// spacing) is ever dropped. A trailing `\n` plus the match's own base
+/// indentation is appended only when no line break already separates the
+/// anchor from the closing `}` (a tight or space-separated empty arm list,
+/// or a non-empty one written on one line) — whenever a line break already
+/// sits there (the common, multi-line case), the buffer's own existing run
+/// back to `}` supplies it and is left exactly as written.
+///
+/// Each generated arm is `::Variant(binders) => panic("unhandled
+/// ::Variant"),`: `panic` types as `!` and joins with any other arm's type
+/// unconditionally, so the edit can never introduce a new type error on
+/// top of the one it's fixing, and the message reads honestly as "not yet
+/// handled" — an empty body wouldn't parse, and `()` would type-check
+/// silently wherever the match's own type happens to permit it, reading as
+/// "handled" when it isn't.
+///
+/// A payload variant's binders are named `v` (one payload) or `v1, v2, …`
+/// (more), checked against locals visible at the match's own (pre-arm)
+/// lexical scope and suffixed with `_` until free on a collision — usable
+/// names beat `_`. This checks only local bindings in scope, not
+/// file-/item-level names a new binding could also shadow: that check is a
+/// full name-resolution query, not the one scope-table lookup this does
+/// per candidate.
+fn match_arms_fix<'db>(
+    db: &'db dyn Db,
+    item: ItemId<'db>,
+    syntax_root: &syntax::SyntaxNode,
+    source_map: &BodySourceMap,
+    expr: ExprId,
+    decl: &ItemLoc,
+    uncovered: &[String],
+) -> Option<syntax::Fix> {
+    let ptr = source_map.node_for_expr(expr)?;
+    let match_expr = ast::MatchExpr::cast(ptr.to_node(syntax_root))?;
+    let l_brace = match_expr.l_brace_token()?;
+    let r_brace = match_expr.r_brace_token()?;
+    let match_start = match_expr.syntax().text_range().start();
+
+    let variants = enum_variants(db, decl.to_id(db)).as_ref()?;
+    // Declaration order falls out of filtering `variants` (already in that
+    // order) rather than `uncovered` (also in that order, but as bare
+    // names with no payload arity attached).
+    let missing: Vec<&(String, Vec<Ty>)> = variants
+        .iter()
+        .filter(|(name, _)| uncovered.iter().any(|u| u == name))
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+
+    let last_arm = match_expr.arms().last();
+    let anchor = last_arm
+        .as_ref()
+        .map(|arm| arm.syntax().text_range().end())
+        .unwrap_or_else(|| l_brace.text_range().end());
+    let r_brace_start = r_brace.text_range().start();
+    debug_assert!(
+        anchor <= r_brace_start,
+        "the last arm sits inside the arm list, so its end can never pass \
+         the list's own closing brace"
+    );
+
+    let text = item.file(db).text(db);
+    let indent = syntax::line_indent(text, match_start);
+    let scopes = expr_scopes(db, item);
+    let enclosing_scope = scopes.scope_of(expr);
+    let shadows =
+        |name: &str| enclosing_scope.is_some_and(|s| scopes.resolve_in_scope(s, name).is_some());
+    let fresh = |base: String| {
+        let mut candidate = base;
+        while shadows(&candidate) {
+            candidate.push('_');
+        }
+        candidate
+    };
+
+    // A comma-less last arm is legal (a `}`-bodied arm never needs one, and
+    // neither does the arm immediately before the list's own `}` — see
+    // `grammar.rs`'s `match_arm`), so inserting straight after it would
+    // glue two arms together into unparseable text. A comma after a
+    // `}`-bodied arm is always accepted (`eat`, not `expect`), so
+    // prefixing one whenever the last arm's own last token isn't already
+    // one is safe unconditionally.
+    let needs_comma = last_arm.is_some_and(|arm| {
+        arm.syntax()
+            .last_token()
+            .is_none_or(|t| t.kind() != syntax::SyntaxKind::COMMA)
+    });
+
+    // One line per missing arm, joined by `\n` with none trailing: whenever
+    // a line break already separates the anchor from the closing `}` (the
+    // common case — a multi-line arm list, or a comment sitting on its own
+    // line after the last arm), the buffer's own existing `\n{indent}}`
+    // supplies the final newline already, so appending another would leave
+    // a blank line. Only when NO line break sits between the anchor and
+    // `}` (a tight empty list, a space-separated one, or a non-empty list
+    // written on one line) is there no newline there to supply, so a
+    // trailing `\n{indent}` is synthesized instead. This is a property of
+    // the text between the two offsets, not of the offsets' equality: an
+    // empty arm list with a space before `}` (`match s { }`) has
+    // `anchor < r_brace_start` yet still needs the synthesized newline.
+    let arm_lines: Vec<String> = missing
+        .iter()
+        .map(|(name, payload)| {
+            let pattern = match payload.len() {
+                0 => format!("::{name}"),
+                1 => format!("::{name}({})", fresh("v".to_owned())),
+                n => {
+                    let binders: Vec<String> = (1..=n).map(|i| fresh(format!("v{i}"))).collect();
+                    format!("::{name}({})", binders.join(", "))
+                }
+            };
+            format!(
+                "{indent}{}{pattern} => panic(\"unhandled ::{name}\"),",
+                syntax::INDENT_UNIT
+            )
+        })
+        .collect();
+
+    let mut insert = if needs_comma {
+        ",\n".to_owned()
+    } else {
+        "\n".to_owned()
+    };
+    insert.push_str(&arm_lines.join("\n"));
+    let has_line_break = text[usize::from(anchor)..usize::from(r_brace_start)].contains('\n');
+    if !has_line_break {
+        insert.push('\n');
+        insert.push_str(&indent);
+    }
+
+    Some(syntax::Fix {
+        label: "Add missing match arms".to_owned(),
+        edits: vec![syntax::TextEdit {
+            range: TextRange::empty(anchor),
+            insert,
+        }],
+    })
 }
 
 /// Definition-site rules for inherent members, reported at the member's

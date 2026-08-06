@@ -48,6 +48,26 @@ pub struct TextEdit {
     pub insert: String,
 }
 
+/// One level of indentation for a generated line — house style, as every
+/// example file writes it. Shared by every generator of multi-line source
+/// text: `ide::completions`'s match-arm snippet template, and `hir`'s
+/// "Add missing match arms" [`Fix`].
+pub const INDENT_UNIT: &str = "    ";
+
+/// The indentation of the line `offset` sits on — the leading run of spaces
+/// and tabs, copied verbatim so a hard-tab file gets hard tabs back. Only
+/// the base: a nested generated line adds [`INDENT_UNIT`] on top of it,
+/// which is always spaces, so a hard-tab file gets a hard-tab base under a
+/// spaces-indented body rather than hard tabs throughout.
+pub fn line_indent(text: &str, offset: TextSize) -> String {
+    let before = &text[..usize::from(offset)];
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    text[line_start..]
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MustLanguage {}
 

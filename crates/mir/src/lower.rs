@@ -1600,7 +1600,8 @@ impl LowerCtx<'_> {
                         });
                 let fallback = InferenceDiagnostic::NonExhaustiveMatch {
                     expr,
-                    uncovered: vec![format!("{}::{}", variant.decl.display_name(), variant.name)],
+                    decl: variant.decl.clone(),
+                    uncovered: vec![variant.name.to_string()],
                 }
                 .message();
                 self.lower_match_straight(b, expr, &scrut, arms, covering, fallback, lens)
@@ -1724,12 +1725,18 @@ impl LowerCtx<'_> {
                             .iter()
                             .enumerate()
                             .filter(|&(i, _)| !switch_arms.iter().any(|&(j, _)| j as usize == i))
-                            .map(|(_, (name, _))| format!("{}::{name}", decl.display_name()))
+                            .map(|(_, (name, _))| name.clone())
                             .collect()
                     })
                     .unwrap_or_default();
-                (!uncovered.is_empty())
-                    .then(|| InferenceDiagnostic::NonExhaustiveMatch { expr, uncovered }.message())
+                (!uncovered.is_empty()).then(|| {
+                    InferenceDiagnostic::NonExhaustiveMatch {
+                        expr,
+                        decl: decl.clone(),
+                        uncovered,
+                    }
+                    .message()
+                })
             });
             match message {
                 Some(message) => b.terminate(

@@ -267,6 +267,7 @@ fn errors_checks_dirty_with_the_documented_count() {
                |
             35 |     match s {
                |     ^^^^^
+               = help: Add missing match arms
 
             error: cannot assign to `x`: it is not declared `mut`
               --> examples/errors.must:45:5

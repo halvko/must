@@ -418,8 +418,12 @@ pub enum InferenceDiagnostic {
     NonExhaustiveMatch {
         /// The match expression.
         expr: ExprId,
-        /// Each uncovered variant, `Enum::Variant`-rendered, in
-        /// declaration order.
+        /// The enum `type` item, carried structurally so [`Self::message`],
+        /// the "Add missing match arms" fix, and MIR's trap fallback can
+        /// all render `{decl.display_name()}::{name}` without re-deriving
+        /// the declaration from the scrutinee's type.
+        decl: ItemLoc,
+        /// Each uncovered variant's bare name, in declaration order.
         uncovered: Vec<String>,
     },
     /// A `match` on a non-enum scrutinee with no `_`/binding arm: those are
@@ -1621,10 +1625,13 @@ impl InferenceDiagnostic {
                      (`{name}::<variant>(...)`)"
                 )
             }
-            InferenceDiagnostic::NonExhaustiveMatch { uncovered, .. } => {
+            InferenceDiagnostic::NonExhaustiveMatch {
+                decl, uncovered, ..
+            } => {
+                let prefix = decl.display_name();
                 let list = uncovered
                     .iter()
-                    .map(|name| format!("`{name}`"))
+                    .map(|name| format!("`{prefix}::{name}`"))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("this `match` does not cover {list}")
@@ -7807,11 +7814,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             .iter()
                             .enumerate()
                             .filter(|&(i, _)| !covered[i])
-                            .map(|(_, (name, _))| format!("{}::{name}", named.decl.display_name()))
+                            .map(|(_, (name, _))| name.clone())
                             .collect();
                         self.result
                             .diagnostics
-                            .push(InferenceDiagnostic::NonExhaustiveMatch { expr, uncovered });
+                            .push(InferenceDiagnostic::NonExhaustiveMatch {
+                                expr,
+                                decl: named.decl.clone(),
+                                uncovered,
+                            });
                     }
                 }
                 Scrutinee::Variant(variant) => {
@@ -7819,11 +7830,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         .diagnostics
                         .push(InferenceDiagnostic::NonExhaustiveMatch {
                             expr,
-                            uncovered: vec![format!(
-                                "{}::{}",
-                                variant.decl.display_name(),
-                                variant.name
-                            )],
+                            decl: variant.decl.clone(),
+                            uncovered: vec![variant.name.to_string()],
                         });
                 }
                 Scrutinee::Other(ty) => {
