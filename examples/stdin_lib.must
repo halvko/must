@@ -1,0 +1,278 @@
+// Standard input as a LIBRARY. `read_line()` is a builtin the compiler
+// knows about; everything below is ordinary Must code over ONE host
+// primitive, and that primitive does nothing but move bytes.
+//
+// Run: printf 'alpha\r\n\nbeta\ngamma' | must-lsp run examples/stdin_lib.must
+//
+// What is a language feature here, and what is not:
+//
+//   * a language feature: `extern fn` (the declaration), `read` (the host's
+//     byte move), `str_from_utf8` (the validity claim), the heap builtins,
+//     and the borrow rules;
+//   * NOT a language feature, and written below: buffering, finding a line
+//     boundary, stripping CRLF, deciding that a blank line is a line and
+//     that end-of-input is not, and handing a line out without copying it.
+//
+// The line every reader in every language gets wrong is the last one, so it
+// is the one this file spends its borrow story on: `next_line` hands back a
+// BORROW tied to the reader, and the reader invalidates it the moment it is
+// used again. Holding one across a refill does not read stale text — it is
+// detected undefined behavior, at the stale read, naming both sites.
+
+// ---- the boundary -------------------------------------------------------
+
+// The only thing the host provides. POSIX's `read`, exactly: fill a
+// caller-owned buffer with at most `len` bytes and answer how many — `0` at
+// end of input, negative `-errno` on failure. No lines, no text, no policy.
+//
+// The count is `isize` because that is what POSIX calls it (`ssize_t`, a
+// signed size) and because it is the type `offset` takes: the end of the
+// filled region is `offset(p, n)`, with nothing to convert. A compiled
+// module imports this as `must.read` — the declaration's own name.
+static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;
+
+// The FIRST wrapper above the boundary, and the only job it has: turn one
+// machine word into something the type system makes you handle. Everything
+// above this line is ordinary Must.
+type Fill = enum {
+    // The new end of the filled region — a pointer, not a count, because
+    // `offset` hands one back directly and pointers are what the scan below
+    // walks.
+    More(u8.&raw mut),
+    End,
+    Failed,
+};
+
+// The arms below are QUALIFIED. `::Failed` reads better, but an `if`/`else`
+// leaf has no expected type of its own to resolve the sigil against — the
+// join's result type is decided after the leaves are inferred, not before.
+static fill = fn(at: u8.&raw mut, room: usize) -> Fill {
+    // A zero-length request is not a question, so it cannot be answered
+    // `End` — asking it would make a full buffer look like end-of-input.
+    if room == 0 {
+        return Fill::Failed;
+    };
+    let n = unsafe { read(at, room) };
+    if n < 0 {
+        Fill::Failed
+    } else if n == 0 {
+        Fill::End
+    } else {
+        // `n > 0`, so this only ever moves forward — `offset`'s one real
+        // precondition (never below the allocation's start) is met by the
+        // branch above it.
+        Fill::More(unsafe { offset(at, n) })
+    }
+};
+
+// `Option` is a library type — there is no module system yet, so a file
+// that wants one declares it. Two variants and nothing else; giving it
+// members is a later feature, not this one.
+type Option = enum::<T> { Some(T), None };
+
+// ---- the reader ---------------------------------------------------------
+
+// One buffer, three pointers into it, and a slot for the line most recently
+// handed out.
+//
+// `line` is the whole borrow story. `next_line` blesses the line's bytes,
+// parks the result HERE, and returns a borrow of this slot — so the view a
+// caller holds is a borrow of the reader, and every later use of the reader
+// invalidates it. That is not a convention: it is the aliasing model, and
+// the interpreter enforces it.
+type Reader = struct {
+    buf: u8.&raw mut,   // the allocation head, and what `deinit` frees
+    cap: usize,
+    start: u8.&raw mut, // first byte of the line being assembled
+    cur: u8.&raw mut,   // next byte to look at
+    end: u8.&raw mut,   // one past the last byte read (never dereferenced)
+    len: usize,         // bytes of the current line so far — `cur - start`
+    eof: bool,
+    line: str,
+} with {
+    impl Self {
+        // The one operation. `@b` is the member's own region binder — a
+        // member that borrows `Self` declares the region it borrows for —
+        // and it is instantiated fresh per call, so two calls in one body
+        // get two independent, non-overlapping loans.
+        //
+        // `::None` is end of input. A blank line is `::Some("")`, never
+        // `::None`: an empty line is real input, and conflating the two is
+        // how a line counter goes wrong on a file that ends in a newline.
+        next_line = fn::<@b>(r: Self.&mut::<@b>) -> Option::<str.&::<@b>> {
+            loop {
+                if r.*.cur == r.*.end {
+                    // Out of bytes. A partial line already assembled at the
+                    // end of input is a real, unterminated final line — the
+                    // case files without a trailing newline produce.
+                    if r.*.eof {
+                        if r.*.len == 0 {
+                            return ::None;
+                        };
+                        r.*.line = bless(r.*.start, r.*.len);
+                        r.*.len = 0;
+                        r.*.start = r.*.cur;
+                        return ::Some(r.*.line.&);
+                    };
+                    r.refill();
+                } else {
+                    let byte = unsafe { r.*.cur.* };
+                    r.*.cur = unsafe { add(r.*.cur, 1) };
+                    if byte == 10 {
+                        // A line boundary. `len` counts the bytes BEFORE
+                        // the newline, so the terminator never reaches the
+                        // view — and a trailing `\r` goes with it, which is
+                        // the whole of CRLF handling.
+                        let width = if r.*.len == 0 {
+                            0
+                        } else if unsafe { add(r.*.start, r.*.len - 1).* } == 13 {
+                            r.*.len - 1
+                        } else {
+                            r.*.len
+                        };
+                        r.*.line = bless(r.*.start, width);
+                        r.*.len = 0;
+                        r.*.start = r.*.cur;
+                        return ::Some(r.*.line.&);
+                    };
+                    // The byte is part of the line. Counting it one at a
+                    // time is not a cost worth avoiding — the scan has to
+                    // look at every byte anyway — and it is what gives the
+                    // bless a `usize` length with nothing converted.
+                    r.*.len = r.*.len + 1;
+                };
+            }
+        };
+
+        // Move the partial line to the front of the buffer and read after
+        // it. Compaction is why the buffer can be smaller than the file:
+        // only the line being assembled has to fit.
+        refill = fn::<@b>(r: Self.&mut::<@b>) -> () {
+            let len = r.*.len;
+            // A full buffer with no line boundary in it. Note the real
+            // limit this states: a line needs room for one byte MORE than
+            // itself — the terminator, or the read that discovers there
+            // isn't one — so the longest line a `cap`-byte reader can
+            // produce is `cap - 1` bytes.
+            if len == r.*.cap {
+                panic("stdin_lib: no line boundary in a full buffer");
+            };
+            unsafe { copy(r.*.start, r.*.buf, len); };
+            r.*.start = r.*.buf;
+            r.*.cur = unsafe { add(r.*.buf, len) };
+            match fill(r.*.cur, r.*.cap - len) {
+                ::More(end) => { r.*.end = end; },
+                ::End => {
+                    r.*.eof = true;
+                    r.*.end = r.*.cur;
+                },
+                ::Failed => panic("stdin_lib: reading standard input failed"),
+            };
+        };
+
+        deinit = fn(r: Self) -> () {
+            unsafe { dealloc_array(r.buf, r.cap); };
+        };
+    }
+};
+
+// The bless, in the one shape this library wants: bytes that came from a
+// terminal or a file are text or the input is broken, so an invalid
+// sequence is an error the program should see rather than a claim it should
+// make. `str_from_utf8_unchecked` is right where the bytes' provenance
+// already guarantees UTF-8; here nothing does.
+static bless = fn(at: u8.&raw mut, len: usize) -> str {
+    match unsafe { str_from_utf8(at, len) } {
+        ::Ok(s) => s,
+        ::Err => panic("stdin_lib: standard input is not valid UTF-8"),
+    }
+};
+
+static reader_new = fn(cap: usize) -> Reader {
+    let buf = match alloc_array::<u8>(cap) {
+        ::Ok(p) => p,
+        ::Err => panic("stdin_lib: out of memory"),
+    };
+    Reader(struct {
+        buf,
+        cap,
+        start = buf,
+        cur = buf,
+        end = buf,
+        len = 0,
+        eof = false,
+        line = "",
+    })
+};
+
+// ---- the demo -----------------------------------------------------------
+
+// An Advent-of-Code-shaped drain: count the lines and the bytes they hold,
+// and notice the blank ones. `line.*` copies the view out — a `str` is
+// copyable, and the copy is what lets `width` outlive the next call.
+static main = fn () -> () {
+    // 16 bytes: small enough that the input below crosses several refills,
+    // which is exactly the case a reader gets wrong.
+    let mut r = reader_new(16);
+    let m = r.&mut;
+    let mut lines = 0;
+    let mut blanks = 0;
+    let mut width = 0;
+    loop {
+        match m.next_line() {
+            ::Some(line) => {
+                lines = lines + 1;
+                let text = line.*;
+                if text == "" {
+                    blanks = blanks + 1;
+                };
+                width = width + count_bytes(text);
+            },
+            ::None => break,
+        };
+    };
+    print("lines: ");
+    print_usize(lines);
+    print(", blank: ");
+    print_usize(blanks);
+    print(", bytes: ");
+    print_usize(width);
+    print("\n");
+    r.deinit();
+};
+
+// `str` has no length accessor yet, so the codepoint walk stands in for
+// one — but it must not count the WALK's steps, which are characters. The
+// index it threads is a BYTE index, so the last boundary it reaches is the
+// answer: "smørre" walks six times and returns seven.
+static count_bytes = fn (s: str) -> usize {
+    let mut i = 0;
+    loop {
+        match s.next_char(i) {
+            ::Char(c, next) => { i = next; },
+            ::End => break i,
+        }
+    }
+};
+
+static print_usize = fn (n: usize) -> () {
+    if n < 10 {
+        print(digit(n));
+    } else {
+        print_usize(n / 10);
+        print(digit(n - (n / 10) * 10));
+    };
+};
+
+static digit = fn (d: usize) -> str {
+    if d == 0 { "0" } else if d == 1 { "1" } else if d == 2 { "2" }
+    else if d == 3 { "3" } else if d == 4 { "4" } else if d == 5 { "5" }
+    else if d == 6 { "6" } else if d == 7 { "7" } else if d == 8 { "8" }
+    else { "9" }
+};
+
+// What this file deliberately does NOT do: hand out an OWNED line. Every
+// view dies at the next `next_line`, and copying one out (`line.*`) works
+// today only because `str` is an owned primitive — the day a `str` can BE a
+// view into a buffer, that copy needs a real allocation behind it. That is
+// a later `String` feature, not this one.

@@ -35,13 +35,24 @@ fn check_run(text: &str, entry: &str, expect: Expect) {
     check_run_impl(text, entry, std::io::empty(), expect);
 }
 
-/// [`check_run`], but `input` is fed to `read_line` as though it were
-/// piped stdin — the mirror of how `check_run` captures `print` output:
-/// this is the injection side. `input` is consumed line-by-line in the
-/// order written; a final line with no trailing `\n` still reads (as the
-/// last `Line`, then `End` on the call after).
+/// [`check_run`], but `input` is fed to whatever reads standard input as
+/// though it were piped stdin — the mirror of how `check_run` captures
+/// `print` output: this is the injection side. The builtin `read_line`
+/// consumes it line-by-line (a final line with no trailing `\n` still
+/// reads, as the last `Line`, then `End` on the call after); a program
+/// that declares its own `extern fn read` import instead consumes it
+/// byte-wise, exactly as a real `read(2)` would.
 fn check_run_with_input(text: &str, entry: &str, input: &str, expect: Expect) {
-    check_run_impl(text, entry, std::io::Cursor::new(input.to_owned()), expect);
+    check_run_with_bytes(text, entry, input.as_bytes(), expect);
+}
+
+/// [`check_run_with_input`]'s raw-bytes twin, for the one input a Rust
+/// `&str` cannot express because it is valid UTF-8 by construction: bytes
+/// a bless has to answer for, or an invalid-UTF-8 stream `read_line` must
+/// reject by name. This is the one place any eval fixture pipes stdin —
+/// [`check_run_with_input`] is defined in terms of it.
+fn check_run_with_bytes(text: &str, entry: &str, input: &[u8], expect: Expect) {
+    check_run_impl(text, entry, std::io::Cursor::new(input.to_vec()), expect);
 }
 
 fn check_run_impl(text: &str, entry: &str, input: impl std::io::BufRead, expect: Expect) {
@@ -714,7 +725,7 @@ fn read_line_crashes_on_input_it_cannot_decode() {
     // `ReadLineResult` has no error arm (P04), so a failed read is a
     // runtime crash — never an `End` (which would look like clean
     // end-of-input) and never a lossily patched `Line`.
-    check_run_impl(
+    check_run_with_bytes(
         r#"
 static main = fn {
     match read_line() {
@@ -724,7 +735,7 @@ static main = fn {
 };
 "#,
         "main()",
-        std::io::Cursor::new(b"\xff\xfe\n".to_vec()),
+        b"\xff\xfe\n",
         expect![[r#"
             error[Runtime]: I/O error in `read_line`: stream did not contain valid UTF-8
         "#]],
@@ -6646,6 +6657,140 @@ fn a_borrowed_view_read_before_the_reader_moves_on_is_fine() {
         "f()",
         expect![[r#"
             => "two"
+        "#]],
+    );
+}
+
+// ---- the stdin library, from the example itself ------------------------
+
+/// `examples/stdin_lib.must` verbatim. Reading it off disk (rather than a
+/// hand-shrunk copy) means these tests pin the exact behaviour, including
+/// the exact panic text, of the file a user actually runs — a re-wording of
+/// the example cannot silently drift from what is pinned here. `main`,
+/// `print_usize`, `count_bytes` and `digit` go unused under the test-only
+/// entry each test appends below; that is fine, `check_run_impl` does not
+/// assert on diagnostics.
+const STDIN_LIB: &str = include_str!("../../../examples/stdin_lib.must");
+
+#[test]
+fn the_stdin_library_joins_lines_across_refills_and_strips_crlf() {
+    // Eighteen bytes through an EIGHT-byte buffer, so every line but the
+    // first is assembled across a refill and compacted to the front. The
+    // joined answer is the whole proof: CRLF stripped to nothing, a blank
+    // line kept as a real (empty) line, and the unterminated `gamma` read
+    // rather than dropped.
+    check_run_with_input(
+        &format!(
+            "{STDIN_LIB}\n\
+             static f = fn() -> str {{\n\
+                 let mut r = reader_new(8);\n\
+                 let m = r.&mut;\n\
+                 let mut out = \"\";\n\
+                 loop {{\n\
+                     match m.next_line() {{\n\
+                         ::Some(line) => {{ out = join(out, line.*); }},\n\
+                         ::None => break out,\n\
+                     }}\n\
+                 }}\n\
+             }};\n\
+             static join = fn(a: str, b: str) -> str {{\n\
+                 if a == \"\" {{ tag(b) }} else {{ pair(a, tag(b)) }}\n\
+             }};\n\
+             static tag = fn(s: str) -> str {{\n\
+                 if s == \"alpha\" {{ \"A\" }}\n\
+                 else if s == \"\" {{ \"_\" }}\n\
+                 else if s == \"beta\" {{ \"B\" }}\n\
+                 else if s == \"gamma\" {{ \"G\" }}\n\
+                 else {{ \"?\" }}\n\
+             }};\n\
+             static pair = fn(a: str, b: str) -> str {{\n\
+                 if a == \"A\" {{ if b == \"_\" {{ \"A_\" }} else {{ \"?\" }} }}\n\
+                 else if a == \"A_\" {{ if b == \"B\" {{ \"A_B\" }} else {{ \"?\" }} }}\n\
+                 else if a == \"A_B\" {{ if b == \"G\" {{ \"A_BG\" }} else {{ \"?\" }} }}\n\
+                 else {{ \"?\" }}\n\
+             }};"
+        ),
+        "f()",
+        "alpha\r\n\nbeta\ngamma",
+        expect![[r#"
+            => "A_BG"
+        "#]],
+    );
+}
+
+#[test]
+fn the_stdin_library_invalidates_a_line_when_the_reader_moves_on() {
+    // THE property this example exists to prove, on the library itself
+    // rather than on a fixture that resembles it: a line handed out by
+    // `next_line` is a borrow OF THE READER, so the next `next_line` — the
+    // call that may refill and overwrite the bytes it came from — kills it,
+    // and reading it afterwards is detected UB naming both sites.
+    check_run_with_input(
+        &format!(
+            "{STDIN_LIB}\n\
+             static f = fn() -> str {{\n\
+                 let mut r = reader_new(8);\n\
+                 let m = r.&mut;\n\
+                 let first = match m.next_line() {{\n\
+                     ::Some(l) => l,\n\
+                     ::None => panic(\"no input\"),\n\
+                 }};\n\
+                 let second = m.next_line();\n\
+                 first.*\n\
+             }};"
+        ),
+        "f()",
+        "one\ntwo\n",
+        expect![[r#"
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, or written through another borrow
+        "#]],
+    );
+}
+
+#[test]
+fn the_stdin_library_reports_bytes_that_are_not_text() {
+    // The CHECKED bless earning its name at the top of the stack: the
+    // library answers rather than asserts, so invalid input is a message
+    // and not a `str` that isn't one.
+    check_run_with_bytes(
+        &format!(
+            "{STDIN_LIB}\n\
+             static f = fn() -> str {{\n\
+                 let mut r = reader_new(8);\n\
+                 let m = r.&mut;\n\
+                 match m.next_line() {{ ::Some(l) => l.*, ::None => \"none\" }}\n\
+             }};"
+        ),
+        "f()",
+        b"ok\xff\n",
+        expect![[r#"
+            error[Panic]: stdin_lib: standard input is not valid UTF-8
+        "#]],
+    );
+}
+
+#[test]
+fn the_stdin_library_refuses_a_line_longer_than_its_buffer() {
+    // A fixed buffer has an honest limit, and the library says so by name
+    // instead of truncating a line or looping forever asking for room it
+    // does not have. The limit is `cap - 1`, not `cap`: a line needs room
+    // for one byte more than itself — the terminator, or the read that
+    // discovers there isn't one — so a 4-byte reader stops at 3.
+    check_run_with_input(
+        &format!(
+            "{STDIN_LIB}\n\
+             static f = fn() -> str {{\n\
+                 let mut r = reader_new(4);\n\
+                 let m = r.&mut;\n\
+                 match m.next_line() {{ ::Some(l) => l.*, ::None => \"none\" }}\n\
+             }};"
+        ),
+        "f()",
+        "abcdefgh\n",
+        expect![[r#"
+            error[Panic]: stdin_lib: no line boundary in a full buffer
         "#]],
     );
 }

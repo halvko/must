@@ -88,18 +88,22 @@
   stdin read, so a program's output precedes both the report it led to and the prompt it is
   waiting on; the DAP console forwards each write to the client as its own event, since
   waiting for a newline that may never come would withhold output indefinitely.
-- **P04** `read_line()` is a layer-1 platform hook (P01), `print`'s input twin: a nullary
-  builtin returning the compiler-provided per-file enum `ReadLineResult = enum { Line(str),
-  End }`, minted the way `AllocResult` is, so it is an ordinary nominal enum and a file's own
-  declaration of the name shadows it. One call is one line with its terminator stripped
-  (`\n`, and a preceding `\r`, so CRLF input reads as LF input); a blank line is `Line("")`;
-  a final unterminated line is still a `Line`; `End` is genuine end of input, never "nothing
-  available yet". A failed read — input that is not UTF-8 included — crashes the program
-  instead; the enum carries no error arm. That line rule is the machine's own, applied to
-  whatever bytes a host hands back, so every host obeys it rather than restating it. Refused
-  in const contexts by the same judgment as `print`. A host with no stdin hands out `End`
-  rather than blocking or inventing input — the debug adapter and the editor's run lens both
-  do. The wasm backend refuses it by name (P06).
+- **P04** stdin is a library. Buffering, line boundaries, CRLF stripping, blank-line versus
+  end-of-input, compacting a partial line, and handing a line out without copying are ordinary
+  Must code over one byte-moving import (P05) plus the blesses (T17) and the heap builtins —
+  see `examples/stdin_lib.must`; the `read_line` builtin is the convenience, not the
+  mechanism. Short reads are real and are not end of input; an I/O error rides the return
+  value so a lifting wrapper's error arm is reachable; the destination range is judged before
+  the read, so a trap never eats input. `read_line()` still returns the compiler-provided
+  per-file enum `ReadLineResult = enum { Line(str), End }`, minted the way `AllocResult` is
+  and shadowable by a file's own declaration of the name. The line rule — strip the
+  terminator (`\n`, and a preceding `\r`, so CRLF reads as LF), a blank line is `Line("")`, a
+  final unterminated line is still a `Line`, `End` is genuine end of input — is the machine's
+  own, applied to whatever bytes a host hands back, so every host obeys it rather than
+  restating it. A failed read crashes the program; the enum carries no error arm. A host with
+  no stdin hands out `End` rather than blocking or inventing input — the debug adapter and
+  the editor's run lens both do. Refused in const contexts by the same judgment as `print`.
+  The wasm backend refuses `read_line` by name (P06).
 - **P10** Semantic tokens are served full-file from the server and bound to the parser: one
   keyword table generates the set, the highlighter enumerates no kinds, and a drift guard
   walks the whole syntax-kind enum. The legend grows by appending, so existing indices never
@@ -156,9 +160,6 @@
   step deep (hierarchy and perf unresolved), and importable enums, moot
   until modules exist. Streaming is unavailable; the protocol's only
   mechanism is marking a list incomplete so the client re-queries. **P12**
-- **`read_line` is still a builtin beside the declared `read` (P05)** — decide whether line
-  delimiting, CRLF stripping and telling a blank line from end of input belong in the compiler
-  at all, or in Must code over the import with `read_line` kept as the convenience. **P04**
 - **Two open debug-adapter bugs**, not decisions: with loops and unfueled run mode an infinite
   loop hangs the session with no interrupt path; and breakpoint arrivals are deduped by
   frame/line/column, so a breakpoint in a loop body fires once per frame. **P11**

@@ -1532,6 +1532,10 @@ reads `End` — there is no DAP console-input round trip to source a line
 from) and the editor's ▶ run lens (its result is a toast message, not a
 terminal). Neither hangs waiting for input that can never arrive.
 
+`read_line` is the convenience, not the mechanism: "Standard input, as a
+library" below builds the same line-reading behavior out of ordinary Must
+code over one byte-moving host import.
+
 == Host imports
 
 `print` and `read_line` are builtins: the compiler knows their names. A
@@ -1602,6 +1606,66 @@ A compiled module has its own reservation: `must.print` is already imported
 for the builtin `print`, so an `extern fn` may not claim that name — a module
 cannot import one name twice.
 
+Turning `read`'s bare count into something a Must program can match on is
+library code, and `examples/stdin_lib.must` — the next section — is that
+library.
+
+== Standard input, as a library
+
+`read_line()` is a builtin. It does not have to be — and
+`examples/stdin_lib.must` is the proof: it reads lines from standard input
+using nothing the compiler knows about except the ability to move bytes.
+
+The host provides one primitive, POSIX's `read`, declared by the program
+itself:
+
+```must
+static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;
+```
+
+Fill a caller-owned buffer with at most `len` bytes; answer how many, `0` at
+end of input, negative `-errno` on failure. No lines, no text, no policy.
+Everything a reader actually does — buffering, finding a line boundary,
+stripping a CRLF, deciding that a blank line is a line and that end-of-input
+is not, moving a partial line to the front of the buffer to make room — is
+written in Must, in that file, and you can change any of it.
+
+Two details of the boundary are worth knowing because they are the ones
+that make library code possible at all. The count comes back `isize` —
+POSIX calls it `ssize_t`, and it is the type `offset` takes, so the end of
+the filled region is `offset(p, n)` with nothing converted. And the line's
+length comes out of the scan as an ordinary `usize` counter, because
+finding the newline means looking at every byte anyway. Must has no integer
+conversions, and this library needs none.
+
+Turning the bytes into text is a separate, explicit step:
+
+```
+match unsafe { str_from_utf8(at, len) } {
+    ::Ok(s) => s,
+    ::Err => panic("stdin_lib: standard input is not valid UTF-8"),
+}
+```
+
+And handing the line out is where the borrow rules do the work:
+
+```
+next_line = fn::<@b>(r: Self.&mut::<@b>) -> Option::<str.&::<@b>> { ... }
+```
+
+The line you get back is a BORROW OF THE READER. That is not documentation —
+it is the type, and it means the reader can reuse its buffer freely, because
+holding a line across the next `next_line` is not stale text but detected
+undefined behavior, reported at the stale read with both sites named. Copy
+what you need out (`line.*`) before asking for the next one, which is what
+the demo does.
+
+The limits are in the file, on purpose. The buffer is fixed, so a line
+longer than it panics by name rather than truncating or hanging. Invalid
+UTF-8 panics by name, because the checked bless made the library answer
+rather than assume. And a line copied out of its view works today only
+because a `str` is an owned value — an owned `String` is a later feature.
+
 == Running compiled modules
 
 A compiled module's imports are `must.print(ptr, len)` plus whatever
@@ -1622,21 +1686,21 @@ the module's `trap_code`/`panic_message_*` globals (also read by the
 differential test harness) and its `must.traps` custom section, which
 exists so a host with no access to the compiler can still name the trap.
 
-This backend has no heap and no raw pointers yet, so `examples/heap.must`
-and `examples/pointers.must` refuse to compile rather than miscompiling —
-there is nothing for either tool to run for those two examples. A safe
+This backend has no heap and no raw pointers yet, so `examples/heap.must`,
+`examples/pointers.must` and `examples/stdin_lib.must` (whose reader needs
+a heap-allocated buffer) refuse to compile rather than miscompiling —
+there is nothing for either tool to run for those three examples. A safe
 borrow is refused by name too, and deliberately not folded into the
 raw-pointer refusal: a borrow lowers to the same machine word, so this
 backend could emit something that runs while silently dropping the
 exclusivity contract. `read_line` has no wasm import yet either, so
 `examples/stdin.must` refuses by name — and so does `examples/chars.must`,
 which reads a line before it walks it. `next_char` has no wasm story either
-and refuses by name in its turn.
-
-Characters themselves are no trouble: a `char` is one scalar slot here, so
-literals, `==` and character-pattern dispatch all compile. The two blesses
-refuse by name as well, though no example reaches them: making a `str` out
-of bytes needs a buffer, and there are no buffers here.
+and refuses by name in its turn. Characters themselves are no trouble: a
+`char` is one scalar slot here, so literals, `==` and character-pattern
+dispatch all compile. The two blesses refuse by name as well;
+`examples/stdin_lib.must` would reach them too, but stops at `alloc_array`
+first, so no example here actually gets far enough to exercise them.
 
 Monomorphization has refusals of its own. A program whose instantiations
 never bottom out — polymorphic recursion, where every call needs an

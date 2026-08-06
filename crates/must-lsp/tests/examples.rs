@@ -79,6 +79,7 @@ const COVERED: &[&str] = &[
     "records.must",
     "state_machine.must",
     "stdin.must",
+    "stdin_lib.must",
 ];
 
 #[test]
@@ -530,6 +531,11 @@ fn stdin_checks_clean() {
     assert_check("stdin.must", 0, expect![[r#""#]]);
 }
 
+#[test]
+fn stdin_lib_checks_clean() {
+    assert_check("stdin_lib.must", 0, expect![[r#""#]]);
+}
+
 // --- run: the documented `// Run:` invocation(s), or the default entry -----
 
 #[test]
@@ -976,6 +982,65 @@ fn stdin_runs() {
         "a\nb\nc\nd",
         0,
         expect!["read more lines than expected\n"],
+    );
+}
+
+#[test]
+fn stdin_lib_runs() {
+    // The documented invocation. Four lines: `alpha` (CRLF-terminated), a
+    // blank one, `beta`, and an unterminated `gamma` — every line-reading
+    // case that has ever been got wrong, in eighteen bytes through a
+    // sixteen-byte buffer, so the input crosses a refill and a partial line
+    // is compacted.
+    assert_run_with_input(
+        &["run", "examples/stdin_lib.must"],
+        "alpha\r\n\nbeta\ngamma",
+        0,
+        expect!["lines: 4, blank: 1, bytes: 14\n"],
+    );
+    // A trailing newline does NOT produce a phantom final line — the
+    // difference between "the input ended" and "the last line was empty".
+    assert_run_with_input(
+        &["run", "examples/stdin_lib.must"],
+        "a\nb\n",
+        0,
+        expect!["lines: 2, blank: 0, bytes: 2\n"],
+    );
+    // Nothing at all: no lines, no hang waiting for input that cannot come.
+    assert_run_with_input(
+        &["run", "examples/stdin_lib.must"],
+        "",
+        0,
+        expect!["lines: 0, blank: 0, bytes: 0\n"],
+    );
+    // Seven short lines through a sixteen-byte buffer: several refills,
+    // each one compacting a partial line to the front.
+    assert_run_with_input(
+        &["run", "examples/stdin_lib.must"],
+        "one\ntwo\nthree\nfour\nfive\nsix\nseven\n",
+        0,
+        expect!["lines: 7, blank: 0, bytes: 27\n"],
+    );
+    // A line the buffer cannot hold PANICS — not a truncated line, not a
+    // hang, not a silent second line. The honest limit of a fixed buffer,
+    // and it exits 1 with nothing on stdout. (The message text is pinned in
+    // `eval`'s suite, where it does not ride on an example's line numbers.)
+    assert_run_with_input(
+        &["run", "examples/stdin_lib.must"],
+        "abcdefghijklmnopqrstuvwxyz\n",
+        1,
+        expect![[r#""#]],
+    );
+    // Multi-byte text survives the bless intact — seven bytes, six
+    // characters, and the count is of BYTES. (Bytes that are NOT valid
+    // UTF-8 are the other half of that story, and cannot be tested here:
+    // this harness pipes a Rust `&str`, which is valid UTF-8 by
+    // construction. The refusal is pinned in `eval`'s suite instead.)
+    assert_run_with_input(
+        &["run", "examples/stdin_lib.must"],
+        "smørre\n",
+        0,
+        expect!["lines: 1, blank: 0, bytes: 7\n"],
     );
 }
 

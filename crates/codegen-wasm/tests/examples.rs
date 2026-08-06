@@ -124,6 +124,18 @@ const UNSUPPORTED: &[(&str, &str, &str)] = &[
         "main()",
         "the `read_line` builtin is not supported by the wasm backend yet",
     ),
+    // The stdin LIBRARY needs a heap for its buffer, so it stops at
+    // `alloc_array` — before either of the two things this backend cannot
+    // do for it. Those are pinned on their own programs elsewhere, so
+    // neither can quietly start compiling behind this one: the host import
+    // `read` (its buffer parameter is a raw pointer) in `structure.rs`'s
+    // `an_import_whose_signature_has_no_wasm_shape_is_refused_by_name`, and
+    // the two blesses in `differential.rs`'s `the_blesses_are_refused_by_name`.
+    (
+        "stdin_lib.must",
+        "main()",
+        "the `alloc_array` builtin is not supported by the wasm backend yet",
+    ),
     // Intentionally dirty: `errors.must` exists to show diagnostics, and
     // its erroneous items have no compilable meaning.
     (
