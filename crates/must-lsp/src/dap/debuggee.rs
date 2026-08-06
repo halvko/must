@@ -128,7 +128,10 @@ pub(crate) struct Debuggee<W: Write + Clone> {
     /// into fresh copies).
     text: String,
     original_len: usize,
-    machine: Machine<'static, RunMode<W>>,
+    // `std::io::Empty` — a debugged program's `read_line` sees immediate
+    // end-of-input (see `Self::new`'s doc comment for why this is the
+    // honest choice, not a placeholder for real stdin).
+    machine: Machine<'static, RunMode<W, std::io::Empty>>,
     /// Cloned for sub-evaluations (conditions, log points, the console).
     console: W,
     pub(crate) breakpoints: Vec<BreakpointSpec>,
@@ -171,17 +174,20 @@ const RECORD_REF_BASE: i64 = 100_000;
 impl<W: Write + Clone> Debuggee<W> {
     /// Read and prepare `path`, ready to run `entry`. Errors are fully
     /// rendered.
+    ///
+    /// A debug session speaks the DAP protocol over its own transport, not
+    /// a terminal — there is no real stdin to hand a debugged program, and
+    /// the adapter has no console-input request to synthesize one from, so
+    /// `read_line` reads [`std::io::Empty`] and reports end-of-input on
+    /// every call (P04): `End`, not a hang and not a fabricated line.
+    /// Revisit if the adapter grows `runInTerminal` or a console-input
+    /// round trip.
     pub(crate) fn new(path: &str, entry: &str, console: W) -> Result<Debuggee<W>, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|err| format!("error: cannot read `{path}`: {err}"))?;
         let db: &'static RootDatabase = Box::leak(Box::new(RootDatabase::default()));
         let prepared = runner::prepare(db, &text, path, entry)?;
-        let mut machine = Machine::new(
-            db,
-            RunMode {
-                out: console.clone(),
-            },
-        );
+        let mut machine = Machine::new(db, RunMode::without_stdin(console.clone()));
         machine
             .start(&prepared.entry)
             .map_err(|err| format!("error: {}", err.message))?;
@@ -552,12 +558,7 @@ impl<W: Write + Clone> Debuggee<W> {
         let wrapped = format!("fn ({params}) {{ {expression}\n}}");
         let prepared = runner::prepare(self.db, &self.text, &self.path, &wrapped)?;
 
-        let mut machine = Machine::new(
-            self.db,
-            RunMode {
-                out: self.console.clone(),
-            },
-        );
+        let mut machine = Machine::new(self.db, RunMode::without_stdin(self.console.clone()));
         machine
             .eval_root(&prepared.entry)
             .and_then(|fn_value| match fn_value {

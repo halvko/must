@@ -1584,6 +1584,7 @@ static main = fn {
             panic Function (fn(str) -> !)
             x Variable (usize)
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            ReadLineResult Enum (enum { Line(str), End })
             Shape Struct (struct { r: usize })
             area Function (fn(usize) -> usize)
             main Function (fn())
@@ -1594,6 +1595,7 @@ static main = fn {
             dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
             offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             print Function (fn(str))
+            read_line Function (fn() -> ReadLineResult)
             const Keyword
             false Keyword
             fn Keyword
@@ -1623,6 +1625,7 @@ static main = fn {
         expect_test::expect![[r#"
             x Variable (mut usize)
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            ReadLineResult Enum (enum { Line(str), End })
             main Function (fn())
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -1632,6 +1635,7 @@ static main = fn {
             offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             panic Function (fn(str) -> !)
             print Function (fn(str))
+            read_line Function (fn() -> ReadLineResult)
             const Keyword
             false Keyword
             fn Keyword
@@ -1655,6 +1659,7 @@ static make_point = fn (x: usize) -> $0 { x };
         expect_test::expect![[r#"
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
             Point Struct (struct { x: usize, y: usize })
+            ReadLineResult Enum (enum { Line(str), End })
             bool Keyword
             i16 Keyword
             i32 Keyword
@@ -2218,6 +2223,7 @@ static main = fn (s: str, n: usize) {
             panic Function (fn(str) -> !)
             n Variable (usize)
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            ReadLineResult Enum (enum { Line(str), End })
             main Function (fn(str, usize))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -2226,6 +2232,7 @@ static main = fn (s: str, n: usize) {
             dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
             offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             print Function (fn(str))
+            read_line Function (fn() -> ReadLineResult)
             const Keyword
             false Keyword
             fn Keyword
@@ -2256,6 +2263,7 @@ static main = fn {
             get_s Function (fn() -> str)
             panic Function (fn(str) -> !)
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            ReadLineResult Enum (enum { Line(str), End })
             get_n Function (fn() -> usize)
             main Function (fn())
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
@@ -2265,6 +2273,7 @@ static main = fn {
             dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
             offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             print Function (fn(str))
+            read_line Function (fn() -> ReadLineResult)
             const Keyword
             false Keyword
             fn Keyword
@@ -2294,6 +2303,7 @@ static main = fn {
             helper Function (fn() -> usize)
             panic Function (fn(str) -> !)
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            ReadLineResult Enum (enum { Line(str), End })
             main Function (fn())
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -2302,6 +2312,7 @@ static main = fn {
             dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
             offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             print Function (fn(str))
+            read_line Function (fn() -> ReadLineResult)
             const Keyword
             false Keyword
             fn Keyword
@@ -2334,6 +2345,7 @@ static main = fn (p: Point, n: usize) {
             n Variable (usize)
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
             Point Struct (struct { x: usize })
+            ReadLineResult Enum (enum { Line(str), End })
             main Function (fn(Point, usize))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -2342,6 +2354,7 @@ static main = fn (p: Point, n: usize) {
             dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
             offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             print Function (fn(str))
+            read_line Function (fn() -> ReadLineResult)
             const Keyword
             false Keyword
             fn Keyword
@@ -2439,6 +2452,7 @@ static main = fn {
         expect_test::expect![[r#"
             s Variable (str)
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            ReadLineResult Enum (enum { Line(str), End })
             main Function (fn())
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -2448,6 +2462,7 @@ static main = fn {
             offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             panic Function (fn(str) -> !)
             print Function (fn(str))
+            read_line Function (fn() -> ReadLineResult)
             const Keyword
             false Keyword
             fn Keyword
@@ -2914,6 +2929,7 @@ static f = fn (s: Shape) {
             match arms Snippet (all 2 variants of Shape)
             s Variable (Shape)
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            ReadLineResult Enum (enum { Line(str), End })
             Shape Enum (enum { Circle(usize), Point })
             f Function (fn(Shape) -> !)
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
@@ -2924,6 +2940,7 @@ static f = fn (s: Shape) {
             offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             panic Function (fn(str) -> !)
             print Function (fn(str))
+            read_line Function (fn() -> ReadLineResult)
             const Keyword
             false Keyword
             fn Keyword
@@ -3200,6 +3217,7 @@ fn completions_match_scrutinee_does_not_suppress_the_normal_set() {
             ambient Constant (Shape)
             noise Variable (usize)
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            ReadLineResult Enum (enum { Line(str), End })
             Shape Enum (enum { Circle(usize), Point })
             f Function (fn(Shape) -> !)
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
@@ -3210,6 +3228,7 @@ fn completions_match_scrutinee_does_not_suppress_the_normal_set() {
             offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             panic Function (fn(str) -> !)
             print Function (fn(str))
+            read_line Function (fn() -> ReadLineResult)
             const Keyword
             false Keyword
             fn Keyword

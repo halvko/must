@@ -37,7 +37,8 @@ pub use item_tree::{
 pub use outlives::{OutlivesDiagnostic, outlives_check};
 pub use scopes::{
     ALLOC_RESULT_NAME, BUILTIN_DISAMBIGUATOR, Builtin, Duplicate, ExprScopes, FileScope,
-    Resolution, TypeScope, alloc_result_loc, expr_scopes, file_scope, resolutions, type_scope,
+    READ_LINE_RESULT_NAME, Resolution, SyntheticDecl, TypeScope, alloc_result_loc, expr_scopes,
+    file_scope, read_line_result_loc, resolutions, synthetic_decls, type_scope,
 };
 pub use traits::{BoundSlot, bound_slots, dict_param_count};
 pub use ty::{
@@ -202,14 +203,19 @@ pub fn item_index(db: &dyn Db, item: ItemId<'_>) -> Option<usize> {
         .position(|&it| it == item)
 }
 
-/// Whether `item` is the compiler-provided [`ALLOC_RESULT_NAME`] enum —
-/// the one declaration that exists without source (see
-/// [`scopes::alloc_result_loc`]). Its item-tree-level queries ([`item_data`],
-/// [`type_decl`]) answer the builtin shape; source-level queries
-/// ([`item_source`], [`item_index`]) answer the empty case, exactly like a
-/// stale id.
-pub fn is_alloc_result_decl(db: &dyn Db, item: ItemId<'_>) -> bool {
-    item.disambiguator(db) == BUILTIN_DISAMBIGUATOR && item.name(db) == ALLOC_RESULT_NAME
+/// The compiler-provided declaration `item` is, if any — the declarations
+/// that exist without source (see [`scopes::synthetic_decls`]). Their
+/// item-tree-level queries ([`item_data`], [`type_decl`]) answer the builtin
+/// shape; source-level queries ([`item_source`], [`item_index`]) answer the
+/// empty case, exactly like a stale id.
+pub fn synthetic_decl(db: &dyn Db, item: ItemId<'_>) -> Option<&'static scopes::SyntheticDecl> {
+    if item.disambiguator(db) != BUILTIN_DISAMBIGUATOR {
+        return None;
+    }
+    let name = item.name(db);
+    scopes::synthetic_decls()
+        .iter()
+        .find(|decl| decl.name == name)
 }
 
 /// The item-tree entry for `item` (its contract, constness, name).
@@ -261,17 +267,12 @@ pub fn item_data<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<item_tree::I
             generics,
         });
     }
-    if is_alloc_result_decl(db, item) {
+    if let Some(decl) = synthetic_decl(db, item) {
         return Some(item_tree::ItemData {
-            name: ALLOC_RESULT_NAME.to_owned(),
+            name: decl.name.to_owned(),
             kind: item_tree::ItemKind::Type,
             type_ref: None,
-            generics: vec![item_tree::GenericParamData {
-                name: "T".to_owned(),
-                kind: item_tree::GenericParamKind::Type,
-                bounds: Vec::new(),
-                outlives: Vec::new(),
-            }],
+            generics: decl.generics.clone(),
         });
     }
     item_tree::item_tree(db, item.file(db))

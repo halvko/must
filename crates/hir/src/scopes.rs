@@ -10,7 +10,7 @@ use la_arena::{Arena, ArenaMap, Idx};
 use rustc_hash::FxHashMap;
 
 use crate::body::{BindingId, Body, ExprData, ExprId, Stmt, body};
-use crate::item_tree::{ItemKind, item_tree};
+use crate::item_tree::{GenericParamData, GenericParamKind, ItemKind, TypeRef, item_tree};
 use crate::{ItemId, ItemLoc};
 
 pub type ScopeId = Idx<ScopeData>;
@@ -339,6 +339,12 @@ pub enum Builtin {
     /// reserved never-live allocation per machine). SAFE; any deref is
     /// detected UB.
     Dangling,
+    /// `read_line()` — `print`'s input twin, a layer-1 platform hook
+    /// (P01, P04). SAFE, monomorphic, nullary: returns the compiler-provided
+    /// [`READ_LINE_RESULT_NAME`] enum (`Line(str)` / `End`), exactly the
+    /// way `alloc_array` returns [`ALLOC_RESULT_NAME`]. Refused in const
+    /// contexts like `print` (const evaluation cannot have side effects).
+    ReadLine,
 }
 
 impl Builtin {
@@ -352,6 +358,7 @@ impl Builtin {
             "offset" => Some(Builtin::Offset),
             "copy" => Some(Builtin::Copy),
             "dangling" => Some(Builtin::Dangling),
+            "read_line" => Some(Builtin::ReadLine),
             _ => None,
         }
     }
@@ -366,6 +373,7 @@ impl Builtin {
             Builtin::Offset => "offset",
             Builtin::Copy => "copy",
             Builtin::Dangling => "dangling",
+            Builtin::ReadLine => "read_line",
         }
     }
 
@@ -392,21 +400,97 @@ pub const BUILTIN_DISAMBIGUATOR: u32 = u32::MAX;
 
 /// The result-shaped return of `alloc_array` (and the library convention
 /// for fallible allocators built over it): a compiler-provided generic enum
-/// `AllocResult::<T> = enum { Ok(T.&raw mut), Err }`. Provided per FILE —
-/// resolution is per-file today, so each file sees "its" declaration; the
-/// identity scheme is the ordinary `ItemLoc` one with the reserved
-/// disambiguator, which keeps every downstream consumer (patterns, match
-/// lowering, widening, the runtime tag) on the completely ordinary
-/// nominal-enum machinery.
+/// `AllocResult::<T> = enum { Ok(T.&raw mut), Err }`.
 pub const ALLOC_RESULT_NAME: &str = "AllocResult";
+
+/// The result-shaped return of `read_line` (P04): a compiler-provided
+/// NON-generic enum `ReadLineResult = enum { Line(str), End }` — a line is
+/// always `str`, so there is no `T` to carry. `Line` holds the line with
+/// its terminator stripped; a blank line is `::Line("")`, never `::End`.
+/// The idiom it exists for:
+///
+/// ```text
+/// loop {
+///     match read_line() {
+///         ::Line(s) => { print(s); },
+///         ::End => break,
+///     }
+/// }
+/// ```
+pub const READ_LINE_RESULT_NAME: &str = "ReadLineResult";
+
+/// A declaration the compiler provides without source: the result enum some
+/// builtin returns. Provided per FILE — resolution is per-file today, so
+/// each file sees "its" declaration; the identity scheme is the ordinary
+/// [`ItemLoc`] one with the reserved [`BUILTIN_DISAMBIGUATOR`], which keeps
+/// every downstream consumer (patterns, match lowering, widening, the
+/// runtime tag) on the completely ordinary nominal-enum machinery.
+pub struct SyntheticDecl {
+    /// Its file-scope name. A file's own declaration of the name shadows
+    /// it, the `print` precedent, and is never reported as a duplicate.
+    pub name: &'static str,
+    /// Its type parameters ([`ALLOC_RESULT_NAME`] has one,
+    /// [`READ_LINE_RESULT_NAME`] none).
+    pub generics: Vec<GenericParamData>,
+    /// Its variants, as syntax-shaped data — the declaration is stated
+    /// here and nowhere else, so nothing downstream needs a special case.
+    pub variants: Vec<(String, Vec<TypeRef>)>,
+}
+
+/// Every compiler-provided declaration, stated once. The four sites that
+/// must know about them — [`type_scope`], [`file_scope`],
+/// [`crate::item_data`] and [`crate::type_decl`] — each handle "a synthetic
+/// declaration", so a third one is a row here rather than a third special
+/// case in each of them.
+pub fn synthetic_decls() -> &'static [SyntheticDecl] {
+    static DECLS: std::sync::LazyLock<Vec<SyntheticDecl>> = std::sync::LazyLock::new(|| {
+        vec![
+            SyntheticDecl {
+                name: ALLOC_RESULT_NAME,
+                generics: vec![GenericParamData {
+                    name: "T".to_owned(),
+                    kind: GenericParamKind::Type,
+                    bounds: Vec::new(),
+                    outlives: Vec::new(),
+                }],
+                variants: vec![
+                    (
+                        "Ok".to_owned(),
+                        vec![TypeRef::RawPtr {
+                            mutable: true,
+                            inner: Box::new(TypeRef::Path("T".to_owned())),
+                        }],
+                    ),
+                    ("Err".to_owned(), Vec::new()),
+                ],
+            },
+            SyntheticDecl {
+                name: READ_LINE_RESULT_NAME,
+                generics: Vec::new(),
+                variants: vec![
+                    ("Line".to_owned(), vec![TypeRef::Path("str".to_owned())]),
+                    ("End".to_owned(), Vec::new()),
+                ],
+            },
+        ]
+    });
+    &DECLS
+}
+
+/// The [`ItemLoc`] of `file`'s copy of the synthetic declaration `name`.
+pub fn synthetic_decl_loc(file: SourceFile, name: &str) -> ItemLoc {
+    ItemLoc::top_level(file, std::sync::Arc::from(name), BUILTIN_DISAMBIGUATOR)
+}
 
 /// The [`ItemLoc`] of `file`'s compiler-provided [`ALLOC_RESULT_NAME`] enum.
 pub fn alloc_result_loc(file: SourceFile) -> ItemLoc {
-    ItemLoc::top_level(
-        file,
-        std::sync::Arc::from(ALLOC_RESULT_NAME),
-        BUILTIN_DISAMBIGUATOR,
-    )
+    synthetic_decl_loc(file, ALLOC_RESULT_NAME)
+}
+
+/// The [`ItemLoc`] of `file`'s compiler-provided [`READ_LINE_RESULT_NAME`]
+/// enum.
+pub fn read_line_result_loc(file: SourceFile) -> ItemLoc {
+    synthetic_decl_loc(file, READ_LINE_RESULT_NAME)
 }
 
 /// Top-level names of a file, *including* what's wrong with them: the scope
@@ -546,11 +630,14 @@ pub fn type_scope(db: &dyn Db, file: SourceFile) -> TypeScope {
     // builtin value names — inserted only when the file doesn't declare the
     // name itself (user declarations shadow builtins, the `print`
     // precedent), and never counted as a duplicate.
-    if !counts.contains_key(ALLOC_RESULT_NAME) {
+    for decl in synthetic_decls() {
+        if counts.contains_key(decl.name) {
+            continue;
+        }
         scope.entries.insert(
-            ALLOC_RESULT_NAME.to_owned(),
+            decl.name.to_owned(),
             TypeScopeEntry {
-                loc: alloc_result_loc(file),
+                loc: synthetic_decl_loc(file, decl.name),
                 ambiguous: false,
             },
         );
@@ -601,11 +688,14 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
     }
     // The compiler-provided declarations — shadowable, never a duplicate
     // (see `type_scope`).
-    if !scope.entries.contains_key(ALLOC_RESULT_NAME) {
+    for decl in synthetic_decls() {
+        if scope.entries.contains_key(decl.name) {
+            continue;
+        }
         scope.entries.insert(
-            ALLOC_RESULT_NAME.to_owned(),
+            decl.name.to_owned(),
             ScopeEntry {
-                loc: alloc_result_loc(file),
+                loc: synthetic_decl_loc(file, decl.name),
                 kind: ItemKind::Type,
                 ambiguous: false,
             },

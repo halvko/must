@@ -43,8 +43,8 @@ pub enum ConstCheckDiagnostic {
     /// [`ConstCheckDiagnostic::ValueCall`] because here the const-ness *is*
     /// known (the literal visibly lacks the marker) and the fix is local.
     NonConstFnLiteralCall { callee: ExprId },
-    /// A call to a side-effecting builtin (`print`). `panic` is the one
-    /// side effect const contexts allow, so it never lands here.
+    /// A call to a side-effecting builtin (`print`, `read_line`). `panic`
+    /// is the one side effect const contexts allow, so it never lands here.
     SideEffectCall { callee: ExprId, builtin: Builtin },
     /// A call to a heap builtin (`alloc_array`/`dealloc_array`) in a const
     /// context — the eager const fence (C04): const-built heap values wait
@@ -377,7 +377,7 @@ impl CheckCtx<'_> {
             Some(Resolution::Builtin(
                 Builtin::Panic | Builtin::Add | Builtin::Offset | Builtin::Copy | Builtin::Dangling,
             )) => {}
-            Some(Resolution::Builtin(builtin @ Builtin::Print)) => {
+            Some(Resolution::Builtin(builtin @ (Builtin::Print | Builtin::ReadLine))) => {
                 self.diagnostics.push(ConstCheckDiagnostic::SideEffectCall {
                     callee,
                     builtin: *builtin,

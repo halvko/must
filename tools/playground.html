@@ -132,13 +132,14 @@
 <pre class="panel" id="result">Load a module to begin.</pre>
 
 <div class="limits">
-  <strong>Limits.</strong> This backend has no heap, no raw pointers and no
-  safe borrows yet — a program using any of them is refused at compile time,
-  by name, so there is nothing for this page to run. The module's only
-  import is <code>must.print</code>, not WASI, so a general-purpose WASI
-  runtime (wasmtime, wasmer, …) will <em>not</em> run these modules as-is —
-  a <code>--wasi</code> shim is future work. This page supplies exactly the
-  one import the module needs and nothing else.
+  <strong>Limits.</strong> This backend has no heap, no raw pointers, no safe
+  borrows and no wasm import for <code>read_line</code> yet — a program using
+  any of them is refused at compile time, by name, so there is nothing for
+  this page to run. The module's only import is <code>must.print</code>, not
+  WASI, so a general-purpose WASI runtime (wasmtime, wasmer, …) will
+  <em>not</em> run these modules as-is — a <code>--wasi</code> shim is future
+  work. This page supplies exactly the one import the module needs and
+  nothing else.
 </div>
 
 <script src="must-wasm.js"></script>

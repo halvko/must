@@ -106,6 +106,14 @@ const UNSUPPORTED: &[(&str, &str, &str)] = &[
         "main()",
         "a raw pointer (heap and pointer primitives are out of scope for this backend)",
     ),
+    // `read_line` has no wasm import yet — `mono::resolve_call`'s
+    // exhaustive `Builtin` match lists it among the refused, so it is
+    // named by its own name, exactly like `alloc_array` above.
+    (
+        "stdin.must",
+        "main()",
+        "the `read_line` builtin is not supported by the wasm backend yet",
+    ),
     // Intentionally dirty: `errors.must` exists to show diagnostics, and
     // its erroneous items have no compilable meaning.
     (

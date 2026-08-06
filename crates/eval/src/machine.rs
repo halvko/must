@@ -26,6 +26,15 @@ pub trait Mode {
     /// `text` verbatim — adding a separator here would make `print` a
     /// line-writer, which it deliberately is not.
     fn print(&mut self, text: &str) -> Result<(), EvalError>;
+
+    /// `read_line()` outside any const context — `print`'s input twin.
+    /// Implementations move bytes only: they hand back the next line as
+    /// the source spells it, terminator INCLUDED, and `None` at genuine
+    /// end-of-input. What counts as a line for the language — terminator
+    /// stripped, a blank line still a line, an unterminated final line
+    /// still a line (P04) — is `Machine::builtin_call`'s business, so
+    /// every host obeys one rule instead of re-deriving it.
+    fn read_line(&mut self) -> Result<Option<String>, EvalError>;
 }
 
 /// The driver behind [`crate::const_value`]: everything is a const context.
@@ -43,17 +52,45 @@ impl Mode for ConstMode {
             notes: Vec::new(),
         })
     }
+
+    /// Unreachable in practice, like `print`'s arm above, and the same
+    /// sentence for the same reason.
+    fn read_line(&mut self) -> Result<Option<String>, EvalError> {
+        Err(EvalError {
+            kind: EvalErrorKind::NotConst,
+            message: hir::diag::side_effect_call_in_const("read_line"),
+            origin: None,
+            notes: Vec::new(),
+        })
+    }
 }
 
 /// Run mode for the CLI and the debug adapter: `print` writes its argument
-/// and nothing else — no newline is appended (ruled). `print` is a write,
+/// and nothing else — no newline is appended (P03). `print` is a write,
 /// not a line; a program that wants a line break emits one itself with the
-/// `\n` escape.
-pub struct RunMode<W: std::io::Write> {
+/// `\n` escape. `read_line` (P04) reads `input` — real, locked,
+/// line-buffered stdin for the CLI; an injectable in-memory reader for
+/// tests; [`std::io::Empty`] for the hosts that have no stdin to offer (the
+/// debug adapter and the editor's run lens, each of which documents why).
+pub struct RunMode<W: std::io::Write, R: std::io::BufRead> {
     pub out: W,
+    pub input: R,
 }
 
-impl<W: std::io::Write> Mode for RunMode<W> {
+impl<W: std::io::Write> RunMode<W, std::io::Empty> {
+    /// A host with no stdin to offer — the debug adapter and the editor's
+    /// run lens. `read_line` reports `End` on the very first call rather
+    /// than blocking on input that can never arrive (P04); the same shape
+    /// a test that injects nothing wants.
+    pub fn without_stdin(out: W) -> Self {
+        RunMode {
+            out,
+            input: std::io::empty(),
+        }
+    }
+}
+
+impl<W: std::io::Write, R: std::io::BufRead> Mode for RunMode<W, R> {
     fn print(&mut self, text: &str) -> Result<(), EvalError> {
         write!(self.out, "{text}").map_err(|err| EvalError {
             kind: EvalErrorKind::Runtime,
@@ -61,6 +98,31 @@ impl<W: std::io::Write> Mode for RunMode<W> {
             origin: None,
             notes: Vec::new(),
         })
+    }
+
+    fn read_line(&mut self) -> Result<Option<String>, EvalError> {
+        // `out` is line-buffered and never flushed per call (P03), so an
+        // unterminated prompt would still be sitting in the buffer while
+        // this blocks. Flush first, or `print("name? "); read_line()` waits
+        // at a terminal that shows nothing.
+        self.out.flush().map_err(|err| EvalError {
+            kind: EvalErrorKind::Runtime,
+            message: format!("I/O error flushing output before `read_line`: {err}"),
+            origin: None,
+            notes: Vec::new(),
+        })?;
+        let mut line = String::new();
+        // A failed read — input that is not UTF-8 included — crashes the
+        // program (P04): `ReadLineResult` has no error arm to carry it.
+        let read = self.input.read_line(&mut line).map_err(|err| EvalError {
+            kind: EvalErrorKind::Runtime,
+            message: format!("I/O error in `read_line`: {err}"),
+            origin: None,
+            notes: Vec::new(),
+        })?;
+        // `BufRead::read_line` reports 0 bytes read exactly at genuine EOF
+        // (never for a blank line, which is 1 byte: the newline itself).
+        Ok(if read == 0 { None } else { Some(line) })
     }
 }
 
@@ -1988,6 +2050,46 @@ impl<'db, M: Mode> Machine<'db, M> {
                 };
                 self.mode.print(text)?;
                 Ok(Value::Unit)
+            }
+            // Defense in depth, same split as `print`: const-check plants
+            // the trap it can see; this is the machine's own guarantee
+            // that const evaluation never performs I/O.
+            Builtin::ReadLine if self.const_depth > 0 => Err(EvalError {
+                kind: EvalErrorKind::NotConst,
+                message: hir::diag::side_effect_call_in_const(builtin.name()),
+                origin: Some((loc.clone(), origin)),
+                notes: Vec::new(),
+            }),
+            Builtin::ReadLine => {
+                expect_args(self, 0)?;
+                Ok(match self.mode.read_line()? {
+                    // What a line IS, decided here rather than once per
+                    // host (P04): the terminator is STRIPPED — `\n`, and a
+                    // preceding `\r` with it, so CRLF input reads the same
+                    // as LF input instead of leaking a stray `\r` onto the
+                    // end of every line. A blank line is `Line("")`, and a
+                    // final unterminated line is a `Line` like any other.
+                    Some(mut text) => {
+                        if text.ends_with('\n') {
+                            text.pop();
+                            if text.ends_with('\r') {
+                                text.pop();
+                            }
+                        }
+                        Value::Variant {
+                            decl: hir::read_line_result_loc(loc.file),
+                            index: 0,
+                            name: "Line".to_owned(),
+                            payload: vec![Value::Str(text)],
+                        }
+                    }
+                    None => Value::Variant {
+                        decl: hir::read_line_result_loc(loc.file),
+                        index: 1,
+                        name: "End".to_owned(),
+                        payload: Vec::new(),
+                    },
+                })
             }
             // The eager const fence (ruled C04), machine side — the same
             // defense-in-depth split as `print`: const-check plants the

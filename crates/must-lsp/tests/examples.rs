@@ -77,6 +77,7 @@ const COVERED: &[&str] = &[
     "reborrow.must",
     "records.must",
     "state_machine.must",
+    "stdin.must",
 ];
 
 #[test]
@@ -97,13 +98,41 @@ fn every_example_file_has_smoke_coverage() {
 /// killed and reported instead of hanging the test process forever.
 /// `label` identifies the invocation in the panic message only.
 fn spawn_with_timeout(args: &[&str], label: &str) -> (String, String, i32) {
-    let mut child = Command::new(BIN)
+    spawn_with_timeout_input(args, label, None)
+}
+
+/// [`spawn_with_timeout`], but with `input` piped to the child's stdin
+/// (written up front, then the handle is dropped/closed so a `read_line`
+/// loop sees genuine end-of-input) — the real-process mirror of
+/// `runner::tests::check_with_input`'s in-process injection, exercising the
+/// actual `must-lsp run program.must < input.txt` contract.
+fn spawn_with_timeout_input(
+    args: &[&str],
+    label: &str,
+    input: Option<&str>,
+) -> (String, String, i32) {
+    let mut command = Command::new(BIN);
+    command
         .args(args)
         .current_dir(workspace_root())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn must-lsp");
+        .stderr(Stdio::piped());
+    // Callers with no input leave the child's stdin inherited; an
+    // injection pipes it, written up front and then dropped/closed so a
+    // `read_line` loop on the child's side sees genuine end-of-input.
+    if input.is_some() {
+        command.stdin(Stdio::piped());
+    }
+    let mut child = command.spawn().expect("spawn must-lsp");
+
+    if let Some(input) = input {
+        use std::io::Write;
+        let mut stdin_pipe = child.stdin.take().expect("child has piped stdin");
+        stdin_pipe
+            .write_all(input.as_bytes())
+            .expect("write child stdin");
+        drop(stdin_pipe);
+    }
 
     // Drain both pipes on background threads while polling: a wedged
     // child that also floods a pipe would otherwise deadlock this
@@ -170,6 +199,18 @@ fn assert_check(file: &str, want_code: i32, want: Expect) {
 fn assert_run(args: &[&str], want_code: i32, want: Expect) {
     let label = args.join(" ");
     let (stdout, _stderr, code) = spawn_with_timeout(args, &label);
+    assert_eq!(
+        code, want_code,
+        "unexpected exit code from `must-lsp {label}`"
+    );
+    want.assert_eq(&stdout);
+}
+
+/// [`assert_run`], with `input` piped to the child's stdin — the real-CLI
+/// exercise of `must-lsp run program.must < input.txt`.
+fn assert_run_with_input(args: &[&str], input: &str, want_code: i32, want: Expect) {
+    let label = args.join(" ");
+    let (stdout, _stderr, code) = spawn_with_timeout_input(args, &label, Some(input));
     assert_eq!(
         code, want_code,
         "unexpected exit code from `must-lsp {label}`"
@@ -395,7 +436,14 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |                                     ^^^^^^^^^^^^
                = help: Insert `::`
 
-            found 28 errors and 1 warning
+            error: cannot call `read_line` in a const context; const evaluation cannot have side effects
+              --> examples/errors.must:308:29
+                |
+            308 | static read_line_in_const = read_line();
+                |                             ^^^^^^^^^
+               = note: this item's initializer is a const context (examples/errors.must:308:1)
+
+            found 29 errors and 1 warning
         "#]],
     );
 }
@@ -448,6 +496,11 @@ fn records_checks_clean() {
 #[test]
 fn state_machine_checks_clean() {
     assert_check("state_machine.must", 0, expect![[r#""#]]);
+}
+
+#[test]
+fn stdin_checks_clean() {
+    assert_check("stdin.must", 0, expect![[r#""#]]);
 }
 
 // --- run: the documented `// Run:` invocation(s), or the default entry -----
@@ -867,5 +920,34 @@ fn state_machine_runs() {
         expect![[r#"
             "go"
         "#]],
+    );
+}
+
+#[test]
+fn stdin_runs() {
+    // The documented invocation, piped exactly as `// Run:` shows: three
+    // lines in, `expected` matches, one summary line out.
+    assert_run_with_input(
+        &["run", "examples/stdin.must"],
+        "a\nb\nc\n",
+        0,
+        expect!["read exactly the expected line count\n"],
+    );
+    // A different line count still terminates cleanly on genuine
+    // end-of-input (no hang waiting for a fourth line) and takes the
+    // other branch.
+    assert_run_with_input(
+        &["run", "examples/stdin.must"],
+        "a\nb\n",
+        0,
+        expect!["read fewer lines than expected\n"],
+    );
+    // No trailing newline on the last line still reads as a `Line`, not a
+    // dropped one — `read_line`'s EOF-without-newline case.
+    assert_run_with_input(
+        &["run", "examples/stdin.must"],
+        "a\nb\nc\nd",
+        0,
+        expect!["read more lines than expected\n"],
     );
 }

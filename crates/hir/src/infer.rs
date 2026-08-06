@@ -7473,7 +7473,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         if let Some(args) = args {
             self.push_not_generic(expr, builtin.name());
             self.infer_const_args_free(args);
-            return builtin_type(builtin);
+            return builtin_type(builtin, self.file);
         }
         if matches!(builtin, Builtin::Add | Builtin::Offset | Builtin::Copy) {
             self.result
@@ -7481,7 +7481,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 .push(InferenceDiagnostic::BuiltinNotFirstClass { expr, builtin });
             return Ty::Error;
         }
-        builtin_type(builtin)
+        builtin_type(builtin, self.file)
     }
 
     /// A direct call of a flavor-polymorphic builtin — the checker special
@@ -9083,10 +9083,19 @@ fn peel_blocks(body: &Body, mut expr: ExprId) -> ExprId {
     }
 }
 
-fn builtin_type(builtin: Builtin) -> Ty {
+fn builtin_type(builtin: Builtin, file: SourceFile) -> Ty {
     match builtin {
         Builtin::Print => Ty::fn_type(vec![Ty::Str], Ty::Unit),
         Builtin::Panic => Ty::fn_type(vec![Ty::Str], Ty::Never),
+        // `read_line()` — monomorphic and nullary, like `print`/`panic`,
+        // but its return type needs `file` to name the per-file
+        // `ReadLineResult` declaration (the same trick `alloc_array`'s
+        // scheme uses for `AllocResult`, except this builtin has no
+        // generic binder of its own to route through `builtin_scheme`).
+        Builtin::ReadLine => Ty::fn_type(
+            Vec::new(),
+            Ty::Named(NamedTy::plain(crate::read_line_result_loc(file))),
+        ),
         // The generic builtins have no ONE type — every mention
         // instantiates [`builtin_scheme`] instead (see the `NameRef` and
         // `GenericApp` arms); the flavor-polymorphic pair has no fn type
@@ -9117,7 +9126,12 @@ fn builtin_generics(builtin: Builtin) -> Option<Vec<GenericParamData>> {
                 outlives: Vec::new(),
             }])
         }
-        Builtin::Print | Builtin::Panic | Builtin::Add | Builtin::Offset | Builtin::Copy => None,
+        Builtin::Print
+        | Builtin::Panic
+        | Builtin::Add
+        | Builtin::Offset
+        | Builtin::Copy
+        | Builtin::ReadLine => None,
     }
 }
 
@@ -9154,7 +9168,12 @@ fn builtin_scheme(builtin: Builtin, file: SourceFile) -> (ItemLoc, Ty) {
             Ty::Unit,
         ),
         Builtin::Dangling => Ty::fn_type(Vec::new(), Ty::raw_ptr(true, t)),
-        Builtin::Print | Builtin::Panic | Builtin::Add | Builtin::Offset | Builtin::Copy => {
+        Builtin::Print
+        | Builtin::Panic
+        | Builtin::Add
+        | Builtin::Offset
+        | Builtin::Copy
+        | Builtin::ReadLine => {
             unreachable!("not a scheme-shaped builtin")
         }
     };

@@ -121,8 +121,8 @@ static f = fn {
 ```
 
 Const evaluation has no side effects, with one exception: `panic`. Calling
-`print` in a const context is an error; calling `panic` is allowed —
-failing loudly at compile time is the point of putting code there.
+`print` or `read_line` in a const context is an error; calling `panic` is
+allowed — failing loudly at compile time is the point of putting code there.
 
 == Mutability
 
@@ -1333,6 +1333,61 @@ N: usize` may be the length of a `[usize; N]` parameter, and a generic type
 may carry a `[usize; N]` field (`Buf::<2>` above). Not yet: a length
 accessor, and matching on arrays.
 
+== Reading standard input
+
+`read_line()` is `print`'s twin — the stdin hook, a platform effect exactly
+like `print` is (see "Running compiled modules" below for what that means
+for a compiled module). It takes no arguments and returns the
+compiler-provided `ReadLineResult` enum, `Line(str) | End`, minted per file
+the same way `alloc_array`'s `AllocResult` is: an ordinary nominal enum,
+nameable, matchable, and SHADOWABLE — in a file that declares its own
+`ReadLineResult` the name resolves to yours, the same rule `print`'s name
+follows (`read_line()` still returns the compiler's enum, matched with the
+`::Line` / `::End` variant shorthands).
+
+One call reads one line. There is no Iterator yet, so draining stdin is a
+`loop`/`match` idiom — this one echoes its input back, a line at a time:
+
+```must
+static main = fn {
+    loop {
+        match read_line() {
+            ::Line(s) => {
+                print(s);
+                print("\n");
+            },
+            ::End => break,
+        };
+    };
+};
+```
+
+The trailing newline is STRIPPED — a CRLF terminator drops both bytes, so
+input piped from either line-ending convention reads identically. A blank
+line is real input, `Line("")`, never confused with `End`; `End` means
+genuine end-of-input (the stream closed), not merely nothing available this
+instant. A read that fails — on input that is not valid UTF-8, say — crashes
+the program rather than returning: `ReadLineResult` has no error arm.
+`read_line` is refused in a const context with `print`'s exact
+message shape (const evaluation cannot have side effects) — see
+`examples/errors.must`.
+
+`must-lsp run` wires real, locked, line-buffered stdin through to a running
+program, so the ordinary pipe invocation works:
+
+```
+printf 'a\nb\nc\n' | must-lsp run examples/stdin.must
+```
+
+A prompt written with no trailing newline still reaches the terminal before
+the program waits: `read_line` flushes the output buffer before it reads.
+
+Two contexts have no real stdin to offer and say so honestly rather than
+inventing one: the debug adapter (a debugged program's `read_line` always
+reads `End` — there is no DAP console-input round trip to source a line
+from) and the editor's ▶ run lens (its result is a toast message, not a
+terminal). Neither hangs waiting for input that can never arrive.
+
 == Running compiled modules
 
 A compiled module expects exactly one import, `must.print(ptr, len)`, and
@@ -1356,7 +1411,8 @@ there is nothing for either tool to run for those two examples. A safe
 borrow is refused by name too, and deliberately not folded into the
 raw-pointer refusal: a borrow lowers to the same machine word, so this
 backend could emit something that runs while silently dropping the
-exclusivity contract.
+exclusivity contract. `read_line` has no wasm import yet either, so
+`examples/stdin.must` refuses by name.
 
 Monomorphization has refusals of its own. A program whose instantiations
 never bottom out — polymorphic recursion, where every call needs an

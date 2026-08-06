@@ -64,10 +64,22 @@
   no grammar.
 - **P03** `print` emits exactly what it is given: `str` only, no newline, no formatting, no
   interpolation. The CLI runner writes to `stdout.lock()` — Rust's own line buffering, no
-  per-call flush — and flushes it explicitly only before a crash report, so a program's
-  output still precedes the report it led to; the DAP console forwards each write to the
-  client as its own event, since waiting for a newline that may never come would withhold
-  output indefinitely.
+  per-call flush — and flushes it explicitly before a crash report and before a blocking
+  stdin read, so a program's output precedes both the report it led to and the prompt it is
+  waiting on; the DAP console forwards each write to the client as its own event, since
+  waiting for a newline that may never come would withhold output indefinitely.
+- **P04** `read_line()` is a layer-1 platform hook (P01), `print`'s input twin: a nullary
+  builtin returning the compiler-provided per-file enum `ReadLineResult = enum { Line(str),
+  End }`, minted the way `AllocResult` is, so it is an ordinary nominal enum and a file's own
+  declaration of the name shadows it. One call is one line with its terminator stripped
+  (`\n`, and a preceding `\r`, so CRLF input reads as LF input); a blank line is `Line("")`;
+  a final unterminated line is still a `Line`; `End` is genuine end of input, never "nothing
+  available yet". A failed read — input that is not UTF-8 included — crashes the program
+  instead; the enum carries no error arm. That line rule is the machine's own, applied to
+  whatever bytes a host hands back, so every host obeys it rather than restating it. Refused
+  in const contexts by the same judgment as `print`. A host with no stdin hands out `End`
+  rather than blocking or inventing input — the debug adapter and the editor's run lens both
+  do. The wasm backend refuses it by name (P06).
 - **P10** Semantic tokens are served full-file from the server and bound to the parser: one
   keyword table generates the set, the highlighter enumerates no kinds, and a drift guard
   walks the whole syntax-kind enum. The legend grows by appending, so existing indices never
@@ -115,6 +127,9 @@
   step deep (hierarchy and perf unresolved), and importable enums, moot
   until modules exist. Streaming is unavailable; the protocol's only
   mechanism is marking a list incomplete so the client re-queries. **P12**
+- **A host-import surface lands** — whether line delimiting, CRLF stripping and telling a
+  blank line from end of input belong in the compiler at all, or in Must code over a
+  byte-moving import with `read_line` kept as the convenience. **P04**
 - **Two open debug-adapter bugs**, not decisions: with loops and unfueled run mode an infinite
   loop hangs the session with no interrupt path; and breakpoint arrivals are deduped by
   frame/line/column, so a breakpoint in a loop body fires once per frame. **P11**

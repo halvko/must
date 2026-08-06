@@ -129,6 +129,36 @@ fn launch_session_runs_the_program() {
 }
 
 #[test]
+fn a_debugged_programs_read_line_sees_end_of_input() {
+    // A debug session speaks DAP over its own transport, not a terminal:
+    // there is no stdin to hand the program, so `read_line` reports `End`
+    // on the first call instead of blocking on input that can never
+    // arrive (P04). The program runs to a clean exit.
+    let program = fixture(
+        "stdin",
+        r#"static main = fn { match read_line() { ::Line(s) => print(s), ::End => print("end\n") }; };"#,
+    );
+    let messages = run_session(&[
+        ("initialize", json!({ "adapterID": "must" })),
+        (
+            "launch",
+            json!({ "program": program.to_str().unwrap(), "entry": "main()" }),
+        ),
+        ("configurationDone", json!({})),
+        ("disconnect", json!({})),
+    ]);
+
+    let output = events(&messages, "output");
+    assert!(
+        output.iter().any(|e| e["body"]["output"] == "end\n"),
+        "read_line reports end-of-input: {output:?}"
+    );
+    assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
 fn deferred_errors_stop_at_the_crash_site_then_terminate_on_resume() {
     let program = fixture(
         "broken",

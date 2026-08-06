@@ -880,7 +880,10 @@ fn run_command(
     // The *buffer* runs, not the file on disk — what you see is what runs.
     let text = snapshot.analysis.file_text(file);
     let mut output = Vec::new();
-    let result = crate::runner::evaluate(text, uri, entry, &mut output);
+    // The ▶ run lens has no terminal underneath it — its result lands in a
+    // showMessage toast — so there is no stdin to hand it and `read_line`
+    // reads immediate end-of-input rather than blocking on nothing.
+    let result = crate::runner::evaluate(text, uri, entry, &mut output, std::io::empty());
     let mut message = format!(
         "{entry}
 "

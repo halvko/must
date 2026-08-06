@@ -1,0 +1,36 @@
+// Reading standard input — the stdin hook, `print`'s twin.
+// `read_line()` is nullary and returns the compiler-provided
+// `ReadLineResult` enum, `Line(str) | End`: one call, one line, trailing
+// newline STRIPPED. `End` means genuine end-of-input; a blank line reads
+// as `Line("")`, never `End`. There is no Iterator yet, so the loop below
+// — matching on `read_line()` until `::End` — is the whole idiom for
+// draining stdin.
+//
+// Run: printf 'a\nb\nc\n' | must-lsp run examples/stdin.must
+//
+// An Advent-of-Code-shaped demo: read every line until end-of-input, count
+// them, and compare the count against a literal — the shape a puzzle
+// solution takes before it does anything with the lines themselves.
+
+static expected: usize = 3;
+
+static count_lines = fn () -> usize {
+    let mut n = 0;
+    loop {
+        match read_line() {
+            ::Line(s) => { n = n + 1; },
+            ::End => break n,
+        }
+    }
+};
+
+static main = fn {
+    let n = count_lines();
+    if n == expected {
+        print("read exactly the expected line count\n");
+    } else if n < expected {
+        print("read fewer lines than expected\n");
+    } else {
+        print("read more lines than expected\n");
+    };
+};

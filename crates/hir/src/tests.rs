@@ -1657,6 +1657,20 @@ fn print_in_a_const_block_is_rejected() {
 }
 
 #[test]
+fn read_line_in_a_const_block_is_rejected() {
+    // `print`'s input twin gets `print`'s exact treatment: a
+    // side-effecting builtin, refused in a const context with the same
+    // message shape (the builtin's own name is the only thing that
+    // varies).
+    check_diagnostics(
+        r#"static x = const { read_line() };"#,
+        expect![[r#"
+            19..28: cannot call `read_line` in a const context; const evaluation cannot have side effects (this `const` block is a const context at 11..16)
+        "#]],
+    );
+}
+
+#[test]
 fn const_block_in_a_plain_fn_body_reenters_the_const_context() {
     // Rule 2 exits the const context at the fn body, but `const { ... }`
     // re-enters it — the violation inside is flagged.
@@ -6757,6 +6771,71 @@ static f = fn () -> AllocResult {
             81..112 'AllocResult(struc...': AllocResult
             93..111 'struct { tag = 1 }': struct { tag: usize }
             108..109 '1': usize
+        "#]],
+    );
+}
+
+#[test]
+fn read_line_result_can_be_matched_in_the_documented_idiom() {
+    // The exact idiom `read_line`'s doc comment shows: `loop { match
+    // read_line() { ::Line(s) => ..., ::End => break ... } }` typechecks
+    // clean with no annotation anywhere — `ReadLineResult` is an ordinary
+    // nominal enum resolved the same way `AllocResult` is.
+    check_diagnostics(
+        r#"
+static count_lines = fn () -> usize {
+    let mut n = 0;
+    loop {
+        match read_line() {
+            ::Line(s) => { n = n + 1; },
+            ::End => break n,
+        }
+    }
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn read_line_is_a_nullary_first_class_function() {
+    // Bare mention (no call): `read_line`'s type names the per-file
+    // `ReadLineResult` decl, exactly like `print`'s bare mention names its
+    // fixed `fn(str) -> ()`.
+    check_infer(
+        r#"
+static f = fn () {
+    let g = read_line;
+};
+"#,
+        expect![[r#"
+            12..44 'fn () {     let g...': fn()
+            18..44 '{     let g = rea...': ()
+            28..29 'g': fn() -> ReadLineResult
+            32..41 'read_line': fn() -> ReadLineResult
+        "#]],
+    );
+}
+
+#[test]
+fn user_declarations_shadow_the_builtin_read_line_result() {
+    // The `AllocResult`/`print` precedent, applied to `read_line`'s result
+    // type: a file declaring its own `ReadLineResult` sees its own
+    // everywhere.
+    check_infer(
+        r#"
+type ReadLineResult = struct { tag: usize };
+static f = fn () -> ReadLineResult {
+    ReadLineResult(struct { tag = 1 })
+};
+"#,
+        expect![[r#"
+            57..123 'fn () -> ReadLine...': fn() -> ReadLineResult
+            81..123 '{     ReadLineRes...': ReadLineResult
+            87..101 'ReadLineResult': fn(struct { tag: usize }) -> ReadLineResult
+            87..121 'ReadLineResult(st...': ReadLineResult
+            102..120 'struct { tag = 1 }': struct { tag: usize }
+            117..118 '1': usize
         "#]],
     );
 }

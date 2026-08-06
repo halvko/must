@@ -551,7 +551,8 @@ impl<'db> Mono<'db> {
                     | Builtin::Add
                     | Builtin::Offset
                     | Builtin::Copy
-                    | Builtin::Dangling => {}
+                    | Builtin::Dangling
+                    | Builtin::ReadLine => {}
                 }
                 return CallTarget::Refused(Refusal::new(
                     format!("the `{}` builtin", builtin.name()),

@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 28 errors and 1 warning.
+// exactly: found 29 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -298,3 +298,11 @@ static owned_receiver = fn () -> () {
 //     quick fix offered: "Insert `::`"
 type Boxed = struct::<T> { value: T };
 static bare_angle_generics = fn (b: Boxed<usize>) -> usize { b.value };
+
+// 30. Const-context violation, `read_line`'s turn: every item initializer
+//     is a const context, and `read_line` is a side-effecting builtin
+//     (the stdin hook, `print`'s input twin) — const evaluation cannot
+//     have side effects, so calling it here is rejected the same way
+//     `print` would be (see `examples/stdin.must`).
+//     error: cannot call `read_line` in a const context; const evaluation cannot have side effects
+static read_line_in_const = read_line();

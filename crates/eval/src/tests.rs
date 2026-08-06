@@ -28,8 +28,23 @@ fn check_const(text: &str, expect: Expect) {
 
 /// Appends `static entrypoint = (<entry>);` to the fixture and runs it with
 /// run-mode semantics (`print` is legal at the entry, statics still force as
-/// consts). Renders captured output, then the result.
+/// consts). Renders captured output, then the result. No stdin: a
+/// `read_line` call sees immediate end-of-input — see
+/// [`check_run_with_input`] for the injectable-input twin.
 fn check_run(text: &str, entry: &str, expect: Expect) {
+    check_run_impl(text, entry, std::io::empty(), expect);
+}
+
+/// [`check_run`], but `input` is fed to `read_line` as though it were
+/// piped stdin — the mirror of how `check_run` captures `print` output:
+/// this is the injection side. `input` is consumed line-by-line in the
+/// order written; a final line with no trailing `\n` still reads (as the
+/// last `Line`, then `End` on the call after).
+fn check_run_with_input(text: &str, entry: &str, input: &str, expect: Expect) {
+    check_run_impl(text, entry, std::io::Cursor::new(input.to_owned()), expect);
+}
+
+fn check_run_impl(text: &str, entry: &str, input: impl std::io::BufRead, expect: Expect) {
     let db = RootDatabase::default();
     let full = format!("{text}\nstatic entrypoint = ({entry});\n");
     let file = SourceFile::new(&db, "test.must".to_owned(), full);
@@ -37,7 +52,13 @@ fn check_run(text: &str, entry: &str, expect: Expect) {
         .iter()
         .find(|&&it| it.name(&db) == "entrypoint")
         .expect("entrypoint item exists");
-    let mut machine = Machine::new(&db, RunMode { out: Vec::new() });
+    let mut machine = Machine::new(
+        &db,
+        RunMode {
+            out: Vec::new(),
+            input,
+        },
+    );
     let result = machine.eval_root(&hir::item_loc(&db, entry_item));
     let printed = String::from_utf8(machine.mode.out).unwrap();
     // Printed output is shown *escaped*, as one `output:` line. `print`
@@ -289,6 +310,226 @@ fn every_escape_reaches_the_value() {
 }
 
 #[test]
+fn read_line_is_refused_at_compile_time() {
+    // `read_line`'s exact `print` treatment: the const-check trap fires
+    // with the editor's message; the machine's own dynamic refusal
+    // (`NotConst`) stays behind it as defense in depth.
+    check_const(
+        r#"static x = read_line();"#,
+        expect![[r#"
+            x = error[Trap]: cannot call `read_line` in a const context; const evaluation cannot have side effects
+        "#]],
+    );
+}
+
+#[test]
+fn read_line_reads_the_documented_idiom_to_end() {
+    // The exact loop `read_line`'s doc comment shows, run for real: two
+    // injected lines come back as `Line`, then genuine end-of-input hits
+    // `::End` and the loop breaks — no third `Line` invented, no hang.
+    check_run_with_input(
+        r#"
+static main = fn {
+    loop {
+        match read_line() {
+            ::Line(s) => { print(s); print("|"); },
+            ::End => break,
+        };
+    };
+};
+"#,
+        "main()",
+        "a\nb\n",
+        expect![[r#"
+            output: "a|b|"
+            => ()
+        "#]],
+    );
+}
+
+#[test]
+fn read_line_strips_the_trailing_newline_lf_and_crlf() {
+    // Both line-ending styles read identically — no stray `\r` leaks onto
+    // the end of a CRLF-terminated line.
+    check_run_with_input(
+        r#"
+static main = fn {
+    loop {
+        match read_line() {
+            ::Line(s) => { print(s); print("|"); },
+            ::End => break,
+        };
+    };
+};
+"#,
+        "main()",
+        "unix\nwindows\r\n",
+        expect![[r#"
+            output: "unix|windows|"
+            => ()
+        "#]],
+    );
+}
+
+#[test]
+fn read_line_blank_line_is_line_empty_not_end() {
+    // A blank line is real input — `Line("")` — never confused with
+    // end-of-input. The middle line here is empty; the count after the
+    // loop proves all three (including the blank one) were read as lines.
+    check_run_with_input(
+        r#"
+static main = fn () -> usize {
+    let mut n = 0;
+    loop {
+        match read_line() {
+            ::Line(s) => { n = n + 1; },
+            ::End => break n,
+        }
+    }
+};
+"#,
+        "main()",
+        "a\n\nb\n",
+        expect![[r#"
+            => 3
+        "#]],
+    );
+}
+
+#[test]
+fn read_line_reads_a_final_line_with_no_trailing_newline() {
+    // A stream that ends mid-line (no final `\n`, as a pipe closing
+    // mid-write would look) still yields that text as a `Line` — the
+    // BYTES read is what decides `Line` vs `End`, not the presence of a
+    // terminator.
+    check_run_with_input(
+        r#"
+static main = fn () -> usize {
+    let mut n = 0;
+    loop {
+        match read_line() {
+            ::Line(s) => { n = n + 1; },
+            ::End => break n,
+        }
+    }
+};
+"#,
+        "main()",
+        "a\nb",
+        expect![[r#"
+            => 2
+        "#]],
+    );
+}
+
+#[test]
+fn read_line_with_no_input_is_immediate_end() {
+    // `check_run` (no injected input) is `read_line`'s empty-stdin case:
+    // the very first call reports `End`.
+    check_run(
+        r#"
+static main = fn {
+    match read_line() {
+        ::Line(s) => print("unexpected line\n"),
+        ::End => print("end\n"),
+    };
+};
+"#,
+        "main()",
+        expect![[r#"
+            output: "end\n"
+            => ()
+        "#]],
+    );
+}
+
+#[test]
+fn read_line_crashes_on_input_it_cannot_decode() {
+    // `ReadLineResult` has no error arm (P04), so a failed read is a
+    // runtime crash — never an `End` (which would look like clean
+    // end-of-input) and never a lossily patched `Line`.
+    check_run_impl(
+        r#"
+static main = fn {
+    match read_line() {
+        ::Line(s) => print("line\n"),
+        ::End => print("end\n"),
+    };
+};
+"#,
+        "main()",
+        std::io::Cursor::new(b"\xff\xfe\n".to_vec()),
+        expect![[r#"
+            error[Runtime]: I/O error in `read_line`: stream did not contain valid UTF-8
+        "#]],
+    );
+}
+
+/// A `Write` that records writes and flushes in order — the only way to
+/// see *when* the output buffer was drained relative to a blocking read.
+#[derive(Default)]
+struct FlushLog(Vec<String>);
+
+impl std::io::Write for FlushLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .push(format!("write {:?}", String::from_utf8_lossy(buf)));
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.push("flush".to_owned());
+        Ok(())
+    }
+}
+
+#[test]
+fn an_unterminated_prompt_is_flushed_before_read_line_reads() {
+    // The CLI's `out` is line-buffered with no per-call flush (P03), so a
+    // prompt with no newline would still be sitting in the buffer while
+    // `read_line` blocked — the terminal would show nothing and the user
+    // would face a bare cursor. `RunMode::read_line` flushes first.
+    let db = RootDatabase::default();
+    let file = SourceFile::new(
+        &db,
+        "test.must".to_owned(),
+        r#"
+static main = fn {
+    print("name? ");
+    match read_line() {
+        ::Line(s) => print(s),
+        ::End => print("!"),
+    };
+};
+static entrypoint = (main());
+"#
+        .to_owned(),
+    );
+    let entry_item = *hir::file_item_ids(&db, file)
+        .iter()
+        .find(|&&it| it.name(&db) == "entrypoint")
+        .expect("entrypoint item exists");
+    let mut machine = Machine::new(
+        &db,
+        RunMode {
+            out: FlushLog::default(),
+            input: std::io::Cursor::new("ada\n".to_owned()),
+        },
+    );
+    machine
+        .eval_root(&hir::item_loc(&db, entry_item))
+        .expect("the program runs clean");
+    assert_eq!(
+        machine.mode.out.0,
+        vec![
+            "write \"name? \"".to_owned(),
+            "flush".to_owned(),
+            "write \"ada\"".to_owned(),
+        ]
+    );
+}
+
+#[test]
 fn escapes_are_cooked_in_const_contexts() {
     // A static initializer is a const context: the same one decoding runs,
     // so the frozen constant already holds the real bytes.
@@ -517,7 +758,7 @@ static entrypoint = (main(20));
         panic!("helper's body is a block with a tail");
     };
 
-    let mut machine = Machine::new(&db, RunMode { out: Vec::new() });
+    let mut machine = Machine::new(&db, RunMode::without_stdin(Vec::new()));
     machine.start(&hir::item_loc(&db, entry)).unwrap();
     assert_eq!(machine.frames().len(), 1);
 
@@ -623,7 +864,7 @@ static entrypoint = (main());
         panic!("the second statement is the panic");
     };
 
-    let mut machine = Machine::new(&db, RunMode { out: Vec::new() });
+    let mut machine = Machine::new(&db, RunMode::without_stdin(Vec::new()));
     machine.start(&hir::item_loc(&db, entry)).unwrap();
     assert!(matches!(machine.step(), Ok(StepEvent::Progress))); // the entry's call
     assert!(matches!(machine.step(), Ok(StepEvent::Progress))); // print("before")
@@ -770,7 +1011,7 @@ static entrypoint = (f() + f());
         .iter()
         .find(|&&it| it.name(&db) == "entrypoint")
         .expect("entrypoint item exists");
-    let mut machine = Machine::new(&db, RunMode { out: Vec::new() });
+    let mut machine = Machine::new(&db, RunMode::without_stdin(Vec::new()));
     let result = machine.eval_root(&hir::item_loc(&db, entry_item));
     assert_eq!(result, Ok(crate::Value::Int(hir::IntValue::Usize(10))));
     assert_eq!(machine.const_block_evaluations(), 1);
@@ -1984,7 +2225,7 @@ fn generic_frame_shows_const_params_as_named_locals() {
         .iter()
         .find(|&&it| it.name(&db) == "entry")
         .expect("entry item");
-    let mut machine = Machine::new(&db, RunMode { out: Vec::new() });
+    let mut machine = Machine::new(&db, RunMode::without_stdin(Vec::new()));
     machine
         .start(&hir::item_loc(&db, entry))
         .expect("entry starts");
@@ -2256,7 +2497,7 @@ static entrypoint = (main());
             .iter()
             .find(|&&it| it.name(&db) == "entrypoint")
             .expect("entrypoint item exists");
-        let mut machine = Machine::new(&db, RunMode { out: Vec::new() });
+        let mut machine = Machine::new(&db, RunMode::without_stdin(Vec::new()));
         match machine.eval_root(&hir::item_loc(&db, entry_item)) {
             Ok(value) => format!("=> {}", value.display()),
             Err(err) => format!("error[{:?}]: {}", err.kind, err.message),
@@ -2550,7 +2791,7 @@ static entrypoint = (main());
             .iter()
             .find(|&&it| it.name(&db) == "entrypoint")
             .expect("entrypoint item exists");
-        let mut machine = Machine::new(&db, RunMode { out: Vec::new() });
+        let mut machine = Machine::new(&db, RunMode::without_stdin(Vec::new()));
         match machine.eval_root(&hir::item_loc(&db, entry_item)) {
             Ok(value) => format!("=> {}", value.display()),
             Err(err) => format!("error[{:?}]: {}", err.kind, err.message),

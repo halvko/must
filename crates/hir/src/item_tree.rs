@@ -616,23 +616,13 @@ pub enum TypeDeclData {
 
 #[salsa::tracked(returns(ref))]
 pub fn type_decl<'db>(db: &'db dyn Db, item: crate::ItemId<'db>) -> Option<TypeDeclData> {
-    // The compiler-provided `AllocResult::<T> = enum { Ok(T.&raw mut),
-    // Err }` (see `scopes::alloc_result_loc`): declared here, as syntax-
-    // shaped data, so everything downstream (`enum_variants`, patterns,
-    // widening, match lowering) runs the completely ordinary nominal-enum
-    // machinery on it.
-    if crate::is_alloc_result_decl(db, item) {
+    // A compiler-provided declaration (`scopes::synthetic_decls`): its
+    // variants are syntax-shaped data, so everything downstream
+    // (`enum_variants`, patterns, widening, match lowering) runs the
+    // completely ordinary nominal-enum machinery on it.
+    if let Some(decl) = crate::synthetic_decl(db, item) {
         return Some(TypeDeclData::Enum {
-            variants: vec![
-                (
-                    "Ok".to_owned(),
-                    vec![TypeRef::RawPtr {
-                        mutable: true,
-                        inner: Box::new(TypeRef::Path("T".to_owned())),
-                    }],
-                ),
-                ("Err".to_owned(), Vec::new()),
-            ],
+            variants: decl.variants.clone(),
         });
     }
     let ast::Item::TypeItem(decl) = item_source(db, item)? else {

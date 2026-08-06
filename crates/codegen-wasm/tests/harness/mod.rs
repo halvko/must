@@ -103,7 +103,9 @@ pub fn on_stack<T: Send>(stack: usize, f: impl FnOnce() -> T + Send) -> T {
 /// Run under the interpreter — the specification side.
 pub fn interpret(db: &RootDatabase, entry: &hir::ItemLoc) -> Run {
     let mut out = Vec::new();
-    let result = Machine::new(db, RunMode { out: &mut out }).eval_root(entry);
+    // Nothing supported here calls `read_line`: the wasm backend refuses it
+    // by name, so no differentially compared program reaches that codepath.
+    let result = Machine::new(db, RunMode::without_stdin(&mut out)).eval_root(entry);
     let stdout = String::from_utf8(out).expect("print output is UTF-8");
     let outcome = match result {
         Ok(Value::Unit) => Outcome::Value(None),
@@ -473,7 +475,7 @@ fn generic_enum(db: &RootDatabase, value: &Value) -> bool {
 /// tells the decoder how to read the result slots back).
 fn reference_value(db: &RootDatabase, entry: &hir::ItemLoc) -> Value {
     let mut sink = Vec::new();
-    Machine::new(db, RunMode { out: &mut sink })
+    Machine::new(db, RunMode::without_stdin(&mut sink))
         .eval_root(entry)
         .unwrap_or(Value::Unit)
 }

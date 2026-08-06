@@ -960,8 +960,13 @@ fn builtin_type_items(edit_range: TextRange) -> Vec<CompletionItem> {
 /// flavor-polymorphic ones have no ONE `hir::Ty`; their detail strings
 /// spell the scheme by hand and a same-arity placeholder fn type drives
 /// the call snippet (its `{error}` params never render — only the arity is
-/// consumed).
-fn builtin_fn_items(edit_range: TextRange, expected: Option<&hir::Ty>) -> Vec<CompletionItem> {
+/// consumed). `file` is needed for `read_line`'s real return type, which
+/// (like `alloc_array`'s `AllocResult`) names a per-file synthetic decl.
+fn builtin_fn_items(
+    file: SourceFile,
+    edit_range: TextRange,
+    expected: Option<&hir::Ty>,
+) -> Vec<CompletionItem> {
     let placeholder_fn = |arity: usize| {
         hir::Ty::fn_type(
             std::iter::repeat_n(hir::Ty::Error, arity).collect(),
@@ -977,6 +982,14 @@ fn builtin_fn_items(edit_range: TextRange, expected: Option<&hir::Ty>) -> Vec<Co
         (
             "panic",
             hir::Ty::fn_type(vec![hir::Ty::Str], hir::Ty::Never),
+            None,
+        ),
+        (
+            "read_line",
+            hir::Ty::fn_type(
+                Vec::new(),
+                hir::Ty::Named(hir::NamedTy::plain(hir::read_line_result_loc(file))),
+            ),
             None,
         ),
         (
@@ -1154,7 +1167,7 @@ fn expression_position_items(
     scrutinee_slot: bool,
 ) -> Vec<CompletionItem> {
     let mut items = file_value_and_type_items(db, file, edit_range, expected, scrutinee_slot);
-    items.extend(builtin_fn_items(edit_range, expected));
+    items.extend(builtin_fn_items(file, edit_range, expected));
     let mut words: Vec<&str> = vec![
         "if", "match", "loop", "fn", "true", "false", "struct", "const", "unsafe",
     ];

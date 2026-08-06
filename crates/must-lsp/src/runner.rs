@@ -27,7 +27,10 @@ pub fn run(path: &str, expr: &str) -> i32 {
         }
     };
     let stdout = std::io::stdout();
-    match evaluate(text, path, expr, stdout.lock()) {
+    // Real, locked, line-buffered stdin — `read_line`'s source in `run`
+    // mode (the CLI's `must-lsp run program.must < input.txt` contract).
+    let stdin = std::io::stdin();
+    match evaluate(text, path, expr, stdout.lock(), stdin.lock()) {
         Ok(Some(value)) => {
             println!("{value}");
             0
@@ -190,14 +193,16 @@ pub fn source_position(
     Some((wide.line + 1, wide.col + 1))
 }
 
-/// Evaluate `expr` in `text`'s file scope, writing `print` output to `out`.
-/// `Ok(Some(_))` is a non-unit result rendered for display; errors come back
-/// rendered with a `path:line:col` location when one is known.
+/// Evaluate `expr` in `text`'s file scope, writing `print` output to `out`
+/// and feeding `read_line` from `input`. `Ok(Some(_))` is a non-unit result
+/// rendered for display; errors come back rendered with a `path:line:col`
+/// location when one is known.
 pub fn evaluate(
     text: String,
     path: &str,
     expr: &str,
     out: impl Write,
+    input: impl std::io::BufRead,
 ) -> Result<Option<String>, String> {
     let db = RootDatabase::default();
     let Prepared {
@@ -206,7 +211,7 @@ pub fn evaluate(
         original_len,
     } = prepare(&db, &text, path, expr)?;
 
-    let mut machine = Machine::new(&db, RunMode { out });
+    let mut machine = Machine::new(&db, RunMode { out, input });
     match machine.eval_root(&entry) {
         Ok(Value::Unit) => Ok(None),
         Ok(value) => Ok(Some(value.display())),
@@ -266,10 +271,24 @@ fn locate(
 #[cfg(test)]
 mod tests {
     /// Runs `expr` against `text`, rendering print output, then the result
-    /// or the error.
+    /// or the error. No stdin: a `read_line` call sees immediate
+    /// end-of-input — see [`check_with_input`] for the injectable-input
+    /// twin.
     fn check(text: &str, expr: &str, expect: expect_test::Expect) {
+        check_with_input(text, expr, "", expect);
+    }
+
+    /// [`check`], but `input` is fed to `read_line` as though it were piped
+    /// stdin.
+    fn check_with_input(text: &str, expr: &str, input: &str, expect: expect_test::Expect) {
         let mut out = Vec::new();
-        let result = super::evaluate(text.to_owned(), "test.must", expr, &mut out);
+        let result = super::evaluate(
+            text.to_owned(),
+            "test.must",
+            expr,
+            &mut out,
+            std::io::Cursor::new(input.to_owned()),
+        );
         let mut rendered = String::from_utf8(out).unwrap();
         match result {
             Ok(Some(value)) => rendered.push_str(&format!("=> {value}\n")),
@@ -292,6 +311,29 @@ static main = fn {
             expect_test::expect![[r#"
                 hello world
             "#]],
+        );
+    }
+
+    #[test]
+    fn read_line_drains_injected_input_and_reports_end() {
+        // Two lines with a trailing `\n` on the second: the loop reads
+        // both as `Line`, then hits genuine end-of-input on the third
+        // call — the documented idiom, run through the `evaluate` entry
+        // point the CLI actually calls.
+        check_with_input(
+            r#"
+static main = fn {
+    loop {
+        match read_line() {
+            ::Line(s) => { print(s); print("|"); },
+            ::End => break,
+        };
+    };
+};
+"#,
+            "main()",
+            "a\nb\n",
+            expect_test::expect!["a|b|"],
         );
     }
 
