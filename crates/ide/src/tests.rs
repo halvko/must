@@ -2971,7 +2971,12 @@ fn completions_match_template_not_offered_once_an_arm_list_exists() {
     // The evidence lives in the REAL tree: splicing the marker in detaches
     // the written arm list from its `match`, so the speculative tree would
     // claim there is none. A template offered here would duplicate arms the
-    // user already wrote.
+    // user already wrote. Two shapes: no `{` yet (the arm list still parses
+    // as a sibling block once spliced), and `{` already there with a real
+    // arm inside it — `match_awaiting_arms`'s `arms().next().is_some()`
+    // check is what catches the second one; an empty `{}` is the ONLY
+    // braced case the template still fires for (see
+    // `completions_match_template_offered_inside_empty_braces` below).
     check_no_completion(
         r#"
 type Shape = enum { Circle(usize), Point };
@@ -2982,7 +2987,80 @@ static f = fn (s: Shape) { match s $0{ ::Point => 1 } };
     check_no_completion(
         r#"
 type Shape = enum { Circle(usize), Point };
-static f = fn (s: Shape) { match s {$0} };
+static f = fn (s: Shape) { match s { ::Point => 1, $0 } };
+"#,
+        "match arms",
+    );
+}
+
+#[test]
+fn completions_match_template_offered_inside_empty_braces() {
+    // `match s {|}` — an editor that auto-closes `{` (Zed does, instantly)
+    // hands the server exactly this the moment `{` is typed, now that `{`
+    // is a trigger character. The template must fire here too, but without
+    // writing braces of its own: the pair already in the tree is the
+    // client's auto-close, and the server has no way to tell it to delete a
+    // second one. Compare the no-braces snippet
+    // (`completions_match_template_writes_every_variant_as_an_arm`): same
+    // arm text, minus the `{` and the `}`.
+    assert_eq!(
+        completion_insert(
+            r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) {
+    match s {$0}
+};
+"#,
+            "match arms",
+        ),
+        crate::InsertText::Snippet {
+            snippet: "\n        ::Circle($1) => $2,\n        ::Point => $3,\n    ".to_owned(),
+            plain: "\n        ::Circle => ,\n        ::Point => ,\n    ".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn completions_match_template_offered_inside_empty_braces_across_whitespace() {
+    // The same slot, spread over its own lines — the whitespace/newline
+    // variant of `match s {|}`. Detection is pure range arithmetic
+    // (`l_brace.end() <= edit_range.start()` and
+    // `edit_range.end() <= r_brace.start()`), so it doesn't care that real
+    // whitespace now sits between the cursor and each brace; only
+    // the exact tight-braces case above pins the snippet text byte for
+    // byte, since here the pre-existing blank line's own indentation stays
+    // in the buffer alongside whatever the template inserts.
+    check_has_completion(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) {
+    match s {
+        $0
+    }
+};
+"#,
+        "match arms",
+    );
+}
+
+#[test]
+fn completions_match_template_not_offered_when_the_brace_belongs_to_the_enclosing_block() {
+    // `match s {` left unclosed, with no `}` of its own anywhere before the
+    // enclosing block's — the parser's error recovery
+    // (`grammar.rs`'s `expect_after_prev(R_BRACE)`) assigns that borrowed
+    // `}` to the match rather than reporting one missing, so
+    // `match_expr.r_brace_token()` returns non-`None` here too. Accepting
+    // the template in this shape would leave the match still unclosed and
+    // delete the enclosing block's only closing brace. `match_awaiting_arms`
+    // tells the two apart by indentation: the borrowed `}` sits at the
+    // enclosing block's shallower indent (0, here) rather than at or past
+    // the `match` keyword's own line indent (4).
+    check_no_completion(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) {
+    match s {$0
+};
 "#,
         "match arms",
     );
@@ -3190,6 +3268,55 @@ static f = fn (param: Shape) {
 "#;
     assert_eq!(completion_sort_text(fixture_text, "near"), "2_10_near");
     assert_eq!(completion_sort_text(fixture_text, "param"), "2_10_param");
+}
+
+#[test]
+fn completions_record_literal_brace_still_offers_fields_not_a_template() {
+    // `{` is now a trigger character (`must_lsp::server_capabilities`), so
+    // a record literal's own auto-closed braces fire a completion request
+    // too. Nothing here is a `match`, so `match_awaiting_arms` finds no
+    // enclosing `MatchExpr` and declines — the position keeps answering
+    // exactly what it always has (the missing-field candidates).
+    let fixture_text = r#"
+type Point = struct { x: usize, y: usize };
+static f = fn {
+    let p = Point(struct {$0});
+};
+"#;
+    check_no_completion(fixture_text, "match arms");
+    check_has_completion(fixture_text, "x");
+    check_has_completion(fixture_text, "y");
+}
+
+#[test]
+fn completions_block_brace_still_offers_statement_candidates_not_a_template() {
+    // A plain block's braces, no `match` anywhere around it: the ordinary
+    // statement-start candidates (a visible `let` among them) show up, not
+    // a match template.
+    let fixture_text = r#"
+static f = fn {
+    if true {$0}
+};
+"#;
+    check_no_completion(fixture_text, "match arms");
+    check_has_completion(fixture_text, "let");
+}
+
+#[test]
+fn completions_match_template_not_offered_at_other_non_match_brace_positions() {
+    // The remaining `{` positions the template slot could in principle be
+    // confused with — a `const { … }` block and a `with { … }` chain body —
+    // decline the template for the same reason as the record-literal/block
+    // cases above: no `MatchExpr` ancestor for `match_awaiting_arms` to find.
+    // Only a sanity check that each answers rather than panicking or
+    // hanging; the two cases above already pin the "normal candidates
+    // still show up" half of the behavior.
+    for fixture_text in [
+        "static f = fn { let x = const {$0}; };",
+        "type Counter = struct { n: usize } with {$0};",
+    ] {
+        check_no_completion(fixture_text, "match arms");
+    }
 }
 
 // ---- generics: ide smoke + real evaluation ----

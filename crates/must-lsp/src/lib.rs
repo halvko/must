@@ -56,11 +56,12 @@ pub fn server_capabilities() -> lsp_types::ServerCapabilities {
         code_lens_provider: Some(lsp_types::CodeLensOptions {
             resolve_provider: Some(false),
         }),
-        // Trigger chars registered for `.`/`::` — member and variant
-        // candidates classify those contexts and answer directly.
+        // Trigger chars registered for `.`/`::`/`{` — member/variant
+        // candidates classify the first two; `{` catches the auto-closed
+        // `match s {|}` empty-arm-list slot (`ArmListShape::EmptyBraces`).
         completion_provider: Some(lsp_types::CompletionOptions {
             resolve_provider: Some(false),
-            trigger_characters: Some(vec![".".to_owned(), ":".to_owned()]),
+            trigger_characters: Some(vec![".".to_owned(), ":".to_owned(), "{".to_owned()]),
             ..Default::default()
         }),
         execute_command_provider: Some(lsp_types::ExecuteCommandOptions {

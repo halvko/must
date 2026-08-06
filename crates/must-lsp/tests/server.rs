@@ -825,7 +825,7 @@ fn run_lens_executes_the_buffer() {
 }
 
 #[test]
-fn completion_capability_is_advertised_with_dot_and_colon_triggers() {
+fn completion_capability_is_advertised_with_dot_colon_and_brace_triggers() {
     let capabilities = must_lsp::server_capabilities();
     let completion = capabilities
         .completion_provider
@@ -833,7 +833,7 @@ fn completion_capability_is_advertised_with_dot_and_colon_triggers() {
     assert_eq!(completion.resolve_provider, Some(false));
     assert_eq!(
         completion.trigger_characters,
-        Some(vec![".".to_owned(), ":".to_owned()])
+        Some(vec![".".to_owned(), ":".to_owned(), "{".to_owned()])
     );
 }
 
@@ -1105,23 +1105,22 @@ fn snippet_incapable_client_receives_the_plain_fallback() {
     drop(client);
 }
 
-/// Fetches the `match arms` template at the arm-list slot of an arm-less
-/// `match` over a two-variant enum — the multi-line snippet both capability
-/// tests below check.
+/// Fetches the `match arms` template completion at `position` in `text` —
+/// the multi-line snippet the capability tests below check, at either
+/// shape of the arm-list slot (see `ide::completions::ArmListShape`).
 fn match_template_item(
     client: &mut TestClient,
     file: &lsp_types::Uri,
+    text: &str,
+    position: lsp_types::Position,
 ) -> lsp_types::CompletionItem {
-    client.open(
-        file,
-        "type Shape = enum { Circle(usize), Point };\nstatic f = fn (s: Shape) {\n    match s \n};\n",
-    );
+    client.open(file, text);
     client.next_diagnostics();
 
     let response = client.request::<lsp_types::request::Completion>(lsp_types::CompletionParams {
         text_document_position: lsp_types::TextDocumentPositionParams {
             text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
-            position: lsp_types::Position::new(2, 12),
+            position,
         },
         work_done_progress_params: Default::default(),
         partial_result_params: Default::default(),
@@ -1136,12 +1135,20 @@ fn match_template_item(
         .expect("the arm-list template is offered")
 }
 
+const MATCH_TEMPLATE_NO_BRACES_SOURCE: &str =
+    "type Shape = enum { Circle(usize), Point };\nstatic f = fn (s: Shape) {\n    match s \n};\n";
+
 #[test]
 fn snippet_capable_client_receives_the_match_arm_template() {
     let mut client = TestClient::start_with(init_with_snippet_support(true));
     let file = uri("file:///match_template_capable.must");
 
-    let template = match_template_item(&mut client, &file);
+    let template = match_template_item(
+        &mut client,
+        &file,
+        MATCH_TEMPLATE_NO_BRACES_SOURCE,
+        lsp_types::Position::new(2, 12),
+    );
     assert_eq!(
         template.kind,
         Some(lsp_types::CompletionItemKind::SNIPPET),
@@ -1172,7 +1179,12 @@ fn snippet_incapable_client_receives_the_match_template_fallback() {
     let mut client = TestClient::start_with(init_with_snippet_support(false));
     let file = uri("file:///match_template_incapable.must");
 
-    let template = match_template_item(&mut client, &file);
+    let template = match_template_item(
+        &mut client,
+        &file,
+        MATCH_TEMPLATE_NO_BRACES_SOURCE,
+        lsp_types::Position::new(2, 12),
+    );
     assert_eq!(template.insert_text_format, None);
     let edit = match template.text_edit.as_ref().expect("has a text edit") {
         lsp_types::CompletionTextEdit::Edit(edit) => edit,
@@ -1186,6 +1198,45 @@ fn snippet_incapable_client_receives_the_match_template_fallback() {
     assert_eq!(
         edit.new_text,
         "{\n        ::Circle => ,\n        ::Point => ,\n    }"
+    );
+
+    drop(client);
+}
+
+/// The other shape of the template slot, end to end: `match s {}` with the
+/// cursor already inside the pair an auto-closing editor supplied. `{` is
+/// now a registered trigger character (`server_capabilities`), so this is
+/// exactly the request a real editor fires the instant the user types `{`
+/// after the scrutinee.
+#[test]
+fn snippet_capable_client_receives_the_match_arm_template_inside_empty_braces() {
+    let mut client = TestClient::start_with(init_with_snippet_support(true));
+    let file = uri("file:///match_template_empty_braces.must");
+
+    // Line 2 is `    match s {}`; column 13 sits right between the `{` and
+    // the `}` an auto-closing client already inserted.
+    let template = match_template_item(
+        &mut client,
+        &file,
+        "type Shape = enum { Circle(usize), Point };\nstatic f = fn (s: Shape) {\n    match s {}\n};\n",
+        lsp_types::Position::new(2, 13),
+    );
+    assert_eq!(
+        template.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET)
+    );
+    let edit = match template.text_edit.as_ref().expect("has a text edit") {
+        lsp_types::CompletionTextEdit::Edit(edit) => edit,
+        other => panic!("expected a plain edit, got {other:?}"),
+    };
+    // No braces of its own: the pair already in the buffer belongs to the
+    // client's auto-close, and the server has no way to ask it to delete a
+    // second one — so the template writes arms only, opening on its own
+    // line same as the no-braces shape, and the existing `}` ends up at
+    // `indent` right after the last arm.
+    assert_eq!(
+        edit.new_text,
+        "\n        ::Circle($1) => $2,\n        ::Point => $3,\n    "
     );
 
     drop(client);

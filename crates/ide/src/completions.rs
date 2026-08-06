@@ -76,14 +76,16 @@
 //!
 //! Two positions no earlier round classified, both keyed off the scrutinee:
 //!
-//! - **The arm-list slot** — `match s ˽`, scrutinee written, no `{` yet.
-//!   Offers one gold snippet that writes the *rest* of the statement: every
-//!   variant as an arm, payload bindings and arm bodies as tab stops, house
-//!   formatting ([`match_template_items`]). Unlike every other context this
-//!   one is detected on the REAL tree, not the speculative one, and
-//!   [`match_awaiting_arms`] says why. It is strictly *additive*: the
-//!   ordinary expression candidates the position already produced stay
-//!   exactly where they were, the template just outranks them.
+//! - **The arm-list slot**, scrutinee written and no arm yet — two shapes:
+//!   `match s ˽` (no `{` typed) and an editor's auto-closed `match s {˽}`
+//!   (see [`ArmListShape`]). Offers one gold snippet that writes the *rest*
+//!   of the statement: every variant as an arm, payload bindings and arm
+//!   bodies as tab stops, house formatting ([`match_template_items`]).
+//!   Unlike every other context this one is detected on the REAL tree, not
+//!   the speculative one, and [`match_awaiting_arms`] says why. It is
+//!   strictly *additive*: the ordinary expression candidates the position
+//!   already produced stay exactly where they were, the template just
+//!   outranks them.
 //! - **The scrutinee slot** — `match ˽`, nothing written yet. The ordinary
 //!   expression candidate set, RE-RANKED so enum-typed (and variant-typed)
 //!   values lead it, nearest definition scope first — a `let` in this scope
@@ -555,7 +557,7 @@ pub(crate) fn completions(
     // splice detaches the marker from the arm-less `match`), and those
     // candidates keep both their place and their ranking. The template just
     // outranks them, being the one answer the grammar actually admits here.
-    if let Some(awaiting) = match_awaiting_arms(&real_root, edit_range) {
+    if let Some(awaiting) = match_awaiting_arms(&real_root, real_text, edit_range) {
         items.extend(match_template_items(
             db, file, &real_root, real_text, &awaiting, edit_range,
         ));
@@ -564,8 +566,30 @@ pub(crate) fn completions(
     items
 }
 
-/// A `match` whose scrutinee is written but whose arm list is not, with the
-/// cursor sitting exactly where the `{` belongs — the template slot.
+/// The two shapes the template slot can be found in — see
+/// [`match_awaiting_arms`]. The only thing this changes about the template
+/// itself is whether it writes its own braces ([`match_template`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArmListShape {
+    /// `match s ˽` — no `{` typed yet. Reached today only by an explicit
+    /// invoke (no trigger character fires mid-whitespace), so the template
+    /// writes the whole `{ ... }` itself.
+    NoBraces,
+    /// `match s {˽}` — an editor that auto-closes `{` (Zed does, instantly)
+    /// has already supplied both braces, and nothing sits between them yet
+    /// (checked by [`match_awaiting_arms`], which also tries to rule out a
+    /// `}` that parse-error recovery borrowed from an enclosing block — an
+    /// indentation heuristic, not an exact test; see that function's doc
+    /// for the cases it still misreads). The template must never emit a
+    /// closing brace of its own here: the one already in the tree belongs
+    /// to the client's auto-close, and the server has no way to tell the
+    /// client to delete a second one.
+    EmptyBraces,
+}
+
+/// A `match` whose scrutinee is written but whose arm list is not (or is
+/// empty), with the cursor sitting where an arm belongs — the template
+/// slot.
 struct MatchAwaitingArms {
     /// The scrutinee's range. It ends before the cursor, so (per the module
     /// doc) it back-maps to an `ExprId` through [`expr_for_range`].
@@ -574,6 +598,7 @@ struct MatchAwaitingArms {
     /// measured from the line this sits on, not from the cursor's line (a
     /// scrutinee may span lines).
     match_start: TextSize,
+    shape: ArmListShape,
 }
 
 /// Detect the template slot — **on the REAL tree**, which is the one
@@ -584,7 +609,10 @@ struct MatchAwaitingArms {
 /// expression parser stops at `MARKER`, closes the `MATCH_EXPR` without its
 /// braces, and leaves the real arm list re-parsed as an unrelated block —
 /// so the speculative tree reports "no arms yet" for a match that is fully
-/// written. The real tree is not spliced and answers correctly.
+/// written. The real tree is not spliced and answers correctly. The same
+/// splice hazard applies to `match s {˽}`: `MARKER` between the real braces
+/// parses as a bare binding pattern (`match_pattern`'s `IDENT` arm), giving
+/// the speculative tree one arm where the real tree has none.
 ///
 /// Requiring `edit_range.start()` to be past the scrutinee's end is what
 /// separates "the scrutinee is finished" from "the scrutinee is still being
@@ -598,7 +626,36 @@ struct MatchAwaitingArms {
 /// the splice-detaches-the-scrutinee failure mode already left outside the
 /// `MATCH_EXPR` once the parser gave up after the scrutinee. Starting
 /// before the prefix keeps the walk on ground the `MATCH_EXPR` still owns.
-fn match_awaiting_arms(real_root: &SyntaxNode, edit_range: TextRange) -> Option<MatchAwaitingArms> {
+///
+/// Walking back over whitespace/comments from `edit_range.start()` to the
+/// last real token, then up that token's ancestors for a `MatchExpr`, finds
+/// the same enclosing match regardless of which shape it is: with no `{`
+/// yet, that token is part of the scrutinee; with `{}` already there and
+/// nothing between them, it's the `{` itself (or, crossing a comment,
+/// possibly the closing `}` — the [`ArmListShape::EmptyBraces`] branch
+/// below bounds-checks against exactly that).
+///
+/// One more thing the `EmptyBraces` branch checks that isn't about the
+/// walk: an unclosed `match s {` is a parse error, and the parser's error
+/// recovery (`grammar.rs`'s `expect_after_prev(R_BRACE)`) hands `r_brace`
+/// to the *enclosing* block's own `}` rather than reporting none. That
+/// brace is real grammar, not the client's auto-close, so offering it as
+/// the arm list's closer would steal it — accepting the template would
+/// leave the `match` unclosed and the enclosing block's `}` gone. The two
+/// are told apart by indentation: a genuine auto-closed pair keeps the `}`
+/// at or past the `match` keyword's own line indent (whether tight or
+/// spread across blank lines), while a stolen enclosing-block `}` usually
+/// sits at that block's shallower indent. This is a heuristic, not a proof:
+/// a body written flush with its own opener (or squeezed onto one line, as
+/// in `{ match s {$0 };`) puts the stolen `}` at the SAME indent as
+/// `match`, and the guard still misreads it as a genuine pair. Telling
+/// those apart for real would mean checking whether the enclosing block
+/// still owns an `r_brace_token` of its own — not done here.
+fn match_awaiting_arms(
+    real_root: &SyntaxNode,
+    real_text: &str,
+    edit_range: TextRange,
+) -> Option<MatchAwaitingArms> {
     let mut token = real_root
         .token_at_offset(edit_range.start())
         .left_biased()?;
@@ -606,14 +663,37 @@ fn match_awaiting_arms(real_root: &SyntaxNode, edit_range: TextRange) -> Option<
         token = token.prev_token()?;
     }
     let match_expr = token.parent_ancestors().find_map(ast::MatchExpr::cast)?;
-    if match_expr.l_brace_token().is_some() {
+    let match_start = match_expr.syntax().text_range().start();
+    let scrutinee_range = match_expr.scrutinee()?.syntax().text_range();
+
+    let Some(l_brace) = match_expr.l_brace_token() else {
+        return (scrutinee_range.end() <= edit_range.start()).then_some(MatchAwaitingArms {
+            scrutinee_range,
+            match_start,
+            shape: ArmListShape::NoBraces,
+        });
+    };
+
+    // Braces exist: the only template slot left is an EMPTY arm list with
+    // the cursor actually inside it. An arm already written (however
+    // partial) is real grammar, not a slot to fill — `match_arm` always
+    // completes its marker node even out of a parse error, so a single
+    // stray identifier being typed already counts as one arm and excludes
+    // this.
+    if match_expr.arms().next().is_some() {
         return None;
     }
-    let scrutinee_range = match_expr.scrutinee()?.syntax().text_range();
-    (scrutinee_range.end() <= edit_range.start()).then(|| MatchAwaitingArms {
-        scrutinee_range,
-        match_start: match_expr.syntax().text_range().start(),
-    })
+    let r_brace = match_expr.r_brace_token()?;
+    let r_brace_indent = line_indent(real_text, r_brace.text_range().start()).len();
+    let match_indent = line_indent(real_text, match_start).len();
+    (l_brace.text_range().end() <= edit_range.start()
+        && edit_range.end() <= r_brace.text_range().start()
+        && r_brace_indent >= match_indent)
+        .then_some(MatchAwaitingArms {
+            scrutinee_range,
+            match_start,
+            shape: ArmListShape::EmptyBraces,
+        })
 }
 
 /// Classify the marker's parent node (in the speculative tree) into one of
@@ -1507,8 +1587,8 @@ fn match_template_items(
         edit_range,
     );
     template.text_edit.insert = InsertText::Snippet {
-        snippet: match_template(variants, &indent, true),
-        plain: match_template(variants, &indent, false),
+        snippet: match_template(variants, &indent, awaiting.shape, true),
+        plain: match_template(variants, &indent, awaiting.shape, false),
     };
     vec![template]
 }
@@ -1550,8 +1630,28 @@ fn line_indent(text: &str, offset: TextSize) -> String {
 /// parens are dropped entirely rather than left empty — the same call
 /// `match_arm_items` makes for a single variant, and for the same reason:
 /// there is no sound name to invent, and `::Pair()` claims an arity of zero.
-fn match_template(variants: &[(String, Vec<hir::Ty>)], indent: &str, snippet: bool) -> String {
-    let mut out = String::from("{\n");
+///
+/// `shape` picks whether the arm list's own braces are part of the output.
+/// [`ArmListShape::NoBraces`] writes them (nothing else will); under
+/// [`ArmListShape::EmptyBraces`] the pair already sits in the tree —
+/// courtesy of the client's auto-close, per [`match_awaiting_arms`] — and
+/// this emits arms only, so the existing `}` lands, unduplicated, right
+/// after the last arm at `indent`. The output always starts with `\n`
+/// before the first arm: the tight auto-close case (the trigger character's
+/// own shape) needs it to put the arm list on its own line, and the
+/// across-whitespace `EmptyBraces` case is accepted as-is rather than
+/// stripped, leaving the buffer's own blank line where it was.
+fn match_template(
+    variants: &[(String, Vec<hir::Ty>)],
+    indent: &str,
+    shape: ArmListShape,
+    snippet: bool,
+) -> String {
+    let mut out = String::new();
+    if shape == ArmListShape::NoBraces {
+        out.push('{');
+    }
+    out.push('\n');
     let mut stop = 1;
     for (name, payload) in variants {
         out.push_str(indent);
@@ -1577,7 +1677,9 @@ fn match_template(variants: &[(String, Vec<hir::Ty>)], indent: &str, snippet: bo
         out.push_str(",\n");
     }
     out.push_str(indent);
-    out.push('}');
+    if shape == ArmListShape::NoBraces {
+        out.push('}');
+    }
     out
 }
 

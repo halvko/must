@@ -1050,6 +1050,17 @@ impl MatchExpr {
     pub fn l_brace_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, L_BRACE)
     }
+    /// The arm list's closing brace. `arms()` are separate `MATCH_ARM`
+    /// children, so this is the only `R_BRACE` that is a direct token child
+    /// of the `MATCH_EXPR` itself — a nested arm body's own closing braces
+    /// live one level down, inside that arm's node. `None` only when the
+    /// parser reached EOF or an item keyword before any `}`; an unclosed
+    /// list otherwise absorbs the next `}` at any depth, including one that
+    /// belongs to an enclosing block (see `ide::completions::match_awaiting_arms`
+    /// for how a caller tells that apart from a real empty arm list).
+    pub fn r_brace_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, R_BRACE)
+    }
 }
 
 impl MatchArm {
