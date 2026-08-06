@@ -26,10 +26,10 @@
   no impls of its own to dispatch to). A NESTED `Self` position (inside a receiver-like
   argument's own type, never the position itself) does not widen; a variant that reaches
   there lands on the sound `NoTraitImpl` rather than silently picking its enum's impl.
-- **T23** The compiler-provided enums (`AllocResult`, `ReadLineResult`, `NextChar`) are the
-  prelude Must cannot write yet: ordinary declarations minted per file from one table,
-  user-shadowable and never duplicate-flagged; the table's order is the variant index. It
-  goes away when modules land.
+- **T23** The compiler-provided enums (`AllocResult`, `ReadLineResult`, `NextChar`,
+  `Utf8Result`) are the prelude Must cannot write yet: ordinary declarations minted per file
+  from one table, user-shadowable and never duplicate-flagged; the table's order is the
+  variant index. It goes away when modules land.
 - **T07** Mutability. `let mut` declares a mutable binding; assignment is a statement; local
   mutation inside a const context is fine; `mut` parameters are local copies; an assignment
   the checker rejects traps rather than proceeding. Field assignment is legal exactly when the
@@ -64,6 +64,14 @@
   character. `str.next_char(i)` answers a scalar plus the next boundary's byte index, and an
   index in the middle of a codepoint panics rather than sliding, because the program has lost
   track of its own index.
+- **T17** Blessing bytes into `str` is a validity claim with two halves, kept separate. That
+  the pointer addresses that many readable bytes is the caller's claim, unchecked in both
+  spellings, which is why both are `unsafe`; "checked" names the other half. Whether the
+  bytes spell a string is answered by one spelling and asserted by the other, and a false
+  assertion is detected UB naming the offset. The pointee is pinned to `u8`, because a bless
+  over another element type would be a layout claim. Both are flavour-polymorphic and so not
+  first-class values, and both are pure and so const-legal. The error carries no payload,
+  because a payload cannot be taken away later.
 
 ## Discarded
 
@@ -83,9 +91,19 @@
 - **`char` as a raw codepoint** — UTF-8 cannot encode a surrogate, so admitting them makes
   every encoder fallible for values no text contains. **`char` as an integer alias** — an
   alias hands back arithmetic and ordering, which is how a non-character gets built. **T16**
+- **A borrowed `str` representation, today** — needs a byte-range path element the aliasing
+  model deliberately lacks (M11), and every `str` consumer would learn a second shape. **T17**
 
 ## Re-evaluate when
 
+- **The str-view fork: `String`, slices, or any borrowed `str`.** A bless materializes today,
+  so the region discipline lives in the signature while the bytes are copied, and a view
+  copied out of a borrow survives because the copy is real. The moment a `str` can be a view,
+  that copy is unsound. Options: materialize (current; needs no memory-model change); a
+  borrowed representation (a byte-range path element, an overlap rule, every `str` consumer
+  learning a second shape, and a collision with the discarded byte-addressed interpreter
+  memory); a region-carrying `str::<@a>` (not spellable, since regions on type declarations
+  do not exist). The second is the likely answer. **T17**
 - **A conversion is wanted in depth** — variance. Judge it with the borrow subsystem's
   variance question (M09). **T13**
 - **Dynamic strings** force the `let s2 = s;` cost question `str` currently dodges. Staging

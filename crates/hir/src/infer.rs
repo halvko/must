@@ -794,10 +794,11 @@ pub enum InferenceDiagnostic {
         /// The turbofish mention expression.
         expr: ExprId,
     },
-    /// A flavor-polymorphic builtin (`add`, `copy`) applied to something
-    /// that is not a raw pointer. These builtins accept `T.&raw` AND
-    /// `T.&raw mut` in the same position, so the argument cannot be checked
-    /// against one expected type — the mismatch gets its own diagnostic.
+    /// A flavor-polymorphic builtin ([`Builtin::flavor_polymorphic`])
+    /// applied to something that is not a raw pointer. These builtins
+    /// accept `T.&raw` AND `T.&raw mut` in the same position, so the
+    /// argument cannot be checked against one expected type — the mismatch
+    /// gets its own diagnostic.
     BuiltinExpectsRawPtr {
         /// The call expression (where MIR refuses the operation).
         call: ExprId,
@@ -806,9 +807,10 @@ pub enum InferenceDiagnostic {
         builtin: Builtin,
         found: Ty,
     },
-    /// A flavor-polymorphic builtin (`add`, `copy`) mentioned without
-    /// being called. Its pointer parameter may be `T.&raw` or `T.&raw mut`,
-    /// so it has no ONE function type to be a value at.
+    /// A flavor-polymorphic builtin ([`Builtin::flavor_polymorphic`])
+    /// mentioned without being called. Its pointer parameter may be
+    /// `T.&raw` or `T.&raw mut`, so it has no ONE function type to be a
+    /// value at.
     BuiltinNotFirstClass {
         /// The referencing expression.
         expr: ExprId,
@@ -3592,13 +3594,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         cause,
                     );
                 }
-                // The flavor-polymorphic builtins (`add`, `offset`, `copy`)
-                // are intercepted like construction heads: their callee has
-                // no one function type to infer, so the call itself is the
-                // special case (see `infer_builtin_special_call`).
-                if let Some(Resolution::Builtin(
-                    builtin @ (Builtin::Add | Builtin::Offset | Builtin::Copy),
-                )) = self.resolutions.get(*callee)
+                // The flavor-polymorphic builtins (see
+                // [`Builtin::flavor_polymorphic`]) are intercepted like
+                // construction heads: their callee has no one function type
+                // to infer, so the call itself is the special case (see
+                // `infer_builtin_special_call`).
+                if let Some(Resolution::Builtin(builtin)) = self.resolutions.get(*callee)
+                    && builtin.flavor_polymorphic()
                 {
                     let builtin = *builtin;
                     return {
@@ -7604,10 +7606,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// A mention of a builtin, bare (`args: None`) or turbofished. The
     /// monomorphic builtins keep their one fixed type; the scheme-shaped
     /// ones ([`builtin_generics`]) run the exact same instantiation
-    /// machinery as generic fn items; the flavor-polymorphic pair
-    /// (`add`/`copy`) has no first-class type at all — its one legal
-    /// position, a direct call, is intercepted in the `Call` arm before
-    /// the callee would be inferred, so reaching here IS the error.
+    /// machinery as generic fn items; the flavor-polymorphic builtins have
+    /// no first-class type at all — their one legal position, a direct
+    /// call, is intercepted in the `Call` arm before the callee would be
+    /// inferred, so reaching here IS the error.
     fn infer_builtin_mention(
         &mut self,
         expr: ExprId,
@@ -7623,7 +7625,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             self.infer_const_args_free(args);
             return builtin_type(builtin, self.file);
         }
-        if matches!(builtin, Builtin::Add | Builtin::Offset | Builtin::Copy) {
+        if builtin.flavor_polymorphic() {
             self.result
                 .diagnostics
                 .push(InferenceDiagnostic::BuiltinNotFirstClass { expr, builtin });
@@ -7633,11 +7635,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     }
 
     /// A direct call of a flavor-polymorphic builtin — the checker special
-    /// case the ruled spec asks for: `add` preserves its pointer
-    /// argument's flavor (`.&raw mut` in → `.&raw mut` out) and `copy`
-    /// accepts either flavor for `src`, neither of which one `fn` type can
-    /// say. Everything else about the call is the ordinary machinery
-    /// (argument expectations with causes, arity as `ArgCountMismatch`).
+    /// case the ruled spec asks for: `add`/`offset` preserve their pointer
+    /// argument's flavor (`.&raw mut` in → `.&raw mut` out), `copy` accepts
+    /// either flavor for `src`, and the blesses accept either for the
+    /// buffer they read while pinning its pointee to `u8`; no one `fn` type
+    /// says any of that. Everything else about the call is the ordinary
+    /// machinery (argument expectations with causes, arity as
+    /// `ArgCountMismatch`).
     fn infer_builtin_special_call(
         &mut self,
         call: ExprId,
@@ -7645,7 +7649,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         args: &[ExprId],
     ) -> Ty {
         let expected_arity = match builtin {
-            Builtin::Add | Builtin::Offset => 2,
+            Builtin::Add
+            | Builtin::Offset
+            | Builtin::StrFromUtf8
+            | Builtin::StrFromUtf8Unchecked => 2,
             Builtin::Copy => 3,
             _ => unreachable!("not a flavor-polymorphic builtin"),
         };
@@ -7725,6 +7732,41 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     Some(Cause::CallSite { call, arg: args[2] }),
                 );
                 Ty::Unit
+            }
+            // `str_from_utf8(p, len)` / `str_from_utf8_unchecked(p, len)`:
+            // `len` bytes at `p`, taken as text. `p` may be either flavor
+            // (reading is what happens to it) but its pointee is pinned to
+            // `u8` — the boundary is BYTES-FIRST, and a bless over some
+            // other element type would be a layout claim, not a text one.
+            Builtin::StrFromUtf8 | Builtin::StrFromUtf8Unchecked => {
+                if let Some((mutable, pointee)) = ptr_arg(self, args[0]) {
+                    let byte = Ty::Int(IntKind::U8);
+                    if !self.adopt(&byte, pointee.as_ref()) {
+                        let found = Ty::RawPtr {
+                            mutable,
+                            pointee: pointee.clone(),
+                        };
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::TypeMismatch {
+                                expr: args[0],
+                                expected: Ty::raw_ptr(mutable, byte),
+                                actual: found,
+                                reasons: vec![Cause::CallSite { call, arg: args[0] }],
+                            });
+                    }
+                }
+                self.infer_expr_with(
+                    args[1],
+                    &Ty::Int(IntKind::Usize),
+                    Some(Cause::CallSite { call, arg: args[1] }),
+                );
+                match builtin {
+                    Builtin::StrFromUtf8 => {
+                        Ty::Named(NamedTy::plain(crate::utf8_result_loc(self.file)))
+                    }
+                    _ => Ty::Str,
+                }
             }
             _ => unreachable!("not a flavor-polymorphic builtin"),
         }
@@ -9325,8 +9367,8 @@ pub fn builtin_type(builtin: Builtin, file: SourceFile) -> Ty {
         ),
         // The generic builtins have no ONE type — every mention
         // instantiates [`builtin_scheme`] instead (see the `NameRef` and
-        // `GenericApp` arms); the flavor-polymorphic pair has no fn type
-        // at all (special-cased at the call, `BuiltinNotFirstClass`
+        // `GenericApp` arms); the flavor-polymorphic builtins have no fn
+        // type at all (special-cased at the call, `BuiltinNotFirstClass`
         // elsewhere). Reached only on error-recovery paths, where the
         // infectious silent type is right.
         Builtin::AllocArray
@@ -9334,15 +9376,20 @@ pub fn builtin_type(builtin: Builtin, file: SourceFile) -> Ty {
         | Builtin::Add
         | Builtin::Offset
         | Builtin::Copy
-        | Builtin::Dangling => Ty::Error,
+        | Builtin::Dangling
+        // The blesses read a RANGE through either raw flavor, exactly like
+        // `copy`'s source — no one `fn` type says that either.
+        | Builtin::StrFromUtf8
+        | Builtin::StrFromUtf8Unchecked => Ty::Error,
     }
 }
 
 /// The generic binder of a scheme-shaped builtin (`alloc_array`,
 /// `dealloc_array`, `dangling` — one type param `T`), or `None` for the
-/// monomorphic (`print`, `panic`) and flavor-polymorphic (`add`, `copy`)
-/// ones. Mirrors [`crate::item_data`]'s shape for generic items so mentions
-/// run the exact same instantiation machinery.
+/// monomorphic (`print`, `panic`) and flavor-polymorphic
+/// ([`Builtin::flavor_polymorphic`]) ones. Mirrors [`crate::item_data`]'s
+/// shape for generic items so mentions run the exact same instantiation
+/// machinery.
 fn builtin_generics(builtin: Builtin) -> Option<Vec<GenericParamData>> {
     match builtin {
         Builtin::AllocArray | Builtin::DeallocArray | Builtin::Dangling => {
@@ -9359,7 +9406,9 @@ fn builtin_generics(builtin: Builtin) -> Option<Vec<GenericParamData>> {
         | Builtin::Offset
         | Builtin::Copy
         | Builtin::ReadLine
-        | Builtin::NextChar => None,
+        | Builtin::NextChar
+        | Builtin::StrFromUtf8
+        | Builtin::StrFromUtf8Unchecked => None,
     }
 }
 
@@ -9402,7 +9451,9 @@ fn builtin_scheme(builtin: Builtin, file: SourceFile) -> (ItemLoc, Ty) {
         | Builtin::Offset
         | Builtin::Copy
         | Builtin::ReadLine
-        | Builtin::NextChar => {
+        | Builtin::NextChar
+        | Builtin::StrFromUtf8
+        | Builtin::StrFromUtf8Unchecked => {
             unreachable!("not a scheme-shaped builtin")
         }
     };

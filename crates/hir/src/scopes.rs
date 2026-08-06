@@ -368,6 +368,29 @@ pub enum Builtin {
     /// in an `impl ... for str` still wins — the `print` shadowing rule,
     /// applied to a member.
     NextChar,
+    /// `str_from_utf8(p, len)` — the CHECKED bless: `len` bytes at `p`
+    /// validated as UTF-8, answering the compiler-provided
+    /// [`UTF8_RESULT_NAME`] enum (`Ok(str)` / `Err`).
+    ///
+    /// UNSAFE, and the marker is about the POINTER, not the text: that `p`
+    /// addresses `len` readable bytes is the caller's claim and nothing
+    /// checks it. "Checked" names the other half — whether those bytes
+    /// spell a string is answered, not assumed. Flavor-polymorphic in `p`
+    /// (either raw flavor reads), like `copy`'s source.
+    ///
+    /// PURE, and therefore const-legal: reading bytes and deciding whether
+    /// they are UTF-8 observes nothing outside its own arguments.
+    StrFromUtf8,
+    /// `str_from_utf8_unchecked(p, len)` — the CLAIMED bless: `len` bytes
+    /// at `p`, taken as a `str` with no validation.
+    ///
+    /// UNSAFE twice over — the pointer claim of [`Builtin::StrFromUtf8`],
+    /// plus the text claim it drops. Handing it bytes that are not UTF-8
+    /// is undefined behavior, and the interpreter DETECTS it: a `str` whose
+    /// contents are not a string would be a value the type system's own
+    /// invariant says cannot exist, so producing one silently is exactly
+    /// the class of bug this machine exists to catch.
+    StrFromUtf8Unchecked,
 }
 
 impl Builtin {
@@ -382,6 +405,8 @@ impl Builtin {
             "copy" => Some(Builtin::Copy),
             "dangling" => Some(Builtin::Dangling),
             "read_line" => Some(Builtin::ReadLine),
+            "str_from_utf8" => Some(Builtin::StrFromUtf8),
+            "str_from_utf8_unchecked" => Some(Builtin::StrFromUtf8Unchecked),
             // `next_char` is deliberately absent: it is a MEMBER of `str`,
             // not a top-level name (see `Builtin::NextChar`).
             _ => None,
@@ -421,6 +446,8 @@ impl Builtin {
             Builtin::Dangling => "dangling",
             Builtin::ReadLine => "read_line",
             Builtin::NextChar => "next_char",
+            Builtin::StrFromUtf8 => "str_from_utf8",
+            Builtin::StrFromUtf8Unchecked => "str_from_utf8_unchecked",
         }
     }
 
@@ -428,12 +455,36 @@ impl Builtin {
     /// `unsafe { ... }` block — exactly the operations that carry a
     /// precondition whose violation is UB even without a visible deref:
     /// freeing invalidates every pointer into the allocation, `copy`
-    /// writes through a raw pointer, and `add` on a pointer that does not
-    /// address an array element (with `i > 0`) is detected UB at the call.
+    /// writes through a raw pointer, `add` on a pointer that does not
+    /// address an array element (with `i > 0`) is detected UB at the call,
+    /// and both blesses read a whole RANGE on the caller's word that it is
+    /// readable (the unchecked one additionally claiming the bytes spell a
+    /// string).
     pub fn requires_unsafe(self) -> bool {
         matches!(
             self,
-            Builtin::DeallocArray | Builtin::Copy | Builtin::Add | Builtin::Offset
+            Builtin::DeallocArray
+                | Builtin::Copy
+                | Builtin::Add
+                | Builtin::Offset
+                | Builtin::StrFromUtf8
+                | Builtin::StrFromUtf8Unchecked
+        )
+    }
+
+    /// Whether this builtin takes a pointer argument in BOTH raw flavors —
+    /// `T.&raw` and `T.&raw mut` in the same position, which no one `fn`
+    /// type says. Such a builtin is not first-class (a mention that is not
+    /// a call has no type to be a value at) and its call is intercepted by
+    /// the checker instead of being checked against a signature.
+    pub fn flavor_polymorphic(self) -> bool {
+        matches!(
+            self,
+            Builtin::Add
+                | Builtin::Offset
+                | Builtin::Copy
+                | Builtin::StrFromUtf8
+                | Builtin::StrFromUtf8Unchecked
         )
     }
 }
@@ -491,6 +542,15 @@ pub const READ_LINE_RESULT_NAME: &str = "ReadLineResult";
 /// program that lost track of its own index, and it traps.
 pub const NEXT_CHAR_NAME: &str = "NextChar";
 
+/// What `str_from_utf8(p, len)` answers (T17): a compiler-provided
+/// non-generic enum `Utf8Result = enum { Ok(str), Err }`, one more row of
+/// [`synthetic_decls`].
+///
+/// `Err` carries no payload, deliberately matching `AllocResult::Err`: which
+/// byte broke the encoding is real information and a real *addition*, but a
+/// payload cannot be taken away once every match arm has learned to bind it.
+pub const UTF8_RESULT_NAME: &str = "Utf8Result";
+
 /// A declaration the compiler provides without source: the result enum some
 /// builtin returns. Provided per FILE — resolution is per-file today, so
 /// each file sees "its" declaration; the identity scheme is the ordinary
@@ -512,7 +572,7 @@ pub struct SyntheticDecl {
 /// Every compiler-provided declaration, stated once. The four sites that
 /// must know about them — [`type_scope`], [`file_scope`],
 /// [`crate::item_data`] and [`crate::type_decl`] — each handle "a synthetic
-/// declaration", so a third one is a row here rather than a third special
+/// declaration", so another one is a row here rather than another special
 /// case in each of them.
 pub fn synthetic_decls() -> &'static [SyntheticDecl] {
     static DECLS: std::sync::LazyLock<Vec<SyntheticDecl>> = std::sync::LazyLock::new(|| {
@@ -558,6 +618,14 @@ pub fn synthetic_decls() -> &'static [SyntheticDecl] {
                     ("End".to_owned(), Vec::new()),
                 ],
             },
+            SyntheticDecl {
+                name: UTF8_RESULT_NAME,
+                generics: Vec::new(),
+                variants: vec![
+                    ("Ok".to_owned(), vec![TypeRef::Path("str".to_owned())]),
+                    ("Err".to_owned(), Vec::new()),
+                ],
+            },
         ]
     });
     &DECLS
@@ -582,6 +650,11 @@ pub fn read_line_result_loc(file: SourceFile) -> ItemLoc {
 /// The [`ItemLoc`] of `file`'s compiler-provided [`NEXT_CHAR_NAME`] enum.
 pub fn next_char_loc(file: SourceFile) -> ItemLoc {
     synthetic_decl_loc(file, NEXT_CHAR_NAME)
+}
+
+/// The [`ItemLoc`] of `file`'s compiler-provided [`UTF8_RESULT_NAME`] enum.
+pub fn utf8_result_loc(file: SourceFile) -> ItemLoc {
+    synthetic_decl_loc(file, UTF8_RESULT_NAME)
 }
 
 /// Top-level names of a file, *including* what's wrong with them: the scope

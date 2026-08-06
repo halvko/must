@@ -1436,6 +1436,47 @@ walk a literal at compile time and freeze the answer into a static. See
 `examples/chars.must` for the whole picture — reading lines, counting
 parentheses, and the byte-versus-character distinction in one program.
 
+== Making a string out of bytes
+
+Strings are not only literals. Given a pointer and a length you can claim
+that the bytes there are text, and there are two ways to say it — one that
+checks and one that does not:
+
+```must
+static text = fn (p: u8.&raw mut, len: usize) -> str {
+    match unsafe { str_from_utf8(p, len) } {
+        ::Ok(s) => s,
+        ::Err => panic("not text"),
+    }
+};
+
+static claimed = fn (p: u8.&raw mut, len: usize) -> str {
+    unsafe { str_from_utf8_unchecked(p, len) }
+};
+```
+
+Both are `unsafe`, and the reason is worth being exact about, because
+"checked" names only half of it. That `p` addresses `len` readable bytes is
+*your* claim in both spellings and nothing verifies it — that is the half
+the marker is for. Whether those bytes spell a string is the other half:
+`str_from_utf8` answers it and hands back the compiler-provided
+`Utf8Result` enum, `Ok(str) | Err`, minted per file and shadowable exactly
+as `NextChar`, `ReadLineResult` and `AllocResult` are;
+`str_from_utf8_unchecked` assumes it.
+
+Assuming wrongly is undefined behavior, and the interpreter catches it,
+naming the offset of the first bad byte. That is not politeness — a `str`
+whose contents are not a string is a value the language says cannot exist,
+so a program that mints one has broken an invariant everything else relies
+on, and finding out immediately is the only useful outcome.
+
+The pointer is to `u8`, always: this is a bytes-first boundary, and a
+claim about some other element type would be about layout, not text. Both
+spellings take either pointer flavor, like `copy`'s source does, and both
+are pure — so a `const` context accepts them too. A zero length is the
+empty string and looks at no pointer at all, which is what lets a line
+scanner bless a blank line with no special case.
+
 == Reading standard input
 
 `read_line()` is `print`'s twin — the stdin hook, a platform effect exactly
@@ -1593,7 +1634,9 @@ which reads a line before it walks it. `next_char` has no wasm story either
 and refuses by name in its turn.
 
 Characters themselves are no trouble: a `char` is one scalar slot here, so
-literals, `==` and character-pattern dispatch all compile.
+literals, `==` and character-pattern dispatch all compile. The two blesses
+refuse by name as well, though no example reaches them: making a `str` out
+of bytes needs a buffer, and there are no buffers here.
 
 Monomorphization has refusals of its own. A program whose instantiations
 never bottom out — polymorphic recursion, where every call needs an

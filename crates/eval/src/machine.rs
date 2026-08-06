@@ -2417,6 +2417,14 @@ impl<'db, M: Mode> Machine<'db, M> {
                 // `args[0]` — the order they were written in, too.
                 self.builtin_next_char(&args[1], &args[0], loc, origin)
             }
+            // No const fence either, for the same reason: deciding whether
+            // bytes are UTF-8 observes nothing outside the arguments. Both
+            // blesses read a range of `u8` elements through a raw pointer;
+            // they differ only in what they do with bytes that are not.
+            Builtin::StrFromUtf8 | Builtin::StrFromUtf8Unchecked => {
+                expect_args(self, 2)?;
+                self.builtin_bless(builtin, &args[0], &args[1], loc, origin)
+            }
         }
     }
 
@@ -2857,6 +2865,108 @@ impl<'db, M: Mode> Machine<'db, M> {
             values[head + offset] = element;
         }
         Ok(Value::Unit)
+    }
+
+    /// `str_from_utf8(p, len)` and `str_from_utf8_unchecked(p, len)` — the
+    /// two blesses, and the whole of Must's bytes-to-text story.
+    ///
+    /// A `str` view over bytes is a VALIDITY CLAIM, and the claim has two
+    /// halves that are deliberately separated. That `p` addresses `len`
+    /// readable bytes is the CALLER's, unchecked in both spellings, which
+    /// is why both are `unsafe`; the interpreter still catches the cases
+    /// its typed memory can see (out of range, freed, never written, or
+    /// foreign to a live safe borrow of one of the bytes). Whether those
+    /// bytes SPELL a string is answered by `str_from_utf8` and merely
+    /// asserted by `str_from_utf8_unchecked` — and a false assertion is
+    /// undefined behavior, DETECTED here, because a `str` whose contents are
+    /// not a string is a value the language's own invariant says cannot
+    /// exist. Producing one silently is exactly what this machine is for.
+    fn builtin_bless(
+        &mut self,
+        builtin: Builtin,
+        p: &Value,
+        len: &Value,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<Value, EvalError> {
+        let name = builtin.name();
+        // The checker pins this length to `usize`; a wrong kind is
+        // deferred-error mode — trap ill-typed, don't launder.
+        let Some(len) = (match len {
+            Value::Int(iv) => iv.usize_payload(),
+            _ => None,
+        }) else {
+            return Err(self.ill_typed("a `usize` byte count", len, loc, origin));
+        };
+        // A zero-length bless judges no pointer at all — `copy`'s rule, and
+        // it is what lets a line scanner bless an empty line (a bare "\n",
+        // or a buffer's very start) with no special case. The empty string
+        // is valid UTF-8, so both spellings answer the same thing.
+        if len == 0 {
+            if !matches!(p, Value::Ptr { .. }) {
+                return Err(self.ill_typed("a raw pointer", p, loc, origin));
+            }
+            return Ok(self.blessed(builtin, String::new(), loc));
+        }
+        let elements = self
+            .copy_range(p, len, name, "buffer", loc, origin)?
+            .to_vec();
+        // The aliasing check rides a bless exactly like it rides `copy`:
+        // reading the range is not a route around the tree, so a live safe
+        // borrow of one of the bytes must be foreign to this read, same as
+        // `p.*[i]` would be.
+        if let Value::Ptr { alloc, path, tag } = p {
+            self.aliasing_access_range(*tag, *alloc, path, len, Access::Read, loc, origin)?;
+        }
+        let mut bytes = Vec::with_capacity(elements.len());
+        for element in &elements {
+            match element {
+                // Strictly `u8`: the checker pins the pointee, so any
+                // other width reaching here is deferred-error mode — trap
+                // ill-typed, don't launder a wider integer into a byte.
+                Value::Int(hir::IntValue::U8(byte)) => bytes.push(*byte),
+                // Reading never-written memory AS A VALUE is UB, and a
+                // bless is a value read of every byte in the range.
+                Value::Uninit => return Err(self.uninit_read(loc, origin)),
+                other => return Err(self.ill_typed("a `u8` element", other, loc, origin)),
+            }
+        }
+        match String::from_utf8(bytes) {
+            Ok(text) => Ok(self.blessed(builtin, text, loc)),
+            Err(err) => match builtin {
+                Builtin::StrFromUtf8 => Ok(Value::Variant {
+                    decl: hir::utf8_result_loc(loc.file),
+                    index: 1,
+                    name: "Err".to_owned(),
+                    payload: Vec::new(),
+                }),
+                _ => Err(EvalError {
+                    kind: EvalErrorKind::UndefinedBehavior,
+                    message: format!(
+                        "`str_from_utf8_unchecked` was given bytes that are not valid \
+                         UTF-8 — the first bad byte is at offset {}",
+                        err.utf8_error().valid_up_to()
+                    ),
+                    origin: Some((loc.clone(), origin)),
+                    notes: Vec::new(),
+                }),
+            },
+        }
+    }
+
+    /// The successful answer of a bless, in whichever shape the spelling
+    /// asks for: the checked one wraps it in `Utf8Result::Ok`, the claimed
+    /// one hands back the `str` itself.
+    fn blessed(&self, builtin: Builtin, text: String, loc: &ItemLoc) -> Value {
+        match builtin {
+            Builtin::StrFromUtf8 => Value::Variant {
+                decl: hir::utf8_result_loc(loc.file),
+                index: 0,
+                name: "Ok".to_owned(),
+                payload: vec![Value::Str(text)],
+            },
+            _ => Value::Str(text),
+        }
     }
 
     /// The shared `copy` range judgement: `p` must be a live pointer
@@ -3635,13 +3745,14 @@ impl<M> Machine<'_, M> {
         Ok(())
     }
 
-    /// `aliasing_access` for the `n` array elements a `copy` touches,
-    /// starting at `path` (whose last step is the head element's
-    /// `Index`) — one call per element, since a node's path is an exact
-    /// field/index chain and cannot name a whole range at once. `copy` is
-    /// memmove: it must be exactly as foreign to a live safe borrow of
-    /// one of its elements as an ordinary `p.*[i]`/`p.*[i] = v` would be,
-    /// on either side.
+    /// `aliasing_access` for the `n` array elements a range builtin
+    /// touches (`copy` on either side, a bless on its buffer), starting at
+    /// `path` (whose last step is the head element's `Index`) — one call
+    /// per element, since a node's path is an exact field/index chain and
+    /// cannot name a whole range at once. Reading or writing a range is
+    /// not a route around the tree: it must be exactly as foreign to a
+    /// live safe borrow of one of its elements as an ordinary
+    /// `p.*[i]`/`p.*[i] = v` would be.
     fn aliasing_access_range(
         &mut self,
         tag: Provenance,

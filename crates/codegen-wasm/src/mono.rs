@@ -600,7 +600,9 @@ impl<'db> Mono<'db> {
                     | Builtin::Copy
                     | Builtin::Dangling
                     | Builtin::ReadLine
-                    | Builtin::NextChar => {}
+                    | Builtin::NextChar
+                    | Builtin::StrFromUtf8
+                    | Builtin::StrFromUtf8Unchecked => {}
                 }
                 return CallTarget::Refused(Refusal::new(
                     format!("the `{}` builtin", builtin.name()),

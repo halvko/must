@@ -37,9 +37,9 @@ pub use item_tree::{
 pub use outlives::{OutlivesDiagnostic, outlives_check};
 pub use scopes::{
     ALLOC_RESULT_NAME, BUILTIN_DISAMBIGUATOR, Builtin, Duplicate, ExprScopes, FileScope,
-    NEXT_CHAR_NAME, READ_LINE_RESULT_NAME, Resolution, SyntheticDecl, TypeScope, alloc_result_loc,
-    expr_scopes, file_scope, next_char_loc, read_line_result_loc, resolutions, synthetic_decls,
-    type_scope,
+    NEXT_CHAR_NAME, READ_LINE_RESULT_NAME, Resolution, SyntheticDecl, TypeScope, UTF8_RESULT_NAME,
+    alloc_result_loc, expr_scopes, file_scope, next_char_loc, read_line_result_loc, resolutions,
+    synthetic_decls, type_scope, utf8_result_loc,
 };
 pub use traits::{BoundSlot, bound_slots, dict_param_count};
 pub use ty::{

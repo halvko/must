@@ -161,6 +161,8 @@
 
 ## Re-evaluate when
 
+- **A borrowed `str` representation lands** — copying one out of a borrow stops being a copy,
+  and the model needs a byte-range path element it deliberately lacks (T17). **M11**
 - **The no-reservation fork** — relaxing is pure UB removal; it was ruled ahead of the
   experiment that would justify it. **M10**
 - **Covariance is wanted** — the three rules in M09 keep it a one-query change. It revives the

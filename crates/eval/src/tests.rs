@@ -6424,3 +6424,228 @@ fn a_misplaced_extern_fn_is_not_an_import() {
         "#]],
     );
 }
+
+// ---- the blesses: bytes into `str` --------------------------------------
+
+/// A buffer of `n` bytes filled from a `str` literal's own bytes, so a
+/// bless fixture can start from known contents without a host read. The
+/// bytes go in one at a time through `add`, which is the only way to write
+/// a buffer today.
+fn bytes_fixture(bytes: &[u8]) -> String {
+    let mut writes = String::new();
+    for (index, byte) in bytes.iter().enumerate() {
+        writes.push_str(&format!("unsafe {{ add(p, {index}).* = {byte}; }};\n"));
+    }
+    format!(
+        "static with_bytes = fn::<T>(k: fn(u8.&raw mut) -> T) -> T {{\n\
+             match alloc_array::<u8>({len}) {{\n\
+                 AllocResult::Ok(p) => {{\n\
+                     {writes}\
+                     let out = k(p);\n\
+                     unsafe {{ dealloc_array(p, {len}); }};\n\
+                     out\n\
+                 }}\n\
+                 AllocResult::Err => panic(\"out of memory\"),\n\
+             }}\n\
+         }};\n",
+        len = bytes.len(),
+    )
+}
+
+#[test]
+fn the_checked_bless_answers_ok_for_utf8_and_err_for_anything_else() {
+    // "Checked" names ONE half: whether the bytes spell a string. That the
+    // pointer addresses them at all is the caller's claim in both
+    // spellings, which is why both are `unsafe`.
+    let fixture = bytes_fixture(&[104, 105, 0xFF]);
+    check_run(
+        &format!(
+            "{fixture}\
+             static good = fn(p: u8.&raw mut) -> str {{\n\
+                 match unsafe {{ str_from_utf8(p, 2) }} {{\n\
+                     Utf8Result::Ok(s) => s,\n\
+                     Utf8Result::Err => \"not utf-8\",\n\
+                 }}\n\
+             }};\n\
+             static bad = fn(p: u8.&raw mut) -> str {{\n\
+                 match unsafe {{ str_from_utf8(p, 3) }} {{\n\
+                     Utf8Result::Ok(s) => s,\n\
+                     Utf8Result::Err => \"not utf-8\",\n\
+                 }}\n\
+             }};\n\
+             static f = fn() -> str {{\n\
+                 let ok = with_bytes::<str>(good);\n\
+                 let refused = with_bytes::<str>(bad);\n\
+                 if ok == \"hi\" {{ refused }} else {{ \"unexpected\" }}\n\
+             }};"
+        ),
+        "f()",
+        expect![[r#"
+            => "not utf-8"
+        "#]],
+    );
+}
+
+#[test]
+fn the_claimed_bless_on_bytes_that_are_not_utf8_is_detected_ub() {
+    // A `str` whose contents are not a string is a value the language's own
+    // invariant says cannot exist. `str_from_utf8_unchecked` is where a
+    // program can assert one into being — so that is where the interpreter
+    // catches it, naming the offset rather than the byte.
+    let fixture = bytes_fixture(&[104, 0xFF]);
+    check_run(
+        &format!(
+            "{fixture}\
+             static claim = fn(p: u8.&raw mut) -> str {{\n\
+                 unsafe {{ str_from_utf8_unchecked(p, 2) }}\n\
+             }};\n\
+             static f = fn() -> str {{ with_bytes::<str>(claim) }};"
+        ),
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: `str_from_utf8_unchecked` was given bytes that are not valid UTF-8 — the first bad byte is at offset 1
+        "#]],
+    );
+}
+
+#[test]
+fn a_bless_past_the_end_of_the_buffer_is_detected_ub() {
+    let fixture = bytes_fixture(&[104, 105]);
+    check_run(
+        &format!(
+            "{fixture}\
+             static over = fn(p: u8.&raw mut) -> str {{\n\
+                 unsafe {{ str_from_utf8_unchecked(p, 5) }}\n\
+             }};\n\
+             static f = fn() -> str {{ with_bytes::<str>(over) }};"
+        ),
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: `str_from_utf8_unchecked` out of bounds — the buffer names 5 element(s) from index 0, but the array has 2
+              note: allocated here
+        "#]],
+    );
+}
+
+#[test]
+fn a_bless_of_never_written_bytes_is_detected_ub() {
+    // A bless is a value read of every byte in the range, so the uninit
+    // gate fires exactly as it does for a deref.
+    check_run(
+        "static f = fn() -> str {\n\
+             match alloc_array::<u8>(4) {\n\
+                 AllocResult::Ok(p) => unsafe { str_from_utf8_unchecked(p, 4) },\n\
+                 AllocResult::Err => \"oom\",\n\
+             }\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: read of uninitialized memory — this element was never written
+        "#]],
+    );
+}
+
+#[test]
+fn a_bless_is_foreign_to_a_live_borrow_of_a_byte_it_reads() {
+    // A bless reads its range through the aliasing tree, exactly as `copy`
+    // reads its source: blessing bytes is not a route around exclusivity,
+    // so a live exclusive borrow of one of them is suspended as `let v =
+    // a[0];` would suspend it.
+    check_run(
+        "static f = fn () -> u8 {\n\
+             let mut a: [u8; 2] = [104, 105];\n\
+             let m = a[0].&mut;\n\
+             unsafe { str_from_utf8_unchecked(a[0].&raw, 2); };\n\
+             m.* = 5;\n\
+             a[0]\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
+              note: this borrow was created here
+              note: suspended here — the place was read while this exclusive borrow was live
+        "#]],
+    );
+}
+
+#[test]
+fn a_zero_length_bless_judges_no_pointer_and_is_the_empty_string() {
+    // `copy`'s rule, and it is what lets a line scanner bless a blank line
+    // — a bare "\n", or the buffer's very start — with no special case.
+    check_run(
+        "static f = fn() -> str { unsafe { str_from_utf8_unchecked(dangling::<u8>(), 0) } };",
+        "f()",
+        expect![[r#"
+            => ""
+        "#]],
+    );
+}
+
+// ---- the load-bearing property: a view dies when the reader moves on ----
+
+#[test]
+fn a_borrowed_view_is_invalidated_when_the_reader_is_used_again() {
+    // Why this rides the blesses: the ruling that `str` stays a value and
+    // gets no borrowed representation rests on a view copied out of a
+    // borrow being real while a view HELD across the owner's next use is
+    // not, and this is that second half. A reader handing out views into
+    // its own buffer returns a borrow of its own `line` slot, so its next
+    // `&mut` use — refilling, advancing, anything — invalidates the view,
+    // and reading it afterwards is detected UB naming both sites.
+    //
+    // Nothing was added to the aliasing model for it: this is
+    // reborrow-at-every-use doing its job.
+    check_run(
+        "type R = struct { line: str, n: usize } with {\n\
+             impl Self {\n\
+                 next = fn::<@b>(r: Self.&mut::<@b>) -> str.&::<@b> {\n\
+                     r.*.n = r.*.n + 1;\n\
+                     r.*.line = if r.*.n == 1 { \"one\" } else { \"two\" };\n\
+                     r.*.line.&\n\
+                 };\n\
+             }\n\
+         };\n\
+         static f = fn() -> str {\n\
+             let mut r = R(struct { line = \"\", n = 0 });\n\
+             let m = r.&mut;\n\
+             let a = m.next();\n\
+             let b = m.next();\n\
+             a.*\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, or written through another borrow
+        "#]],
+    );
+}
+
+#[test]
+fn a_borrowed_view_read_before_the_reader_moves_on_is_fine() {
+    // The other half of the same claim, and the half the ruling leans on:
+    // a view read before the owner moves on is an ordinary read, so the
+    // discipline rejects only the program that holds one too long.
+    check_run(
+        "type R = struct { line: str, n: usize } with {\n\
+             impl Self {\n\
+                 next = fn::<@b>(r: Self.&mut::<@b>) -> str.&::<@b> {\n\
+                     r.*.n = r.*.n + 1;\n\
+                     r.*.line = if r.*.n == 1 { \"one\" } else { \"two\" };\n\
+                     r.*.line.&\n\
+                 };\n\
+             }\n\
+         };\n\
+         static f = fn() -> str {\n\
+             let mut r = R(struct { line = \"\", n = 0 });\n\
+             let m = r.&mut;\n\
+             let first = m.next().*;\n\
+             let second = m.next().*;\n\
+             if first == \"one\" { second } else { \"unexpected\" }\n\
+         };",
+        "f()",
+        expect![[r#"
+            => "two"
+        "#]],
+    );
+}

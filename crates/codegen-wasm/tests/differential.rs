@@ -581,6 +581,34 @@ static main = fn () -> usize {
     );
 }
 
+#[test]
+fn the_blesses_are_refused_by_name() {
+    // Turning bytes into a `str` needs a buffer to turn, and this backend
+    // has no heap and no pointers to reach one with. Refused BY NAME
+    // through the same per-builtin path `read_line` and `next_char` take —
+    // never folded into a vaguer "strings are limited" excuse.
+    for spelling in ["str_from_utf8", "str_from_utf8_unchecked"] {
+        let message = harness::refusal(
+            &format!(
+                r#"
+static main = fn () -> usize {{
+    let mut b: u8 = 104;
+    unsafe {{ {spelling}(b.&raw mut, 1); }};
+    0
+}}
+"#
+            ),
+            "main()",
+        );
+        assert!(
+            message.contains(&format!(
+                "the `{spelling}` builtin is not supported by the wasm backend yet"
+            )),
+            "unexpected refusal: {message}"
+        );
+    }
+}
+
 // --- functions, generics, traits ----------------------------------------
 
 #[test]

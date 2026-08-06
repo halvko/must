@@ -1028,6 +1028,16 @@ fn builtin_fn_items(
             placeholder_fn(0),
             Some("fn::<T>() -> T.&raw mut"),
         ),
+        (
+            "str_from_utf8",
+            placeholder_fn(2),
+            Some("unsafe fn(u8.&raw [mut], usize) -> Utf8Result"),
+        ),
+        (
+            "str_from_utf8_unchecked",
+            placeholder_fn(2),
+            Some("unsafe fn(u8.&raw [mut], usize) -> str"),
+        ),
     ]
     .into_iter()
     .map(|(name, ty, detail)| {

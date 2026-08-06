@@ -1620,6 +1620,7 @@ static main = fn {
             NextChar Enum (enum { Char(char, usize), End })
             ReadLineResult Enum (enum { Line(str), End })
             Shape Struct (struct { r: usize })
+            Utf8Result Enum (enum { Ok(str), Err })
             area Function (fn(usize) -> usize)
             main Function (fn())
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
@@ -1630,6 +1631,8 @@ static main = fn {
             offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             print Function (fn(str))
             read_line Function (fn() -> ReadLineResult)
+            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
             const Keyword
             false Keyword
             fn Keyword
@@ -1661,6 +1664,7 @@ static main = fn {
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
             NextChar Enum (enum { Char(char, usize), End })
             ReadLineResult Enum (enum { Line(str), End })
+            Utf8Result Enum (enum { Ok(str), Err })
             main Function (fn())
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -1671,6 +1675,8 @@ static main = fn {
             panic Function (fn(str) -> !)
             print Function (fn(str))
             read_line Function (fn() -> ReadLineResult)
+            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
             const Keyword
             false Keyword
             fn Keyword
@@ -1696,6 +1702,7 @@ static make_point = fn (x: usize) -> $0 { x };
             NextChar Enum (enum { Char(char, usize), End })
             Point Struct (struct { x: usize, y: usize })
             ReadLineResult Enum (enum { Line(str), End })
+            Utf8Result Enum (enum { Ok(str), Err })
             bool Keyword
             char Keyword
             i16 Keyword
@@ -2315,6 +2322,7 @@ static main = fn (s: str, n: usize) {
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
             NextChar Enum (enum { Char(char, usize), End })
             ReadLineResult Enum (enum { Line(str), End })
+            Utf8Result Enum (enum { Ok(str), Err })
             main Function (fn(str, usize))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -2324,6 +2332,8 @@ static main = fn (s: str, n: usize) {
             offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             print Function (fn(str))
             read_line Function (fn() -> ReadLineResult)
+            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
             const Keyword
             false Keyword
             fn Keyword
@@ -2356,6 +2366,7 @@ static main = fn {
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
             NextChar Enum (enum { Char(char, usize), End })
             ReadLineResult Enum (enum { Line(str), End })
+            Utf8Result Enum (enum { Ok(str), Err })
             get_n Function (fn() -> usize)
             main Function (fn())
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
@@ -2366,6 +2377,8 @@ static main = fn {
             offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             print Function (fn(str))
             read_line Function (fn() -> ReadLineResult)
+            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
             const Keyword
             false Keyword
             fn Keyword
@@ -2397,6 +2410,7 @@ static main = fn {
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
             NextChar Enum (enum { Char(char, usize), End })
             ReadLineResult Enum (enum { Line(str), End })
+            Utf8Result Enum (enum { Ok(str), Err })
             main Function (fn())
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -2406,6 +2420,8 @@ static main = fn {
             offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             print Function (fn(str))
             read_line Function (fn() -> ReadLineResult)
+            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
             const Keyword
             false Keyword
             fn Keyword
@@ -2440,6 +2456,7 @@ static main = fn (p: Point, n: usize) {
             NextChar Enum (enum { Char(char, usize), End })
             Point Struct (struct { x: usize })
             ReadLineResult Enum (enum { Line(str), End })
+            Utf8Result Enum (enum { Ok(str), Err })
             main Function (fn(Point, usize))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -2449,6 +2466,8 @@ static main = fn (p: Point, n: usize) {
             offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
             print Function (fn(str))
             read_line Function (fn() -> ReadLineResult)
+            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
             const Keyword
             false Keyword
             fn Keyword
@@ -2548,6 +2567,7 @@ static main = fn {
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
             NextChar Enum (enum { Char(char, usize), End })
             ReadLineResult Enum (enum { Line(str), End })
+            Utf8Result Enum (enum { Ok(str), Err })
             main Function (fn())
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -2558,6 +2578,8 @@ static main = fn {
             panic Function (fn(str) -> !)
             print Function (fn(str))
             read_line Function (fn() -> ReadLineResult)
+            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
             const Keyword
             false Keyword
             fn Keyword
@@ -3027,6 +3049,7 @@ static f = fn (s: Shape) {
             NextChar Enum (enum { Char(char, usize), End })
             ReadLineResult Enum (enum { Line(str), End })
             Shape Enum (enum { Circle(usize), Point })
+            Utf8Result Enum (enum { Ok(str), Err })
             f Function (fn(Shape) -> !)
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -3037,6 +3060,8 @@ static f = fn (s: Shape) {
             panic Function (fn(str) -> !)
             print Function (fn(str))
             read_line Function (fn() -> ReadLineResult)
+            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
             const Keyword
             false Keyword
             fn Keyword
@@ -3355,6 +3380,7 @@ fn completions_match_scrutinee_does_not_suppress_the_normal_set() {
             NextChar Enum (enum { Char(char, usize), End })
             ReadLineResult Enum (enum { Line(str), End })
             Shape Enum (enum { Circle(usize), Point })
+            Utf8Result Enum (enum { Ok(str), Err })
             f Function (fn(Shape) -> !)
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -3365,6 +3391,8 @@ fn completions_match_scrutinee_does_not_suppress_the_normal_set() {
             panic Function (fn(str) -> !)
             print Function (fn(str))
             read_line Function (fn() -> ReadLineResult)
+            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
             const Keyword
             false Keyword
             fn Keyword

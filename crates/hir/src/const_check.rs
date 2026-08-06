@@ -418,7 +418,14 @@ impl CheckCtx<'_> {
                 | Builtin::Offset
                 | Builtin::Copy
                 | Builtin::Dangling
-                | Builtin::NextChar,
+                | Builtin::NextChar
+                // The two blesses join them for `next_char`'s reason: they
+                // are PURE. Reading bytes and deciding whether they spell a
+                // string observes nothing outside the arguments — and the
+                // heap fence already stops the interesting cases, since
+                // there is no const-context way to get a buffer.
+                | Builtin::StrFromUtf8
+                | Builtin::StrFromUtf8Unchecked,
             )) => {}
             Some(Resolution::Builtin(builtin @ (Builtin::Print | Builtin::ReadLine))) => {
                 self.diagnostics.push(ConstCheckDiagnostic::SideEffectCall {

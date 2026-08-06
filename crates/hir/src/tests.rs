@@ -12199,3 +12199,74 @@ fn a_misplaced_extern_fn_is_not_a_host_import() {
         "#]],
     );
 }
+
+// ---- the blesses: bytes into `str` --------------------------------------
+
+#[test]
+fn user_declarations_shadow_the_builtin_utf8_result() {
+    // The `AllocResult`/`ReadLineResult` rule, once more: a file that
+    // declares the name sees its own everywhere.
+    check_infer(
+        "type Utf8Result = struct { tag: usize };\n\
+         static x = Utf8Result(struct { tag = 1 });",
+        expect![[r#"
+            52..62 'Utf8Result': fn(struct { tag: usize }) -> Utf8Result
+            52..82 'Utf8Result(struct...': Utf8Result
+            63..81 'struct { tag = 1 }': struct { tag: usize }
+            78..79 '1': usize
+        "#]],
+    );
+}
+
+#[test]
+fn both_blesses_require_unsafe_and_pin_their_pointee_to_u8() {
+    // `unsafe` is about the POINTER in both spellings — that it addresses
+    // `len` readable bytes is the caller's unchecked claim, so "checked"
+    // names only whether the bytes spell UTF-8. And the pointee is `u8`,
+    // not `T`: this boundary is bytes-first, and a bless over some other
+    // element type would be a layout claim, not a text one. The first call
+    // is the clean one: `p` is a `u8.&raw`, so it also pins that either raw
+    // flavor is accepted — the reason neither bless is first-class.
+    check_diagnostics(
+        "static f = fn(p: u8.&raw, q: usize.&raw mut) -> () {\n\
+             unsafe { str_from_utf8(p, 1); };\n\
+             str_from_utf8(q, 1);\n\
+             str_from_utf8_unchecked(p, 1);\n\
+             unsafe { str_from_utf8_unchecked(q, 1); };\n\
+         };",
+        expect![[r#"
+            86..105: calling `str_from_utf8` requires an `unsafe { ... }` block
+            100..101: type mismatch: expected `u8.&raw mut`, found `usize.&raw mut`
+            107..136: calling `str_from_utf8_unchecked` requires an `unsafe { ... }` block
+            171..172: type mismatch: expected `u8.&raw mut`, found `usize.&raw mut`
+        "#]],
+    );
+}
+
+#[test]
+fn a_bless_is_not_a_first_class_value() {
+    // Same reason `copy` is not: its pointer parameter accepts either raw
+    // flavor, which no one `fn` type says.
+    check_diagnostics(
+        "static f = fn() -> () { let g = str_from_utf8; };",
+        expect![[r#"
+            32..45: `str_from_utf8` must be called directly; its pointer parameter accepts both `T.&raw` and `T.&raw mut`, so it has no one function type to be a value at
+        "#]],
+    );
+}
+
+#[test]
+fn both_blesses_are_const_legal() {
+    // A bless has no effect for a const context to refuse — the pointer
+    // builtins' reason, and `unsafe` is orthogonal to `const`.
+    check_diagnostics(
+        "static empty = const { unsafe { str_from_utf8_unchecked(dangling::<u8>(), 0) } };\n\
+         static checked = const {\n\
+             match unsafe { str_from_utf8(dangling::<u8>(), 0) } {\n\
+                 Utf8Result::Ok(s) => s,\n\
+                 Utf8Result::Err => \"not utf-8\",\n\
+             }\n\
+         };",
+        expect![""],
+    );
+}
