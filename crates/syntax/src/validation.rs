@@ -5,7 +5,7 @@
 //! exactly the information a quick fix needs.
 
 use crate::ast::{self, AstNode};
-use crate::{BRACE_RULE, Fix, SyntaxError, SyntaxNode, SyntaxToken, TextEdit};
+use crate::{BRACE_RULE, Fix, SyntaxError, SyntaxKind, SyntaxNode, SyntaxToken, TextEdit};
 use text_size::TextRange;
 
 pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
@@ -182,6 +182,18 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
                 range: ref_type.syntax().text_range(),
                 fix: None,
             });
+        } else if let Some(path_type) = ast::PathType::cast(node.clone()) {
+            reject_bare_angle_generic_args(
+                path_type.name_ref(),
+                path_type.generic_arg_list(),
+                &mut errors,
+            );
+        } else if let Some(path_expr) = ast::PathExpr::cast(node.clone()) {
+            reject_bare_angle_generic_args(
+                path_expr.name_ref(),
+                path_expr.generic_arg_list(),
+                &mut errors,
+            );
         }
         // `x.&` / `x.&mut` and `T.&::<@a>` / `T.&mut::<@a>` — the postfix
         // SAFE borrows, duals of `.*`. Un-reserved; hir owns them from here
@@ -925,6 +937,63 @@ fn reject_unqualified_bare_variant_pat(
             label: "Insert `::`".to_owned(),
             edits: vec![TextEdit {
                 range: TextRange::empty(name_ref.syntax().text_range().start()),
+                insert: "::".to_owned(),
+            }],
+        }),
+    });
+}
+
+/// `Boxed<usize>` / `f<usize>(3)` — the bare-angle typo for `::<...>`, on
+/// either side of the grammar (`PathType`, `PathExpr`). Bare angles are
+/// permanently illegal (G06: turbofish everywhere), so the grammar parses
+/// the typo into the shape it plainly means — the same `GENERIC_ARG_LIST`
+/// the turbofish spelling builds — and this pass names the missing `::`
+/// (X03: a never-legal-but-recognizable form is corrected, not refused by
+/// the parser). The arguments themselves are judged exactly as a
+/// correctly-spelled mention's are; nothing about arity or kinds is said
+/// here.
+///
+/// The tell is the token immediately before the list, never
+/// `colon2_token()` — for `f<usize>::assoc` that would find the TRAILING
+/// `::`. A second segment's own list hangs inside `MemberGenericArgs`, out
+/// of reach of the direct-child `generic_arg_list()` accessors, so it can
+/// never be mistaken for the owner's.
+///
+/// Only a PATH'S OWNER is corrected: the grammar takes the bare form on a
+/// first segment, so `Pair::first<usize>` is still read as a comparison
+/// and reported as one.
+fn reject_bare_angle_generic_args(
+    name_ref: Option<ast::NameRef>,
+    arg_list: Option<ast::GenericArgList>,
+    errors: &mut Vec<SyntaxError>,
+) {
+    let (Some(name_ref), Some(arg_list)) = (name_ref, arg_list) else {
+        return;
+    };
+    let mut prev = arg_list.syntax().prev_sibling_or_token();
+    while let Some(element) = prev {
+        if element.kind().is_trivia() {
+            prev = element.prev_sibling_or_token();
+            continue;
+        }
+        if element.kind() == SyntaxKind::COLON2 {
+            return;
+        }
+        break;
+    }
+    let name = name_ref.text();
+    errors.push(SyntaxError {
+        message: format!("generic arguments use the turbofish: write `{name}::<...>`"),
+        // The name and its arguments, not the whole path node: a trailing
+        // qualified segment (`f<usize>::assoc`) is not part of the mistake.
+        range: name_ref
+            .syntax()
+            .text_range()
+            .cover(arg_list.syntax().text_range()),
+        fix: Some(Fix {
+            label: "Insert `::`".to_owned(),
+            edits: vec![TextEdit {
+                range: TextRange::empty(name_ref.syntax().text_range().end()),
                 insert: "::".to_owned(),
             }],
         }),

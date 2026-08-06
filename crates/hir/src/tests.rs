@@ -4914,6 +4914,73 @@ fn turbofish_in_type_position_takes_no_generic_arguments() {
 }
 
 #[test]
+fn bare_angle_generic_mention_gets_only_the_syntax_correction() {
+    // `Boxed<usize>` parses into the same `GENERIC_ARG_LIST` `Boxed::<usize>`
+    // does (G06/X03 — see `syntax::validation`), so hir judges the arguments
+    // it can see: the arity matches, and the ONE diagnostic is the syntax
+    // correction. The bare-mention arity mirror, which would fire on a
+    // `Boxed` with no list at all, never sees this.
+    check_diagnostics(
+        "type Boxed = struct::<T> { value: T };\n\
+         static f = fn (b: Boxed::<usize>) -> usize { b.value };\n\
+         static g = fn (b: Boxed<usize>) -> usize { b.value };",
+        expect![[r#"
+            113..125: generic arguments use the turbofish: write `Boxed::<...>`
+        "#]],
+    );
+}
+
+#[test]
+fn bare_angle_generic_call_gets_only_the_syntax_correction() {
+    // Expression position, the case the heuristic exists for: the call's
+    // arguments are really in the tree, so inference reads them and the
+    // ONE diagnostic is the syntax correction.
+    check_diagnostics(
+        "static f = fn::<T>(x: T) -> T { x };\n\
+         static u = fn () -> usize { f<usize>(3) };",
+        expect![[r#"
+            65..73: generic arguments use the turbofish: write `f::<...>`
+        "#]],
+    );
+}
+
+#[test]
+fn bare_angle_ordering_chain_is_read_as_a_call() {
+    // The heuristic's residual measured where it is paid: `a < b > (d)` is
+    // token-for-token `f::<T>(d)`, is read as the call, and the misread
+    // costs the whole expression rather than one message. No well-typed
+    // program is spelled that way — `a < b` is a `bool` and `>` wants
+    // numbers — so nothing that compiles is traded for it. A comma makes
+    // the shape a working program again, and then the heuristic declines
+    // it (see `syntax`'s `bare_angle_top_level_comma_keeps_the_comparison_reading`).
+    check_diagnostics(
+        "static x = fn (a: usize, b: usize, d: usize) -> bool { a < b > (d) };",
+        expect![[r#"
+            55..62: generic arguments use the turbofish: write `a::<...>`
+            55..62: `a` takes no generic arguments
+            55..62: expression of type `usize` is not callable
+            59..60: unknown type `b`
+        "#]],
+    );
+}
+
+#[test]
+fn bare_angle_on_a_non_generic_type_also_reports_the_arity() {
+    // The honest other half: a non-generic target gets the correction AND
+    // the judgement the correctly-spelled `Boxed::<usize>` gets, because the
+    // arguments are really there in the tree. That is why the worked example
+    // in `examples/errors.must` uses a GENERIC target.
+    check_diagnostics(
+        "type Boxed = struct { value: usize };\n\
+         static f = fn (b: Boxed<usize>) -> usize { b.value };",
+        expect![[r#"
+            56..68: generic arguments use the turbofish: write `Boxed::<...>`
+            56..68: `Boxed` takes no generic arguments (declared here at 5..10)
+        "#]],
+    );
+}
+
+#[test]
 fn generic_const_fn_body_is_a_const_context() {
     check_diagnostics(
         "static f = const fn::<const N: usize>() -> usize { g() };\nstatic g = fn () -> usize { 1 };",

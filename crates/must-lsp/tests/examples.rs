@@ -387,7 +387,14 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |     ^^^^^^^^
                = note: `bump` is defined here (examples/errors.must:284:9)
 
-            found 27 errors and 1 warning
+            error: generic arguments use the turbofish: write `Boxed::<...>`
+              --> examples/errors.must:300:37
+                |
+            300 | static bare_angle_generics = fn (b: Boxed<usize>) -> usize { b.value };
+                |                                     ^^^^^^^^^^^^
+               = help: Insert `::`
+
+            found 28 errors and 1 warning
         "#]],
     );
 }

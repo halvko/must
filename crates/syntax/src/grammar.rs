@@ -693,24 +693,21 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
                 p.bump(COLON2);
                 if p.at(L_ANGLE) {
                     generic_arg_list(p);
-                    // `Option::<usize>::Some` — a variant of a generic
-                    // enum: the turbofish sits on the enum, the variant
-                    // segment follows.
-                    if p.at(COLON2) {
-                        p.bump(COLON2);
-                        if p.at(IDENT) {
-                            name_ref(p);
-                            member_generic_args(p);
-                        } else {
-                            p.error("expected a variant name after `::`");
-                        }
-                    }
+                    trailing_qualified_segment(p);
                 } else if p.at(IDENT) {
                     name_ref(p);
                     member_generic_args(p);
                 } else {
                     p.error("expected a variant name after `::`");
                 }
+            } else if bare_angle_generic_args_expr(p) {
+                // `f<T>(...)` / `f<T>::assoc` — the same bare-angle typo
+                // type position takes, parsed into the same shape and
+                // corrected the same way; only the gate differs, because
+                // `<` is a real operator here and some spellings of a
+                // comparison are indistinguishable from a call.
+                generic_arg_list(p);
+                trailing_qualified_segment(p);
             }
             m.complete(p, PATH_EXPR)
         }
@@ -1273,7 +1270,9 @@ fn arg_list(p: &mut Parser<'_>) {
 }
 
 /// `::<usize, 42, const LEN>` — a turbofish argument list. The caller has
-/// already bumped the `COLON2` and confirmed `p.at(L_ANGLE)`.
+/// confirmed `p.at(L_ANGLE)`; the `::` in front is the caller's business,
+/// and its ABSENCE is exactly what marks the result as the bare-angle typo
+/// for `validation` to correct.
 fn generic_arg_list(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(L_ANGLE);
@@ -1321,6 +1320,140 @@ fn member_generic_args(p: &mut Parser<'_>) {
     p.bump(COLON2);
     generic_arg_list(p);
     m.complete(p, MEMBER_GENERIC_ARGS);
+}
+
+/// The segment that may follow a path's OWNER turbofish
+/// (`Option::<usize>::Some` — a variant of a generic enum; `Pair::<T>::first`
+/// — a member of a generic owner), with its own possible turbofish. A no-op
+/// when no `::` follows.
+fn trailing_qualified_segment(p: &mut Parser<'_>) {
+    if !p.at(COLON2) {
+        return;
+    }
+    p.bump(COLON2);
+    if p.at(IDENT) {
+        name_ref(p);
+        member_generic_args(p);
+    } else {
+        p.error("expected a variant name after `::`");
+    }
+}
+
+/// Whether the `<` the caller is sitting on (right after a bare name in
+/// expression position) is the bare-angle typo for `::<` rather than a
+/// comparison — a pure lookahead, consuming nothing, so the caller parses
+/// the group with [`generic_arg_list`] exactly as the correctly-spelled
+/// path does (X03: the never-legal-but-recognizable form gets its real tree
+/// shape and a later correction, not a bespoke recovery node).
+///
+/// Type position needs no gate at all; expression position does, because
+/// `<` is a real operator here and `a < b` closes just as cleanly as
+/// `f<T>`. So this fires only on an angle-balanced group followed by `::`
+/// (a further qualified segment — nothing valid puts `::` after a
+/// comparison) or by `(` (a generic call), and the call shape additionally
+/// requires the group to hold no top-level comma.
+///
+/// That comma is the whole difference between a misread and a broken
+/// program: `g(a < b, c > (d))` — two comparisons as call arguments,
+/// legal and well-typed — is otherwise token-for-token a one-argument call
+/// on `a::<b, c>`. Refusing it costs only the correction on a
+/// MULTI-argument bare-angle call (`f<A, B>(x)`, left to read as
+/// comparisons, as at any earlier commit). What remains ambiguous is
+/// `a < b > (d)`, deliberately read as the call: `a < b` is a `bool` and
+/// `>` wants numbers, so no well-typed program is spelled that way, while
+/// the call is a typo people really make.
+fn bare_angle_generic_args_expr(p: &Parser<'_>) -> bool {
+    let Some(group) = scan_bare_angle_group(p) else {
+        return false;
+    };
+    match p.nth(group.len) {
+        COLON2 => true,
+        L_PAREN => !group.top_level_comma,
+        _ => false,
+    }
+}
+
+/// A balanced `<...>` group found by [`scan_bare_angle_group`].
+struct BareAngleGroup {
+    /// Token count from the opening `<` through its match: `p.nth(len)` is
+    /// the first token past the group.
+    len: usize,
+    /// Whether a `,` separates arguments at the group's own level.
+    top_level_comma: bool,
+}
+
+/// Bounded, token-only lookahead from an opening `<`: the group running
+/// from that `<` through its match, or `None` if no match is in reach.
+///
+/// Everything except the scan bound and `EOF` is judged at nest 0 — outside
+/// any paren, bracket or brace pair opened after the `<`. Angles included:
+/// a `>` deeper in closes nothing here (`a < f(b > (c))` is a comparison
+/// around a call whose argument is another one, not a group), while a real
+/// argument's own angles balance within it, so ignoring them costs nothing.
+///
+/// Parens and brackets nest legitimately inside an argument (`Vec<[T; 4]>`,
+/// `Vec<fn(T) -> U>`); braces do not on their own — an ordinary block would
+/// swallow the rest of a function body hunting for a `>` — so only the two
+/// legal shapes, `const { ... }` and `struct { ... }`, are let through, by
+/// peeking back at the keyword that must introduce them.
+///
+/// Bails on: the scan bound (a `<` this far from any `>` was never a
+/// turbofish); `EOF`; a brace that is not one of those two shapes; or, at
+/// nest 0, a comparison operator, a `=>`, a `;`, or a statement/item
+/// keyword — none of which can appear at an argument list's own level,
+/// though all are ordinary content deeper in.
+fn scan_bare_angle_group(p: &Parser<'_>) -> Option<BareAngleGroup> {
+    const SCAN_BOUND: usize = 128;
+    if !p.at(L_ANGLE) {
+        return None;
+    }
+    let mut angle = 0i32;
+    let mut nest = 0i32;
+    let mut top_level_comma = false;
+    for k in 0..SCAN_BOUND {
+        match p.nth(k) {
+            EOF => return None,
+            L_ANGLE if nest == 0 => angle += 1,
+            R_ANGLE if nest == 0 => {
+                angle -= 1;
+                if angle == 0 {
+                    return Some(BareAngleGroup {
+                        len: k + 1,
+                        top_level_comma,
+                    });
+                }
+            }
+            L_PAREN | L_BRACKET => nest += 1,
+            R_PAREN | R_BRACKET => {
+                nest -= 1;
+                if nest < 0 {
+                    return None;
+                }
+            }
+            L_BRACE if k > 0 && matches!(p.nth(k - 1), CONST_KW | STRUCT_KW) => nest += 1,
+            L_BRACE => return None,
+            R_BRACE => {
+                nest -= 1;
+                if nest < 0 {
+                    return None;
+                }
+            }
+            COMMA if angle == 1 && nest == 0 => top_level_comma = true,
+            // `&T`, `@a + @b`, `Self = T`, `fn(T) -> U` are all legal at an
+            // argument list's own level; the equality/ordering operators and
+            // a match arm's `=>` are not, so finding one there means this was
+            // a chain of comparisons. Inside a `const { a == b }` argument
+            // they are ordinary content, which is why this arm — like the
+            // angle counters and every bail but the brace — reads `nest`.
+            EQ2 | NEQ | LTEQ | GTEQ | FAT_ARROW if nest == 0 => return None,
+            SEMICOLON if nest == 0 => return None,
+            STATIC_KW | TRAIT_KW | TYPE_KW | LET_KW | WITH_KW | IMPL_KW | FOR_KW if nest == 0 => {
+                return None;
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// One turbofish argument. Disambiguated by form, not by the declaration
@@ -1774,10 +1907,9 @@ fn type_core(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         IDENT => {
             let m = p.start();
             name_ref(p);
-            // `Shape::Circle` in type position: a variant type. `Pair::<T>`
-            // in type position: a generic type mention (future — no generic
-            // type declarations exist yet, but the syntax parses uniformly
-            // with the expression side).
+            // `Shape::Circle` in type position: a variant type. `Pair::<T>`:
+            // a generic type mention, spelled the same as on the expression
+            // side.
             if p.at(COLON2) {
                 p.bump(COLON2);
                 if p.at(L_ANGLE) {
@@ -1787,6 +1919,18 @@ fn type_core(p: &mut Parser<'_>) -> Option<CompletedMarker> {
                 } else {
                     p.error("expected a variant name after `::`");
                 }
+            } else if p.at(L_ANGLE) {
+                // `Pair<T>` — the bare-angle typo for `Pair::<T>` (Rust
+                // muscle memory), permanently illegal under G06 but
+                // perfectly recognizable, so X03 applies: parse it into the
+                // real shape it means — the very `GENERIC_ARG_LIST` the
+                // turbofish spelling builds — and let `validation` CORRECT
+                // the missing `::`. Unambiguous in type position (there is
+                // no comparison operator here), and no lookahead is needed
+                // to bound an unclosed `Pair<`: `generic_arg_list`'s own
+                // no-progress break and `expect_after_prev(R_ANGLE)` end it
+                // exactly where `Pair::<` mid-typing ends.
+                generic_arg_list(p);
             }
             m.complete(p, PATH_TYPE)
         }

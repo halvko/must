@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 27 errors and 1 warning.
+// exactly: found 28 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -288,3 +288,13 @@ static owned_receiver = fn () -> () {
     let mut c = Counter(struct { n = 1 });
     c.bump()
 };
+
+// 29. The bare-angle generics typo. `::<...>` applies generic arguments
+//     everywhere, so `Boxed<usize>` is a permanent mistake rather than a
+//     form waiting to be granted — the parser reads it as the turbofish it
+//     plainly means (the arguments are checked exactly as `Boxed::<usize>`'s
+//     are) and the diagnostic names the missing `::`.
+//     error: generic arguments use the turbofish: write `Boxed::<...>`
+//     quick fix offered: "Insert `::`"
+type Boxed = struct::<T> { value: T };
+static bare_angle_generics = fn (b: Boxed<usize>) -> usize { b.value };
