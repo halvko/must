@@ -354,6 +354,25 @@ pub enum Const {
     Builtin(Builtin),
     /// A `fn` literal; its code is in [`MirLowered::bodies`] of the same item.
     Fn(BodyId),
+    /// A HOST IMPORT — the value of `static name = extern fn(...) -> T;`.
+    ///
+    /// There is no body to point at, so the constant carries the
+    /// DECLARATION instead: the item that declares the import — whose name
+    /// is the name the host is asked for, deliberately, since the
+    /// declaration is the whole contract and no symbol-override surface
+    /// exists to disagree with it — and the signature it was asked with.
+    ///
+    /// The SIGNATURE rides along rather than being re-derived at the call
+    /// from argument values or the destination local, because a host has to
+    /// judge the DECLARATION — including the parts no argument value can
+    /// show it, like a buffer pointer's pointee type. Record, don't
+    /// re-derive. Keeping the whole `ItemLoc` rather than just its name is
+    /// the same rule once more: a backend that must reject a declaration
+    /// can then point at it.
+    ExternFn {
+        decl: ItemLoc,
+        sig: hir::FnTy,
+    },
     /// A `const { … }` block — or a turbofish const argument, which is the
     /// same thing (a compile-time expression body; see
     /// [`MirLowered::const_args`]): the referenced body (in the same

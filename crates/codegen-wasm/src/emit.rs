@@ -28,6 +28,8 @@ use mir::{
     TerminatorKind,
 };
 
+use rustc_hash::FxHashMap;
+
 use crate::layout::{self, EqSlot, Unsupported};
 use crate::mono::{CallTarget, InstanceKey, Mono, Refusal};
 use crate::wasm::{FuncBody, ValType};
@@ -62,6 +64,11 @@ pub struct Emitter<'a, 'db> {
     pub panic_len: u32,
     /// Function index per registered instance, by registration order.
     pub func_indices: &'a [u32],
+    /// Function index per HOST IMPORT, keyed by the name the module imports
+    /// under — the declaring `static`'s own name. Declared before any
+    /// defined function (imports own the low index space), so this map is
+    /// complete before the first body is written.
+    pub extern_imports: &'a FxHashMap<String, u32>,
 }
 
 /// Per-function emission state.
@@ -793,7 +800,12 @@ impl<'a, 'db> Emitter<'a, 'db> {
         origin: ExprId,
     ) -> Result<Vec<i64>, Refusal> {
         match konst {
-            Const::Unit | Const::Fn(_) | Const::Builtin(_) => Ok(Vec::new()),
+            // A callee is a compile-time identity, not data: zero slots.
+            // An import is one too — its name is resolved at link time, so
+            // there is nothing to lay out here either.
+            Const::Unit | Const::Fn(_) | Const::ExternFn { .. } | Const::Builtin(_) => {
+                Ok(Vec::new())
+            }
             Const::Int(value) => Ok(vec![value.to_i128() as i64]),
             Const::Bool(value) => Ok(vec![i64::from(*value)]),
             // One slot holding the scalar value, exactly as an integer
@@ -852,7 +864,9 @@ impl<'a, 'db> Emitter<'a, 'db> {
             )
         };
         match value {
-            Value::Unit | Value::Fn(_) | Value::Builtin(_) => Ok(Vec::new()),
+            Value::Unit | Value::Fn(_) | Value::ExternFn { .. } | Value::Builtin(_) => {
+                Ok(Vec::new())
+            }
             Value::Int(int) => Ok(vec![int.to_i128() as i64]),
             Value::Bool(b) => Ok(vec![i64::from(*b)]),
             Value::Char(c) => Ok(vec![i64::from(u32::from(*c))]),
@@ -1406,38 +1420,8 @@ impl<'a, 'db> Emitter<'a, 'db> {
                         return Ok(());
                     }
                     Some(CallTarget::Instance(callee)) => {
-                        let mut pushed = 0;
-                        for op in args {
-                            let (src, ty) = self.operand(ctx, op, origin)?;
-                            let width = self.slots(ctx, &ty, origin)?;
-                            self.push_range(ctx, &src, 0, width, origin)?;
-                            pushed += width;
-                        }
-                        // Defense in depth. Under the dispatch-loop shape
-                        // stray operands are LEGALLY abandoned at every
-                        // block exit, so a module whose call arity is
-                        // wrong still validates and quietly computes with
-                        // the wrong values — a wasm engine's own
-                        // validation cannot catch it (a type argument
-                        // mis-derived as the dummy `()`, for instance,
-                        // would otherwise pass silently; see
-                        // `a_fn_literal_passed_to_a_generic_keeps_its_own_return_type`
-                        // in tests/differential.rs). An argument list that
-                        // does not fill the callee's parameters is a bug
-                        // in this backend, and it stops here instead of
-                        // shipping.
-                        let expected = self.signature(&callee)?.0.len() as u32;
-                        if pushed != expected {
-                            return Err(Refusal::new(
-                                format!(
-                                    "this call (the backend built {pushed} argument slot(s) \
-                                     for a function taking {expected} — that is a bug in the \
-                                     wasm backend, not in your program)"
-                                ),
-                                &ctx.loc,
-                                origin,
-                            ));
-                        }
+                        let (params, results) = self.signature(&callee)?;
+                        let (expected, results) = (params.len() as u32, results.len() as u32);
                         let Some(slot) = self.mono.func_index(&callee) else {
                             return Err(Refusal::new(
                                 "a call to a function that was never registered",
@@ -1445,26 +1429,46 @@ impl<'a, 'db> Emitter<'a, 'db> {
                                 origin,
                             ));
                         };
-                        ctx.body.call(self.func_indices[slot as usize]);
-                        // The callee's result count and the destination's
-                        // width can genuinely differ: inference recovers a
-                        // mismatch by trusting an annotation, so a call to
-                        // a `!`-returning function can be *typed* by the
-                        // expectation at its use site. Reconcile — the
-                        // surplus code is dead either way, since such a
-                        // call never returns.
-                        let results = self.signature(&callee)?.1.len() as u32;
-                        let width = ctx.slots[raw(dest)];
-                        let base = ctx.base[raw(dest)];
-                        for _ in width..results {
-                            ctx.body.drop_();
-                        }
-                        for _ in results..width {
-                            ctx.body.i64_const(0);
-                        }
-                        for slot in (0..width).rev() {
-                            ctx.body.local_set(base + slot);
-                        }
+                        let index = self.func_indices[slot as usize];
+                        self.direct_call(
+                            ctx,
+                            args,
+                            *dest,
+                            origin,
+                            index,
+                            expected,
+                            results,
+                            "a function",
+                        )?;
+                    }
+                    // A host import: ordinary arguments, ordinary `call`,
+                    // ordinary results — the whole difference from a
+                    // defined function is which index space the callee
+                    // lives in.
+                    Some(CallTarget::Extern {
+                        name,
+                        params,
+                        results,
+                        ..
+                    }) => {
+                        let Some(&index) = self.extern_imports.get(&name) else {
+                            return Err(Refusal::new(
+                                format!("the host import `{name}` (it was never declared)"),
+                                &ctx.loc,
+                                origin,
+                            ));
+                        };
+                        let what = format!("the host import `{name}`");
+                        self.direct_call(
+                            ctx,
+                            args,
+                            *dest,
+                            origin,
+                            index,
+                            params.len() as u32,
+                            results.len() as u32,
+                            &what,
+                        )?;
                     }
                     Some(CallTarget::Refused(refusal)) => return Err(refusal),
                     None => {
@@ -1519,6 +1523,71 @@ impl<'a, 'db> Emitter<'a, 'db> {
                 Ok(())
             }
         }
+    }
+
+    /// Emit one direct `call`: push the arguments, guard the arity, call
+    /// `index`, and reconcile the callee's result count with the
+    /// destination's width. A defined function and a host import differ
+    /// only in which index space `index` came from, so they share this.
+    ///
+    /// The arity guard is defense in depth. Under the dispatch-loop shape
+    /// stray operands are LEGALLY abandoned at every block exit, so a
+    /// module whose call arity is wrong still validates and quietly
+    /// computes with the wrong values — a wasm engine's own validation
+    /// cannot catch it (a type argument mis-derived as the dummy `()`, for
+    /// instance, would otherwise pass silently; see
+    /// `a_fn_literal_passed_to_a_generic_keeps_its_own_return_type` in
+    /// tests/differential.rs). An argument list that does not fill the
+    /// callee's parameters is a bug in this backend, and it stops here
+    /// instead of shipping.
+    #[allow(clippy::too_many_arguments)]
+    fn direct_call(
+        &mut self,
+        ctx: &mut Ctx<'db>,
+        args: &[Operand],
+        dest: LocalId,
+        origin: ExprId,
+        index: u32,
+        expected: u32,
+        results: u32,
+        callee: &str,
+    ) -> Result<(), Refusal> {
+        let mut pushed = 0;
+        for op in args {
+            let (src, ty) = self.operand(ctx, op, origin)?;
+            let width = self.slots(ctx, &ty, origin)?;
+            self.push_range(ctx, &src, 0, width, origin)?;
+            pushed += width;
+        }
+        if pushed != expected {
+            return Err(Refusal::new(
+                format!(
+                    "this call (the backend built {pushed} argument slot(s) for {callee} \
+                     taking {expected} — that is a bug in the wasm backend, not in your \
+                     program)"
+                ),
+                &ctx.loc,
+                origin,
+            ));
+        }
+        ctx.body.call(index);
+        // The callee's result count and the destination's width can
+        // genuinely differ: inference recovers a mismatch by trusting an
+        // annotation, so a call to a `!`-returning function can be *typed*
+        // by the expectation at its use site. Reconcile — the surplus code
+        // is dead either way, since such a call never returns.
+        let width = ctx.slots[raw(dest)];
+        let base = ctx.base[raw(dest)];
+        for _ in width..results {
+            ctx.body.drop_();
+        }
+        for _ in results..width {
+            ctx.body.i64_const(0);
+        }
+        for slot in (0..width).rev() {
+            ctx.body.local_set(base + slot);
+        }
+        Ok(())
     }
 
     fn goto(&mut self, ctx: &mut Ctx<'db>, target: BlockId) {

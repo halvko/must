@@ -216,7 +216,13 @@ pub enum ExprData {
         is_const: bool,
         params: Vec<Param>,
         ret_type: Option<TypeRef>,
-        body: ExprId,
+        /// `None` for an `extern fn`, and only for an `extern fn` — a HOST
+        /// IMPORT declaration rather than a definition, and the one fn
+        /// literal in the language with nothing to check, lower or run. An
+        /// extern literal is exactly a signature: it has no body, because
+        /// the code it names is on the other side of the boundary, so
+        /// `None` IS the fact and nothing else records it.
+        body: Option<ExprId>,
     },
     /// `match scrutinee { arms }`. Typing-wise the arms are witnesses of
     /// one join (like `if`/`else` branches); dispatch-wise MIR decides
@@ -905,7 +911,17 @@ impl LowerCtx {
                 let ret_type = it
                     .ret_type()
                     .map(|rt| rt.ty().map(TypeRef::from_ast).unwrap_or(TypeRef::Error));
-                let body = self.lower_opt_expr(it.body());
+                // `None` IS the import, so an IMPORT only ever exists where
+                // the declaration is well formed — see
+                // `ast::FnLiteral::declares_host_import`. A written body, or
+                // a placement that gives the import no name of its own, is
+                // already a syntax error; lowering it as an import anyway
+                // would launder that error into a host refusal at run time
+                // ("no host implementation for `bad`"), which blames the
+                // wrong side of a boundary the program never crossed. The
+                // superset rule applies instead: keep what the user wrote,
+                // and a missing body lowers to `Missing` like any other.
+                let body = (!it.declares_host_import()).then(|| self.lower_opt_expr(it.body()));
                 self.alloc_expr(
                     ExprData::FnLiteral {
                         is_const,

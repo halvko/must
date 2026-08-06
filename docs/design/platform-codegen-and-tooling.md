@@ -5,30 +5,52 @@
 - **P01** Three layers, and the platform owns `main`. Layer 0 is bare: no platform, no
   effects; purity is checkable by a symbol scan. Layer 1 is platform hooks: effects are
   platform imports, so a host that does not provide a hook has statically denied the
-  capability. Layer 2 is batteries: day-to-day users write what they write today and never
-  learn the word "platform"; embedders replace layer 2, not the language. Const check's "no
-  effects in const contexts" is the same judgment at a different boundary.
+  capability, and a program declares its own hooks with `extern fn` (P05). Layer 2 is
+  batteries: day-to-day users write what they write today and never learn the word "platform";
+  embedders replace layer 2, not the language. Const check's "no effects in const contexts" is
+  the same judgment at a different boundary.
 - **P02** The embeddability checklist, an acceptance test for any memory, FFI or platform
   ruling: no process-global mutable state, many instances per process; the host supplies the
   allocator at instantiation through one small uniform interface; deterministic teardown;
   errors cross a registered boundary and never unwind host frames; no raw pointers cross the
   boundary; no ambient authority. Items 1 and 3 rule out tracing GC and pervasive refcounting;
   item 4 is why traps map to a panic hook.
-- **P06** The wasm backend. A compiled module's entire host dependency is one import: no
-  allocator, no GC, no unwinder, no scheduler, no support library, no start function, no
-  runtime initialization; statics are const-evaluated at compile time and baked in. The
-  encoder is hand-rolled with no runtime dependencies. Monomorphization happens at codegen,
-  licensed by X11, and a differential harness makes the law executable: every supported
-  example and targeted programs run under the interpreter and a real engine, asserting
-  identical output, termination kind, trap reason and decoded value. Dictionaries resolve
-  away completely; overflow checks are emitted at every width; records and enums get an
-  internal, unspecified layout. Unsupported constructs refuse by name, pointing at the
-  source; the backend must never miscompile silently. Monomorphization's own limits are
-  refusals too: a body that recurs at an ever-new instantiation of itself is named after a
-  fixed number of re-entries counted across the whole cycle (polymorphic recursion), and a
-  call chain too deep to walk safely — even one with nothing recursive in it — is refused by
-  depth alone. Both are refused by name before the walk can exhaust the stack budget
-  `compile` documents (8 MiB), which its callers are contracted to provide.
+- **P05** Host imports: the declaration is the whole contract. `static name = extern fn(...)
+  -> T;` — `extern` rides `const`'s modifier slot on the fn literal, there is no body, and an
+  unwritten return type means `()`. The item's own name is the import's field name, the module
+  is `must` (`print`'s sibling), and the written signature is the one machine signature the
+  host must provide. Four forms are rejected, each restating that one sentence: a body, `const
+  extern fn`, generic binders, and anywhere but a `static`'s initializer. There is no
+  symbol-override surface: config here would be a second place for the truth to live. Calling
+  an import requires `unsafe` for the same reason a raw deref does — what it does is written
+  in a language this compiler never sees — and so does taking one as a value, because once it
+  is bound the call site says only that something is being called, so the last place a reader
+  can see which import is in play is where the value is taken. Imports stay first-class; they
+  are priced, not removed. The compiler validates no import signature, since a compiler that
+  did would have to know every host, which is the coupling `extern` exists to avoid; each host
+  judges the full declaration at the call and refuses by name. The constant carries the
+  declared signature rather than a host re-deriving it from argument values, because no
+  argument value can carry a pointee type: a value-inspecting host would fill a boolean array
+  with bytes and mint values the type system says cannot exist. Names the compiler already
+  imports are reserved, and the reserved set is the module's own import list, so a new builtin
+  import reserves itself. Claiming a reserved name is rejected, not "unsupported": two imports
+  of one (module, field) is a module an engine resolves twice, a silent-wrong-answer class.
+- **P06** The wasm backend. A compiled module's entire host dependency is one builtin import,
+  plus the imports the program itself declares (P05): no allocator, no GC, no unwinder, no
+  scheduler, no support library, no start function, no runtime initialization; statics are
+  const-evaluated at compile time and baked in. The encoder is hand-rolled with no runtime
+  dependencies. Monomorphization happens at codegen, licensed by X11, and a differential
+  harness makes the law executable: every supported example and targeted programs run under
+  the interpreter and a real engine, asserting identical output, termination kind, trap reason
+  and decoded value. Dictionaries resolve away completely; overflow checks are emitted at
+  every width; records and enums get an internal, unspecified layout. Unsupported constructs
+  refuse by name, pointing at the source; the backend must never miscompile silently.
+  Monomorphization's own limits are refusals too: a body that recurs at an ever-new
+  instantiation of itself is named after a fixed number of re-entries counted across the whole
+  cycle (polymorphic recursion), and a call chain too deep to walk safely — even one with
+  nothing recursive in it — is refused by depth alone. Both are refused by name before the
+  walk can exhaust the stack budget `compile` documents (8 MiB), which its callers are
+  contracted to provide.
 - Findings from the wasm backend that bind later work. MIR's erasure forces the backend to
   re-derive type arguments by unification, which is inference done twice and incomplete in
   principle (X10); the pre-mono LIR is where the fix belongs. MIR field order is name-sorted
@@ -107,6 +129,9 @@
   cannot represent heap allocations. **P11**
 - **`{` as a completion trigger character** — fired the template at the least wanted moment;
   replaced by the quick fix on the non-exhaustive-match diagnostic. **P12**
+- **`print` as an ordinary declared import** — `str`'s (offset, length) pair is a platform ABI
+  this backend decided by accident, and no user-written signature can spell it today.
+  **P03 P05**
 
 ## Re-evaluate when
 
@@ -117,8 +142,12 @@
   convention, and "dictionaries resolve away completely" ends. **P06**
 - **An LIR is built** — the wasm backend's re-derived type arguments get fixed there, and
   guaranteed optimizations live there instead of being hoped for. **P08**
+- **FFI is designed** — it owns the `extern` surface, symbol mangling, export units, and
+  whether Must can claim no-alias equivalents on a native backend. **P05**
 - **The `str` platform ABI gets a second customer** — decide it on purpose before anything
   else depends on it. **P06**
+- **Unsafe function types are ruled** — whether taking an import as a value stays priced with
+  `unsafe`, or the gate moves to the value's type. **P05**
 - **The editor extension gains a tree-sitter grammar** — the client then
   re-indents multi-line snippet bodies and the template's absolute indentation
   doubles. One function to fix; recorded because nobody would connect the
@@ -127,9 +156,9 @@
   step deep (hierarchy and perf unresolved), and importable enums, moot
   until modules exist. Streaming is unavailable; the protocol's only
   mechanism is marking a list incomplete so the client re-queries. **P12**
-- **A host-import surface lands** — whether line delimiting, CRLF stripping and telling a
-  blank line from end of input belong in the compiler at all, or in Must code over a
-  byte-moving import with `read_line` kept as the convenience. **P04**
+- **`read_line` is still a builtin beside the declared `read` (P05)** — decide whether line
+  delimiting, CRLF stripping and telling a blank line from end of input belong in the compiler
+  at all, or in Must code over the import with `read_line` kept as the convenience. **P04**
 - **Two open debug-adapter bugs**, not decisions: with loops and unfueled run mode an infinite
   loop hangs the session with no interrupt path; and breakpoint arrivals are deduped by
   frame/line/column, so a breakpoint in a loop body fires once per frame. **P11**

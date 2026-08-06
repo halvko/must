@@ -12,9 +12,11 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
     let mut errors = Vec::new();
     for node in root.descendants() {
         if let Some(fn_literal) = ast::FnLiteral::cast(node.clone()) {
-            // The parser reports "expected `{`" itself when the body is
-            // absent entirely.
-            if let Some(body) = fn_literal.body() {
+            if fn_literal.is_extern() {
+                validate_extern_fn(&fn_literal, &mut errors);
+            } else if let Some(body) = fn_literal.body() {
+                // The parser reports "expected `{`" itself when the body is
+                // absent entirely.
                 require_block(&body, BRACE_RULE, &mut errors);
             }
             reject_nested_generic_binder(&fn_literal, &mut errors);
@@ -1237,6 +1239,77 @@ fn reject_stray_type_binder(
         range: list.syntax().text_range(),
         fix: None,
     });
+}
+
+/// `static name = extern fn(...) -> T;` — a host import declaration.
+///
+/// Everything rejected here is rejected because the DECLARATION IS THE WHOLE
+/// CONTRACT: the item's name is the import's field name, its signature is the
+/// one machine signature the host must provide, and there is no body because
+/// the body lives on the other side of the boundary.
+fn validate_extern_fn(fn_literal: &ast::FnLiteral, errors: &mut Vec<SyntaxError>) {
+    if let Some(body) = fn_literal.body() {
+        errors.push(SyntaxError {
+            message: "an `extern fn` declares a host import and has no body; \
+                      the implementation lives on the other side of the boundary"
+                .to_owned(),
+            range: body.syntax().text_range(),
+            fix: Some(Fix {
+                label: "Remove the body".to_owned(),
+                edits: vec![TextEdit {
+                    range: body.syntax().text_range(),
+                    insert: String::new(),
+                }],
+            }),
+        });
+    }
+    if let Some(const_token) = fn_literal.const_token() {
+        errors.push(SyntaxError {
+            message: "an `extern fn` cannot be `const`: a host import is a call \
+                      out of the program, and const evaluation has no host"
+                .to_owned(),
+            range: const_token.text_range(),
+            fix: None,
+        });
+    }
+    if let Some(binders) = fn_literal.generic_param_list() {
+        errors.push(SyntaxError {
+            message: "an `extern fn` cannot be generic: an import has exactly one \
+                      machine signature, and there is nothing to monomorphize it into"
+                .to_owned(),
+            range: binders.syntax().text_range(),
+            fix: None,
+        });
+    }
+    // The import's field name IS the item's name, so an anonymous `extern fn`
+    // — one that is not a top-level `static`'s initializer — has no name to
+    // import under. `const` is rejected with it: `const` is copied per
+    // mention and an import is one identity.
+    let parent = fn_literal.syntax().parent();
+    // `unsafe extern fn` already draws the `unsafe fn` reservation on the
+    // wrapping node; a second error about placement would be noise.
+    if parent
+        .as_ref()
+        .is_some_and(|p| p.kind() == SyntaxKind::UNSAFE_BLOCK_EXPR)
+    {
+        return;
+    }
+    let placed_well = parent
+        .and_then(ast::StaticItem::cast)
+        .is_some_and(|item| !item.is_const());
+    if !placed_well {
+        let range = fn_literal
+            .extern_token()
+            .map_or_else(|| fn_literal.syntax().text_range(), |t| t.text_range());
+        errors.push(SyntaxError {
+            message: "an `extern fn` must be a `static`'s initializer — \
+                      `static name = extern fn(...) -> T;` — because the item's \
+                      name is the name the host is asked for"
+                .to_owned(),
+            range,
+            fix: None,
+        });
+    }
 }
 
 /// The grammar parses any expression where the language requires a block;

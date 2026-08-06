@@ -1491,15 +1491,88 @@ reads `End` — there is no DAP console-input round trip to source a line
 from) and the editor's ▶ run lens (its result is a toast message, not a
 terminal). Neither hangs waiting for input that can never arrive.
 
+== Host imports
+
+`print` and `read_line` are builtins: the compiler knows their names. A
+program can also declare a host import of its own, and the compiler learns
+nothing at all about what it does:
+
+```must
+static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;
+```
+
+`extern` sits exactly where `const` sits on a fn literal, and the literal
+has no body — the implementation is on the other side of the boundary. The
+DECLARATION IS THE WHOLE CONTRACT: the item's own name is the name the host
+is asked for (a compiled module imports it as `must.read`, `must.print`'s
+sibling), and the signature written here is the one machine signature the
+host must provide. An unwritten return type means `()`, since there is no
+body to infer one from. Four things follow, and each is the same sentence
+from a different side — an `extern fn` may not have a body, may not be
+`const`, may not be generic, and must be a `static`'s initializer.
+
+Calling one requires `unsafe` — and so does taking one as a value:
+
+```must
+static f = fn (p: u8.&raw mut) -> isize { unsafe { read(p, 8) } };
+static g = fn () -> () { let h = unsafe { read }; };
+```
+
+The reason is the boundary itself. A raw-pointer deref needs the marker
+because misusing it is undefined behavior; an import needs it because what
+it does is written in a language this compiler never sees, so nothing on
+this side can establish that calling it is sound. You vouch, which is what
+the marker has always meant.
+
+The value-position half is what keeps that promise. Once an import is bound
+to a name, the call site says only that *something* is being called — so the
+last place a reader can see which import is in play is where the value is
+taken, and that is where the marker belongs. An import is still an ordinary
+function value: you can bind it, pass it, return it. You just say so.
+
+Calling one in a const context is an error for the same reason `print` is:
+there is no host at compile time.
+
+The *compiler* checks no import's signature against any host — one that did
+would have to know every host, which is the coupling `extern` exists to
+avoid. What happens instead is that each host answers for itself, and does it
+thoroughly. The interpreter provides exactly one primitive, `read`, the
+POSIX-shaped byte read: it fills the caller's buffer with at most `len` bytes
+and answers a count, `0` at end of input, or a negative `-errno`. A short
+read is real and is not end of input. The count comes back as a signed
+machine word, so both `isize` (which is what POSIX calls it) and `i64` are
+accepted and the answer arrives in whichever you asked for.
+
+Declare it any other way — a buffer that is not a mutable pointer to bytes, a
+length that is not a `usize` — and the call refuses, naming the signature this
+host does have. That check is the declaration's, not the arguments': a buffer
+of eight fresh `bool`s and a buffer of eight fresh bytes are indistinguishable
+at run time, so only the type you wrote can say which one you meant.
+
+An import the interpreter does not provide is refused by name when it is
+called, rather than silently doing nothing:
+
+```
+runtime error: no host implementation for the import `launch_missiles`
+  — the interpreter provides `read` and nothing else
+```
+
+A compiled module has its own reservation: `must.print` is already imported
+for the builtin `print`, so an `extern fn` may not claim that name — a module
+cannot import one name twice.
+
 == Running compiled modules
 
-A compiled module expects exactly one import, `must.print(ptr, len)`, and
-exports one function, `main` (the entry expression compiled in, chosen
-with `must-lsp compile -e <expression>`, default `main()`). Two tools in
-`tools/` run one: `wasm-run.mjs` from the command line, `playground.html`
-by opening it in a browser and dropping the file on it — `file://` works,
-no server needed. Neither is a WASI runtime: a general-purpose engine such
-as wasmtime or wasmer will not run these modules as-is.
+A compiled module's imports are `must.print(ptr, len)` plus whatever
+`extern fn` declarations the program itself made, and it exports one
+function, `main` (the entry expression compiled in, chosen with `must-lsp
+compile -e <expression>`, default `main()`). Two tools in `tools/` run one:
+`wasm-run.mjs` from the command line, `playground.html` by opening it in a
+browser and dropping the file on it — `file://` works, no server needed.
+Both wire the builtin import and nothing else, so a program with imports of
+its own needs a host that knows them. Neither is a WASI runtime: a
+general-purpose engine such as wasmtime or wasmer will not run these
+modules as-is.
 
 On a clean return both print the raw ABI result slots — a `.wasm` file
 carries no type information, so this is not the typed `Display`

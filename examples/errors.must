@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 30 errors and 1 warning.
+// exactly: found 32 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -316,3 +316,20 @@ static retired_prefix_borrow = fn () -> () {
     let x: usize = 1;
     let r = &x;
 };
+
+// 32. A host import called without the marker. `extern fn` declares a call
+//     OUT of the program, and what it does is written in a language this
+//     compiler never sees — so nothing on this side can establish that the
+//     call is sound, and the caller vouches with `unsafe` exactly as it
+//     does for a raw-pointer deref (21 above).
+//     error: calling the host import `host_read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
+static host_read = extern fn(buf: u8.&raw mut, len: usize) -> isize;
+static unvouched_import = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
+
+// 33. An `extern fn` with a body. The declaration is the whole contract:
+//     the item's name is the name the host is asked for and the signature
+//     is what the host must provide, so there is nothing here to define —
+//     the implementation lives on the other side of the boundary.
+//     error: an `extern fn` declares a host import and has no body; the implementation lives on the other side of the boundary
+//     quick fix offered: "Remove the body"
+static import_with_a_body = extern fn(n: usize) -> usize { n };

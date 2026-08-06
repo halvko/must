@@ -683,6 +683,32 @@ impl FnLiteral {
     pub fn is_const(&self) -> bool {
         self.const_token().is_some()
     }
+    /// The `extern` marker of a host-import declaration, if present. It
+    /// rides the same modifier slot `const` does, so an `extern fn` is one
+    /// `FN_LITERAL` node — the only structural difference is that it has no
+    /// [`Self::body`].
+    pub fn extern_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, EXTERN_KW)
+    }
+    pub fn is_extern(&self) -> bool {
+        self.extern_token().is_some()
+    }
+    /// Whether this literal actually DECLARES a host import: the `extern`
+    /// marker, no body, and the placement that gives the import its name —
+    /// a non-`const` `static`'s initializer. Validation reports the missing
+    /// body and the misplacement separately; lowering asks the whole
+    /// question at once, because an import that is not well formed would be
+    /// refused at run time under a name (the enclosing item's) the program
+    /// never declared.
+    pub fn declares_host_import(&self) -> bool {
+        self.is_extern()
+            && self.body().is_none()
+            && self
+                .syntax()
+                .parent()
+                .and_then(StaticItem::cast)
+                .is_some_and(|item| !item.is_const())
+    }
     /// The generic binder (`fn::<T, const N: usize>`), when present; hir
     /// lowers it.
     pub fn generic_param_list(&self) -> Option<GenericParamList> {

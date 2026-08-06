@@ -41,6 +41,20 @@ pub enum Value {
     /// like every other scalar's.
     Char(char),
     Fn(FnValue),
+    /// A HOST IMPORT's value — what `static name = extern fn(...) -> T;`
+    /// evaluates to. There is no body on this side of the boundary, so it
+    /// carries what a host judges instead: the declaring item, whose name is
+    /// the name the host is asked for, and the SIGNATURE it was asked with.
+    /// Callable exactly like [`Value::Fn`] and [`Value::Builtin`], and like
+    /// them it is opaque to display.
+    ///
+    /// The signature travels WITH the value rather than being read off the
+    /// call site, so a host's judgement is the same whether the import is
+    /// called by name or through a binding.
+    ExternFn {
+        decl: ItemLoc,
+        sig: hir::FnTy,
+    },
     Builtin(Builtin),
     /// A record value: fields sorted by name, matching `Ty::Record` and
     /// `mir::AggregateKind::Record`'s canonical order. The derived
@@ -250,6 +264,10 @@ impl std::hash::Hash for Value {
             Value::Char(c) => c.hash(state),
             // Discriminant only — see the impl comment.
             Value::Fn(_) => {}
+            // The DECLARATION is the identity; a signature is a fact about
+            // the declaration it already picks out. Hashing it too would be
+            // lawful and pointless.
+            Value::ExternFn { decl, .. } => decl.hash(state),
             Value::Builtin(b) => b.hash(state),
             Value::Record { fields } => fields.hash(state),
             // Lawful but never an identity: array values are excluded from
@@ -296,6 +314,7 @@ impl Value {
             // everywhere a bare `a` would read as a name.
             Value::Char(c) => format!("{c:?}"),
             Value::Fn(_) => "fn".to_owned(),
+            Value::ExternFn { decl, .. } => format!("extern fn {}", decl.display_name()),
             Value::Builtin(b) => format!("builtin {}", b.name()),
             Value::Record { fields } => {
                 if fields.is_empty() {
@@ -375,6 +394,7 @@ impl Value {
             | Value::Bool(_)
             | Value::Char(_)
             | Value::Fn(_)
+            | Value::ExternFn { .. }
             | Value::Builtin(_)
             | Value::Uninit => false,
         }
@@ -398,6 +418,7 @@ impl Value {
             | Value::Bool(_)
             | Value::Char(_)
             | Value::Fn(_)
+            | Value::ExternFn { .. }
             | Value::Builtin(_)
             | Value::Ptr { .. } => false,
         }

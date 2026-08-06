@@ -14514,3 +14514,116 @@ fn outlives_clauses_ride_the_with_clause_grammar() {
         "#]],
     );
 }
+
+// ---- `extern fn` — host import declarations ----------------------------
+
+#[test]
+fn an_extern_fn_declaration_parses_as_a_bodyless_fn_literal() {
+    // `extern` rides the same modifier slot `const` does: one FN_LITERAL
+    // node with one more token child, and no BLOCK_EXPR under it.
+    check(
+        "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;",
+        expect![[r#"
+            SOURCE_FILE@0..61
+              STATIC_ITEM@0..61
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..11
+                  IDENT@7..11 "read"
+                WHITESPACE@11..12 " "
+                EQ@12..13 "="
+                WHITESPACE@13..14 " "
+                FN_LITERAL@14..60
+                  EXTERN_KW@14..20 "extern"
+                  WHITESPACE@20..21 " "
+                  FN_KW@21..23 "fn"
+                  PARAM_LIST@23..53
+                    L_PAREN@23..24 "("
+                    PARAM@24..40
+                      BIND_PAT@24..27
+                        NAME@24..27
+                          IDENT@24..27 "buf"
+                      COLON@27..28 ":"
+                      WHITESPACE@28..29 " "
+                      RAW_PTR_TYPE@29..40
+                        PATH_TYPE@29..31
+                          NAME_REF@29..31
+                            IDENT@29..31 "u8"
+                        DOT@31..32 "."
+                        AMP@32..33 "&"
+                        RAW_KW@33..36 "raw"
+                        WHITESPACE@36..37 " "
+                        MUT_KW@37..40 "mut"
+                    COMMA@40..41 ","
+                    WHITESPACE@41..42 " "
+                    PARAM@42..52
+                      BIND_PAT@42..45
+                        NAME@42..45
+                          IDENT@42..45 "len"
+                      COLON@45..46 ":"
+                      WHITESPACE@46..47 " "
+                      PATH_TYPE@47..52
+                        NAME_REF@47..52
+                          IDENT@47..52 "usize"
+                    R_PAREN@52..53 ")"
+                  WHITESPACE@53..54 " "
+                  RET_TYPE@54..60
+                    THIN_ARROW@54..56 "->"
+                    WHITESPACE@56..57 " "
+                    PATH_TYPE@57..60
+                      NAME_REF@57..60
+                        IDENT@57..60 "i64"
+                SEMICOLON@60..61 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn a_half_written_fn_modifier_prefix_is_reported_not_asserted() {
+    // The dispatch guards claim `const extern` / `extern const` as a fn
+    // literal's prefix before the `fn` arrives — that pair is what a user
+    // has on screen mid-keystroke — so the absent keyword is a diagnostic,
+    // not an assertion. Every position a fn literal can start in.
+    check_errors(
+        "static a = const extern;\n\
+         static b = extern const;\n\
+         static c = fn() -> () { const extern };\n\
+         static d = [extern const];\n\
+         static e = unsafe extern extern;\n\
+         static f = unsafe const extern;\n",
+        expect![[r#"
+            11..16: an `extern fn` cannot be `const`: a host import is a call out of the program, and const evaluation has no host
+            23..24: expected `fn`
+            43..48: an `extern fn` cannot be `const`: a host import is a call out of the program, and const evaluation has no host
+            48..49: expected `fn`
+            74..79: an `extern fn` cannot be `const`: a host import is a call out of the program, and const evaluation has no host
+            80..86: an `extern fn` must be a `static`'s initializer — `static name = extern fn(...) -> T;` — because the item's name is the name the host is asked for
+            87..88: expected `fn`
+            102..108: an `extern fn` must be a `static`'s initializer — `static name = extern fn(...) -> T;` — because the item's name is the name the host is asked for
+            109..114: an `extern fn` cannot be `const`: a host import is a call out of the program, and const evaluation has no host
+            114..115: expected `fn`
+            135..141: expected an expression
+            142..148: expected an item (`static`, `const`, `type` or `trait`)
+            148..149: expected an item (`static`, `const`, `type` or `trait`)
+            168..173: an `extern fn` cannot be `const`: a host import is a call out of the program, and const evaluation has no host
+            168..180: `unsafe fn` is not supported yet; use `unsafe { ... }` blocks inside a plain `fn`
+            180..181: expected `fn`
+        "#]],
+    );
+}
+
+#[test]
+fn extern_fn_error_forms() {
+    check_errors(
+        "static a = extern fn(n: i64) -> i64 { n };\n\
+         static b = extern fn::<T>(n: T) -> i64;\n\
+         static c = const extern fn(n: i64) -> i64;\n\
+         const d = extern fn(n: i64) -> i64;\n",
+        expect![[r#"
+            36..41: an `extern fn` declares a host import and has no body; the implementation lives on the other side of the boundary
+            63..68: an `extern fn` cannot be generic: an import has exactly one machine signature, and there is nothing to monomorphize it into
+            94..99: an `extern fn` cannot be `const`: a host import is a call out of the program, and const evaluation has no host
+            136..142: an `extern fn` must be a `static`'s initializer — `static name = extern fn(...) -> T;` — because the item's name is the name the host is asked for
+        "#]],
+    );
+}

@@ -46,6 +46,11 @@ pub enum ConstCheckDiagnostic {
     /// A call to a side-effecting builtin (`print`, `read_line`). `panic`
     /// is the one side effect const contexts allow, so it never lands here.
     SideEffectCall { callee: ExprId, builtin: Builtin },
+    /// A call to an `extern fn` — a host import — in a const context. The
+    /// same judgment as [`ConstCheckDiagnostic::SideEffectCall`] at a
+    /// different boundary, and its own variant because the *reason* differs:
+    /// not "this would have an effect" but "there is nobody there".
+    ExternCall { callee: ExprId, item: ItemLoc },
     /// A call to a heap builtin (`alloc_array`/`dealloc_array`) in a const
     /// context — the eager const fence (C04): const-built heap values wait
     /// for interning (C06), and refusing at the call keeps the later
@@ -68,6 +73,7 @@ impl ConstCheckDiagnostic {
             ConstCheckDiagnostic::NonConstFnCall { callee, .. }
             | ConstCheckDiagnostic::NonConstFnLiteralCall { callee }
             | ConstCheckDiagnostic::SideEffectCall { callee, .. }
+            | ConstCheckDiagnostic::ExternCall { callee, .. }
             | ConstCheckDiagnostic::HeapCall { callee, .. }
             | ConstCheckDiagnostic::ValueCall { callee } => *callee,
         }
@@ -85,6 +91,9 @@ impl ConstCheckDiagnostic {
             }
             ConstCheckDiagnostic::SideEffectCall { builtin, .. } => {
                 diag::side_effect_call_in_const(builtin.name())
+            }
+            ConstCheckDiagnostic::ExternCall { item, .. } => {
+                diag::extern_call_in_const(item.display_name())
             }
             ConstCheckDiagnostic::HeapCall { builtin, .. } => {
                 diag::heap_call_in_const(builtin.name())
@@ -270,7 +279,12 @@ impl CheckCtx<'_> {
             // calls are checked. A plain fn body is runtime code (exits the
             // const context), a `const fn` body must be const-evaluable
             // wherever the literal is defined.
-            ExprData::FnLiteral { is_const, body, .. } => self.check_expr(*body, *is_const),
+            ExprData::FnLiteral { is_const, body, .. } => {
+                // An `extern fn` has no body: nothing to check inside it.
+                if let Some(body) = body {
+                    self.check_expr(*body, *is_const);
+                }
+            }
         }
     }
 
@@ -308,6 +322,10 @@ impl CheckCtx<'_> {
             // A directly-called fn literal wears its const-ness on its
             // sleeve. (Parens lower transparently, so `(const fn ...)(x)`
             // presents the literal as the callee too.)
+            // An `extern fn` literal called on the spot: it has no name, so
+            // validation has already rejected the declaration itself. Left
+            // to that error rather than doubled here.
+            ExprData::FnLiteral { body: None, .. } => {}
             ExprData::FnLiteral { is_const: true, .. } => {}
             ExprData::FnLiteral {
                 is_const: false, ..
@@ -351,6 +369,17 @@ impl CheckCtx<'_> {
     fn check_named_callee(&mut self, callee: ExprId, name_expr: ExprId) {
         match self.resolutions.get(name_expr) {
             Some(Resolution::Item(loc)) => {
+                // A host import, judged BEFORE constness: an `extern fn` is
+                // never `const fn` (validation rejects the combination), so
+                // `NonConstFnCall`'s "marking it `const fn` would allow
+                // this" would be advice that cannot be taken.
+                if crate::is_extern_fn(self.db, loc.to_id(self.db)) {
+                    self.diagnostics.push(ConstCheckDiagnostic::ExternCall {
+                        callee,
+                        item: loc.clone(),
+                    });
+                    return;
+                }
                 match root_fn_is_const(self.db, loc.to_id(self.db)) {
                     Some(true) => {}
                     Some(false) => self.diagnostics.push(ConstCheckDiagnostic::NonConstFnCall {

@@ -142,7 +142,12 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
                     .flat_map(|p| body.pat_bindings(p.pat))
                     .collect(),
             });
-            compute_expr_scopes(body, scopes, *b, scope);
+            // An `extern fn` still gets its parameter scope — the names are
+            // real, hoverable and completable; there is simply no body under
+            // it for them to be visible in.
+            if let Some(b) = b {
+                compute_expr_scopes(body, scopes, *b, scope);
+            }
         }
         ExprData::Call { callee, args, .. } => {
             compute_expr_scopes(body, scopes, *callee, scope);

@@ -418,8 +418,18 @@ impl LowerCtx<'_> {
                 // Unsafe-builtin findings land on the call — the call is
                 // the operation that must not execute, so it traps like
                 // any broken call (arguments still evaluated for effects).
-                hir::UnsafeCheckDiagnostic::BuiltinCallOutsideUnsafe { call, .. } => {
+                hir::UnsafeCheckDiagnostic::BuiltinCallOutsideUnsafe { call, .. }
+                // A host-import call lands the same way, for the same
+                // reason: the call is the operation that must not run.
+                | hir::UnsafeCheckDiagnostic::ExternCallOutsideUnsafe { call, .. } => {
                     self.call_traps.insert(*call, diag.message());
+                }
+                // Taking an import as a VALUE is not a call and not a
+                // deref, so it goes through `value_traps`: the mention is
+                // lowered as an ordinary read, and the read is what must
+                // not produce anything.
+                hir::UnsafeCheckDiagnostic::ExternValueOutsideUnsafe { expr, .. } => {
+                    self.value_traps.insert(*expr, diag.message());
                 }
             }
         }
@@ -1439,9 +1449,26 @@ impl LowerCtx<'_> {
             // same runtime code (unlike a `const` block, which is a
             // compile-time body of its own).
             ExprData::Unsafe { body: inner } => self.lower_expr(b, *inner),
+            // A host import is exactly a signature, so there is nothing to
+            // lower. The declaring item's name is what a backend imports
+            // under and what the interpreter asks its host for.
+            ExprData::FnLiteral { body: None, .. } => {
+                let sig = match self.ty(expr) {
+                    Ty::Fn(f) => f.as_ref().clone(),
+                    // Broken source; the declaration carries its own error.
+                    _ => hir::FnTy {
+                        params: Vec::new(),
+                        ret: Ty::Error,
+                    },
+                };
+                Operand::Const(Const::ExternFn {
+                    decl: self.loc.clone(),
+                    sig,
+                })
+            }
             ExprData::FnLiteral {
                 params,
-                body: fn_body,
+                body: Some(fn_body),
                 ..
             } => {
                 let ret_ty = match self.ty(expr) {

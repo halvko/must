@@ -4448,6 +4448,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // `is_const` doesn't affect typing here.
                 is_const: _,
             } => {
+                // An `extern fn` has no body, so the literal itself is the
+                // only anchor a broken parameter pattern can be blamed on.
+                let pat_anchor = fn_body.unwrap_or(expr);
                 let param_tys: Vec<Ty> = params
                     .iter()
                     .map(|param| {
@@ -4473,15 +4476,26 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         // A parameter pattern has no per-call site to blame
                         // a broken destructure on; the whole body is the
                         // best available anchor (every call runs it).
-                        self.check_pat(param.pat, &ty, *fn_body);
+                        self.check_pat(param.pat, &ty, pat_anchor);
                         ty
                     })
                     .collect();
                 let ret = match ret_type {
                     Some(type_ref) => self.lower_type_ref(type_ref),
+                    // Nothing can infer an import's return type — there is
+                    // no body — so an unwritten one means exactly `()`.
+                    None if fn_body.is_none() => Ty::Unit,
                     None => self.fresh_var(),
                 };
                 let ret_cause = ret_type.is_some().then_some(Cause::ReturnAnnotation(expr));
+                // An `extern fn` IS its signature: no body to check against
+                // the return type, no joins to resolve, no `return` target.
+                let Some(fn_body) = *fn_body else {
+                    let ty = Ty::fn_type(param_tys, ret);
+                    let ty = self.check(expr, ty, expected, cause);
+                    self.result.type_of_expr.insert(expr, ty.clone());
+                    return ty;
+                };
                 // The function is a unit that must be internally
                 // consistent: its joins solve (by depth) before any outer
                 // join consumes its type, and they never flatten into one —
@@ -4503,7 +4517,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     ty: ret.clone(),
                     cause: ret_cause,
                 });
-                let body_ty = self.infer_expr_with(*fn_body, &ret, ret_cause);
+                let body_ty = self.infer_expr_with(fn_body, &ret, ret_cause);
                 self.return_targets.pop();
                 self.loop_sinks = saved_loops;
                 self.scope_depth -= 1;

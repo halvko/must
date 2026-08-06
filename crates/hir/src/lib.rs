@@ -219,6 +219,30 @@ pub fn synthetic_decl(db: &dyn Db, item: ItemId<'_>) -> Option<&'static scopes::
         .find(|decl| decl.name == name)
 }
 
+/// Whether `item` is a HOST IMPORT — `static name = extern fn(...) -> T;`.
+///
+/// The fact lives on the ITEM, not on the type: an extern's type is an
+/// ordinary `Ty::Fn`, deliberately, so an import is annotatable, passable and
+/// callable exactly like any other function value. What the checkers need to
+/// know is which *declaration* a given call reaches, and that is a body
+/// question.
+///
+/// Its OWN query, for [`const_check::root_fn_is_const`]'s reason: every call
+/// site of a named item asks this, so an edit inside one item's body must
+/// reach other items' checks only when this value actually flips. Answered
+/// off the range-free [`body`] query underneath, so it backdates under every
+/// edit that does not change the declaration itself.
+#[salsa::tracked]
+pub fn is_extern_fn<'db>(db: &'db dyn Db, item: ItemId<'db>) -> bool {
+    let lowered = body::body(db, item);
+    lowered.root.is_some_and(|root| {
+        matches!(
+            lowered.exprs[root],
+            body::ExprData::FnLiteral { body: None, .. }
+        )
+    })
+}
+
 /// The item-tree entry for `item` (its contract, constness, name).
 /// Tracked so that consumers (`signature`, `infer`) depend on this item's
 /// *entry* rather than on the whole positional item list — inserting an

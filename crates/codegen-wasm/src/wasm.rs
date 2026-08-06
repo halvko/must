@@ -105,6 +105,17 @@ impl Module {
         (self.imports.len() - 1) as u32
     }
 
+    /// Whether `(module, field)` is already imported.
+    ///
+    /// Asked of the module rather than of a hand-written list, so the answer
+    /// cannot drift from the imports actually declared: a name becomes
+    /// reserved by being used, not by being written down twice.
+    pub fn imports_func(&self, module: &str, field: &str) -> bool {
+        self.imports
+            .iter()
+            .any(|(m, f, _)| m == module && f == field)
+    }
+
     /// Reserve a function index for a body supplied later by
     /// [`Module::set_body`] — the two-phase shape monomorphization needs
     /// (call sites must know callee indices before every body is built).

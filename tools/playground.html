@@ -136,11 +136,11 @@
   borrows and no wasm story for <code>read_line</code> and the
   <code>str</code> builtins yet — a program using any of them is refused
   at compile time, by name, so there is nothing for this page to run. The
-  module's only import is <code>must.print</code>, not WASI, so a
+  builtin import is <code>must.print</code>, not WASI, so a
   general-purpose WASI runtime (wasmtime, wasmer, …) will <em>not</em> run
-  these modules as-is — a <code>--wasi</code> shim is future work. This
-  page supplies exactly the one import the module needs and nothing
-  else.
+  these modules as-is — a <code>--wasi</code> shim is future work. This page
+  supplies only the builtin import, so a program that declares
+  <code>extern fn</code> imports of its own needs a host that knows them.
 </div>
 
 <script src="must-wasm.js"></script>

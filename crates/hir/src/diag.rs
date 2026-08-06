@@ -45,6 +45,40 @@ pub fn builtin_call_requires_unsafe(name: &str) -> String {
     format!("calling `{name}` requires an `unsafe {{ ... }}` block")
 }
 
+/// A call of an `extern fn` outside any `unsafe { ... }` block. The same rule
+/// as [`DEREF_REQUIRES_UNSAFE`], and the reason is the boundary itself: what
+/// an import does is written in a language this compiler never sees, so
+/// nothing on this side can establish that calling it is sound. The caller
+/// vouches, which is exactly what the marker means.
+pub fn extern_call_requires_unsafe(name: &str) -> String {
+    format!(
+        "calling the host import `{name}` requires an `unsafe {{ ... }}` block; \
+         nothing on this side of the boundary can check what it does"
+    )
+}
+
+/// An `extern fn` mentioned as a VALUE — bound, passed, returned — outside
+/// any `unsafe { ... }` block. The marker moves to where the value is TAKEN
+/// because that is the last place a reader can see which import is in play:
+/// once it is a value, the call site says only that something is being
+/// called. Nothing here forbids first-class imports; it prices them.
+pub fn extern_value_requires_unsafe(name: &str) -> String {
+    format!(
+        "taking the host import `{name}` as a value requires an `unsafe {{ ... }}` block; \
+         a value can be called from anywhere, so vouching happens where it is taken"
+    )
+}
+
+/// An `extern fn` call in a const context — [`side_effect_call_in_const`]'s
+/// judgment at a different boundary, stated in its own words because "side
+/// effect" is the wrong noun for "there is nobody there".
+pub fn extern_call_in_const(name: &str) -> String {
+    format!(
+        "cannot call the host import `{name}` in a const context; \
+         there is no host at compile time"
+    )
+}
+
 /// The eager const fence (C04): `alloc_array` / `dealloc_array` refuse in
 /// const contexts until interning (C06) delivers — refusing eagerly keeps
 /// the later relaxation a grant instead of a retraction. Rendered per verb

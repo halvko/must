@@ -457,7 +457,20 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |             ^^
                = help: Rewrite as postfix
 
-            found 30 errors and 1 warning
+            error: calling the host import `host_read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
+              --> examples/errors.must:327:58
+                |
+            327 | static unvouched_import = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
+                |                                                          ^^^^^^^^^^^^^^^
+
+            error: an `extern fn` declares a host import and has no body; the implementation lives on the other side of the boundary
+              --> examples/errors.must:335:58
+                |
+            335 | static import_with_a_body = extern fn(n: usize) -> usize { n };
+                |                                                          ^^^^^
+               = help: Remove the body
+
+            found 32 errors and 1 warning
         "#]],
     );
 }

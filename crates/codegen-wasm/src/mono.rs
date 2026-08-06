@@ -40,6 +40,7 @@ use mir::{BlockId, BodyId, Const, LocalId, MirBody, Operand, ProjElem, Rvalue, T
 use rustc_hash::FxHashMap;
 
 use crate::layout::{self, Unsupported};
+use crate::wasm::ValType;
 
 /// A refusal, located: what we cannot compile and where it sits.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +66,20 @@ impl Refusal {
     }
 }
 
+/// A host import whose signature has no wasm representation, refused BY THE
+/// IMPORT'S NAME with the layout rule as the parenthetical. Which boundary is
+/// unavailable is the useful half; which layout rule objected is the detail.
+///
+/// It points at the DECLARATION, not at the call that reached it: the
+/// signature is the declaration's, and that is where the fix goes.
+fn extern_refusal(name: &str, at: &(ItemLoc, ExprId), err: Unsupported) -> CallTarget {
+    CallTarget::Refused(Refusal::new(
+        format!("{} in the host import `{name}`'s signature", err.0),
+        &at.0,
+        at.1,
+    ))
+}
+
 /// A fully-instantiated callable: which body, plus everything an instance
 /// of it is keyed by. Wraps the interpreter's own [`eval::FnValue`] — the
 /// item, body and const arguments an instance is keyed by are identical to
@@ -86,6 +101,16 @@ pub enum StaticVal {
     Unknown,
     Fn(FnRef),
     Builtin(Builtin),
+    /// A HOST IMPORT — `static name = extern fn(...) -> T;`. Statically
+    /// known by construction: an import is a declaration, and the
+    /// declaration is the whole value, so it resolves through data and
+    /// branches like any constant. The DECLARED signature rides along (an
+    /// import is never generic, so it is ground): the wasm signature is
+    /// built from it, not re-derived from what a call site happened to pass.
+    ExternFn {
+        decl: ItemLoc,
+        sig: hir::FnTy,
+    },
 }
 
 impl StaticVal {
@@ -115,6 +140,22 @@ pub enum CallTarget {
     Instance(InstanceKey),
     Print,
     Panic,
+    /// A call of a host import, resolved to the name the module imports
+    /// under and the wasm signature it imports with. The signature is
+    /// computed HERE, where the instance's concrete types are in hand, so
+    /// `compile` can declare every import before the first defined function
+    /// without re-deriving anything.
+    Extern {
+        name: String,
+        params: Vec<ValType>,
+        results: Vec<ValType>,
+        /// Where the import is DECLARED — the caret for a refusal raised
+        /// while the import section is being built, long after this. A
+        /// declaration is what such a refusal asks the user to change, so
+        /// the call that reached it is not the useful site (and stands in
+        /// only when the declaring item is too broken to have one).
+        decl: (ItemLoc, ExprId),
+    },
     Refused(Refusal),
 }
 
@@ -464,6 +505,10 @@ impl<'db> Mono<'db> {
             // it, so any call through it is refused (never miscompiled).
             Operand::Copy(_) => StaticVal::Unknown,
             Operand::Const(Const::Builtin(builtin)) => StaticVal::Builtin(*builtin),
+            Operand::Const(Const::ExternFn { decl, sig }) => StaticVal::ExternFn {
+                decl: decl.clone(),
+                sig: sig.clone(),
+            },
             // A `fn` literal in THIS body: it inherits the enclosing
             // instance's arguments — the binder scopes the whole item, so
             // const params behave like auto-captured constants (the
@@ -482,6 +527,7 @@ impl<'db> Mono<'db> {
                     type_args: Vec::new(),
                 }),
                 Ok(Value::Builtin(builtin)) => StaticVal::Builtin(builtin),
+                Ok(Value::ExternFn { decl, sig }) => StaticVal::ExternFn { decl, sig },
                 _ => StaticVal::Unknown,
             },
             Operand::Const(Const::ConstBlock(body)) => match self.const_block(key, *body) {
@@ -561,6 +607,46 @@ impl<'db> Mono<'db> {
                     &key.func.value.item,
                     origin,
                 ));
+            }
+            // A host import: the module grows an import entry and the call
+            // becomes an ordinary `call` of it. The signature is the
+            // DECLARATION's — the constant recorded it (`Const::ExternFn`)
+            // precisely so no host, and no backend, has to re-derive it from
+            // what a call site passed, and an import is never generic, so it
+            // is ground here. If any part of it has no wasm representation
+            // the refusal names the IMPORT rather than the type: a reader
+            // needs to know which boundary is unavailable, not which layout
+            // rule said so.
+            StaticVal::ExternFn { decl, sig } => {
+                let name = decl.display_name().to_owned();
+                // Every diagnostic about an import belongs on its
+                // declaration, so resolve that site once here. An item with
+                // no initializer expression is broken and already carries
+                // its own error; fall back to the call rather than pair an
+                // item with an expression out of another item's body.
+                let decl = match hir::body::body(self.db, decl.to_id(self.db)).root {
+                    Some(root) => (decl, root),
+                    None => (key.func.value.item.clone(), origin),
+                };
+                let mut params = Vec::new();
+                for ty in &sig.params {
+                    match layout::slots(self.db, ty) {
+                        Ok(count) => {
+                            params.extend(std::iter::repeat_n(ValType::I64, count as usize))
+                        }
+                        Err(err) => return extern_refusal(&name, &decl, err),
+                    }
+                }
+                let results = match layout::slots(self.db, &sig.ret) {
+                    Ok(count) => vec![ValType::I64; count as usize],
+                    Err(err) => return extern_refusal(&name, &decl, err),
+                };
+                return CallTarget::Extern {
+                    name,
+                    params,
+                    results,
+                    decl,
+                };
             }
             StaticVal::Fn(func) => func,
             StaticVal::Unknown => {
@@ -648,6 +734,11 @@ impl<'db> Mono<'db> {
         op: &Operand,
     ) -> Result<Ty, Unsupported> {
         match op {
+            Operand::Const(Const::ExternFn { .. }) => {
+                return Err(Unsupported::new(
+                    "a host import used as a value (imports are callable, not data)",
+                ));
+            }
             Operand::Copy(place) => {
                 let mut ty = locals
                     .get(raw(place.local))
@@ -793,7 +884,9 @@ impl<'db> Mono<'db> {
             match target {
                 CallTarget::Instance(callee) => targets.push(callee.clone()),
                 CallTarget::Refused(refusal) => return Err(refusal.clone()),
-                CallTarget::Print | CallTarget::Panic => {}
+                // An import declares no instance to register — the module
+                // grows an import entry for it in `compile` instead.
+                CallTarget::Print | CallTarget::Panic | CallTarget::Extern { .. } => {}
             }
         }
         self.register_path.push(item);

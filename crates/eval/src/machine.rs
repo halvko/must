@@ -6,7 +6,7 @@
 //! any item being forced is a const context regardless of the driving mode.
 
 use base_db::Db;
-use hir::{Builtin, ExprId, ItemLoc};
+use hir::{Builtin, ExprId, IntKind, ItemLoc, Ty};
 use la_arena::ArenaMap;
 use mir::{
     AggregateKind, BodyId, Const, LocalData, LocalId, MirBody, MirLowered, Operand, ProjElem,
@@ -35,6 +35,22 @@ pub trait Mode {
     /// still a line (P04) — is `Machine::builtin_call`'s business, so
     /// every host obeys one rule instead of re-deriving it.
     fn read_line(&mut self) -> Result<Option<String>, EvalError>;
+
+    /// The host primitive behind `extern fn read(buf, len) -> isize` — the
+    /// machine-shaped byte read, and the layer `read_line` would be built on
+    /// if it were library code.
+    ///
+    /// Appends AT MOST `len` bytes to `out` and answers what POSIX `read`
+    /// answers: the number of bytes appended, `0` at end of input, or a
+    /// NEGATIVE `-errno`. Note what is deliberately not promised — a short
+    /// read is not end of input, and the caller has no way to tell the two
+    /// apart except by the count being zero. That is the boundary's shape,
+    /// not the interpreter's simplification.
+    ///
+    /// An `Err` here is an *interpreter* failure (there was no errno to
+    /// report), not the program's; the program's errors ride the return
+    /// value, where library code can see them.
+    fn read(&mut self, out: &mut Vec<u8>, len: usize) -> Result<i64, EvalError>;
 }
 
 /// The driver behind [`crate::const_value`]: everything is a const context.
@@ -59,6 +75,19 @@ impl Mode for ConstMode {
         Err(EvalError {
             kind: EvalErrorKind::NotConst,
             message: hir::diag::side_effect_call_in_const("read_line"),
+            origin: None,
+            notes: Vec::new(),
+        })
+    }
+
+    /// Unreachable in practice, like the arms above: [`Machine::for_const`]
+    /// starts at `const_depth = 1`, so `extern_call` refuses before any
+    /// host is asked. It is the last line of the same defense, so it says
+    /// the same sentence the squiggle did.
+    fn read(&mut self, _out: &mut Vec<u8>, _len: usize) -> Result<i64, EvalError> {
+        Err(EvalError {
+            kind: EvalErrorKind::NotConst,
+            message: hir::diag::extern_call_in_const("read"),
             origin: None,
             notes: Vec::new(),
         })
@@ -123,6 +152,43 @@ impl<W: std::io::Write, R: std::io::BufRead> Mode for RunMode<W, R> {
         // `BufRead::read_line` reports 0 bytes read exactly at genuine EOF
         // (never for a blank line, which is 1 byte: the newline itself).
         Ok(if read == 0 { None } else { Some(line) })
+    }
+
+    fn read(&mut self, out: &mut Vec<u8>, len: usize) -> Result<i64, EvalError> {
+        if len == 0 {
+            // A zero-length request reads nothing and means nothing: `0`
+            // here is NOT end of input, which is why the boundary's EOF
+            // rule is stated for a nonzero-len request only.
+            return Ok(0);
+        }
+        // `Read::read` is allowed to return fewer bytes than asked for, and
+        // that IS the host contract — no loop here to paper over it, because
+        // library code above must be written to expect short reads anyway.
+        let start = out.len();
+        out.resize(start + len, 0);
+        let result = std::io::Read::read(&mut self.input, &mut out[start..]);
+        match result {
+            Ok(n) => {
+                out.truncate(start + n);
+                Ok(i64::try_from(n).unwrap_or(i64::MAX))
+            }
+            Err(err) => {
+                out.truncate(start);
+                // The error channel is the RETURN VALUE, not a trap — that
+                // is the whole point of a machine-shaped boundary, and it is
+                // what makes the lifting wrapper's `Err` arm reachable. Only
+                // an error with no errno to report has nowhere to go.
+                match err.raw_os_error() {
+                    Some(errno) if errno > 0 => Ok(-i64::from(errno)),
+                    _ => Err(EvalError {
+                        kind: EvalErrorKind::Runtime,
+                        message: format!("I/O error in the host `read`: {err}"),
+                        origin: None,
+                        notes: Vec::new(),
+                    }),
+                }
+            }
+        }
     }
 }
 
@@ -799,8 +865,16 @@ impl<'db, M: Mode> Machine<'db, M> {
                             Some((*dest, *target)),
                         )?;
                     }
-                    Value::Builtin(builtin) => {
-                        let result = self.builtin_call(builtin, args, &loc, origin)?;
+                    Value::Builtin(_) | Value::ExternFn { .. } => {
+                        let result = match callee {
+                            Value::Builtin(builtin) => {
+                                self.builtin_call(builtin, args, &loc, origin)?
+                            }
+                            Value::ExternFn { decl, sig } => {
+                                self.extern_call(decl.display_name(), &sig, args, &loc, origin)?
+                            }
+                            _ => unreachable!("matched just above"),
+                        };
                         match target {
                             Some(target) => {
                                 let frame = self.frames.last_mut().expect("frame still live");
@@ -1962,6 +2036,12 @@ impl<'db, M: Mode> Machine<'db, M> {
                     body: *body,
                     const_args: self.current_const_args(),
                 }),
+                // A host import carries only its declaration — there is no
+                // body, and nothing to capture.
+                Const::ExternFn { decl, sig } => Value::ExternFn {
+                    decl: decl.clone(),
+                    sig: sig.clone(),
+                },
                 Const::ConstBlock(body) => {
                     let env = self.current_const_args();
                     self.force_const_block(loc, *body, env)?
@@ -1996,6 +2076,204 @@ impl<'db, M: Mode> Machine<'db, M> {
             .last()
             .map(|frame| frame.const_args.clone())
             .unwrap_or_default()
+    }
+
+    /// Call a HOST IMPORT — `static name = extern fn(...) -> T;`.
+    ///
+    /// The interpreter is one particular host, and this is the whole set of
+    /// primitives it provides. Dispatch is BY NAME, because the name is the
+    /// contract (there is no symbol-override surface), and a name this host
+    /// does not implement is refused BY NAME at the call — the P01 layer-1
+    /// property stated at runtime: a host that does not provide a hook has
+    /// denied the capability, and the honest answer is to say which one.
+    ///
+    /// The declared SIGNATURE is checked here too, at the call rather than at
+    /// the declaration, and deliberately: a compiler that validated import
+    /// signatures would have to know every host, which is exactly the
+    /// coupling `extern` exists to avoid.
+    fn extern_call(
+        &mut self,
+        name: &str,
+        sig: &hir::FnTy,
+        args: Vec<Value>,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<Value, EvalError> {
+        // Defense in depth, the same split `print` and `read_line` have:
+        // const-check plants the trap it can see, this is the machine's own
+        // guarantee that compile-time evaluation never reaches a host.
+        if self.const_depth > 0 {
+            return Err(EvalError {
+                kind: EvalErrorKind::NotConst,
+                message: hir::diag::extern_call_in_const(name),
+                origin: Some((loc.clone(), origin)),
+                notes: Vec::new(),
+            });
+        }
+        match name {
+            "read" => self.host_read(sig, args, loc, origin),
+            _ => Err(EvalError {
+                kind: EvalErrorKind::Runtime,
+                message: format!(
+                    "no host implementation for the import `{name}` — \
+                     the interpreter provides `read` and nothing else"
+                ),
+                origin: Some((loc.clone(), origin)),
+                notes: Vec::new(),
+            }),
+        }
+    }
+
+    /// `extern fn read(buf: u8.&raw mut, len: usize) -> isize` — the one host
+    /// primitive the interpreter provides, and the only place stdin enters
+    /// the language below `read_line`.
+    ///
+    /// Bytes land in the caller's buffer as `u8` values, one per element:
+    /// the interpreter's memory is typed, so "filling a buffer" is writing
+    /// elements, not moving bytes. The return value is the machine-shaped
+    /// count — nonnegative, `0` at end of input, negative `-errno` — and
+    /// lifting it into something a Must program can match on is the FIRST
+    /// WRAPPER's job, in Must, above this line.
+    fn host_read(
+        &mut self,
+        sig: &hir::FnTy,
+        args: Vec<Value>,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<Value, EvalError> {
+        const SHAPE: &str = "fn(buf: u8.&raw mut, len: usize) -> isize";
+        // THE DECLARATION IS WHAT IS JUDGED, in full, before anything is
+        // read or written.
+        //
+        // Judging argument VALUES instead would be unsound here and the
+        // reason is worth stating: a fresh `alloc_array::<bool>(n)` and a
+        // fresh `alloc_array::<u8>(n)` hold the same uninitialized elements,
+        // so no inspection of the buffer can tell a byte array from an array
+        // of something else. Only the declared pointee can, and getting it
+        // wrong would fill a `bool` array with numbers that are not `bool`s
+        // — a value the type system says cannot exist, discovered much later
+        // as an internal error blaming the compiler.
+        let [buf_ty, len_ty] = sig.params.as_slice() else {
+            return Err(self.host_signature_error("read", SHAPE, loc, origin));
+        };
+        // A MUTABLE raw pointer to `u8`: `read` writes bytes, so a shared
+        // pointer is as wrong as a non-byte one, and a non-pointer buffer is
+        // refused here rather than reaching the value check below (which
+        // would blame the compiler for what the declaration said).
+        let byte_buffer = matches!(
+            buf_ty,
+            Ty::RawPtr { mutable: true, pointee } if matches!(**pointee, Ty::Int(IntKind::U8))
+        );
+        if !byte_buffer || !matches!(len_ty, Ty::Int(IntKind::Usize)) {
+            return Err(self.host_signature_error("read", SHAPE, loc, origin));
+        }
+        // The count comes back as a SIGNED MACHINE WORD, and both Must
+        // spellings of one — `isize` (POSIX's own `ssize_t`) and `i64` — are
+        // accepted, with the answer built in whichever the declaration asked
+        // for. The declaration decides the Must-side type; the host only
+        // promises the machine shape. That is what lets a library feed the
+        // count straight to `offset(p, i: isize)`, which matters because the
+        // language has no integer conversions to bridge the gap with.
+        let count_kind = match &sig.ret {
+            Ty::Int(kind @ (IntKind::Isize | IntKind::I64)) => *kind,
+            _ => return Err(self.host_signature_error("read", SHAPE, loc, origin)),
+        };
+        // Everything below is deferred-error mode: the signature is right,
+        // so a value of the wrong shape reaching here is an invariant
+        // violation, not a user's mistake.
+        let [buf, len] = args.as_slice() else {
+            return Err(self.internal_error(
+                "the host `read` was called with the wrong number of arguments".to_owned(),
+                Some((loc.clone(), origin)),
+            ));
+        };
+        let Some(len) = (match len {
+            Value::Int(hir::IntValue::Usize(v)) => Some(u128::from(*v)),
+            _ => None,
+        }) else {
+            return Err(self.ill_typed("a `usize` length", len, loc, origin));
+        };
+        let len = usize::try_from(len).unwrap_or(usize::MAX);
+        if len == 0 {
+            // A zero-length request touches the buffer not at all, so the
+            // pointer is not judged either — the same rule `copy` follows
+            // for a zero-length copy, and it is what lets a caller ask for
+            // "however much room is left" without a special case when the
+            // answer is none.
+            if !matches!(buf, Value::Ptr { .. }) {
+                return Err(self.ill_typed("a raw pointer", buf, loc, origin));
+            }
+            return Ok(count_value(count_kind, 0));
+        }
+        // Judge the destination range BEFORE reading: a read that consumed
+        // input and then trapped would have eaten bytes nobody can get back.
+        let len_n = u128::from(len as u64);
+        self.copy_range(buf, len_n, "read", "buffer", loc, origin)?;
+        // Bounds are not the whole judgement. The host WRITES these bytes,
+        // so the aliasing tree hears about it exactly as it does for
+        // `copy`'s destination range (and for a plain `p.*[i] = v`): a live
+        // safe borrow of one of them must be foreign to this write, and the
+        // full REQUESTED length is what is judged — the host may fill any
+        // prefix of it, and the caller handed the whole range over either
+        // way.
+        if let Value::Ptr { alloc, path, tag } = buf {
+            self.aliasing_access_range(*tag, *alloc, path, len_n, Access::Write, loc, origin)?;
+        }
+        let mut bytes = Vec::new();
+        let count = self.mode.read(&mut bytes, len)?;
+        if bytes.is_empty() {
+            return Ok(count_value(count_kind, count));
+        }
+        let Value::Ptr { alloc, path, .. } = buf else {
+            unreachable!("copy_range verified the pointer shape");
+        };
+        let Some(PathElem::Index(head)) = path.last() else {
+            unreachable!("copy_range verified the element shape");
+        };
+        let head = *head as usize;
+        let allocation = self.memory.get_mut(alloc).expect("checked by copy_range");
+        if !allocation.writable {
+            return Err(EvalError {
+                kind: EvalErrorKind::UndefinedBehavior,
+                message: "write through a pointer into read-only memory (a `static`)".to_owned(),
+                origin: Some((loc.clone(), origin)),
+                notes: Vec::new(),
+            });
+        }
+        let parent = &path[..path.len() - 1];
+        let slot = match project_path_mut(&mut allocation.value, parent) {
+            Ok(slot) => slot,
+            Err(error) => return Err(self.ptr_path_error(error, loc, origin)),
+        };
+        let Value::Array(values) = slot else {
+            unreachable!("copy_range verified the array shape");
+        };
+        for (offset, byte) in bytes.iter().enumerate() {
+            values[head + offset] = Value::Int(hir::IntValue::U8(*byte));
+        }
+        Ok(count_value(count_kind, count))
+    }
+
+    /// A host primitive reached with arguments its contract does not accept.
+    /// Named as a mismatch between the DECLARATION and the host rather than
+    /// as an internal error, because that is what it is: the declaration is
+    /// the user's claim about a host they cannot see, and this host disagrees.
+    fn host_signature_error(
+        &self,
+        name: &str,
+        expected: &str,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> EvalError {
+        EvalError {
+            kind: EvalErrorKind::Runtime,
+            message: format!(
+                "the host import `{name}` was declared with a signature this host \
+                 does not provide; it provides `{expected}`"
+            ),
+            origin: Some((loc.clone(), origin)),
+            notes: Vec::new(),
+        }
     }
 
     fn builtin_call(
@@ -2528,8 +2806,10 @@ impl<'db, M: Mode> Machine<'db, M> {
         }
         // Read the source range out in full first (the memmove trick), and
         // range-check the destination through the same shared judgement.
-        let elements = self.copy_range(src, n, "source", loc, origin)?.to_vec();
-        self.copy_range(dst, n, "destination", loc, origin)?;
+        let elements = self
+            .copy_range(src, n, "copy", "source", loc, origin)?
+            .to_vec();
+        self.copy_range(dst, n, "copy", "destination", loc, origin)?;
         // The aliasing check rides the copy exactly like an ordinary deref
         // does for `read_place`/`write_through`: `copy` is memmove, not a
         // route around the tree — a live safe borrow of one of the `n`
@@ -2589,6 +2869,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         &self,
         p: &Value,
         n: u128,
+        what: &str,
         role: &str,
         loc: &ItemLoc,
         origin: ExprId,
@@ -2605,7 +2886,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         let Some(PathElem::Index(head)) = path.last() else {
             return Err(EvalError {
                 kind: EvalErrorKind::UndefinedBehavior,
-                message: format!("`copy` {role} pointer does not address an array element"),
+                message: format!("`{what}` {role} pointer does not address an array element"),
                 origin: Some((loc.clone(), origin)),
                 notes: Vec::new(),
             });
@@ -2621,7 +2902,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             return Err(EvalError {
                 kind: EvalErrorKind::UndefinedBehavior,
                 message: format!(
-                    "`copy` out of bounds — the {role} names {n} element(s) from \
+                    "`{what}` out of bounds — the {role} names {n} element(s) from \
                      index {head}, but the array has {len}"
                 ),
                 origin: Some((loc.clone(), origin)),
@@ -2980,10 +3261,23 @@ fn value_ty(value: &Value) -> hir::Ty {
         // (and a pointer must not cross into a fresh console-eval machine
         // anyway — its allocation lives here): `{error}` demotes it from
         // console-eval parameters, the variables panel still shows it.
-        Value::Fn(_) | Value::Builtin(_) | Value::Tuple(_) | Value::Ptr { .. } => hir::Ty::Error,
+        Value::Fn(_)
+        | Value::ExternFn { .. }
+        | Value::Builtin(_)
+        | Value::Tuple(_)
+        | Value::Ptr { .. } => hir::Ty::Error,
         // Machine-internal poison: no surface type exists for it.
         Value::Uninit => hir::Ty::Error,
     }
+}
+
+/// The host `read`'s machine-shaped count, built in whichever Must spelling
+/// of a signed machine word the declaration asked for.
+fn count_value(kind: IntKind, count: i64) -> Value {
+    Value::Int(match kind {
+        IntKind::I64 => hir::IntValue::I64(count),
+        _ => hir::IntValue::Isize(count),
+    })
 }
 
 fn local_name(body: &MirBody, local: LocalId) -> String {

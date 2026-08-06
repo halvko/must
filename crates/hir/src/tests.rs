@@ -12101,3 +12101,101 @@ fn a_bind_shadowing_a_variant_warns_through_a_borrow_too() {
         "#]],
     );
 }
+
+// ---- `extern fn` — host imports ----------------------------------------
+
+#[test]
+fn an_extern_fn_has_an_ordinary_fn_type() {
+    // The import is deliberately NOT a distinguished type: it is a
+    // `fn(...) -> T` like any other, so it is annotatable, passable and
+    // callable with nothing new to learn. What makes it an import is the
+    // DECLARATION, which is why the checkers ask the item, not the type.
+    check_infer(
+        "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;",
+        expect![[r#"
+            14..60 'extern fn(buf: u8...': fn(u8.&raw mut, usize) -> i64
+            24..27 'buf': u8.&raw mut
+            42..45 'len': usize
+        "#]],
+    );
+}
+
+#[test]
+fn calling_an_extern_fn_outside_unsafe_is_rejected() {
+    check_diagnostics(
+        "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+         static f = fn(p: u8.&raw mut) -> i64 { read(p, 1) };",
+        expect![[r#"
+            101..111: calling the host import `read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
+        "#]],
+    );
+}
+
+#[test]
+fn calling_an_extern_fn_in_a_const_context_is_rejected() {
+    // Not `NonConstFnCall`: "marking it `const fn` would allow this" is
+    // advice that cannot be taken, because `const extern fn` is itself
+    // rejected. The honest refusal names the missing host.
+    check_diagnostics(
+        "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+         static f = const fn(p: u8.&raw mut) -> i64 { unsafe { read(p, 1) } };",
+        expect![[r#"
+            116..120: cannot call the host import `read` in a const context; there is no host at compile time (this `const fn` is always a const context at 73..78)
+        "#]],
+    );
+}
+
+#[test]
+fn taking_an_extern_fn_as_a_value_requires_unsafe() {
+    // `let f = read; f(buf, 8)` used to reach the host with no marker
+    // anywhere: the call site says only that SOMETHING is being called, so
+    // the last place a reader can see which import is in play is where the
+    // value is taken. That is where the marker goes — imports stay
+    // first-class, they are just priced.
+    check_diagnostics(
+        "static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;\n\
+         static loose = fn() -> () { let f = read; };\n\
+         static vouched = fn() -> () { let f = unsafe { read }; };\n\
+         static called = fn(p: u8.&raw mut) -> isize { unsafe { read(p, 1) } };",
+        expect![[r#"
+            100..104: taking the host import `read` as a value requires an `unsafe { ... }` block; a value can be called from anywhere, so vouching happens where it is taken
+        "#]],
+    );
+}
+
+#[test]
+fn an_extern_fn_with_a_body_is_not_a_host_import() {
+    // The syntax error stands (see `syntax`'s own test); what must not
+    // happen is the item becoming an import ANYWAY, which would turn a
+    // written body into a run-time refusal naming a boundary the program
+    // never crossed. The body wins: an import exists only where the
+    // declaration is well formed, so neither the `unsafe` rule nor the
+    // const rule fires here.
+    check_diagnostics(
+        "static bad = extern fn(n: i64) -> i64 { n };\n\
+         static f = fn() -> i64 { bad(1) };\n\
+         static g = const fn() -> i64 { bad(1) };",
+        expect![[r#"
+            38..43: an `extern fn` declares a host import and has no body; the implementation lives on the other side of the boundary
+            111..114: cannot call `bad` in a const context; marking it `const fn` would allow this (`bad` is defined here at 7..10) (this `const fn` is always a const context at 91..96)
+        "#]],
+    );
+}
+
+#[test]
+fn a_misplaced_extern_fn_is_not_a_host_import() {
+    // Same rule as the written body, for the other half of a well-formed
+    // declaration: an import's name IS its item's name, so an `extern fn`
+    // that is not a plain `static`'s initializer has no name to import
+    // under. Lowering it as an import anyway would refuse at run time under
+    // the ENCLOSING item's name. It lowers as an ordinary fn literal with a
+    // missing body instead — exactly what dropping `extern` would give.
+    check_diagnostics(
+        "static outer = fn() -> i64 { let f = extern fn(n: i64) -> i64; f(1) };\n\
+         const copied = extern fn(n: i64) -> i64;",
+        expect![[r#"
+            37..43: an `extern fn` must be a `static`'s initializer — `static name = extern fn(...) -> T;` — because the item's name is the name the host is asked for
+            86..92: an `extern fn` must be a `static`'s initializer — `static name = extern fn(...) -> T;` — because the item's name is the name the host is asked for
+        "#]],
+    );
+}

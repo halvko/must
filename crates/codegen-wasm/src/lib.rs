@@ -91,6 +91,13 @@ pub enum CompileError {
     Unsupported(Refusal),
     /// The entry item has nothing to run.
     NoEntry(String),
+    /// A program this backend refuses for a reason that is NOT a missing
+    /// feature — nothing here is waiting to be built, so it must not be
+    /// reported with [`CompileError::Unsupported`]'s "yet".
+    Rejected {
+        message: String,
+        origin: Option<(ItemLoc, hir::ExprId)>,
+    },
 }
 
 impl CompileError {
@@ -98,6 +105,7 @@ impl CompileError {
         match self {
             CompileError::Unsupported(refusal) => refusal.message(),
             CompileError::NoEntry(message) => message.clone(),
+            CompileError::Rejected { message, .. } => message.clone(),
         }
     }
 
@@ -105,6 +113,7 @@ impl CompileError {
         match self {
             CompileError::Unsupported(refusal) => refusal.origin.clone(),
             CompileError::NoEntry(_) => None,
+            CompileError::Rejected { origin, .. } => origin.clone(),
         }
     }
 }
@@ -161,6 +170,76 @@ impl Traps {
         self.entries.push(entry);
         (self.entries.len() - 1) as u32
     }
+}
+
+/// Declare one wasm import per HOST IMPORT the program actually calls, and
+/// answer the name -> function-index map the emitter calls through.
+///
+/// Reachability is monomorphization's answer, not a scan of the file: an
+/// `extern fn` nothing calls costs the module nothing, which is the same
+/// dead-code rule every other item follows. The module name is `must` and
+/// the field name is the declaring `static`'s own name — the declaration is
+/// the whole contract, and there is no override surface to disagree with it.
+///
+/// CALL THIS AFTER every builtin import and before the first defined
+/// function: the module's existing imports are the names it reserves, and
+/// imports own the low function-index space.
+fn collect_extern_imports(
+    mono: &mut mono::Mono<'_>,
+    module: &mut Module,
+) -> Result<FxHashMap<String, u32>, CompileError> {
+    let order = mono.order.clone();
+    let mut indices: FxHashMap<String, u32> = FxHashMap::default();
+    // Deterministic: instance registration order, then block order within
+    // an instance — the same discipline `Mono::register` uses, so a module
+    // is byte-identical across runs.
+    let mut seen: Vec<(String, Vec<ValType>, Vec<ValType>)> = Vec::new();
+    for key in &order {
+        let analysis = mono.analyze(key);
+        let mut sites: Vec<(usize, &mono::CallTarget)> = analysis
+            .calls
+            .iter()
+            .map(|(block, target)| (block.into_raw().into_u32() as usize, target))
+            .collect();
+        sites.sort_by_key(|(block, _)| *block);
+        for (_, target) in sites {
+            if let mono::CallTarget::Extern {
+                name,
+                params,
+                results,
+                decl,
+            } = target
+            {
+                // A name the compiler already imports under is RESERVED.
+                // Two imports of one `(module, field)` is a module with two
+                // answers to the same question, and an engine resolves both
+                // — so this is a silent-wrong-answer class, not a missing
+                // feature. The reserved set is whatever the module imports
+                // ALREADY, so a future sibling of `print` reserves itself by
+                // being declared above this function's one call site — which
+                // it must be anyway, since imports own the low index space.
+                if module.imports_func(IMPORT_MODULE, name) {
+                    return Err(CompileError::Rejected {
+                        message: format!(
+                            "an `extern fn` may not be named `{name}`: this backend already \
+                             imports `{IMPORT_MODULE}.{name}` for the builtin of that name, \
+                             and a module cannot import one name twice"
+                        ),
+                        origin: Some(decl.clone()),
+                    });
+                }
+                if !seen.iter().any(|(known, _, _)| known == name) {
+                    seen.push((name.clone(), params.clone(), results.clone()));
+                }
+            }
+        }
+    }
+    for (name, params, results) in seen {
+        let ty = module.func_type(params, results);
+        let index = module.import_func(IMPORT_MODULE, &name, ty);
+        indices.insert(name, index);
+    }
+    Ok(indices)
 }
 
 /// The name of the exported entry point. P01: the platform owns `main`.
@@ -227,6 +306,18 @@ pub fn compile(db: &dyn Db, entry: &ItemLoc) -> Result<Artifact, CompileError> {
     let mut module = Module::new();
     let print_ty = module.func_type(vec![ValType::I32, ValType::I32], Vec::new());
     let print = module.import_func(IMPORT_MODULE, "print", print_ty);
+    // Host imports, declared BEFORE any defined function: imports own the
+    // low function-index space, so the whole set has to be known here. It
+    // is — monomorphization has already walked every reachable body and
+    // resolved each call site, signature included.
+    //
+    // `print` stays hand-written above — where `collect_extern_imports`
+    // sees it, and so reserves its name — rather than becoming an `extern fn`
+    // declaration in every program: it is a builtin, and `str`'s (offset,
+    // length) pair is a platform ABI this backend decided by accident (see
+    // `platform-codegen-and-tooling.md`) — not something a user-written
+    // signature can spell today.
+    let extern_imports = collect_extern_imports(&mut mono, &mut module)?;
     let str_eq_ty = module.func_type(
         vec![ValType::I64, ValType::I64, ValType::I64, ValType::I64],
         vec![ValType::I64],
@@ -255,6 +346,7 @@ pub fn compile(db: &dyn Db, entry: &ItemLoc) -> Result<Artifact, CompileError> {
             panic_offset,
             panic_len,
             func_indices: &[],
+            extern_imports: &extern_imports,
         };
         let mut signatures = Vec::with_capacity(order.len());
         for key in &order {
@@ -277,6 +369,7 @@ pub fn compile(db: &dyn Db, entry: &ItemLoc) -> Result<Artifact, CompileError> {
             panic_offset,
             panic_len,
             func_indices: &func_indices,
+            extern_imports: &extern_imports,
         };
         let mut bodies = Vec::with_capacity(order.len());
         for key in &order {

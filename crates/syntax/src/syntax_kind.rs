@@ -73,6 +73,7 @@ pub enum SyntaxKind {
     FOR_KW,
     TRAIT_KW,
     REQUIRES_KW,
+    EXTERN_KW,
     ERROR_TOKEN,
 
     // Nodes
@@ -238,6 +239,7 @@ keywords! {
     "for" => FOR_KW,
     "trait" => TRAIT_KW,
     "requires" => REQUIRES_KW,
+    "extern" => EXTERN_KW,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {

@@ -208,6 +208,7 @@ fn operand(op: &Operand) -> String {
             Const::Item(loc) => format!("item {}", loc.display_name()),
             Const::Builtin(b) => format!("builtin {}", b.name()),
             Const::Fn(body) => format!("fn {}", body_name(*body)),
+            Const::ExternFn { decl, .. } => format!("extern fn {}", decl.display_name()),
             Const::ConstBlock(body) => format!("const {}", body_name(*body)),
             Const::ConstParam(index) => format!("const param {index}"),
         },

@@ -333,3 +333,108 @@ fn a_generic_cycle_at_the_caps_is_refused_by_name() {
         "and reads as one sentence: {message}"
     );
 }
+
+#[test]
+fn a_declared_host_import_becomes_a_real_wasm_import_and_is_called_through() {
+    // The `extern fn` mechanism, end to end at the module level: the
+    // declaration's own name is the import's field name (module `must`,
+    // `print`'s sibling), it lands in the import section, and the call
+    // goes through it. Nothing here is `read`-specific — `read` itself
+    // needs a raw pointer, which this backend refuses by name.
+    let source = "static host_tick = extern fn(n: i64) -> i64;\n\
+                  static main = fn () -> i64 { unsafe { host_tick(7) } };";
+    let artifact = compile(source, "main()");
+    let engine = wasmi::Engine::default();
+    let module = wasmi::Module::new(&engine, &artifact.wasm[..]).expect("validates");
+    let imports: Vec<(String, String)> = module
+        .imports()
+        .map(|import| (import.module().to_owned(), import.name().to_owned()))
+        .collect();
+    assert_eq!(
+        imports,
+        vec![
+            ("must".to_owned(), "print".to_owned()),
+            ("must".to_owned(), "host_tick".to_owned()),
+        ],
+        "a declared import joins `print` in the import section, under its own name"
+    );
+
+    // And it really is wired: a host that doubles gets 7 and the module
+    // returns 14.
+    let mut store = wasmi::Store::new(&engine, ());
+    let mut linker = wasmi::Linker::new(&engine);
+    linker
+        .func_wrap("must", "print", |_: i32, _: i32| {})
+        .expect("print");
+    linker
+        .func_wrap("must", "host_tick", |n: i64| n * 2)
+        .expect("host_tick");
+    let instance = linker
+        .instantiate_and_start(&mut store, &module)
+        .expect("instantiates");
+    let entry = instance
+        .get_typed_func::<(), i64>(&store, "main")
+        .expect("entry");
+    assert_eq!(entry.call(&mut store, ()).expect("runs"), 14);
+}
+
+#[test]
+fn an_import_whose_signature_has_no_wasm_shape_is_refused_by_name() {
+    // The `read` primitive itself, on this backend: its buffer parameter
+    // is a raw pointer, and pointers are out of scope here. The refusal
+    // names the IMPORT — which boundary is unavailable is the useful half.
+    let message = harness::on_budget(|| {
+        let db = RootDatabase::default();
+        let source = "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+                      static main = fn () -> i64 {\n\
+                          let mut b: u8 = 0;\n\
+                          unsafe { read(b.&raw mut, 1) }\n\
+                      };";
+        let loc = harness::prepare(&db, source, "main()");
+        let Err(codegen_wasm::CompileError::Unsupported(refusal)) =
+            codegen_wasm::compile(&db, &loc)
+        else {
+            panic!("the backend must refuse an import it cannot lay out");
+        };
+        refusal.message()
+    });
+    assert_eq!(
+        message,
+        "a raw pointer (heap and pointer primitives are out of scope for this backend) \
+         in the host import `read`'s signature is not supported by the wasm backend yet"
+    );
+}
+
+#[test]
+fn an_extern_fn_may_not_claim_a_name_the_compiler_already_imports() {
+    // Two imports of one `(module, field)` is a module with two answers to
+    // the same question — an engine resolves BOTH, so the program runs with
+    // whichever the host happened to bind, silently. That is a wrong-answer
+    // class, not a missing feature, so it is rejected rather than "not
+    // supported yet". The reserved set is the module's own import list at
+    // this point, so a future sibling of `print` reserves itself with no
+    // second place to write it down — provided it is declared above the
+    // call that collects the program's imports.
+    let (message, named) = harness::on_budget(|| {
+        let db = RootDatabase::default();
+        let source = "static print = extern fn(offset: i64, len: i64) -> ();\n\
+                      static main = fn () -> () { unsafe { print(0, 0) }; };";
+        let loc = harness::prepare(&db, source, "main()");
+        let Err(err) = codegen_wasm::compile(&db, &loc) else {
+            panic!("the backend must reject an import that collides with `must.print`");
+        };
+        let (item, _) = err.origin().expect("the rejection carries a caret");
+        (err.message(), item.display_name().to_owned())
+    });
+    assert_eq!(
+        message,
+        "an `extern fn` may not be named `print`: this backend already imports \
+         `must.print` for the builtin of that name, and a module cannot import \
+         one name twice"
+    );
+    assert_eq!(
+        named, "print",
+        "the rejection must point at the declaration it asks the user to rename, \
+         not at the call that reached it"
+    );
+}

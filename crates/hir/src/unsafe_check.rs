@@ -38,13 +38,23 @@ pub enum UnsafeCheckDiagnostic {
     /// The squiggle (and MIR's trap) lands on the call expression: the
     /// call is the operation that must not run.
     BuiltinCallOutsideUnsafe { call: ExprId, builtin: Builtin },
+    /// A call of an `extern fn` — a host import — outside any `unsafe { ...
+    /// }` block. Same rule, different reason: an import's behavior is not
+    /// written in this language, so nothing here can establish it is sound.
+    ExternCallOutsideUnsafe { call: ExprId, name: String },
+    /// An `extern fn` mentioned as a VALUE outside any `unsafe { ... }`
+    /// block. Without this, `let f = read; f(buf, 8)` reaches the host with
+    /// no marker anywhere — the call site cannot name what it is calling.
+    ExternValueOutsideUnsafe { expr: ExprId, name: String },
 }
 
 impl UnsafeCheckDiagnostic {
     pub fn expr(&self) -> ExprId {
         match self {
             UnsafeCheckDiagnostic::DerefOutsideUnsafe { expr } => *expr,
-            UnsafeCheckDiagnostic::BuiltinCallOutsideUnsafe { call, .. } => *call,
+            UnsafeCheckDiagnostic::BuiltinCallOutsideUnsafe { call, .. }
+            | UnsafeCheckDiagnostic::ExternCallOutsideUnsafe { call, .. } => *call,
+            UnsafeCheckDiagnostic::ExternValueOutsideUnsafe { expr, .. } => *expr,
         }
     }
 
@@ -58,6 +68,12 @@ impl UnsafeCheckDiagnostic {
             UnsafeCheckDiagnostic::BuiltinCallOutsideUnsafe { builtin, .. } => {
                 diag::builtin_call_requires_unsafe(builtin.name())
             }
+            UnsafeCheckDiagnostic::ExternCallOutsideUnsafe { name, .. } => {
+                diag::extern_call_requires_unsafe(name)
+            }
+            UnsafeCheckDiagnostic::ExternValueOutsideUnsafe { name, .. } => {
+                diag::extern_value_requires_unsafe(name)
+            }
         }
     }
 }
@@ -66,6 +82,7 @@ impl UnsafeCheckDiagnostic {
 pub fn unsafe_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<UnsafeCheckDiagnostic> {
     let body = body(db, item);
     let mut ctx = CheckCtx {
+        db,
         body,
         resolutions: resolutions(db, item),
         infer: crate::infer::infer(db, item),
@@ -78,6 +95,9 @@ pub fn unsafe_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<UnsafeCheckD
 }
 
 struct CheckCtx<'db> {
+    /// Consulted for exactly one cross-item question: does this call reach
+    /// an `extern fn` declaration? ([`crate::is_extern_fn`].)
+    db: &'db dyn Db,
     body: &'db Body,
     resolutions: &'db ArenaMap<ExprId, Resolution>,
     /// Consulted for exactly one question: is this `.*` through a raw
@@ -111,12 +131,36 @@ impl CheckCtx<'_> {
             _ => true,
         }
     }
+    /// Walk a call's CALLEE, which the `Call` arm has already judged as a
+    /// call. A bare name is finished there and has nothing beneath it, so
+    /// the value-position rule must not fire on it a second time; every
+    /// other callee shape (a turbofish, a call result, a field access)
+    /// still holds code to check.
+    fn check_callee(&mut self, callee: ExprId, in_unsafe: bool) {
+        if matches!(self.body.exprs[callee], ExprData::NameRef(_)) {
+            return;
+        }
+        self.check_expr(callee, in_unsafe);
+    }
+
     fn check_expr(&mut self, expr: ExprId, in_unsafe: bool) {
         match &self.body.exprs[expr] {
-            ExprData::Missing
-            | ExprData::Literal(_)
-            | ExprData::NameRef(_)
-            | ExprData::ElidedVariant { .. } => {}
+            // A name in VALUE position: `let f = read;`, an argument, a
+            // return. Not a call — the `Call` arm claimed those — so the
+            // import is escaping into a value, and the marker belongs here.
+            ExprData::NameRef(_) => {
+                if !in_unsafe
+                    && let Some(Resolution::Item(loc)) = self.resolutions.get(expr)
+                    && crate::is_extern_fn(self.db, loc.to_id(self.db))
+                {
+                    self.diagnostics
+                        .push(UnsafeCheckDiagnostic::ExternValueOutsideUnsafe {
+                            expr,
+                            name: loc.display_name().to_owned(),
+                        });
+                }
+            }
+            ExprData::Missing | ExprData::Literal(_) | ExprData::ElidedVariant { .. } => {}
             // Both lists a path can carry — the owner's turbofish and a
             // second segment's own — hold ordinary const-arg expressions,
             // so both are walked (the reserved one still contains code).
@@ -146,17 +190,32 @@ impl CheckCtx<'_> {
                     ExprData::GenericApp { base, .. } => *base,
                     _ => *callee,
                 };
-                if !in_unsafe
-                    && let Some(Resolution::Builtin(builtin)) = self.resolutions.get(callee_name)
-                    && builtin.requires_unsafe()
-                {
-                    self.diagnostics
-                        .push(UnsafeCheckDiagnostic::BuiltinCallOutsideUnsafe {
-                            call: expr,
-                            builtin: *builtin,
-                        });
+                if !in_unsafe {
+                    match self.resolutions.get(callee_name) {
+                        Some(Resolution::Builtin(builtin)) if builtin.requires_unsafe() => {
+                            self.diagnostics.push(
+                                UnsafeCheckDiagnostic::BuiltinCallOutsideUnsafe {
+                                    call: expr,
+                                    builtin: *builtin,
+                                },
+                            );
+                        }
+                        // A host import. The marker is required at the CALL
+                        // for the same reason it is for `copy`: this is the
+                        // operation that must not run unvouched.
+                        Some(Resolution::Item(loc))
+                            if crate::is_extern_fn(self.db, loc.to_id(self.db)) =>
+                        {
+                            self.diagnostics
+                                .push(UnsafeCheckDiagnostic::ExternCallOutsideUnsafe {
+                                    call: expr,
+                                    name: loc.display_name().to_owned(),
+                                });
+                        }
+                        _ => {}
+                    }
                 }
-                self.check_expr(*callee, in_unsafe);
+                self.check_callee(*callee, in_unsafe);
                 for &arg in args {
                     self.check_expr(arg, in_unsafe);
                 }
@@ -254,7 +313,11 @@ impl CheckCtx<'_> {
             ExprData::ConstBlock { body } => self.check_expr(*body, in_unsafe),
             // A separate function: it runs under any caller, so it declares
             // its own unsafety — the region resets.
-            ExprData::FnLiteral { body, .. } => self.check_expr(*body, false),
+            ExprData::FnLiteral { body, .. } => {
+                if let Some(body) = body {
+                    self.check_expr(*body, false);
+                }
+            }
         }
     }
 }
