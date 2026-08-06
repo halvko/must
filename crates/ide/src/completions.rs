@@ -51,6 +51,11 @@
 //! arm-list template ([`match_template_items`]), which has no type to
 //! compare against an expectation and is pinned at tier `0` instead.
 //!
+//! The gap is what the scrutinee slot spends: it *subdivides* `00`–`09`
+//! by definition-scope distance instead of adding a fourth sort component,
+//! so the three-part key and every already-pinned `sort_text` are
+//! unchanged. See [`SCRUTINEE_LOCAL_TIER_MAX`].
+//!
 //! ## Snippets
 //!
 //! A handful of candidates carry an [`InsertText::Snippet`] instead of
@@ -69,7 +74,7 @@
 //!
 //! ## The `match` slots
 //!
-//! One position no earlier round classified, keyed off the scrutinee:
+//! Two positions no earlier round classified, both keyed off the scrutinee:
 //!
 //! - **The arm-list slot** — `match s ˽`, scrutinee written, no `{` yet.
 //!   Offers one gold snippet that writes the *rest* of the statement: every
@@ -79,6 +84,18 @@
 //!   [`match_awaiting_arms`] says why. It is strictly *additive*: the
 //!   ordinary expression candidates the position already produced stay
 //!   exactly where they were, the template just outranks them.
+//! - **The scrutinee slot** — `match ˽`, nothing written yet. The ordinary
+//!   expression candidate set, RE-RANKED so enum-typed (and variant-typed)
+//!   values lead it, nearest definition scope first — a `let` in this scope
+//!   before one in an enclosing scope before a parameter before a file item
+//!   ([`Context::MatchScrutinee`]). Nothing is suppressed; the normal set
+//!   follows underneath.
+//!
+//! Three further layers are DESIGNED BUT NOT BUILT, and the reasoning lives
+//! in `docs/design/platform-codegen-and-tooling.md` rather than here:
+//! one-step "easily produced" enums (a field access or method call that
+//! *yields* an enum), importable enums (moot — no module system exists),
+//! and streaming lower-priority layers in behind a first response.
 //!
 //! ## Detail, and why there is no `completionItem/resolve`
 //!
@@ -195,6 +212,26 @@ enum Provenance {
 /// provenance order to decide.
 const TYPE_TIER_NONE: u8 = 2;
 
+/// The scrutinee slot spends the gold band (`00`–`09`, the gap below
+/// [`Provenance::Local`]) on **definition-scope distance**: an enum-typed
+/// local declared `d` scopes away from the `match` sorts at tier `d`, so
+/// this scope's `let`s lead, then enclosing scopes', then the enclosing
+/// `fn`'s parameters — the chain [`hir::ExprScopes::visible_bindings_with_depth`]
+/// already measures, no tier list of our own.
+///
+/// The band is ten slots wide and the chain is not, so distances saturate
+/// here: past eight nested binding scopes candidates tie and the sort key's
+/// alphabetical component decides. That is a display detail — the tie is
+/// deterministic, and eight scopes deep the "nearest" signal has stopped
+/// meaning much anyway.
+const SCRUTINEE_LOCAL_TIER_MAX: u8 = 7;
+
+/// The bottom of the gold band: an enum-typed *file item* — the "broader
+/// context" layer, below every local however distant, above the ordinary
+/// candidate set. Deliberately not `09`: that slot stays free for a layer
+/// that has to sit between this and [`Provenance::Local`].
+const SCRUTINEE_ITEM_TIER: u8 = 8;
+
 /// The leading component of the sort key — see the module doc's TYPE tier
 /// for the 0/1/2 scheme. Both types arrive fully resolved (expectations by
 /// `InferCtx::finish`, candidate types by their own queries), so plain
@@ -227,9 +264,24 @@ fn completion_item(
     detail: Option<String>,
     edit_range: TextRange,
 ) -> CompletionItem {
+    completion_item_at_tier(label, kind, provenance as u8, type_tier, detail, edit_range)
+}
+
+/// [`completion_item`] with the provenance component given as its raw
+/// number rather than a named tier — for the scrutinee slot, which spends
+/// the gold band on scope distance (see [`SCRUTINEE_LOCAL_TIER_MAX`]) and
+/// so has no single [`Provenance`] to name.
+fn completion_item_at_tier(
+    label: impl Into<String>,
+    kind: CompletionItemKind,
+    tier: u8,
+    type_tier: u8,
+    detail: Option<String>,
+    edit_range: TextRange,
+) -> CompletionItem {
     let label = label.into();
     CompletionItem {
-        sort_text: format!("{type_tier}_{:02}_{label}", provenance as u8),
+        sort_text: format!("{type_tier}_{tier:02}_{label}"),
         filter_text: label.clone(),
         text_edit: CompletionTextEdit {
             range: edit_range,
@@ -361,6 +413,19 @@ enum Context {
     /// the `struct`/`enum` keywords, not the general expression-position
     /// candidates the marker would otherwise classify as.
     TypeItemRhs,
+    /// A `match`'s scrutinee slot (`match ˽`, or a prefix of one).
+    /// The candidates are the ordinary expression-position set; the only
+    /// difference is the RANKING, which leads with enum-typed values
+    /// nearest-definition-scope-first (see [`SCRUTINEE_LOCAL_TIER_MAX`]).
+    ///
+    /// Carries the `match` keyword's own start offset rather than the
+    /// cursor: it sits before the cursor, so it back-maps straight to the
+    /// real tree (the [`Context::RecordLiteralField`] trick), and the real
+    /// `MATCH_EXPR` node it lands on is a registered expression whose
+    /// `ExprScopes` scope is exactly the one a scrutinee written there
+    /// would see. Reaching for that scope from the *cursor* instead would
+    /// mean climbing out of a hole with no registered expression in it.
+    MatchScrutinee { match_start: TextSize },
 }
 
 pub(crate) fn completions(
@@ -426,6 +491,7 @@ pub(crate) fn completions(
             statement_start,
             in_loop,
             expected_ty,
+            false,
         ),
         Some(Context::FieldAccess { receiver_range }) => field_items(
             db,
@@ -471,6 +537,17 @@ pub(crate) fn completions(
             record_pattern_items(db, file, &real_root, offset, record_pat_start, edit_range)
         }
         Some(Context::TypeItemRhs) => type_item_rhs_items(edit_range),
+        Some(Context::MatchScrutinee { match_start }) => expression_position_items(
+            db,
+            file,
+            &real_root,
+            match_start,
+            edit_range,
+            false,
+            in_loop(&parent),
+            expected_ty,
+            true,
+        ),
         None => Vec::new(),
     };
     // The arm-list template is strictly ADDITIVE: the position also
@@ -655,6 +732,17 @@ fn classify(parent: &SyntaxNode) -> Option<Context> {
         .is_some_and(|p| p.kind() == SyntaxKind::TYPE_ITEM)
     {
         return Some(Context::TypeItemRhs);
+    }
+    // The scrutinee slot. A `MATCH_EXPR`'s only direct child expression
+    // IS its scrutinee (arm bodies live under `MATCH_ARM`), so the parent
+    // kind alone settles it. Checked before the general expression case
+    // below: same candidates, different ranking.
+    if let Some(match_expr) = path_expr.syntax().parent()
+        && match_expr.kind() == SyntaxKind::MATCH_EXPR
+    {
+        return Some(Context::MatchScrutinee {
+            match_start: match_expr.text_range().start(),
+        });
     }
     let statement_start = path_expr.syntax().parent().is_some_and(|p| {
         p.kind() == SyntaxKind::BLOCK_EXPR
@@ -887,6 +975,7 @@ fn file_value_and_type_items(
     file: SourceFile,
     edit_range: TextRange,
     expected: Option<&hir::Ty>,
+    scrutinee_slot: bool,
 ) -> Vec<CompletionItem> {
     hir::file_scope(db, file)
         .iter()
@@ -900,10 +989,20 @@ fn file_value_and_type_items(
                 } else {
                     CompletionItemKind::Constant
                 };
-                let mut candidate = completion_item(
+                // The scrutinee slot's "broader context" layer: an enum-typed file item is
+                // still a legal scrutinee, just the furthest-away one. A
+                // `fn` RETURNING an enum is deliberately not lifted — that
+                // is the unbuilt "easily produced enums" layer, recorded in
+                // the tooling doc, not smuggled in here.
+                let provenance = if scrutinee_slot && is_enum_typed(db, &ty) {
+                    SCRUTINEE_ITEM_TIER
+                } else {
+                    Provenance::Item as u8
+                };
+                let mut candidate = completion_item_at_tier(
                     name,
                     kind,
-                    Provenance::Item,
+                    provenance,
                     tier,
                     Some(ty.display()),
                     edit_range,
@@ -972,8 +1071,9 @@ fn expression_position_items(
     statement_start: bool,
     in_loop: bool,
     expected: Option<&hir::Ty>,
+    scrutinee_slot: bool,
 ) -> Vec<CompletionItem> {
-    let mut items = file_value_and_type_items(db, file, edit_range, expected);
+    let mut items = file_value_and_type_items(db, file, edit_range, expected, scrutinee_slot);
     items.extend(builtin_fn_items(edit_range, expected));
     let mut words: Vec<&str> = vec![
         "if", "match", "loop", "fn", "true", "false", "struct", "const", "unsafe",
@@ -989,18 +1089,44 @@ fn expression_position_items(
     items.extend(
         locals_for(db, file, real_root, offset, statement_start)
             .into_iter()
-            .map(|(name, mutable, ty)| {
-                completion_item(
-                    name,
+            .map(|local| {
+                // In the scrutinee slot an enum-typed local is ranked by
+                // how far away its declaration is; everywhere else every
+                // local shares one tier, as it always has.
+                let provenance = match &local.ty {
+                    Some(ty) if scrutinee_slot && is_enum_typed(db, ty) => {
+                        local.depth.min(SCRUTINEE_LOCAL_TIER_MAX as u32) as u8
+                    }
+                    _ => Provenance::Local as u8,
+                };
+                completion_item_at_tier(
+                    local.name,
                     CompletionItemKind::Variable,
-                    Provenance::Local,
-                    type_tier(ty.as_ref(), expected),
-                    local_detail(ty.as_ref(), mutable),
+                    provenance,
+                    type_tier(local.ty.as_ref(), expected),
+                    local_detail(local.ty.as_ref(), local.mutable),
                     edit_range,
                 )
             }),
     );
     items
+}
+
+/// Whether a value of this type can be a `match` scrutinee that dispatches
+/// — an enum, or one of its variants (a variant-typed scrutinee is legal
+/// and simply has one reachable arm). The scrutinee slot's test for its
+/// leading layers.
+///
+/// A `fn` returning an enum is NOT enum-typed: calling it would produce a
+/// scrutinee, and "one step of production" is the unbuilt layer. The
+/// distinction is exactly the one [`type_tier`] draws for a `fn` candidate
+/// under a value expectation, kept deliberately.
+fn is_enum_typed(db: &RootDatabase, ty: &hir::Ty) -> bool {
+    match ty {
+        hir::Ty::Named(named) => hir::enum_variants(db, named.decl.to_id(db)).is_some(),
+        hir::Ty::Variant(_) => true,
+        _ => false,
+    }
 }
 
 /// `receiver.field` completions: the receiver's fields directly
@@ -1491,6 +1617,7 @@ fn record_literal_items(
             false,
             in_loop(&anchor),
             expected,
+            false,
         );
     };
 
@@ -1502,17 +1629,17 @@ fn record_literal_items(
 
     let mut items: Vec<CompletionItem> = locals_for(db, file, real_root, offset, false)
         .into_iter()
-        .filter_map(|(name, mutable, ty)| {
+        .filter_map(|local| {
             // The gold local's own expectation is the field it would fill
             // (shorthand: `x` means `x = x`): matching the field's *type*
             // too ranks it tier 0.
-            let (_, field_ty) = missing.iter().find(|(field, _)| **field == name)?;
+            let (_, field_ty) = missing.iter().find(|(field, _)| **field == local.name)?;
             Some(completion_item(
-                name,
+                local.name,
                 CompletionItemKind::Variable,
                 Provenance::Gold,
-                type_tier(ty.as_ref(), Some(field_ty)),
-                local_detail(ty.as_ref(), mutable),
+                type_tier(local.ty.as_ref(), Some(field_ty)),
+                local_detail(local.ty.as_ref(), local.mutable),
                 edit_range,
             ))
         })
@@ -1795,11 +1922,22 @@ fn expr_for_range(
     }
 }
 
-/// Visible locals at `offset`, each with whether it's `mut` and its
-/// inferred type (for the sort key's TYPE tier; `None` when inference has
-/// no entry) — the candidate source for expression/statement-start
-/// completions. Empty when `offset` isn't inside any item's body
-/// (defensive; shouldn't happen for a position classified as
+/// A visible local, as a completion candidate.
+struct Local {
+    name: String,
+    mutable: bool,
+    /// The inferred type, for the sort key's TYPE tier and the scrutinee slot's enum test.
+    /// `None` when inference has no entry.
+    ty: Option<hir::Ty>,
+    /// Definition-scope distance from the completion position — see
+    /// [`hir::ExprScopes::visible_bindings_with_depth`]. Only the
+    /// scrutinee slot ranks on it; every other context ignores it.
+    depth: u32,
+}
+
+/// Visible locals at `offset` — the candidate source for expression/
+/// statement-start completions. Empty when `offset` isn't inside any item's
+/// body (defensive; shouldn't happen for a position classified as
 /// `Expression`).
 fn locals_for(
     db: &RootDatabase,
@@ -1807,7 +1945,7 @@ fn locals_for(
     real_root: &SyntaxNode,
     offset: TextSize,
     statement_start: bool,
-) -> Vec<(String, bool, Option<hir::Ty>)> {
+) -> Vec<Local> {
     let Some(anchor) = real_anchor(real_root, offset) else {
         return Vec::new();
     };
@@ -1831,18 +1969,17 @@ fn locals_for(
         let Some(scope) = expr_scopes.scope_of(expr_id) else {
             return Vec::new();
         };
-        expr_scopes.visible_bindings(scope)
+        expr_scopes.visible_bindings_with_depth(scope)
     };
     let inference = hir::infer::infer(db, item);
     bindings
         .into_iter()
-        .filter(|(name, _)| !name.is_empty())
-        .map(|(name, binding)| {
-            (
-                name,
-                body.bindings[binding].mutable,
-                inference.type_of_binding.get(binding).cloned(),
-            )
+        .filter(|(name, _, _)| !name.is_empty())
+        .map(|(name, binding, depth)| Local {
+            mutable: body.bindings[binding].mutable,
+            ty: inference.type_of_binding.get(binding).cloned(),
+            name,
+            depth,
         })
         .collect()
 }
@@ -1853,20 +1990,30 @@ fn locals_for(
 /// exactly the scope `hir::scopes::compute_expr_scopes` would have handed a
 /// statement written at `offset`, without needing an `ExprId` there (there
 /// usually isn't one — that's the position we're completing).
+///
+/// The reconstruction extends to the definition-scope DISTANCES too: each
+/// `let` opens a scope over the one before it — including a binding-free
+/// `let _ = …`, which still costs a hop in the real chain — so overlaying
+/// one pushes everything already visible a hop further away. No caller
+/// ranks on the distance from *this* path today (the scrutinee slot always
+/// resolves a real `ExprId`, never a statement-start position), so this is
+/// unexercised rather than tested; kept accurate anyway, since a
+/// reconstruction that got it wrong would be a trap for the one that
+/// eventually does rank on it.
 fn locals_in_block(
     body: &hir::Body,
     source_map: &hir::BodySourceMap,
     expr_scopes: &hir::ExprScopes,
     block: &ast::BlockExpr,
     offset: TextSize,
-) -> Vec<(String, hir::BindingId)> {
+) -> Vec<(String, hir::BindingId, u32)> {
     let Some(block_id) = source_map.expr_for_node(SyntaxNodePtr::new(block.syntax())) else {
         return Vec::new();
     };
     let Some(scope) = expr_scopes.scope_of(block_id) else {
         return Vec::new();
     };
-    let mut current = expr_scopes.visible_bindings(scope);
+    let mut current = expr_scopes.visible_bindings_with_depth(scope);
     for stmt in block.statements() {
         if stmt.syntax().text_range().start() >= offset {
             break;
@@ -1879,10 +2026,20 @@ fn locals_in_block(
         let Some(pat_id) = source_map.pat_for_node(SyntaxNodePtr::new(pat.syntax())) else {
             continue;
         };
-        for (name, binding) in body.pat_bindings(pat_id) {
-            match current.iter_mut().find(|(n, _)| *n == name) {
-                Some(slot) => slot.1 = binding,
-                None => current.push((name, binding)),
+        let bindings = body.pat_bindings(pat_id);
+        // `compute_expr_scopes` allocates a scope for every `let`, even a
+        // `let _ = …` with no bindings at all — so every hop bumps depth
+        // here too, before the (possibly empty) bindings loop below.
+        for (_, _, depth) in current.iter_mut() {
+            *depth += 1;
+        }
+        for (name, binding) in bindings {
+            match current.iter_mut().find(|(n, _, _)| *n == name) {
+                Some(slot) => {
+                    slot.1 = binding;
+                    slot.2 = 0;
+                }
+                None => current.push((name, binding, 0)),
             }
         }
     }

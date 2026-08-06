@@ -43,19 +43,47 @@ impl ExprScopes {
         }
     }
 
-    /// All bindings visible from `scope`, shadowing respected (used by
-    /// completions later; cheap to provide now).
+    /// All bindings visible from `scope`, shadowing respected.
     pub fn visible_bindings(&self, scope: ScopeId) -> Vec<(String, BindingId)> {
+        self.visible_bindings_with_depth(scope)
+            .into_iter()
+            .map(|(name, binding, _)| (name, binding))
+            .collect()
+    }
+
+    /// [`Self::visible_bindings`] plus each binding's **definition-scope
+    /// distance**: how many scope hops separate `scope` from the scope that
+    /// declares it (`0` — declared in `scope` itself). Completions rank the
+    /// `match` scrutinee slot by exactly this number, nearest first.
+    ///
+    /// The count is the *real* chain distance, not a hand-made tier list,
+    /// because [`compute_expr_scopes`] already allocates one scope per
+    /// binding construct: a `let` opens a child scope of the statement
+    /// before it, a fn literal's parameters open one under whatever encloses
+    /// the literal, and a match arm's bindings open one under the match.
+    /// Nesting is therefore strictly monotone — an inner `let` always beats
+    /// an outer one, every `let` in a body always beats that body's
+    /// parameters, and a closure's own bindings will always beat its
+    /// captures' the day closures land, with no rule to add.
+    ///
+    /// Shadowing: the nearest declaration of a name wins, and the distance
+    /// reported is *its* distance (the shadowed outer one is not offered at
+    /// all, so its greater distance never competes).
+    pub fn visible_bindings_with_depth(&self, scope: ScopeId) -> Vec<(String, BindingId, u32)> {
         let mut seen = FxHashMap::default();
         let mut current = Some(scope);
+        let mut depth = 0;
         while let Some(scope) = current {
             let data = &self.scopes[scope];
             for (name, binding) in data.entries.iter().rev() {
-                seen.entry(name.clone()).or_insert(*binding);
+                seen.entry(name.clone()).or_insert((*binding, depth));
             }
             current = data.parent;
+            depth += 1;
         }
-        seen.into_iter().collect()
+        seen.into_iter()
+            .map(|(name, (binding, depth))| (name, binding, depth))
+            .collect()
     }
 }
 

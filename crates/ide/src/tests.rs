@@ -3016,6 +3016,135 @@ static f = fn (s: Shape) {
     );
 }
 
+// ---- match-scrutinee ranking ----
+
+/// Every layer of the scrutinee ranking in one body: a `let` in the
+/// cursor's own scope, one further out, a fn parameter, a file item — and a
+/// non-enum local, which stays where every local has always sorted.
+const SCRUTINEE_LAYERS: &str = r#"
+type Shape = enum { Circle(usize), Point };
+static ambient: Shape = Shape::Point;
+static f = fn (param: Shape) {
+    let outer: Shape = param;
+    let noise: usize = 1;
+    {
+        let near: Shape = outer;
+        match $0
+    }
+};
+"#;
+
+#[test]
+fn completions_match_scrutinee_ranks_by_definition_scope_distance() {
+    // Nearest definition scope first, all the way out: this scope's `let`,
+    // then the enclosing scope's, then the enclosing `fn`'s parameter, then
+    // the file. The numbers are real chain distances, not a hand-made tier
+    // list — `noise` sits one hop nearer than `outer` and so pushes it from
+    // 01 to 02, which is exactly what a `let` between them does to the
+    // scope chain.
+    assert_eq!(completion_sort_text(SCRUTINEE_LAYERS, "near"), "2_00_near");
+    assert_eq!(
+        completion_sort_text(SCRUTINEE_LAYERS, "outer"),
+        "2_02_outer"
+    );
+    assert_eq!(
+        completion_sort_text(SCRUTINEE_LAYERS, "param"),
+        "2_03_param"
+    );
+    assert_eq!(
+        completion_sort_text(SCRUTINEE_LAYERS, "ambient"),
+        "2_08_ambient"
+    );
+    // Not enum-typed: no lift at all, the ordinary local tier.
+    assert_eq!(
+        completion_sort_text(SCRUTINEE_LAYERS, "noise"),
+        "2_10_noise"
+    );
+}
+
+#[test]
+fn completions_match_scrutinee_does_not_suppress_the_normal_set() {
+    // The enum-typed values lead; everything an expression position would
+    // otherwise offer still follows, in its usual order.
+    check_completions(
+        SCRUTINEE_LAYERS,
+        expect_test::expect![[r#"
+            near Variable (Shape)
+            outer Variable (Shape)
+            param Variable (Shape)
+            ambient Constant (Shape)
+            noise Variable (usize)
+            AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            Shape Enum (enum { Circle(usize), Point })
+            f Function (fn(Shape) -> !)
+            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
+            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
+            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
+            dangling Function (fn::<T>() -> T.&raw mut)
+            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
+            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
+            panic Function (fn(str) -> !)
+            print Function (fn(str))
+            const Keyword
+            false Keyword
+            fn Keyword
+            if Keyword
+            loop Keyword
+            match Keyword
+            struct Keyword
+            true Keyword
+            unsafe Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_match_scrutinee_ranking_survives_a_typed_prefix() {
+    // The slot classifies the same whether the marker stands alone or is
+    // glued to a prefix, so the ranking is the same too — otherwise the
+    // list would reshuffle under the user's first keystroke.
+    let fixture_text = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (param: Shape) {
+    let near: Shape = param;
+    match n$0
+};
+"#;
+    assert_eq!(completion_sort_text(fixture_text, "near"), "2_00_near");
+    assert_eq!(completion_sort_text(fixture_text, "param"), "2_01_param");
+}
+
+#[test]
+fn completions_match_scrutinee_lifts_a_variant_typed_local() {
+    // A variant-typed value is a legal scrutinee (it simply has one
+    // reachable arm), so it belongs in the leading layer next to the
+    // enum-typed ones.
+    let fixture_text = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn () {
+    let c: Shape::Circle = Shape::Circle(1);
+    match $0
+};
+"#;
+    assert_eq!(completion_sort_text(fixture_text, "c"), "2_00_c");
+}
+
+#[test]
+fn completions_match_scrutinee_ranking_stops_at_the_match() {
+    // Only the scrutinee slot re-ranks. The same locals in an ordinary
+    // expression position keep the flat local tier — a ranking that leaked
+    // would reorder every completion list in the file.
+    let fixture_text = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (param: Shape) {
+    let near: Shape = param;
+    print($0);
+};
+"#;
+    assert_eq!(completion_sort_text(fixture_text, "near"), "2_10_near");
+    assert_eq!(completion_sort_text(fixture_text, "param"), "2_10_param");
+}
+
 // ---- generics: ide smoke + real evaluation ----
 //
 // The no-panic smoke tests keep their smoke shape: completions/hover with the

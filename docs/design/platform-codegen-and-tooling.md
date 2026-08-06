@@ -50,11 +50,15 @@
   prefix words. The frame limit is 10,000, and the message quotes the number.
 - **P11** The debugger runs in-process on the const-eval interpreter (X08): same MIR, same
   machine, same UB findings.
-- **P12** `match` completions. An arm-list template that writes the rest of the
-  statement (every variant, payload bindings and arm bodies as tab stops in
-  definition order), on explicit invoke. Snippets are indented absolutely, because
-  the editor's snippet path shifts by a tree-sitter result and the extension
-  registers no grammar.
+- **P12** `match` completions. Two things keyed off the scrutinee: an
+  arm-list template that writes the rest of the statement (every variant,
+  payload bindings and arm bodies as tab stops in definition order),
+  offered on explicit invoke; and scrutinee ranking that re-orders the
+  expression set so enum-typed values lead, ordered by definition-scope
+  distance (scope-chain hop count, not a hand-written tier list, so
+  closures inherit the rule). Nothing is suppressed. Snippets are indented
+  absolutely, because the editor's snippet path shifts by a tree-sitter
+  result and the extension registers no grammar.
 - **P03** `print` emits exactly what it is given: `str` only, no newline, no formatting, no
   interpolation. The CLI runner writes to `stdout.lock()` — Rust's own line buffering, no
   per-call flush — and flushes it explicitly only before a crash report, so a program's
@@ -104,6 +108,10 @@
   re-indents multi-line snippet bodies and the template's absolute indentation
   doubles. One function to fix; recorded because nobody would connect the
   trigger to completions. **P12**
+- **Completion layers designed, not built**: values that yield an enum one
+  step deep (hierarchy and perf unresolved), and importable enums, moot
+  until modules exist. Streaming is unavailable; the protocol's only
+  mechanism is marking a list incomplete so the client re-queries. **P12**
 - **Two open debug-adapter bugs**, not decisions: with loops and unfueled run mode an infinite
   loop hangs the session with no interrupt path; and breakpoint arrivals are deduped by
   frame/line/column, so a breakpoint in a loop body fires once per frame. **P11**
