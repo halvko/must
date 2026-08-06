@@ -70,6 +70,15 @@
   borrowed independently. An access without an exact path passes the root, which over-reports
   rather than under-reports. Reads are exact because stores already resolve their exact place;
   anything coarser would make reading a disjoint field stricter than writing it.
+- **M13** Match projects through borrows. Matching a borrow binds payload sub-place borrows;
+  matching an owned place copies or moves as before; no new pattern grammar. The scrutinee's
+  flavour decides, all the way down. Each payload binder gets a fresh region bounded by the
+  scrutinee's (bounded, not shortened, so it can take the parent's whole region, which is what
+  makes an `as_ref`-shaped member writable). The tag test is a read through the borrow, so an
+  invalidated scrutinee is caught at the match; a match that dispatches on nothing performs no
+  tag test, and so no access. The rule moves by design: "a referent this match can dispatch on
+  lifts the lens" is defined by which patterns exist, so every future pattern-kind grant also
+  changes the lens for borrowed scrutinees of that type.
 
 ### Ruled, not built
 
@@ -146,6 +155,8 @@
   termination argument, and the aliasing model becomes hostage to the solver. **M09 M10**
 - **An escape lint for raw reborrows** — an accurate one needs static raw-pointer provenance,
   which the model deletes, so any cheap approximation false-positives. **M08**
+- **Binder markers in patterns (`t.&`) and binders-as-places** — patterns stay
+  construction-shaped; a per-binder mode breaks construction/destruction symmetry. **M13**
 
 ## Re-evaluate when
 

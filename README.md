@@ -91,8 +91,9 @@ requires byte-identical behavior. Design notes:
 recursion, and higher-order calls (`functions.must`), compile-time evaluation
 (`compile_time.must`), generics (`generics.must`), fixed-size arrays
 (`arrays.must`), raw pointers (`pointers.must`), the heap built on top of
-them (`heap.must`), safe borrows (`borrows.must`) and members that borrow
-`Self` (`reborrow.must`) — plus `errors.must`, an intentionally broken file
+them (`heap.must`), safe borrows (`borrows.must`), members that borrow
+`Self` (`reborrow.must`) and matching through a borrow
+(`match_projection.must`) — plus `errors.must`, an intentionally broken file
 pairing each diagnostic with the exact message `must-lsp check` prints for
 it.
 

@@ -7638,7 +7638,37 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
             }
         }
-        let scrut = match self.resolve_shallow(&scrut_ty) {
+        // MATCH PROJECTS THROUGH BORROWS (M13). A borrowed scrutinee
+        // dispatches on the enum BEHIND the borrow, and every payload
+        // binding comes out as a borrow of the corresponding sub-place —
+        // never a copy, never a move. The lens is what the rest of the
+        // match carries to remember it is looking through one; `None`
+        // means an OWNED scrutinee, and every path below is then
+        // byte-identical to what it was before this existed.
+        //
+        // Only a referent a `match` can dispatch on lifts the lens (the
+        // same `dispatches_on` mir asks). A `struct.&` or a `usize.&`
+        // scrutinee stays `Scrutinee::Other` holding the BORROW type,
+        // exactly as before, so its diagnostics do not move.
+        let mut lens = None;
+        let mut classify = self.resolve_shallow(&scrut_ty);
+        if let Ty::Borrow {
+            mutable,
+            region,
+            referent,
+        } = &classify
+        {
+            let referent = self.resolve_shallow(referent);
+            if crate::dispatches_on(self.db, &referent) {
+                lens = Some(MatchLens {
+                    mutable: *mutable,
+                    region: region.clone(),
+                    scrutinee,
+                });
+                classify = referent;
+            }
+        }
+        let scrut = match classify {
             Ty::Named(named) => {
                 if enum_variants(self.db, named.decl.to_id(self.db)).is_some() {
                     Scrutinee::Enum(named)
@@ -7688,7 +7718,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let mut catch_all = false;
         let mut all_diverge = true;
         for arm in arms {
-            let cover = self.check_match_pat(expr, arm.pat, &scrut);
+            let cover = self.check_match_pat(expr, arm.pat, &scrut, lens.as_ref());
             match cover {
                 Cover::Nothing => {}
                 _ if catch_all => {
@@ -7863,7 +7893,21 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// Check one arm's pattern against the scrutinee: resolve variant
     /// names (type-directed), type the pattern's bindings, and report what
     /// the pattern covers.
-    fn check_match_pat(&mut self, match_expr: ExprId, pat: PatId, scrut: &Scrutinee) -> Cover {
+    ///
+    /// `lens` is `Some` exactly when the scrutinee is a BORROW of the enum
+    /// (or variant) `scrut` describes — see [`MatchLens`]. It changes only
+    /// what the bindings are typed as: a whole-value binder gets the
+    /// borrow back, and each payload binder gets a borrow of that
+    /// payload's sub-place. Coverage, variant resolution, arity and every
+    /// diagnostic below are untouched by it, which is what makes the owned
+    /// path provably unchanged.
+    fn check_match_pat(
+        &mut self,
+        match_expr: ExprId,
+        pat: PatId,
+        scrut: &Scrutinee,
+        lens: Option<&MatchLens>,
+    ) -> Cover {
         match self.body.pats[pat].clone() {
             PatData::Missing => Cover::Nothing,
             PatData::Wildcard => Cover::All,
@@ -7902,6 +7946,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     Scrutinee::Variant(variant) => Ty::Variant(variant.clone()),
                     Scrutinee::Other(ty) | Scrutinee::Unknown(ty) => ty.clone(),
                     Scrutinee::Error => Ty::Error,
+                };
+                // A whole-value binder on a BORROWED scrutinee binds the
+                // borrow itself, with the scrutinee's own region and no
+                // new edge: it names the very same place, so there is
+                // nothing to project and nothing to shorten. (This is also
+                // what the arm got before the lens existed, when a
+                // borrowed scrutinee classified as `Scrutinee::Other`.)
+                let ty = match lens {
+                    Some(lens) => lens.wrap(lens.region.clone(), ty),
+                    None => ty,
                 };
                 self.result.type_of_binding.insert(binding, ty);
                 Cover::All
@@ -8001,6 +8055,35 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
                 for (i, &binding) in bindings.iter().enumerate() {
                     let ty = payload.get(i).cloned().unwrap_or(Ty::Error);
+                    // THE PROJECTION. Through a borrow the binder does not
+                    // receive the payload — it receives a borrow OF the
+                    // payload's sub-place, in the scrutinee's flavor, at a
+                    // fresh region the scrutinee's region must cover.
+                    //
+                    // Fresh-and-bounded rather than the scrutinee's region
+                    // verbatim, for the same reason every other mention of
+                    // a borrow mints one: the payload loan is allowed to be
+                    // SHORTER than the parent's, and the single directed
+                    // edge is what forbids it ever being longer. It is not
+                    // forced shorter — `@r` has only this upper bound, so
+                    // it can still take the parent's whole region, which is
+                    // exactly the `as_ref` requirement.
+                    //
+                    // `Ty::Error` stays bare: an already-broken binding
+                    // reads worse wrapped in a borrow, and cascades.
+                    let ty = match lens {
+                        Some(lens) if !matches!(ty, Ty::Error) => {
+                            let region = self.fresh_region();
+                            self.push_outlives(
+                                lens.region.clone(),
+                                region.clone(),
+                                lens.scrutinee,
+                                RegionConstraintReason::Projection,
+                            );
+                            lens.wrap(region, ty)
+                        }
+                        _ => ty,
+                    };
                     self.result.type_of_binding.insert(binding, ty);
                 }
                 match scrut {
@@ -8852,6 +8935,36 @@ impl<'a, 'db> InferCtx<'a, 'db> {
 
     fn resolve_shallow(&mut self, ty: &Ty) -> Ty {
         constraint::resolve_shallow(self.table, ty)
+    }
+}
+
+/// The BORROW a `match` is looking through, when it is looking through
+/// one — the whole of "match projects through borrows" as data.
+///
+/// Held beside [`Scrutinee`] rather than as a variant of it on purpose:
+/// the scrutinee classification answers "what universe do the arms cover",
+/// which a borrow does not change at all (the enum behind `T.&` has the
+/// same variants `T` does). What the borrow changes is only what the
+/// BINDERS are typed as, and that is what this carries.
+struct MatchLens {
+    /// The scrutinee borrow's flavor, which every payload borrow inherits.
+    /// There is no per-binder mode and there is no pattern syntax for one:
+    /// a `.&mut` scrutinee binds `.&mut` payloads, a `.&` scrutinee binds
+    /// `.&` payloads, and copying out afterwards is spelled `t.*`.
+    mutable: bool,
+    /// The scrutinee's region — the upper bound on every payload's.
+    region: Region,
+    /// The scrutinee expression, which every projection edge is blamed on.
+    /// A pattern has no `ExprId` of its own, and the scrutinee is the
+    /// operation that made the projection possible, so it is the honest
+    /// anchor for "this borrow does not live long enough".
+    scrutinee: ExprId,
+}
+
+impl MatchLens {
+    /// A type reached through this lens, at `region`.
+    fn wrap(&self, region: Region, ty: Ty) -> Ty {
+        Ty::borrow(self.mutable, region, ty)
     }
 }
 

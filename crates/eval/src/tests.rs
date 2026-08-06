@@ -5261,3 +5261,350 @@ fn a_read_only_borrow_loop_does_not_accumulate_scan_cost() {
         "#]],
     );
 }
+
+// ---- match projects through borrows: aliasing and the tag read ----------
+//
+// The static story is in `hir`; what runs here is the two things only the
+// interpreter can show. A payload binding really points INTO the matched
+// value (so a write through it is visible to its owner), and the tag test
+// really is an access through the scrutinee's node (so an invalidated
+// scrutinee is caught at the `match`, not at the first arm that uses a
+// binding).
+
+#[test]
+fn a_mut_payload_binding_aliases_the_matched_value() {
+    // THE aliasing proof. `bump` never sees the option by value; its write
+    // lands in `main`'s storage, and the owner reads it back. Any answer
+    // other than 101 would mean the binding was a copy.
+    check_run(
+        "type Opt = enum::<T> { Some(T), None };\n\
+         static bump = fn::<@a>(o: Opt::<usize>.&mut::<@a>) -> () {\n\
+             match o { ::Some(t) => { t.* = t.* + 100; }, ::None => {} }\n\
+         };\n\
+         static f = fn() -> usize {\n\
+             let mut o: Opt::<usize> = Opt::<usize>::Some(1);\n\
+             bump(o.&mut);\n\
+             match o { ::Some(n) => n, ::None => 0 }\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 101
+        "#]],
+    );
+}
+
+#[test]
+fn two_mut_payload_bindings_of_one_variant_are_independent() {
+    // Two exclusive borrows of two payload SLOTS, live at once. This is
+    // only sound — and only accepted — because the aliasing tree is
+    // path-granular: minting `y` is a write at the second slot, which the
+    // borrow of the first cannot see.
+    check_run(
+        "type Pair = enum { Both(usize, usize), Neither };\n\
+         static go = fn::<@a>(p: Pair.&mut::<@a>) -> () {\n\
+             match p { ::Both(x, y) => { x.* = 7; y.* = 9; }, ::Neither => {} }\n\
+         };\n\
+         static f = fn() -> usize {\n\
+             let mut p: Pair = ::Both(1, 2);\n\
+             go(p.&mut);\n\
+             match p { ::Both(a, b) => a + b, ::Neither => 0 }\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 16
+        "#]],
+    );
+}
+
+#[test]
+fn a_containing_borrow_still_conflicts_with_a_payload_borrow() {
+    // Paths OVERLAP when one contains the other, so a borrow of the whole
+    // option and a borrow of its payload are not disjoint: minting the
+    // second is a write the first can see. (`[]` — the allocation root —
+    // contains everything, which is what keeps a write by the local's own
+    // name reaching every borrow into it.)
+    check_run(
+        "type Opt = enum::<T> { Some(T), None };\n\
+         static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
+         static f = fn() -> usize {\n\
+             let mut o: Opt::<usize> = Opt::<usize>::Some(1);\n\
+             let inner = match o.&mut { ::Some(t) => t, ::None => panic(\"none\") };\n\
+             o = Opt::<usize>::Some(5);\n\
+             set(inner, 9);\n\
+             0\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, or written through another borrow
+        "#]],
+    );
+}
+
+#[test]
+fn the_tag_read_of_a_shared_borrowed_match_goes_through_the_tree() {
+    // The tag test is an access, and this is it firing. `r` was
+    // invalidated by a direct write to the local; the `match` itself is
+    // the undefined behavior, before any arm body runs. Lowering the tag
+    // read as a copy of a detached value — which is what the owned path
+    // does — would have let this run clean.
+    check_run(
+        "type Opt = enum::<T> { Some(T), None };\n\
+         static f = fn() -> usize {\n\
+             let mut o: Opt::<usize> = Opt::<usize>::Some(1);\n\
+             let r = o.&;\n\
+             o = Opt::<usize>::None;\n\
+             match r { ::Some(_) => 1, ::None => 0 }\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, or written through another borrow
+        "#]],
+    );
+}
+
+#[test]
+fn the_tag_read_of_an_exclusive_borrowed_match_is_a_shared_freeze() {
+    // The `.&mut` flavor, ISOLATED: the second `match` dispatches on the
+    // tag but binds nothing (`::None` carries no payload, `_` binds the
+    // pointer), so the only access it performs is the tag read.
+    //
+    // That read goes through `m`, and `inner` — a payload borrow minted
+    // under `m` — is foreign to it: a foreign read FREEZES an exclusive
+    // node rather than disabling it, so writing through `inner` afterwards
+    // is the suspended-by-a-read case, which gets its own message. Reading
+    // the tag off a detached copy would have done none of this.
+    check_run(
+        "type Opt = enum::<T> { Some(T), None };\n\
+         static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
+         static f = fn() -> usize {\n\
+             let mut o: Opt::<usize> = Opt::<usize>::Some(1);\n\
+             let m = o.&mut;\n\
+             let inner = match m { ::Some(t) => t, ::None => panic(\"none\") };\n\
+             let tag = match m { ::None => 0, _ => 7 };\n\
+             set(inner, 9);\n\
+             tag\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
+              note: this borrow was created here
+              note: suspended here — the place was read while this exclusive borrow was live
+        "#]],
+    );
+}
+
+#[test]
+fn a_borrowed_match_that_dispatches_on_nothing_reads_nothing() {
+    // The control for the test above, and the other half of the rule: a
+    // `match` whose arms make no tag decision does not read the tag, so it
+    // is not an access at all. Same program, with `_` back in place of the
+    // two variant arms — `inner` survives it and the write lands.
+    check_run(
+        "type Opt = enum::<T> { Some(T), None };\n\
+         static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
+         static f = fn() -> usize {\n\
+             let mut o: Opt::<usize> = Opt::<usize>::Some(1);\n\
+             let m = o.&mut;\n\
+             let inner = match m { ::Some(t) => t, ::None => panic(\"none\") };\n\
+             let tag = match m { _ => 7 };\n\
+             set(inner, 9);\n\
+             tag + match o { ::Some(n) => n, ::None => 0 }\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 16
+        "#]],
+    );
+}
+
+#[test]
+fn a_variant_typed_borrowed_match_writes_through_its_payload() {
+    // Tag-free at runtime — no switch, no tag read — but the payload
+    // binding is a borrow of the slot just the same.
+    check_run(
+        "type State = enum { Run(usize), Stop };\n\
+         static tick = fn::<@a>(s: State::Run.&mut::<@a>) -> () {\n\
+             match s { ::Run(n) => { n.* = n.* + 1; } }\n\
+         };\n\
+         static f = fn() -> usize {\n\
+             let mut s: State::Run = ::Run(41);\n\
+             tick(s.&mut);\n\
+             match s { ::Run(n) => n }\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 42
+        "#]],
+    );
+}
+
+#[test]
+fn projecting_twice_reaches_the_inner_payload() {
+    // Transitivity, running: the binding is a borrow, so matching IT
+    // projects again, and the write lands two levels down in the owner.
+    check_run(
+        "type Opt = enum::<T> { Some(T), None };\n\
+         static bump = fn::<@a>(o: Opt::<Opt::<usize>>.&mut::<@a>) -> () {\n\
+             match o {\n\
+                 ::Some(inner) => match inner {\n\
+                     ::Some(n) => { n.* = n.* + 1; },\n\
+                     ::None => {},\n\
+                 },\n\
+                 ::None => {},\n\
+             }\n\
+         };\n\
+         static f = fn() -> usize {\n\
+             let mut o: Opt::<Opt::<usize>> =\n\
+                 Opt::<Opt::<usize>>::Some(Opt::<usize>::Some(6));\n\
+             bump(o.&mut);\n\
+             match o {\n\
+                 ::Some(inner) => match inner { ::Some(n) => n, ::None => 0 },\n\
+                 ::None => 0,\n\
+             }\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 7
+        "#]],
+    );
+}
+
+#[test]
+fn an_owned_match_still_copies_its_payloads_out() {
+    // The owned path, running unchanged: the binding is the VALUE, so
+    // writing to a mutable copy of it cannot touch the scrutinee.
+    check_run(
+        "type Opt = enum::<T> { Some(T), None };\n\
+         static f = fn() -> usize {\n\
+             let o: Opt::<usize> = Opt::<usize>::Some(1);\n\
+             let copied = match o { ::Some(t) => t, ::None => 0 };\n\
+             let again = match o { ::Some(t) => t, ::None => 0 };\n\
+             copied + again\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 2
+        "#]],
+    );
+}
+
+// ---- containment, from the borrows a projection makes ------------------
+//
+// Reads are path-exact (a disjoint field read leaves a sibling borrow
+// alone), and the other half of that rule is that CONTAINMENT in either
+// direction is still a conflict. These pin it over the shapes only a
+// borrowed match produces — a payload borrow under a whole-value read —
+// plus the two containment cases the sibling-read tests above do not
+// reach.
+
+#[test]
+fn reading_the_whole_value_still_freezes_a_payload_borrow() {
+    // CONTAINMENT, the read covering the borrow: `m.*` reads all of the
+    // option, which includes the payload slot `t` points at. The borrow is
+    // frozen by it, so the later write through `t` is the
+    // suspended-by-a-read case. Path exactness must not have turned this
+    // off — a shorter path covers more, and `[]` covers everything.
+    check_run(
+        "type Opt = enum::<T> { Some(T), None };\n\
+         static set = fn::<@r>(m: usize.&mut::<@r>, v: usize) -> () { m.* = v; };\n\
+         static f = fn() -> usize {\n\
+             let mut o: Opt::<usize> = Opt::<usize>::Some(1);\n\
+             let m = o.&mut;\n\
+             let t = match m { ::Some(t) => t, ::None => panic(\"none\") };\n\
+             let whole = m.*;\n\
+             set(t, 9);\n\
+             match whole { ::Some(n) => n, ::None => 0 }\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
+              note: this borrow was created here
+              note: suspended here — the place was read while this exclusive borrow was live
+        "#]],
+    );
+}
+
+#[test]
+fn reading_through_a_prefix_still_freezes_the_borrow_below_it() {
+    // CONTAINMENT one level in: the borrow is of `w.*.inner.b`, the read is
+    // of `w.*.inner` — a strict PREFIX of the borrow's path, so it contains
+    // it and the freeze fires. Overlap is prefix-either-way, not equality.
+    check_run(
+        "type Inner = struct { a: usize, b: usize };\n\
+         type W = struct { inner: Inner, other: usize };\n\
+         static set = fn::<@r>(m: usize.&mut::<@r>, v: usize) -> () { m.* = v; };\n\
+         static f = fn::<@a>(w: W.&mut::<@a>) -> usize {\n\
+             let bb = w.*.inner.b.&mut;\n\
+             let seen = w.*.inner;\n\
+             set(bb, 3);\n\
+             seen.a\n\
+         };\n\
+         static g = fn() -> usize {\n\
+             let mut w: W = W(struct { inner = Inner(struct { a = 1, b = 2 }), other = 0 });\n\
+             f(w.&mut)\n\
+         };",
+        "g()",
+        expect![[r#"
+            error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
+              note: this borrow was created here
+              note: suspended here — the place was read while this exclusive borrow was live
+        "#]],
+    );
+}
+
+#[test]
+fn reading_a_local_by_its_bare_name_still_reaches_every_borrow_into_it() {
+    // The root read, unchanged: a place with no element steps at all is the
+    // empty path, which contains everything. `let r = n.&; n = 99; r.*` —
+    // the ordinary exclusivity bug — must still be caught, and a bare-name
+    // read of a borrowed STRUCT must still reach a borrow of one field.
+    check_run(
+        "type W = struct { a: usize, b: usize };\n\
+         static set = fn::<@r>(m: usize.&mut::<@r>, v: usize) -> () { m.* = v; };\n\
+         static f = fn() -> usize {\n\
+             let mut w: W = W(struct { a = 1, b = 2 });\n\
+             let bb = w.b.&mut;\n\
+             let whole = w;\n\
+             set(bb, 3);\n\
+             whole.a\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
+              note: this borrow was created here
+              note: suspended here — the place was read while this exclusive borrow was live
+        "#]],
+    );
+}
+
+#[test]
+fn a_raw_pointer_minted_from_a_borrow_is_path_filtered_too() {
+    // M08's raw-pointer consequence, under path-granular nodes: a
+    // `.&raw mut` minted through a borrow inherits the borrow's NODE
+    // (`.&raw` is not a decayed safe borrow), and its PATH comes along
+    // with it — so a raw write at a disjoint slot does not kill a sibling
+    // borrow. Correct and consistent: the raw pointer speaks through the
+    // same node, at its own location.
+    check_run(
+        "type W = struct { a: usize, b: usize };\n\
+         static f = fn::<@a>(w: W.&mut::<@a>) -> usize {\n\
+             let bb = w.*.b.&mut;\n\
+             let ra = w.*.a.&raw mut;\n\
+             unsafe { ra.* = 7; };\n\
+             bb.* = 3;\n\
+             w.*.a + w.*.b\n\
+         };\n\
+         static g = fn() -> usize {\n\
+             let mut w: W = W(struct { a = 1, b = 2 });\n\
+             f(w.&mut)\n\
+         };",
+        "g()",
+        expect![[r#"
+            => 10
+        "#]],
+    );
+}

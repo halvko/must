@@ -613,6 +613,56 @@ variant crashes with exactly the squiggle's message. Arms that can never
 run (after a catch-all, a variant already covered) are warnings, not
 errors. On a non-enum scrutinee only `_` or a binding can match (for now).
 
+*Matching a BORROW projects through it.* A scrutinee of type
+`Opt::<T>.&::<@a>` dispatches on the enum behind the borrow, and each payload
+binding comes out as a *borrow of that payload's slot* rather than a copy of
+it — `.&mut` in, `.&mut` out. Nothing in the pattern says so: the scrutinee's
+flavor decides, there is no per-binder marker, and patterns stay exactly
+construction-shaped.
+
+```must
+type Opt = enum::<T> { Some(T), None };
+
+static bump = fn::<@a>(o: Opt::<usize>.&mut::<@a>) -> () {
+    match o {
+        ::Some(t) => { t.* = t.* + 1; },   // `t: usize.&mut` — writes the OWNER
+        ::None => {},
+    }
+};
+```
+
+That is what makes an `as_ref`-shaped function writable — one that turns a
+borrow of an option into an option of a borrow:
+
+```must
+static project_in = fn::<@a, T>(s: Opt::<T>.&::<@a>) -> Opt::<T.&::<@a>> {
+    match s {
+        ::Some(t) => Opt::<T.&::<@a>>::Some(t),
+        ::None => Opt::<T.&::<@a>>::None,
+    }
+};
+```
+
+The payload binding's region is fresh, with one rule attached: the
+scrutinee's region must outlive it. So it may be *shorter* than the
+scrutinee's and can never be longer — and, as above, it may be exactly the
+scrutinee's, which is why `project_in` can hand its result back at the
+caller's own `@a`. Trying to return it for longer is a check-time error
+naming the bound the signature would have to declare.
+
+Because every binding is a borrow, you can never *move* a payload out of a
+borrowed scrutinee. Reading one is the ordinary `t.*`, which copies, so the
+payload has to be copyable; a payload that must move needs the owned place
+matched instead. Matching an *owned* scrutinee is unchanged in every
+respect — it still copies, and still moves payloads that cannot be copied.
+
+Since a binding is itself a borrow, matching *it* projects again, which is
+how the rule reaches nested data today (nested patterns are not grammar
+yet). And the tag test is a real read *through* the borrow, so a scrutinee
+that has already been invalidated is caught at the `match` itself rather
+than at whichever arm first touches a binding. A `match` no arm of which
+dispatches — only `_` or a binding — tests no tag and so reads nothing.
+
 *Matching a variant-typed scrutinee needs no dispatch at all.* A `fn (s:
 State::Running)` knows statically which variant it holds, so a `match`
 inside compiles to a direct payload destructure — no switch, no tag read,
@@ -627,6 +677,8 @@ Not in v1 (landing later as one coherent pattern-language feature): nested
 patterns, or-patterns (`0 | 1`), guards, literal patterns, `if match`,
 `match ... else`, the statement form `match x => pat;`, and record
 patterns — though `..` is already reserved in pattern position for them.
+Nested patterns are the one whose absence is visible above: reaching into
+nested data through a borrow is spelled as two matches until they land.
 
 == Loops
 
@@ -1218,6 +1270,12 @@ verbatim instead: no reborrow is minted, nothing is suspended, and the
 interpreter sees one borrow where there are two, so both writes land.
 Closing that means minting the reborrow (or a move) regardless of
 expectation, which is a change to typing rather than to either checker.
+
+One more thing borrows do, covered where `match` is: matching a borrowed
+scrutinee binds *borrows* of the payloads rather than copies of them, so
+`Opt::<T>.&::<@a>` can be turned into `Opt::<T.&::<@a>>` and a `.&mut`
+payload binding writes the value it was matched from. See
+`examples/match_projection.must`, which runs.
 
 Also not yet supported: regions on type declarations (`struct::<@a, T>`),
 implied bounds, elision of any kind, and compiling a program that uses safe

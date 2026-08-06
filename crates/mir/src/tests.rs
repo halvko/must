@@ -2897,3 +2897,238 @@ fn a_reborrow_through_a_borrow_stays_a_borrow() {
         "#]],
     );
 }
+
+// ---- match projects through borrows -------------------------------------
+
+#[test]
+fn a_borrowed_match_reads_the_tag_through_the_deref_and_borrows_its_payloads() {
+    // The whole runtime content of the ruling, in one snapshot.
+    //
+    //   * `switch _2.*` — the tag test is a READ THROUGH THE BORROW, not a
+    //     read of a detached copy, so the interpreter's aliasing tree sees
+    //     it and an invalidated scrutinee is caught before any arm runs;
+    //   * `_4 = &mut _2.*.0` — the payload binding is a BORROW of the
+    //     payload's sub-place, `Rvalue::Borrow` over `[Deref, Field(0)]`.
+    //     Compare the owned lowering (`match_on_enum_lowers_to_switch_variant`),
+    //     which is `_4 = _2.0`: a value read out of a copy.
+    check_mir(
+        r#"
+type Opt = enum { Some(usize), None };
+static f = fn::<@a>(s: Opt.&mut::<@a>) -> () {
+    match s {
+        ::Some(t) => { t.* = 1; },
+        ::None => {},
+    }
+};
+"#,
+        expect![[r#"
+            item Opt:
+            item f:
+            fn b0(_1: Opt.&mut) -> () {
+              _0: ()  // return
+              _1: Opt.&mut  // param s
+              _2: Opt.&mut
+              _3: ()
+              _4: usize.&mut  // t
+              bb0:
+                _2 = _1
+                switch _2.* on Opt -> [0: bb1, 1: bb2, otherwise: bb3]
+              bb1:
+                _4 = &mut _2.*.0
+                _4.* = 1
+                _3 = ()
+                goto -> bb4
+              bb2:
+                _3 = ()
+                goto -> bb4
+              bb3:
+                unreachable
+              bb4:
+                _0 = _3
+                return
+            }
+            fn b1() -> fn(Opt.&mut) {
+              _0: fn(Opt.&mut)  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn a_shared_borrowed_match_borrows_its_payloads_shared() {
+    // The flavor rides through: `&` where the scrutinee was `&`.
+    check_mir(
+        r#"
+type Opt = enum { Some(usize), None };
+static f = fn::<@a>(s: Opt.&::<@a>) -> usize {
+    match s {
+        ::Some(t) => t.*,
+        ::None => 0,
+    }
+};
+"#,
+        expect![[r#"
+            item Opt:
+            item f:
+            fn b0(_1: Opt.&) -> usize {
+              _0: usize  // return
+              _1: Opt.&  // param s
+              _2: Opt.&
+              _3: usize
+              _4: usize.&  // t
+              _5: usize
+              bb0:
+                _2 = _1
+                switch _2.* on Opt -> [0: bb1, 1: bb2, otherwise: bb3]
+              bb1:
+                _4 = & _2.*.0
+                _5 = _4.*
+                _3 = _5
+                goto -> bb4
+              bb2:
+                _3 = 0
+                goto -> bb4
+              bb3:
+                unreachable
+              bb4:
+                _0 = _3
+                return
+            }
+            fn b1() -> fn(Opt.&) -> usize {
+              _0: fn(Opt.&) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn a_variant_typed_borrowed_match_borrows_without_a_switch() {
+    // No dispatch (the value can only be this one variant), so no tag read
+    // — but the payload binding is still a borrow of the sub-place.
+    check_mir(
+        r#"
+type State = enum { Run(usize), Stop };
+static f = fn::<@a>(s: State::Run.&mut::<@a>) -> () {
+    match s {
+        ::Run(n) => { n.* = 1; },
+    }
+};
+"#,
+        expect![[r#"
+            item State:
+            item f:
+            fn b0(_1: State::Run.&mut) -> () {
+              _0: ()  // return
+              _1: State::Run.&mut  // param s
+              _2: State::Run.&mut
+              _3: ()
+              _4: usize.&mut  // n
+              bb0:
+                _2 = _1
+                _4 = &mut _2.*.0
+                _4.* = 1
+                _3 = ()
+                goto -> bb1
+              bb1:
+                _0 = _3
+                return
+            }
+            fn b1() -> fn(State::Run.&mut) {
+              _0: fn(State::Run.&mut)  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn a_whole_value_binder_through_a_borrow_copies_the_pointer() {
+    // A bare bind names the same place the scrutinee does, so it aliases
+    // the value exactly as it always did — which through a borrow means
+    // copying the pointer, not minting a node. It also decides no tag, so
+    // there is no switch and nothing is read through the borrow.
+    check_mir(
+        r#"
+type Opt = enum { Some(usize), None };
+static f = fn::<@a>(s: Opt.&::<@a>) -> Opt.&::<@a> {
+    match s { whole => whole }
+};
+"#,
+        expect![[r#"
+            item Opt:
+            item f:
+            fn b0(_1: Opt.&) -> Opt.& {
+              _0: Opt.&  // return
+              _1: Opt.&  // param s
+              _2: Opt.&
+              _3: Opt.&
+              _4: Opt.&  // whole
+              bb0:
+                _2 = _1
+                goto -> bb1
+              bb1:
+                _4 = _2
+                _3 = _4
+                goto -> bb2
+              bb2:
+                _0 = _3
+                return
+            }
+            fn b1() -> fn(Opt.&) -> Opt.& {
+              _0: fn(Opt.&) -> Opt.&  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn an_owned_match_that_dispatches_on_nothing_has_no_switch() {
+    // The dead-switch elision is not a borrowed-scrutinee special case: an
+    // owned match whose only arm is a catch-all decides nothing on the tag
+    // either, so it lowers to a plain `goto`. Here that drops only a read
+    // of the pinned temp, which nothing can borrow into.
+    check_mir(
+        r#"
+type Opt = enum { Some(usize), None };
+static f = fn(o: Opt) -> usize {
+    match o { _ => 7 }
+};
+"#,
+        expect![[r#"
+            item Opt:
+            item f:
+            fn b0(_1: Opt) -> usize {
+              _0: usize  // return
+              _1: Opt  // param o
+              _2: Opt
+              _3: usize
+              bb0:
+                _2 = _1
+                goto -> bb1
+              bb1:
+                _3 = 7
+                goto -> bb2
+              bb2:
+                _0 = _3
+                return
+            }
+            fn b1() -> fn(Opt) -> usize {
+              _0: fn(Opt) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}

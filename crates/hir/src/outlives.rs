@@ -115,6 +115,12 @@ impl OutlivesDiagnostic {
                         "requiring these two borrows to be the same type"
                     }
                     RegionConstraintReason::CalleeBound => "calling this function",
+                    // The user wrote a `match`, not a borrow — name that,
+                    // for the same reason `Reborrow` names the use rather
+                    // than the machinery.
+                    RegionConstraintReason::Projection => {
+                        "matching this borrow to bind its payloads"
+                    }
                 };
                 // A MEET on the shorter side needs only ONE member
                 // covered — it is the overlap of its members, so covering

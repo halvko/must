@@ -956,23 +956,9 @@ impl<'db, M: Mode> Machine<'db, M> {
                     if after_deref && let Some(pending) = reads.last_mut() {
                         pending.2.push(PathElem::Field(*index));
                     }
-                    match current {
-                        Value::Record { fields } => match fields.get(*index as usize) {
-                            Some((_, field)) => field,
-                            None => {
-                                return Err(self.internal_error(
-                                    format!(
-                                        "record field index {index} out of range \
-                                         ({} elements)",
-                                        fields.len()
-                                    ),
-                                    Some((loc.clone(), origin)),
-                                ));
-                            }
-                        },
-                        other => {
-                            return Err(self.ill_typed("a record value", other, loc, origin));
-                        }
+                    match field_step(current, *index) {
+                        Ok(next) => next,
+                        Err(error) => return Err(self.ptr_path_error(error, loc, origin)),
                     }
                 }
                 ResolvedProj::Index(index) => {
@@ -2549,17 +2535,7 @@ fn project_path<'v>(slot: &'v Value, path: &[PathElem]) -> Result<&'v Value, Pro
             // Stepping INTO uninitialized memory: its structure was never
             // written — detected UB, not a shape violation.
             (_, Value::Uninit) => return Err(ProjectError::Uninit),
-            (PathElem::Field(index), Value::Record { fields }) => {
-                let len = fields.len();
-                match fields.get(*index as usize) {
-                    Some((_, field)) => field,
-                    None => {
-                        return Err(ProjectError::Shape(format!(
-                            "record field index {index} out of range ({len} elements)"
-                        )));
-                    }
-                }
-            }
+            (PathElem::Field(index), value) => field_step(value, *index)?,
             (PathElem::Index(index), Value::Array(values)) => {
                 let len = values.len() as u128;
                 let index = *index as u128;
@@ -2571,12 +2547,6 @@ fn project_path<'v>(slot: &'v Value, path: &[PathElem]) -> Result<&'v Value, Pro
             (PathElem::Index(_), other) => {
                 return Err(ProjectError::Shape(format!(
                     "expected an array value to project into, found `{}`",
-                    other.display()
-                )));
-            }
-            (PathElem::Field(_), other) => {
-                return Err(ProjectError::Shape(format!(
-                    "expected a record value to project into, found `{}`",
                     other.display()
                 )));
             }
@@ -2597,17 +2567,7 @@ fn project_path_mut<'v>(
             // (A path ENDING at an uninit slot succeeds: the write
             // replaces the poison — that is how elements get initialized.)
             (_, Value::Uninit) => return Err(ProjectError::Uninit),
-            (PathElem::Field(index), Value::Record { fields }) => {
-                let len = fields.len();
-                match fields.get_mut(*index as usize) {
-                    Some((_, field)) => field,
-                    None => {
-                        return Err(ProjectError::Shape(format!(
-                            "record field index {index} out of range ({len} elements)"
-                        )));
-                    }
-                }
-            }
+            (PathElem::Field(index), value) => field_step_mut(value, *index)?,
             (PathElem::Index(index), Value::Array(values)) => {
                 let len = values.len() as u128;
                 let index = *index as u128;
@@ -2622,15 +2582,73 @@ fn project_path_mut<'v>(
                     other.display()
                 )));
             }
-            (PathElem::Field(_), other) => {
-                return Err(ProjectError::Shape(format!(
-                    "expected a record value to project into, found `{}`",
-                    other.display()
-                )));
-            }
         };
     }
     Ok(current)
+}
+
+/// One FIELD step of a path walk: a record field by canonical index, or a
+/// variant/tuple payload element by position.
+///
+/// The payload arms are what makes a match-through-a-borrow binding
+/// reachable — the binder's pointer path steps into the matched value, and
+/// every read and write through it walks that step back down. An enum-typed
+/// value is a [`Value::Variant`]; an unwidened variant-TYPED one is a
+/// tag-free [`Value::Tuple`], so both spell the same step.
+///
+/// Overrunning either is an internal error, not UB: arity is a
+/// compile-time fact (the checker reports `PatArity`, and lowering plants a
+/// placeholder), so a path that overruns one means lowering and the value
+/// disagree. Shared by [`project_path`], [`project_path_mut`] and
+/// `Machine::read_place`, which is what keeps the read and write sides
+/// agreeing about what a field step means.
+fn field_step(value: &Value, index: u32) -> Result<&Value, ProjectError> {
+    match value {
+        Value::Record { fields } => fields
+            .get(index as usize)
+            .map(|(_, field)| field)
+            .ok_or_else(|| field_out_of_range("record field", index, fields.len())),
+        Value::Variant { payload, .. } | Value::Tuple(payload) => payload
+            .get(index as usize)
+            .ok_or_else(|| field_out_of_range("variant payload", index, payload.len())),
+        other => Err(ProjectError::Shape(format!(
+            "expected a record, variant or tuple value to project into, found `{}`",
+            other.display()
+        ))),
+    }
+}
+
+/// [`field_step`], mutably — the store half. Writing through a `.&mut`
+/// payload binding mutates the matched value IN PLACE, which is the whole
+/// point of projecting rather than copying.
+fn field_step_mut(value: &mut Value, index: u32) -> Result<&mut Value, ProjectError> {
+    match value {
+        Value::Record { fields } => {
+            let len = fields.len();
+            fields
+                .get_mut(index as usize)
+                .map(|(_, field)| field)
+                .ok_or_else(|| field_out_of_range("record field", index, len))
+        }
+        Value::Variant { payload, .. } | Value::Tuple(payload) => {
+            let len = payload.len();
+            payload
+                .get_mut(index as usize)
+                .ok_or_else(|| field_out_of_range("variant payload", index, len))
+        }
+        other => Err(ProjectError::Shape(format!(
+            "expected a record, variant or tuple value to project into, found `{}`",
+            other.display()
+        ))),
+    }
+}
+
+/// The overrun message both halves render, so the read and write sides
+/// cannot drift apart on the wording.
+fn field_out_of_range(what: &str, index: u32, len: usize) -> ProjectError {
+    ProjectError::Shape(format!(
+        "{what} index {index} out of range ({len} elements)"
+    ))
 }
 
 /// How `Machine::resolve_place_alloc` treats the place's own element

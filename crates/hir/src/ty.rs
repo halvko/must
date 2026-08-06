@@ -1560,6 +1560,24 @@ pub fn type_underlying<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<Ty> {
     ))
 }
 
+/// Whether a `match` on a value of this (shallow-resolved) type dispatches
+/// on it — an enum declaration, or one of its variants. Everything else can
+/// only be matched by a catch-all.
+///
+/// The one predicate both passes ask: inference uses it to decide whether
+/// a BORROWED scrutinee lifts the projection lens (M13 — `match` projects
+/// through a borrow exactly when a `match` on the referent would dispatch
+/// on it), and mir asks the same question of the same referent when it
+/// lowers the match. The rule moves by design: granting a new pattern kind
+/// widens this, and every borrowed scrutinee of that type follows.
+pub fn dispatches_on(db: &dyn Db, ty: &Ty) -> bool {
+    match ty {
+        Ty::Named(named) => enum_variants(db, named.decl.to_id(db)).is_some(),
+        Ty::Variant(_) => true,
+        _ => false,
+    }
+}
+
 /// The variants an enum `type` item declares — `(name, payload types)` in
 /// source order (a variant's index is its identity) — or `None` when the
 /// item declares a struct shape or is broken. The enum-side counterpart of

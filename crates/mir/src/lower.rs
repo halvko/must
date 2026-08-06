@@ -1551,19 +1551,44 @@ impl LowerCtx<'_> {
     ) -> Operand {
         let scrut_op = self.lower_expr(b, scrutinee);
         // Pin the scrutinee in a temp: the switch reads it and every
-        // payload extraction re-reads it.
+        // payload extraction re-reads it. Through a borrow the temp holds
+        // the POINTER, and every read/borrow below goes through its deref.
         let scrut_local = b.temp(self.ty(scrutinee));
         b.push_assign(scrut_local, Rvalue::Use(scrut_op), scrutinee);
         let scrut = Operand::Copy(scrut_local.into());
 
-        match self.ty(scrutinee) {
+        // MATCH PROJECTS THROUGH BORROWS: dispatch on the type BEHIND the
+        // borrow, and bind payloads as borrows of its sub-places. The lens
+        // is `None` for an owned scrutinee, and every line below then runs
+        // exactly the code it ran before this existed.
+        //
+        // The condition is the same predicate `infer_match` used —
+        // `hir::dispatches_on` — so a `struct.&` scrutinee still reaches
+        // the catch-all-only lowering as the BORROW it is, and its trap
+        // message does not move.
+        let mut lens = None;
+        let mut dispatch_on = self.ty(scrutinee);
+        if let Ty::Borrow {
+            mutable, referent, ..
+        } = &dispatch_on
+            && hir::dispatches_on(self.db, referent)
+        {
+            lens = Some(BorrowedScrutinee {
+                local: scrut_local,
+                mutable: *mutable,
+                expr: scrutinee,
+            });
+            dispatch_on = referent.as_ref().clone();
+        }
+
+        match dispatch_on {
             // The dispatch is keyed on the DECLARATION alone: variant
             // indices (and so tags) are identical across instantiations of
             // a generic enum — the args never reach the runtime switch.
             Ty::Named(named)
                 if hir::enum_variants(self.db, named.decl.to_id(self.db)).is_some() =>
             {
-                self.lower_match_switch(b, expr, &scrut, named.decl, arms)
+                self.lower_match_switch(b, expr, &scrut, named.decl, arms, lens)
             }
             Ty::Variant(variant) => {
                 let covering =
@@ -1578,7 +1603,7 @@ impl LowerCtx<'_> {
                     uncovered: vec![format!("{}::{}", variant.decl.display_name(), variant.name)],
                 }
                 .message();
-                self.lower_match_straight(b, expr, &scrut, arms, covering, fallback)
+                self.lower_match_straight(b, expr, &scrut, arms, covering, fallback, lens)
             }
             scrut_ty => {
                 let covering = arms
@@ -1589,7 +1614,7 @@ impl LowerCtx<'_> {
                     scrutinee: scrut_ty,
                 }
                 .message();
-                self.lower_match_straight(b, expr, &scrut, arms, covering, fallback)
+                self.lower_match_straight(b, expr, &scrut, arms, covering, fallback, lens)
             }
         }
     }
@@ -1597,7 +1622,8 @@ impl LowerCtx<'_> {
     /// The tagged dispatch: one switch arm per first-covering variant
     /// pattern, a catch-all arm as `otherwise` — or, when there is none
     /// and coverage has holes, a trap carrying the non-exhaustiveness
-    /// diagnostic's exact message.
+    /// diagnostic's exact message. No variant pattern dispatches means no
+    /// switch: the arms go straight to `otherwise` and no tag is read.
     fn lower_match_switch(
         &mut self,
         b: &mut BodyBuilder,
@@ -1605,6 +1631,7 @@ impl LowerCtx<'_> {
         scrut: &Operand,
         decl: ItemLoc,
         arms: &[MatchArm],
+        lens: Option<BorrowedScrutinee>,
     ) -> Operand {
         let dest = b.temp(self.ty(expr));
         let arm_blocks: Vec<BlockId> = arms.iter().map(|_| b.new_block()).collect();
@@ -1628,19 +1655,58 @@ impl LowerCtx<'_> {
             Some(block) => (block, false),
             None => (b.new_block(), true),
         };
-        b.terminate(
-            TerminatorKind::SwitchVariant {
-                discr: scrut.clone(),
-                decl: decl.clone(),
-                arms: switch_arms.clone(),
-                otherwise: otherwise_block,
-            },
-            expr,
-        );
+        // THE TAG TEST. Through a borrow it is a READ THROUGH THE BORROW,
+        // not a read of a detached copy: the discriminant operand names
+        // the pointee place, so the interpreter's aliasing tree sees the
+        // access and a scrutinee that was invalidated (written through
+        // another borrow, or through the local's own name) is caught HERE,
+        // before any arm runs. For a `.&mut` scrutinee it is a shared read
+        // through that node, which freezes every borrow foreign to it —
+        // the same event `s.*` would be, minus the copy-out rule.
+        // The origin moves to the scrutinee only when there IS a read to
+        // blame: an owned switch reads a detached value and keeps the
+        // whole-match origin it always had.
+        //
+        // No arm dispatches (a catch-all first, or nothing but dead arms)
+        // means the tag decides nothing, and then it is not read at all —
+        // the same tag-free lowering a variant-typed scrutinee gets. It
+        // matters most through a borrow, where the read would otherwise
+        // freeze every payload borrow minted under the scrutinee for a
+        // `match` that inspects nothing. An owned scrutinee drops the dead
+        // switch on the same grounds — there it only drops a redundant read
+        // of the pinned temp, which nothing can borrow into.
+        if switch_arms.is_empty() {
+            b.terminate(
+                TerminatorKind::Goto {
+                    target: otherwise_block,
+                },
+                expr,
+            );
+        } else {
+            let (discr, origin) = match &lens {
+                Some(lens) => (
+                    Operand::Copy(Place {
+                        local: lens.local,
+                        projection: vec![crate::ProjElem::Deref],
+                    }),
+                    lens.expr,
+                ),
+                None => (scrut.clone(), expr),
+            };
+            b.terminate(
+                TerminatorKind::SwitchVariant {
+                    discr,
+                    decl: decl.clone(),
+                    arms: switch_arms.clone(),
+                    otherwise: otherwise_block,
+                },
+                origin,
+            );
+        }
         let join = b.new_block();
         for (arm, &block) in arms.iter().zip(&arm_blocks) {
             b.current = block;
-            self.bind_match_pattern(b, arm.pat, scrut, arm.body);
+            self.bind_match_pattern(b, arm.pat, scrut, arm.body, lens);
             let op = self.lower_expr(b, arm.body);
             b.push_assign(dest, Rvalue::Use(op), arm.body);
             b.terminate(TerminatorKind::Goto { target: join }, expr);
@@ -1695,13 +1761,14 @@ impl LowerCtx<'_> {
         arms: &[MatchArm],
         covering: Option<usize>,
         fallback: String,
+        lens: Option<BorrowedScrutinee>,
     ) -> Operand {
         let dest = b.temp(self.ty(expr));
         let join = b.new_block();
         match covering {
             Some(covering) => {
                 let arm = &arms[covering];
-                self.bind_match_pattern(b, arm.pat, scrut, arm.body);
+                self.bind_match_pattern(b, arm.pat, scrut, arm.body, lens);
                 let op = self.lower_expr(b, arm.body);
                 b.push_assign(dest, Rvalue::Use(op), arm.body);
                 b.terminate(TerminatorKind::Goto { target: join }, expr);
@@ -1736,7 +1803,7 @@ impl LowerCtx<'_> {
             }
             let block = b.new_block();
             b.current = block;
-            self.bind_match_pattern(b, arm.pat, scrut, arm.body);
+            self.bind_match_pattern(b, arm.pat, scrut, arm.body, lens);
             let op = self.lower_expr(b, arm.body);
             b.push_assign(dest, Rvalue::Use(op), arm.body);
             b.terminate(TerminatorKind::Goto { target: join }, expr);
@@ -1769,12 +1836,23 @@ impl LowerCtx<'_> {
     /// A variant pattern reads its payloads out of the (tagged or
     /// variant-typed) value by field index; a bare bind aliases the whole
     /// value.
+    ///
+    /// Through a borrow (`lens`), the payloads are not read at all: each
+    /// binder gets a `Rvalue::Borrow` of the payload's SUB-PLACE, reached
+    /// as `scrutinee.*.<index>`. That is the whole runtime content of
+    /// "match projects through borrows" — the binding aliases the
+    /// scrutinee's storage instead of copying out of a detached value, and
+    /// each one is a real child node in the aliasing tree. A bare bind
+    /// still aliases the whole thing, which through a borrow means copying
+    /// the pointer: it names the same place, so there is nothing to
+    /// project.
     fn bind_match_pattern(
         &mut self,
         b: &mut BodyBuilder,
         pat: PatId,
         scrut: &Operand,
         origin: ExprId,
+        lens: Option<BorrowedScrutinee>,
     ) {
         match &self.body.pats[pat].clone() {
             PatData::Missing | PatData::Wildcard => {}
@@ -1799,14 +1877,23 @@ impl LowerCtx<'_> {
                 for (index, &binding) in bindings.iter().enumerate() {
                     let local = self.alloc_binding_local(b, binding);
                     if index < payloads {
-                        b.push_assign(
-                            local,
-                            Rvalue::Field {
+                        let rvalue = match &lens {
+                            Some(lens) => Rvalue::Borrow {
+                                mutable: lens.mutable,
+                                place: Place {
+                                    local: lens.local,
+                                    projection: vec![
+                                        crate::ProjElem::Deref,
+                                        crate::ProjElem::Field(index as u32),
+                                    ],
+                                },
+                            },
+                            None => Rvalue::Field {
                                 base: scrut.clone(),
                                 index: index as u32,
                             },
-                            origin,
-                        );
+                        };
+                        b.push_assign(local, rvalue, origin);
                     } else {
                         // Arity error (already trapped): a placeholder
                         // keeps the local initialized and lowering total.
@@ -3152,6 +3239,25 @@ enum DerefRoot {
     /// An `{error}`-typed receiver: nothing rooted here is ever
     /// observable, so the place is dropped and lowering stays total.
     Silent,
+}
+
+/// A `match` whose scrutinee is a BORROW of the matched enum: the local
+/// holding that pointer, and the flavor every payload borrow inherits from
+/// it. `None` everywhere means an owned scrutinee, which lowers exactly as
+/// it always has.
+///
+/// There is no per-binder mode here for the same reason there is none in
+/// the grammar: the scrutinee's flavor decides, and copying a payload out
+/// afterwards is spelled `t.*`.
+#[derive(Clone, Copy)]
+struct BorrowedScrutinee {
+    /// The pinned scrutinee temp — it holds the POINTER, so every access
+    /// below is rooted at `local.*`.
+    local: LocalId,
+    mutable: bool,
+    /// The scrutinee expression, to blame the tag read on — the mirror of
+    /// the field hir's own `MatchLens` carries for the same reason.
+    expr: ExprId,
 }
 
 /// How one match arm participates in dispatch.

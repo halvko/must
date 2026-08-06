@@ -235,6 +235,13 @@ pub enum RegionConstraintReason {
     /// requirement; one reading serves all three
     /// (`push_region_binder_bounds`).
     CalleeBound,
+    /// A `match` on a BORROWED scrutinee bound a payload by borrow — the
+    /// projection edge, `@scrutinee: @payload`. Structurally the same
+    /// single directed edge a reborrow emits (the payload is a sub-place
+    /// of what the scrutinee points at, so it can never be good for
+    /// longer), named apart only so the message can point at the match
+    /// rather than at a borrow the user never wrote.
+    Projection,
 }
 
 impl Constraints {

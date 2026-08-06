@@ -78,6 +78,24 @@ const UNSUPPORTED: &[(&str, &str, &str)] = &[
         "total_count()",
         "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet",
     ),
+    // Match-through-a-borrow is borrow code like any other, and it must
+    // refuse by the SAME name rather than inventing a match-shaped
+    // excuse: a borrowed match lowers to a deref-rooted `switch` and
+    // `Rvalue::Borrow` payload bindings, both of which this backend could
+    // emit as plain address arithmetic that runs and silently drops
+    // exclusivity. The refusal fires twice over — the scrutinee local's
+    // type has no layout, and `Rvalue::Borrow` is refused by name — and
+    // this pins that neither route was quietly opened.
+    (
+        "match_projection.must",
+        "main()",
+        "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet",
+    ),
+    (
+        "match_projection.must",
+        "project_in_demo()",
+        "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet",
+    ),
     (
         "heap.must",
         "main()",

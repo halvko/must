@@ -72,6 +72,7 @@ const COVERED: &[&str] = &[
     "heap.must",
     "hello.must",
     "loops.must",
+    "match_projection.must",
     "pointers.must",
     "reborrow.must",
     "records.must",
@@ -425,6 +426,11 @@ fn loops_checks_clean() {
 }
 
 #[test]
+fn match_projection_checks_clean() {
+    assert_check("match_projection.must", 0, expect![[r#""#]]);
+}
+
+#[test]
 fn pointers_checks_clean() {
     assert_check("pointers.must", 0, expect![[r#""#]]);
 }
@@ -734,6 +740,45 @@ fn loops_runs() {
         expect![[r#"
             0
         "#]],
+    );
+}
+
+#[test]
+fn match_projection_runs() {
+    // `188` = 101 + 33 + 7 + 5 + 42, and every term is a different half of
+    // the ruling:
+    //
+    //   101 — `bump` wrote through a `.&mut` PAYLOAD binding and the owner
+    //         saw it, which is the whole aliasing claim;
+    //    33 — 11 + 22, two exclusive payload borrows of one variant, live
+    //         at once because they name disjoint slots;
+    //     7 — a borrow matched, then the BINDING matched again (transitive
+    //         projection, spelled as two matches);
+    //     5 — an OWNED match moving a noncopyable (`.&mut`) payload out,
+    //         which a borrowed match could never produce;
+    //    42 — `project_in`'s result outliving the match that made it.
+    assert_run(
+        &["run", "examples/match_projection.must"],
+        0,
+        expect![
+            "188
+"
+        ],
+    );
+    // The `as_ref` shape on its own: `Opt::<usize>.&` in, `Opt::<usize.&>`
+    // out, at the caller's full region.
+    assert_run(
+        &[
+            "run",
+            "examples/match_projection.must",
+            "-e",
+            "project_in_demo()",
+        ],
+        0,
+        expect![
+            "42
+"
+        ],
     );
 }
 

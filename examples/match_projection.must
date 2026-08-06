@@ -1,0 +1,158 @@
+// Matching a BORROW: `match` projects through it.
+//
+// Run: must-lsp run examples/match_projection.must
+// Run: must-lsp run examples/match_projection.must -e project_in_demo()
+//
+// The rule is one sentence: matching a borrow binds payload BORROWS;
+// matching an owned place copies or moves, exactly as it always did. There
+// is no new pattern syntax for it, and there is no per-binder mode — the
+// SCRUTINEE's flavor decides, all the way down.
+//
+//     s: Opt::<T>.&::<@a>       ::Some(t)  =>  t: T.&::<@r>,  @a: @r
+//     s: Opt::<T>.&mut::<@a>    ::Some(t)  =>  t: T.&mut::<@r>
+//     s: Opt::<T>               ::Some(t)  =>  t: T           (unchanged)
+//
+// `@r` is a fresh region the scrutinee's must cover. It is bounded, not
+// forced shorter — which is what lets `project_in` below hand the payload
+// borrow back at the caller's whole `@a`.
+//
+// Three things fall out of it, and this file shows each one running:
+//
+//   1. `as_ref` is writable — turning `Opt::<T>.&` into `Opt::<T.&>`;
+//   2. a `.&mut` payload binding ALIASES the matched value, so writing
+//      through it is visible in the owner afterwards;
+//   3. copying out is still available, and still spelled `.*`.
+
+type Opt = enum::<T> {
+    Some(T),
+    None,
+};
+
+type Pair = enum {
+    Both(usize, usize),
+    Neither,
+};
+
+
+// ---- 1. the projection itself -------------------------------------------
+//
+// `Opt::<T>.&::<@a>` in, `Opt::<T.&::<@a>>` out — the borrow moves from
+// around the option to around its payload. Nothing in the body says
+// "borrow": `t` IS one, because `s` was.
+//
+// The arm bodies name the enum (`Opt::<...>::Some`) rather than writing
+// the elided `::Some`. That is not about borrows: a match arm's body is a
+// join leaf, and the elided sigil reads the expected type, which a join
+// leaf does not have. Owned code hits it identically.
+
+static project_in = fn::<@a, T>(s: Opt::<T>.&::<@a>) -> Opt::<T.&::<@a>> {
+    match s {
+        ::Some(t) => Opt::<T.&::<@a>>::Some(t),
+        ::None => Opt::<T.&::<@a>>::None,
+    }
+};
+
+// The region really does come out at the caller's `@a`, so the result
+// outlives the match that produced it.
+static project_in_demo = fn() -> usize {
+    let o: Opt::<usize> = Opt::<usize>::Some(41);
+    let projected = project_in::<@_, usize>(o.&);
+    match projected {
+        ::Some(t) => t.* + 1,
+        ::None => 0,
+    }
+};
+
+
+// ---- 2. `.&mut` payloads alias the matched value ------------------------
+//
+// The proof that this is a projection and not a copy: `bump` never sees
+// the option by value, and its write lands in the caller's storage.
+
+static bump = fn::<@a>(o: Opt::<usize>.&mut::<@a>) -> () {
+    match o {
+        // `t: usize.&mut::<@r>` — a borrow of the payload SLOT.
+        ::Some(t) => { t.* = t.* + 100; },
+        ::None => {},
+    }
+};
+
+// Two payloads of one variant are two INDEPENDENT borrows: they name
+// disjoint slots, so both may be exclusive at once.
+static bump_both = fn::<@a>(p: Pair.&mut::<@a>) -> () {
+    match p {
+        ::Both(x, y) => {
+            x.* = x.* + 1;
+            y.* = y.* + 2;
+        },
+        ::Neither => {},
+    }
+};
+
+
+// ---- 3. copying out is `.*`, and still is -------------------------------
+//
+// There is no per-binder mode, so a binder is never "the value". Reading
+// one is the ordinary safe deref, with the ordinary rule: it copies, so
+// the referent has to be copyable. Mixing is just doing that to some of
+// them.
+
+static sum = fn::<@a>(p: Pair.&::<@a>) -> usize {
+    match p {
+        ::Both(x, y) => x.* + y.*,
+        ::Neither => 0,
+    }
+};
+
+// Transitive, by composition rather than by nesting: the binding IS a
+// borrow, so matching IT projects again. (Nested patterns are not grammar
+// yet; two matches say the same thing.)
+static inner_or = fn::<@a>(o: Opt::<Opt::<usize>>.&::<@a>, fallback: usize) -> usize {
+    match o {
+        ::Some(inner) => match inner {
+            ::Some(n) => n.*,
+            ::None => fallback,
+        },
+        ::None => fallback,
+    }
+};
+
+
+// ---- and the owned path, unchanged --------------------------------------
+//
+// An owned scrutinee still copies or MOVES its payloads out — including
+// payloads that cannot be copied at all. `Opt::<usize.&mut>` is such a
+// type: `.&mut` is affine, so `t` here could never have been produced by
+// reading through a borrow. It is produced by matching the owned option.
+
+static unwrap_or_zero = fn::<@b>(o: Opt::<usize.&mut::<@b>>, fallback: usize) -> usize {
+    match o {
+        // `t: usize.&mut::<@b>`, moved out of an owned place.
+        ::Some(t) => t.*,
+        ::None => fallback,
+    }
+};
+
+
+static main = fn() -> usize {
+    let mut o: Opt::<usize> = Opt::<usize>::Some(1);
+    bump(o.&mut);
+    // 101 — read back from the OWNER, which is the aliasing proof.
+    let bumped = match o {
+        ::Some(n) => n,
+        ::None => 0,
+    };
+
+    let mut p: Pair = ::Both(10, 20);
+    bump_both(p.&mut);
+    let paired = sum(p.&); // 11 + 22
+
+    let nested: Opt::<Opt::<usize>> = Opt::<Opt::<usize>>::Some(Opt::<usize>::Some(7));
+    let deep = inner_or(nested.&, 0);
+
+    let mut n: usize = 5;
+    let moved = unwrap_or_zero::<@_>(Opt::<usize.&mut::<@_>>::Some(n.&mut), 0);
+
+    // 101 + 33 + 7 + 5 + 42
+    bumped + paired + deep + moved + project_in_demo()
+};

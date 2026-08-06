@@ -42,9 +42,9 @@ pub use scopes::{
 pub use traits::{BoundSlot, bound_slots, dict_param_count};
 pub use ty::{
     ConstArgValue, FnTy, GenericArg, IntKind, IntValue, NamedTy, ReceiverShape, Region, RegionVar,
-    SelfPosition, Ty, VariantTy, enum_variants, member_self_position, member_self_ty,
-    receiver_takes, signature, substitute_args, type_underlying, type_underlying_for,
-    variant_payloads_for, widens_to,
+    SelfPosition, Ty, VariantTy, dispatches_on, enum_variants, member_self_position,
+    member_self_ty, receiver_takes, signature, substitute_args, type_underlying,
+    type_underlying_for, variant_payloads_for, widens_to,
 };
 pub use unsafe_check::UnsafeCheckDiagnostic;
 
