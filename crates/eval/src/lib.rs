@@ -82,6 +82,10 @@ pub enum Value {
     Ptr {
         alloc: AllocId,
         path: Vec<PathElem>,
+        /// Which node of the allocation's aliasing tree this pointer
+        /// speaks through. See [`Provenance`] — deliberately OUTSIDE this
+        /// value's equality and hash.
+        tag: Provenance,
     },
     /// MACHINE-INTERNAL tracked-uninit (the ruled A04 poison): the value of
     /// a fresh `alloc_array` element before its first write. No surface
@@ -96,6 +100,44 @@ pub enum Value {
     /// Must's typed memory, one `Value` variant.
     Uninit,
 }
+
+/// A pointer's aliasing-tree node, wrapped so that it takes NO part in
+/// pointer equality or hashing.
+///
+/// This wrapper is a hazard fence, and the hazard is specific. `Value`'s
+/// derived `PartialEq` IS the language's `==` on pointers, and derived
+/// equality on a tag-carrying `Ptr` would make two pointers to the same
+/// place compare UNEQUAL merely because they were borrowed differently —
+/// turning an aliasing-model bookkeeping detail into an observable program
+/// result, which is exactly what the model must never do. The same argument
+/// applies to hashing (memo keys). So `Provenance` compares equal to every
+/// other `Provenance`, always, and hashes to nothing.
+///
+/// `None` marks a raw pointer minted straight off a bare local's name (not
+/// through a safe borrow): it resolves lazily, against whichever node is
+/// that allocation's ROOT at the moment of the access — a safe borrow taken
+/// after the pointer was minted still governs it. Only an allocation no
+/// safe borrow has EVER covered has no root, and the access is then a true
+/// no-op.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Provenance(pub Option<BorrowTag>);
+
+impl PartialEq for Provenance {
+    fn eq(&self, _: &Provenance) -> bool {
+        true
+    }
+}
+
+impl Eq for Provenance {}
+
+impl std::hash::Hash for Provenance {
+    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
+}
+
+/// A node in an allocation's aliasing tree — an index into the machine's
+/// node table. Per-machine-run, like [`AllocId`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BorrowTag(pub u32);
 
 /// Identity of one abstract-memory allocation, unique per machine run and
 /// NEVER reused (that non-reuse is the whole UB-detection story: a freed or
@@ -223,7 +265,10 @@ impl std::hash::Hash for Value {
             // Lawful but never an identity: like `Fn`, pointers are
             // excluded from the const-arg domain (an `AllocId` is
             // per-machine-run), so this hash can never key an instance.
-            Value::Ptr { alloc, path } => {
+            // The TAG is deliberately absent: see `Provenance`. Two
+            // pointers to the same place must key the same, whatever
+            // borrows they travelled through.
+            Value::Ptr { alloc, path, .. } => {
                 alloc.hash(state);
                 path.hash(state);
             }

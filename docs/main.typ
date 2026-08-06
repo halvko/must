@@ -1088,6 +1088,13 @@ site and the invalidating site both named. That is the same treatment raw
 pointers get, and it is interpreter quality rather than a language
 guarantee.
 
+The backstop reasons about *parts*, not whole values: two borrows collide
+only when the storage they name overlaps. So `w.a.&mut` and `w.b.&mut` are
+independent and may both be live, while a borrow of `w` and a borrow of
+`w.a` are not — one contains the other. Reads and writes are judged the
+same way, so neither `w.b = 5;` nor `let v = w.b;` disturbs a live borrow
+of `w.a`.
+
 Four limits of that backstop are worth stating plainly rather than leaving
 to be discovered.
 

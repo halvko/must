@@ -961,8 +961,10 @@ fn field_access_on_a_nonexistent_field_still_traps() {
 fn nested_field_assign_lowers_to_a_place_projection() {
     // `p.a.b = 2;` writes through a Place: the root's local plus the
     // field-index path (innermost first — `a`'s index in `p`, then `b`'s
-    // in `p.a`), rendered `_1.0.0`. The RHS is evaluated before the write,
-    // like every assignment.
+    // in `p.a`), rendered `_3.0.0`. The RHS is evaluated before the write,
+    // like every assignment. The trailing READ of the same chain is the
+    // SAME projection (`_4 = _3.0.0`, not a copy of `p.a` followed by a
+    // field extraction) — see `lower_place_read`.
     check_mir(
         "static f = fn () -> usize { let mut p = struct { a = struct { b = 1 } }; p.a.b = 2; p.a.b };",
         expect![[r#"
@@ -972,16 +974,14 @@ fn nested_field_assign_lowers_to_a_place_projection() {
               _1: struct { b: usize }
               _2: struct { a: struct { b: usize } }
               _3: struct { a: struct { b: usize } }  // p
-              _4: struct { b: usize }
-              _5: usize
+              _4: usize
               bb0:
                 _1 = { b: 1 }
                 _2 = { a: _1 }
                 _3 = _2
                 _3.0.0 = 2
-                _4 = _3.0
-                _5 = _4.0
-                _0 = _5
+                _4 = _3.0.0
+                _0 = _4
                 return
             }
             fn b1() -> fn() -> usize {
@@ -2362,6 +2362,70 @@ static main = fn() {
                 _6 = 1
                 _5.*.1 = 2
                 _5.*.0[_6] = 3
+                _0 = ()
+                return
+            }
+            fn b1() -> fn() {
+              _0: fn()  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn place_shaped_reads_lower_to_one_projection() {
+    // The read twin of `through_pointer_writes_lower_to_deref_projected_places`:
+    // a chain that names a PLACE is read through one projection, however
+    // long it is and whether or not a deref roots it — never as a copy of
+    // its root followed by a field/index extraction. `eval`'s aliasing
+    // tree checks each read against the path it sees here, so a wide read
+    // would be a foreign access to every borrow underneath it (see
+    // `lower_place_read`).
+    check_mir(
+        r#"
+static main = fn() {
+    let mut r: struct { x: usize, buf: [usize; 2] } = struct { x = 1, buf = [1, 2] };
+    let p = r.&raw mut;
+    let i = 1;
+    let a = r.buf[i];
+    unsafe {
+        let b = p.*.x;
+        let c = p.*.buf[i];
+    }
+};
+"#,
+        expect![[r#"
+            item main:
+            fn b0() -> () {
+              _0: ()  // return
+              _1: [usize; 2]
+              _2: struct { buf: [usize; 2], x: usize }
+              _3: struct { buf: [usize; 2], x: usize }  // r
+              _4: struct { buf: [usize; 2], x: usize }.&raw mut
+              _5: struct { buf: [usize; 2], x: usize }.&raw mut  // p
+              _6: usize  // i
+              _7: usize
+              _8: usize  // a
+              _9: usize
+              _10: usize  // b
+              _11: usize
+              _12: usize  // c
+              bb0:
+                _1 = [1, 2]
+                _2 = { buf: _1, x: 1 }
+                _3 = _2
+                _4 = &raw mut _3
+                _5 = _4
+                _6 = 1
+                _7 = _3.0[_6]
+                _8 = _7
+                _9 = _5.*.1
+                _10 = _9
+                _11 = _5.*.0[_6]
+                _12 = _11
                 _0 = ()
                 return
             }

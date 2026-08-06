@@ -155,9 +155,9 @@ pub(crate) struct Constraints {
     region_edges: Vec<RegionConstraint>,
     /// Where the checker INSERTED a reborrow, and what flavor came out.
     /// Drained into the inference result so MIR can materialize the
-    /// operation: an implicit reborrow that produces no MIR would be
-    /// invisible to a future dynamic aliasing check, which needs the
-    /// parent/child relation it models to actually exist at runtime.
+    /// operation: an implicit reborrow that produces no MIR is invisible
+    /// to the interpreter's aliasing tree, which means the parent/child
+    /// relation Tree Borrows models simply does not exist at runtime.
     reborrows: ArenaMap<ExprId, bool>,
     /// How many speculative snapshots are currently open.
     ///

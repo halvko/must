@@ -262,18 +262,19 @@ pub enum Rvalue {
     /// word, and the region that told them apart is already erased by the
     /// time MIR exists.
     ///
-    /// It is a variant of its own anyway, for two reasons. A future
-    /// dynamic aliasing check has exactly one place to mint tracking state
-    /// — here, and only here, never at `AddrOf` — so keeping the variants
-    /// distinct now is what keeps that check a local change later rather
-    /// than a re-plumbing. And every exhaustive consumer is forced to
-    /// decide what a safe borrow means for it rather than inheriting the
-    /// raw answer by accident (the wasm backend refuses it BY NAME).
+    /// It is a variant of its own anyway, for two reasons. The interpreter
+    /// mints an aliasing-tree NODE here and only here — a raw borrow
+    /// deliberately inherits its parent's node instead — so the two
+    /// operations differ in exactly one observable way: what they do to
+    /// that tree. And every exhaustive consumer is forced to decide what a
+    /// safe borrow means for it rather than inheriting the raw answer by
+    /// accident (the wasm backend refuses it BY NAME).
     ///
     /// A borrow whose root is a `static` lowers through
     /// [`Rvalue::AddrOfStatic`] instead: a static's allocation is
     /// read-only and shared for the whole run, so there is no exclusivity
-    /// to track (`.&mut` of a `static` is rejected upstream).
+    /// to track and no node worth minting (`.&mut` of a `static` is
+    /// rejected upstream).
     Borrow {
         mutable: bool,
         place: Place,

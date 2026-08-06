@@ -4532,12 +4532,13 @@ static main = fn() -> usize { outer::<usize>(4) };
     );
 }
 
-// ---- safe borrows: runtime semantics -------------------------------------
+// ---- safe borrows: the dynamic aliasing check ---------------------------
 //
-// No exclusivity check exists yet, static or dynamic: a safe borrow reads
-// and writes exactly like a raw pointer at runtime, and the existing
-// dangling-pointer detection (frame pop, use-after-free) applies to it
-// unchanged, because that detection has nothing to do with exclusivity.
+// Static exclusivity (loan liveness) is not built yet. Until it exists the
+// interpreter answers the same question dynamically, which is the house
+// pattern — the unsafe substrate gets checked at runtime while the static
+// story is built. The launch configuration is the ruled one: Tree Borrows'
+// structure with NO `Reserved` phase, so `&mut` starts `Unique`.
 
 #[test]
 fn a_borrow_reads_and_writes_the_place_it_borrows() {
@@ -4552,10 +4553,57 @@ fn a_borrow_reads_and_writes_the_place_it_borrows() {
 }
 
 #[test]
+fn two_exclusive_borrows_of_one_place_is_detected_ub() {
+    // The exclusive-write violation. Minting `b` is a write through the
+    // parent, which disables the sibling `a`; writing through `a`
+    // afterwards is the use of an invalidated borrow.
+    check_run(
+        "static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
+         static f = fn () -> usize {\n\
+             let mut n: usize = 1;\n\
+             let a = n.&mut;\n\
+             let b = n.&mut;\n\
+             set(b, 2);\n\
+             set(a, 3);\n\
+             n\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, or written through another borrow
+        "#]],
+    );
+}
+
+#[test]
+fn using_a_child_after_writing_through_its_parent_is_detected_ub() {
+    // Use-after-parent-invalidated. `child` is a reborrow of `a`; writing
+    // through `a` is foreign to `child`, so `child` is disabled — and
+    // disabling is transitive, which is what makes one check cover a whole
+    // subtree.
+    check_run(
+        "static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
+         static f = fn::<@a>(m: usize.&mut::<@a>) -> () {\n\
+             let child = m.*.&mut::<@_>;\n\
+             set(m, 5);\n\
+             set(child, 9);\n\
+         };\n\
+         static g = fn () -> usize { let mut n: usize = 1; f(n.&mut); n };",
+        "g()",
+        expect![[r#"
+            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, or written through another borrow
+        "#]],
+    );
+}
+
+#[test]
 fn many_shared_borrows_of_one_place_are_fine() {
-    // The shared regime: any number of readers, no invalidation — trivially
-    // true today since nothing tracks exclusivity yet, but pinned so a
-    // later dynamic check is built against a passing baseline, not a gap.
+    // The shared regime: any number of readers, no invalidation. A shared
+    // creation is a READ through the parent, which freezes rather than
+    // disables.
     check_run(
         "static get = fn::<@a>(r: usize.&::<@a>) -> usize { r.* };\n\
          static f = fn () -> usize {\n\
@@ -4578,10 +4626,9 @@ fn a_nested_literal_frame_escape_is_caught_dynamically() {
     // `docs/main.typ`'s "What is checked, and what is checked yet"): a
     // borrow returned at `@_` from a nested literal never reaches a
     // universal of the ENCLOSING item, so the outlives module's escape
-    // check has nothing to reject. The interpreter still catches it — not
-    // as an aliasing violation, but as the same dangling-pointer trap a
-    // raw pointer would hit, because the borrowed local's storage really
-    // is gone once the nested literal's own frame returns.
+    // check has nothing to reject. The interpreter still catches it,
+    // because the borrowed local's storage really is gone once the
+    // nested literal's own frame returns.
     check_run(
         "static main = fn () -> usize {\n\
              let f = fn () -> usize.&::<@_> { let mut n = 7; n.& };\n\
@@ -4590,6 +4637,627 @@ fn a_nested_literal_frame_escape_is_caught_dynamically() {
         "main()",
         expect![[r#"
             error[UndefinedBehavior]: dangling pointer — the local it pointed to no longer exists (its frame has returned)
+        "#]],
+    );
+}
+
+#[test]
+fn a_raw_only_program_never_touches_the_aliasing_tree() {
+    // Scope, pinned: a raw-only allocation (never covered by a safe
+    // borrow) has no root to inherit, so its raw pointers resolve to
+    // nothing and never touch the tree. So the aliasing model costs
+    // raw-pointer-only programs exactly nothing, and cannot have changed
+    // one — which is what makes this an addition rather than a
+    // semantics change.
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut n: usize = 1;\n\
+             let p = n.&raw mut;\n\
+             let q = n.&raw mut;\n\
+             unsafe { p.* = 2; q.* = 3; p.* }\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 3
+        "#]],
+    );
+}
+
+#[test]
+fn disjoint_field_borrows_of_one_struct_coexist() {
+    // `p.x.&mut` and `p.y.&mut` are minted straight off the local's own
+    // name (no deref): each node's path is exactly its own field, and
+    // `paths_overlap` says disjoint fields never interact — so writing
+    // through one, then the other, is not exclusivity violation, unlike
+    // two borrows of the SAME field (see
+    // `two_exclusive_borrows_of_one_place_is_detected_ub`).
+    check_run(
+        "static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
+         static f = fn () -> usize {\n\
+             let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };\n\
+             let bx = p.x.&mut;\n\
+             let by = p.y.&mut;\n\
+             set(bx, 10);\n\
+             set(by, 20);\n\
+             p.x + p.y\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 30
+        "#]],
+    );
+}
+
+#[test]
+fn writing_a_disjoint_sibling_field_does_not_disturb_a_borrow() {
+    // The direct-write-by-name route (`write_place`'s promoted-local
+    // branch) must carry the WRITE's own path too: `p.y = 5;` writes
+    // through the root with path `[y]`, foreign to a borrow of `[x]` only
+    // because the paths are disjoint.
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };\n\
+             let bx = p.x.&mut;\n\
+             p.y = 50;\n\
+             bx.* = 9;\n\
+             p.x + p.y\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 59
+        "#]],
+    );
+}
+
+#[test]
+fn two_exclusive_borrows_of_the_same_field_is_still_detected_ub() {
+    // Regression for the per-location fix: SAME field, not disjoint ones
+    // — `paths_overlap` says `[x]`/`[x]` overlap, so this must still be
+    // the ordinary exclusivity violation.
+    check_run(
+        "static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
+         static f = fn () -> usize {\n\
+             let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };\n\
+             let a = p.x.&mut;\n\
+             let b = p.x.&mut;\n\
+             set(b, 2);\n\
+             set(a, 3);\n\
+             p.x\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, or written through another borrow
+        "#]],
+    );
+}
+
+#[test]
+fn a_whole_struct_borrow_still_dominates_every_field() {
+    // Regression: a borrow of path `[]` (the whole struct) must still be
+    // foreign to (and disable, and be disabled by) a borrow of any one
+    // field — `paths_overlap` treats the empty path as a prefix of
+    // everything.
+    check_run(
+        "static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
+         static f = fn () -> usize {\n\
+             let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };\n\
+             let whole = p.&mut;\n\
+             let field = p.x.&mut;\n\
+             set(field, 9);\n\
+             whole.* = struct { x = 0, y = 0 };\n\
+             p.x\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, or written through another borrow
+        "#]],
+    );
+}
+
+#[test]
+fn disjoint_array_element_borrows_coexist() {
+    check_run(
+        "static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
+         static f = fn () -> usize {\n\
+             let mut a: [usize; 2] = [1, 2];\n\
+             let b0 = a[0].&mut;\n\
+             let b1 = a[1].&mut;\n\
+             set(b0, 10);\n\
+             set(b1, 20);\n\
+             a[0] + a[1]\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 30
+        "#]],
+    );
+}
+
+#[test]
+fn reading_one_field_through_a_wide_borrow_does_not_kill_a_sibling_field_child() {
+    // The read-side per-location fix: `b` is a WIDE reborrow (path `[]`,
+    // the whole struct); reading `b.*.x` must be checked with path `[x]`
+    // — the field the read actually touches, extended past the deref —
+    // not `b`'s own `[]` path, which would make every read through `b`
+    // foreign to every child of `b`, however disjoint. Rust accepts the
+    // equivalent (`let c = &mut b.y; let v = b.x; *c = 5;`).
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };\n\
+             let b = p.&mut;\n\
+             let c = b.*.y.&mut;\n\
+             let v = b.*.x;\n\
+             c.* = 5;\n\
+             v + p.y\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 6
+        "#]],
+    );
+}
+
+#[test]
+fn reading_one_element_through_a_wide_borrow_does_not_kill_a_sibling_element_child() {
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut a: [usize; 2] = [1, 2];\n\
+             let b = a.&mut;\n\
+             let c = b.*[1].&mut;\n\
+             let v = b.*[0];\n\
+             c.* = 9;\n\
+             v + a[1]\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 10
+        "#]],
+    );
+}
+
+#[test]
+fn reading_a_nested_field_through_a_wide_borrow_does_not_kill_a_sibling_child() {
+    // Two derefs deep: `by` is a reborrow of `p.y` (path `[y]`), `cw` a
+    // child of `by` over `w` (path `[y, w]`). Reading `by.*.u` must be
+    // checked with path `[y, u]` — disjoint from `[y, w]` — not `by`'s
+    // own `[y]`.
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut p: struct { y: struct { u: usize, w: usize } } =\n\
+                 struct { y = struct { u = 1, w = 2 } };\n\
+             let by = p.y.&mut;\n\
+             let cw = by.*.w.&mut;\n\
+             let v = by.*.u;\n\
+             cw.* = 9;\n\
+             v + p.y.w\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 10
+        "#]],
+    );
+}
+
+#[test]
+fn reading_a_sibling_field_by_name_does_not_kill_a_field_child() {
+    // The plainest shape in the language: a two-field struct, one field
+    // borrowed, the OTHER read by name. `p.y` reads through the
+    // allocation's root, so the path it carries has to be `[y]` — which
+    // means the read must lower as one projected place
+    // (`lower_place_read`), not as a copy of the whole `p` followed by a
+    // field extraction. Rust accepts the equivalent.
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };\n\
+             let bx = p.x.&mut;\n\
+             let v = p.y;\n\
+             bx.* = 9;\n\
+             p.x + p.y + v\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 13
+        "#]],
+    );
+}
+
+#[test]
+fn reading_a_sibling_element_by_name_does_not_kill_an_element_child() {
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut a: [usize; 3] = [1, 2, 3];\n\
+             let b0 = a[0].&mut;\n\
+             let v = a[1];\n\
+             b0.* = 9;\n\
+             a[0] + v\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 11
+        "#]],
+    );
+}
+
+#[test]
+fn reading_a_nested_field_by_name_does_not_kill_a_sibling_child() {
+    // Two steps deep, no deref anywhere: `p.x.y` must carry `[x, y]`,
+    // disjoint from the borrow's `[x, z]`.
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut p: struct { x: struct { y: usize, z: usize }, w: usize } =\n\
+                 struct { x = struct { y = 1, z = 2 }, w = 3 };\n\
+             let c = p.x.z.&mut;\n\
+             let v = p.x.y;\n\
+             c.* = 5;\n\
+             v + p.x.z\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 6
+        "#]],
+    );
+}
+
+#[test]
+fn reading_a_disjoint_top_level_field_does_not_kill_a_deeper_child() {
+    // The read is SHALLOWER than the borrow: `p.z` carries `[z]`, the
+    // borrow `[a, q]`. Neither is a prefix of the other.
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut p: struct { a: struct { q: usize, r: usize }, z: usize } =\n\
+                 struct { a = struct { q = 1, r = 2 }, z = 3 };\n\
+             let c = p.a.q.&mut;\n\
+             let v = p.z;\n\
+             c.* = 9;\n\
+             v + p.a.q\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 12
+        "#]],
+    );
+}
+
+#[test]
+fn reading_a_field_of_an_element_by_name_does_not_kill_its_sibling() {
+    // An index step then a field step: `a[0].x` carries `[0, x]`.
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut a: [struct { x: usize, y: usize }; 2] =\n\
+                 [struct { x = 1, y = 2 }, struct { x = 3, y = 4 }];\n\
+             let c = a[0].y.&mut;\n\
+             let v = a[0].x;\n\
+             c.* = 5;\n\
+             v + a[0].y\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 6
+        "#]],
+    );
+}
+
+#[test]
+fn reading_two_steps_past_a_deref_narrows_to_the_field_it_touches() {
+    // The deref-rooted twin of the tests above: the chain past `b.*` is
+    // TWO steps long, so the path is `[x, y]` — a chain does not stop
+    // narrowing one step after the deref.
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut p: struct { x: struct { y: usize, z: usize }, w: usize } =\n\
+                 struct { x = struct { y = 1, z = 2 }, w = 3 };\n\
+             let b = p.&mut;\n\
+             let c = b.*.x.z.&mut;\n\
+             let v = b.*.x.y;\n\
+             c.* = 5;\n\
+             v + p.x.z\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 6
+        "#]],
+    );
+}
+
+#[test]
+fn reading_the_same_field_by_name_still_suspends_an_exclusive_borrow() {
+    // The other side of the narrowing: `p.x` read by name carries `[x]`,
+    // which OVERLAPS the borrow's `[x]` — a shared use of a place with a
+    // live exclusive borrow of it, and writing through that borrow
+    // afterwards is the ordinary violation.
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };\n\
+             let bx = p.x.&mut;\n\
+             let v = p.x;\n\
+             bx.* = 9;\n\
+             p.x + v\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
+              note: this borrow was created here
+              note: suspended here — the place was read while this exclusive borrow was live
+        "#]],
+    );
+}
+
+#[test]
+fn a_borrow_behind_a_borrow_reads_and_writes_the_root() {
+    // Two borrow steps: the inner `bb.*` is an ordinary pointer LOAD, and
+    // the loaded value carries the tag `b.&mut` minted, so the write
+    // through it lands on `n`'s own allocation as a CHILD of that node
+    // rather than as a stranger to it.
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut n: usize = 1;\n\
+             let mut b = n.&mut;\n\
+             let bb = b.&mut;\n\
+             bb.*.* = 5;\n\
+             bb.*.* + n\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 10
+        "#]],
+    );
+}
+
+#[test]
+fn a_raw_write_past_a_live_safe_borrow_is_detected_ub() {
+    // `n.&raw mut` is minted from a bare local's name AFTER a safe borrow
+    // already covers `n` — it inherits `n`'s existing root (not a fresh
+    // inert node), so the raw write is exactly as foreign to `r` as
+    // `n = 9;` would be.
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut n: usize = 1;\n\
+             let r = n.&mut;\n\
+             let p = n.&raw mut;\n\
+             unsafe { p.* = 9; }\n\
+             r.*\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, or written through another borrow
+        "#]],
+    );
+}
+
+#[test]
+fn a_raw_pointer_minted_before_the_safe_borrow_still_shares_its_root() {
+    // The raw pointer is minted FIRST, while `Provenance(None)` still has
+    // no root to resolve against; the safe borrow minted after it is what
+    // creates the root. The raw write must still resolve lazily, at the
+    // moment of the access, against whatever root exists then.
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut n: usize = 1;\n\
+             let p = n.&raw mut;\n\
+             let r = n.&mut;\n\
+             unsafe { p.* = 9; }\n\
+             r.*\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, or written through another borrow
+        "#]],
+    );
+}
+
+#[test]
+fn a_raw_reborrow_through_a_live_mut_borrow_stays_clean() {
+    // A raw reborrow ROUTED THROUGH the safe borrow (`r.*.&raw mut`, not
+    // straight off `n`'s name) inherits `r`'s own node rather than the
+    // root, per the `.&raw`-is-not-a-decayed-borrow rule — so it does not
+    // disturb `r` at all.
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut n: usize = 1;\n\
+             let r = n.&mut;\n\
+             let p = unsafe { r.*.&raw mut };\n\
+             unsafe { p.* = 9; }\n\
+             r.*\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 9
+        "#]],
+    );
+}
+
+#[test]
+fn copy_through_the_destination_is_foreign_to_a_live_borrow_of_an_element() {
+    // `copy` is memmove, not a route around the aliasing tree: a live
+    // safe borrow of an element the copy overwrites must be invalidated
+    // exactly as `a[0] = 7;` would invalidate it.
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut src: [usize; 1] = [7];\n\
+             let mut a: [usize; 2] = [1, 2];\n\
+             let m = a[0].&mut;\n\
+             unsafe { copy(src[0].&raw, a[0].&raw mut, 1); }\n\
+             m.*\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, or written through another borrow
+        "#]],
+    );
+}
+
+#[test]
+fn copy_through_the_source_is_foreign_to_a_live_borrow_of_an_element() {
+    // The other half of the same claim: the SOURCE range is read, element
+    // by element, so a live exclusive borrow of an element the copy reads
+    // is suspended exactly as `let v = a[0];` would suspend it.
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut a: [usize; 2] = [1, 2];\n\
+             let mut dst: [usize; 1] = [0];\n\
+             let m = a[0].&mut;\n\
+             unsafe { copy(a[0].&raw, dst[0].&raw mut, 1); }\n\
+             m.* = 5;\n\
+             a[0]\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
+              note: this borrow was created here
+              note: suspended here — the place was read while this exclusive borrow was live
+        "#]],
+    );
+}
+
+#[test]
+fn a_borrow_tag_is_not_part_of_pointer_equality() {
+    // Two pointers to the same place must compare EQUAL however they were
+    // derived — one through a `.&mut` (so it carries that borrow's
+    // aliasing node) and one straight off the local (so it carries the
+    // untracked root). A tag is aliasing bookkeeping, and letting it reach
+    // `==` would turn bookkeeping into an observable program result,
+    // which is exactly what an aliasing model must never do.
+    check_run(
+        "static f = fn () -> bool {\n\
+             let mut n: usize = 1;\n\
+             let borrowed = n.&mut;\n\
+             let via_borrow = borrowed.*.&raw mut;\n\
+             let direct = n.&raw mut;\n\
+             via_borrow == direct\n\
+         };",
+        "f()",
+        expect![[r#"
+            => true
+        "#]],
+    );
+}
+
+#[test]
+fn a_direct_write_to_a_borrowed_local_invalidates_the_borrow() {
+    // A write to a local BY ITS OWN NAME must reach the aliasing tree
+    // exactly as a write through a deref-rooted place does — the most
+    // ordinary exclusivity violation in the language, not a special case.
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut n: usize = 1;\n\
+             let r = n.&;\n\
+             n = 99;\n\
+             r.*\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, or written through another borrow
+        "#]],
+    );
+}
+
+#[test]
+fn a_direct_read_of_a_borrowed_local_freezes_an_exclusive_borrow() {
+    // A foreign read through the root demotes an exclusive child to
+    // shared, so a later write through it is caught. And the message
+    // must name the STATE that rejected the write (`Frozen`, from a
+    // foreign read), not the borrow's own flavor — `m` here IS a
+    // `.&mut`, so "write through a shared borrow" would be false of it.
+    check_run(
+        "static f = fn () -> usize {\n\
+             let mut n: usize = 1;\n\
+             let m = n.&mut;\n\
+             let copy: usize = n;\n\
+             m.* = 5;\n\
+             copy\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
+              note: this borrow was created here
+              note: suspended here — the place was read while this exclusive borrow was live
+        "#]],
+    );
+}
+
+#[test]
+fn an_implicit_degradation_mints_a_real_child_node() {
+    // M07 says degradation is not spelled `v.*.&` "because the explicit
+    // form produces exactly the same child node" — a claim about the IR
+    // that an implicit reborrow must actually make true: it needs its own
+    // MIR operation, so `s` and `m` mint distinct tags with a real
+    // parent/child relation to violate.
+    check_run(
+        "static get = fn::<@x>(r: usize.&::<@x>) -> usize { r.* };\n\
+         static f = fn () -> usize {\n\
+             let mut n: usize = 1;\n\
+             let m = n.&mut;\n\
+             let s: usize.&::<@_> = m;\n\
+             m.* = 7;\n\
+             get(s)\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, or written through another borrow
+        "#]],
+    );
+}
+
+#[test]
+fn dynamic_ub_names_the_borrow_site_and_the_invalidating_site() {
+    // The report must name both interesting sites even when the trap
+    // fires inside a callee that has no borrow sites of its own — both
+    // the borrow site and the invalidating site live in the caller here.
+    check_run(
+        "static bump = fn::<@a>(m: usize.&mut::<@a>) -> () { m.* = m.* + 1; };\n\
+         static f = fn () -> () {\n\
+             let mut n: usize = 1;\n\
+             let a = n.&mut;\n\
+             let b = n.&mut;\n\
+             bump(b);\n\
+             bump(a);\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, or written through another borrow
+        "#]],
+    );
+}
+
+#[test]
+fn a_read_only_borrow_loop_does_not_accumulate_scan_cost() {
+    // A read can only demote `Unique`, so it never has to look at a node
+    // that is already settled — a read-only borrow loop must not rescan
+    // every borrow the program has ever made. Pinned behaviorally: the
+    // loop must still produce the right answer with several thousand
+    // live shared borrows outstanding.
+    check_run(
+        "static get = fn::<@a>(r: usize.&::<@a>) -> usize { r.* };\n\
+         static f = fn () -> usize {\n\
+             let n: usize = 3;\n\
+             let mut acc: usize = 0;\n\
+             let mut i: usize = 0;\n\
+             loop {\n\
+                 acc = acc + get(n.&);\n\
+                 i = i + 1;\n\
+                 if i == 2000 { break } else { }\n\
+             };\n\
+             acc\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 6000
         "#]],
     );
 }

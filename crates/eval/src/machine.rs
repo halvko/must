@@ -15,8 +15,8 @@ use mir::{
 use rustc_hash::FxHashMap;
 
 use crate::{
-    AllocId, EvalError, EvalErrorKind, EvalNote, FnValue, GenericArgValue, Instance, PathElem,
-    Value,
+    AllocId, BorrowTag, EvalError, EvalErrorKind, EvalNote, FnValue, GenericArgValue, Instance,
+    PathElem, Provenance, Value,
 };
 
 /// What the machine does at its impure edges. [`ConstMode`] refuses;
@@ -222,6 +222,34 @@ pub struct Machine<'db, M> {
     /// (static=identity, observable). Plain mentions of `S` keep cloning
     /// the `forced` memo, unchanged.
     static_allocs: FxHashMap<ItemLoc, AllocId>,
+    /// Every aliasing-tree node minted this run, indexed by [`BorrowTag`].
+    /// One flat table rather than a tree per allocation: nodes are never
+    /// removed (a disabled node stays, exactly as a freed [`AllocId`]
+    /// stays), so an index is a permanent identity and the parent chain
+    /// IS the tree.
+    borrow_nodes: Vec<BorrowNode>,
+    /// The root node of each allocation a safe borrow has ever covered.
+    /// Created on demand — a program with no safe borrows never allocates
+    /// one, so raw-only programs pay nothing and behave exactly as before.
+    borrow_roots: FxHashMap<AllocId, BorrowTag>,
+    /// Which nodes of each allocation an access still has to CONSIDER,
+    /// split by what can still happen to them.
+    ///
+    /// Three things keep the scan small, and each is a property of the
+    /// state machine rather than a heuristic. An access only ever affects
+    /// nodes of its OWN allocation, so the map is per-allocation. A READ
+    /// can only demote `Unique` to `Frozen`, so it never has to look at a
+    /// node that is already settled. And a DISABLED node is dropped
+    /// entirely: disabling is permanent and transitive, so it can neither
+    /// change state again nor shield a descendant.
+    ///
+    /// Nodes stay in [`Self::borrow_nodes`] forever regardless — a tag
+    /// must keep naming its node, exactly as a freed `AllocId` keeps
+    /// naming its allocation. Only the SCAN lists shrink.
+    ///
+    /// Without this a loop that borrows per iteration is quadratic in both
+    /// flavors: every access rescans every borrow the program ever made.
+    borrow_nodes_of: FxHashMap<AllocId, AllocNodes>,
     /// The reserved never-live allocation behind `dangling`, minted once
     /// per machine on the first call — every `dangling()` result compares
     /// equal, and every deref of one is detected UB.
@@ -254,6 +282,9 @@ impl<'db, M: Mode> Machine<'db, M> {
             next_frame_serial: 0,
             memory: FxHashMap::default(),
             static_allocs: FxHashMap::default(),
+            borrow_nodes: Vec::new(),
+            borrow_roots: FxHashMap::default(),
+            borrow_nodes_of: FxHashMap::default(),
             dangling_alloc: None,
             next_alloc: 0,
         }
@@ -855,7 +886,7 @@ impl<'db, M: Mode> Machine<'db, M> {
     /// are the source program's `[i]`, so THEIR bounds failures are
     /// ordinary runtime traps, exactly like `a[i]` reads.
     fn read_place(
-        &self,
+        &mut self,
         loc: &ItemLoc,
         body: &MirBody,
         local: LocalId,
@@ -879,6 +910,41 @@ impl<'db, M: Mode> Machine<'db, M> {
                 Some((loc.clone(), origin)),
             ));
         };
+        // `(tag, allocation, path)` per deref stepped through — checked
+        // against the aliasing tree once the walk's borrow of memory is
+        // released. `path` is the ELEMENT PATH the access actually
+        // touches, so two nodes covering disjoint fields/elements of the
+        // same allocation never interact — see `paths_overlap`. A
+        // field/index step AFTER a deref extends the most recent entry's
+        // path (see `after_deref` below): the pointer's own stored path
+        // names where it points, but `p.*.y` touches only the `y` field
+        // of that pointee, not the whole thing.
+        let mut reads: Vec<(Provenance, AllocId, Vec<PathElem>)> = Vec::new();
+        // Whether the walk has stepped through a deref yet — gates the
+        // field/index path-extension above so it never fires for the
+        // deref-free special case just below, whose entry already carries
+        // the full projection.
+        let mut after_deref = false;
+        // A place with NO deref names the local's own storage. If that
+        // storage is covered by borrows, reading it is a read through the
+        // allocation's ROOT — foreign to every borrow below it whose path
+        // overlaps this one, so it freezes exclusive children exactly as
+        // a sibling borrow would.
+        //
+        // Without this the root node was inert for the local's own name,
+        // and `let r = n.&; n = 99; r.*` — the most ordinary exclusivity
+        // bug there is — ran clean.
+        if !projection.iter().any(|e| matches!(e, ResolvedProj::Deref))
+            && let Some(frame) = self.frames.last()
+            && let Some(&alloc) = frame.promoted.get(&local)
+            && let Some(&root) = self.borrow_roots.get(&alloc)
+        {
+            reads.push((
+                Provenance(Some(root)),
+                alloc,
+                resolved_proj_path(projection),
+            ));
+        }
         for elem in projection {
             // Projecting into tracked-uninit: the structure was never
             // written — detected UB (same judgement as `project_path`).
@@ -886,47 +952,69 @@ impl<'db, M: Mode> Machine<'db, M> {
                 return Err(self.uninit_read(loc, origin));
             }
             current = match elem {
-                ResolvedProj::Field(index) => match current {
-                    Value::Record { fields } => match fields.get(*index as usize) {
-                        Some((_, field)) => field,
-                        None => {
-                            return Err(self.internal_error(
-                                format!(
-                                    "record field index {index} out of range \
-                                     ({} elements)",
-                                    fields.len()
-                                ),
-                                Some((loc.clone(), origin)),
-                            ));
+                ResolvedProj::Field(index) => {
+                    if after_deref && let Some(pending) = reads.last_mut() {
+                        pending.2.push(PathElem::Field(*index));
+                    }
+                    match current {
+                        Value::Record { fields } => match fields.get(*index as usize) {
+                            Some((_, field)) => field,
+                            None => {
+                                return Err(self.internal_error(
+                                    format!(
+                                        "record field index {index} out of range \
+                                         ({} elements)",
+                                        fields.len()
+                                    ),
+                                    Some((loc.clone(), origin)),
+                                ));
+                            }
+                        },
+                        other => {
+                            return Err(self.ill_typed("a record value", other, loc, origin));
                         }
-                    },
-                    other => {
-                        return Err(self.ill_typed("a record value", other, loc, origin));
                     }
-                },
-                ResolvedProj::Index(index) => match current {
-                    Value::Array(values) => {
-                        if *index >= values.len() as u128 {
-                            return Err(EvalError {
-                                kind: EvalErrorKind::Runtime,
-                                message: hir::diag::index_out_of_bounds(
-                                    values.len() as u128,
-                                    *index,
-                                ),
-                                origin: Some((loc.clone(), origin)),
-                                notes: Vec::new(),
-                            });
+                }
+                ResolvedProj::Index(index) => {
+                    if after_deref && let Some(pending) = reads.last_mut() {
+                        pending
+                            .2
+                            .push(PathElem::Index(u64::try_from(*index).unwrap_or(u64::MAX)));
+                    }
+                    match current {
+                        Value::Array(values) => {
+                            if *index >= values.len() as u128 {
+                                return Err(EvalError {
+                                    kind: EvalErrorKind::Runtime,
+                                    message: hir::diag::index_out_of_bounds(
+                                        values.len() as u128,
+                                        *index,
+                                    ),
+                                    origin: Some((loc.clone(), origin)),
+                                    notes: Vec::new(),
+                                });
+                            }
+                            &values[*index as usize]
                         }
-                        &values[*index as usize]
+                        other => {
+                            return Err(self.ill_typed("an array value", other, loc, origin));
+                        }
                     }
-                    other => {
-                        return Err(self.ill_typed("an array value", other, loc, origin));
-                    }
-                },
+                }
                 ResolvedProj::Deref => {
-                    let Value::Ptr { alloc, path } = current else {
+                    let Value::Ptr { alloc, path, tag } = current else {
                         return Err(self.ill_typed("a raw pointer", current, loc, origin));
                     };
+                    // The aliasing check rides the READ, not the address:
+                    // safe pointers live by EXISTENCE, and this is where
+                    // existence becomes a use. Deferred past the loop
+                    // because the walk holds a borrow of memory and the
+                    // check mutates the tree; the order is unobservable
+                    // (both outcomes stop execution). Steps AFTER this
+                    // one extend this entry's path (see `after_deref`
+                    // above) — `p.*.y` only touches `y`.
+                    reads.push((*tag, *alloc, path.clone()));
+                    after_deref = true;
                     let allocation = self.allocation_for_deref(*alloc, loc, origin)?;
                     self.follow_ptr_path(&allocation.value, path, loc, origin)?
                 }
@@ -941,7 +1029,11 @@ impl<'db, M: Mode> Machine<'db, M> {
         if current.contains_uninit() {
             return Err(self.uninit_read(loc, origin));
         }
-        Ok(current.clone())
+        let value = current.clone();
+        for (tag, alloc, path) in reads {
+            self.aliasing_access(tag, alloc, &path, Access::Read, loc, origin)?;
+        }
+        Ok(value)
     }
 
     /// Resolve a place to an abstract-memory location `(allocation,
@@ -962,7 +1054,17 @@ impl<'db, M: Mode> Machine<'db, M> {
         projection: &[ResolvedProj],
         mode: PathMode,
         origin: ExprId,
-    ) -> Result<(AllocId, Vec<PathElem>), EvalError> {
+    ) -> Result<(AllocId, Vec<PathElem>, Provenance), EvalError> {
+        // The node the resulting address speaks through. A place with no
+        // deref addresses the root local's own storage: the untracked
+        // marker, resolved against that local's ROOT (if a safe borrow
+        // has ever minted one) the first time it is actually used — see
+        // `Machine::aliasing_access`. A deref inherits the pointer's own
+        // node, which is exactly the `.&raw`-is-not-a-decayed-borrow rule
+        // as a mechanism: a raw pointer minted from a borrow keeps the
+        // borrow's node instead of getting one of its own, so the two die
+        // together.
+        let mut provenance = Provenance::default();
         let split = projection
             .iter()
             .position(|elem| matches!(elem, ResolvedProj::Deref));
@@ -973,9 +1075,10 @@ impl<'db, M: Mode> Machine<'db, M> {
             }
             Some(split) => {
                 let ptr = self.read_place(loc, body, local, &projection[..split], origin)?;
-                let Value::Ptr { alloc, path } = ptr else {
+                let Value::Ptr { alloc, path, tag } = ptr else {
                     return Err(self.ill_typed("a raw pointer", &ptr, loc, origin));
                 };
+                provenance = tag;
                 (alloc, path, &projection[split + 1..])
             }
         };
@@ -1026,16 +1129,18 @@ impl<'db, M: Mode> Machine<'db, M> {
                     let Value::Ptr {
                         alloc: next_alloc,
                         path: next_path,
+                        tag: next_tag,
                     } = current
                     else {
                         return Err(self.ill_typed("a raw pointer", current, loc, origin));
                     };
                     alloc = *next_alloc;
                     path = next_path.clone();
+                    provenance = *next_tag;
                 }
             }
         }
-        Ok((alloc, path))
+        Ok((alloc, path, provenance))
     }
 
     /// Store through a pointer-routed place (a projection containing a
@@ -1056,9 +1161,14 @@ impl<'db, M: Mode> Machine<'db, M> {
         value: Value,
         origin: ExprId,
     ) -> Result<(), EvalError> {
-        let (alloc, path) =
+        let (alloc, path, provenance) =
             self.resolve_place_alloc(loc, body, local, projection, PathMode::Store, origin)?;
         self.allocation_for_deref(alloc, loc, origin)?;
+        // The write half of the aliasing check. A write through a borrow
+        // invalidates every borrow it is foreign to, and is itself
+        // undefined behavior if this borrow was already invalidated —
+        // exclusivity, enforced dynamically until the loan checker lands.
+        self.aliasing_access(provenance, alloc, &path, Access::Write, loc, origin)?;
         let allocation = self.memory.get_mut(&alloc).expect("checked just above");
         if !allocation.writable {
             return Err(EvalError {
@@ -1150,16 +1260,39 @@ impl<'db, M: Mode> Machine<'db, M> {
             ProjectError::Uninit => this.uninit_read(loc, origin),
             ProjectError::Shape(detail) => this.internal_error(detail, Some((loc.clone(), origin))),
         };
-        let frame = self.frames.last_mut().expect("frame still live");
         // A promoted (address-taken) local lives in memory, not in the
         // frame map: the write lands in its allocation, so pointers into
         // it observe it — including interior pointers surviving a
         // whole-value overwrite, exactly real-memory behavior. The
-        // `is_empty` fast path keeps pointer-free bodies on the plain
+        // `is_none` fast path keeps pointer-free bodies on the plain
         // frame-map route.
-        if !frame.promoted.is_empty()
-            && let Some(&alloc) = frame.promoted.get(&local)
-        {
+        let promoted = self
+            .frames
+            .last()
+            .expect("frame still live")
+            .promoted
+            .get(&local)
+            .copied();
+        if let Some(alloc) = promoted {
+            // Writing a local BY ITS OWN NAME is a write through the
+            // allocation's root, foreign to every borrow below it whose
+            // path overlaps the field/element actually written — which
+            // disables them, so a later use of one is caught. Without this
+            // the root node was inert for the local's own name and
+            // `let m = n.&mut; n = 99; m.* = 5;` ran clean. The path is
+            // the projection itself (never a deref here — that route is
+            // `write_through`), so `p.y = 5` does not disturb a borrow of
+            // the disjoint field `p.x`.
+            if let Some(&root) = self.borrow_roots.get(&alloc) {
+                self.aliasing_access(
+                    Provenance(Some(root)),
+                    alloc,
+                    &resolved_proj_path(projection),
+                    Access::Write,
+                    loc,
+                    origin,
+                )?;
+            }
             let slot = match self.memory.get_mut(&alloc) {
                 Some(allocation) => &mut allocation.value,
                 None => {
@@ -1181,6 +1314,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 Err(error) => Err(project_error(self, error)),
             };
         }
+        let frame = self.frames.last_mut().expect("frame still live");
         if projection.is_empty() {
             frame.locals.insert(local, value);
             return Ok(());
@@ -1398,16 +1532,9 @@ impl<'db, M: Mode> Machine<'db, M> {
             // bounds-checked here (validity is judged at the deref): an
             // out-of-range address mints silently, and every later deref
             // of it is detected UB.
-            // `place.&` / `place.&mut` — a SAFE borrow. Structurally
-            // `Rvalue::AddrOf`'s twin (see its own doc comment), and at
-            // this stage the identical runtime value too: no static or
-            // dynamic exclusivity check exists yet, so the two share this
-            // one arm. A later stage that adds a dynamic aliasing check
-            // gives this its own arm, minting tracking state here and
-            // only here.
-            Rvalue::AddrOf { place, .. } | Rvalue::Borrow { place, .. } => {
+            Rvalue::AddrOf { place, .. } => {
                 let projection = self.resolve_projection(loc, body, &place.projection, origin)?;
-                let (alloc, path) = self.resolve_place_alloc(
+                let (alloc, path, tag) = self.resolve_place_alloc(
                     loc,
                     body,
                     place.local,
@@ -1415,7 +1542,30 @@ impl<'db, M: Mode> Machine<'db, M> {
                     PathMode::Mint,
                     origin,
                 )?;
-                Ok(Value::Ptr { alloc, path })
+                // The raw pointer INHERITS the node it was minted through
+                // rather than getting one of its own — the mechanism
+                // behind the ruling that `.&raw` is deliberately not a
+                // decayed safe borrow. `x.*.&raw mut` therefore points at
+                // the referent under `x`'s node: the two interleave
+                // freely and die together.
+                Ok(Value::Ptr { alloc, path, tag })
+            }
+            // `place.&` / `place.&mut` — a SAFE borrow. Same address as
+            // its raw sibling would produce, plus the one thing that
+            // separates them: a fresh node in the allocation's aliasing
+            // tree, whose creation is itself an access through the parent.
+            Rvalue::Borrow { mutable, place } => {
+                let projection = self.resolve_projection(loc, body, &place.projection, origin)?;
+                let (alloc, path, parent) = self.resolve_place_alloc(
+                    loc,
+                    body,
+                    place.local,
+                    &projection,
+                    PathMode::Mint,
+                    origin,
+                )?;
+                let tag = self.mint_borrow(parent, alloc, &path, *mutable, loc, origin)?;
+                Ok(Value::Ptr { alloc, path, tag })
             }
             // `S[.field | [index]]....&raw`: the static's ONE allocation,
             // minted read-only on first mention — so two `S.&raw` are the
@@ -1463,7 +1613,14 @@ impl<'db, M: Mode> Machine<'db, M> {
                         }
                     }
                 }
-                Ok(Value::Ptr { alloc, path })
+                // A static's allocation is read-only and shared for the
+                // whole run, so there is no exclusivity to track: the
+                // untracked root is the honest node for it.
+                Ok(Value::Ptr {
+                    alloc,
+                    path,
+                    tag: Provenance::default(),
+                })
             }
         }
     }
@@ -1701,8 +1858,8 @@ impl<'db, M: Mode> Machine<'db, M> {
                 // local's current value lives in its allocation.
                 if let Some(frame) = frame
                     && !frame.promoted.is_empty()
-                    && let Some(alloc) = frame.promoted.get(&place.local)
-                    && let Some(allocation) = self.memory.get(alloc)
+                    && let Some(&alloc) = frame.promoted.get(&place.local)
+                    && let Some(allocation) = self.memory.get(&alloc)
                 {
                     // The tracked-uninit read gate (see `read_place`): a
                     // promoted local's storage is real memory, so `copy`
@@ -1710,7 +1867,24 @@ impl<'db, M: Mode> Machine<'db, M> {
                     if allocation.value.contains_uninit() {
                         return Err(self.uninit_read(loc, origin));
                     }
-                    return Ok(allocation.value.clone());
+                    let value = allocation.value.clone();
+                    // Reading a local BY ITS OWN NAME is a read through the
+                    // allocation's root — foreign to every borrow below it,
+                    // so an exclusive child freezes. The projected route
+                    // (`read_place`) does the same; this is the bare-local
+                    // fast path, and leaving it out made the check depend
+                    // on whether a projection happened to be written.
+                    if let Some(&root) = self.borrow_roots.get(&alloc) {
+                        self.aliasing_access(
+                            Provenance(Some(root)),
+                            alloc,
+                            &[],
+                            Access::Read,
+                            loc,
+                            origin,
+                        )?;
+                    }
+                    return Ok(value);
                 }
                 frame
                     .and_then(|frame| frame.locals.get(place.local))
@@ -1928,6 +2102,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             payload: vec![Value::Ptr {
                 alloc,
                 path: vec![PathElem::Index(0)],
+                tag: Provenance::default(),
             }],
         })
     }
@@ -1944,7 +2119,12 @@ impl<'db, M: Mode> Machine<'db, M> {
         loc: &ItemLoc,
         origin: ExprId,
     ) -> Result<Value, EvalError> {
-        let Value::Ptr { alloc, path } = p else {
+        let Value::Ptr {
+            alloc,
+            path,
+            tag: _,
+        } = p
+        else {
             return Err(self.ill_typed("a raw pointer", p, loc, origin));
         };
         // The checker pins this count to `usize`; a wrong kind is
@@ -2035,7 +2215,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         loc: &ItemLoc,
         origin: ExprId,
     ) -> Result<Value, EvalError> {
-        let Value::Ptr { alloc, path } = p else {
+        let Value::Ptr { alloc, path, tag } = p else {
             return Err(self.ill_typed("a raw pointer", p, loc, origin));
         };
         // The checker pins `add`'s index to `usize`; a wrong kind is
@@ -2050,6 +2230,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             return Ok(Value::Ptr {
                 alloc: *alloc,
                 path: path.clone(),
+                tag: *tag,
             });
         }
         let mut path = path.clone();
@@ -2066,6 +2247,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 Ok(Value::Ptr {
                     alloc: *alloc,
                     path,
+                    tag: *tag,
                 })
             }
             _ => Err(EvalError {
@@ -2091,7 +2273,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         loc: &ItemLoc,
         origin: ExprId,
     ) -> Result<Value, EvalError> {
-        let Value::Ptr { alloc, path } = p else {
+        let Value::Ptr { alloc, path, tag } = p else {
             return Err(self.ill_typed("a raw pointer", p, loc, origin));
         };
         // The checker pins `offset`'s argument to `isize`; a wrong kind is
@@ -2106,6 +2288,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             return Ok(Value::Ptr {
                 alloc: *alloc,
                 path: path.clone(),
+                tag: *tag,
             });
         }
         let mut path = path.clone();
@@ -2127,6 +2310,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 Ok(Value::Ptr {
                     alloc: *alloc,
                     path,
+                    tag: *tag,
                 })
             }
             _ => Err(EvalError {
@@ -2179,7 +2363,24 @@ impl<'db, M: Mode> Machine<'db, M> {
         // range-check the destination through the same shared judgement.
         let elements = self.copy_range(src, n, "source", loc, origin)?.to_vec();
         self.copy_range(dst, n, "destination", loc, origin)?;
-        let Value::Ptr { alloc, path } = dst else {
+        // The aliasing check rides the copy exactly like an ordinary deref
+        // does for `read_place`/`write_through`: `copy` is memmove, not a
+        // route around the tree — a live safe borrow of one of the `n`
+        // destination elements must be foreign to this write (and of a
+        // source element, to this read), same as `p.* = v;`/`p.*` would
+        // be for a single element.
+        if let Value::Ptr { alloc, path, tag } = src {
+            self.aliasing_access_range(*tag, *alloc, path, n, Access::Read, loc, origin)?;
+        }
+        if let Value::Ptr { alloc, path, tag } = dst {
+            self.aliasing_access_range(*tag, *alloc, path, n, Access::Write, loc, origin)?;
+        }
+        let Value::Ptr {
+            alloc,
+            path,
+            tag: _,
+        } = dst
+        else {
             unreachable!("copy_range verified the pointer shape");
         };
         let Some(PathElem::Index(head)) = path.last() else {
@@ -2225,7 +2426,12 @@ impl<'db, M: Mode> Machine<'db, M> {
         loc: &ItemLoc,
         origin: ExprId,
     ) -> Result<&[Value], EvalError> {
-        let Value::Ptr { alloc, path } = p else {
+        let Value::Ptr {
+            alloc,
+            path,
+            tag: _,
+        } = p
+        else {
             return Err(self.ill_typed("a raw pointer", p, loc, origin));
         };
         let allocation = self.allocation_for_deref(*alloc, loc, origin)?;
@@ -2282,6 +2488,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         Value::Ptr {
             alloc,
             path: vec![PathElem::Index(0)],
+            tag: Provenance::default(),
         }
     }
 
@@ -2593,4 +2800,428 @@ fn local_name(body: &MirBody, local: LocalId) -> String {
 fn root_origin(db: &dyn Db, loc: &ItemLoc) -> Option<(ItemLoc, ExprId)> {
     let root = hir::body::body(db, loc.to_id(db)).root?;
     Some((loc.clone(), root))
+}
+
+// ---- the aliasing tree (Tree Borrows structure, no-Reserved launch) -----
+//
+// Static exclusivity — which borrows may be live at once — is not built
+// yet (no loan liveness). Until it exists the INTERPRETER answers the
+// same question dynamically, which is the house pattern: the unsafe
+// substrate is checked at runtime while the static story is built
+// (`alloc_array`'s UB detection got exactly this treatment).
+//
+// The structure is Tree Borrows': every safe borrow mints a NODE that is a
+// child of the node its parent pointer speaks through, and an access
+// through one node changes the state of every node it is foreign to. The
+// launch configuration is the ruled one: there is NO `Reserved` phase —
+// `&mut` starts `Unique`. Rust cannot do that (two-phase borrows depend on
+// it); Must can, because self-last evaluation made two-phase borrows
+// unnecessary. Relaxing to `Reserved` later is pure UB removal, so nothing
+// written against this can break.
+//
+// Scope: a raw pointer minted through a deref inherits the node its
+// parent pointer speaks through, per the ruling that `.&raw` is not a
+// decayed safe borrow. A raw pointer minted straight off a bare local's
+// name (`n.&raw mut`) carries the untracked marker (`Provenance(None)`)
+// until it is resolved against an access, at which point it inherits
+// that local's ROOT if one already exists — the root IS the local's own
+// storage, so the two must be the same node. Only an allocation no safe
+// borrow has EVER covered has no root to inherit, and a raw access to it
+// is then a true no-op.
+//
+// Per-location state is APPROXIMATED, not per-allocation: every node also
+// carries the element path (field/index chain) it was minted over, and
+// two nodes interact only when one path is a prefix of the other (they
+// could name overlapping memory). `p.x.&mut` and `p.y.&mut` therefore
+// coexist — disjoint fields of the same struct never alias — while
+// `p.&mut` (path `[]`, the whole value) still dominates both, and every
+// access through a place — read or write, deref-routed or not — carries
+// the path of the chain it names, so neither `p.y = 5;` nor `let v =
+// p.y;` can disturb a borrow of `p.x`. That is a joint property with
+// `mir::lower`: a chain only has a path here because it arrives as ONE
+// projected place (`lower_place_read`) instead of a copy of its root.
+// The approximation: a node minted over a WIDE path is disabled
+// wholesale by any foreign access into any part of it, never partially —
+// true sub-node partitioning is not built (M10, Ruled-not-built). See
+// `paths_overlap`.
+
+/// The scan lists of one allocation — see [`Machine::borrow_nodes_of`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct AllocNodes {
+    /// Nodes still in `Unique`: the only ones a READ can affect.
+    unique: Vec<BorrowTag>,
+    /// Nodes in `Frozen`: a read cannot touch them, a write disables them.
+    settled: Vec<BorrowTag>,
+}
+
+/// One node of an allocation's aliasing tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BorrowNode {
+    alloc: AllocId,
+    /// `None` for an allocation's root.
+    parent: Option<BorrowTag>,
+    /// The element path this node covers — empty for the allocation's
+    /// root (the whole value) and for a borrow of the whole local. Two
+    /// nodes are only ever foreign to each other when their paths
+    /// overlap (see `paths_overlap`), which is what lets disjoint
+    /// fields/elements of one allocation be borrowed independently.
+    path: Vec<PathElem>,
+    state: NodeState,
+    /// Where this borrow was created — `None` for a root, which no
+    /// expression writes.
+    born: Option<(ItemLoc, ExprId)>,
+    /// Where it was invalidated, once it has been. Carried so the report
+    /// can name the OTHER site: a bare "this borrow is no longer valid"
+    /// at the use tells you nothing about which access killed it, and the
+    /// use is routinely inside a callee while both interesting sites are
+    /// in the caller.
+    invalidated: Option<(ItemLoc, ExprId)>,
+}
+
+/// Whether an access covering `a` and a node covering `b` could name
+/// overlapping memory — true exactly when one path is a prefix of the
+/// other (including the equal case). Two field/index steps that diverge
+/// anywhere along the shorter path are provably disjoint locations.
+fn paths_overlap(a: &[PathElem], b: &[PathElem]) -> bool {
+    a.iter().zip(b).all(|(x, y)| x == y)
+}
+
+/// Convert a deref-free resolved projection (the program's own field/
+/// index steps into a local's own storage) into the element path the
+/// aliasing tree keys on. Index operands are the program's own checked
+/// `[i]`, already bounds-verified by the caller, so the `u64` conversion
+/// is infallible in practice; `u64::MAX` is a safe, non-panicking
+/// fallback since this path is used only for aliasing-tree comparisons,
+/// never to address memory.
+fn resolved_proj_path(projection: &[ResolvedProj]) -> Vec<PathElem> {
+    projection
+        .iter()
+        .map(|elem| match elem {
+            ResolvedProj::Field(index) => PathElem::Field(*index),
+            ResolvedProj::Index(index) => {
+                PathElem::Index(u64::try_from(*index).unwrap_or(u64::MAX))
+            }
+            ResolvedProj::Deref => {
+                unreachable!("resolved_proj_path is only called on a deref-free projection")
+            }
+        })
+        .collect()
+}
+
+/// What a node currently permits. No `Reserved`: the ruled launch starts
+/// `&mut` at `Unique`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeState {
+    /// Exclusive: reads and writes.
+    Unique,
+    /// Shared: reads only.
+    Frozen,
+    /// Invalidated by a conflicting access through another node. Any use
+    /// is undefined behavior.
+    Disabled,
+}
+
+/// Which kind of access is happening — the only axis the transitions need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Access {
+    Read,
+    Write,
+}
+
+impl<M> Machine<'_, M> {
+    /// The root node of `alloc`, created on first use.
+    fn borrow_root(&mut self, alloc: AllocId) -> BorrowTag {
+        if let Some(&tag) = self.borrow_roots.get(&alloc) {
+            return tag;
+        }
+        let tag = BorrowTag(self.borrow_nodes.len() as u32);
+        self.borrow_nodes.push(BorrowNode {
+            alloc,
+            parent: None,
+            path: Vec::new(),
+            state: NodeState::Unique,
+            born: None,
+            invalidated: None,
+        });
+        self.borrow_roots.insert(alloc, tag);
+        self.borrow_nodes_of
+            .entry(alloc)
+            .or_default()
+            .unique
+            .push(tag);
+        tag
+    }
+
+    /// Whether `node` is `ancestor` or below it.
+    fn is_descendant_of(&self, node: BorrowTag, ancestor: BorrowTag) -> bool {
+        let mut current = Some(node);
+        while let Some(tag) = current {
+            if tag == ancestor {
+                return true;
+            }
+            current = self.borrow_nodes[tag.0 as usize].parent;
+        }
+        false
+    }
+
+    /// Perform an access through `tag`, covering element path `path` —
+    /// the whole dynamic check.
+    ///
+    /// Two things happen, in order. The accessing node must still permit
+    /// the access (a disabled node is undefined behavior, which is the
+    /// use-after-parent-invalidated case: disabling is transitive). Then
+    /// every node the access is FOREIGN to — a strict descendant of the
+    /// accessor, or an unrelated cousin, WHOSE PATH OVERLAPS `path` —
+    /// reacts: a foreign write disables it, a foreign read freezes it.
+    /// Ancestors are untouched: an access through a child is not foreign
+    /// to the parent it was reborrowed from, which is precisely what
+    /// makes reborrow-at-every-use work. A node whose path names a
+    /// disjoint field/element is untouched for the same reason a cousin
+    /// allocation would be: it cannot be the same memory.
+    fn aliasing_access(
+        &mut self,
+        tag: Provenance,
+        alloc: AllocId,
+        path: &[PathElem],
+        access: Access,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<(), EvalError> {
+        let tag = match tag {
+            Provenance(Some(tag)) => tag,
+            // A raw pointer minted directly from a bare local's own name
+            // (never through a safe borrow) inherits that local's ROOT —
+            // once one exists. `n.&raw mut` and `n`'s own name are the
+            // SAME storage, so they must be the same node: if a safe
+            // borrow has already covered `n` (creating its root), a raw
+            // write here is exactly as foreign to that borrow as a plain
+            // `n = ...` would be. Only when no safe borrow has EVER
+            // covered this allocation is there no root to inherit, and
+            // the access is a true no-op — see
+            // `a_raw_only_program_never_touches_the_aliasing_tree`.
+            Provenance(None) => match self.borrow_roots.get(&alloc) {
+                Some(&root) => root,
+                None => return Ok(()),
+            },
+        };
+        let node = &self.borrow_nodes[tag.0 as usize];
+        // The two sites a reader actually needs: where this borrow came
+        // from, and what killed it. Both are usually in the caller while
+        // the failing use is inside a callee.
+        let mut notes = Vec::new();
+        if let Some(born) = node.born.clone() {
+            notes.push(EvalNote {
+                message: "this borrow was created here".to_owned(),
+                origin: Some(born),
+            });
+        }
+        if let Some(invalidated) = node.invalidated.clone() {
+            // What happened there is exactly what the node's state says:
+            // a foreign READ only suspends an exclusive borrow (`Frozen`),
+            // a foreign write or reborrow kills it outright. The headline
+            // below draws the same distinction, and the two must not
+            // disagree about the same source location.
+            notes.push(EvalNote {
+                message: if node.state == NodeState::Frozen {
+                    "suspended here — the place was read while this exclusive borrow was live"
+                } else {
+                    "invalidated here — the value was borrowed again, \
+                     or written through another borrow"
+                }
+                .to_owned(),
+                origin: Some(invalidated),
+            });
+        }
+        let ub = |message: &str| EvalError {
+            kind: EvalErrorKind::UndefinedBehavior,
+            message: message.to_owned(),
+            origin: Some((loc.clone(), origin)),
+            notes: notes.clone(),
+        };
+        match self.borrow_nodes[tag.0 as usize].state {
+            NodeState::Disabled => {
+                let verb = match access {
+                    Access::Read => "read",
+                    Access::Write => "write",
+                };
+                return Err(ub(&format!(
+                    "{verb} through a borrow that is no longer valid: the value was \
+                     borrowed again, or written through another borrow, while this \
+                     borrow was still live"
+                )));
+            }
+            NodeState::Frozen if access == Access::Write => {
+                // A node reaches `Frozen` two ways, and they are different
+                // stories. A `.&mut` was frozen by a foreign READ
+                // (something else looked at the place while this borrow
+                // was live), and calling that "a shared borrow" is simply
+                // false of the value being written through. A `.&` was
+                // BORN frozen — a flavor error, which the checker refuses
+                // statically before it can run (no write may travel
+                // through a shared step), so that arm is the backstop for
+                // a path the static rule does not see.
+                return Err(ub(
+                    if self.borrow_nodes[tag.0 as usize].invalidated.is_some() {
+                        "write through a borrow that was suspended by a read of the same place \
+                     while this borrow was live"
+                    } else {
+                        "write through a shared borrow — only `.&mut` may write through a borrow"
+                    },
+                ));
+            }
+            NodeState::Unique | NodeState::Frozen => {}
+        }
+        // A read scans only the exclusive nodes: it can do nothing to a
+        // node that is already `Frozen`, and nothing at all to a
+        // `Disabled` one. A write has to see both.
+        let scan: Vec<BorrowTag> = match self.borrow_nodes_of.get(&alloc) {
+            None => Vec::new(),
+            Some(list) => match access {
+                Access::Read => list.unique.clone(),
+                Access::Write => list.unique.iter().chain(&list.settled).copied().collect(),
+            },
+        };
+        let mut touched = false;
+        for other in scan {
+            if other == tag {
+                continue;
+            }
+            // An ancestor of the accessor is not foreign to it.
+            if self.is_descendant_of(tag, other) {
+                continue;
+            }
+            // A node whose path is disjoint from this access's path
+            // cannot name the same memory — two borrows into different
+            // fields/elements of one allocation never interact.
+            if !paths_overlap(path, &self.borrow_nodes[other.0 as usize].path) {
+                continue;
+            }
+            touched = true;
+            let victim = &mut self.borrow_nodes[other.0 as usize];
+            match access {
+                Access::Write => {
+                    if victim.state != NodeState::Disabled {
+                        victim.invalidated = Some((loc.clone(), origin));
+                    }
+                    victim.state = NodeState::Disabled;
+                }
+                Access::Read => {
+                    if victim.state == NodeState::Unique {
+                        victim.state = NodeState::Frozen;
+                        victim.invalidated = Some((loc.clone(), origin));
+                    }
+                }
+            }
+        }
+        // Re-file whatever changed state: demoted nodes move out of the
+        // exclusive list (a read will never need them again) and disabled
+        // ones leave both. Both moves are forced by the state machine, so
+        // neither can hide a violation — a node that is still able to
+        // react is still scanned by the access that could make it react.
+        // Skipped entirely when the scan changed nothing — which is the
+        // common case and the one that decides the cost: an access that
+        // finds only ancestors (every access in a loop that borrows the
+        // same place) must not pay for the whole history to be re-filed.
+        if touched && let Some(list) = self.borrow_nodes_of.get_mut(&alloc) {
+            let nodes = &self.borrow_nodes;
+            let mut demoted: Vec<BorrowTag> = Vec::new();
+            list.unique
+                .retain(|node| match nodes[node.0 as usize].state {
+                    NodeState::Unique => true,
+                    NodeState::Frozen => {
+                        demoted.push(*node);
+                        false
+                    }
+                    NodeState::Disabled => false,
+                });
+            list.settled
+                .retain(|node| nodes[node.0 as usize].state != NodeState::Disabled);
+            list.settled.extend(demoted);
+        }
+        Ok(())
+    }
+
+    /// `aliasing_access` for the `n` array elements a `copy` touches,
+    /// starting at `path` (whose last step is the head element's
+    /// `Index`) — one call per element, since a node's path is an exact
+    /// field/index chain and cannot name a whole range at once. `copy` is
+    /// memmove: it must be exactly as foreign to a live safe borrow of
+    /// one of its elements as an ordinary `p.*[i]`/`p.*[i] = v` would be,
+    /// on either side.
+    fn aliasing_access_range(
+        &mut self,
+        tag: Provenance,
+        alloc: AllocId,
+        path: &[PathElem],
+        n: u128,
+        access: Access,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<(), EvalError> {
+        let Some((PathElem::Index(head), prefix)) = path.split_last() else {
+            // `copy_range` already rejected a pointer whose path does not
+            // end in an `Index` — unreachable in practice, but a no-op
+            // rather than a panic if this is ever called before that
+            // check runs.
+            return Ok(());
+        };
+        let mut elem_path = prefix.to_vec();
+        elem_path.push(PathElem::Index(*head));
+        for offset in 0..n {
+            let index = *head + u64::try_from(offset).unwrap_or(u64::MAX);
+            *elem_path.last_mut().expect("just pushed") = PathElem::Index(index);
+            self.aliasing_access(tag, alloc, &elem_path, access, loc, origin)?;
+        }
+        Ok(())
+    }
+
+    /// Mint the node a `.&`/`.&mut` creates.
+    ///
+    /// Creating a borrow is itself an access through the PARENT — a write
+    /// for `.&mut`, a read for `.&` — which is what disables a sibling
+    /// exclusive borrow and what freezes one on a shared reborrow. The new
+    /// node then starts `Unique` (exclusive) or `Frozen` (shared): no
+    /// `Reserved` phase, per the ruling.
+    fn mint_borrow(
+        &mut self,
+        parent: Provenance,
+        alloc: AllocId,
+        path: &[PathElem],
+        mutable: bool,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<Provenance, EvalError> {
+        let parent = match parent {
+            Provenance(Some(tag)) => tag,
+            Provenance(None) => self.borrow_root(alloc),
+        };
+        self.aliasing_access(
+            Provenance(Some(parent)),
+            alloc,
+            path,
+            if mutable { Access::Write } else { Access::Read },
+            loc,
+            origin,
+        )?;
+        let tag = BorrowTag(self.borrow_nodes.len() as u32);
+        self.borrow_nodes.push(BorrowNode {
+            alloc,
+            parent: Some(parent),
+            path: path.to_vec(),
+            state: if mutable {
+                NodeState::Unique
+            } else {
+                NodeState::Frozen
+            },
+            born: Some((loc.clone(), origin)),
+            invalidated: None,
+        });
+        let list = self.borrow_nodes_of.entry(alloc).or_default();
+        if mutable {
+            list.unique.push(tag);
+        } else {
+            list.settled.push(tag);
+        }
+        Ok(Provenance(Some(tag)))
+    }
 }

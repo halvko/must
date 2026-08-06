@@ -549,14 +549,13 @@ impl LowerCtx<'_> {
     /// Lower an expression, MATERIALIZING any reborrow the checker
     /// inserted at it.
     ///
-    /// An implicit reborrow that produces no MIR operation would be
-    /// invisible to a future dynamic aliasing check: the child node would
-    /// never exist, so there would be no parent/child relation for a write
-    /// through the parent while the child is live to violate. M07 says
+    /// An implicit reborrow that produces no MIR operation is invisible to
+    /// the interpreter's aliasing tree: the child node never exists, so
+    /// there is no parent/child relation to violate and a write through the
+    /// parent while the child is live goes undetected. M07 says
     /// degradation is not spelled `v.*.&` "because the explicit form
     /// produces exactly the same child node" — which is a statement about
-    /// the IR, and it has to be made true rather than assumed, before
-    /// anything reads the IR to check it.
+    /// the IR, and it has to be made true rather than assumed.
     ///
     /// Only a PLACE-shaped source is reborrowed. A freshly-formed borrow
     /// (`x.&mut` passed straight into a call) is already its own node;
@@ -1156,12 +1155,17 @@ impl LowerCtx<'_> {
             // receiver's record type is already resolved by inference, so
             // the field name becomes an index into its sorted field list.
             ExprData::Field { receiver, name } => {
-                let base = self.lower_expr(b, *receiver);
                 // No field name at all (`a.`): the parse error covers it,
                 // same invented-but-generic wording as a missing operand.
                 if name.is_empty() {
                     return self.trap(b, expr, "syntax error: missing field name".to_owned());
                 }
+                // A place-shaped chain (`p.x`, `b.*.x`, `p.a.b`) reads
+                // through ONE projection — see `lower_place_read`.
+                if let Some(op) = self.lower_place_read(b, expr) {
+                    return op;
+                }
+                let base = self.lower_expr(b, *receiver);
                 match self.field_index(*receiver, name) {
                     Some(index) => {
                         let dest = b.temp(self.ty(expr));
@@ -1210,7 +1214,13 @@ impl LowerCtx<'_> {
             // diagnosed base (not an array / unknown type) or a
             // compile-time OOB is a pending value trap on this expression;
             // the placeholder is never observed.
+            //
+            // A place-shaped chain (`a[i]`, `b.*[i]`, `m[0][1]`) reads
+            // through ONE projection — see `lower_place_read`.
             ExprData::Index { base, index } => {
+                if let Some(op) = self.lower_place_read(b, expr) {
+                    return op;
+                }
                 let base_op = self.lower_expr(b, *base);
                 let index_op = self.lower_expr(b, *index);
                 // A diagnosed read (compile-time OOB, non-array base,
@@ -1349,10 +1359,10 @@ impl LowerCtx<'_> {
             // place walk, same addressable marking, same resulting
             // `(alloc, path)` value. The region is already gone (see
             // `Self::ty`), and at runtime a borrow and a raw pointer to
-            // the same place are the same machine word; `Rvalue::Borrow`
-            // stays a variant of its own so a future dynamic aliasing
-            // check has one place to mint tracking state, not because the
-            // interpreter does anything different with it today.
+            // the same place are the same machine word; what separates
+            // them is `Rvalue::Borrow`'s tag minting, which the
+            // interpreter uses to detect exclusivity violations
+            // dynamically until the loan checker lands.
             ExprData::Borrow { mutable, place, .. } => {
                 if self.value_traps.contains_key(&expr) {
                     return Operand::Const(Const::Unit);
@@ -1373,11 +1383,10 @@ impl LowerCtx<'_> {
                 }
                 match self.ty(*receiver) {
                     // Both pointer flavors read the same way — one
-                    // `ProjElem::Deref`. What differs is who checks the
-                    // read: `unsafe` for a raw pointer; a safe one needs no
-                    // marker, because the borrow checker's job is to make
-                    // the marker unnecessary (exclusivity checking itself
-                    // is a later stage, static or dynamic).
+                    // `ProjElem::Deref`. What differs is who checked the
+                    // read: `unsafe` for a raw pointer, the borrow checker
+                    // (and, until it is complete, the interpreter's
+                    // aliasing tree) for a safe one.
                     Ty::RawPtr { .. } | Ty::Borrow { .. } => {
                         let root = self.operand_root_local(b, op, *receiver);
                         let dest = b.temp(self.ty(expr));
@@ -2177,26 +2186,7 @@ impl LowerCtx<'_> {
         value: ExprId,
         value_op: Operand,
     ) {
-        // The chain's field-access and index expressions, outermost first;
-        // `root` is the non-projection expression at its base. The walk
-        // stops at a deref: that deref is the chain's OUTERMOST one — the
-        // one governing the write (everything beneath it, deeper derefs
-        // included, is an ordinary *read* that produces the pointer).
-        let mut chain = Vec::new();
-        let mut root = target;
-        loop {
-            match &self.body.exprs[root] {
-                ExprData::Field { receiver, .. } => {
-                    chain.push(root);
-                    root = *receiver;
-                }
-                ExprData::Index { base, .. } => {
-                    chain.push(root);
-                    root = *base;
-                }
-                _ => break,
-            }
-        }
+        let (root, chain) = self.place_chain(target);
         // A deref roots the chain (`p.* = v;`, `p.*.x = v;`, `p.*[i] = v;`):
         // the store goes through the raw pointer — a new root whose
         // legality is the pointer's `.&raw mut`-ness, not any binding's
@@ -2210,24 +2200,24 @@ impl LowerCtx<'_> {
             let deref = root;
             // The write was rejected on the governing deref (a shared
             // pointer): trap with the squiggle's exact text — the write
-            // must not happen.
+            // must not happen. Checked BEFORE the pointer is evaluated,
+            // unlike the deref's read-side judgements.
             if let Some(message) = self.assign_traps.get(&deref).cloned() {
                 self.trap(b, deref, message);
                 return;
             }
-            let ptr_op = self.lower_expr(b, receiver);
-            // A broken deref (non-pointer receiver — its value trap
-            // carries the message), or one outside `unsafe`: the store is
-            // replaced by the trap (the pointer still evaluated for its
-            // effects).
-            if let Some(message) = self.value_traps.get(&deref).cloned() {
-                self.trap(b, deref, message);
-                return;
-            }
-            if let Some(message) = self.unsafe_traps.get(&deref).cloned() {
-                self.trap(b, deref, message);
-                return;
-            }
+            // A broken or unguarded deref replaces the store with the
+            // trap (the pointer still evaluated for its effects); an
+            // `{error}`-typed receiver skips the store, like the field
+            // path's missing-index case.
+            let local = match self.lower_deref_root(b, deref, receiver) {
+                DerefRoot::Local(local) => local,
+                DerefRoot::Trap(message) => {
+                    self.trap(b, deref, message);
+                    return;
+                }
+                DerefRoot::Silent => return,
+            };
             // A broken link above the deref (unknown field, non-record
             // receiver, non-array base, compile-time OOB): pending value
             // traps from the target's read-typing, innermost first.
@@ -2237,13 +2227,6 @@ impl LowerCtx<'_> {
                     return;
                 }
             }
-            // A broken receiver (not a `RawPtr` — `{error}`-typed, its own
-            // story upstream) skips the write, like the field path's
-            // missing-index case.
-            if !matches!(self.ty(receiver), Ty::RawPtr { .. } | Ty::Borrow { .. }) {
-                return;
-            }
-            let local = self.operand_root_local(b, ptr_op, receiver);
             // `{error}`-typed links skip the write silently, keeping
             // lowering total, like the name-rooted path's missing-index
             // case.
@@ -2401,6 +2384,95 @@ impl LowerCtx<'_> {
         }
     }
 
+    /// Read a PLACE-shaped chain (`p.x`, `p.a.b`, `a[i]`, `b.*.x`,
+    /// `b.*.a.q`) through one [`Place`] projection instead of
+    /// materializing the receiver and extracting from the copy. Built out
+    /// of the same three pieces the write side
+    /// ([`Self::lower_field_assign_target`]) and address-of
+    /// ([`Self::lower_addr_of_flavored`]) are — [`Self::place_chain`],
+    /// [`Self::lower_deref_root`], [`Self::lower_place_projection`].
+    ///
+    /// This is what keeps the dynamic aliasing check's path narrow: a
+    /// read of `p.y` is checked against path `[y]`, not against the whole
+    /// of `p`, so it cannot suspend a live borrow of the sibling `p.x`
+    /// (`paths_overlap` in `eval::machine`). Materializing the receiver
+    /// first makes every read as wide as its chain's ROOT, which is a
+    /// foreign access to every borrow underneath it.
+    ///
+    /// `None` when the chain is not place-shaped — a call result, a
+    /// literal, a record literal, an item, a capture of an enclosing
+    /// function's local: those still lower as
+    /// [`Rvalue::Field`]/[`Rvalue::Index`] over a materialized base,
+    /// which is the right shape for a value that has no place of its own.
+    fn lower_place_read(&mut self, b: &mut BodyBuilder, expr: ExprId) -> Option<Operand> {
+        let (root, chain) = self.place_chain(expr);
+        // `a.` — a missing field name anywhere in the chain: the general
+        // path reports the parse error, after evaluating the receiver.
+        if chain.iter().any(|&link| {
+            matches!(&self.body.exprs[link], ExprData::Field { name, .. } if name.is_empty())
+        }) {
+            return None;
+        }
+        // The root local the projection hangs off: a deref roots it in
+        // the POINTER (the read goes through it, path extended — nothing
+        // materialized, the original allocation's identity preserved), a
+        // name roots it in the binding's own storage.
+        let local = match &self.body.exprs[root] {
+            ExprData::Deref { receiver } => {
+                let receiver = *receiver;
+                match self.lower_deref_root(b, root, receiver) {
+                    DerefRoot::Local(local) => local,
+                    DerefRoot::Trap(message) => return Some(self.trap(b, root, message)),
+                    // Never observable: read the placeholder instead.
+                    DerefRoot::Silent => return Some(Operand::Const(Const::Unit)),
+                }
+            }
+            ExprData::NameRef(_) => {
+                let Some(Resolution::Local(binding)) = self.resolutions.get(root) else {
+                    return None;
+                };
+                // A local of an enclosing function has no local here; the
+                // general path reports the unsupported capture.
+                *b.local_for_binding.get(binding)?
+            }
+            _ => return None,
+        };
+        // A broken root or link INSIDE the chain (unknown field,
+        // non-record receiver, non-array base, compile-time OOB),
+        // root-outward: pending value traps from the read's own typing,
+        // exactly as the write and address-of walks reconcile them (a
+        // deref root's own trap is already reconciled — re-reading it
+        // here finds nothing).
+        // `expr`'s own trap is excluded — it is the wrapper's
+        // ([`Self::lower_expr_traps`]) to fire, and it must fire instead
+        // of the read, not after it.
+        for &link in std::iter::once(&root).chain(chain[1..].iter().rev()) {
+            if let Some(message) = self.value_traps.get(&link).cloned() {
+                return Some(self.trap(b, link, message));
+            }
+        }
+        let lead = matches!(&self.body.exprs[root], ExprData::Deref { .. })
+            .then_some(crate::ProjElem::Deref);
+        // `{error}`-typed links read as the never-observed placeholder,
+        // like the general path's missing-field-index case.
+        let Some(projection) = self.lower_place_projection(b, &chain, lead) else {
+            return Some(Operand::Const(Const::Unit));
+        };
+        if self.value_traps.contains_key(&expr) {
+            return Some(Operand::Const(Const::Unit));
+        }
+        // The read happens HERE, not wherever the operand is consumed:
+        // its effects (bounds checks, deref liveness, the aliasing check)
+        // belong at this point in the CFG.
+        let dest = b.temp(self.ty(expr));
+        b.push_assign(
+            dest,
+            Rvalue::Use(Operand::Copy(Place { local, projection })),
+            expr,
+        );
+        Some(Operand::Copy(dest.into()))
+    }
+
     /// Lower `place.&raw [mut]` for the accepted place shapes (everything
     /// else was diagnosed and value-trapped upstream): the chain's field
     /// and element steps resolve exactly like a field-assign target's,
@@ -2435,41 +2507,20 @@ impl LowerCtx<'_> {
         place: ExprId,
         flavor: PtrFlavor,
     ) -> Operand {
-        // The chain's field-access and index expressions, outermost first;
-        // `root` is the expression at its base. Like an assignment
-        // target's walk, it stops at a deref — the OUTERMOST one, whose
-        // pointer the minted address extends.
-        let mut chain = Vec::new();
-        let mut root = place;
-        loop {
-            match &self.body.exprs[root] {
-                ExprData::Field { receiver, .. } => {
-                    chain.push(root);
-                    root = *receiver;
-                }
-                ExprData::Index { base, .. } => {
-                    chain.push(root);
-                    root = *base;
-                }
-                _ => break,
-            }
-        }
+        let (root, chain) = self.place_chain(place);
         // A deref-rooted place: the pointer reads like any expression
         // (deeper derefs inside it are ordinary loads with their own
         // unsafe gating), then the address is that pointer, path-extended.
         if let ExprData::Deref { receiver } = &self.body.exprs[root] {
             let receiver = *receiver;
             let deref = root;
-            let ptr_op = self.lower_expr(b, receiver);
-            // A broken deref (non-pointer receiver), or one outside
-            // `unsafe` (the deref rule is uniform — the place's own deref
-            // included): trap with the squiggle's exact message.
-            if let Some(message) = self.value_traps.get(&deref).cloned() {
-                return self.trap(b, deref, message);
-            }
-            if let Some(message) = self.unsafe_traps.get(&deref).cloned() {
-                return self.trap(b, deref, message);
-            }
+            // The deref rule is uniform — the place's own deref included —
+            // so a broken or unguarded one traps here.
+            let local = match self.lower_deref_root(b, deref, receiver) {
+                DerefRoot::Local(local) => local,
+                DerefRoot::Trap(message) => return self.trap(b, deref, message),
+                DerefRoot::Silent => return Operand::Const(Const::Unit),
+            };
             // Broken links above the deref: pending value traps from the
             // operand's read-typing, innermost first.
             for &link in chain.iter().rev() {
@@ -2477,12 +2528,6 @@ impl LowerCtx<'_> {
                     return self.trap(b, link, message);
                 }
             }
-            // `{error}`-typed receiver, silently broken upstream: the
-            // pointer value is never observable — keep lowering total.
-            if !matches!(self.ty(receiver), Ty::RawPtr { .. } | Ty::Borrow { .. }) {
-                return Operand::Const(Const::Unit);
-            }
-            let local = self.operand_root_local(b, ptr_op, receiver);
             let Some(projection) =
                 self.lower_place_projection(b, &chain, Some(crate::ProjElem::Deref))
             else {
@@ -2613,6 +2658,65 @@ impl LowerCtx<'_> {
             // Justified by the unresolved-name diagnostic.
             None => self.trap(b, root, hir::diag::unresolved_name(name)),
         }
+    }
+
+    /// Walk a place chain to its root: the field and index steps,
+    /// OUTERMOST first, and the expression at the base (a name, a deref,
+    /// or something that is no place at all). The walk stops at a deref —
+    /// the chain's outermost one, the one that governs the access;
+    /// everything beneath it is an ordinary read producing the pointer.
+    ///
+    /// The one walk all three place lowerings share — the write target
+    /// ([`Self::lower_field_assign_target`]), the address-of operand
+    /// ([`Self::lower_addr_of_flavored`]) and the read
+    /// ([`Self::lower_place_read`]) — which is what makes them agree by
+    /// construction, not by inspection, about what a chain names.
+    fn place_chain(&self, expr: ExprId) -> (ExprId, Vec<ExprId>) {
+        let mut chain = Vec::new();
+        let mut root = expr;
+        loop {
+            match &self.body.exprs[root] {
+                ExprData::Field { receiver, .. } => {
+                    chain.push(root);
+                    root = *receiver;
+                }
+                ExprData::Index { base, .. } => {
+                    chain.push(root);
+                    root = *base;
+                }
+                _ => break,
+            }
+        }
+        (root, chain)
+    }
+
+    /// Resolve a deref-rooted place chain's root: the pointer (the
+    /// deref's receiver) evaluates like any other read — deeper derefs
+    /// inside it are ordinary loads with their own unsafe gating — and
+    /// the judgements that belong to the deref ITSELF are reconciled
+    /// here, leaving the caller only the shape of the answer.
+    ///
+    /// The place that comes out is the ORIGINAL allocation's identity
+    /// with an extended path: nothing is materialized, so a write, an
+    /// address-of and a read through the same chain all name the same
+    /// bytes.
+    fn lower_deref_root(
+        &mut self,
+        b: &mut BodyBuilder,
+        deref: ExprId,
+        receiver: ExprId,
+    ) -> DerefRoot {
+        let ptr_op = self.lower_expr(b, receiver);
+        if let Some(message) = self.value_traps.get(&deref).cloned() {
+            return DerefRoot::Trap(message);
+        }
+        if let Some(message) = self.unsafe_traps.get(&deref).cloned() {
+            return DerefRoot::Trap(message);
+        }
+        if !matches!(self.ty(receiver), Ty::RawPtr { .. } | Ty::Borrow { .. }) {
+            return DerefRoot::Silent;
+        }
+        DerefRoot::Local(self.operand_root_local(b, ptr_op, receiver))
     }
 
     /// Resolve a place chain's links (outermost first, as the target/place
@@ -3002,6 +3106,20 @@ impl LowerCtx<'_> {
     }
 }
 
+/// What a deref-rooted place chain resolved to — see
+/// [`LowerCtx::lower_deref_root`].
+enum DerefRoot {
+    /// The local the leading `Deref` projection hangs off.
+    Local(LocalId),
+    /// The deref is broken (a non-pointer receiver) or unguarded (a raw
+    /// deref outside `unsafe`): plant this message, in whatever shape the
+    /// caller needs.
+    Trap(String),
+    /// An `{error}`-typed receiver: nothing rooted here is ever
+    /// observable, so the place is dropped and lowering stays total.
+    Silent,
+}
+
 /// How one match arm participates in dispatch.
 enum ArmKind {
     /// Keyed by variant index in the scrutinee's enum.
@@ -3122,9 +3240,7 @@ impl BodyBuilder {
 enum PtrFlavor {
     /// `.&raw` / `.&raw mut` — by-access semantics, no aliasing node.
     Raw,
-    /// `.&` / `.&mut` — a safe borrow. Structurally identical to `Raw`
-    /// today; kept distinct so a future dynamic aliasing check has one
-    /// place to mint tracking state.
+    /// `.&` / `.&mut` — a safe borrow, which mints an aliasing-tree node.
     Borrow,
 }
 

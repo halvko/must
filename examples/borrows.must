@@ -94,6 +94,27 @@ static through = fn::<@a>(m: usize.&mut::<@a>) -> usize {
     m.*
 };
 
+// ---- disjoint fields borrow independently -------------------------------
+//
+// A borrow is minted over a PLACE, and two places naming disjoint parts of
+// one value never conflict: `p.x.&mut` and `p.y.&mut` are live at the same
+// time, and reading or writing one field does not disturb a borrow of the
+// other. Only overlapping places interact — a borrow of the whole `p` would
+// dominate both fields.
+static fields = fn () -> usize {
+    let mut p: struct { x: usize, y: usize } = struct { x = 0, y = 0 };
+    let bx = p.x.&mut;
+    let by = p.y.&mut;
+    // Both are live at once, because `p.x` and `p.y` are disjoint places.
+    set_to(bx, 1);
+    set_to(by, 2);
+    // A sibling READ is disjoint in the same way: reading `p.y` does not
+    // suspend a borrow of `p.x`, so `bx` is still good right after it.
+    let v = p.y;
+    set_to(bx, v + 1);
+    p.x
+};
+
 // ---- joins: a branch is a use site like any other -----------------------
 //
 // Each branch REBORROWS into the result, so two unrelated regions join
@@ -140,12 +161,15 @@ static main = fn () -> () {
     print_usize(get(longer(r)));
 
     // A join over two borrows, and a join over two FLAVORS. The exclusive
-    // borrow is of a DIFFERENT local — borrowing `n` both ways at once
-    // would be an exclusivity violation, which no checker rejects yet,
-    // static or dynamic.
+    // borrow is of a DIFFERENT local — borrowing `n` both ways at once is
+    // exactly the exclusivity violation the interpreter detects; static
+    // loan liveness would reject it too, once it lands.
     print_usize(pick(n.&, n.&, true));
     let mut other: usize = 80;
     print_usize(pick_flavors(n.&, other.&mut, true));
+
+    // Two fields of one struct, borrowed at once.
+    print_usize(fields());
 };
 
 // The language has no integer formatting yet and `print` takes a `str`, so

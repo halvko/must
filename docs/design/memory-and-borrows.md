@@ -17,10 +17,11 @@
   `offset(p, isize)`, `copy` (memmove semantics), `dangling`. `unsafe` is required for a raw
   deref, pointer arithmetic, freeing and copying; taking a raw borrow, comparing pointers,
   `dangling` and allocating are safe.
-- **M08** `.&raw` is not a decayed safe borrow: a raw reborrow `x.*.&raw mut` is safe to
-  create, because every consuming operation on a raw pointer is gated — safe code may create a
-  dangling raw pointer but cannot use one. This is the language's single region-laundering
-  path; the soundness review must name it.
+- **M08** `.&raw` is not a decayed safe borrow, which forces the aliasing model's
+  tag-inheritance shape (M10). A raw reborrow `x.*.&raw mut` is safe to create, because every
+  consuming operation on a raw pointer is gated: safe code may create a dangling raw pointer
+  but cannot use one. This is the language's single region-laundering path; the soundness
+  review must name it.
 - **M04** First-class `&T`/`&mut T` plus a borrow checker; raw pointers remain the unsafe
   substrate. The system is designed as one piece with outlives first, because a borrow checker
   contains a region engine. Hard constraint: the specialization law (X11); lifetimes reject
@@ -54,9 +55,33 @@
   spurious errors that follow are ones users cannot attribute, because the two regions look
   identical in source. The un-retrofittable part is library API shape: a slice's region arity
   and narrowing signature are public from day one, so split read-only from mutable views then.
+- **M10** Tree Borrows' structure, strictly: the shape, not Rust's policy. Three commitments:
+  a tree of provenance, not a stack; per-node, per-location permission state machines driven
+  by access, which buys read-read reordering for the planned optimizer; and a raw borrow
+  inherits its parent's node, forced by M08. Posture: more UB than TB wherever Must is unsure,
+  relaxed additively. Specifically, no reservation phase at launch and `&mut` starts `Unique`;
+  Rust cannot do this because of two-phase borrows, Must can because self-last evaluation made
+  them unnecessary, and relaxing later is pure UB removal. Underneath, everything lives by
+  access. The borrow checker is what makes safe references appear to live by existence,
+  statically. The aliasing model is the dynamic layer and must not know about lifetimes.
+- **M11** The aliasing tree is path-granular and reads are path-exact. Every node carries the
+  element path it was minted over, and a foreign node reacts only when the two paths overlap
+  (one is a prefix of the other), so disjoint fields and elements of one allocation are
+  borrowed independently. An access without an exact path passes the root, which over-reports
+  rather than under-reports. Reads are exact because stores already resolve their exact place;
+  anything coarser would make reading a disjoint field stricter than writing it.
 
 ### Ruled, not built
 
+- **M10** Protectors on reference-typed parameters are in, which pre-rules a piece of the
+  lifetime design: "a reference argument is alive for the whole call" is a dynamic rule with UB
+  attached. Publish the licence list: what the optimizer may assume, each with its theorem;
+  anything not on it is a hope. Neither is built by this stage's aliasing tree.
+- **M10** Per-location state within one node is approximated, not built: a node minted over a
+  WIDE path (a whole struct, a whole array) is disabled wholesale by any foreign access into
+  any part of it, never partially — the path granularity M11 buys stops at the node boundary.
+  Strictly more UB than true per-location tracking, on the stated posture; relaxing to genuine
+  sub-node partitioning later is pure UB removal.
 - **M12** Temporaries live to the end of the innermost enclosing block, always: no shape-based
   extension rules, no liveness derivation; a shorter life is spelled with an explicit block. A
   match scrutinee lives to the end of the match; a loop condition is per iteration. Tail
@@ -104,13 +129,28 @@
 - **Body-local region names as binders** — a signature region is universal and a body region
   existential, so a body-local name asserts that two regions coincide; it is an annotation,
   not a binder. **M06**
+- **Stacked Borrows** — it contradicts M08 (direct-raw-borrow-then-use-the-place is what it
+  calls UB); it forbids read-read reordering, so the planned optimizer would be illegal on day
+  one; its two known patches paper over the reference-to-raw decay Must designed out; and "SB
+  first, TB later" is not a relaxation, because the models are incomparable. **M10**
+- **Inventing an aliasing model** — buy proven components. **Published TB verbatim** —
+  strict-first is the hedge, and it is about policy, not structure. **Dynamic exclusivity
+  without provenance** — buys almost no optimizer licences and cannot describe raw pointers.
+  **M10**
 - **Contravariance** — no measured genuine uses, and the shape people write is not rescued by
   it. **A targeted "all-static regions may be viewed shorter" rule** — deciding whether
   shortening is safe needs per-parameter shared-versus-exclusive information, which is
   variance under another name. **M09**
+- **Lifetimes choosing codegen** — selection becomes inference-dependent, MIR stops being
+  erased, borrow check stops being a decl-level query, the two form a mutual fixpoint with no
+  termination argument, and the aliasing model becomes hostage to the solver. **M09 M10**
+- **An escape lint for raw reborrows** — an accurate one needs static raw-pointer provenance,
+  which the model deletes, so any cheap approximation false-positives. **M08**
 
 ## Re-evaluate when
 
+- **The no-reservation fork** — relaxing is pure UB removal; it was ruled ahead of the
+  experiment that would justify it. **M10**
 - **Covariance is wanted** — the three rules in M09 keep it a one-query change. It revives the
   unused-region-parameter question: a slice's region appears in no field, so variance cannot
   be derived structurally, and a phantom-field marker is written variance. "Variance derived,
@@ -128,3 +168,6 @@
 - **Destructors land** — they owe the match-scrutinee-temporary lint (a scrutinee with a
   destructor keeps its loans live through every arm: the deadlocking `match lock()`), drop
   order, glue, partial moves, and the ASAP decision. **M12**
+- **Data races** are out of scope for both aliasing models. Whether well-typed safe programs
+  can violate the model is tested, not proven (as in Rust); it lands at the soundness review.
+  **M10**
