@@ -4170,3 +4170,121 @@ static a = fn(p: P) -> usize { D::<Self = usize>::m(1) + P::len(p) };
         "#]],
     );
 }
+
+// ---- match projects through borrows: what the editor shows --------------
+
+#[test]
+fn hover_on_a_borrowed_matchs_payload_binding_shows_the_borrow() {
+    // The binding IS a borrow, and hover says so — including the flavor,
+    // which is the thing a reader needs to know before writing `t.*`.
+    check_hover(
+        r#"
+type Opt = enum::<T> { Some(T), None };
+static f = fn::<@a>(s: Opt::<usize>.&mut::<@a>) -> () {
+    match s { ::Some(t$0) => { t.* = 1; }, ::None => {} }
+};
+"#,
+        "```must\nt: usize.&mut\n```",
+    );
+}
+
+#[test]
+fn hover_on_an_owned_matchs_payload_binding_still_shows_the_value() {
+    // The control: the same enum matched by value binds the value.
+    check_hover(
+        r#"
+type Opt = enum::<T> { Some(T), None };
+static f = fn(s: Opt::<usize>) -> usize {
+    match s { ::Some(t$0) => t, ::None => 0 }
+};
+"#,
+        "```must\nt: usize\n```",
+    );
+}
+
+#[test]
+fn hover_on_a_whole_value_binder_through_a_borrow_shows_the_borrow() {
+    // A whole-value binder is not a projection: it names the same place, so
+    // it gets the scrutinee's own borrow back, region and all.
+    check_hover(
+        r#"
+type Opt = enum::<T> { Some(T), None };
+static f = fn::<@a>(s: Opt::<usize>.&::<@a>) -> usize {
+    match s { whole$0 => 0 }
+};
+"#,
+        "```must\nwhole: Opt::<usize>.&::<@a>\n```",
+    );
+}
+
+#[test]
+fn completions_match_arm_sees_through_a_borrowed_scrutinee() {
+    // The arm slot has to look through the same lens `infer_match` does,
+    // or it would decline exactly the scrutinees the checker accepts.
+    let fixture_text = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn::<@a>(s: Shape.&::<@a>) {
+    match s {
+        $0
+    }
+};
+"#;
+    check_has_completion(fixture_text, "::Circle");
+    check_has_completion(fixture_text, "::Point");
+    check_has_completion(fixture_text, "_");
+}
+
+#[test]
+fn completions_match_template_fires_on_a_borrowed_scrutinee() {
+    // The arm-list template, unchanged in shape: the arms of a borrowed
+    // match are the same arms, and only the bindings' types differ — so
+    // the very same snippet is right, and its `$1` payload stops now bind
+    // borrows.
+    assert_eq!(
+        completion_insert(
+            r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn::<@a>(s: Shape.&mut::<@a>) {
+    match s $0
+};
+"#,
+            "match arms",
+        ),
+        crate::InsertText::Snippet {
+            snippet: "{\n        ::Circle($1) => $2,\n        ::Point => $3,\n    }".to_owned(),
+            plain: "{\n        ::Circle => ,\n        ::Point => ,\n    }".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn completions_match_template_not_offered_for_a_borrow_of_a_non_enum() {
+    // The lens is lifted only for a referent a `match` dispatches on: a
+    // `struct.&` scrutinee is not a dispatching scrutinee, and there are no
+    // arms to guess.
+    check_no_completion(
+        r#"
+type P = struct { x: usize };
+static f = fn::<@a>(p: P.&::<@a>) {
+    match p $0
+};
+"#,
+        "match arms",
+    );
+}
+
+#[test]
+fn completions_match_scrutinee_lifts_a_borrowed_enum_typed_param() {
+    // The scrutinee SLOT's ranking follows the same lens: a borrow of an
+    // enum is a scrutinee the checker accepts, so it belongs in the leading
+    // layer next to the owned ones.
+    let fixture_text = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn::<@a>(s: Shape.&::<@a>, n: usize) {
+    match $0
+};
+"#;
+    assert_eq!(completion_sort_text(fixture_text, "s"), "2_00_s");
+    // The control: a local the lens does not reach keeps the flat tier.
+    assert_eq!(completion_sort_text(fixture_text, "n"), "2_10_n");
+}

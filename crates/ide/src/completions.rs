@@ -1193,19 +1193,36 @@ fn expression_position_items(
 }
 
 /// Whether a value of this type can be a `match` scrutinee that dispatches
-/// — an enum, or one of its variants (a variant-typed scrutinee is legal
-/// and simply has one reachable arm). The scrutinee slot's test for its
-/// leading layers.
+/// — [`hir::dispatches_on`] behind one peeled borrow, so an enum, one of
+/// its variants (legal, and simply has one reachable arm), or a borrow of
+/// either, because `match` looks through a borrow. The scrutinee slot's
+/// test for its leading layers.
 ///
 /// A `fn` returning an enum is NOT enum-typed: calling it would produce a
 /// scrutinee, and "one step of production" is the unbuilt layer. The
 /// distinction is exactly the one [`type_tier`] draws for a `fn` candidate
 /// under a value expectation, kept deliberately.
 fn is_enum_typed(db: &RootDatabase, ty: &hir::Ty) -> bool {
+    hir::dispatches_on(db, dispatch_ty(ty))
+}
+
+/// One borrow layer peeled off, if there is one; the type itself otherwise.
+/// Whether what comes back dispatches is [`hir::dispatches_on`]'s call —
+/// `usize.&` peels to a `usize` that dispatches on nothing, and a borrow of
+/// a borrow peels to a `Borrow`, which is right: neither `infer_match` nor
+/// mir lifts a lens there either.
+///
+/// `match` projects through borrows, so `s: Opt::<T>.&::<@a>` covers `Opt`'s
+/// variants and its arms bind borrows of the payloads. Every scrutinee-side
+/// completion has to look through the same lens `infer_match` does, or it
+/// would decline exactly the scrutinees the checker accepts.
+///
+/// This is NOT auto-deref, which is sealed shut: nothing here changes what
+/// a `.` means, only which variants a `match` can offer as arms.
+fn dispatch_ty(ty: &hir::Ty) -> &hir::Ty {
     match ty {
-        hir::Ty::Named(named) => hir::enum_variants(db, named.decl.to_id(db)).is_some(),
-        hir::Ty::Variant(_) => true,
-        _ => false,
+        hir::Ty::Borrow { referent, .. } => referent,
+        _ => ty,
     }
 }
 
@@ -1413,7 +1430,9 @@ fn match_arm_items(
     };
     let inference = hir::infer::infer(db, item);
 
-    let enum_named = match inference.type_of_expr.get(scrutinee_expr) {
+    // Through the borrow, if there is one: the arms of a borrowed match are
+    // the same arms, and only the bindings' types differ.
+    let enum_named = match inference.type_of_expr.get(scrutinee_expr).map(dispatch_ty) {
         Some(hir::Ty::Named(named)) if hir::enum_variants(db, named.decl.to_id(db)).is_some() => {
             named.clone()
         }
@@ -1553,7 +1572,8 @@ fn match_template_items(
         return Vec::new();
     };
     let inference = hir::infer::infer(db, item);
-    let Some(hir::Ty::Named(named)) = inference.type_of_expr.get(scrutinee) else {
+    // Through the borrow, if there is one — same lens as [`match_arm_items`].
+    let Some(hir::Ty::Named(named)) = inference.type_of_expr.get(scrutinee).map(dispatch_ty) else {
         return Vec::new();
     };
     let Some(variants) = hir::enum_variants(db, named.decl.to_id(db)).as_ref() else {
