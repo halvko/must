@@ -949,8 +949,16 @@ fn reject_nested_generic_binder(fn_literal: &ast::FnLiteral, errors: &mut Vec<Sy
     }
     // A member's defining fn literal: a TRAIT-IMPL member carries its own
     // binder (a requirement may be a generic fn — Display's `fmt` over
-    // `W: Write`), so the binder is live there. An INHERENT member's
-    // binder stays reserved — the type's own binders already flow in.
+    // `W: Write`), so the whole binder is live there.
+    //
+    // An INHERENT member's binder is live for REGIONS and reserved for
+    // everything else. The split is not arbitrary: the type's own type and
+    // const params already flow into every member, so a member-own one is
+    // redundant sugar. A region has no such source — regions on type
+    // declarations are themselves reserved — so a member that takes a
+    // borrow of `Self` has nowhere else to bind the per-call region it
+    // needs, and with no elision it may not decline to name one. Granting
+    // the other two kinds deletes the two errors below and nothing else.
     if fn_literal
         .syntax()
         .parent()
@@ -959,13 +967,24 @@ fn reject_nested_generic_binder(fn_literal: &ast::FnLiteral, errors: &mut Vec<Sy
         if semantic_member_context(fn_literal.syntax()) == Some(MemberContext::TraitImpl) {
             return;
         }
-        errors.push(SyntaxError {
-            message: "generic members are not supported yet \
-                      (the type's own binders are already in scope)"
-                .to_owned(),
-            range: generic_param_list.syntax().text_range(),
-            fix: None,
-        });
+        for param in generic_param_list.params() {
+            let message = match &param {
+                ast::GenericParam::RegionParam(_) => continue,
+                ast::GenericParam::TypeParam(_) => {
+                    "a member's own type parameters are not supported yet \
+                     (the type's own binders are already in scope)"
+                }
+                ast::GenericParam::ConstParam(_) => {
+                    "a member's own const parameters are not supported yet \
+                     (the type's own binders are already in scope)"
+                }
+            };
+            errors.push(SyntaxError {
+                message: message.to_owned(),
+                range: param.syntax().text_range(),
+                fix: None,
+            });
+        }
         return;
     }
     errors.push(SyntaxError {

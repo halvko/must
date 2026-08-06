@@ -73,6 +73,7 @@ const COVERED: &[&str] = &[
     "hello.must",
     "loops.must",
     "pointers.must",
+    "reborrow.must",
     "records.must",
     "state_machine.must",
 ];
@@ -329,7 +330,7 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |                                               ^^^^^^^^^^^^^
                = note: a module-level `plain_len` is defined here — statics are never dot-callable; call `plain_len(...)` instead (examples/errors.must:182:8)
 
-            error: `scaled` is not dot-callable: its last parameter is not `Self`-typed (dot-call resolution is structural)
+            error: `scaled` is not dot-callable: its last parameter is neither `Self` nor a safe borrow of `Self` (dot-call resolution is structural)
               --> examples/errors.must:194:56
                 |
             194 | static wrong_self_position = fn (s: Scaler) -> usize { s.scaled(2) };
@@ -349,37 +350,44 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |                       ^^^^^^^^
 
             error: a member's own generic arguments are not supported yet: arguments written on `Measured::size` cannot be applied here
-              --> examples/errors.must:230:53
+              --> examples/errors.must:232:53
                 |
-            230 | static member_own_turbofish = fn () -> () { let f = Measured::size::<usize>; };
+            232 | static member_own_turbofish = fn () -> () { let f = Measured::size::<usize>; };
                 |                                                     ^^^^^^^^^^^^^^^^^^^^^^^
 
             error: `len` is a field of `Sized`, not a member — fields are reached through a value: `value.len`
-              --> examples/errors.must:238:55
+              --> examples/errors.must:240:55
                 |
-            238 | static field_through_the_type = fn () -> () { let n = Sized::len; };
+            240 | static field_through_the_type = fn () -> () { let n = Sized::len; };
                 |                                                       ^^^^^^^^^^
-               = note: `Sized` is defined here (examples/errors.must:237:6)
+               = note: `Sized` is defined here (examples/errors.must:239:6)
 
             error: `Self` names the implementer, so it cannot be `_`: write the type (`Trait::<Self = Type>::member`), or use the short form `Trait::member(...)` where an argument determines `Self`
-              --> examples/errors.must:251:45
+              --> examples/errors.must:253:45
                 |
-            251 | static self_hole = fn (n: usize) -> usize { Countable::<Self = _>::count(n) };
+            253 | static self_hole = fn (n: usize) -> usize { Countable::<Self = _>::count(n) };
                 |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
             error: using this borrow where a longer-lived one is expected needs `@a` to outlive `@b`, which this signature does not declare; add `@a: @b` to the binder
-              --> examples/errors.must:260:80
+              --> examples/errors.must:262:80
                 |
-            260 | static undeclared_outlives = fn::<@a, @b>(x: usize.&::<@a>) -> usize.&::<@b> { x };
+            262 | static undeclared_outlives = fn::<@a, @b>(x: usize.&::<@a>) -> usize.&::<@b> { x };
                 |                                                                                ^
 
             error: cannot resolve `::Point` without an expected type — write `Enum::Point`
-              --> examples/errors.must:270:53
+              --> examples/errors.must:272:53
                 |
-            270 | static sigil_without_a_type = fn () -> () { let s = ::Point; };
+            272 | static sigil_without_a_type = fn () -> () { let s = ::Point; };
                 |                                                     ^^^^^^^
 
-            found 26 errors and 1 warning
+            error: `bump` takes `Self.&mut`, and a borrow is never inserted for an owned receiver — write `.&mut.bump(...)`
+              --> examples/errors.must:289:5
+                |
+            289 |     c.bump()
+                |     ^^^^^^^^
+               = note: `bump` is defined here (examples/errors.must:284:9)
+
+            found 27 errors and 1 warning
         "#]],
     );
 }
@@ -412,6 +420,11 @@ fn loops_checks_clean() {
 #[test]
 fn pointers_checks_clean() {
     assert_check("pointers.must", 0, expect![[r#""#]]);
+}
+
+#[test]
+fn reborrow_checks_clean() {
+    assert_check("reborrow.must", 0, expect![[r#""#]]);
 }
 
 #[test]
@@ -729,6 +742,24 @@ fn pointers_runs() {
         aliasing: writing through the copy q is seen through p
         field pointer: r.a.&raw mut wrote only r.a
     "#]],
+    );
+}
+
+#[test]
+fn reborrow_runs() {
+    // `101`: `get_or_default(7, 100, ..)` inserts 100 and hands back a
+    // borrow OF THE MAP'S SLOT; `a.* = a.* + 1` writes 101 through it; the
+    // second lookup finds key 7 present, ignores the 999 default, and reads
+    // back what was written. Any other number means the borrow aliased a
+    // copy instead of the map.
+    assert_run(&["run", "examples/reborrow.must"], 0, expect!["101\n"]);
+    // `60`: 20 impl-directed + 20 + 20 bound-directed through the hidden
+    // dictionary — the trait half of a borrow-`Self` member, both call
+    // directions, actually executing.
+    assert_run(
+        &["run", "examples/reborrow.must", "-e", "total_count()"],
+        0,
+        expect!["60\n"],
     );
 }
 

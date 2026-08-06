@@ -231,7 +231,9 @@ pub enum RegionConstraintReason {
     /// A callee's declared outlives bound (`fn::<@a, @b: @a>`) travels
     /// with the instantiation at a call site — the caller's own regions
     /// must satisfy the bound the callee wrote, not a reborrow the caller
-    /// performed.
+    /// performed. The callee is a free fn, an inherent member or a trait
+    /// requirement; one reading serves all three
+    /// (`push_region_binder_bounds`).
     CalleeBound,
 }
 

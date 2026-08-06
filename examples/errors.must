@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 26 errors and 1 warning.
+// exactly: found 27 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -182,10 +182,10 @@ type Opted = struct { n: usize };
 static plain_len = fn (o: Opted) -> usize { o.n };
 static dotted_call = fn (o: Opted) -> usize { o.plain_len() };
 
-// 20. A member whose LAST parameter is not `Self`-typed is not dot-callable:
-//     dot-call resolution is structural — the receiver becomes the last
-//     argument, so only a Self-typed last parameter can receive it.
-//     error: `scaled` is not dot-callable: its last parameter is not `Self`-typed (dot-call resolution is structural)
+// 20. A member whose LAST parameter is neither `Self` nor a safe borrow of
+//     `Self` is not dot-callable: resolution is structural — the receiver
+//     becomes the last argument, so only those two shapes receive it.
+//     error: `scaled` is not dot-callable: its last parameter is neither `Self` nor a safe borrow of `Self` (dot-call resolution is structural)
 type Scaler = struct { n: usize } with {
     impl Self {
         scaled = fn(s: Self, by: usize) -> usize { s.n * by };
@@ -216,11 +216,13 @@ static return_in_const_block = fn () -> usize {
 
 // 23. A turbofish on a qualified member's OWN name. The path is not
 //     malformed — it parses as the shape it will keep, with the arguments
-//     on the SEGMENT that was given them — it is RESERVED: members do not
-//     carry binders of their own yet. The day they do, this diagnostic
-//     goes away and nothing else moves. (On a VARIANT the same shape gets
-//     a different answer: a variant never gets a binder, so its arguments
-//     are the owner's, misplaced — `Shape::<usize>::Circle`.)
+//     on the SEGMENT that was given them — it is RESERVED: a member's own
+//     binder carries REGIONS only (see 28 below), and a region argument is
+//     never spelled at a call anyway. The day type and const params join
+//     it, this diagnostic goes away and nothing else moves. (On a VARIANT
+//     the same shape gets a different answer: a variant never gets a
+//     binder, so its arguments are the owner's, misplaced —
+//     `Shape::<usize>::Circle`.)
 //     error: a member's own generic arguments are not supported yet: arguments written on `Measured::size` cannot be applied here
 type Measured = struct { n: usize } with {
     impl Self {
@@ -268,3 +270,21 @@ static undeclared_outlives = fn::<@a, @b>(x: usize.&::<@a>) -> usize.&::<@b> { x
 //     canonical one. Sugar that only ever removes a rejection.
 //     error: cannot resolve `::Point` without an expected type — write `Enum::Point`
 static sigil_without_a_type = fn () -> () { let s = ::Point; };
+
+// 28. A dot-call whose member takes a BORROW of `Self`, on an OWNED
+//     receiver. This is NOT auto-ref, and the reason is a rule, not an
+//     omission: the borrow the compiler would have to insert is a borrow
+//     of the LOCAL `c` itself, and the one licensed insertion is a borrow
+//     of `x.*` where `x` is ALREADY a borrow. So the borrow is written —
+//     and `c.&mut.bump()` is an ordinary postfix chain whose receiver is
+//     then a borrow, which is the licensed case.
+//     error: `bump` takes `Self.&mut`, and a borrow is never inserted for an owned receiver — write `.&mut.bump(...)`
+type Counter = struct { n: usize } with {
+    impl Self {
+        bump = fn::<@b>(m: Self.&mut::<@b>) -> () { m.*.n = m.*.n + 1; };
+    }
+};
+static owned_receiver = fn () -> () {
+    let mut c = Counter(struct { n = 1 });
+    c.bump()
+};

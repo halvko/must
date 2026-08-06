@@ -323,8 +323,9 @@ static main = fn () -> usize {
 ```
 
 There is no `self` keyword. Dot-callability is *structural*: a member is
-reachable through the dot exactly when its LAST parameter is `Self`-typed,
-and the receiver becomes that last argument. `c.bump(2)` means `bump(2, c)`
+reachable through the dot exactly when its LAST parameter is `Self`-typed —
+or a safe borrow of `Self`, which is its own section below — and the
+receiver becomes that last argument. `c.bump(2)` means `bump(2, c)`
 — literally, including evaluation order, so the written arguments run
 *before* the receiver expression binds. That is the whole reason the
 receiver sits last rather than first.
@@ -360,8 +361,10 @@ type Vecish = struct { len: usize } with {
 ```
 
 There is no auto-deref and no auto-ref. A receiver's type must *be* the
-member's `Self`, so a raw pointer to a type with members does not dot-call
-them; write the deref yourself.
+member's `Self`, with one exception: a borrow receiver reborrows into a
+member whose `Self` is itself a borrow, and nothing else is ever inserted.
+A *raw* pointer to a type with members still never dot-calls them; write
+the deref yourself.
 
 The owner's generic binder is in scope in member signatures and bodies, and
 a dot-call never spells a turbofish — the receiver's type supplies the
@@ -1071,6 +1074,49 @@ through the borrow instead of copying it, so an affine referent is no
 obstacle there. Nor is `r.*` handed to a parameter that wants a borrow: that
 is the reborrow above, which suspends the parent rather than copying it.
 
+=== Members that borrow `Self`
+
+A member is dot-callable when its *last* parameter is `Self`-typed — and a
+safe borrow of `Self` counts, which is what lets a type expose accessors
+rather than consuming its receiver. Such a member declares the region it
+borrows for, on its own binder:
+
+```must
+type Counter = struct { n: usize } with {
+    impl Self {
+        get  = fn::<@b>(m: Self.&::<@b>) -> usize { m.*.n };
+        bump = fn::<@b>(m: Self.&mut::<@b>) -> () { m.*.n = m.*.n + 1; };
+    }
+};
+
+static twice = fn::<@a>(c: Counter.&mut::<@a>) -> usize {
+    c.bump();
+    c.bump();
+    c.get()
+};
+```
+
+`@b` has nowhere else to come from: the type's own binder carries its type
+parameters, not regions, and nothing is elided. It is a fresh region at
+every call, so the two `c.bump()` calls above borrow independently. (Type
+and const parameters on a member are *not* supported yet — the owner's are
+already in scope, so a member-own one would only be sugar.)
+
+`c` there is already a borrow, and `c.bump()` does not dereference it —
+there is no auto-deref. It *reborrows*: the receiver is the last argument
+like any other, so it gets the same insertion every argument position gets,
+which is the licensed exception above (`c` is already a borrow, so borrowing
+`c.*` is allowed). An exclusive receiver reaches a shared member the same
+way, by degradation.
+
+Going the other direction is refused, and by the same rule read backwards.
+On an *owned* receiver the compiler would have to insert a borrow of the
+local itself, which the exception forbids — so you write it, and
+`counter.&mut.bump()` is an ordinary postfix chain whose receiver is then a
+borrow. A shared receiver never reaches a `Self.&mut` member at all, because
+shared never becomes exclusive. And a borrow receiver never reaches a member
+whose `Self` is a *value* — that would be auto-deref; write `c.*.take()`.
+
 === Outlives clauses
 
 Returning a borrow at a region the caller chose is a promise that the value
@@ -1122,7 +1168,31 @@ to be discovered.
 
 It is *dynamic*, so it reports a violation only on a path that actually
 runs. A branch never taken is never checked, and a program that passes on
-one input says nothing about another.
+one input says nothing about another. The shape you are most likely to
+reach it through is the borrow-returning member this chapter taught you
+to write: call one twice, keep both results, and you hold two live `.&mut`s
+into the same value — exclusivity violated in plain sight, with the static
+half silent:
+
+```must
+type Cell = struct { n: usize } with {
+    impl Self {
+        slot = fn::<@b>(c: Self.&mut::<@b>) -> usize.&mut::<@b> { c.*.n.&mut };
+    }
+};
+
+static two_writes = fn::<@a>(c: Cell.&mut::<@a>) -> () {
+    let a = c.slot();
+    let b = c.slot();
+    a.* = 1;   // undefined behavior — reported when it runs, not when it checks
+    b.* = 2;
+};
+```
+
+The second `c.slot()` invalidates `a`, so it is the write through `a` that
+traps; the interpreter reports it precisely, naming where that borrow was
+created and what invalidated it. Deciding it statically is loan liveness,
+the next stage, and this is its clearest customer.
 
 And its liveness notion is the FRAME, not the block. A borrow of a local
 declared in an inner block keeps working after that block ends, because the
@@ -1219,7 +1289,11 @@ exists so a host with no access to the compiler can still name the trap.
 
 This backend has no heap and no raw pointers yet, so `examples/heap.must`
 and `examples/pointers.must` refuse to compile rather than miscompiling —
-there is nothing for either tool to run for those two examples.
+there is nothing for either tool to run for those two examples. A safe
+borrow is refused by name too, and deliberately not folded into the
+raw-pointer refusal: a borrow lowers to the same machine word, so this
+backend could emit something that runs while silently dropping the
+exclusivity contract.
 
 Monomorphization has refusals of its own. A program whose instantiations
 never bottom out — polymorphic recursion, where every call needs an

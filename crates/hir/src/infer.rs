@@ -29,10 +29,10 @@ use crate::item_tree::{
 };
 use crate::scopes::{Builtin, Resolution, resolutions, type_scope};
 use crate::ty::{
-    ConstArgValue, GenericArg, IntKind, IntValue, NamedTy, ParamScope, Region, Ty, TyVar,
-    TyVarValue, VariantTy, builtin_type_by_name, enum_variants, generic_param_scope,
-    lower_type_ref_in, member_is_dot_callable, member_self_ty, signature,
-    signature_needs_annotation, substitute_args, type_underlying_for,
+    ConstArgValue, GenericArg, IntKind, IntValue, NamedTy, ParamScope, ReceiverShape, Region,
+    SelfPosition, Ty, TyVar, TyVarValue, VariantTy, builtin_type_by_name, enum_variants,
+    generic_param_scope, lower_type_ref_in, member_self_position, member_self_ty, receiver_takes,
+    self_position_of, signature, signature_needs_annotation, substitute_args, type_underlying_for,
 };
 use crate::{ItemId, ItemLoc, Severity, TypeRef, item_loc};
 
@@ -935,6 +935,32 @@ pub enum InferenceDiagnostic {
         /// The member (its definition is the related location).
         member: ItemLoc,
     },
+    /// A dot-call whose member wants a BORROW of `Self` but whose receiver
+    /// is an owned place. NOT auto-ref: inserting `x.&mut` here would
+    /// borrow the LOCAL `x` itself, which clause 2 of the ratified G14
+    /// exception forbids outright. The escape is to write the borrow, and
+    /// the postfix chain `m.&mut.f(...)` then arrives as a borrow receiver.
+    MemberWantsBorrowReceiver {
+        /// The call expression (where MIR traps).
+        expr: ExprId,
+        name: String,
+        /// Whether the member's `Self` parameter is exclusive.
+        mutable: bool,
+        /// The member (its definition is the related location).
+        member: ItemLoc,
+    },
+    /// A dot-call whose member wants `Self.&mut` but whose receiver is a
+    /// SHARED borrow. Shared never sharpens to exclusive — the same rule
+    /// `Constraints::try_reborrow` enforces at every other argument
+    /// position, stated where the receiver can still name its own place.
+    MemberWantsExclusiveReceiver {
+        /// The call expression (where MIR traps).
+        expr: ExprId,
+        name: String,
+        receiver_ty: Ty,
+        /// The member (its definition is the related location).
+        member: ItemLoc,
+    },
     /// A member fn reached through a bare dot (`v.len` without a call):
     /// members are not field values.
     MemberNotCalled {
@@ -1290,6 +1316,8 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::BuiltinNotFirstClass { expr, .. }
             | InferenceDiagnostic::NoSuchMember { expr, .. }
             | InferenceDiagnostic::NotDotCallable { expr, .. }
+            | InferenceDiagnostic::MemberWantsBorrowReceiver { expr, .. }
+            | InferenceDiagnostic::MemberWantsExclusiveReceiver { expr, .. }
             | InferenceDiagnostic::MemberNotCalled { expr, .. }
             | InferenceDiagnostic::NamedGenericArg { expr, .. }
             | InferenceDiagnostic::QualifiedTraitMemberOnType { expr, .. }
@@ -1427,8 +1455,22 @@ impl InferenceDiagnostic {
                 name, receiver_ty, ..
             } => format!("no field or member `{name}` on `{}`", receiver_ty.display()),
             InferenceDiagnostic::NotDotCallable { name, .. } => format!(
-                "`{name}` is not dot-callable: its last parameter is not `Self`-typed \
-                 (dot-call resolution is structural)"
+                "`{name}` is not dot-callable: its last parameter is neither `Self` nor a \
+                 safe borrow of `Self` (dot-call resolution is structural)"
+            ),
+            InferenceDiagnostic::MemberWantsBorrowReceiver { name, mutable, .. } => {
+                let borrow = if *mutable { ".&mut" } else { ".&" };
+                format!(
+                    "`{name}` takes `Self{borrow}`, and a borrow is never inserted for an \
+                     owned receiver — write `{borrow}.{name}(...)`"
+                )
+            }
+            InferenceDiagnostic::MemberWantsExclusiveReceiver {
+                name, receiver_ty, ..
+            } => format!(
+                "`{name}` takes `Self.&mut`, but `{}` is a shared borrow — a shared borrow \
+                 never becomes exclusive",
+                receiver_ty.display()
             ),
             InferenceDiagnostic::MemberNotCalled { name, .. } => {
                 format!("`{name}` is a member fn, not a field; call it: `.{name}(...)`")
@@ -3009,6 +3051,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
                 InferenceDiagnostic::NoSuchField { receiver_ty, .. }
                 | InferenceDiagnostic::NoSuchMember { receiver_ty, .. }
+                | InferenceDiagnostic::MemberWantsExclusiveReceiver { receiver_ty, .. }
                 | InferenceDiagnostic::MemberCallAmbiguity { receiver_ty, .. } => {
                     *receiver_ty = resolve_finished(self.table, receiver_ty);
                 }
@@ -3112,6 +3155,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::IntLiteralOutOfRange { .. }
                 | InferenceDiagnostic::BuiltinNotFirstClass { .. }
                 | InferenceDiagnostic::NotDotCallable { .. }
+                | InferenceDiagnostic::MemberWantsBorrowReceiver { .. }
                 | InferenceDiagnostic::MemberNotCalled { .. }
                 | InferenceDiagnostic::NamedGenericArg { .. }
                 | InferenceDiagnostic::QualifiedTraitMemberOnType { .. }
@@ -4598,20 +4642,17 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// path in the `Call` arm (which must decide field-vs-member before
     /// choosing a callee) shares it verbatim.
     fn field_access_ty(&mut self, expr: ExprId, receiver: ExprId, name: &str, resolved: Ty) -> Ty {
-        // A BORROW receiver. Reaching through it to the referent's fields
-        // and members would be auto-deref, which G14 rules out absolutely
-        // — and the one licensed exception runs the other way (the
-        // compiler may insert a borrow of `x.*`, never a deref of `x`).
-        // So this is RESERVED rather than silently unsupported: the day a
-        // member's receiver position can be spelled `Self.&::<@a>`, this
-        // diagnostic is deleted and nothing else moves.
+        // A BORROW receiver. Reaching through it to the referent's FIELDS
+        // would be auto-deref, which G14 rules out absolutely — and the
+        // one licensed exception runs the other way (the compiler may
+        // insert a borrow of `x.*`, never a deref of `x`). The escape is
+        // one character: write the deref.
         //
-        // Not decided yet: making a `Self.&`-typed last parameter
-        // dot-callable does NOT fall out of the structural rule for free.
-        // It needs two things not built here — member-own binders (so a
-        // member can declare `@a`) and a receiver-matching rule that
-        // relates a borrow receiver to a borrow parameter. The escape
-        // exists today and is one character: write the deref.
+        // Its MEMBERS are the other question, and a different path: a
+        // member whose own `Self` parameter is a borrow takes the call
+        // (G14 clause 1), which `receiver_takes` decides before the
+        // dot-call path ever falls through to this helper. A value `Self`
+        // still lands here, on the callee, with this same message.
         if matches!(resolved, Ty::Borrow { .. }) {
             self.result
                 .diagnostics
@@ -4888,10 +4929,32 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let receiver_ty = self.infer_expr(receiver, &receiver_fresh);
         let resolved = self.resolve_shallow(&receiver_ty);
 
+        // A BORROW receiver reaches the referent's MEMBERS — and only its
+        // members. Which members is the whole question, and the answer is
+        // `receiver_takes`: a member whose own `Self` parameter is a borrow
+        // takes the call (the receiver reborrows into it, G14 clause 1);
+        // one whose `Self` is a value does NOT, because reaching it would
+        // be auto-deref, which G14 seals absolutely. FIELDS are never
+        // reached through a borrow for the same reason — `.*` is one
+        // character, and `field_access_ty` below says so.
+        //
+        // Note this is a *lookup* through the borrow, not a coercion: the
+        // receiver's type is unchanged, and the only thing that ever meets
+        // the member's `Self` parameter is the borrow the user wrote.
+        let receiver_shape = ReceiverShape::of(&resolved);
+        let member_recv = match &resolved {
+            Ty::Borrow { referent, .. } => self.resolve_shallow(referent),
+            _ => resolved.clone(),
+        };
+
         // A RIGID receiver: only its bounds can re-open members (TR07) —
-        // bound-directed resolution, lowered through the hidden
-        // dictionary.
-        if let Ty::Param(param) = &resolved
+        // bound-directed resolution, lowered through the hidden dictionary.
+        // Read off `member_recv`, so a BORROW of a rigid receiver reaches
+        // the same bounds a bare one does: inside a generic body
+        // `T.&::<@z>` is exactly the shape a `Self.&`-taking requirement is
+        // called on, and routing it down the concrete path instead produced
+        // "write `.*.pass`" — advice that would move out of a borrow.
+        if let Ty::Param(param) = &member_recv
             && !name.is_empty()
         {
             let param = param.clone();
@@ -4908,6 +4971,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 name,
                 args,
                 &callee_expectation,
+                receiver_shape,
+                &resolved,
             );
             return self.finish_dot_call(expr, ty, expected, cause);
         }
@@ -4916,7 +4981,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // members: the receiver widens — variant → enum, the sanctioned
         // conversion — into the Self argument, exactly as it would into
         // any enum-typed parameter).
-        let named_recv = match &resolved {
+        let named_recv = match &member_recv {
             Ty::Named(named) if !name.is_empty() => Some(named.clone()),
             Ty::Variant(variant) if !name.is_empty() => Some(NamedTy {
                 decl: variant.decl.clone(),
@@ -4936,12 +5001,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // two halves a builtin cannot have.
         let builtin_recv = named_recv.is_none()
             && !name.is_empty()
-            && matches!(resolved, Ty::Int(_) | Ty::Str | Ty::Bool);
+            && matches!(member_recv, Ty::Int(_) | Ty::Str | Ty::Bool);
         if named_recv.is_some() || builtin_recv {
             let underlying = named_recv
                 .as_ref()
                 .and_then(|named| type_underlying_for(self.db, named));
             let field_ty = match &underlying {
+                // A borrow receiver reaches no fields: that IS auto-deref.
+                _ if receiver_shape.is_borrow() => None,
                 Some(Ty::Record(rec)) => rec.field_ty(name).cloned(),
                 _ => None,
             };
@@ -4960,9 +5027,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // for a variant-typed receiver (impls live on the enum, and
                 // the receiver widens into the Self argument, the ordinary
                 // sanctioned conversion).
+                //
+                // Under a BORROW receiver this is the REFERENT's type, not
+                // the borrow: impls live on the referent, and every escape
+                // (`Map::get(k, m)`) spells the referent too.
                 let recv_ty = match &named_recv {
                     Some(named) => Ty::Named(named.clone()),
-                    None => resolved.clone(),
+                    None => member_recv.clone(),
                 };
                 let inherent = named_recv
                     .as_ref()
@@ -4979,9 +5050,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
                 let inherent_carrier = inherent
                     .as_ref()
-                    .filter(|loc| member_is_dot_callable(self.db, loc.to_id(self.db)))
+                    .filter(|loc| self.member_takes_receiver(loc, receiver_shape))
                     .cloned();
-                let traits = self.trait_call_candidates(&recv_ty, name);
+                let traits = self.trait_call_candidates(&recv_ty, name, receiver_shape);
                 // A broken IMPL member is the definition site's problem
                 // too — it carries no call and makes nothing ambiguous.
                 if traits.iter().any(|candidate| candidate.broken) {
@@ -5067,6 +5138,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         name,
                         args,
                         &callee_expectation,
+                        receiver_shape,
                     );
                     return self.finish_dot_call(expr, ty, expected, cause);
                 }
@@ -5091,14 +5163,21 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     let not_dot_callable =
                         inherent.or_else(|| traits.first().and_then(|c| c.member.clone()));
                     match not_dot_callable {
+                        // A member exists but this RECEIVER cannot reach it.
+                        // Three reasons, and each names its own escape —
+                        // `receiver_takes`'s table read backwards.
                         Some(member) => {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::NotDotCallable {
-                                    expr,
-                                    name: name.to_owned(),
-                                    member,
-                                });
+                            let position = self.self_position(&member);
+                            let diagnostic = self.receiver_shape_refusal(
+                                expr,
+                                callee,
+                                name,
+                                receiver_shape,
+                                position,
+                                &resolved,
+                                member,
+                            );
+                            self.result.diagnostics.push(diagnostic);
                         }
                         None => {
                             self.result
@@ -5201,36 +5280,24 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         callee_expectation: &Ty,
         args: &[ExprId],
     ) -> Ty {
-        // A member's binder IS the owner's (an inherent member declares no
-        // parameters of its own), so the receiver type's arguments map onto
-        // it position by position. A SHORT argument list — a mention that
-        // failed to resolve its own arguments — would leave the tail rigid
-        // and then blame a type parameter the user never wrote, so the
-        // member call is abandoned instead: the mention carries the error.
-        let arity = crate::item_data(self.db, member_loc.to_id(self.db))
-            .as_ref()
-            .map(|data| data.generics.len())
-            .unwrap_or_default();
-        if named.args.len() != arity {
+        // A member's binder is the OWNER's followed by its own (TR10), so
+        // the receiver type's arguments map onto the owner's PREFIX
+        // position by position; everything past it is the member's own and
+        // is instantiated fresh per call, never spelled. A SHORT argument
+        // list — a mention that failed to resolve its own arguments — would
+        // leave the tail rigid and then blame a type parameter the user
+        // never wrote, so the member call is abandoned instead: the mention
+        // carries the error.
+        let owner_arity = self.owner_binder_arity(&member_loc);
+        if named.args.len() != owner_arity {
             self.result.type_of_expr.insert(callee, Ty::Error);
             self.infer_args_broken(args);
             return Ty::Error;
         }
-        let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
-        let mut const_subst: FxHashMap<u32, ConstArgValue> = FxHashMap::default();
-        for (index, arg) in named.args.iter().enumerate() {
-            match arg {
-                GenericArg::Ty(ty) => {
-                    subst.insert(index as u32, ty.clone());
-                }
-                GenericArg::Const(value) => {
-                    const_subst.insert(index as u32, value.clone());
-                }
-                // Regions are erased: nothing to substitute into a scheme.
-                GenericArg::Region(_) => {}
-            }
-        }
+        let (subst, const_subst) = owner_arg_subst(&named.args);
+        let region_subst = self.member_own_region_subst(expr, &member_loc, owner_arity);
         let inst = instantiate_scheme(&sig, &member_loc, &subst, &const_subst);
+        let inst = substitute_regions(&inst, &member_loc, &region_subst);
         self.result.member_of_expr.insert(expr, member_loc);
         // Arity is checked by `finish_receiver_call`; the receiver IS the
         // last argument, checked against the instantiated Self param —
@@ -5299,11 +5366,170 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         f.ret.clone()
     }
 
+    /// The arity of the OWNER's binder for an inherent member — the prefix
+    /// of the member's binder the receiver's type supplies (TR10: the
+    /// owner's params keep the low indices, the member's own are appended).
+    fn owner_binder_arity(&self, member_loc: &ItemLoc) -> usize {
+        crate::member_owner(self.db, member_loc.to_id(self.db))
+            .and_then(|owner| {
+                crate::item_data(self.db, owner)
+                    .as_ref()
+                    .map(|data| data.generics.len())
+            })
+            .unwrap_or_default()
+    }
+
+    /// Mint one fresh EXISTENTIAL per member-own REGION binder, and relate
+    /// the member's own declared outlives bounds between them — the region
+    /// half of instantiating an inherent member at a call site.
+    ///
+    /// An inherent member's binder is the owner's followed by its own (see
+    /// [`crate::item_data`]), so everything at or past `owner_arity` is the
+    /// member's. Minting here is not an optimisation: without it the
+    /// member's rigid `Region::Param`s survive into the CALLER's body,
+    /// where the outlives solver reads a region's binder index as a node
+    /// number — so a member's `@b` at index 0 would silently BE the
+    /// caller's universal at index 0, and two calls in one body would share
+    /// one region. Fresh existentials are what make a member's region
+    /// per-call, which is the whole reason the binder exists.
+    fn member_own_region_subst(
+        &mut self,
+        key: ExprId,
+        member_loc: &ItemLoc,
+        owner_arity: usize,
+    ) -> FxHashMap<u32, Region> {
+        let generics = item_generics(self.db, member_loc.to_id(self.db)).to_vec();
+        let mut region_subst: FxHashMap<u32, Region> = FxHashMap::default();
+        for (index, param) in generics.iter().enumerate().skip(owner_arity) {
+            if matches!(param.kind, GenericParamKind::Region) {
+                region_subst.insert(index as u32, self.fresh_region());
+            }
+        }
+        self.push_region_binder_bounds(&generics, &region_subst, key);
+        region_subst
+    }
+
+    /// A binder's declared outlives bounds (`fn::<@b, @c: @b>`) become
+    /// obligations at the site that instantiates it, between the regions
+    /// standing for its params there — one reading, shared by free-fn
+    /// mentions, inherent members and trait requirements, so no spelling
+    /// can silently drop a bound the callee wrote.
+    ///
+    /// `region_subst` maps a region param's binder index to its region at
+    /// this site; a param with no entry is skipped, and so is a bound
+    /// naming one (an inherent member's binder is prefixed by the owner's,
+    /// which the receiver's type supplies rather than this site).
+    fn push_region_binder_bounds(
+        &mut self,
+        generics: &[GenericParamData],
+        region_subst: &FxHashMap<u32, Region>,
+        key: ExprId,
+    ) {
+        for (index, param) in generics.iter().enumerate() {
+            if !matches!(param.kind, GenericParamKind::Region) {
+                continue;
+            }
+            let Some(sup) = region_subst.get(&(index as u32)).cloned() else {
+                continue;
+            };
+            for bound in &param.outlives {
+                let sub = generics
+                    .iter()
+                    .position(|other| other.name == *bound)
+                    .and_then(|i| region_subst.get(&(i as u32)).cloned());
+                if let Some(sub) = sub {
+                    self.push_outlives(sup.clone(), sub, key, RegionConstraintReason::CalleeBound);
+                }
+            }
+        }
+    }
+
+    /// Where a member's `Self` sits (structural: its LAST parameter is
+    /// `Self`-typed, or a SAFE borrow of `Self`), or `None` when the member
+    /// has no dot-callable shape at all.
+    ///
+    /// A raw pointer to `Self` is deliberately NOT a self position: `.&raw`
+    /// is not a decayed borrow, no raw borrow is ever inserted, and there is
+    /// no reborrow relation to check it against.
+    fn self_position(&self, member: &ItemLoc) -> Option<SelfPosition> {
+        member_self_position(self.db, member.to_id(self.db))
+    }
+
+    /// The precise refusal when a member EXISTS but this receiver cannot
+    /// reach it — [`receiver_takes`]'s table read backwards, and the one
+    /// place that reading lives. Shared by the concrete-receiver path and
+    /// the bound-directed one so a rigid receiver never gets different
+    /// advice from a nominal one; `member` is what the diagnostic points at
+    /// (the member itself concretely, the trait for a bound-directed call).
+    fn receiver_shape_refusal(
+        &self,
+        expr: ExprId,
+        callee: ExprId,
+        name: &str,
+        receiver_shape: ReceiverShape,
+        position: Option<SelfPosition>,
+        resolved: &Ty,
+        member: ItemLoc,
+    ) -> InferenceDiagnostic {
+        match (receiver_shape, position) {
+            // An owned receiver, a borrow `Self`: NOT auto-ref (clause 2
+            // forbids borrowing the local) — write the borrow.
+            (ReceiverShape::Owned, Some(SelfPosition::Borrow { mutable })) => {
+                InferenceDiagnostic::MemberWantsBorrowReceiver {
+                    expr,
+                    name: name.to_owned(),
+                    mutable,
+                    member,
+                }
+            }
+            // A shared receiver, an exclusive `Self`.
+            (
+                ReceiverShape::Borrow { mutable: false },
+                Some(SelfPosition::Borrow { mutable: true }),
+            ) => InferenceDiagnostic::MemberWantsExclusiveReceiver {
+                expr,
+                name: name.to_owned(),
+                receiver_ty: resolved.clone(),
+                member,
+            },
+            // A borrow receiver, a value `Self`: that is auto-deref,
+            // sealed. Reported on the CALLEE, exactly where the field path
+            // has always reported it, so the squiggle and the MIR value
+            // trap do not move now that this branch reaches it first.
+            (ReceiverShape::Borrow { .. }, Some(SelfPosition::Value)) => {
+                InferenceDiagnostic::DotThroughBorrow {
+                    expr: callee,
+                    name: name.to_owned(),
+                    receiver_ty: resolved.clone(),
+                }
+            }
+            // No self position at all: the structural shape is absent.
+            _ => InferenceDiagnostic::NotDotCallable {
+                expr,
+                name: name.to_owned(),
+                member,
+            },
+        }
+    }
+
+    /// Whether a member takes a dot-call from a receiver of this shape —
+    /// the structural test of [`crate::ty::member_self_position`], narrowed
+    /// by [`receiver_takes`].
+    fn member_takes_receiver(&self, member: &ItemLoc, receiver: ReceiverShape) -> bool {
+        self.self_position(member)
+            .is_some_and(|position| receiver_takes(receiver, position))
+    }
+
     /// Every trait that could answer `recv.name(...)` on a CONCRETE
     /// receiver (impl-directed, TR01 extended): the trait declares `name`
     /// AND is implemented for the receiver. In file order; whether each
     /// one can actually take the call is on the candidate.
-    fn trait_call_candidates(&self, resolved: &Ty, name: &str) -> Vec<TraitCallCandidate> {
+    fn trait_call_candidates(
+        &self,
+        resolved: &Ty,
+        name: &str,
+        receiver: ReceiverShape,
+    ) -> Vec<TraitCallCandidate> {
         let Some(self_key) = crate::traits::SelfKey::for_ty(resolved) else {
             return Vec::new();
         };
@@ -5321,7 +5547,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 let dot_callable = !broken
                     && member
                         .as_ref()
-                        .is_some_and(|loc| member_is_dot_callable(self.db, loc.to_id(self.db)));
+                        .is_some_and(|loc| self.member_takes_receiver(loc, receiver));
                 TraitCallCandidate {
                     trait_: trait_loc,
                     member,
@@ -5347,6 +5573,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         name: &str,
         args: &[ExprId],
         callee_expectation: &Ty,
+        receiver_shape: ReceiverShape,
     ) -> Ty {
         let member_id = member_loc.to_id(self.db);
         let sig = signature(self.db, member_id);
@@ -5358,12 +5585,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             self.infer_args_broken(args);
             return Ty::Error;
         }
-        let self_ty = member_self_ty(self.db, member_id);
-        let dot_callable = matches!(
-            (&sig, self_ty.as_ref()),
-            (Ty::Fn(f), Some(self_ty)) if f.params.last() == Some(self_ty)
-        );
-        if !dot_callable {
+        // The SAME rule the candidate filter used — one statement of G14's
+        // structural test plus `receiver_takes`, so a candidate can never
+        // be admitted here and refused there (or the reverse).
+        if !self.member_takes_receiver(&member_loc, receiver_shape) {
             self.result
                 .diagnostics
                 .push(InferenceDiagnostic::NotDotCallable {
@@ -5422,7 +5647,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             });
         }
         self.push_bound_obligations(key, generics, &subst);
-        instantiate_scheme(&sig, member_loc, &subst, &FxHashMap::default())
+        // Regions too, and for the same reason a free fn's are minted at
+        // its mention: left rigid, a member's `@b` survives into the
+        // CALLER's body, where the outlives solver reads a region param's
+        // binder index as a node number. A trait-impl member's binder is
+        // its own alone (its owner is non-generic), so nothing precedes it.
+        let region_subst = self.member_own_region_subst(key, member_loc, 0);
+        let inst = instantiate_scheme(&sig, member_loc, &subst, &FxHashMap::default());
+        substitute_regions(&inst, member_loc, &region_subst)
     }
 
     /// A dot-call on a RIGID receiver: bound-directed resolution (TR07 —
@@ -5439,6 +5671,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         name: &str,
         args: &[ExprId],
         callee_expectation: &Ty,
+        receiver_shape: ReceiverShape,
+        resolved: &Ty,
     ) -> Ty {
         let own = self.own_item.as_ref().is_some_and(|own| param.item == *own);
         let bounds = if own {
@@ -5528,19 +5762,29 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             Ty::Param(param.clone()),
         );
         self.push_bound_obligations(expr, &req.generics, &var_of);
-        let Ty::Fn(f) = &inst else {
+        // A requirement whose signature is not fn-shaped is broken at its
+        // declaration, which carries that diagnostic.
+        if !matches!(&inst, Ty::Fn(_)) {
             self.result.type_of_expr.insert(callee, Ty::Error);
             self.infer_args_broken(args);
             return Ty::Error;
-        };
-        if f.params.last() != Some(&Ty::Param(param.clone())) {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::NotDotCallable {
-                    expr,
-                    name: name.to_owned(),
-                    member: trait_loc,
-                });
+        }
+        // The SAME table the concrete path uses, over the requirement's
+        // freshly-lowered signature: a requirement whose `Self` parameter
+        // is a BORROW takes a borrowed rigid receiver, which reborrows into
+        // it exactly as a nominal receiver does.
+        let position = self_position_of(&inst, &Ty::Param(param.clone()));
+        if !position.is_some_and(|position| receiver_takes(receiver_shape, position)) {
+            let diagnostic = self.receiver_shape_refusal(
+                expr,
+                callee,
+                name,
+                receiver_shape,
+                position,
+                resolved,
+                trait_loc,
+            );
+            self.result.diagnostics.push(diagnostic);
             self.result.type_of_expr.insert(callee, Ty::Error);
             self.infer_args_broken(args);
             return Ty::Error;
@@ -5591,6 +5835,19 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             pending.push((gp.name.clone(), var.clone()));
             var_of.insert(index as u32, var);
         }
+        // A requirement's REGION params are existentials of THIS call. The
+        // signature is lowered fresh rather than substituted, so the fresh
+        // region goes into the scope the lowering reads; without it the
+        // name resolves to nothing and the borrow's region is `Error`.
+        let mut region_subst: FxHashMap<u32, Region> = FxHashMap::default();
+        for (index, gp) in req.generics.iter().enumerate() {
+            if matches!(gp.kind, GenericParamKind::Region) && !gp.name.is_empty() {
+                let region = self.fresh_region();
+                scope.regions.insert(gp.name.clone(), region.clone());
+                region_subst.insert(index as u32, region);
+            }
+        }
+        self.push_region_binder_bounds(&req.generics, &region_subst, key);
         if !pending.is_empty() {
             self.pending_instantiations.push(PendingInstantiation {
                 expr: key,
@@ -6486,21 +6743,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // scheme — member schemes are keyed by the MEMBER's `ItemLoc` at the
         // owner's binder indices.
         let named = self.instantiate_type_mention(expr, owner, args);
-        let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
-        let mut const_subst: FxHashMap<u32, ConstArgValue> = FxHashMap::default();
-        for (index, arg) in named.args.iter().enumerate() {
-            match arg {
-                GenericArg::Ty(ty) => {
-                    subst.insert(index as u32, ty.clone());
-                }
-                GenericArg::Const(value) => {
-                    const_subst.insert(index as u32, value.clone());
-                }
-                // Regions are erased: nothing to substitute into a scheme.
-                GenericArg::Region(_) => {}
-            }
-        }
+        let (subst, const_subst) = owner_arg_subst(&named.args);
+        // The member's OWN regions are per-MENTION existentials, exactly as
+        // at a dot-call — a qualified spelling is the same instantiation
+        // written differently, and leaving them rigid would launder every
+        // obligation the mention incurs (see `member_own_region_subst`).
+        let region_subst =
+            self.member_own_region_subst(expr, &member, self.owner_binder_arity(&member));
         let inst = instantiate_scheme(&sig, &member, &subst, &const_subst);
+        let inst = substitute_regions(&inst, &member, &region_subst);
         self.result.member_value_of_expr.insert(
             expr,
             QualifiedMemberValue {
@@ -7049,23 +7300,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // The callee's declared outlives bounds (`fn::<@a, @b: @a>`)
         // travel with the instantiation: at this call site they become
         // obligations between the fresh variables that stand for them.
-        for (index, param) in generics.iter().enumerate() {
-            if !matches!(param.kind, GenericParamKind::Region) {
-                continue;
-            }
-            let Some(sup) = region_subst.get(&(index as u32)).cloned() else {
-                continue;
-            };
-            for bound in &param.outlives {
-                let sub = generics
-                    .iter()
-                    .position(|other| other.name == *bound)
-                    .and_then(|i| region_subst.get(&(i as u32)).cloned());
-                if let Some(sub) = sub {
-                    self.push_outlives(sup.clone(), sub, expr, RegionConstraintReason::CalleeBound);
-                }
-            }
-        }
+        self.push_region_binder_bounds(generics, &region_subst, expr);
         let inst = instantiate_scheme(&sig, &loc, &subst, &const_subst);
         substitute_regions(&inst, &loc, &region_subst)
     }
@@ -8795,6 +9030,30 @@ fn builtin_scheme(builtin: Builtin, file: SourceFile) -> (ItemLoc, Ty) {
         }
     };
     (loc, sig)
+}
+
+/// The type/const halves of a member's substitution, read off the OWNER's
+/// generic arguments — an inherent member's scheme is keyed by the MEMBER's
+/// `ItemLoc` at the owner's binder indices ([`crate::ty::member_self_ty`]),
+/// so the owner's argument list substitutes into it directly. Regions in
+/// this list are erased (type declarations carry no live region params);
+/// the member's OWN regions are minted separately and freshly per call, by
+/// `InferCtx::member_own_region_subst`.
+fn owner_arg_subst(args: &[GenericArg]) -> (FxHashMap<u32, Ty>, FxHashMap<u32, ConstArgValue>) {
+    let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
+    let mut const_subst: FxHashMap<u32, ConstArgValue> = FxHashMap::default();
+    for (index, arg) in args.iter().enumerate() {
+        match arg {
+            GenericArg::Ty(ty) => {
+                subst.insert(index as u32, ty.clone());
+            }
+            GenericArg::Const(value) => {
+                const_subst.insert(index as u32, value.clone());
+            }
+            GenericArg::Region(_) => {}
+        }
+    }
+    (subst, const_subst)
 }
 
 /// The generic binder of `item` — empty for non-generic items.

@@ -822,9 +822,19 @@ pub struct MemberData {
     pub type_ref: Option<TypeRef>,
     pub home: MemberHome,
     /// The member's OWN generic binder (`fmt = fn::<W: Write>(...)`) —
-    /// live for trait-impl members (a requirement may be a generic fn);
-    /// always empty for inherent members (their binder is the owner's,
-    /// see [`crate::item_data`]).
+    /// live in full for trait-impl members (a requirement may be a generic
+    /// fn); for an INHERENT member only its REGION params are live, and
+    /// they are APPENDED to the owner's binder by [`crate::item_data`].
+    ///
+    /// Why regions and only regions: an inherent member already sees the
+    /// owner's type and const params ("the type's own binders are already
+    /// in scope"), so a member-own *type* binder is redundant sugar and
+    /// stays reserved. A REGION has no such source — regions on type
+    /// declarations are themselves reserved — so a borrow-taking member
+    /// (`get = fn::<@b>(k: K, m: Self.&mut::<@b>)`) has nowhere else to
+    /// bind the per-call region it needs, and with no elision it cannot
+    /// decline to name one. The type/const halves are rejected in
+    /// `syntax::validation::reject_nested_generic_binder` and dropped here.
     pub generics: Vec<GenericParamData>,
 }
 
@@ -854,14 +864,22 @@ pub fn type_members<'db>(db: &'db dyn Db, item: crate::ItemId<'db>) -> Vec<Membe
     semantic_member_sources(&decl)
         .into_iter()
         .map(|source| {
+            let own = match source.member.value() {
+                Some(ast::Expr::FnLiteral(fn_lit)) => {
+                    generics_from_param_list(fn_lit.generic_param_list())
+                }
+                _ => Vec::new(),
+            };
             let generics = match &source.home {
-                MemberHome::Inherent => Vec::new(),
-                MemberHome::TraitImpl { .. } => match source.member.value() {
-                    Some(ast::Expr::FnLiteral(fn_lit)) => {
-                        generics_from_param_list(fn_lit.generic_param_list())
-                    }
-                    _ => Vec::new(),
-                },
+                // Regions only — see [`MemberData::generics`]. A type or
+                // const param here is a reserved spelling with its own
+                // diagnostic; dropping it leaves its mentions resolving to
+                // the owner's binder (or nothing), exactly as before.
+                MemberHome::Inherent => own
+                    .into_iter()
+                    .filter(|param| matches!(param.kind, GenericParamKind::Region))
+                    .collect(),
+                MemberHome::TraitImpl { .. } => own,
             };
             MemberData {
                 name: source.name,

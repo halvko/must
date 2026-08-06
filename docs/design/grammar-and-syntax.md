@@ -68,12 +68,11 @@
   return 1;` types the block off the binding, a step toward reachability analysis this rule
   isn't.
 - **G14** No auto-deref, ever, and no auto-ref, with one bounded exception. Resolution never
-  reaches through a deref, so an outer name disappearing can never silently re-resolve; a
-  pointer to a type with members does not dot-call them, because the receiver's type must BE
-  the member's `Self`. The exception: the compiler may insert a safe borrow of `x.*` where `x`
-  is already a borrow; never a borrow of `x` itself; never a raw borrow. The first clause
-  licenses implicit reborrow and degradation (M07); the second separates reborrow from
-  auto-ref; the third stops a call site minting `x.*.&raw mut` and laundering a region (M08).
+  reaches through a deref, so an outer name disappearing can never silently re-resolve. The
+  exception: the compiler may insert a safe borrow of `x.*` where `x` is already a borrow;
+  never a borrow of `x` itself; never a raw borrow. The first clause licenses implicit
+  reborrow and degradation (M07); the second separates reborrow from auto-ref; the third
+  stops a call site minting `x.*.&raw mut` and laundering a region (M08).
 - **G25** A bare pattern name never reinterprets as a variant: it binds fresh with a
   shadowing warning, and `::Circle` is the variant spelling. The sigil also works in
   expression position as reject-only sugar: it reads the position's expected type and nothing

@@ -1,0 +1,173 @@
+// Borrow-returning members: `get_or_default` over a two-slot map.
+//
+// Run: must-lsp run examples/reborrow.must
+// Run: must-lsp run examples/reborrow.must -e total_count()
+//
+// Short, and every line of it needs a piece of the borrow-`Self` story:
+//
+//   * a member that takes a BORROW of `Self`, which needs a per-call region
+//     — so a member declares its own region binder (`fn::<@b>`);
+//   * a dot-call whose receiver is already a borrow, which reborrows into
+//     that region instead of dereferencing (there is no auto-deref, ever);
+//   * `T` inferred through a borrow, so `Self.&mut::<@b>` matches a
+//     `Map::<K, V>.&mut::<@a>` argument;
+//   * `::Some` / `::None` in EXPRESSION position, resolved from the type
+//     the position expects.
+//
+// The last section does the same thing through a TRAIT, which is where a
+// borrow-`Self` member has to work if library APIs are going to use one.
+//
+// It also computes something, and the answer is the point: the borrow
+// `get_or_default` hands back really does alias the map's own storage, so
+// writing through it is visible to the next lookup.
+
+// ---- the enum, with an inherent member ----------------------------------
+
+type Option = enum::<T> {
+    Some(T),
+    None,
+} with {
+    impl Self {
+        // A member's `Self` is just its LAST parameter (G14, TR01 — dot-call
+        // resolution is structural, and there is no `self` token). The
+        // owner's binder `T` is already in scope here.
+        unwrap = fn(s: Self) -> T {
+            match s {
+                ::Some(t) => t,
+                ::None => panic("unwrap was called on a ::None value"),
+            }
+        }
+    }
+};
+
+// ---- the map ------------------------------------------------------------
+//
+// Two fixed slots: there is no heap in this example, and none is needed to
+// show the borrow story. What matters is the SIGNATURES.
+
+type Map = struct::<K, V> {
+    k0: K, v0: V, used0: bool,
+    k1: K, v1: V, used1: bool,
+} with {
+    impl Self {
+        // `@b` is the member's OWN region binder, and it has nowhere else
+        // to come from: `Map`'s binder carries `K` and `V`, regions on type
+        // declarations are not a thing yet, and nothing is elided. So a
+        // member that borrows `Self` declares the region it borrows for.
+        //
+        // It is instantiated FRESH at every call, exactly like a free
+        // function's — two calls in one body get two independent regions.
+        get = fn::<@b>(key: K, m: Self.&mut::<@b>) -> Option::<V.&mut::<@b>> {
+            // `::Some(...)` — the elided sigil in expression position, the
+            // mirror of the pattern spelling. The enum comes from the
+            // position's expected type, which here is the `return`'s: the
+            // declared return type. Where no enum is in view, this is an
+            // error naming the qualified spelling — it is sugar that only
+            // ever removes a rejection, never an inference feature.
+            if m.*.used0 == true { if m.*.k0 == key { return ::Some(m.*.v0.&mut); }; };
+            if m.*.used1 == true { if m.*.k1 == key { return ::Some(m.*.v1.&mut); }; };
+            ::None
+        };
+
+        insert = fn::<@b>(key: K, val: V, m: Self.&mut::<@b>) -> () {
+            if m.*.used0 == false {
+                m.*.k0 = key;
+                m.*.v0 = val;
+                m.*.used0 = true;
+                return;
+            };
+            m.*.k1 = key;
+            m.*.v1 = val;
+            m.*.used1 = true;
+        };
+    }
+};
+
+// ---- the fixture --------------------------------------------------------
+//
+// `map` is a `.&mut`, and `map.get(key)` is a dot-call on a BORROW. The
+// receiver is not dereferenced — that would be auto-deref, which is sealed.
+// It REBORROWS: the checker inserts a borrow of `map.*`, licensed because
+// `map` is already a borrow, and constrains the new loan against the
+// member's `@b`. That is the G14 exception, and it is the same reborrow any
+// other argument position gets — the receiver is simply the last argument.
+//
+// Note what this makes legal: `map` is mentioned THREE times, in a function
+// that hands a borrow back out. A `&mut` is affine, so none of those
+// mentions may be a copy — each is a fresh, shorter loan with the parent
+// suspended for exactly its span. Reborrow-at-every-use is what makes
+// writing this feel like nothing at all.
+static get_or_default = fn::<@a, K, V>(
+    key: K, val: V, map: Map::<K, V>.&mut::<@a>
+) -> V.&mut::<@a> {
+    match map.get(key) {
+        ::Some(v) => v,
+        ::None => {
+            map.insert(key, val);
+            map.get(key).unwrap()
+        },
+    }
+};
+
+// ---- the answer ---------------------------------------------------------
+
+static main = fn() -> usize {
+    let mut m = Map::<usize, usize>(struct {
+        k0 = 0, v0 = 0, used0 = false,
+        k1 = 0, v1 = 0, used1 = false,
+    });
+
+    // Not present: inserted with the default, and we get a borrow OF THE
+    // MAP'S SLOT back.
+    let a = get_or_default(7, 100, m.&mut);
+    a.* = a.* + 1;
+
+    // Present now, so the default is ignored — and the value read here is
+    // the one written through `a` above, which is the whole proof that the
+    // borrow aliased the map rather than a copy of it.
+    let b = get_or_default(7, 999, m.&mut);
+    b.*
+};
+
+
+// ---- the same member shape, through a trait -----------------------------
+//
+// A requirement whose `Self` parameter is a borrow declares its region on
+// the requirement's own binder, and an impl matches it by declaring the
+// same one. (A trait impl needs a non-generic implementer today, so this
+// section uses its own small type rather than `Map`.)
+//
+// Both directions of the call work:
+//
+//   * IMPL-directed, on a concrete receiver — the impl is found from the
+//     receiver's type and called directly;
+//   * BOUND-directed, inside a generic body on a BORROWED rigid receiver
+//     (`T.&::<@z>` where `T: Counted`) — lowered through the hidden
+//     dictionary parameter, with the reborrow happening just the same.
+//
+// The second is what makes generic code over a borrowed value possible at
+// all, and `T.&` is the shape such code naturally receives.
+
+type Counter = struct { n: usize };
+
+trait Counted = requires {
+    count: fn::<@r>(s: Self.&::<@r>) -> usize;
+} with {
+    impl Counter {
+        count = fn::<@r>(s: Counter.&::<@r>) -> usize { s.*.n };
+    }
+};
+
+// Bound-directed: `t` is a borrow of a RIGID type, and `t.count()` reaches
+// the bound through the dictionary. Nothing here knows what `T` is.
+static counted_twice = fn::<@z, T: Counted>(t: T.&::<@z>) -> usize {
+    // Two calls, two independent reborrows of the same parent.
+    t.count() + t.count()
+};
+
+static total_count = fn() -> usize {
+    let c = Counter(struct { n = 20 });
+    // Impl-directed on a concrete borrow receiver, then bound-directed on
+    // the same shape through the dictionary.
+    Counted::count(c.&) + counted_twice::<@_, Counter>(c.&)
+};

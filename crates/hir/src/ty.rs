@@ -1366,17 +1366,102 @@ pub fn member_self_ty(db: &dyn Db, item: ItemId<'_>) -> Option<Ty> {
     }))
 }
 
-/// Whether `item` — a member id — is reachable through the dot. Dot-call
-/// resolution is STRUCTURAL (there is no `self` token): the receiver
-/// becomes the LAST argument, so a member is dot-callable exactly when it
-/// is an fn whose last parameter is its own `Self` type. One definition,
-/// because inference and completions must never disagree about which
-/// members the dot offers.
-pub fn member_is_dot_callable(db: &dyn Db, item: ItemId<'_>) -> bool {
-    matches!(
-        (signature(db, item), member_self_ty(db, item)),
-        (Ty::Fn(f), Some(self_ty)) if f.params.last() == Some(&self_ty)
-    )
+/// Where a dot-callable member's `Self` sits in its LAST parameter —
+/// dot-callability is structural (TR01: there is no `self` token), and this
+/// is the whole of the structure it reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelfPosition {
+    /// `fn(..., s: Self)` — the receiver IS the value.
+    Value,
+    /// `fn::<@b>(..., s: Self.&::<@b>)` / `Self.&mut::<@b>` — the receiver
+    /// is a BORROW of the value.
+    Borrow { mutable: bool },
+}
+
+/// The shape a dot-call's RECEIVER arrives in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiverShape {
+    /// The receiver is the value itself.
+    Owned,
+    /// The receiver is a borrow of the value.
+    Borrow { mutable: bool },
+}
+
+impl ReceiverShape {
+    /// The shape of an already-resolved receiver type.
+    pub fn of(ty: &Ty) -> Self {
+        match ty {
+            Ty::Borrow { mutable, .. } => ReceiverShape::Borrow { mutable: *mutable },
+            _ => ReceiverShape::Owned,
+        }
+    }
+
+    /// Whether the receiver arrived as a borrow.
+    pub fn is_borrow(self) -> bool {
+        matches!(self, ReceiverShape::Borrow { .. })
+    }
+}
+
+/// Where `Self` sits in an already-lowered signature, given the type
+/// standing for `Self` — the structural test over a `Ty` rather than over a
+/// declaration, so a trait REQUIREMENT's freshly-lowered signature and a
+/// member's stored one are judged by one function.
+///
+/// A raw pointer to `Self` is deliberately NOT a self position: `.&raw` is
+/// not a decayed borrow, no raw borrow is ever inserted, and there is no
+/// reborrow relation to check it against.
+pub fn self_position_of(sig: &Ty, self_ty: &Ty) -> Option<SelfPosition> {
+    let Ty::Fn(f) = sig else {
+        return None;
+    };
+    match f.params.last()? {
+        last if last == self_ty => Some(SelfPosition::Value),
+        Ty::Borrow {
+            mutable, referent, ..
+        } if &**referent == self_ty => Some(SelfPosition::Borrow { mutable: *mutable }),
+        _ => None,
+    }
+}
+
+/// Where `item` — a member id — takes its receiver, or `None` when it has
+/// no dot-callable shape at all.
+pub fn member_self_position(db: &dyn Db, item: ItemId<'_>) -> Option<SelfPosition> {
+    let self_ty = member_self_ty(db, item)?;
+    self_position_of(&signature(db, item), &self_ty)
+}
+
+/// Whether a receiver of this shape can take a dot-call of a member with
+/// this `Self` position. The table is deliberately ASYMMETRIC, and the
+/// asymmetry is G14's bounded exception, both clauses:
+///
+/// - A BORROW receiver meeting a borrow `Self` is licensed by clause 1 —
+///   the inserted borrow is of `x.*`, where `x` is already a borrow — and
+///   it is the ordinary reborrow every other argument position gets, not a
+///   new kind of event. Exclusive may degrade to shared; shared may never
+///   sharpen to exclusive.
+/// - An OWNED receiver meeting a borrow `Self` is refused by clause 2: the
+///   borrow the compiler would have to insert is a borrow of the LOCAL
+///   itself, which the exception forbids outright. The user writes
+///   `m.&mut.f(...)` — which is a postfix chain whose receiver is then a
+///   borrow, so it comes back through the licensed case.
+/// - A BORROW receiver meeting a value `Self` would be auto-deref, sealed
+///   absolutely. The user writes `m.*.f(...)`.
+///
+/// Nothing here can insert a borrow, and nothing downstream can either: the
+/// only inserter is `Constraints::try_reborrow`, which requires a borrow on
+/// BOTH sides before it emits anything.
+pub fn receiver_takes(receiver: ReceiverShape, position: SelfPosition) -> bool {
+    match (receiver, position) {
+        (ReceiverShape::Owned, SelfPosition::Value) => true,
+        (
+            ReceiverShape::Borrow {
+                mutable: receiver_mut,
+            },
+            SelfPosition::Borrow { mutable },
+        ) => receiver_mut || !mutable,
+        (ReceiverShape::Owned, SelfPosition::Borrow { .. })
+        | (ReceiverShape::Borrow { .. }, SelfPosition::Value) => false,
+    }
 }
 
 /// The [`ParamScope`] of `item`'s generic binder. For a MEMBER item the

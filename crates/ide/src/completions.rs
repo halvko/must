@@ -1134,6 +1134,12 @@ fn is_enum_typed(db: &RootDatabase, ty: &hir::Ty) -> bool {
 /// anything else (no record shape to project through — the diagnostic for
 /// a genuinely wrong receiver already squiggles it, this just offers no
 /// candidates instead of a wrong one).
+///
+/// A BORROW receiver has no fields — projecting through it would be
+/// auto-deref, which is sealed — but it does reach the members its shape
+/// can take, read off the same [`hir::receiver_takes`] table inference
+/// uses, so the dot never offers what a call would refuse (or hides what
+/// it would accept).
 fn field_items(
     db: &RootDatabase,
     file: SourceFile,
@@ -1180,15 +1186,24 @@ fn field_items(
         .collect();
     // Dot-callable inherent members of a named (or variant-typed — it
     // widens) receiver, offered next to the fields they share the dot
-    // with.
-    let decl = match ty {
+    // with. A borrow receiver's members hang off the REFERENT's
+    // declaration; which of them the dot offers is the receiver shape's
+    // row of the table.
+    let shape = hir::ReceiverShape::of(ty);
+    let owner = match ty {
+        hir::Ty::Borrow { referent, .. } => &**referent,
+        _ => ty,
+    };
+    let decl = match owner {
         hir::Ty::Named(named) => Some(&named.decl),
         hir::Ty::Variant(variant) => Some(&variant.decl),
         _ => None,
     };
     if let Some(decl) = decl {
         for member_id in hir::member_item_ids(db, decl.to_id(db)) {
-            if !hir::member_is_dot_callable(db, member_id) {
+            let dot_callable = hir::member_self_position(db, member_id)
+                .is_some_and(|position| hir::receiver_takes(shape, position));
+            if !dot_callable {
                 continue;
             }
             let sig = hir::signature(db, member_id);

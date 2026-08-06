@@ -3485,6 +3485,33 @@ fn dot_completions_offer_members_next_to_fields() {
 }
 
 #[test]
+fn dot_completions_on_a_borrow_receiver_follow_the_receiver_shape() {
+    // The dot offers what a call would accept: through a `&mut` receiver
+    // that is both borrow members and not the value one; through a shared
+    // receiver only the shared one. Fields are never offered — projecting
+    // through a borrow would be auto-deref.
+    const BORROW_FIXTURE: &str = r#"
+type Counter = struct { n: usize } with {
+    impl Self {
+        get = fn(c: Self) -> usize { c.n };
+        read = fn::<@r>(c: Self.&::<@r>) -> usize { c.*.n };
+        bump = fn::<@r>(c: Self.&mut::<@r>) -> () { c.*.n = 1; };
+    }
+};
+"#;
+    let exclusive =
+        format!("{BORROW_FIXTURE}static main = fn::<@a>(c: Counter.&mut::<@a>) -> () {{ c.$0 }};");
+    check_has_completion(&exclusive, "read");
+    check_has_completion(&exclusive, "bump");
+    check_no_completion(&exclusive, "get");
+    check_no_completion(&exclusive, "n");
+    let shared =
+        format!("{BORROW_FIXTURE}static main = fn::<@a>(c: Counter.&::<@a>) -> () {{ c.$0 }};");
+    check_has_completion(&shared, "read");
+    check_no_completion(&shared, "bump");
+}
+
+#[test]
 fn member_bodies_highlight_as_code() {
     check_highlights(
         r#"

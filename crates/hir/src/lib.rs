@@ -41,9 +41,10 @@ pub use scopes::{
 };
 pub use traits::{BoundSlot, bound_slots, dict_param_count};
 pub use ty::{
-    ConstArgValue, FnTy, GenericArg, IntKind, IntValue, NamedTy, Region, RegionVar, Ty, VariantTy,
-    enum_variants, member_is_dot_callable, member_self_ty, signature, substitute_args,
-    type_underlying, type_underlying_for, variant_payloads_for, widens_to,
+    ConstArgValue, FnTy, GenericArg, IntKind, IntValue, NamedTy, ReceiverShape, Region, RegionVar,
+    SelfPosition, Ty, VariantTy, enum_variants, member_self_position, member_self_ty,
+    receiver_takes, signature, substitute_args, type_underlying, type_underlying_for,
+    variant_payloads_for, widens_to,
 };
 pub use unsafe_check::UnsafeCheckDiagnostic;
 
@@ -229,14 +230,28 @@ pub fn item_data<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<item_tree::I
             .iter()
             .find(|m| m.name == member_name && m.disambiguator == member_dis)?;
         // An INHERENT member's binder is the owner's (the type's params
-        // flow into member signatures and bodies); a TRAIT-IMPL member
-        // carries its OWN binder (a requirement may be a generic fn) —
-        // its owner is non-generic by the non-generic-trait rules.
+        // flow into member signatures and bodies) PLUS its own REGION
+        // params, APPENDED. The owner's params keep indices `0..arity`,
+        // which is what [`crate::ty::member_self_ty`] relies on when it
+        // re-spells the owner's binder at the MEMBER's `ItemLoc`, and what
+        // lets a dot-call read the owner's substitution straight off the
+        // receiver's argument list. A member-own region therefore lands at
+        // `arity + i` and is a universal of the member like any signature
+        // region — including to `outlives_check`, which indexes universals
+        // by binder position and leaves a hole at every non-region param.
+        //
+        // A TRAIT-IMPL member carries its OWN binder alone (a requirement
+        // may be a generic fn) — its owner is non-generic by the
+        // non-generic-trait rules, so there is nothing to prepend.
         let generics = match &data.home {
-            item_tree::MemberHome::Inherent => item_data(db, owner)
-                .as_ref()
-                .map(|owner_data| owner_data.generics.clone())
-                .unwrap_or_default(),
+            item_tree::MemberHome::Inherent => {
+                let mut generics = item_data(db, owner)
+                    .as_ref()
+                    .map(|owner_data| owner_data.generics.clone())
+                    .unwrap_or_default();
+                generics.extend(data.generics.iter().cloned());
+                generics
+            }
             item_tree::MemberHome::TraitImpl { .. } => data.generics.clone(),
         };
         return Some(item_tree::ItemData {
@@ -1353,8 +1368,12 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     })
                     .collect(),
                 // The member's definition (its last parameter) is what
-                // makes it not dot-callable — one click away.
-                InferenceDiagnostic::NotDotCallable { member, .. } => {
+                // makes it not dot-callable — one click away. The two
+                // receiver-shape refusals point at the same place for the
+                // same reason: the `Self` parameter is what disagrees.
+                InferenceDiagnostic::NotDotCallable { member, .. }
+                | InferenceDiagnostic::MemberWantsBorrowReceiver { member, .. }
+                | InferenceDiagnostic::MemberWantsExclusiveReceiver { member, .. } => {
                     item_tree::member_source(db, member.to_id(db))
                         .and_then(|m| m.name())
                         .map(|n| {

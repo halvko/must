@@ -7290,8 +7290,8 @@ static main = fn() -> usize {
 };
 "#,
         expect![[r#"
-            223..230: `mk` is not dot-callable: its last parameter is not `Self`-typed (dot-call resolution is structural) (`mk` is defined here at 61..63)
-            233..241: `rev` is not dot-callable: its last parameter is not `Self`-typed (dot-call resolution is structural) (`rev` is defined here at 103..106)
+            223..230: `mk` is not dot-callable: its last parameter is neither `Self` nor a safe borrow of `Self` (dot-call resolution is structural) (`mk` is defined here at 61..63)
+            233..241: `rev` is not dot-callable: its last parameter is neither `Self` nor a safe borrow of `Self` (dot-call resolution is structural) (`rev` is defined here at 103..106)
         "#]],
     );
 }
@@ -7605,7 +7605,7 @@ type Box2 = struct::<T> { v: T } with {
 static main = fn() -> usize { Box2(struct { v = 1 }).get_pinned() };
 "#,
         expect![[r#"
-            156..191: `get_pinned` is not dot-callable: its last parameter is not `Self`-typed (dot-call resolution is structural) (`get_pinned` is defined here at 65..75)
+            156..191: `get_pinned` is not dot-callable: its last parameter is neither `Self` nor a safe borrow of `Self` (dot-call resolution is structural) (`get_pinned` is defined here at 65..75)
             174..175: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
@@ -7676,7 +7676,9 @@ fn firewall_member_body_edit_does_not_reinfer_siblings_or_callers() {
 #[test]
 fn no_auto_deref_through_raw_pointers() {
     // NO auto-deref, ever (G14): a pointer to a type with members does not
-    // dot-call them — the receiver's type must BE the member's `Self`.
+    // dot-call them. A raw pointer is not a decayed borrow, so G14's
+    // bounded exception — which reborrows a borrow receiver into a
+    // borrow-`Self` member — never reaches it.
     check_diagnostics(
         r#"
 type A = struct { x: usize } with {
@@ -8948,15 +8950,22 @@ static called = fn() -> usize { D::<const { 1 + true }>::n::<usize>(3) };
 
 #[test]
 fn the_member_generic_program_the_future_will_make_legal() {
-    // The owner's own example, pinned as it behaves TODAY — the arc that
-    // lands member generics should have to change exactly these two lines
-    // and nothing else:
+    // The owner's own example, pinned as it behaves TODAY — the commit
+    // that lands member TYPE generics should have to change exactly these
+    // two lines and nothing else:
     //
     //   1. the DECLARATION's binder (`syntax::validation`'s reservation),
     //   2. the USE site's arguments (this module's reservation).
     //
     // Both are diagnostics over a REAL parse: no ERROR nodes, no grammar
     // change pending. Deleting them is the whole grant.
+    //
+    // The REGION half of the binder is no longer reserved (see
+    // `inherent_member_own_region_binder_is_live`): a member-own region has
+    // no other source, and it needs no use-site spelling either, because a
+    // region argument is always inferred. So the reservation narrowed from
+    // the whole binder list to the individual type/const params — which is
+    // why the range here covers `T`, not `::<T>`.
     check_diagnostics(
         r#"
 type Measured = struct { n: usize } with {
@@ -8970,7 +8979,7 @@ static main = fn() -> usize {
 };
 "#,
         expect![[r#"
-            77..82: generic members are not supported yet (the type's own binders are already in scope)
+            80..81: a member's own type parameters are not supported yet (the type's own binders are already in scope)
             167..190: a member's own generic arguments are not supported yet: arguments written on `Measured::size` cannot be applied here
         "#]],
     );
@@ -9759,14 +9768,10 @@ fn a_region_is_not_part_of_a_types_identity() {
 #[test]
 fn a_dot_through_a_borrow_is_reserved_with_its_escape_named() {
     // G14's exception is one-directional: the compiler may insert a
-    // borrow of `x.*`, never a deref of `x`. So a field or member reached
-    // through a borrow is RESERVED rather than auto-dereffed, and the
-    // message names the one-character escape that already works.
-    //
-    // Not decided yet: making a `Self.&`-typed last parameter dot-callable
-    // does not fall out of the structural rule for free — it needs
-    // member-own binders (so a member can declare `@a`) plus a
-    // receiver-matching rule for borrow receivers.
+    // borrow of `x.*`, never a deref of `x`. A member whose own `Self` is
+    // a borrow is reached through a borrow receiver; a VALUE `Self` is
+    // not — that would be the deref — and the message names the
+    // one-character escape.
     check_diagnostics(
         "type Counter = struct { n: usize } with {\n\
              impl Self { get = fn (c: Self) -> usize { c.n }; }\n\
@@ -9783,6 +9788,401 @@ fn a_dot_through_a_borrow_is_reserved_with_its_escape_named() {
          };\n\
          static f = fn::<@a>(c: Counter.&::<@a>) -> usize { c.*.get() };",
         expect![[r#""#]],
+    );
+}
+
+// ---- members that borrow `Self` ----------------------------------------
+
+#[test]
+fn an_inherent_members_own_region_binder_is_live() {
+    // The reservation on a member's own binder is now REGIONS ONLY, and the
+    // split is not arbitrary: the owner's type and const params already
+    // flow into every member ("the type's own binders are already in
+    // scope"), so a member-own one is redundant sugar. A REGION has no such
+    // source — regions on type declarations are themselves reserved — so a
+    // member taking a borrow of `Self` has nowhere else to bind the
+    // per-call region it needs, and with no elision it may not decline to
+    // name one.
+    check_diagnostics(
+        r#"
+type Map = struct::<K, V> { n: usize } with {
+    impl Self {
+        peek = fn::<@b>(m: Self.&mut::<@b>) -> usize { m.*.n };
+    }
+};
+static f = fn::<@a>(m: Map::<usize, usize>.&mut::<@a>) -> usize { m.peek() };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_member_own_region_is_per_call_never_the_callers_universal() {
+    // The member's binder is the OWNER's followed by its own, so a
+    // member-own region sits at `owner_arity + i`. Left rigid, it survives
+    // into the CALLER's body, where the outlives solver reads a region
+    // param's binder index as a NODE NUMBER — a member's `@b` at index 0
+    // silently BECOMES the caller's universal at index 0, and two calls in
+    // one body share one region. Both spellings mint a fresh existential
+    // instead, so this program (which relates nothing to `@a`) checks.
+    check_diagnostics(
+        r#"
+type Cell = struct { n: usize } with {
+    impl Self {
+        pass = fn::<@b>(p: usize.&::<@b>, m: Self.&::<@b>) -> usize.&::<@b> { p };
+    }
+};
+static dot = fn::<@a>(c: Cell.&::<@a>) -> usize {
+    let short: usize = 5;
+    c.pass(short.&).*
+};
+static qualified = fn::<@a>(c: Cell.&::<@a>) -> usize {
+    let short: usize = 5;
+    Cell::pass(short.&, c).*
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_member_own_region_still_carries_its_declared_outlives_bounds() {
+    // `fn::<@b, @c: @b>` at a member is the same instantiation a free fn
+    // gets: the declared bound becomes an obligation between the two fresh
+    // variables, so the body may rely on it and the caller must supply it.
+    check_diagnostics(
+        r#"
+type Cell = struct { n: usize } with {
+    impl Self {
+        widen = fn::<@b, @c: @b>(p: usize.&::<@c>, m: Self.&::<@b>) -> usize.&::<@b> { p };
+    }
+};
+static f = fn::<@a>(c: Cell.&::<@a>, p: usize.&::<@a>) -> usize { c.widen(p).* };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_member_own_type_or_const_binder_stays_reserved_precisely() {
+    // The OTHER two kinds keep their reservation, now stated per kind and
+    // squiggling the individual param rather than the whole list — so a
+    // mixed binder grants the region and refuses only what is refused.
+    check_diagnostics(
+        r#"
+type Measured = struct { n: usize } with {
+    impl Self {
+        size = fn::<@b, T, const N: usize>(m: Self.&::<@b>, t: T) -> usize { m.*.n };
+    }
+};
+"#,
+        expect![[r#"
+            84..85: a member's own type parameters are not supported yet (the type's own binders are already in scope)
+            87..101: a member's own const parameters are not supported yet (the type's own binders are already in scope)
+        "#]],
+    );
+}
+
+#[test]
+fn a_borrow_receiver_dot_call_reborrows_into_the_members_region() {
+    // G14 and TR01 say the receiver IS the last argument, so a member whose last
+    // parameter is a BORROW of `Self` takes a borrow receiver — through
+    // exactly the reborrow every other argument position gets. This is G14's
+    // exception clause 1: the inserted borrow is of `map.*`, where `map` is
+    // already a borrow. Exclusive receivers reach shared members too, by
+    // the ordinary degradation reborrow.
+    check_diagnostics(
+        r#"
+type Cell = struct { n: usize } with {
+    impl Self {
+        get = fn::<@b>(m: Self.&::<@b>) -> usize { m.*.n };
+        bump = fn::<@b>(m: Self.&mut::<@b>) -> () { m.*.n = m.*.n + 1; };
+    }
+};
+static f = fn::<@a>(c: Cell.&mut::<@a>) -> usize {
+    c.bump();
+    c.get()
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn an_owned_receiver_never_gets_a_borrow_inserted_for_it() {
+    // NOT auto-ref, and the reason is clause 2 of the G14 exception: the
+    // borrow the compiler would have to insert is a borrow of the LOCAL
+    // itself, which the exception forbids outright. So the escape is
+    // spelled, and the diagnostic spells it.
+    check_diagnostics(
+        r#"
+type Cell = struct { n: usize } with {
+    impl Self {
+        bump = fn::<@b>(m: Self.&mut::<@b>) -> () { m.*.n = m.*.n + 1; };
+    }
+};
+static f = fn() -> usize {
+    let mut c = Cell(struct { n = 1 });
+    c.bump();
+    c.n
+};
+"#,
+        expect![[r#"
+            210..218: `bump` takes `Self.&mut`, and a borrow is never inserted for an owned receiver — write `.&mut.bump(...)` (`bump` is defined here at 64..68)
+        "#]],
+    );
+    // The escape, working: `c.&mut.bump()` is an ordinary postfix chain
+    // whose receiver is then a borrow, so it comes back through the
+    // licensed case.
+    check_diagnostics(
+        r#"
+type Cell = struct { n: usize } with {
+    impl Self {
+        bump = fn::<@b>(m: Self.&mut::<@b>) -> () { m.*.n = m.*.n + 1; };
+    }
+};
+static f = fn() -> usize {
+    let mut c = Cell(struct { n = 1 });
+    c.&mut.bump();
+    c.n
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_shared_receiver_cannot_reach_an_exclusive_member() {
+    // Shared never sharpens to exclusive — the same rule `try_reborrow`
+    // enforces at every other argument position, stated at the receiver,
+    // where the place is still nameable.
+    check_diagnostics(
+        r#"
+type Cell = struct { n: usize } with {
+    impl Self {
+        bump = fn::<@b>(m: Self.&mut::<@b>) -> () { m.*.n = m.*.n + 1; };
+    }
+};
+static f = fn::<@a>(c: Cell.&::<@a>) -> () { c.bump() };
+"#,
+        expect![[r#"
+            184..192: `bump` takes `Self.&mut`, but `Cell.&::<@a>` is a shared borrow — a shared borrow never becomes exclusive (`bump` is defined here at 64..68)
+        "#]],
+    );
+}
+
+#[test]
+fn the_receiver_shape_disambiguates_a_member_against_a_same_named_field() {
+    // A pleasant consequence of the rule being a TABLE rather than a
+    // filter: a fn-typed field and a `Self.&`-taking member of the same
+    // name are never both candidates, so neither spelling is ambiguous and
+    // each names exactly one thing.
+    //
+    // Through a BORROW the field is not reachable at all (that would be
+    // auto-deref), so the member wins; on an OWNED receiver the member is
+    // not reachable (clause 2 forbids borrowing the local), so the field
+    // wins — and the reader who wanted the member writes `b.&.get()`.
+    check_diagnostics(
+        r#"
+type B = struct { get: fn() -> usize } with {
+    impl Self { get = fn::<@b>(x: Self.&::<@b>) -> usize { 100 }; }
+};
+static through_a_borrow = fn::<@a>(b: B.&::<@a>) -> usize { b.get() };
+static owned = fn(b: B) -> usize { b.get() };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_variant_typed_borrow_does_not_widen_into_an_enum_member() {
+    // The boundary, pinned because it looks like an omission and is not.
+    // A variant-typed RECEIVER widens into an enum member's `Self`
+    // parameter — that is the sanctioned conversion. Through a BORROW it
+    // cannot: widening injects a tag, which changes the representation,
+    // and there is nowhere to put the tagged value when all you hold is a
+    // pointer at the untagged one. So the member is still found (the
+    // referent's enum owns it) and the receiver check reports the honest
+    // mismatch; `NoSuchMember` would have been the worse answer.
+    //
+    // Nothing here is auto-deref-adjacent: `.*.area()` reads the referent,
+    // which is a copy, and widens like any other value.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point } with {
+    impl Self {
+        area = fn::<@b>(s: Self.&::<@b>) -> usize { 1 };
+    }
+};
+static borrowed_variant = fn::<@a>(c: Shape::Circle.&::<@a>) -> usize { c.area() };
+"#,
+        expect![[r#"
+            205..206: type mismatch: expected `Shape.&`, found `Shape::Circle.&::<@a>`
+        "#]],
+    );
+}
+
+#[test]
+fn a_trait_requirement_may_carry_a_region_binder() {
+    // `binders_match` had arms for Type and Const and none for Region, so
+    // a region param in a requirement's binder made EVERY textually
+    // identical impl member "not match". A `Self.&`-taking requirement
+    // must declare a region (nothing is elided), so that one guard was
+    // what made the trait half of borrow-`Self` members unreachable.
+    //
+    // All three kinds side by side, each with a conforming impl.
+    check_diagnostics(
+        r#"
+type Cell = struct { n: usize };
+trait A = requires { f: fn(x: usize, s: Self) -> usize; }
+  with { impl Cell { f = fn(x: usize, s: Self) -> usize { x }; } };
+trait B = requires { g: fn::<T>(x: T, s: Self) -> usize; }
+  with { impl Cell { g = fn::<T>(x: T, s: Self) -> usize { 1 }; } };
+trait C = requires { h: fn::<@b>(x: usize.&::<@b>, s: Self) -> usize; }
+  with { impl Cell { h = fn::<@b>(x: usize.&::<@b>, s: Self) -> usize { 1 }; } };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_region_binders_outlives_bounds_must_agree_positionally() {
+    // Region outlives bounds name SIBLING params, so they compare by
+    // position, not by spelling — the requirement's `@a`/`@b` and the
+    // impl's `@x`/`@y` are the same binder. An impl that declares a
+    // DIFFERENT bound set does not match, the same exact-set rule type
+    // bounds already follow.
+    check_diagnostics(
+        r#"
+type Cell = struct { n: usize };
+trait Renamed = requires { f: fn::<@a, @b: @a>(p: usize.&::<@b>, s: Self) -> usize; }
+  with { impl Cell { f = fn::<@x, @y: @x>(p: usize.&::<@y>, s: Self) -> usize { 1 }; } };
+"#,
+        expect![[r#"
+            141..142: member `f` does not match `Renamed`'s requirement: expected `fn(usize.&::<@b>, Cell) -> usize`, found `fn(usize.&::<@y>, Cell) -> usize` (required by the trait here at 61..62)
+        "#]],
+    );
+    check_diagnostics(
+        r#"
+type Cell = struct { n: usize };
+trait Dropped = requires { f: fn::<@a, @b: @a>(p: usize.&::<@b>, s: Self) -> usize; }
+  with { impl Cell { f = fn::<@x, @y>(p: usize.&::<@y>, s: Self) -> usize { 1 }; } };
+"#,
+        expect![[r#"
+            141..142: member `f`'s generic binder does not match `Dropped`'s requirement (arity, kinds and bounds must agree) (required by the trait here at 61..62)
+        "#]],
+    );
+}
+
+#[test]
+fn a_borrow_self_requirement_is_reachable_both_ways() {
+    // The trait half, end to end: declared, implemented, called on a
+    // CONCRETE borrow receiver (impl-directed) and on a BORROWED RIGID one
+    // (bound-directed, through the hidden dictionary). `examples/` has the
+    // runnable twin — this same shape returns 82.
+    check_diagnostics(
+        r#"
+type Cell = struct { n: usize };
+trait Readable = requires {
+    read: fn::<@r>(s: Self.&::<@r>) -> usize;
+} with {
+    impl Cell { read = fn::<@r>(s: Cell.&::<@r>) -> usize { s.*.n }; }
+};
+static direct = fn::<@a>(c: Cell.&::<@a>) -> usize { c.read() };
+static generic = fn::<@z, T: Readable>(t: T.&::<@z>) -> usize { t.read() };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_borrowed_rigid_receiver_reaches_its_bounds() {
+    // The bound-directed path is routed off the referent, so `T.&::<@z>`
+    // reaches the same bounds a bare `T` does. Before, it fell past the
+    // rigid branch to the concrete path and got `write .*.pass` — advice
+    // that would move out of a borrow, on the one shape a `Self.&`
+    // requirement is actually called on.
+    //
+    // The obligation flows through the dictionary path too: the escaping
+    // form is rejected for ESCAPING, which is the proof the region edge is
+    // emitted and not laundered by the indirection.
+    check_diagnostics(
+        r#"
+type Cell = struct { n: usize };
+trait Pass = requires {
+    pass: fn::<@b>(p: usize.&::<@b>, s: Self.&::<@b>) -> usize.&::<@b>;
+} with {
+    impl Cell { pass = fn::<@b>(p: usize.&::<@b>, s: Self.&::<@b>) -> usize.&::<@b> { p }; }
+};
+static ok = fn::<@z, T: Pass>(c: T.&::<@z>, p: usize.&::<@z>) -> usize.&::<@z> { c.pass(p) };
+static leak = fn::<@z, T: Pass>(c: T.&::<@z>) -> usize.&::<@z> {
+    let n: usize = 7;
+    c.pass(n.&)
+};
+"#,
+        expect![[r#"
+            427..430: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@z`, which outlives the body
+        "#]],
+    );
+}
+
+#[test]
+fn a_requirements_own_region_bound_travels_to_the_call_site() {
+    // A requirement carrying its own region binder (`fn::<@b, @c: @b>`)
+    // reaches a call for the first time here, so the bound it declares has
+    // to reach it too: a requirement's binder is instantiated like any
+    // other, and its outlives bounds become obligations between the fresh
+    // regions. Without them both trait spellings launder the bound — the
+    // escaping calls below check clean while their free-fn twin is
+    // rejected.
+    check_diagnostics(
+        r#"
+type Cell = struct { n: usize };
+trait Widen = requires {
+    widen: fn::<@b, @c: @b>(p: usize.&::<@c>, s: Self.&::<@b>) -> usize.&::<@b>;
+} with {
+    impl Cell {
+        widen = fn::<@b, @c: @b>(p: usize.&::<@c>, s: Cell.&::<@b>) -> usize.&::<@b> { p };
+    }
+};
+static bound_directed = fn::<@z, T: Widen>(t: T.&::<@z>) -> usize.&::<@z> {
+    let n: usize = 7;
+    t.widen(n.&)
+};
+static qualified = fn::<@z>(c: Cell.&::<@z>) -> usize.&::<@z> {
+    let n: usize = 7;
+    Widen::widen(n.&, c)
+};
+"#,
+        expect![[r#"
+            376..379: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@z`, which outlives the body
+            487..490: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@z`, which outlives the body
+        "#]],
+    );
+}
+
+#[test]
+fn the_receiver_shape_table_is_the_same_on_a_rigid_receiver() {
+    // One table, one set of messages, whether `Self` is nominal or rigid —
+    // which is the point of routing both paths through
+    // `receiver_shape_refusal`. A rigid receiver used to get a different
+    // (and, for the borrow cases, wrong) story.
+    check_diagnostics(
+        r#"
+type Cell = struct { n: usize };
+trait Bump = requires {
+    bump: fn::<@r>(s: Self.&mut::<@r>) -> ();
+} with {
+    impl Cell { bump = fn::<@r>(s: Cell.&mut::<@r>) -> () { s.*.n = 1; }; }
+};
+static owned = fn::<T: Bump>(t: T) -> () { t.bump() };
+static shared = fn::<@z, T: Bump>(t: T.&::<@z>) -> () { t.bump() };
+static exclusive = fn::<@z, T: Bump>(t: T.&mut::<@z>) -> () { t.bump() };
+"#,
+        expect![[r#"
+            235..243: `bump` takes `Self.&mut`, and a borrow is never inserted for an owned receiver — write `.&mut.bump(...)`
+            303..311: `bump` takes `Self.&mut`, but `T.&::<@z>` is a shared borrow — a shared borrow never becomes exclusive
+        "#]],
     );
 }
 
@@ -9978,6 +10378,57 @@ static in_branch = fn(c: bool) -> Shape { if c { ::Point } else { ::Point } };
             161..168: cannot resolve `::Point` without an expected type — write `Enum::Point`
             178..185: cannot resolve `::Point` without an expected type — write `Enum::Point`
         "#]],
+    );
+}
+
+#[test]
+fn the_owners_reborrow_program_checks_clean() {
+    // The acceptance test for members that borrow `Self`: the owner's own
+    // `get_or_default`, unmodified. It exercises all four gaps at once —
+    // a member-own region binder, a dot-call on a borrow receiver, `V`
+    // inferred through `Self.&mut`, and `::None` in expression position —
+    // and it is also the Polonius conditional-return case: `::Some(v) => v`
+    // returns a loan derived from `map` out of a match whose other arm
+    // borrows `map` again.
+    //
+    // `examples/reborrow.must` is the same program with a body, and it
+    // RUNS: the borrow it hands back really aliases the map's storage.
+    check_diagnostics(
+        r#"
+type Option = enum::<T> {
+    Some(T),
+    None,
+} with {
+    impl Self {
+        unwrap = fn(s: Self) -> T {
+            match s {
+                ::Some(t) => t,
+                ::None => panic("unwrap was called on a ::None value"),
+            }
+        }
+    }
+}
+
+type Map = struct::<K, V> { } with {
+    impl Self {
+        get = fn::<@b>(key: K, m: Self.&mut::<@b>) -> Option::<V.&mut::<@b>> { ::None };
+        insert = fn::<@b>(key: K, val: V, m: Self.&mut::<@b>) -> () { };
+    }
+};
+
+static get_or_default = fn::<@a, K, V>(
+    key: K, val: V, map: Map::<K, V>.&mut::<@a>
+) -> V.&mut::<@a> {
+    match map.get(key) {
+        ::Some(v) => v,
+        ::None => {
+            map.insert(key, val);
+            map.get(key).unwrap()
+        },
+    }
+};
+"#,
+        expect![[r#""#]],
     );
 }
 
@@ -10266,6 +10717,31 @@ fn no_context_shape_launders_a_region_obligation() {
             "{opt}static k = fn::<@a, @b>(q: usize.&::<@b>, c: bool) -> Opt::<usize.&::<@a>> {{\n\
                  if c {{ Opt::<usize.&::<@b>>::Some(q) }} \
                  else {{ Opt::<usize.&::<@b>>::Some(q) }}\n\
+             }};"
+        ),
+    );
+    // The MEMBER-CALL shape. A dot-call's receiver is checked against
+    // the member's `Self` parameter through the same `check`, so it must
+    // incur the same obligation the plain call does — and the member's own
+    // `@b` must be a fresh existential at the call, not a rigid param that
+    // the outlives solver would read as whichever universal of the CALLER
+    // sits at the same binder index.
+    let cell = "type Cell = struct { n: usize } with {\n\
+                    impl Self {\n\
+                        pass = fn::<@b>(p: usize.&::<@b>, m: Self.&::<@b>) -> usize.&::<@b> { p };\n\
+                    }\n\
+                };\n";
+    check_wrapping_changes_nothing(
+        &format!(
+            "{cell}static m1 = fn::<@a>(c: Cell.&::<@a>) -> usize.&::<@a> {{\n\
+                 let local: usize = 5;\n\
+                 Cell::pass(local.&, c)\n\
+             }};"
+        ),
+        &format!(
+            "{cell}static m1 = fn::<@a>(c: Cell.&::<@a>) -> usize.&::<@a> {{\n\
+                 let local: usize = 5;\n\
+                 c.pass(local.&)\n\
              }};"
         ),
     );

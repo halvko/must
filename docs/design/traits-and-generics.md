@@ -16,12 +16,12 @@
   arguments; the named-Self form, `Trait::<Self = Type>::member(args)`, spells `Self` out and
   is the escape when the short form itself is ambiguous (G13). Clauses immediately precede the
   item's defining brace. There is no `self` token: dot-call is structural, so a member whose
-  last parameter is `Self`-typed is dot-callable and the receiver becomes its LAST argument —
-  which is why the written arguments evaluate before the receiver binds. Expression-position
-  `Self` is rigid: one meaning per body, the owner type at the member's own binders. Reserved
-  for later: trait aliases, generic traits and generic-type impls, supertrait clauses, default
-  members, associated types/consts, `unsafe` traits and trait members, and marker impls — the
-  house parse-and-reserve pattern throughout.
+  last parameter is `Self`-typed, or a safe borrow of `Self`, is dot-callable and the receiver
+  becomes its LAST argument — which is why the written arguments evaluate before the receiver
+  binds. Expression-position `Self` is rigid: one meaning per body, the owner type at the
+  member's own binders. Reserved for later: trait aliases, generic traits and generic-type
+  impls, supertrait clauses, default members, associated types/consts, `unsafe` traits and
+  trait members, and marker impls — the house parse-and-reserve pattern throughout.
 - **TR02** Dispatch is static only, flattened dictionary-lowered. No `dyn` in v1. Every bounded
   type param contributes one dictionary SLOT per `(param, resolved bound trait)` pair
   (`hir::bound_slots`, canonical order: params in binder order, bounds in written order,
@@ -85,6 +85,13 @@
   the house pattern for every derived or marker judgment. `clone` for heap-owning types is
   hand-written by ruling: it must read the stored allocator, so it is not derivable even in
   principle. Introspection replaces derive.
+- **TR10** Member-own binders, REGIONS only. An inherent member's binder is the owner's
+  followed by its own, so the owner keeps the low indices and nothing downstream moves; a
+  trait-impl member's binder is its own alone. The member's own half carries regions and
+  nothing else: they are inferred and minted fresh at every call, are never spelled at a use
+  site, and are not positions in any written argument list — which is what lets a member
+  borrow `Self` for a region the owner's binder has no way to supply. A member's own type and
+  const parameters stay reserved, per kind.
 
 ## Discarded
 
@@ -94,8 +101,13 @@
   mirrors the runtime split: fields are data in the value's layout, impls are static fns no
   value carries a pointer to); keywordless elements (context ambiguity, greppability, diff
   anchoring). **TR01**
-- **Auto-ref to dodge the receiver wall** — a conversion policy with inference consequences,
-  not a spelling: the receiver's type must BE the member's `Self`. **TR01**
+- **Auto-ref to dodge the receiver wall** — the bounded reborrow exception (G14) dissolves the
+  wall instead. **TR01**
+- **Member-own TYPE binders** — still reserved: the owner's type parameters already flow into
+  every member signature and body, and a member's own would need a use-site spelling that does
+  not exist. **Member-own CONST binders** — still reserved for a different reason: a const
+  argument is part of an instance's identity, and a member's arguments are read off the
+  receiver's type, which cannot supply one. **TR10**
 - **`dyn` / trait objects in v1** — no customer; brings vtable layout, object safety and
   post-erasure lifetime questions. **Named / first-class impls** — a named impl is a
   dictionary you can pass, which reintroduces incoherence and breaks applicative identity: the
@@ -149,6 +161,8 @@
 - **The stdlib grows higher-order functions** — the cheap moment for effect polymorphism;
   every HOF written at a fixed row meanwhile is migration debt. Foreclosure risk is near zero:
   rigidity transplanted, no new inference domain. **TR08**
+- **Member-own const binders** — trip-wire: instantiation grows a member-side argument list,
+  or instance identity moves off the receiver's type. **TR10**
 - **Derive replacement is designed** — introspection. **TR12**
 - **A `send` assertion form** is owed and unruled: the mitigation for the private-field semver
   hazard, which is inherent to derived-from-structure. **TR09**

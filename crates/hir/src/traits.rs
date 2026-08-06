@@ -422,9 +422,24 @@ pub fn lower_requirement_sig(
 }
 
 /// Whether two binders match for impl-vs-requirement purposes: same
-/// arity, same kinds position by position, and the same RESOLVED bound
-/// set per type param (order-insensitive; unresolvable bounds compare by
-/// absence — their own diagnostics tell that story).
+/// arity, same kinds position by position, the same RESOLVED bound set per
+/// type param, and the same OUTLIVES set per region param (both
+/// order-insensitive; unresolvable bounds compare by absence — their own
+/// diagnostics tell that story).
+///
+/// A REGION param matches a region param. Without that arm a requirement
+/// could not carry a region binder at all — and a requirement whose member
+/// borrows `Self` **must** carry one, because nothing is elided — so this
+/// single guard was what made the trait half of borrow-`Self` members
+/// unreachable, no matter how exactly the impl copied the requirement.
+///
+/// Region outlives bounds compare POSITIONALLY, because they name sibling
+/// params rather than resolvable items: `@b: @a` means "the param at index
+/// 0", so the requirement's spelling and the impl's need not agree, exactly
+/// as type-param names need not. Exact-set comparison (not subset) is the
+/// strict-first choice already made for type bounds; an impl declaring
+/// FEWER outlives bounds than its requirement is in fact sound (it promises
+/// more), so loosening in that direction later is purely additive.
 pub(crate) fn binders_match(
     db: &dyn Db,
     file: SourceFile,
@@ -434,14 +449,39 @@ pub(crate) fn binders_match(
     if req.len() != member.len() {
         return false;
     }
+    // Each binder's own name → index map, for the positional comparison.
+    fn index_of(params: &[GenericParamData]) -> rustc_hash::FxHashMap<&str, u32> {
+        params
+            .iter()
+            .enumerate()
+            .map(|(index, param)| (param.name.as_str(), index as u32))
+            .collect()
+    }
+    let (req_index, member_index) = (index_of(req), index_of(member));
     req.iter().zip(member).all(|(r, m)| {
         let kinds_match = matches!(
             (&r.kind, &m.kind),
             (GenericParamKind::Type, GenericParamKind::Type)
+                | (GenericParamKind::Region, GenericParamKind::Region)
                 | (GenericParamKind::Const(_), GenericParamKind::Const(_))
         );
         if !kinds_match {
             return false;
+        }
+        if matches!(r.kind, GenericParamKind::Region) {
+            let positions = |names: &[String], map: &rustc_hash::FxHashMap<&str, u32>| {
+                // A name resolving to nothing is dropped, mirroring an
+                // unresolvable trait bound: the declaration carries that
+                // diagnostic and matching must not invent a second one.
+                let mut out: Vec<u32> = names
+                    .iter()
+                    .filter_map(|n| map.get(n.as_str()).copied())
+                    .collect();
+                out.sort_unstable();
+                out.dedup();
+                out
+            };
+            return positions(&r.outlives, &req_index) == positions(&m.outlives, &member_index);
         }
         let resolve = |bounds: &[TypeRef]| {
             let mut traits: Vec<ItemLoc> = bounds

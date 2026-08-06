@@ -78,10 +78,10 @@ browser (`file://` works, no server) and drag the `.wasm` file onto it.
 The module imports exactly one thing, the platform effect `must.print`,
 and exports `main` plus its memory and its reporting globals (`trap_code`
 saying which trap fired, and the panic message's offset/length). What it
-does not compile yet — raw pointers, the heap builtins — it refuses by
-name, with a source location, rather than miscompiling. The backend lives
-in `crates/codegen-wasm`; its differential test harness runs every
-supported example under both the interpreter and a real engine and
+does not compile yet — raw pointers, the heap builtins, safe borrows — it
+refuses by name, with a source location, rather than miscompiling. The
+backend lives in `crates/codegen-wasm`; its differential test harness runs
+every supported example under both the interpreter and a real engine and
 requires byte-identical behavior. Design notes:
 `docs/design/platform-codegen-and-tooling.md`.
 
@@ -91,9 +91,10 @@ requires byte-identical behavior. Design notes:
 recursion, and higher-order calls (`functions.must`), compile-time evaluation
 (`compile_time.must`), generics (`generics.must`), fixed-size arrays
 (`arrays.must`), raw pointers (`pointers.must`), the heap built on top of
-them (`heap.must`) and safe borrows (`borrows.must`) — plus `errors.must`, an
-intentionally broken file pairing each diagnostic with the exact message
-`must-lsp check` prints for it.
+them (`heap.must`), safe borrows (`borrows.must`) and members that borrow
+`Self` (`reborrow.must`) — plus `errors.must`, an intentionally broken file
+pairing each diagnostic with the exact message `must-lsp check` prints for
+it.
 
 Programs run even when they don't typecheck: execution proceeds until it
 reaches something broken, then crashes with the same message the editor

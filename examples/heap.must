@@ -56,13 +56,16 @@
 //   type's own generic binder (`T` below) in scope and `Self` naming the
 //   type at its full binders.
 // - There is no `self` keyword. Dot-callability is STRUCTURAL: a member
-//   whose LAST parameter is `Self`-typed is callable as `value.name(args)`,
-//   which is exactly `name(args, value)` — the receiver is the last
-//   argument, so the written arguments evaluate BEFORE the receiver binds.
+//   whose LAST parameter is `Self`-typed — or a safe borrow of `Self` — is
+//   callable as `value.name(args)`, which is exactly `name(args, value)`:
+//   the receiver is the last argument, so the written arguments evaluate
+//   BEFORE the receiver binds.
 // - Module-level fns are deliberately NOT dot-callable — `heapvec_new`
 //   below stays an ordinary call because construction has no receiver.
-// - No auto-deref, no auto-ref, ever: the receiver's type must BE the
-//   member's `Self`.
+// - No auto-deref, no auto-ref, ever. The one bounded exception is a
+//   borrow receiver meeting a borrow `Self`, which reborrows; a raw
+//   pointer never dot-calls, and nothing is ever inserted for an owned
+//   receiver.
 
 // ---- a growable vector, concretely -------------------------------------
 // One buffer, a length, a capacity. No allocator parameter and no vtable:

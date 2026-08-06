@@ -64,6 +64,20 @@ const UNSUPPORTED: &[(&str, &str, &str)] = &[
         "main()",
         "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet",
     ),
+    // The borrow-ergonomics fixture is borrow-shaped end to end (its
+    // members take `Self.&mut`), so it lands on the same named refusal
+    // `borrows.must` does — for the same reason: the backend could emit
+    // something that runs and would drop the exclusivity contract doing it.
+    (
+        "reborrow.must",
+        "main()",
+        "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet",
+    ),
+    (
+        "reborrow.must",
+        "total_count()",
+        "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet",
+    ),
     (
         "heap.must",
         "main()",

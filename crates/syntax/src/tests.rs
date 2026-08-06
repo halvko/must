@@ -3651,6 +3651,124 @@ fn elided_variant_expression_missing_name() {
 }
 
 #[test]
+fn inherent_member_region_binder_parses_without_reservation() {
+    // Regions are the ONE kind of member-own binder that is live: a member
+    // taking a borrow of `Self` has nowhere else to bind its per-call
+    // region. The type and const kinds keep their reservation, now squiggling
+    // the individual param rather than the whole list.
+    check(
+        "type Cell = struct { n: usize } with {\n\
+             impl Self { get = fn::<@b>(m: Self.&::<@b>) -> usize { m.*.n }; }\n\
+         };",
+        expect![[r#"
+            SOURCE_FILE@0..107
+              TYPE_ITEM@0..107
+                TYPE_KW@0..4 "type"
+                WHITESPACE@4..5 " "
+                NAME@5..9
+                  IDENT@5..9 "Cell"
+                WHITESPACE@9..10 " "
+                EQ@10..11 "="
+                WHITESPACE@11..12 " "
+                RECORD_EXPR@12..31
+                  STRUCT_KW@12..18 "struct"
+                  WHITESPACE@18..19 " "
+                  L_BRACE@19..20 "{"
+                  WHITESPACE@20..21 " "
+                  RECORD_EXPR_FIELD@21..29
+                    NAME_REF@21..22
+                      IDENT@21..22 "n"
+                    COLON@22..23 ":"
+                    WHITESPACE@23..24 " "
+                    PATH_TYPE@24..29
+                      NAME_REF@24..29
+                        IDENT@24..29 "usize"
+                  WHITESPACE@29..30 " "
+                  R_BRACE@30..31 "}"
+                WHITESPACE@31..32 " "
+                WITH_GROUP@32..106
+                  WITH_KW@32..36 "with"
+                  WHITESPACE@36..37 " "
+                  L_BRACE@37..38 "{"
+                  WHITESPACE@38..39 "\n"
+                  IMPL_ELEMENT@39..104
+                    IMPL_KW@39..43 "impl"
+                    WHITESPACE@43..44 " "
+                    PATH_TYPE@44..48
+                      NAME_REF@44..48
+                        IDENT@44..48 "Self"
+                    WHITESPACE@48..49 " "
+                    L_BRACE@49..50 "{"
+                    WHITESPACE@50..51 " "
+                    MEMBER@51..102
+                      NAME@51..54
+                        IDENT@51..54 "get"
+                      WHITESPACE@54..55 " "
+                      EQ@55..56 "="
+                      WHITESPACE@56..57 " "
+                      FN_LITERAL@57..101
+                        FN_KW@57..59 "fn"
+                        GENERIC_PARAM_LIST@59..65
+                          COLON2@59..61 "::"
+                          L_ANGLE@61..62 "<"
+                          REGION_PARAM@62..64
+                            REGION_IDENT@62..64 "@b"
+                          R_ANGLE@64..65 ">"
+                        PARAM_LIST@65..82
+                          L_PAREN@65..66 "("
+                          PARAM@66..81
+                            BIND_PAT@66..67
+                              NAME@66..67
+                                IDENT@66..67 "m"
+                            COLON@67..68 ":"
+                            WHITESPACE@68..69 " "
+                            BORROW_TYPE@69..81
+                              PATH_TYPE@69..73
+                                NAME_REF@69..73
+                                  IDENT@69..73 "Self"
+                              DOT@73..74 "."
+                              AMP@74..75 "&"
+                              COLON2@75..77 "::"
+                              GENERIC_ARG_LIST@77..81
+                                L_ANGLE@77..78 "<"
+                                REGION_ARG@78..80
+                                  REGION_IDENT@78..80 "@b"
+                                R_ANGLE@80..81 ">"
+                          R_PAREN@81..82 ")"
+                        WHITESPACE@82..83 " "
+                        RET_TYPE@83..91
+                          THIN_ARROW@83..85 "->"
+                          WHITESPACE@85..86 " "
+                          PATH_TYPE@86..91
+                            NAME_REF@86..91
+                              IDENT@86..91 "usize"
+                        WHITESPACE@91..92 " "
+                        BLOCK_EXPR@92..101
+                          L_BRACE@92..93 "{"
+                          WHITESPACE@93..94 " "
+                          FIELD_EXPR@94..99
+                            DEREF_EXPR@94..97
+                              PATH_EXPR@94..95
+                                NAME_REF@94..95
+                                  IDENT@94..95 "m"
+                              DOT@95..96 "."
+                              STAR@96..97 "*"
+                            DOT@97..98 "."
+                            NAME_REF@98..99
+                              IDENT@98..99 "n"
+                          WHITESPACE@99..100 " "
+                          R_BRACE@100..101 "}"
+                      SEMICOLON@101..102 ";"
+                    WHITESPACE@102..103 " "
+                    R_BRACE@103..104 "}"
+                  WHITESPACE@104..105 "\n"
+                  R_BRACE@105..106 "}"
+                SEMICOLON@106..107 ";"
+        "#]],
+    );
+}
+
+#[test]
 fn variant_path_type_annotation() {
     check(
         "static s: Shape::Circle = c;",
@@ -9718,7 +9836,7 @@ type A = struct { x: usize } with {
               WHITESPACE@147..148 "\n"
             error 61..66: associated consts are not supported yet
             error 89..90: a member must be defined as an `fn` literal
-            error 106..111: generic members are not supported yet (the type's own binders are already in scope)
+            error 109..110: a member's own type parameters are not supported yet (the type's own binders are already in scope)
         "#]],
     );
 }

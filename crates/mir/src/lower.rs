@@ -348,6 +348,11 @@ impl LowerCtx<'_> {
                 // execute (arguments still evaluate for effects).
                 InferenceDiagnostic::NoSuchMember { expr, .. }
                 | InferenceDiagnostic::NotDotCallable { expr, .. }
+                // The two receiver-shape refusals are the same kind of
+                // broken dot-call: the member exists, this receiver cannot
+                // reach it, so the CALL is what must not execute.
+                | InferenceDiagnostic::MemberWantsBorrowReceiver { expr, .. }
+                | InferenceDiagnostic::MemberWantsExclusiveReceiver { expr, .. }
                 | InferenceDiagnostic::FieldNotCallable { expr, .. } => {
                     self.call_traps.insert(*expr, diag.message());
                 }
