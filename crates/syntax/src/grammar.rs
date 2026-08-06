@@ -640,14 +640,22 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
     }
     // The RETIRED prefix `&raw x` / `&raw mut x` — kept only to emit the
     // migration diagnostic (see `addr_of_expr`); the live spelling is
-    // postfix `x.&raw` / `x.&raw mut`. `&` alone is not an expression
-    // starter (references are reserved), so the arm is gated on the `raw`
-    // keyword following.
+    // postfix `x.&raw` / `x.&raw mut`. Checked first so `raw` claims this
+    // shape ahead of the general prefix-borrow arm below.
     if p.at(AMP) && p.nth(1) == RAW_KW {
         return Some(addr_of_expr(p));
     }
+    // The RETIRED prefix safe borrow `&x` / `&mut x`. Safe borrows are now
+    // spelled postfix (`x.&` / `x.&mut`); the prefix form superset-parses
+    // into the same `BORROW_EXPR` node the postfix form produces (never a
+    // silent reinterpretation) so downstream stays coherent — a migration
+    // diagnostic (with a rewrite-to-postfix quick fix) is validation's job,
+    // keyed off the missing leading `DOT` (see `validation.rs`).
+    if p.at(AMP) {
+        return Some(prefix_borrow_expr(p));
+    }
     // `-x` — unary minus on numbers. Same operand tier as the retired
-    // prefix `&raw`: a primary expression plus its postfix chain, so
+    // prefix borrows above: a primary expression plus its postfix chain, so
     // `-a.b` negates the field and `-x + y` stays a sum of the negation.
     if p.at(MINUS) {
         let m = p.start();
@@ -1087,6 +1095,25 @@ fn addr_of_expr(p: &mut Parser<'_>) -> CompletedMarker {
     m.complete(p, ADDR_OF_EXPR)
 }
 
+/// The RETIRED prefix safe borrow `&x` / `&mut x`. The caller has already
+/// confirmed `p.at(AMP)` (and that `&raw ...` was ruled out). Safe borrows
+/// are now spelled postfix (`x.&` / `x.&mut`); the prefix form
+/// superset-parses into the same `BORROW_EXPR` node the postfix form
+/// produces — never a silent reinterpretation — so downstream (hir, the
+/// checker) sees exactly the node it already knows how to handle. Unlike
+/// its postfix dual, the prefix spelling never carried a region turbofish,
+/// so none is attempted here. The migration diagnostic itself is
+/// validation's job (see `validation.rs`), keyed off the missing leading
+/// `DOT` this node never gets. The operand parses at the same binding power
+/// as `&raw`'s: a primary expression plus its postfix chain.
+fn prefix_borrow_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump(AMP);
+    p.eat(MUT_KW);
+    expr_bp(p, 7);
+    m.complete(p, BORROW_EXPR)
+}
+
 /// `unsafe { ... }` — an expression-position block that marks a checker
 /// region (deref of a raw pointer is legal inside). Same shape as
 /// `const { ... }`. `unsafe fn` superset-parses (the literal becomes the
@@ -1123,7 +1150,9 @@ fn at_expr_start(p: &Parser<'_>) -> bool {
         | MINUS => true,
         CONST_KW => matches!(p.nth(1), FN_KW | L_BRACE),
         STRUCT_KW | ENUM_KW => at_type_literal_body(p),
-        AMP => p.nth(1) == RAW_KW,
+        // `&raw ...` and the retired prefix borrows `&x` / `&mut x` both
+        // start an expression now — see `primary_expr`'s AMP arms.
+        AMP => true,
         _ => false,
     }
 }
@@ -1439,8 +1468,8 @@ fn scan_bare_angle_group(p: &Parser<'_>) -> Option<BareAngleGroup> {
                 }
             }
             COMMA if angle == 1 && nest == 0 => top_level_comma = true,
-            // `&T`, `@a + @b`, `Self = T`, `fn(T) -> U` are all legal at an
-            // argument list's own level; the equality/ordering operators and
+            // `T.&::<@a>`, `@a + @b`, `Self = T`, `fn(T) -> U` are all legal at
+            // an argument list's own level; the equality/ordering operators and
             // a match arm's `=>` are not, so finding one there means this was
             // a chain of comparisons. Inside a `const { a == b }` argument
             // they are ordinary content, which is why this arm — like the
@@ -1868,18 +1897,21 @@ fn type_core(p: &mut Parser<'_>) -> Option<CompletedMarker> {
             type_(p);
             m.complete(p, RAW_PTR_TYPE)
         }
-        // Without the `raw` keyword the `&` parses as a reference type, which
-        // stays reserved ("references are not supported yet", see validation)
-        // — `&T`/`&mut T` are kept unclaimed for real references, which stay
-        // unspoken for. Safe borrows spell postfix `T.&`/`T.&mut` instead, a
-        // distinct `BORROW_TYPE` node parsed in `type_`'s own postfix loop
-        // above, never through this prefix arm.
+        // The RETIRED prefix safe borrow type `&T` / `&mut T`. Safe borrow
+        // types are now spelled postfix (`T.&` / `T.&mut`, region turbofish
+        // `T.&::<@a>`); the prefix form superset-parses into the same
+        // `BORROW_TYPE` node the postfix form produces — never a silent
+        // reinterpretation — so hir sees exactly the node it already knows
+        // how to handle. The migration diagnostic is validation's job, keyed
+        // off the missing leading `DOT`. Legacy `&'a T` is NOT recognized
+        // here: the `&` fires its own migration and the freed `'` is an
+        // ordinary unexpected-character lexer error (G26).
         AMP => {
             let m = p.start();
             p.bump(AMP);
-            p.eat(LIFETIME_IDENT);
+            p.eat(MUT_KW);
             type_(p);
-            m.complete(p, REF_TYPE)
+            m.complete(p, BORROW_TYPE)
         }
         FN_KW => {
             let m = p.start();

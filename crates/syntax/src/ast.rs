@@ -120,7 +120,6 @@ ast_node!(FnType: FN_TYPE);
 ast_node!(UnitType: UNIT_TYPE);
 ast_node!(NeverType: NEVER_TYPE);
 ast_node!(PathType: PATH_TYPE);
-ast_node!(RefType: REF_TYPE);
 ast_node!(HoleType: HOLE_TYPE);
 ast_node!(
     /// `{ x: T, y: U }`, a structural record type.
@@ -436,7 +435,6 @@ ast_enum!(
     UnitType,
     NeverType,
     PathType,
-    RefType,
     RawPtrType,
     BorrowType,
     HoleType,
@@ -1365,16 +1363,6 @@ impl ConstArg {
     /// restrict this later).
     pub fn expr(&self) -> Option<Expr> {
         child(&self.syntax)
-    }
-}
-
-impl RefType {
-    pub fn ty(&self) -> Option<Type> {
-        child(&self.syntax)
-    }
-    /// The leading `&` — the reservation diagnostic's anchor.
-    pub fn amp_token(&self) -> Option<SyntaxToken> {
-        token(&self.syntax, AMP)
     }
 }
 

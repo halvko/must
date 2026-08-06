@@ -1013,7 +1013,12 @@ A borrow is a checked pointer. `x.&` borrows a place for reading, `x.&mut`
 borrows it exclusively, and `r.*` reads through either — the same postfix
 deref a raw pointer uses. What makes them different is that a borrow needs
 no `unsafe`: safety is decided by the pointer's *flavor*, and `.&raw` is the
-unsafe flavor. There is no auto-ref and no auto-deref, ever.
+unsafe flavor. There is no auto-ref and no auto-deref, ever. The old prefix
+spelling (`&x` / `&mut x`, and the type forms `&T` / `&mut T`) is retired
+the same way `&raw` was — a targeted migration diagnostic, never a silent
+reinterpretation — and here the diagnostic also carries a fix that rewrites
+it postfix, except where postfix would bind somewhere else (a borrow of a
+`fn(..) -> T` has no postfix spelling at all).
 
 Every borrow says how long it is good for. That is its *region*, spelled
 `@a`, and it rides the borrow operator's own turbofish:

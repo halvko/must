@@ -7045,7 +7045,14 @@ static f = fn (v: HeapVec::<str>) {
 }
 
 #[test]
-fn non_raw_reference_fields_in_type_declarations_stay_rejected() {
+fn retired_prefix_borrow_type_field_migrates_and_still_needs_a_region() {
+    // The retired prefix `&x` superset-parses into the same `BORROW_TYPE`
+    // node the postfix form produces (a syntax-level migration diagnostic,
+    // see `syntax::tests`), so it flows into hir exactly like a real safe
+    // borrow — including the requirement that it name a region. Two
+    // genuinely independent complaints, both surviving: the migration
+    // (syntax) and the missing region (semantic) — plus `x` naming a value,
+    // not a type, unrelated to either.
     check_diagnostics(
         r#"
 static x = 4;
@@ -7053,7 +7060,8 @@ type Bad = struct { r: &x };
 "#,
         expect![[r#"
             12..13: cannot infer the type of this number: it has no defining use — add a type annotation
-            38..40: references are not supported yet
+            38..39: a safe borrow must name its region (`T.&::<@a>`); regions are never elided yet
+            38..40: borrow types are spelled postfix: `T.&` / `T.&mut`
             39..40: `x` is not a type
         "#]],
     );

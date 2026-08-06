@@ -128,7 +128,6 @@ pub enum TypeRef {
         params: Vec<TypeRef>,
         ret: Option<Box<TypeRef>>,
     },
-    Ref(Box<TypeRef>),
     /// `T.&raw` / `T.&raw mut` — a raw pointer type.
     RawPtr {
         mutable: bool,
@@ -260,10 +259,6 @@ impl TypeRef {
                     .and_then(|rt| rt.ty())
                     .map(|t| Box::new(TypeRef::from_ast(t))),
             },
-            ast::Type::RefType(it) => match it.ty() {
-                Some(inner) => TypeRef::Ref(Box::new(TypeRef::from_ast(inner))),
-                None => TypeRef::Error,
-            },
             ast::Type::RawPtrType(it) => match it.ty() {
                 Some(inner) => TypeRef::RawPtr {
                     mutable: it.is_mut(),
@@ -357,7 +352,6 @@ impl TypeRef {
                 params.iter().any(TypeRef::contains_hole)
                     || ret.as_ref().is_some_and(|r| r.contains_hole())
             }
-            TypeRef::Ref(inner) => inner.contains_hole(),
             TypeRef::RawPtr { inner, .. } | TypeRef::Borrow { inner, .. } => inner.contains_hole(),
             TypeRef::Apply { args, .. } => args.iter().any(|arg| match arg {
                 GenericArgRef::Type(ty) => ty.contains_hole(),
@@ -383,7 +377,6 @@ impl TypeRef {
                 params.iter().all(TypeRef::is_fully_typed)
                     && ret.as_ref().is_some_and(|r| r.is_fully_typed())
             }
-            TypeRef::Ref(inner) => inner.is_fully_typed(),
             // A borrow's REGION is not part of "fully typed": a missing or
             // wildcard region is a region question, reported as one.
             TypeRef::RawPtr { inner, .. } | TypeRef::Borrow { inner, .. } => inner.is_fully_typed(),
@@ -414,7 +407,6 @@ impl TypeRef {
     pub fn mentions_fn(&self) -> bool {
         match self {
             TypeRef::Fn { .. } => true,
-            TypeRef::Ref(inner) => inner.mentions_fn(),
             TypeRef::RawPtr { inner, .. } | TypeRef::Borrow { inner, .. } => inner.mentions_fn(),
             TypeRef::Record(fields) => fields.iter().any(|(_, ty)| ty.mentions_fn()),
             TypeRef::Array { elem, .. } => elem.mentions_fn(),
@@ -441,7 +433,6 @@ impl TypeRef {
     pub fn mentions_array(&self) -> bool {
         match self {
             TypeRef::Array { .. } => true,
-            TypeRef::Ref(inner) => inner.mentions_array(),
             TypeRef::RawPtr { inner, .. } | TypeRef::Borrow { inner, .. } => inner.mentions_array(),
             TypeRef::Record(fields) => fields.iter().any(|(_, ty)| ty.mentions_array()),
             TypeRef::Fn { params, ret } => {

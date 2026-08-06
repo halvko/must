@@ -444,7 +444,14 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |                             ^^^^^^^^^
                = note: this item's initializer is a const context (examples/errors.must:308:1)
 
-            found 29 errors and 1 warning
+            error: borrows are spelled postfix: `x.&` / `x.&mut`
+              --> examples/errors.must:317:13
+                |
+            317 |     let r = &x;
+                |             ^^
+               = help: Rewrite as postfix
+
+            found 30 errors and 1 warning
         "#]],
     );
 }

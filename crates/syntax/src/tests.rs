@@ -20,14 +20,14 @@ fn hello_annotated() {
     check(
         r#"
 static main: fn() -> () = fn() -> () {
-    let s: &'static str = "hello";
+    let s: str = "hello";
     (fn () -> () { print(s) })();
 }
 "#,
         expect![[r#"
-            SOURCE_FILE@0..111
+            SOURCE_FILE@0..102
               WHITESPACE@0..1 "\n"
-              STATIC_ITEM@1..110
+              STATIC_ITEM@1..101
                 STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..12
@@ -48,7 +48,7 @@ static main: fn() -> () = fn() -> () {
                 WHITESPACE@24..25 " "
                 EQ@25..26 "="
                 WHITESPACE@26..27 " "
-                FN_LITERAL@27..110
+                FN_LITERAL@27..101
                   FN_KW@27..29 "fn"
                   PARAM_LIST@29..31
                     L_PAREN@29..30 "("
@@ -61,10 +61,10 @@ static main: fn() -> () = fn() -> () {
                       L_PAREN@35..36 "("
                       R_PAREN@36..37 ")"
                   WHITESPACE@37..38 " "
-                  BLOCK_EXPR@38..110
+                  BLOCK_EXPR@38..101
                     L_BRACE@38..39 "{"
                     WHITESPACE@39..44 "\n    "
-                    LET_STMT@44..74
+                    LET_STMT@44..65
                       LET_KW@44..47 "let"
                       WHITESPACE@47..48 " "
                       BIND_PAT@48..49
@@ -72,62 +72,57 @@ static main: fn() -> () = fn() -> () {
                           IDENT@48..49 "s"
                       COLON@49..50 ":"
                       WHITESPACE@50..51 " "
-                      REF_TYPE@51..63
-                        AMP@51..52 "&"
-                        LIFETIME_IDENT@52..59 "'static"
-                        WHITESPACE@59..60 " "
-                        PATH_TYPE@60..63
-                          NAME_REF@60..63
-                            IDENT@60..63 "str"
-                      WHITESPACE@63..64 " "
-                      EQ@64..65 "="
-                      WHITESPACE@65..66 " "
-                      LITERAL@66..73
-                        STRING@66..73 "\"hello\""
-                      SEMICOLON@73..74 ";"
-                    WHITESPACE@74..79 "\n    "
-                    EXPR_STMT@79..108
-                      CALL_EXPR@79..107
-                        PAREN_EXPR@79..105
-                          L_PAREN@79..80 "("
-                          FN_LITERAL@80..104
-                            FN_KW@80..82 "fn"
+                      PATH_TYPE@51..54
+                        NAME_REF@51..54
+                          IDENT@51..54 "str"
+                      WHITESPACE@54..55 " "
+                      EQ@55..56 "="
+                      WHITESPACE@56..57 " "
+                      LITERAL@57..64
+                        STRING@57..64 "\"hello\""
+                      SEMICOLON@64..65 ";"
+                    WHITESPACE@65..70 "\n    "
+                    EXPR_STMT@70..99
+                      CALL_EXPR@70..98
+                        PAREN_EXPR@70..96
+                          L_PAREN@70..71 "("
+                          FN_LITERAL@71..95
+                            FN_KW@71..73 "fn"
+                            WHITESPACE@73..74 " "
+                            PARAM_LIST@74..76
+                              L_PAREN@74..75 "("
+                              R_PAREN@75..76 ")"
+                            WHITESPACE@76..77 " "
+                            RET_TYPE@77..82
+                              THIN_ARROW@77..79 "->"
+                              WHITESPACE@79..80 " "
+                              UNIT_TYPE@80..82
+                                L_PAREN@80..81 "("
+                                R_PAREN@81..82 ")"
                             WHITESPACE@82..83 " "
-                            PARAM_LIST@83..85
-                              L_PAREN@83..84 "("
-                              R_PAREN@84..85 ")"
-                            WHITESPACE@85..86 " "
-                            RET_TYPE@86..91
-                              THIN_ARROW@86..88 "->"
-                              WHITESPACE@88..89 " "
-                              UNIT_TYPE@89..91
-                                L_PAREN@89..90 "("
-                                R_PAREN@90..91 ")"
-                            WHITESPACE@91..92 " "
-                            BLOCK_EXPR@92..104
-                              L_BRACE@92..93 "{"
+                            BLOCK_EXPR@83..95
+                              L_BRACE@83..84 "{"
+                              WHITESPACE@84..85 " "
+                              CALL_EXPR@85..93
+                                PATH_EXPR@85..90
+                                  NAME_REF@85..90
+                                    IDENT@85..90 "print"
+                                ARG_LIST@90..93
+                                  L_PAREN@90..91 "("
+                                  PATH_EXPR@91..92
+                                    NAME_REF@91..92
+                                      IDENT@91..92 "s"
+                                  R_PAREN@92..93 ")"
                               WHITESPACE@93..94 " "
-                              CALL_EXPR@94..102
-                                PATH_EXPR@94..99
-                                  NAME_REF@94..99
-                                    IDENT@94..99 "print"
-                                ARG_LIST@99..102
-                                  L_PAREN@99..100 "("
-                                  PATH_EXPR@100..101
-                                    NAME_REF@100..101
-                                      IDENT@100..101 "s"
-                                  R_PAREN@101..102 ")"
-                              WHITESPACE@102..103 " "
-                              R_BRACE@103..104 "}"
-                          R_PAREN@104..105 ")"
-                        ARG_LIST@105..107
-                          L_PAREN@105..106 "("
-                          R_PAREN@106..107 ")"
-                      SEMICOLON@107..108 ";"
-                    WHITESPACE@108..109 "\n"
-                    R_BRACE@109..110 "}"
-              WHITESPACE@110..111 "\n"
-            error 51..63: references are not supported yet
+                              R_BRACE@94..95 "}"
+                          R_PAREN@95..96 ")"
+                        ARG_LIST@96..98
+                          L_PAREN@96..97 "("
+                          R_PAREN@97..98 ")"
+                      SEMICOLON@98..99 ";"
+                    WHITESPACE@99..100 "\n"
+                    R_BRACE@100..101 "}"
+              WHITESPACE@101..102 "\n"
         "#]],
     );
 }
@@ -8949,6 +8944,416 @@ fn retired_prefix_raw_ptr_type_migration() {
 }
 
 #[test]
+fn retired_prefix_borrow_expr_migration() {
+    // The retired prefix safe-borrow spelling superset-parses into the same
+    // `BORROW_EXPR` node the postfix form produces — a targeted migration
+    // diagnostic, never a silent reinterpretation, mirroring the `&raw`
+    // precedent above.
+    check(
+        "static f = fn { let a = &x; let b = &mut y; };",
+        expect![[r#"
+            SOURCE_FILE@0..46
+              STATIC_ITEM@0..46
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..45
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..45
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..27
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      BIND_PAT@20..21
+                        NAME@20..21
+                          IDENT@20..21 "a"
+                      WHITESPACE@21..22 " "
+                      EQ@22..23 "="
+                      WHITESPACE@23..24 " "
+                      BORROW_EXPR@24..26
+                        AMP@24..25 "&"
+                        PATH_EXPR@25..26
+                          NAME_REF@25..26
+                            IDENT@25..26 "x"
+                      SEMICOLON@26..27 ";"
+                    WHITESPACE@27..28 " "
+                    LET_STMT@28..43
+                      LET_KW@28..31 "let"
+                      WHITESPACE@31..32 " "
+                      BIND_PAT@32..33
+                        NAME@32..33
+                          IDENT@32..33 "b"
+                      WHITESPACE@33..34 " "
+                      EQ@34..35 "="
+                      WHITESPACE@35..36 " "
+                      BORROW_EXPR@36..42
+                        AMP@36..37 "&"
+                        MUT_KW@37..40 "mut"
+                        WHITESPACE@40..41 " "
+                        PATH_EXPR@41..42
+                          NAME_REF@41..42
+                            IDENT@41..42 "y"
+                      SEMICOLON@42..43 ";"
+                    WHITESPACE@43..44 " "
+                    R_BRACE@44..45 "}"
+                SEMICOLON@45..46 ";"
+            error 24..26: borrows are spelled postfix: `x.&` / `x.&mut`
+            error 36..42: borrows are spelled postfix: `x.&` / `x.&mut`
+        "#]],
+    );
+}
+
+#[test]
+fn retired_prefix_borrow_expr_fix_rewrites_to_postfix() {
+    // The fix is two edits (delete the leading `&`/`&mut`, append the
+    // postfix operator after the operand) — the "wrap in `{ }`"-style
+    // multi-edit `Fix`, not a single parser-level insertion.
+    let non_mut = "static f = fn { &x; };";
+    let parse = crate::parse(non_mut);
+    let err = parse
+        .errors()
+        .iter()
+        .find(|e| e.message.starts_with("borrows are spelled postfix"))
+        .expect("expected the migration diagnostic");
+    let fix = err.fix.as_ref().expect("expected a fix");
+    assert_eq!(fix.label, "Rewrite as postfix");
+    assert_eq!(apply_fix(non_mut, fix), "static f = fn { x.&; };");
+
+    let mutable = "static f = fn { &mut x; };";
+    let parse = crate::parse(mutable);
+    let err = parse
+        .errors()
+        .iter()
+        .find(|e| e.message.starts_with("borrows are spelled postfix"))
+        .expect("expected the migration diagnostic");
+    let fix = err.fix.as_ref().expect("expected a fix");
+    assert_eq!(apply_fix(mutable, fix), "static f = fn { x.&mut; };");
+}
+
+#[test]
+fn retired_prefix_borrow_type_migration() {
+    // Type position's mirror of the expression-side migration above.
+    check(
+        "static f = fn(a: &str, b: &mut str) -> () { };",
+        expect![[r#"
+            SOURCE_FILE@0..46
+              STATIC_ITEM@0..46
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..45
+                  FN_KW@11..13 "fn"
+                  PARAM_LIST@13..35
+                    L_PAREN@13..14 "("
+                    PARAM@14..21
+                      BIND_PAT@14..15
+                        NAME@14..15
+                          IDENT@14..15 "a"
+                      COLON@15..16 ":"
+                      WHITESPACE@16..17 " "
+                      BORROW_TYPE@17..21
+                        AMP@17..18 "&"
+                        PATH_TYPE@18..21
+                          NAME_REF@18..21
+                            IDENT@18..21 "str"
+                    COMMA@21..22 ","
+                    WHITESPACE@22..23 " "
+                    PARAM@23..34
+                      BIND_PAT@23..24
+                        NAME@23..24
+                          IDENT@23..24 "b"
+                      COLON@24..25 ":"
+                      WHITESPACE@25..26 " "
+                      BORROW_TYPE@26..34
+                        AMP@26..27 "&"
+                        MUT_KW@27..30 "mut"
+                        WHITESPACE@30..31 " "
+                        PATH_TYPE@31..34
+                          NAME_REF@31..34
+                            IDENT@31..34 "str"
+                    R_PAREN@34..35 ")"
+                  WHITESPACE@35..36 " "
+                  RET_TYPE@36..41
+                    THIN_ARROW@36..38 "->"
+                    WHITESPACE@38..39 " "
+                    UNIT_TYPE@39..41
+                      L_PAREN@39..40 "("
+                      R_PAREN@40..41 ")"
+                  WHITESPACE@41..42 " "
+                  BLOCK_EXPR@42..45
+                    L_BRACE@42..43 "{"
+                    WHITESPACE@43..44 " "
+                    R_BRACE@44..45 "}"
+                SEMICOLON@45..46 ";"
+            error 17..21: borrow types are spelled postfix: `T.&` / `T.&mut`
+            error 26..34: borrow types are spelled postfix: `T.&` / `T.&mut`
+        "#]],
+    );
+}
+
+#[test]
+fn retired_prefix_borrow_type_fix_rewrites_to_postfix() {
+    let plain = "static f = fn(s: &str) {};";
+    let parse = crate::parse(plain);
+    let err = parse
+        .errors()
+        .iter()
+        .find(|e| e.message.starts_with("borrow types are spelled postfix"))
+        .expect("expected the migration diagnostic");
+    let fix = err.fix.as_ref().expect("expected a fix");
+    assert_eq!(fix.label, "Rewrite as postfix");
+    // No region turbofish: `T.&` requires one everywhere and hir's own
+    // "must name its region" diagnostic says so — inventing a name here
+    // would be a guess.
+    assert_eq!(apply_fix(plain, fix), "static f = fn(s: str.&) {};");
+
+    let mutable = "static f = fn(s: &mut str) {};";
+    let parse = crate::parse(mutable);
+    let err = parse
+        .errors()
+        .iter()
+        .find(|e| e.message.starts_with("borrow types are spelled postfix"))
+        .expect("expected the migration diagnostic");
+    let fix = err.fix.as_ref().expect("expected a fix");
+    assert_eq!(apply_fix(mutable, fix), "static f = fn(s: str.&mut) {};");
+}
+
+#[test]
+fn a_prefix_borrow_type_postfix_would_rebind_gets_no_fix() {
+    // Postfix `.&` binds to whatever the type ENDS in, and there is no type
+    // grouping to override it (G08). So for a `fn(..) -> T` referent the
+    // rewrite would land on the RETURN type (`&fn() -> usize` is a borrow OF
+    // a fn; `fn() -> usize.&` is a fn returning one), for a retired prefix
+    // raw pointer on the pointee, and for a retired prefix BORROW on that
+    // borrow's own referent — which for `&&mut T` swaps the two borrows'
+    // mutability (`&mut usize.&` is `usize.&.&mut`, not `usize.&mut.&`).
+    // Each migrates; none offers a fix that silently changes the type.
+    // Validation walks in preorder, so the first diagnostic is the OUTER
+    // borrow's — the one whose rewrite would rebind.
+    for text in [
+        "static f = fn(a: &fn() -> usize) {};",
+        "static f = fn(a: &&raw usize) {};",
+        "static f = fn(a: &&mut usize) {};",
+        "static f = fn(a: &mut &usize) {};",
+        "static f = fn(a: &&fn() -> usize) {};",
+        "static f = fn(a: &&&raw usize) {};",
+    ] {
+        let parse = crate::parse(text);
+        let err = parse
+            .errors()
+            .iter()
+            .find(|e| e.message.starts_with("borrow types are spelled postfix"))
+            .expect("expected the migration diagnostic");
+        assert!(err.fix.is_none(), "postfix would rebind: {text}");
+    }
+    // A `fn` type with no return type ends in its own `)`, so the rewrite is
+    // sound and the fix stays on offer.
+    let text = "static f = fn(a: &fn(usize)) {};";
+    let parse = crate::parse(text);
+    let err = parse
+        .errors()
+        .iter()
+        .find(|e| e.message.starts_with("borrow types are spelled postfix"))
+        .expect("expected the migration diagnostic");
+    let fix = err.fix.as_ref().expect("expected a fix");
+    assert_eq!(apply_fix(text, fix), "static f = fn(a: fn(usize).&) {};");
+    // And the inner spelling migrating first is what unblocks the outer one:
+    // over a referent that is ALREADY postfix, the outer fix is sound again.
+    let text = "static f = fn(a: &usize.&mut::<@a>) {};";
+    let parse = crate::parse(text);
+    let err = parse
+        .errors()
+        .iter()
+        .find(|e| e.message.starts_with("borrow types are spelled postfix"))
+        .expect("expected the migration diagnostic");
+    let fix = err.fix.as_ref().expect("expected a fix");
+    assert_eq!(
+        apply_fix(text, fix),
+        "static f = fn(a: usize.&mut::<@a>.&) {};"
+    );
+}
+
+#[test]
+fn a_prefix_borrow_with_no_operand_migrates_without_a_fix() {
+    // The prefix spelling can lose its operand — the postfix form never
+    // could, since it always precedes one. The migration still reports;
+    // the rewrite has nothing to move, so no fix is offered.
+    let text = "static f = fn { let r = &; };";
+    let parse = crate::parse(text);
+    let err = parse
+        .errors()
+        .iter()
+        .find(|e| e.message.starts_with("borrows are spelled postfix"))
+        .expect("expected the migration diagnostic");
+    assert!(
+        err.fix.is_none(),
+        "an operandless borrow has nothing to move"
+    );
+}
+
+#[test]
+fn retired_prefix_borrow_type_does_not_chase_a_retired_lifetime() {
+    // The parser does not chase a retired spelling across token kinds
+    // (G26). In legacy `&'a T` the `&` fires its own migration and stops;
+    // the freed `'` is an ordinary unexpected-character lexer error, and
+    // the referent never reaches the borrow — so no rewrite is offered and
+    // what followed is recovered as further (garbage) parameters. Making
+    // sense of the wreckage is diagnostics-layer work, not the base
+    // parser's; what is pinned here is that the parse terminates, covers
+    // the whole input, and stays honest about the `&`.
+    let text = "static f = fn(s: &'a str) {};";
+    let parse = crate::parse(text);
+    let messages: Vec<&str> = parse.errors().iter().map(|e| e.message.as_str()).collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.starts_with("borrow types are spelled postfix")),
+        "the `&` still migrates: {messages:?}"
+    );
+    assert!(
+        messages.contains(&"unexpected character `'`"),
+        "the freed `'` is a plain lexer error: {messages:?}"
+    );
+    let root = parse.syntax_node();
+    let borrow = root
+        .descendants()
+        .find(|n| n.kind() == crate::SyntaxKind::BORROW_TYPE)
+        .expect("the `&` still opens a borrow type");
+    assert_eq!(
+        borrow.text_range(),
+        crate::TextRange::new(17.into(), 18.into())
+    );
+    let err = parse
+        .errors()
+        .iter()
+        .find(|e| e.message.starts_with("borrow types are spelled postfix"))
+        .expect("expected the migration diagnostic");
+    assert!(err.fix.is_none(), "no referent, nothing to rewrite");
+    assert_eq!(
+        usize::from(root.text_range().end()),
+        text.len(),
+        "recovery still covers the whole input"
+    );
+}
+
+#[test]
+fn bare_amp_between_expressions_is_not_a_binary_operator() {
+    // `&` has never bound as a binary operator (it is absent from
+    // `expr_bp`'s precedence table — this sweep doesn't add it there
+    // either, only to `primary_expr`'s prefix dispatch), so `a & b` is not
+    // "bitwise and": `a` ends the first statement (missing `;`, with the
+    // usual insert fix), and `& b` starts a fresh one — which the retired
+    // prefix borrow now claims, exactly as `&b` on its own would. The
+    // first statement's error is unaffected by this sweep; the second's
+    // used to be "expected an expression" and is now the migration
+    // diagnostic, because bare `&` had to start becoming a valid
+    // expression for the retired prefix borrow to superset-parse at all.
+    check(
+        "static f = fn { a & b; };",
+        expect![[r#"
+            SOURCE_FILE@0..25
+              STATIC_ITEM@0..25
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..24
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..24
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    EXPR_STMT@16..17
+                      PATH_EXPR@16..17
+                        NAME_REF@16..17
+                          IDENT@16..17 "a"
+                    WHITESPACE@17..18 " "
+                    EXPR_STMT@18..22
+                      BORROW_EXPR@18..21
+                        AMP@18..19 "&"
+                        WHITESPACE@19..20 " "
+                        PATH_EXPR@20..21
+                          NAME_REF@20..21
+                            IDENT@20..21 "b"
+                      SEMICOLON@21..22 ";"
+                    WHITESPACE@22..23 " "
+                    R_BRACE@23..24 "}"
+                SEMICOLON@24..25 ";"
+            error 16..17: expected `;`
+            error 18..21: borrows are spelled postfix: `x.&` / `x.&mut`
+        "#]],
+    );
+}
+
+#[test]
+fn bare_quote_is_an_honest_lexer_error() {
+    // The `'`-prefixed lifetime kind is retired outright: a bare `'`
+    // anywhere is now an ordinary unknown-character error, with no
+    // misdirection toward lifetimes (gone) or char literals (a future,
+    // unruled question) — and the identifier after it lexes and parses on
+    // its own, exactly like any other stray character would (statement-
+    // level recovery retries fresh at the next token).
+    check(
+        "static x = fn { 'a; };",
+        expect![[r#"
+            SOURCE_FILE@0..22
+              STATIC_ITEM@0..22
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..21
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..21
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    ERROR@16..17
+                      ERROR_TOKEN@16..17 "'"
+                    EXPR_STMT@17..19
+                      PATH_EXPR@17..18
+                        NAME_REF@17..18
+                          IDENT@17..18 "a"
+                      SEMICOLON@18..19 ";"
+                    WHITESPACE@19..20 " "
+                    R_BRACE@20..21 "}"
+                SEMICOLON@21..22 ";"
+            error 16..17: unexpected character `'`
+        "#]],
+    );
+}
+
+/// Applies every edit in `fix` to `text` (rightmost-first, so earlier
+/// offsets stay valid) and returns the result — the plainest way to pin
+/// what a multi-edit `Fix` actually produces.
+fn apply_fix(text: &str, fix: &crate::Fix) -> String {
+    let mut edits: Vec<&crate::TextEdit> = fix.edits.iter().collect();
+    edits.sort_by_key(|e| std::cmp::Reverse(u32::from(e.range.start())));
+    let mut out = text.to_owned();
+    for edit in edits {
+        let range = usize::from(edit.range.start())..usize::from(edit.range.end());
+        out.replace_range(range, &edit.insert);
+    }
+    out
+}
+
+#[test]
 fn safe_borrow_expr() {
     // `x.&` / `x.&mut` (DOT AMP without `raw`) — the postfix safe borrows.
     // Their own node, no reservation error; hir owns them from here.
@@ -9155,46 +9560,6 @@ fn unsafe_fn_is_reserved() {
                       R_BRACE@24..25 "}"
                 SEMICOLON@25..26 ";"
             error 18..25: `unsafe fn` is not supported yet; use `unsafe { ... }` blocks inside a plain `fn`
-        "#]],
-    );
-}
-
-#[test]
-fn plain_reference_type_is_reserved() {
-    check(
-        "static f = fn(s: &str) {};",
-        expect![[r#"
-            SOURCE_FILE@0..26
-              STATIC_ITEM@0..26
-                STATIC_KW@0..6 "static"
-                WHITESPACE@6..7 " "
-                NAME@7..8
-                  IDENT@7..8 "f"
-                WHITESPACE@8..9 " "
-                EQ@9..10 "="
-                WHITESPACE@10..11 " "
-                FN_LITERAL@11..25
-                  FN_KW@11..13 "fn"
-                  PARAM_LIST@13..22
-                    L_PAREN@13..14 "("
-                    PARAM@14..21
-                      BIND_PAT@14..15
-                        NAME@14..15
-                          IDENT@14..15 "s"
-                      COLON@15..16 ":"
-                      WHITESPACE@16..17 " "
-                      REF_TYPE@17..21
-                        AMP@17..18 "&"
-                        PATH_TYPE@18..21
-                          NAME_REF@18..21
-                            IDENT@18..21 "str"
-                    R_PAREN@21..22 ")"
-                  WHITESPACE@22..23 " "
-                  BLOCK_EXPR@23..25
-                    L_BRACE@23..24 "{"
-                    R_BRACE@24..25 "}"
-                SEMICOLON@25..26 ";"
-            error 17..21: references are not supported yet
         "#]],
     );
 }

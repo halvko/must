@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 29 errors and 1 warning.
+// exactly: found 30 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -306,3 +306,13 @@ static bare_angle_generics = fn (b: Boxed<usize>) -> usize { b.value };
 //     `print` would be (see `examples/stdin.must`).
 //     error: cannot call `read_line` in a const context; const evaluation cannot have side effects
 static read_line_in_const = read_line();
+
+// 31. The retired PREFIX safe-borrow spelling: safe borrows (like raw ones,
+//     21 above) are postfix — `x.&` / `x.&mut` — so a bare `&x` / `&mut x`
+//     gets a targeted migration diagnostic rather than a silent
+//     reinterpretation, with a fix that rewrites it.
+//     error: borrows are spelled postfix: `x.&` / `x.&mut`
+static retired_prefix_borrow = fn () -> () {
+    let x: usize = 1;
+    let r = &x;
+};

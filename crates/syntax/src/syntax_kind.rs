@@ -15,7 +15,6 @@ pub enum SyntaxKind {
     HOLE,
     INT_NUMBER,
     STRING,
-    LIFETIME_IDENT,
     /// `@a` / `@_` — a region name or the region wildcard.
     REGION_IDENT,
     L_PAREN,
@@ -100,7 +99,6 @@ pub enum SyntaxKind {
     UNIT_TYPE,
     NEVER_TYPE,
     PATH_TYPE,
-    REF_TYPE,
     HOLE_TYPE,
     RECORD_TYPE,
     RECORD_TYPE_FIELD,

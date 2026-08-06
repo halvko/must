@@ -173,15 +173,6 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             validate_impl_element(&impl_element, &mut errors);
         } else if let Some(member) = ast::Member::cast(node.clone()) {
             validate_member(&member, &mut errors);
-        } else if let Some(ref_type) = ast::RefType::cast(node.clone()) {
-            // `&T`/`&mut T` stay unclaimed for real references — parse-and-
-            // reserve, the same pattern as `pub` fields. `T.&raw` is a
-            // distinct node (`RawPtrType`) and never lands here.
-            errors.push(SyntaxError {
-                message: "references are not supported yet".to_owned(),
-                range: ref_type.syntax().text_range(),
-                fix: None,
-            });
         } else if let Some(path_type) = ast::PathType::cast(node.clone()) {
             reject_bare_angle_generic_args(
                 path_type.name_ref(),
@@ -194,11 +185,21 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
                 path_expr.generic_arg_list(),
                 &mut errors,
             );
+        } else if let Some(borrow_expr) = ast::BorrowExpr::cast(node.clone()) {
+            // `x.&` / `x.&mut` — the postfix SAFE borrow, dual of `.*`, which
+            // hir owns from here (region kinds, reborrow, exclusivity) — and
+            // its RETIRED prefix spelling `&x` / `&mut x`, superset-parsed
+            // into this same node (see `grammar::prefix_borrow_expr`); told
+            // apart by the missing `DOT`. `x.&raw` stays a distinct node
+            // (`AddrOfExpr`) and never lands here.
+            reject_prefix_borrow_expr(&borrow_expr, &mut errors);
+        } else if let Some(borrow_type) = ast::BorrowType::cast(node.clone()) {
+            // `T.&::<@a>` / `T.&mut::<@a>` and the RETIRED prefix spellings
+            // `&T` / `&mut T` — mirror of the expression-side split above
+            // (see `grammar::type_core`'s AMP arm). `T.&raw` stays a distinct
+            // node (`RawPtrType`).
+            reject_prefix_borrow_type(&borrow_type, &mut errors);
         }
-        // `x.&` / `x.&mut` and `T.&::<@a>` / `T.&mut::<@a>` — the postfix
-        // SAFE borrows, duals of `.*`. Un-reserved; hir owns them from here
-        // (region kinds, reborrow, exclusivity), and `x.&raw` / `T.&raw`
-        // stay distinct nodes that never land here.
     }
     errors
 }
@@ -997,6 +998,121 @@ fn reject_bare_angle_generic_args(
                 insert: "::".to_owned(),
             }],
         }),
+    });
+}
+
+/// Whether a `BorrowExpr`/`BorrowType`/`RawPtrType` node is the RETIRED
+/// prefix spelling (`&x` / `&T` / `&raw T`, built by
+/// `grammar::prefix_borrow_expr` / `type_core`'s AMP arms) rather than the
+/// real postfix `.&` / `.&mut` / `.&raw`. Both shapes complete into the same
+/// node kind; the postfix form always carries the operator's own `DOT` as a
+/// direct child (`operand DOT AMP ...`), which the prefix form — `AMP`
+/// first, no `DOT` anywhere — never produces. An unambiguous, purely
+/// structural tell.
+fn is_prefix_spelling(node: &SyntaxNode) -> bool {
+    !node
+        .children_with_tokens()
+        .filter_map(|it| it.into_token())
+        .any(|t| t.kind() == SyntaxKind::DOT)
+}
+
+/// The rewrite a retired prefix borrow needs: delete everything before the
+/// operand (the leading `&`/`&mut `) and append the postfix spelling after
+/// it. Two edits, so it is a validation-built [`Fix`] rather than a
+/// parser-level single insertion.
+fn rewrite_to_postfix_fix(node: TextRange, operand: TextRange, suffix: &str) -> Fix {
+    Fix {
+        label: "Rewrite as postfix".to_owned(),
+        edits: vec![
+            TextEdit {
+                range: TextRange::new(node.start(), operand.start()),
+                insert: String::new(),
+            },
+            TextEdit {
+                range: TextRange::empty(operand.end()),
+                insert: suffix.to_owned(),
+            },
+        ],
+    }
+}
+
+/// `&x` / `&mut x` — the retired prefix safe borrow, superset-parsed into
+/// the node the postfix form produces (see the `BorrowExpr` arm above). A
+/// corrective migration diagnostic naming the postfix spelling, with a quick
+/// fix that rewrites it; phrased like its `&raw` sibling in
+/// `grammar::addr_of_expr`. No rebinding guard is needed on this side (the
+/// type side has [`postfix_binds_to_whole_type`]): the operand parses at the
+/// postfix tier already, so the only expressions it can END in are the other
+/// prefix forms — `&-x`, `&&raw x`, `&&x` — and every one of those is a
+/// borrow of something that is not a place, rejected with the same error
+/// before and after the rewrite. (The rewrite rebinds there exactly as it
+/// would in type position, `&&mut y` becoming `&mut y.&`; nothing rides on
+/// it, because neither spelling compiles.)
+fn reject_prefix_borrow_expr(borrow: &ast::BorrowExpr, errors: &mut Vec<SyntaxError>) {
+    if !is_prefix_spelling(borrow.syntax()) {
+        return;
+    }
+    let range = borrow.syntax().text_range();
+    let suffix = if borrow.is_mut() { ".&mut" } else { ".&" };
+    let fix = borrow
+        .receiver()
+        .map(|receiver| rewrite_to_postfix_fix(range, receiver.syntax().text_range(), suffix));
+    errors.push(SyntaxError {
+        message: "borrows are spelled postfix: `x.&` / `x.&mut`".to_owned(),
+        range,
+        fix,
+    });
+}
+
+/// Does a postfix `.&` appended to this type's text bind to the WHOLE type?
+/// Only when the type does not already END in a nested type of its own,
+/// which the operator would claim instead — and with no type grouping there
+/// is no other spelling to fall back on (see G08's "pointer or borrow to a
+/// fn type" in `docs/design/grammar-and-syntax.md`). Three type forms end
+/// that way: a `fn(..) -> T` (`&fn() -> usize` is a borrow OF a fn,
+/// `fn() -> usize.&` a fn RETURNING one), a retired prefix raw pointer
+/// (`&raw T.&` is a pointer TO a borrow) and a retired prefix borrow
+/// (`&mut T.&` is a MUT borrow of a shared one — appending to `&&mut T`
+/// would swap the two borrows' mutability; `&&T` survives only because it
+/// is symmetric). The inner spelling migrates first, and once it is postfix
+/// the outer's fix is sound again and returns. The match is exhaustive on
+/// purpose: a new type form has to be classified, not defaulted.
+fn postfix_binds_to_whole_type(ty: &ast::Type) -> bool {
+    match ty {
+        ast::Type::FnType(it) => it.ret_type().is_none(),
+        ast::Type::RawPtrType(it) => !is_prefix_spelling(it.syntax()),
+        ast::Type::BorrowType(it) => !is_prefix_spelling(it.syntax()),
+        // Each ends in a token or a closing bracket of its own.
+        ast::Type::UnitType(_)
+        | ast::Type::NeverType(_)
+        | ast::Type::PathType(_)
+        | ast::Type::HoleType(_)
+        | ast::Type::RecordType(_)
+        | ast::Type::ArrayType(_) => true,
+    }
+}
+
+/// `&T` / `&mut T` — the retired prefix safe borrow TYPE, mirror of
+/// [`reject_prefix_borrow_expr`]. The rewrite leaves the region turbofish
+/// off: `T.&` needs one everywhere (no elision exists for a hand-written
+/// type), and hir's own "must name its region" diagnostic says so with the
+/// spelling — a name invented here would be a guess. It is withheld
+/// entirely where postfix cannot express the same type
+/// ([`postfix_binds_to_whole_type`]); the migration itself still reports.
+fn reject_prefix_borrow_type(borrow: &ast::BorrowType, errors: &mut Vec<SyntaxError>) {
+    if !is_prefix_spelling(borrow.syntax()) {
+        return;
+    }
+    let range = borrow.syntax().text_range();
+    let suffix = if borrow.is_mut() { ".&mut" } else { ".&" };
+    let fix = borrow
+        .ty()
+        .filter(postfix_binds_to_whole_type)
+        .map(|ty| rewrite_to_postfix_fix(range, ty.syntax().text_range(), suffix));
+    errors.push(SyntaxError {
+        message: "borrow types are spelled postfix: `T.&` / `T.&mut`".to_owned(),
+        range,
+        fix,
     });
 }
 

@@ -73,7 +73,6 @@ fn next_token(rest: &str, inner: &mut Vec<InnerError>) -> (SyntaxKind, usize, Op
             (COMMENT, len, None)
         }
         '"' => scan_string(rest, inner),
-        '\'' => scan_lifetime(rest),
         '@' => scan_region(rest),
         c if is_ident_start(c) => {
             let len = scan_while(rest, is_ident_continue);
@@ -195,20 +194,6 @@ fn scan_string(rest: &str, inner: &mut Vec<InnerError>) -> (SyntaxKind, usize, O
         rest.len(),
         Some("unterminated string".into()),
     )
-}
-
-fn scan_lifetime(rest: &str) -> (SyntaxKind, usize, Option<String>) {
-    match rest.chars().nth(1) {
-        Some(c) if is_ident_start(c) => {
-            let len = 1 + scan_while(&rest[1..], is_ident_continue);
-            (SyntaxKind::LIFETIME_IDENT, len, None)
-        }
-        _ => (
-            SyntaxKind::ERROR_TOKEN,
-            1,
-            Some("expected a lifetime name after `'`".into()),
-        ),
-    }
 }
 
 /// `@a` — a REGION name; `@_` — the region wildcard ("there is a region

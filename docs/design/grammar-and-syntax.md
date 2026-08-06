@@ -20,12 +20,12 @@
   Address-of is postfix too: `x.&raw` / `x.&raw mut`, with the type twins `T.&raw` /
   `T.&raw mut` — no prefix place adaptor (deref, address-of) exists in the grammar. The
   retired prefix `&raw x` / `&raw mut x` (and the type twins) superset-parse into the same
-  nodes with a targeted migration diagnostic, never a silent reinterpretation; prefix
-  `&T`/`&mut T` stay the pre-existing reservation for real references. Plain `x.&` / `x.&mut`
-  and the type twins `T.&` / `T.&mut`, with no `raw`, are the SAFE borrows, with a region
-  turbofish of their own (`x.&mut::<@a>`) — optional on the borrow expression (inferred when
-  omitted) but required on the type form `T.&`/`T.&mut` everywhere, since no elision exists
-  yet for a hand-written type.
+  nodes with a targeted migration diagnostic, never a silent reinterpretation, and the
+  retired prefix safe borrows `&x`/`&mut x`, `&T`/`&mut T` migrate the same way (G26).
+  Plain `x.&` / `x.&mut` and the type twins `T.&` / `T.&mut`, with no `raw`, are the SAFE
+  borrows, with a region turbofish of their own (`x.&mut::<@a>`) — optional on the borrow
+  expression (inferred when omitted) but required on the type form `T.&`/`T.&mut`
+  everywhere, since no elision exists yet for a hand-written type.
 - **G09** The region sigil is `@`: `@a`, wildcard `@_`, join `@a + @b`, binder slot
   `fn::<@a, T, const N>`, outlives clause `@a: @b`. Chosen because `@` is unclaimed; migrating
   it would be mechanical.
@@ -78,6 +78,13 @@
   expression position as reject-only sugar: it reads the position's expected type and nothing
   else, so it resolves wherever an expectation reaches and is refused elsewhere with the
   qualified spelling named. The qualified spelling stays canonical.
+- **G26** A retired spelling migrates; it never reinterprets. Prefix `&x`, `&mut x`, `&T`
+  and `&mut T` superset-parse into the same node the postfix form produces, with a
+  corrective diagnostic and a rewriting fix — withheld where no postfix text means the
+  same thing, as for a borrow of a `fn(..) -> T`. The parser does not chase a retired
+  spelling across token kinds: in `&'a T` the `&` fires its own migration and the freed
+  `'` is an ordinary unexpected-character lexer error. That recovery is diagnostics-layer
+  work.
 
 ## Discarded
 
@@ -135,9 +142,11 @@
   land** — the defensive float grammar stops being free. **G06 G07**
 - **Tuples are built** — postfix turbofish on arbitrary expressions, construction,
   patterns, arity limits and the unit-tuple question. **G07**
-- **Someone wants a raw pointer to a fn type** — unspellable postfix (`fn() -> usize.&raw`
-  binds to the return type) and there is no type grouping (`(...)` is unit). Inherent to
-  the design. **G08**
+- **Someone wants a pointer or borrow to a fn type** — unspellable postfix
+  (`fn() -> usize.&raw`, `fn() -> usize.&` bind to the return type) and there is no type
+  grouping (`(...)` is unit). Inherent to the design; for now the retired prefix spelling
+  still builds such a type, and its migration reports without offering the rewrite, since
+  no postfix text means the same thing. **G08 G26**
 - **Parked gaps**, none ruled: `&&`/`||`; comparison chaining (parses, then type-errors, where
   non-associativity would be clearer); loop labels; compound assignment;
   assignment-as-expression; record rest; match-arm record patterns; a line-continuation

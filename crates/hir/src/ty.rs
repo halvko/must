@@ -1192,8 +1192,6 @@ pub(crate) fn lower_region_ref(
 /// Lower a syntactic type annotation under a generic binder's
 /// [`ParamScope`] (empty outside generic bodies — the binder shadows
 /// file-level type items and builtins, so params are consulted first).
-/// References are transparent for now (`&'static str` and `str` are the
-/// same type to inference).
 pub(crate) fn lower_type_ref_in(
     db: &dyn Db,
     file: SourceFile,
@@ -1216,12 +1214,6 @@ pub(crate) fn lower_type_ref_in(
                 .unwrap_or_else(|| Ty::Infer(table.new_key(TyVarValue::Unknown)));
 
             Ty::fn_type(params, ret)
-        }
-        TypeRef::Ref(type_ref) => {
-            // References are parse-and-reserved (validation rejects them);
-            // lowering stays transparent so the pointee's checking still
-            // works on the reserved spelling.
-            lower_type_ref_in(db, file, type_ref, table, scope)
         }
         TypeRef::RawPtr { mutable, inner } => {
             Ty::raw_ptr(*mutable, lower_type_ref_in(db, file, inner, table, scope))
