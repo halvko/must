@@ -628,6 +628,13 @@ impl Builtin {
 /// ever collide with it, and an [`ItemLoc`] carrying it round-trips through
 /// interning like any other (its item-tree queries answer the builtin
 /// shape; its *source* queries answer the empty case).
+///
+/// TWO kinds of compiler-provided declaration share this reserved namespace,
+/// keyed only by name: the ENUMS ([`synthetic_decls`]) and the generic
+/// builtin FUNCTIONS, whose schemes are keyed the same way
+/// (`infer::builtin_scheme`). A collision is unconstructible today —
+/// builtins are `snake_case` names and the enums are `CamelCase` ones — but
+/// it is a naming convention holding it up, not a type.
 pub const BUILTIN_DISAMBIGUATOR: u32 = u32::MAX;
 
 /// The result-shaped return of `alloc_array` (and the library convention
@@ -698,71 +705,97 @@ pub struct SyntheticDecl {
     /// Its type parameters ([`ALLOC_RESULT_NAME`] has one,
     /// [`READ_LINE_RESULT_NAME`] none).
     pub generics: Vec<GenericParamData>,
-    /// Its variants, as syntax-shaped data — the declaration is stated
-    /// here and nowhere else, so nothing downstream needs a special case.
+    /// Its variants, IN SOURCE ORDER, each with its POSITIONAL payload — a
+    /// variant's INDEX is its identity at the type, value and runtime-tag
+    /// level, so nothing here is sorted and no reader may re-derive the
+    /// order. The declaration is stated here and nowhere else, so nothing
+    /// downstream needs a special case.
     pub variants: Vec<(String, Vec<TypeRef>)>,
 }
 
-/// Every compiler-provided declaration, stated once. The four sites that
+impl SyntheticDecl {
+    /// The INDEX and payload shape of this declaration's variant `name` —
+    /// the one place a variant's runtime tag comes from.
+    ///
+    /// The interpreter's `builtin_variant` needs both to build a tagged
+    /// value (this row's order IS the tag `SwitchVariant` dispatches on),
+    /// and reading them off the row is what keeps a reordered table from
+    /// silently misrouting values: the row moves, the tag moves with it.
+    pub fn variant(&self, name: &str) -> Option<(u32, &[TypeRef])> {
+        self.variants
+            .iter()
+            .position(|(variant, _)| variant == name)
+            .map(|index| (index as u32, self.variants[index].1.as_slice()))
+    }
+}
+
+/// Every compiler-provided declaration, stated once. The FIVE sites that
 /// must know about them — [`type_scope`], [`file_scope`],
-/// [`crate::item_data`] and [`crate::type_decl`] — each handle "a synthetic
-/// declaration", so another one is a row here rather than another special
-/// case in each of them.
+/// [`crate::item_data`], [`crate::type_decl`] and the interpreter's
+/// `builtin_variant` (the first cross-crate reader of a row's variant
+/// order) — each handle "a synthetic declaration", so another one is a row
+/// here rather than another special case in each of them.
+///
+/// THE PRELUDE MUST CANNOT WRITE YET. These are ordinary Must
+/// declarations in every respect except where they come from — nothing here
+/// is a compiler concept, it is source the language has no place to put.
+/// When modules and cross-file resolution land, the prelude becomes a Must
+/// file and this table DELETES ITSELF; every concept invented here has to be
+/// unwound then, so the table stays deliberately concept-poor (a name, a
+/// binder, variants — the item tree's own types, no mirror of them).
+///
+/// SHADOWABLE, and KIND-BLIND about it: a file that declares the name as a
+/// TYPE sees its own everywhere (the `print` precedent). A file that
+/// declares it as a VALUE (`static NextChar = 'x';`) takes the name just as
+/// completely — both registrations ask only whether the name is declared, so
+/// the builtin type is simply not there and an annotation naming it is an
+/// ordinary "`NextChar` is not a type". Pinned by
+/// `a_value_item_taking_a_builtin_enum_name_takes_the_type_with_it`.
 pub fn synthetic_decls() -> &'static [SyntheticDecl] {
     static DECLS: std::sync::LazyLock<Vec<SyntheticDecl>> = std::sync::LazyLock::new(|| {
         vec![
+            // `AllocResult::<T> = enum { Ok(T.&raw mut), Err }` — the one
+            // generic row. `AllocResult::<T>` only ever holds a POINTER to a
+            // `T` (`Ok(T.&raw mut)`), never a `T`, so `T` can be linear
+            // without ever being able to lose one: the default `forget`
+            // bound would refuse `alloc_array::<String>` for nothing.
             SyntheticDecl {
                 name: ALLOC_RESULT_NAME,
-                generics: vec![GenericParamData {
-                    name: "T".to_owned(),
-                    kind: GenericParamKind::Type,
-                    bounds: Vec::new(),
-                    outlives: Vec::new(),
-                    // `AllocResult::<T>` only ever holds a POINTER to a
-                    // `T` (`Ok(T.&raw mut)`), never a `T`, so it can carry
-                    // a linear element type without ever being able to
-                    // lose one. The default `forget` bound would refuse
-                    // `alloc_array::<String>` for nothing.
-                    without_forget: true,
-                }],
+                generics: vec![type_param_without_forget("T")],
                 variants: vec![
-                    (
-                        "Ok".to_owned(),
-                        vec![TypeRef::RawPtr {
-                            mutable: true,
-                            inner: Box::new(TypeRef::Path("T".to_owned())),
-                        }],
-                    ),
+                    ("Ok".to_owned(), vec![raw_ptr_mut("T")]),
                     ("Err".to_owned(), Vec::new()),
                 ],
             },
+            // `ReadLineResult = enum { Line(str), End }` — non-generic: a
+            // line is always `str`, so there is no `T` to carry.
             SyntheticDecl {
                 name: READ_LINE_RESULT_NAME,
                 generics: Vec::new(),
                 variants: vec![
-                    ("Line".to_owned(), vec![TypeRef::Path("str".to_owned())]),
+                    ("Line".to_owned(), vec![path("str")]),
                     ("End".to_owned(), Vec::new()),
                 ],
             },
+            // `NextChar = enum { Char(char, usize), End }` — the second
+            // payload is the byte index of the next boundary: the value
+            // threaded into the following call.
             SyntheticDecl {
                 name: NEXT_CHAR_NAME,
                 generics: Vec::new(),
                 variants: vec![
-                    (
-                        "Char".to_owned(),
-                        vec![
-                            TypeRef::Path("char".to_owned()),
-                            TypeRef::Path("usize".to_owned()),
-                        ],
-                    ),
+                    ("Char".to_owned(), vec![path("char"), path("usize")]),
                     ("End".to_owned(), Vec::new()),
                 ],
             },
+            // `Utf8Result = enum { Ok(str), Err }` — `Ok` carries the
+            // blessed view; `Err` carries nothing, matching
+            // `AllocResult::Err`.
             SyntheticDecl {
                 name: UTF8_RESULT_NAME,
                 generics: Vec::new(),
                 variants: vec![
-                    ("Ok".to_owned(), vec![TypeRef::Path("str".to_owned())]),
+                    ("Ok".to_owned(), vec![path("str")]),
                     ("Err".to_owned(), Vec::new()),
                 ],
             },
@@ -771,8 +804,49 @@ pub fn synthetic_decls() -> &'static [SyntheticDecl] {
     &DECLS
 }
 
+/// `T` — a named type, the payload spelling every row but `AllocResult`'s
+/// `Ok` uses.
+fn path(name: &str) -> TypeRef {
+    TypeRef::Path(name.to_owned())
+}
+
+/// `T.&raw mut` — a mutable raw pointer to a named type.
+fn raw_ptr_mut(name: &str) -> TypeRef {
+    TypeRef::RawPtr {
+        mutable: true,
+        inner: Box::new(path(name)),
+    }
+}
+
+/// A rigid TYPE parameter that OPTS OUT of the default `forget` bound —
+/// `T without forget`. The only binder shape any row needs so far; an
+/// ordinary parameter (or a const or region one) would be its own helper
+/// beside this, spelled where the reader is already looking.
+fn type_param_without_forget(name: &str) -> GenericParamData {
+    GenericParamData {
+        name: name.to_owned(),
+        kind: GenericParamKind::Type,
+        bounds: Vec::new(),
+        outlives: Vec::new(),
+        without_forget: true,
+    }
+}
+
+/// The compiler-provided declaration named `name`, if there is one.
+pub fn synthetic_decl_named(name: &str) -> Option<&'static SyntheticDecl> {
+    synthetic_decls().iter().find(|decl| decl.name == name)
+}
+
 /// The [`ItemLoc`] of `file`'s copy of the synthetic declaration `name`.
+///
+/// `name` must BE a row's: a reserved-disambiguator location for a name no
+/// table row declares is a stale id nothing will ever answer for — a typo,
+/// not a case to handle.
 pub fn synthetic_decl_loc(file: SourceFile, name: &str) -> ItemLoc {
+    debug_assert!(
+        synthetic_decl_named(name).is_some(),
+        "`{name}` is not a compiler-provided declaration (see `synthetic_decls`)"
+    );
     ItemLoc::top_level(file, std::sync::Arc::from(name), BUILTIN_DISAMBIGUATOR)
 }
 

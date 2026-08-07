@@ -2417,19 +2417,16 @@ impl<'db, M: Mode> Machine<'db, M> {
                                 text.pop();
                             }
                         }
-                        Value::Variant {
-                            decl: hir::read_line_result_loc(loc.file),
-                            index: 0,
-                            name: "Line".to_owned(),
-                            payload: vec![Value::Str(text)],
-                        }
+                        builtin_variant(
+                            loc.file,
+                            hir::READ_LINE_RESULT_NAME,
+                            "Line",
+                            vec![Value::Str(text)],
+                        )
                     }
-                    None => Value::Variant {
-                        decl: hir::read_line_result_loc(loc.file),
-                        index: 1,
-                        name: "End".to_owned(),
-                        payload: Vec::new(),
-                    },
+                    None => {
+                        builtin_variant(loc.file, hir::READ_LINE_RESULT_NAME, "End", Vec::new())
+                    }
                 })
             }
             Builtin::AllocArray => {
@@ -2549,12 +2546,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             return Err(self.ill_typed("a `usize` argument", index, loc, origin));
         };
         let index = usize::try_from(index.to_i128().max(0)).unwrap_or(usize::MAX);
-        let end = Value::Variant {
-            decl: hir::next_char_loc(loc.file),
-            index: 1,
-            name: "End".to_owned(),
-            payload: Vec::new(),
-        };
+        let end = builtin_variant(loc.file, hir::NEXT_CHAR_NAME, "End", Vec::new());
         if index >= text.len() {
             return Ok(end);
         }
@@ -2585,12 +2577,12 @@ impl<'db, M: Mode> Machine<'db, M> {
                 Some((loc.clone(), origin)),
             ));
         };
-        Ok(Value::Variant {
-            decl: hir::next_char_loc(loc.file),
-            index: 0,
-            name: "Char".to_owned(),
-            payload: vec![Value::Char(c), Value::Int(next)],
-        })
+        Ok(builtin_variant(
+            loc.file,
+            hir::NEXT_CHAR_NAME,
+            "Char",
+            vec![Value::Char(c), Value::Int(next)],
+        ))
     }
 
     /// `alloc_array::<T>(n)`: one fresh heap allocation of `n`
@@ -2646,16 +2638,16 @@ impl<'db, M: Mode> Machine<'db, M> {
             origin: Some((loc.clone(), origin)),
         });
         // The head pointer: element 0 of the allocation.
-        Ok(Value::Variant {
-            decl: hir::alloc_result_loc(loc.file),
-            index: 0,
-            name: "Ok".to_owned(),
-            payload: vec![Value::Ptr {
+        Ok(builtin_variant(
+            loc.file,
+            hir::ALLOC_RESULT_NAME,
+            "Ok",
+            vec![Value::Ptr {
                 alloc,
                 path: vec![PathElem::Index(0)],
                 tag: Provenance::default(),
             }],
-        })
+        ))
     }
 
     /// `dealloc_array::<T>(p, n)`: exact-match free (ruled A03/A04). Every
@@ -2971,12 +2963,12 @@ impl<'db, M: Mode> Machine<'db, M> {
         match String::from_utf8(bytes) {
             Ok(text) => Ok(self.blessed(builtin, text, loc)),
             Err(err) => match builtin {
-                Builtin::StrFromUtf8 => Ok(Value::Variant {
-                    decl: hir::utf8_result_loc(loc.file),
-                    index: 1,
-                    name: "Err".to_owned(),
-                    payload: Vec::new(),
-                }),
+                Builtin::StrFromUtf8 => Ok(builtin_variant(
+                    loc.file,
+                    hir::UTF8_RESULT_NAME,
+                    "Err",
+                    Vec::new(),
+                )),
                 _ => Err(EvalError {
                     kind: EvalErrorKind::UndefinedBehavior,
                     message: format!(
@@ -2996,12 +2988,12 @@ impl<'db, M: Mode> Machine<'db, M> {
     /// one hands back the `str` itself.
     fn blessed(&self, builtin: Builtin, text: String, loc: &ItemLoc) -> Value {
         match builtin {
-            Builtin::StrFromUtf8 => Value::Variant {
-                decl: hir::utf8_result_loc(loc.file),
-                index: 0,
-                name: "Ok".to_owned(),
-                payload: vec![Value::Str(text)],
-            },
+            Builtin::StrFromUtf8 => builtin_variant(
+                loc.file,
+                hir::UTF8_RESULT_NAME,
+                "Ok",
+                vec![Value::Str(text)],
+            ),
             _ => Value::Str(text),
         }
     }
@@ -3248,6 +3240,43 @@ impl<'db, M: Mode> Machine<'db, M> {
             format!("expected {expected}, found `{}`", found.display()),
             Some((loc.clone(), origin)),
         )
+    }
+}
+
+/// A tagged value of one of the compiler-provided enums — the interpreter's
+/// ONE way to build one (`hir::synthetic_decls` is the declaration).
+///
+/// The tag comes off the ROW: a variant's index is its position in the
+/// table, the same order `type_decl` hands the rest of the compiler, so a
+/// table edit that reorders variants moves the runtime tag with it. Spelling
+/// `index: 1, name: "End"` at the call instead would be a second copy of the
+/// order — and `TerminatorKind::SwitchVariant` dispatches on the INDEX
+/// alone, so the two disagreeing would misroute values with nothing to
+/// notice it.
+///
+/// Panics if `enum_name` names no row or `variant` no variant of it: both
+/// are typos in this file, not states a program can reach.
+fn builtin_variant(
+    file: base_db::SourceFile,
+    enum_name: &str,
+    variant: &str,
+    payload: Vec<Value>,
+) -> Value {
+    let row = hir::synthetic_decl_named(enum_name)
+        .unwrap_or_else(|| panic!("`{enum_name}` is not a compiler-provided enum"));
+    let (index, payload_types) = row
+        .variant(variant)
+        .unwrap_or_else(|| panic!("`{enum_name}` has no variant `{variant}`"));
+    debug_assert_eq!(
+        payload.len(),
+        payload_types.len(),
+        "`{enum_name}::{variant}` was built with the wrong number of payload slots"
+    );
+    Value::Variant {
+        decl: hir::synthetic_decl_loc(file, enum_name),
+        index,
+        name: variant.to_owned(),
+        payload,
     }
 }
 

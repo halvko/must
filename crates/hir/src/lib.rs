@@ -41,7 +41,8 @@ pub use scopes::{
     ALLOC_RESULT_NAME, BUILTIN_DISAMBIGUATOR, Builtin, ConstLegality, Duplicate, ExprScopes,
     FileScope, NEXT_CHAR_NAME, READ_LINE_RESULT_NAME, Resolution, SyntheticDecl, TypeScope,
     UTF8_RESULT_NAME, alloc_result_loc, expr_scopes, file_scope, next_char_loc,
-    read_line_result_loc, resolutions, synthetic_decls, type_scope, utf8_result_loc,
+    read_line_result_loc, resolutions, synthetic_decl_loc, synthetic_decl_named, synthetic_decls,
+    type_scope, utf8_result_loc,
 };
 pub use traits::{BoundSlot, bound_slots, dict_param_count};
 pub use ty::{
@@ -211,14 +212,16 @@ pub fn item_index(db: &dyn Db, item: ItemId<'_>) -> Option<usize> {
 /// item-tree-level queries ([`item_data`], [`type_decl`]) answer the builtin
 /// shape; source-level queries ([`item_source`], [`item_index`]) answer the
 /// empty case, exactly like a stale id.
+///
+/// The name is enough because the reserved disambiguator is: no source item
+/// can carry it ([`BUILTIN_DISAMBIGUATOR`]), and a file that declares the
+/// name itself never gets the builtin into its scope in the first place —
+/// that is where shadowing happens.
 pub fn synthetic_decl(db: &dyn Db, item: ItemId<'_>) -> Option<&'static scopes::SyntheticDecl> {
     if item.disambiguator(db) != BUILTIN_DISAMBIGUATOR {
         return None;
     }
-    let name = item.name(db);
-    scopes::synthetic_decls()
-        .iter()
-        .find(|decl| decl.name == name)
+    scopes::synthetic_decl_named(item.name(db))
 }
 
 /// Whether `item` is a HOST IMPORT — `static name = extern fn(...) -> T;`.

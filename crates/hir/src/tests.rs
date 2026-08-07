@@ -7109,6 +7109,108 @@ static f = fn () -> AllocResult {
 }
 
 #[test]
+fn every_compiler_provided_enum_resolves_with_its_variants() {
+    // The end-to-end half of the table's contract: each name resolves in
+    // ANNOTATION position without the file declaring it, and each carries
+    // exactly its own variants with exactly their payloads — a dropped row
+    // makes the annotation unresolved, a wrong variant list makes the
+    // exhaustive `match` complain. Named enums on purpose, so a fixture
+    // reads like the Must a user writes;
+    // `every_table_row_is_registered_and_declared` covers whatever ROWS the
+    // table happens to hold, and the per-enum shadowing tests pin the other
+    // half of the rule (a user declaration wins).
+    check_diagnostics(
+        r#"
+static f = fn (
+    a: AllocResult::<usize>,
+    b: ReadLineResult,
+    c: NextChar,
+    d: Utf8Result,
+) -> usize {
+    let w = match a { ::Ok(p) => unsafe { p.* }, ::Err => 0 };
+    let x = match b { ::Line(line) => line.len(), ::End => 0 };
+    let y = match c { ::Char(ch, next) => next, ::End => 0 };
+    let z = match d { ::Ok(text) => text.len(), ::Err => 0 };
+    w + x + y + z
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn every_table_row_is_registered_and_declared() {
+    // The addition half of the table's contract, at the Rust level so that
+    // it covers ROWS and not four hand-named enums: whatever
+    // `synthetic_decls` holds, every row is in both scopes of an ordinary
+    // file under its own reserved location, `type_decl` hands back exactly
+    // the row's variants, and `item_data` hands back exactly its binder. A
+    // fifth row that nothing registered fails here without anyone having to
+    // think to write a fixture for it.
+    let db = RootDatabase::default();
+    let file = SourceFile::new(
+        &db,
+        "test.must".to_owned(),
+        "static f = fn () {};".to_owned(),
+    );
+    let table = crate::scopes::synthetic_decls();
+    assert!(!table.is_empty(), "the table is what this test is about");
+    for decl in table.iter() {
+        let loc = crate::synthetic_decl_loc(file, decl.name);
+        assert_eq!(
+            crate::type_scope(&db, file).resolve(decl.name),
+            Some(crate::Resolution::TypeItem(loc.clone())),
+            "`{}` is missing from the type scope",
+            decl.name
+        );
+        assert_eq!(
+            crate::file_scope(&db, file).resolve(decl.name),
+            Some(crate::Resolution::TypeItem(loc.clone())),
+            "`{}` is missing from the file scope",
+            decl.name
+        );
+        let item = loc.to_id(&db);
+        assert_eq!(
+            crate::type_decl(&db, item),
+            &Some(crate::TypeDeclData::Enum {
+                variants: decl.variants.clone(),
+            }),
+            "`{}`'s declared shape is not its row's",
+            decl.name
+        );
+        let data = crate::item_data(&db, item)
+            .as_ref()
+            .expect("a compiler-provided enum has item data");
+        assert_eq!(data.generics, decl.generics, "`{}`'s binder", decl.name);
+        assert_eq!(data.kind, crate::ItemKind::Type, "`{}`'s kind", decl.name);
+    }
+}
+
+#[test]
+fn a_value_item_taking_a_builtin_enum_name_takes_the_type_with_it() {
+    // The cross-kind edge of shadowing, pinned as the honest behavior it
+    // is: both registrations ask only whether the NAME is declared, never
+    // by what KIND of item, so a `static NextChar` takes the name out of
+    // the type scope as thoroughly as a `type NextChar` would — and a value
+    // item declares no type, so the annotation then resolves to nothing at
+    // all — reported as the ordinary "not a type", exactly as it would be
+    // for a user's own `static NextChar` shadowing a user's own `type`. The
+    // `print` precedent read consistently (a file that spells the name owns
+    // it); the alternative, letting a value item and a compiler-provided
+    // type share a name, is a rule about KINDS that nothing else in the
+    // language has yet.
+    check_diagnostics(
+        r#"
+static NextChar = 'x';
+static f = fn (c: NextChar) -> usize { 1 };
+"#,
+        expect![[r#"
+            42..50: `NextChar` is not a type
+        "#]],
+    );
+}
+
+#[test]
 fn read_line_result_can_be_matched_in_the_documented_idiom() {
     // The exact idiom `read_line`'s doc comment shows: `loop { match
     // read_line() { ::Line(s) => ..., ::End => break ... } }` typechecks
