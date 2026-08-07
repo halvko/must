@@ -9248,6 +9248,118 @@ fn retired_prefix_borrow_type_does_not_chase_a_retired_lifetime() {
 }
 
 #[test]
+fn retired_lifetime_in_return_type_desyncs_the_rest_of_the_item() {
+    // Param position recovers (see the sibling test above): `param_list`'s
+    // loop consumes the stranded `'`/name/referent as bogus extra params
+    // and re-syncs at the closing `)`. Return-type position has no such
+    // loop — `ret_type` calls `type_` once — so when the recursive call
+    // bails on the CHAR without consuming it, `fn_literal` falls into its
+    // "superset-parse the body as an expression" branch, swallowing the
+    // lone `'` as a garbage one-token body. The `static` item closes right
+    // there, before its trailing `;` — that error is suppressed in
+    // `Builder::error`, because the lexer's error on the `'` already
+    // intersects the token it would anchor to. Everything after is then
+    // read by `source_file`'s item loop, token by token, as "expected an
+    // item" until the next item keyword — here, end of input.
+    check_errors(
+        "static f = fn(s: str) -> &'a str { s };",
+        expect![[r#"
+            25..26: borrow types are spelled postfix: `T.&` / `T.&mut`
+            26..27: unterminated character literal: expected a closing `'`
+            27..28: expected an item (`static`, `const`, `type` or `trait`)
+            29..32: expected an item (`static`, `const`, `type` or `trait`)
+            33..34: expected an item (`static`, `const`, `type` or `trait`)
+            35..36: expected an item (`static`, `const`, `type` or `trait`)
+            37..38: expected an item (`static`, `const`, `type` or `trait`)
+            38..39: expected an item (`static`, `const`, `type` or `trait`)
+        "#]],
+    );
+    // Not lifetime-specific: any type token `type_` refuses desyncs the
+    // item the same way — only the leading errors differ. `)` (unlike the
+    // CHAR above) is in `at_expr_recovery`'s gate set, so `fn_literal`
+    // takes its "expected `{`" branch instead of superset-parsing a body;
+    // no body is added, so the item's own "expected `;`" is left
+    // un-suppressed (nothing else has flagged the `->` it anchors to), and
+    // `type_`'s "expected a type" survives instead of being deduped
+    // against a same-range lexer error the way the CHAR case's was.
+    check_errors(
+        "static f = fn(s: str) -> ) str { s };",
+        expect![[r#"
+            23..24: expected `;`
+            25..26: expected a type
+            27..30: expected an item (`static`, `const`, `type` or `trait`)
+            31..32: expected an item (`static`, `const`, `type` or `trait`)
+            33..34: expected an item (`static`, `const`, `type` or `trait`)
+            35..36: expected an item (`static`, `const`, `type` or `trait`)
+            36..37: expected an item (`static`, `const`, `type` or `trait`)
+        "#]],
+    );
+}
+
+#[test]
+fn retired_lifetime_in_struct_field_desyncs_the_rest_of_the_item() {
+    // Struct-field position's version of the case above, via a different
+    // mechanism: `x`'s name and `:` parse fine, but the field's type hits
+    // the same "AMP consumed, referent bails on the CHAR" shape, leaving
+    // `record_type`'s loop stuck at the CHAR. It reruns
+    // `record_type_field`, which this time takes its no-name branch
+    // (`p.at(IDENT)` is false) and also consumes nothing, so the loop's
+    // zero-progress check breaks it. The `RECORD_TYPE` closes without its
+    // own `}`, the enclosing `static` item closes without `=`/`;`, and
+    // `source_file`'s item loop reads everything from there on, token by
+    // token, as "expected an item" until the next item keyword — here, end
+    // of input (a following item resyncs normally, same as any other bad
+    // item — this isn't special to the cascade).
+    //
+    // This is a genuine type-position gap, not just ordinary item-boundary
+    // resync: `type_core`'s catch-all never consumes a token, so
+    // `record_type_field` can't see a type here no matter what follows. A
+    // boundary-gated catch-all there — bump one token when `type_` refuses
+    // and the parser isn't sitting at an `at_expr_recovery` boundary,
+    // mirroring `primary_expr`'s own gate — would let this snippet's item
+    // resync at its real `}`/`;` instead of cascading; not built here.
+    check_errors(
+        "static p: struct { x: &'a str } = 0;",
+        expect![[r#"
+            22..23: borrow types are spelled postfix: `T.&` / `T.&mut`
+            23..24: unterminated character literal: expected a closing `'`
+            24..25: expected an item (`static`, `const`, `type` or `trait`)
+            26..29: expected an item (`static`, `const`, `type` or `trait`)
+            30..31: expected an item (`static`, `const`, `type` or `trait`)
+            32..33: expected an item (`static`, `const`, `type` or `trait`)
+            34..35: expected an item (`static`, `const`, `type` or `trait`)
+            35..36: expected an item (`static`, `const`, `type` or `trait`)
+        "#]],
+    );
+    // The tail cascade is identical, and both snippets actually run the
+    // same two `record_type_field` passes: a with-name pass on `x` whose
+    // type fails, then a zero-progress no-name pass that breaks the loop.
+    // The leading errors differ only in where that pile of same-range
+    // errors lands and which of them survives. Here nothing is consumed
+    // past `:`, so the pile sits at 22..23 (the `)`) where `type_`'s
+    // "expected a type" is first in and wins `parse`'s range-equal dedup,
+    // and the missing `}` anchors on the untouched `:` at 20..21 and
+    // survives. With the retired lifetime the `&` is consumed as a
+    // `BORROW_TYPE`, so the pile lands on the CHAR the lexer already
+    // flagged at 23..24 — the lexer error wins that dedup instead — and
+    // the missing `}` now anchors on the `&` (22..23), which touches that
+    // pile, so `Builder::error`'s after-prev suppression drops it before
+    // it is ever pushed.
+    check_errors(
+        "static p: struct { x: ) str } = 0;",
+        expect![[r#"
+            20..21: expected `}`
+            22..23: expected a type
+            24..27: expected an item (`static`, `const`, `type` or `trait`)
+            28..29: expected an item (`static`, `const`, `type` or `trait`)
+            30..31: expected an item (`static`, `const`, `type` or `trait`)
+            32..33: expected an item (`static`, `const`, `type` or `trait`)
+            33..34: expected an item (`static`, `const`, `type` or `trait`)
+        "#]],
+    );
+}
+
+#[test]
 fn bare_amp_between_expressions_is_not_a_binary_operator() {
     // `&` has never bound as a binary operator (it is absent from
     // `expr_bp`'s precedence table — this sweep doesn't add it there
