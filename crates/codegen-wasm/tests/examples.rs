@@ -136,6 +136,24 @@ const UNSUPPORTED: &[(&str, &str, &str)] = &[
         "main()",
         "the `alloc_array` builtin is not supported by the wasm backend yet",
     ),
+    // This program also has a safe borrow (`let m = r.&mut;`) and, inside
+    // `reader_new`/`to_owned`, a heap allocation — each refused by name on
+    // its own program elsewhere (`borrows.must`/`reborrow.must`/
+    // `match_projection.must`; `heap.must`/`stdin_lib.must`), so neither
+    // can quietly start compiling behind this one. Neither is what fires
+    // here: `register` reports the first refused CALL SITE it finds in a
+    // function's own body before computing any local's layout (where the
+    // borrow would separately refuse) or descending into a callee (where
+    // `alloc_array` sits), and `s.len()` is a call site directly in
+    // `main`'s own body. Linearity itself costs this backend nothing (see
+    // `structure.rs`'s `a_linear_type_changes_nothing_about_the_emitted_module`):
+    // the refusal that fires here is about a builtin, and none of the
+    // three is the capability.
+    (
+        "string_lib.must",
+        "main()",
+        "the `len` builtin is not supported by the wasm backend yet",
+    ),
     // Intentionally dirty: `errors.must` exists to show diagnostics, and
     // its erroneous items have no compilable meaning.
     (

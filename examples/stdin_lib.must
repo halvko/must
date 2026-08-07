@@ -275,5 +275,6 @@ static digit = fn (d: usize) -> str {
 // What this file deliberately does NOT do: hand out an OWNED line. Every
 // view dies at the next `next_line`, and copying one out (`line.*`) works
 // today only because `str` is an owned primitive — the day a `str` can BE a
-// view into a buffer, that copy needs a real allocation behind it. That is
-// a later `String` feature, not this one.
+// view into a buffer, that copy needs a real allocation behind it.
+// `examples/string_lib.must` copies a line out with exactly that shape,
+// `to_owned`, and shows what it takes to make the copy survive the fork.

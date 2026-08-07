@@ -57,7 +57,8 @@
   signature is as fixed as any other (T13: `fn() -> T` is invariant, so `!` in return position
   never widens to something else on a later use's say-so).
 - **T15** `str` is a primitive; `Vec`, `String` and `Slice` are library types, and slices
-  are not primitive. Interpolation is a library feature.
+  are not primitive. Interpolation is a library feature. Proof: a `String` written in Must,
+  where the representation, allocation, copy, read-back and free are all ordinary code.
 - **T16** `char` is a Unicode scalar value: its own primitive, never an integer alias,
   holding a codepoint that is not a surrogate. A character literal's type is definite, which
   lets a `'x'` pattern blame itself rather than re-type the scrutinee. `char` has equality

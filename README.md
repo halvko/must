@@ -96,9 +96,11 @@ top of them (`heap.must`), safe borrows (`borrows.must`), members that
 borrow `Self` (`reborrow.must`), matching through a borrow
 (`match_projection.must`), reading standard input (`stdin.must`) and the
 same thing written as a library over a declared host import
-(`stdin_lib.must`), and walking text character by character
-(`chars.must`) — plus `errors.must`, an intentionally broken file pairing
-each diagnostic with the exact message `must-lsp check` prints for it.
+(`stdin_lib.must`), an owned, heap-backed string built the same way, over
+the `forget` capability (`string_lib.must`), and walking text character by
+character (`chars.must`) — plus `errors.must`, an intentionally broken file
+pairing each diagnostic with the exact message `must-lsp check` prints for
+it.
 
 Programs run even when they don't typecheck: execution proceeds until it
 reaches something broken, then crashes with the same message the editor

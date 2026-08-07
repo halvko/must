@@ -13040,6 +13040,10 @@ static take = fn(b: Box::<Res>) -> () {
 /// type and not as a compiler special case. Nothing in `hir` knows the name;
 /// the whole of what makes it work is the clause and the members below, and
 /// the refusals that follow are the ones a user of it would meet.
+///
+/// This mirrors `examples/string_lib.must`'s declaration exactly, but is
+/// pinned here rather than shared with it: that example must check clean,
+/// so the refusal cases below have nowhere to live except a copy.
 const STRING_PRELUDE: &str = r#"
 type String = struct {
     ptr: u8.&raw mut,

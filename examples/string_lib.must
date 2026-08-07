@@ -1,0 +1,325 @@
+// `String` as a LIBRARY — an owned, allocation-backed string whose disposal
+// is enforced by the type system rather than by a destructor.
+//
+// Run: printf 'alpha\r\n\nbeta\ngamma' | must-lsp run examples/string_lib.must
+//
+// The whole feature is one clause:
+//
+//     type String = struct { ... } without forget;
+//
+// `with` attaches things to a declaration; `without` takes one away. What it
+// takes away here is `forget` — the ability to let a value go out of scope
+// with nothing done about it. A `String` must therefore be CONSUMED, exactly
+// once, on every path, and the compiler refuses the program otherwise. There
+// is no `Drop` trait, no drop glue, and nothing emitted: `drop` below is an
+// ordinary method that takes `Self` by value, and the identical program with
+// the clause removed compiles to the same bytes.
+//
+// What the language provides, and what is written here:
+//
+//   * a language feature: the `forget` capability itself, `str_bytes` (the
+//     bless read backwards: a `str`'s bytes, into storage you own), `s.len()`,
+//     `str_from_utf8_unchecked` (the claim), and the heap builtins;
+//   * NOT a language feature, and written below: the {ptr, len, cap}
+//     representation, allocating for it, copying into it, reading it back,
+//     and freeing it.
+//
+// The demo is the thing a borrowed view cannot do. `stdin_lib.must`'s reader
+// hands out a `str.&` tied to its own buffer, and that view dies the moment
+// the reader moves on — which is correct, and which means the reader cannot
+// answer "which line was longest?". Copying one OUT with `to_owned` can, and
+// the copy outlives every refill after it.
+
+// ---- the type -----------------------------------------------------------
+
+type String = struct {
+    // The allocation. `cap == 0` means there is no allocation at all and
+    // this is the dangling pointer — the empty string owns nothing, and
+    // `alloc_array(0)` traps, so the empty case has to be real rather than
+    // a zero-sized allocation.
+    ptr: u8.&raw mut,
+    len: usize,
+    cap: usize,
+} without forget with {
+    impl Self {
+        // Read the owned bytes back. The bytes came from a `str`, so they
+        // are UTF-8 by provenance and the CLAIMED bless is the right one:
+        // `str_from_utf8` would re-answer a question nothing could have
+        // changed the answer to.
+        //
+        // The result is a `str`, not a `str.&::<@a>`, because a `str` is an
+        // owned primitive today — the bless MATERIALIZES. The region is
+        // still real and still declared: it bounds the BORROW `s` itself,
+        // `Self.&::<@a>`, so the signature is honest about what this method
+        // needs alive — it says nothing about the `str` the borrow reads
+        // out of `s`, which is a fresh, ordinary value the caller owns.
+        //
+        // What CATCHES the program that gets the shape right and the order
+        // wrong is dynamic, like every aliasing check today: consuming a
+        // value invalidates every borrow of it exactly as writing over it
+        // does, and a read through one afterwards is detected undefined
+        // behavior naming both sites. Static loan liveness is a later arc;
+        // the region is the discipline, the interpreter is the proof.
+        //
+        // When the str-view fork lands on a borrowed representation, this
+        // return type grows the region and the copy disappears; nothing
+        // else here changes.
+        as_str = fn::<@a>(s: Self.&::<@a>) -> str {
+            unsafe { str_from_utf8_unchecked(s.*.ptr, s.*.len) }
+        };
+
+        // The byte length, without going through the bless. Note that
+        // `s.*.len` reads ONE FIELD out of a borrow of a `String` — the
+        // whole value could not be read, because copying a value that must
+        // be consumed would make two obligations naming one allocation.
+        len = fn::<@a>(s: Self.&::<@a>) -> usize {
+            s.*.len
+        };
+
+        // The consuming method — and the bottom of the disposal chain.
+        //
+        // The destructuring `let` is what makes this possible without any
+        // compiler support: taking the value apart hands its obligation to
+        // its parts, and the parts are a pointer and two integers, which
+        // anyone may forget. `..` skips `len`; it would be REFUSED if it
+        // skipped a field that itself had to be consumed.
+        drop = fn(s: Self) -> () {
+            let String(struct { ptr, cap, .. }) = s;
+            // The empty string never allocated, so there is nothing to give
+            // back. Freeing a dangling pointer would be undefined behavior,
+            // and the interpreter would say so.
+            if cap > 0 {
+                unsafe { dealloc_array(ptr, cap); };
+            };
+        };
+    }
+};
+
+// The empty string: no allocation at all. It exists as its own function
+// because `alloc_array(0)` traps — a zero-byte allocation is not a thing to
+// ask the allocator for — so "owns nothing" has to be representable, and
+// `cap == 0` is how `drop` recognizes it.
+static empty_string = fn() -> String {
+    String(struct {
+        ptr = unsafe { dangling::<u8>() },
+        len = 0,
+        cap = 0,
+    })
+};
+
+// Copy a borrowed view into an owned string — `to_owned`'s shape, and the
+// only constructor this library needs.
+//
+// It takes a BORROW of a `str` rather than a `str`, and that is the whole
+// point: the caller keeps a view that is about to die, and hands back
+// something that will not. The result mentions no region at all, which is
+// what "owned" means.
+static to_owned = fn::<@a>(s: str.&::<@a>) -> String {
+    let text = s.*;
+    let n = text.len();
+    if n == 0 {
+        return empty_string();
+    };
+    let p = match alloc_array::<u8>(n) {
+        ::Ok(p) => p,
+        ::Err => panic("string_lib: out of memory"),
+    };
+    // The bless, backwards. That `p` addresses `n` writable bytes is this
+    // function's claim — it just allocated them — and that is exactly what
+    // the `unsafe` marker is for.
+    unsafe { str_bytes(text, p); };
+    String(struct { ptr = p, len = n, cap = n })
+};
+
+// ---- the reader (condensed from `stdin_lib.must` — the comments live
+// there; only the panic prefixes differ here) -----------------------------
+//
+// `Reader` stays forgettable here, same as it is there: its consuming
+// method is an ordinary `deinit`, not a `without forget` obligation like
+// `String`'s `drop`. Making the reader itself linear is a change to
+// `stdin_lib.must`, not to this file — this file is about `String`.
+
+static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;
+
+type Fill = enum {
+    More(u8.&raw mut),
+    End,
+    Failed,
+};
+
+static fill = fn(at: u8.&raw mut, room: usize) -> Fill {
+    if room == 0 {
+        return Fill::Failed;
+    };
+    let n = unsafe { read(at, room) };
+    if n < 0 {
+        Fill::Failed
+    } else if n == 0 {
+        Fill::End
+    } else {
+        Fill::More(unsafe { offset(at, n) })
+    }
+};
+
+type Option = enum::<T> { Some(T), None };
+
+type Reader = struct {
+    buf: u8.&raw mut,
+    cap: usize,
+    start: u8.&raw mut,
+    cur: u8.&raw mut,
+    end: u8.&raw mut,
+    len: usize,
+    eof: bool,
+    line: str,
+} with {
+    impl Self {
+        next_line = fn::<@b>(r: Self.&mut::<@b>) -> Option::<str.&::<@b>> {
+            loop {
+                if r.*.cur == r.*.end {
+                    if r.*.eof {
+                        if r.*.len == 0 {
+                            return ::None;
+                        };
+                        r.*.line = bless(r.*.start, r.*.len);
+                        r.*.len = 0;
+                        r.*.start = r.*.cur;
+                        return ::Some(r.*.line.&);
+                    };
+                    r.refill();
+                } else {
+                    let byte = unsafe { r.*.cur.* };
+                    r.*.cur = unsafe { add(r.*.cur, 1) };
+                    if byte == 10 {
+                        let width = if r.*.len == 0 {
+                            0
+                        } else if unsafe { add(r.*.start, r.*.len - 1).* } == 13 {
+                            r.*.len - 1
+                        } else {
+                            r.*.len
+                        };
+                        r.*.line = bless(r.*.start, width);
+                        r.*.len = 0;
+                        r.*.start = r.*.cur;
+                        return ::Some(r.*.line.&);
+                    };
+                    r.*.len = r.*.len + 1;
+                };
+            }
+        };
+
+        refill = fn::<@b>(r: Self.&mut::<@b>) -> () {
+            let len = r.*.len;
+            if len == r.*.cap {
+                panic("string_lib: no line boundary in a full buffer");
+            };
+            unsafe { copy(r.*.start, r.*.buf, len); };
+            r.*.start = r.*.buf;
+            r.*.cur = unsafe { add(r.*.buf, len) };
+            match fill(r.*.cur, r.*.cap - len) {
+                ::More(end) => { r.*.end = end; },
+                ::End => {
+                    r.*.eof = true;
+                    r.*.end = r.*.cur;
+                },
+                ::Failed => panic("string_lib: reading standard input failed"),
+            };
+        };
+
+        deinit = fn(r: Self) -> () {
+            unsafe { dealloc_array(r.buf, r.cap); };
+        };
+    }
+};
+
+static bless = fn(at: u8.&raw mut, len: usize) -> str {
+    match unsafe { str_from_utf8(at, len) } {
+        ::Ok(s) => s,
+        ::Err => panic("string_lib: standard input is not valid UTF-8"),
+    }
+};
+
+static reader_new = fn(cap: usize) -> Reader {
+    let buf = match alloc_array::<u8>(cap) {
+        ::Ok(p) => p,
+        ::Err => panic("string_lib: out of memory"),
+    };
+    Reader(struct {
+        buf,
+        cap,
+        start = buf,
+        cur = buf,
+        end = buf,
+        len = 0,
+        eof = false,
+        line = "",
+    })
+};
+
+// ---- the demo -----------------------------------------------------------
+
+// "Which line was longest?" — a question a borrowed view cannot answer, and
+// the reason `String` exists.
+//
+// `longest` is a `String` that outlives every refill after the line it came
+// from. Watch what the checker makes the loop do with it: the old value is
+// dropped BEFORE the new one is assigned, because writing over a live
+// `String` would lose it, and the loop is only accepted because it leaves
+// `longest` in the same state it found it in.
+static main = fn () -> () {
+    // 16 bytes, as in `stdin_lib.must`: small enough that the input crosses
+    // several refills, so a view handed out early is long dead by the end.
+    let mut r = reader_new(16);
+    let m = r.&mut;
+    let mut lines = 0;
+    let mut longest = empty_string();
+    loop {
+        match m.next_line() {
+            ::Some(line) => {
+                lines = lines + 1;
+                if line.*.len() > longest.&.len() {
+                    // The order is forced: the old string has to go
+                    // somewhere before the new one can take its place.
+                    longest.drop();
+                    longest = to_owned(line);
+                };
+            },
+            ::None => break,
+        };
+    };
+    print("lines: ");
+    print_usize(lines);
+    print(", longest: \"");
+    print(longest.&.as_str());
+    print("\" (");
+    print_usize(longest.&.len());
+    print(" bytes)\n");
+    // The one path out of `main`, and it consumes both owners.
+    longest.drop();
+    r.deinit();
+};
+
+static print_usize = fn (n: usize) -> () {
+    if n < 10 {
+        print(digit(n));
+    } else {
+        print_usize(n / 10);
+        print(digit(n - (n / 10) * 10));
+    };
+};
+
+static digit = fn (d: usize) -> str {
+    if d == 0 { "0" } else if d == 1 { "1" } else if d == 2 { "2" }
+    else if d == 3 { "3" } else if d == 4 { "4" } else if d == 5 { "5" }
+    else if d == 6 { "6" } else if d == 7 { "7" } else if d == 8 { "8" }
+    else { "9" }
+};
+
+// What this file deliberately does NOT do: grow. There is no `push`, no
+// capacity doubling, and no concatenation — `to_owned` allocates exactly
+// what it needs and never touches the allocation again. Growth is an
+// allocator question (realloc, or allocate-copy-free) and an amortization
+// question, and neither is what this file is about: the claim being made
+// here is that an owned, heap-backed string can be a LIBRARY type whose
+// disposal the compiler enforces, and the claim is settled by `drop` being
+// six lines of ordinary Must.

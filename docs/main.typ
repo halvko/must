@@ -1893,8 +1893,111 @@ the demo does.
 The limits are in the file, on purpose. The buffer is fixed, so a line
 longer than it panics by name rather than truncating or hanging. Invalid
 UTF-8 panics by name, because the checked bless made the library answer
-rather than assume. And a line copied out of its view works today only
-because a `str` is an owned value — an owned `String` is a later feature.
+rather than assume. And a line copied out of its borrowed view survives the
+next refill only because `str` is an owned value today — "Owned strings"
+below builds `String`, the shape that keeps working once that changes.
+
+== Owned strings
+
+`next_line`, above, hands back a *borrow* of the reader's own buffer, and
+that borrow dies the moment the reader refills — which is correct, and
+which is why the reader alone cannot answer "which line was longest?":
+whichever line wins has to survive every refill after it, not just the one
+it came from.
+
+Copying the borrowed view out (`line.*`) works today only because `str` is
+itself an owned primitive; the day a `str` becomes a real view onto a
+buffer, that copy needs a real allocation behind it. `String` is that
+shape, built now to show the capability doing the work: it is a *library*
+type, not a compiler feature. Nothing below is built into the language:
+
+```must
+type String = struct {
+    ptr: u8.&raw mut,
+    len: usize,
+    cap: usize,
+} without forget with {
+    impl Self {
+        as_str = fn::<@a>(s: Self.&::<@a>) -> str {
+            unsafe { str_from_utf8_unchecked(s.*.ptr, s.*.len) }
+        };
+        len = fn::<@a>(s: Self.&::<@a>) -> usize { s.*.len };
+        drop = fn(s: Self) -> () {
+            let String(struct { ptr, cap, .. }) = s;
+            if cap > 0 {
+                unsafe { dealloc_array(ptr, cap); };
+            };
+        };
+    }
+};
+
+static empty_string = fn() -> String {
+    String(struct { ptr = unsafe { dangling::<u8>() }, len = 0, cap = 0 })
+};
+
+static to_owned = fn::<@a>(s: str.&::<@a>) -> String {
+    let text = s.*;
+    let n = text.len();
+    if n == 0 { return empty_string(); };
+    let p = match alloc_array::<u8>(n) {
+        ::Ok(p) => p,
+        ::Err => panic("out of memory"),
+    };
+    unsafe { str_bytes(text, p); };
+    String(struct { ptr = p, len = n, cap = n })
+};
+```
+
+`without forget` is what makes it safe to write: a `String` must be consumed
+on every path, so the compiler will not let you forget the `drop()`. See
+"Values that must be consumed" for what that check does and what it refuses.
+
+Two `str` operations do the copying: `s.len()` sizes the allocation (see
+"Walking a string" above) and `str_bytes` fills it (see "Making a string
+out of bytes" above).
+
+Reading back uses the *claimed* bless, `str_from_utf8_unchecked`, and that
+is not a shortcut: the bytes came from a `str`, so they are UTF-8 by
+provenance, and `str_from_utf8` would be re-answering a question nothing
+could have changed the answer to.
+
+The empty string owns nothing at all — `alloc_array(0)` traps, so `cap == 0`
+with a dangling pointer is how "there is no allocation" is spelled, and
+`drop` checks for it before freeing.
+
+=== Why it is worth the trouble
+
+`m` below is a `.&mut` borrow of a `Reader` built with `reader_new`, taken
+once outside the loop (`let m = r.&mut;`) so the same borrow reborrows on
+every `next_line` call rather than being retaken each time:
+
+```must
+let mut longest = empty_string();
+loop {
+    match m.next_line() {
+        ::Some(line) => {
+            if line.*.len() > longest.&.len() {
+                longest.drop();
+                longest = to_owned(line);
+            };
+        },
+        ::None => break,
+    };
+};
+print(longest.&.as_str());
+longest.drop();
+```
+
+`to_owned` is the copy that answers what the reader's own borrow cannot: it
+survives every refill after the line it came from.
+
+Notice the two lines in the middle. `longest.drop()` comes *before* the
+assignment because writing over a live `String` would lose it, and the
+compiler says so. And the loop is accepted only because it leaves `longest`
+in the same state it found it in — dropping without replacing would mean the
+second iteration disposed of something already gone.
+
+`examples/string_lib.must` is this program in full, reader included.
 
 == Running compiled modules
 
@@ -1916,23 +2019,25 @@ the module's `trap_code`/`panic_message_*` globals (also read by the
 differential test harness) and its `must.traps` custom section, which
 exists so a host with no access to the compiler can still name the trap.
 
-This backend has no heap and no raw pointers yet, so `examples/heap.must`,
-`examples/pointers.must` and `examples/stdin_lib.must` (whose reader needs
-a heap-allocated buffer) refuse to compile rather than miscompiling —
-there is nothing for either tool to run for those three examples. A safe
-borrow is refused by name too, and deliberately not folded into the
-raw-pointer refusal: a borrow lowers to the same machine word, so this
-backend could emit something that runs while silently dropping the
-exclusivity contract. `read_line` has no wasm import yet either, so
-`examples/stdin.must` refuses by name — and so does `examples/chars.must`,
-which reads a line before it walks it. `next_char` has no wasm story either
-and refuses by name in its turn. Characters themselves are no trouble: a
-`char` is one scalar slot here, so literals, `==` and character-pattern
-dispatch all compile. The two `str` primitives, `len` and `str_bytes`,
-have no wasm story either and refuse by name in their turn. The two
-blesses refuse by name as well; `examples/stdin_lib.must` would reach
-them too, but stops at `alloc_array` first, so no example here actually
-gets far enough to exercise them.
+This backend has no heap and no raw pointers yet, so `examples/heap.must`
+and `examples/pointers.must` refuse to compile rather than miscompiling.
+Every example whose `main` needs a heap-allocated buffer refuses for the
+same reason, though not always at the same call: `examples/stdin_lib.must`'s
+reader stops at `alloc_array` itself, while `examples/string_lib.must`'s
+`main` calls `s.len()` directly and stops there first, before ever reaching
+its own `alloc_array` call. A safe borrow is refused by name too, and
+deliberately not folded into the raw-pointer refusal: a borrow lowers to the
+same machine word, so this backend could emit something that runs while
+silently dropping the exclusivity contract. `read_line` has no wasm import
+yet either, so `examples/stdin.must` refuses by name — and so does
+`examples/chars.must`, which reads a line before it walks it. `next_char`
+has no wasm story either and refuses by name in its turn. Characters
+themselves are no trouble: a `char` is one scalar slot here, so literals,
+`==` and character-pattern dispatch all compile. The two `str` primitives,
+`len` and `str_bytes`, have no wasm story either and refuse by name in
+their turn. The two blesses refuse by name as well; neither
+`stdin_lib.must` (stopped at `alloc_array`) nor `string_lib.must` (stopped
+at `len`) gets far enough to exercise them.
 
 Monomorphization has refusals of its own. A program whose instantiations
 never bottom out — polymorphic recursion, where every call needs an

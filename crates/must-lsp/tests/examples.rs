@@ -80,6 +80,7 @@ const COVERED: &[&str] = &[
     "state_machine.must",
     "stdin.must",
     "stdin_lib.must",
+    "string_lib.must",
 ];
 
 #[test]
@@ -534,6 +535,11 @@ fn stdin_checks_clean() {
 #[test]
 fn stdin_lib_checks_clean() {
     assert_check("stdin_lib.must", 0, expect![[r#""#]]);
+}
+
+#[test]
+fn string_lib_checks_clean() {
+    assert_check("string_lib.must", 0, expect![[r#""#]]);
 }
 
 // --- run: the documented `// Run:` invocation(s), or the default entry -----
@@ -1041,6 +1047,51 @@ fn stdin_lib_runs() {
         "smørre\n",
         0,
         expect!["lines: 1, blank: 0, bytes: 7\n"],
+    );
+}
+
+#[test]
+fn string_lib_runs() {
+    // The documented invocation, through a sixteen-byte buffer: `alpha` is
+    // captured on the first line and survives every refill after it, which
+    // is the thing a borrowed view into the reader's buffer cannot do.
+    assert_run_with_input(
+        &["run", "examples/string_lib.must"],
+        "alpha\r\n\nbeta\ngamma",
+        0,
+        expect![[r#"
+            lines: 4, longest: "alpha" (5 bytes)
+        "#]],
+    );
+    // The winner is the THIRD of five lines in a sixteen-byte buffer, so
+    // the copy outlives at least two refills of the storage it came from.
+    assert_run_with_input(
+        &["run", "examples/string_lib.must"],
+        "one\ntwo\nthree\nfour\nfive\n",
+        0,
+        expect![[r#"
+            lines: 5, longest: "three" (5 bytes)
+        "#]],
+    );
+    // No input: the empty `String` never allocates, and `drop` knows not to
+    // free what was never allocated.
+    assert_run_with_input(
+        &["run", "examples/string_lib.must"],
+        "",
+        0,
+        expect![[r#"
+            lines: 0, longest: "" (0 bytes)
+        "#]],
+    );
+    // Multi-byte text survives the copy intact, and the count is of BYTES
+    // — `s.len()` answers what `next_char` indexes with.
+    assert_run_with_input(
+        &["run", "examples/string_lib.must"],
+        "ab\nsm\u{f8}rre\n",
+        0,
+        expect![[r#"
+            lines: 2, longest: "smørre" (7 bytes)
+        "#]],
     );
 }
 
