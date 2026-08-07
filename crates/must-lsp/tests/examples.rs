@@ -74,6 +74,7 @@ const COVERED: &[&str] = &[
     "hello.must",
     "loops.must",
     "match_projection.must",
+    "option.must",
     "pointers.must",
     "reborrow.must",
     "records.must",
@@ -514,6 +515,14 @@ fn match_projection_checks_clean() {
 }
 
 #[test]
+fn option_checks_clean() {
+    // `Option` and its inherent members (`is_some`, `unwrap`, `flat_map`,
+    // `map`, `as_ref`) — definitions only, no `main`; see `option_runs`
+    // below for the four documented `-e` invocations.
+    assert_check("option.must", 0, expect![[r#""#]]);
+}
+
+#[test]
 fn pointers_checks_clean() {
     assert_check("pointers.must", 0, expect![[r#""#]]);
 }
@@ -877,6 +886,62 @@ fn match_projection_runs() {
             "42
 "
         ],
+    );
+}
+
+#[test]
+fn option_runs() {
+    // A borrowing member: `is_some` takes `Self.&::<@local>`.
+    assert_run(
+        &[
+            "run",
+            "examples/option.must",
+            "-e",
+            "{ let o: Option::<usize> = Option::Some(1); o.&.is_some() }",
+        ],
+        0,
+        expect![[r#"
+            true
+        "#]],
+    );
+    // A consuming member: `unwrap` takes `Self` by value.
+    assert_run(
+        &[
+            "run",
+            "examples/option.must",
+            "-e",
+            "{ let o: Option::<usize> = Option::Some(1); o.unwrap() }",
+        ],
+        0,
+        expect![[r#"
+            1
+        "#]],
+    );
+    // The other side of `unwrap`: panics on `::None` (stderr only — the
+    // panic message is not part of what this asserts, `errors_runs` above
+    // does the same for its own default-entry trap).
+    assert_run(
+        &[
+            "run",
+            "examples/option.must",
+            "-e",
+            "{ let o: Option::<usize> = Option::None; o.unwrap() }",
+        ],
+        1,
+        expect![[r#""#]],
+    );
+    // A higher-order member: `flat_map` takes a `fn` value as an argument.
+    assert_run(
+        &[
+            "run",
+            "examples/option.must",
+            "-e",
+            "Option::Some(1).flat_map(fn(x: usize) -> Option::<usize> { Option::Some(x + 1) }).unwrap()",
+        ],
+        0,
+        expect![[r#"
+            2
+        "#]],
     );
 }
 

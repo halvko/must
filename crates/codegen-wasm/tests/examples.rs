@@ -41,6 +41,23 @@ const SUPPORTED: &[(&str, &str)] = &[
     ("loops.must", "find_even_multiple(3, 20)"),
     ("loops.must", "find_even_multiple(5, 4)"),
     ("loops.must", "find_even_multiple(0, 20)"),
+    // `option.must`'s three owned-receiver `Run:` lines: a tagged-enum
+    // payload out through a consuming member (both the `::Some` and the
+    // `::None`-traps-on-`panic` path), and a `fn`-value argument threaded
+    // through a generic member. Its borrowing member (`is_some`) is not
+    // here — see `UNSUPPORTED` below.
+    (
+        "option.must",
+        "{ let o: Option::<usize> = Option::Some(1); o.unwrap() }",
+    ),
+    (
+        "option.must",
+        "{ let o: Option::<usize> = Option::None; o.unwrap() }",
+    ),
+    (
+        "option.must",
+        "Option::Some(1).flat_map(fn(x: usize) -> Option::<usize> { Option::Some(x + 1) }).unwrap()",
+    ),
     ("records.must", "sum_pair"),
     ("records.must", "moved"),
     ("records.must", "same_point"),
@@ -49,8 +66,9 @@ const SUPPORTED: &[(&str, &str)] = &[
     ("state_machine.must", "run_lights()"),
 ];
 
-/// `(file, entry expression, what the refusal must name)` — the examples
-/// this backend does NOT compile, with the diagnostic it owes the user.
+/// `(file, entry expression, what the refusal must name)` — the
+/// invocations this backend does NOT compile, with the diagnostic each
+/// owes the user.
 /// The heap and raw pointers are out of scope for this backend; refusing
 /// them honestly is the requirement, and this is where that is checked.
 const UNSUPPORTED: &[(&str, &str, &str)] = &[
@@ -94,6 +112,16 @@ const UNSUPPORTED: &[(&str, &str, &str)] = &[
     (
         "match_projection.must",
         "project_in_demo()",
+        "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet",
+    ),
+    // `option.must`'s own borrowing member: `is_some` takes
+    // `Self.&::<@local>`, and a dot-call never inserts a borrow for an
+    // owned receiver (G14, `docs/design/grammar-and-syntax.md`), so
+    // reaching it means writing the postfix `.&` itself — the same borrow
+    // refused everywhere else in this cluster.
+    (
+        "option.must",
+        "{ let o: Option::<usize> = Option::Some(1); o.&.is_some() }",
         "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet",
     ),
     (

@@ -1,0 +1,56 @@
+// `Option<T>` — a tagged enum with a payload, carrying in one type the
+// member shapes the manual's "Members that borrow `Self`" and "Members
+// with their own type parameters" sections describe: `is_some` takes a
+// BORROWED receiver (`Self.&::<@local>`), `unwrap` CONSUMES its receiver,
+// `flat_map`/`map` take a `fn` VALUE as an argument through a member-own
+// type parameter, and `as_ref` projects the payload's type through the
+// receiver's region. `T` here is a plain type parameter (no `without
+// forget`) — the linear-payload proof is the `hir` test
+// `an_option_of_string_is_the_container_shape_that_has_to_work`, not this
+// file.
+//
+// Run: must-lsp run examples/option.must -e '{ let o: Option::<usize> = Option::Some(1); o.&.is_some() }'  (=> true)
+// Run: must-lsp run examples/option.must -e '{ let o: Option::<usize> = Option::Some(1); o.unwrap() }'      (=> 1)
+// Run: must-lsp run examples/option.must -e '{ let o: Option::<usize> = Option::None; o.unwrap() }'         (panics: "unwrap was called on a ::None value")
+// Run: must-lsp run examples/option.must -e 'Option::Some(1).flat_map(fn(x: usize) -> Option::<usize> { Option::Some(x + 1) }).unwrap()'  (=> 2)
+//
+// `map`'s body captures its `f` parameter inside the closure it builds for
+// `flat_map` — `check` is clean, but neither engine can run it yet (the
+// interpreter refuses captures, wasm refuses the resulting indirect call),
+// so it has no `Run:` line of its own; that gap is pre-existing and not
+// this file's to close.
+
+type Option = enum::<T> {
+    Some(T),
+    None,
+} with {
+    impl Self {
+        is_some = const fn::<@local>(s: Self.&::<@local>) -> bool {
+            match s {
+                ::Some(_) => true,
+                ::None => false,
+            }
+        }
+        unwrap = const fn(s: Self) -> T {
+            match s {
+                ::Some(t) => t,
+                ::None => panic("unwrap was called on a ::None value"),
+            }
+        }
+        flat_map = fn::<U>(f: fn(T) -> Option::<U>, s: Self) -> Option::<U> {
+            match s {
+                ::Some(v) => { f(v) }
+                ::None => { Option::None }
+            }
+        }
+        map = fn::<U>(f: fn(T) -> U, s: Self) -> Option::<U> {
+            s.flat_map(fn(t) { Option::Some(f(t)) })
+        }
+        as_ref = fn::<@a>(s: Self.&::<@a>) -> Option::<T.&::<@a>> {
+            match s {
+                ::Some(t) => Option::Some(t),
+                ::None => Option::None,
+            }
+        }
+    }
+}

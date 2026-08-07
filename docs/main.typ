@@ -1226,7 +1226,8 @@ type Option = enum::<T> { Some(T), None } with {
 
 `T` is the container's — one per `Option::<T>` — while `U` is the call's:
 `map` over the same `Option::<usize>` may produce an `Option::<bool>` at
-one site and an `Option::<str>` at the next.
+one site and an `Option::<str>` at the next. `examples/option.must` is this
+type in full — `is_some`, `unwrap` and `as_ref` beside `flat_map` and `map`.
 
 The member's binder is the owner's *followed by* its own, which is what
 makes the two halves reach the call site from different places. The owner's

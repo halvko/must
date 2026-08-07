@@ -97,8 +97,9 @@ borrow `Self` (`reborrow.must`), matching through a borrow
 (`match_projection.must`), reading standard input (`stdin.must`) and the
 same thing written as a library over a declared host import
 (`stdin_lib.must`), an owned, heap-backed string built the same way, over
-the `forget` capability (`string_lib.must`), and walking text character by
-character (`chars.must`) — plus `errors.must`, an intentionally broken file
+the `forget` capability (`string_lib.must`), walking text character by
+character (`chars.must`), and a generic `Option` with the member shapes
+around it (`option.must`) — plus `errors.must`, an intentionally broken file
 pairing each diagnostic with the exact message `must-lsp check` prints for
 it.
 

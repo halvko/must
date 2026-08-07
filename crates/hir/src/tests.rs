@@ -14043,10 +14043,11 @@ static half_only = fn(p: Pair) -> String { p.left };
 
 #[test]
 fn an_option_of_string_is_the_container_shape_that_has_to_work() {
-    // The member shape a generic option owes — a borrowing `is_some`, a
-    // consuming `unwrap`, a region-projecting `as_ref` — over a linear
-    // payload. Nothing here is `String`-specific: it is the acid test that
-    // the capability machinery composes with the generic machinery.
+    // Three of `examples/option.must`'s five members — a borrowing
+    // `is_some`, a consuming `unwrap`, a region-projecting `as_ref` — over
+    // a payload binder that sheds `forget` (the example itself keeps a
+    // plain `T`). Nothing here is `String`-specific: it is the acid test
+    // that the capability machinery composes with the generic machinery.
     check_string(
         r#"
 type Option = enum::<T without forget> {
