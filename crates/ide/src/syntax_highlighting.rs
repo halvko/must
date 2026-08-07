@@ -495,8 +495,8 @@ fn classify_type_name(db: &RootDatabase, file: SourceFile, name: &str) -> (HlTag
 }
 
 /// Push the token's range, split at line breaks: LSP clients aren't required
-/// to handle multiline tokens, and Must strings (and future comments) can
-/// span lines.
+/// to handle multiline tokens, and Must strings and block comments both span
+/// lines.
 fn push_line_split(acc: &mut Vec<HlRange>, token: &SyntaxToken, tag: HlTag, mods: HlMods) {
     let text = token.text();
     let base = token.text_range().start();

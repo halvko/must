@@ -44,6 +44,10 @@
   real type and fn, pointer and array field types are first class. Shorthand `struct { x }` is
   `struct { x = x }`. The retired `name: value` spelling is a targeted error, never a silent
   reinterpretation.
+- **G20** Block comments nest. Both comment spellings lex to one `COMMENT` kind. An unclosed
+  `/*` swallows the rest of the file; every still-open `/*` gets its own diagnostic, and only
+  the innermost gets a fix, because nothing in the file says where the others were meant to
+  end.
 - **G13** Fields and members are separate namespaces, and the SYNTAX decides which one a name
   reaches: a bare dot always reads the field, and call syntax resolves to a dot-callable
   member — inherent or trait-impl alike. A name carried by MORE THAN ONE carrier (an inherent
@@ -151,6 +155,10 @@
 - **`const { }` bounding `return` the way it bounds `break`** — reachable (a `const` block
   is a separate MIR body) but a different construct wearing the same spelling; the exit
   should leave the outer fn. **G15**
+- **Non-nesting block comments** — the use case is commenting out code, and code containing
+  its own `/* */` is what a non-nesting scanner cannot survive. **Blaming a single `/*`** —
+  outermost-only points arbitrarily far from the typo; innermost-only leaves outer levels
+  silently open. **G20**
 - **Prefix deref `*p`** — purely to make users write `(*p).x`. **Auto-deref as the escape
   from those parens** — a conversion policy with inference consequences, not a spelling.
   **G08 G14**
@@ -208,6 +216,8 @@
   its own remote chain could otherwise reroute an existing field call; relaxing back to
   member-wins-plus-a-lint is the named fallback if the error annoys more than it protects.
   **G13**
+- **A doc-comment convention lands** — `/**` and `///` carry no meaning today so that adopting
+  one is free to pick its spelling. **G20**
 - **Shift operators land** — turbofish needs token-splitting against `>>`. **Floats
   land** — the defensive float grammar stops being free. **G06 G07**
 - **Tuples are built** — postfix turbofish on arbitrary expressions, construction,

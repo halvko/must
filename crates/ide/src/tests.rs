@@ -375,6 +375,45 @@ static main = fn (count: usize) {
 }
 
 #[test]
+fn highlights_block_comments_as_comments() {
+    // `/* ... */` shares `COMMENT`'s one lexical tag with `//` (see
+    // `lexer::scan_block_comment`), so it needs no highlighter code of its
+    // own — pinned here so that stays true. Nested, to also confirm the
+    // highlighter sees ONE token spanning the whole thing rather than
+    // splitting at the first (inner) `*/`.
+    check_highlights(
+        "/* a /* nested */ comment */\nstatic x = 1;",
+        expect_test::expect![[r#"
+            0..28 "/* a /* nested */ comment */" Comment
+            29..35 "static" Keyword
+            36..37 "x" Variable.declaration.static
+            38..39 "=" Operator
+            40..41 "1" Number
+        "#]],
+    );
+}
+
+#[test]
+fn highlights_split_multiline_block_comments_per_line() {
+    // `push_line_split` already existed for multi-line STRING tokens (LSP
+    // clients aren't required to handle a highlight range that spans
+    // lines) — `/* */` is the second token kind to go through that same
+    // function, since `//` never contained a newline of its own to split
+    // on. Two ranges, not one, and the `\n` between them is in neither.
+    check_highlights(
+        "static s = 1; /* one\ntwo */",
+        expect_test::expect![[r#"
+            0..6 "static" Keyword
+            7..8 "s" Variable.declaration.static
+            9..10 "=" Operator
+            11..12 "1" Number
+            14..20 "/* one" Comment
+            21..27 "two */" Comment
+        "#]],
+    );
+}
+
+#[test]
 fn highlights_hole_pattern_unstyled() {
     // `_` isn't an IDENT token, so it's left unclassified (no panic, no
     // bogus Variable highlight).
@@ -2048,6 +2087,19 @@ fn completions_inside_a_string_literal_is_empty() {
 fn completions_inside_a_comment_is_empty() {
     let (analysis, _file, pos) = fixture("// hi $0\nstatic main = fn { 1 };");
     assert_eq!(analysis.completions(pos), Vec::new());
+}
+
+#[test]
+fn a_block_comment_offers_no_completions_and_no_hover() {
+    // `/* */` shares `COMMENT` with `//` (see `highlights_block_comments_as_comments`),
+    // so both already inherit their host feature's comment exclusion with
+    // no code of their own — completions via the `SyntaxKind::COMMENT`
+    // check in `completions.rs`, hover by construction (it only ever
+    // looks for an `IDENT` token, which a comment position never is).
+    // Pinned so that stays true.
+    let (analysis, _file, pos) = fixture("static main = fn { /* hi $0 */ 1 };");
+    assert_eq!(analysis.completions(pos), Vec::new());
+    assert_eq!(analysis.hover(pos), None);
 }
 
 // ---- field access ----

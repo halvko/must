@@ -2,7 +2,7 @@
 //! by exactly one token, malformed input becomes `ERROR_TOKEN` (or a token
 //! carrying an error, e.g. an unterminated string).
 
-use crate::{SyntaxError, SyntaxKind};
+use crate::{Fix, SyntaxError, SyntaxKind, TextEdit};
 use text_size::{TextRange, TextSize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,12 +11,25 @@ pub struct Token {
     pub len: TextSize,
 }
 
-/// An error at a range *inside* a token — a bad escape in a string literal.
-/// `range` is relative to the token's start. Token boundaries never depend
-/// on these: a malformed escape is a diagnostic, not a re-lex.
+/// An error at a range *inside* a token — a bad escape in a string literal,
+/// or each still-open `/*` inside an unterminated block comment. `range`,
+/// and any `fix`'s edits, are relative to the token's start. Token
+/// boundaries never depend on these: a malformed escape is a diagnostic,
+/// not a re-lex.
 struct InnerError {
     range: std::ops::Range<usize>,
     message: String,
+    /// A machine-applicable fix, when one is known — same idea as
+    /// [`crate::Fix`], but its edits are still token-relative like `range`
+    /// above, so they get the identical `pos`-shift in [`tokenize`] rather
+    /// than needing an absolute offset this deep in the scan.
+    fix: Option<InnerFix>,
+}
+
+struct InnerFix {
+    label: String,
+    /// (edit range relative to the token start, text to insert)
+    edits: Vec<(std::ops::Range<usize>, String)>,
 }
 
 pub fn tokenize(text: &str) -> (Vec<Token>, Vec<SyntaxError>) {
@@ -39,14 +52,32 @@ pub fn tokenize(text: &str) -> (Vec<Token>, Vec<SyntaxError>) {
                 fix: None,
             });
         }
-        for InnerError { range, message } in inner.drain(..) {
+        for InnerError {
+            range,
+            message,
+            fix,
+        } in inner.drain(..)
+        {
+            let shift = |r: std::ops::Range<usize>| {
+                TextRange::new(
+                    TextSize::new((pos + r.start) as u32),
+                    TextSize::new((pos + r.end) as u32),
+                )
+            };
+            let fix = fix.map(|InnerFix { label, edits }| Fix {
+                label,
+                edits: edits
+                    .into_iter()
+                    .map(|(range, insert)| TextEdit {
+                        range: shift(range),
+                        insert,
+                    })
+                    .collect(),
+            });
             errors.push(SyntaxError {
                 message,
-                range: TextRange::new(
-                    TextSize::new((pos + range.start) as u32),
-                    TextSize::new((pos + range.end) as u32),
-                ),
-                fix: None,
+                range: shift(range),
+                fix,
             });
         }
         tokens.push(Token {
@@ -72,6 +103,7 @@ fn next_token(rest: &str, inner: &mut Vec<InnerError>) -> (SyntaxKind, usize, Op
             let len = rest.find('\n').unwrap_or(rest.len());
             (COMMENT, len, None)
         }
+        '/' if rest.as_bytes().get(1) == Some(&b'*') => scan_block_comment(rest, inner),
         '"' => scan_string(rest, inner),
         '\'' => scan_char(rest),
         '@' => scan_region(rest),
@@ -221,12 +253,14 @@ fn scan_string(rest: &str, inner: &mut Vec<InnerError>) -> (SyntaxKind, usize, O
                 Some((j, e)) => inner.push(InnerError {
                     range: i..j + e.len_utf8(),
                     message: escape_error(e),
+                    fix: None,
                 }),
                 // Only reachable at end of input: before a closing quote a
                 // backslash would have escaped that quote instead.
                 None => inner.push(InnerError {
                     range: i..i + 1,
                     message: "a string cannot end with a lone `\\`".to_owned(),
+                    fix: None,
                 }),
             },
             _ => {}
@@ -351,6 +385,91 @@ fn multi_char_error(too_long: bool) -> Option<String> {
          use a string (`\"...\"`) to hold more"
             .to_owned()
     })
+}
+
+/// `/* ... */` — a block comment, NESTING the way Rust's does: a `/*` met
+/// while a block comment is already open starts another level rather than
+/// reading as ordinary text, and it takes a matching count of `*/` to close
+/// back out to zero. That is the whole point of nesting: the use case is
+/// commenting out a chunk of code that itself contains a block comment, and
+/// a non-nesting scanner would have the FIRST `*/` inside it end the outer
+/// comment early, spilling whatever follows into real tokens.
+///
+/// Depth is tracked as a STACK of each open `/*`'s offset, not a bare
+/// counter: every entry still on the stack at EOF is its OWN independently
+/// unclosed comment, and gets its OWN diagnostic (see the fallthrough
+/// below) — N obligations, N errors, rather than blaming a single one
+/// (outermost or innermost) and leaving the rest to be rediscovered one
+/// fix at a time. The single-blame alternatives, and why report-all beats
+/// both, are recorded under G20 (Discarded, in
+/// `docs/design/grammar-and-syntax.md`).
+///
+/// No comment-start recognition happens inside a string or character
+/// literal, and this scanner doesn't need any logic to secure that: it
+/// only ever runs once a block comment has already started (dispatched on
+/// the token's own first two bytes in [`next_token`]), and from inside it
+/// every byte other than a `/*`/`*/` pair is inert text — a `"` in a
+/// comment body starts nothing, exactly as a `/*` inside a string
+/// (`"/*"`, scanned by [`scan_string`] before this function is ever
+/// reached) starts nothing either.
+///
+/// A body that happens to start with `*` (`/** ... */`) earns no special
+/// status: Must has no doc-comment convention today (no `///`, no
+/// `/** */`), so this is an ordinary nested-capable comment like any
+/// other — the leading `*` is just its first character of body text.
+///
+/// Unterminated swallows the rest of the file — the same call as an
+/// unterminated string ([`scan_string`]): there is no sane place to resume
+/// lexing after an unclosed comment, and editor auto-close makes the case
+/// rare in practice (Zed's own `must` extension declares `/*`/`*/` for
+/// exactly this reason).
+///
+/// Only the INNERMOST still-open `/*` (the last one reported, below) gets
+/// a fix: appending `*/` right at EOF closes exactly that level, because
+/// it is the one still open at the moment the file runs out. Any OTHER
+/// still-open `/*` would need its `*/` inserted somewhere back inside the
+/// file — a position this scan has no principled way to choose — so those
+/// stay a diagnostic with no fix: a wrong guess is worse than an honest gap.
+fn scan_block_comment(
+    rest: &str,
+    inner: &mut Vec<InnerError>,
+) -> (SyntaxKind, usize, Option<String>) {
+    let mut opens = vec![0usize];
+    let mut chars = rest.char_indices().skip(2).peekable();
+    while let Some((i, c)) = chars.next() {
+        let next = chars.peek().map(|&(_, c)| c);
+        match (c, next) {
+            ('/', Some('*')) => {
+                opens.push(i);
+                chars.next();
+            }
+            ('*', Some('/')) => {
+                chars.next();
+                opens.pop();
+                if opens.is_empty() {
+                    return (SyntaxKind::COMMENT, i + 2, None);
+                }
+            }
+            _ => {}
+        }
+    }
+    // Reaching here means the scan ran out of input before `opens` ever
+    // emptied out (the empty-return above is the only other way out).
+    // Every remaining entry is its own unclosed `/*`, oldest (outermost)
+    // first since that's push order — report one diagnostic each.
+    let innermost = opens.len() - 1;
+    for (i, start) in opens.into_iter().enumerate() {
+        let fix = (i == innermost).then(|| InnerFix {
+            label: "Insert `*/`".to_owned(),
+            edits: vec![(rest.len()..rest.len(), "*/".to_owned())],
+        });
+        inner.push(InnerError {
+            range: start..start + 2,
+            message: "unterminated block comment: expected a closing `*/`".to_owned(),
+            fix,
+        });
+    }
+    (SyntaxKind::COMMENT, rest.len(), None)
 }
 
 /// `@a` — a REGION name; `@_` — the region wildcard ("there is a region

@@ -52,6 +52,29 @@ error anchored at the escape itself, and a trailing lone backslash is an
 unterminated string. The lexer and the value decoder share one table, so they
 can never disagree about what counts as a valid escape.
 
+== Comments
+
+`//` runs to the end of the line. `/* ... */` runs to its matching `*/` and
+*nests* — a `/*` written while a block comment is already open starts another
+level, so commenting out a chunk of code that itself contains a block comment
+just works:
+
+```must
+/* static old = fn {
+    /* print("debug"); */
+    1
+}; */
+```
+
+The inner `/* print("debug"); */` doesn't end the outer comment early; only
+the final `*/` does. An unclosed `/*` eats the rest of the file as one
+comment — there's no good place to resume after it — and the error(s) name
+every opener still unclosed, not just one, so nesting two levels deep and
+forgetting both `*/`s gets two diagnostics, not a single confusing one.
+`/**` is not a doc-comment marker — Must has no doc-comment convention (yet),
+so `/** like this */` is just an ordinary comment whose first character
+happens to be `*`.
+
 == Variable declarations
 
 `let` is the only variable-declaration form. Possible sugars — an

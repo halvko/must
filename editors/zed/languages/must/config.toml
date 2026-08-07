@@ -1,6 +1,10 @@
 name = "Must"
 path_suffixes = ["must"]
 line_comments = ["// "]
+# Four-key shape per Zed's `BlockCommentConfig` (the bundled HTML extension
+# is the precedent); `prefix`/`tab_size` left at their no-op defaults since
+# Must has no continuation-formatting convention for a multi-line comment.
+block_comment = { start = "/*", end = "*/", prefix = "", tab_size = 0 }
 # Deliberately no `grammar`: no tree-sitter grammar; highlighting comes from
 # the server's semantic tokens (`semantic_tokens: "full"` in the README).
 # Diagnostics/hover/goto-def also come from the LSP.
@@ -9,4 +13,9 @@ brackets = [
     { start = "{", end = "}", close = true, newline = true },
     { start = "(", end = ")", close = true, newline = true },
     { start = "\"", end = "\"", close = true, newline = false, not_in = ["string"] },
+    # Auto-close is a separate mechanism from `block_comment` above (that one
+    # drives the comment-toggle command and continuation formatting, not
+    # typing): typing `/*` inserts ` */` right after the cursor, giving
+    # `/* | */` to type into. `not_in` here follows the `"` entry just above.
+    { start = "/*", end = " */", close = true, newline = false, not_in = ["string", "comment"] },
 ]
