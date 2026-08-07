@@ -1236,14 +1236,15 @@ and it is bounded exactly: the compiler may insert a *safe* borrow of `x.*`
 where `x` is already a borrow, never a borrow of `x` itself, and never a raw
 borrow.
 
-`.&mut` follows the same transitive-mutability rule assignments do — the
-root binding must be `mut` — and no write permission may be reached through
-a shared step, which is what stops a shared borrow laundering into one. That
-is judged over the whole place rather than its outermost step: writing
-through a `.&` is rejected (`cannot assign through `T.&`: writing needs a
-`.&mut` borrow`), and so is writing through a `.&mut` that is itself held
-behind a `.&`, because reading a `.&mut` out of a place *reborrows* it, and
-a shared place may grant no such reborrow. Minting `.&mut` or `.&raw mut`
+`.&mut` additionally requires the root binding to be `mut` — the same
+transitivity rule assignments use — and blames the root with the same "make
+it `mut`" quick fix an assignment would. Nor may write permission be reached
+through a shared step, which is what stops a shared borrow laundering into
+one. That is judged over the whole place rather than its outermost step:
+writing through a `.&` is rejected (`cannot assign through `T.&`: writing
+needs a `.&mut` borrow`), and so is writing through a `.&mut` that is itself
+held behind a `.&`, because reading a `.&mut` out of a place *reborrows* it,
+and a shared place may grant no such reborrow. Minting `.&mut` or `.&raw mut`
 anywhere along such a chain is rejected the same way, and so is the implicit
 reborrow, which is that mint with the `.&mut` left unwritten. A `.&raw mut`
 in the middle stops the walk instead: reading a raw pointer out copies it,

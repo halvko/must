@@ -1364,10 +1364,11 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                         .unwrap_or_default()
                 }
                 InferenceDiagnostic::AssignToImmutable { binding, name, .. }
-                | InferenceDiagnostic::AddrOfMutImmutable { binding, name, .. } => {
+                | InferenceDiagnostic::AddrOfMutImmutable { binding, name, .. }
+                | InferenceDiagnostic::BorrowMutImmutable { binding, name, .. } => {
                     // Where `mut` is missing — also the anchor for the
-                    // insert-`mut` quick fix (assignments and `.&raw mut`
-                    // judge the same transitive root).
+                    // insert-`mut` quick fix (assignments, `.&mut` and
+                    // `.&raw mut` judge the same transitive root).
                     source_map
                         .node_for_binding(*binding)
                         .map(|ptr| {
@@ -1525,7 +1526,8 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 // not an assignment target, and `mut` on one is its own
                 // diagnostic.
                 InferenceDiagnostic::AssignToImmutable { binding, name, .. }
-                | InferenceDiagnostic::AddrOfMutImmutable { binding, name, .. } => source_map
+                | InferenceDiagnostic::AddrOfMutImmutable { binding, name, .. }
+                | InferenceDiagnostic::BorrowMutImmutable { binding, name, .. } => source_map
                     .node_for_binding(*binding)
                     .and_then(|ptr| ast::Name::cast(ptr.to_node(&syntax_root)))
                     .and_then(|decl| decl.mut_slot())

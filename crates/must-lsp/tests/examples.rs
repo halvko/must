@@ -524,7 +524,15 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |                                                                                ^^^^^^
                = help: Drop the region argument
 
-            found 40 errors and 1 warning
+            error: cannot borrow `x` as `.&mut`: it is not declared `mut`
+              --> examples/errors.must:430:13
+                |
+            430 |     let m = x.&mut;
+                |             ^
+               = help: Make `x` mutable
+               = note: `x` is declared without `mut` here (examples/errors.must:428:9)
+
+            found 41 errors and 1 warning
         "#]],
     );
 }

@@ -900,6 +900,7 @@ pub enum InferenceDiagnostic {
         borrow: ExprId,
         /// The root name expression (carries the squiggle).
         root: ExprId,
+        binding: BindingId,
         /// The root binding's name.
         name: String,
         /// The whole place as written.
@@ -2734,7 +2735,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         match &self.body.exprs[root] {
             ExprData::NameRef(name) => match self.resolutions.get(root) {
                 Some(Resolution::Local(binding)) => {
-                    if mutable && !self.body.bindings[*binding].mutable {
+                    let data = &self.body.bindings[*binding];
+                    if mutable && !data.mutable {
                         segments.reverse();
                         let place_text = format!("{name}{}", segments.concat());
                         self.result
@@ -2742,7 +2744,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             .push(InferenceDiagnostic::BorrowMutImmutable {
                                 borrow,
                                 root,
-                                name: name.clone(),
+                                binding: *binding,
+                                name: data.name.clone(),
                                 place: place_text,
                             });
                     }

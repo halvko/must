@@ -11754,10 +11754,22 @@ fn a_dot_call_receiver_is_a_value_position() {
 
 #[test]
 fn exclusive_borrow_needs_a_mut_root() {
+    // Same transitive-root judgement as an assignment or a `.&raw mut`,
+    // with the same "declared without `mut` here" note on the declaration.
     check_diagnostics(
         "static f = fn () -> () { let n: usize = 1; let m = n.&mut; };",
         expect![[r#"
-            51..52: cannot borrow `n` as `.&mut`: it is not declared `mut`
+            51..52: cannot borrow `n` as `.&mut`: it is not declared `mut` (`n` is declared without `mut` here at 29..30)
+        "#]],
+    );
+    // Through a projection the two names differ: the place is what was
+    // borrowed, the root is what the fix goes on, and the message says
+    // both rather than blaming the field for the declaration's omission.
+    check_diagnostics(
+        "static f = fn () -> () { let p: struct { x: usize } = struct { x = 1 }; \
+         let m = p.x.&mut; };",
+        expect![[r#"
+            80..81: cannot borrow `p.x` as `.&mut`: `p` is not declared `mut` (`p` is declared without `mut` here at 29..30)
         "#]],
     );
 }
@@ -11775,6 +11787,25 @@ fn an_exclusive_borrow_of_an_item_points_at_its_definition() {
             90..91: cannot borrow a `const` as `.&mut`: a `const` is copied at every mention, so there is no one place to borrow (`g` is defined here at 27..28)
         "#]],
     );
+}
+
+#[test]
+fn borrow_mut_immutable_offers_the_make_mut_fix() {
+    // Same machinery as `addr_of_mut_immutable_offers_the_make_mut_fix`:
+    // `.&mut` of a non-`mut` root anchors the insert-`mut` fix at the
+    // binding's declaration, not the borrow.
+    let text = "static f = fn () -> () { let n: usize = 1; let m = n.&mut; };";
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Make `n` mutable");
+    assert_eq!(fix.edits.len(), 1);
+    assert_eq!(fix.edits[0].insert, "mut ");
+    // Immediately before the binding's name `n` in `let n` (offset 29):
+    // applying it yields `let mut n = 1;`.
+    assert_eq!(u32::from(fix.edits[0].range.start()), 29);
 }
 
 #[test]

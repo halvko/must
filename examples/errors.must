@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 40 errors and 1 warning.
+// exactly: found 41 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -417,3 +417,15 @@ static misordered_binder = fn::<T, @a>(r: T.&::<@a>) -> T.&::<@a> { r };
 //     error: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&::<@a> = x.&;`)
 //     quick fix offered: "Drop the region argument"
 static region_at_a_borrow = fn::<@c>(p: usize.&::<@c>) -> usize { let q = p.*.&::<@c>; q.* };
+
+// 41. `.&mut` of a non-`mut` root: the safe twin of `.&raw mut` (11 above)
+//     — an exclusive borrow may only be taken from something already
+//     assignable, so the same mut-root rule blames the binding and offers
+//     the same "make it `mut`" quick fix.
+//     error: cannot borrow `x` as `.&mut`: it is not declared `mut`
+//     quick fix offered: "Make `x` mutable"
+static borrow_mut_non_mut = fn () {
+    let x: usize = 1;
+    print("hello");
+    let m = x.&mut;
+};
