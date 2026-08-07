@@ -36,8 +36,9 @@ static main: fn() -> () = fn() -> () {
                 WHITESPACE@13..14 " "
                 FN_TYPE@14..24
                   FN_KW@14..16 "fn"
-                  L_PAREN@16..17 "("
-                  R_PAREN@17..18 ")"
+                  PARAM_LIST@16..18
+                    L_PAREN@16..17 "("
+                    R_PAREN@17..18 ")"
                   WHITESPACE@18..19 " "
                   RET_TYPE@19..24
                     THIN_ARROW@19..21 "->"
@@ -309,8 +310,9 @@ static main = fn {
                       WHITESPACE@26..27 " "
                       FN_TYPE@27..40
                         FN_KW@27..29 "fn"
-                        L_PAREN@29..30 "("
-                        R_PAREN@30..31 ")"
+                        PARAM_LIST@29..31
+                          L_PAREN@29..30 "("
+                          R_PAREN@30..31 ")"
                         WHITESPACE@31..32 " "
                         RET_TYPE@32..40
                           THIN_ARROW@32..34 "->"
@@ -503,8 +505,9 @@ fn never_type_annotation() {
                 WHITESPACE@16..17 " "
                 FN_TYPE@17..26
                   FN_KW@17..19 "fn"
-                  L_PAREN@19..20 "("
-                  R_PAREN@20..21 ")"
+                  PARAM_LIST@19..21
+                    L_PAREN@19..20 "("
+                    R_PAREN@20..21 ")"
                   WHITESPACE@21..22 " "
                   RET_TYPE@22..26
                     THIN_ARROW@22..24 "->"
@@ -621,38 +624,40 @@ fn an_unsafe_fn_type_parses_into_the_fn_type_node() {
     check(
         "static f: unsafe fn(usize) -> usize = g;",
         expect![[r#"
-        SOURCE_FILE@0..40
-          STATIC_ITEM@0..40
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "f"
-            COLON@8..9 ":"
-            WHITESPACE@9..10 " "
-            FN_TYPE@10..35
-              UNSAFE_KW@10..16 "unsafe"
-              WHITESPACE@16..17 " "
-              FN_KW@17..19 "fn"
-              L_PAREN@19..20 "("
-              PATH_TYPE@20..25
-                NAME_REF@20..25
-                  IDENT@20..25 "usize"
-              R_PAREN@25..26 ")"
-              WHITESPACE@26..27 " "
-              RET_TYPE@27..35
-                THIN_ARROW@27..29 "->"
-                WHITESPACE@29..30 " "
-                PATH_TYPE@30..35
-                  NAME_REF@30..35
-                    IDENT@30..35 "usize"
-            WHITESPACE@35..36 " "
-            EQ@36..37 "="
-            WHITESPACE@37..38 " "
-            PATH_EXPR@38..39
-              NAME_REF@38..39
-                IDENT@38..39 "g"
-            SEMICOLON@39..40 ";"
-    "#]],
+            SOURCE_FILE@0..40
+              STATIC_ITEM@0..40
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                COLON@8..9 ":"
+                WHITESPACE@9..10 " "
+                FN_TYPE@10..35
+                  UNSAFE_KW@10..16 "unsafe"
+                  WHITESPACE@16..17 " "
+                  FN_KW@17..19 "fn"
+                  PARAM_LIST@19..26
+                    L_PAREN@19..20 "("
+                    PARAM@20..25
+                      PATH_TYPE@20..25
+                        NAME_REF@20..25
+                          IDENT@20..25 "usize"
+                    R_PAREN@25..26 ")"
+                  WHITESPACE@26..27 " "
+                  RET_TYPE@27..35
+                    THIN_ARROW@27..29 "->"
+                    WHITESPACE@29..30 " "
+                    PATH_TYPE@30..35
+                      NAME_REF@30..35
+                        IDENT@30..35 "usize"
+                WHITESPACE@35..36 " "
+                EQ@36..37 "="
+                WHITESPACE@37..38 " "
+                PATH_EXPR@38..39
+                  NAME_REF@38..39
+                    IDENT@38..39 "g"
+                SEMICOLON@39..40 ";"
+        "#]],
     );
 }
 
@@ -1121,7 +1126,7 @@ static b = fn {};
               WHITESPACE@45..46 "\n"
             error 19..20: expected a region name after `@` (`@a`, or `@_` to infer one)
             error 21..22: unexpected character `%`
-            error 23..27: expected an item (`static`, `const`, `type` or `trait`)
+            error 23..27: expected an item (`static`, `const`, `type`, `trait` or `extern`)
         "#]],
     );
 }
@@ -1959,8 +1964,8 @@ fn const_item_inside_block_still_recovers() {
               ERROR@30..31
                 SEMICOLON@30..31 ";"
             error 14..15: expected `}`
-            error 29..30: expected an item (`static`, `const`, `type` or `trait`)
-            error 30..31: expected an item (`static`, `const`, `type` or `trait`)
+            error 29..30: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            error 30..31: expected an item (`static`, `const`, `type`, `trait` or `extern`)
         "#]],
     );
 }
@@ -1994,7 +1999,7 @@ fn dangling_const_at_block_end_recovers() {
                 SEMICOLON@23..24 ";"
             error 14..15: expected `}`
             error 22..23: expected a name for the item
-            error 23..24: expected an item (`static`, `const`, `type` or `trait`)
+            error 23..24: expected an item (`static`, `const`, `type`, `trait` or `extern`)
         "#]],
     );
 }
@@ -3110,9 +3115,9 @@ fn record_literal_where_block_required_in_if() {
                 SEMICOLON@27..28 ";"
             error 18..19: expected `;`
             error 19..20: expected an expression
-            error 25..26: expected an item (`static`, `const`, `type` or `trait`)
-            error 26..27: expected an item (`static`, `const`, `type` or `trait`)
-            error 27..28: expected an item (`static`, `const`, `type` or `trait`)
+            error 25..26: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            error 26..27: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            error 27..28: expected an item (`static`, `const`, `type`, `trait` or `extern`)
         "#]],
     );
 }
@@ -4722,6 +4727,17 @@ type T = usize;
     assert!(
         parse.debug_dump().contains("TRAIT_ITEM@"),
         "the trait declaration must survive the skip: {}",
+        parse.debug_dump()
+    );
+    // Same for the import marker, which leads its item.
+    let parse = crate::parse(
+        "static f = fn (n: usize) -> usize { match n {\n    -1 => 1\nextern static g: unsafe fn() -> usize;\n",
+    );
+    let msgs: Vec<_> = parse.errors().iter().map(|e| e.message.clone()).collect();
+    assert_eq!(msgs, ["expected a pattern", "expected `}`"], "{msgs:?}");
+    assert!(
+        parse.debug_dump().contains("EXTERN_KW@58..64"),
+        "the import declaration must survive the skip: {}",
         parse.debug_dump()
     );
 }
@@ -6883,12 +6899,12 @@ fn turbofish_const_paren_escape_no_longer_parses() {
             error 21..22: expected a name, literal, or `{ ... }` block after `const`; wrap a compound expression in `const { ... }`
             error 22..23: expected `)` (only the unit type `()` is supported here)
             error 24..25: expected `;`
-            error 26..27: expected an item (`static`, `const`, `type` or `trait`)
-            error 27..28: expected an item (`static`, `const`, `type` or `trait`)
-            error 28..29: expected an item (`static`, `const`, `type` or `trait`)
-            error 29..30: expected an item (`static`, `const`, `type` or `trait`)
-            error 30..31: expected an item (`static`, `const`, `type` or `trait`)
-            error 31..32: expected an item (`static`, `const`, `type` or `trait`)
+            error 26..27: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            error 27..28: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            error 28..29: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            error 29..30: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            error 30..31: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            error 31..32: expected an item (`static`, `const`, `type`, `trait` or `extern`)
         "#]],
     );
 }
@@ -9440,12 +9456,12 @@ fn retired_lifetime_in_return_type_desyncs_the_rest_of_the_item() {
         expect![[r#"
             25..26: borrow types are spelled postfix: `T.&` / `T.&mut`
             26..27: unterminated character literal: expected a closing `'`
-            27..28: expected an item (`static`, `const`, `type` or `trait`)
-            29..32: expected an item (`static`, `const`, `type` or `trait`)
-            33..34: expected an item (`static`, `const`, `type` or `trait`)
-            35..36: expected an item (`static`, `const`, `type` or `trait`)
-            37..38: expected an item (`static`, `const`, `type` or `trait`)
-            38..39: expected an item (`static`, `const`, `type` or `trait`)
+            27..28: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            29..32: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            33..34: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            35..36: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            37..38: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            38..39: expected an item (`static`, `const`, `type`, `trait` or `extern`)
         "#]],
     );
     // Not lifetime-specific: any type token `type_` refuses desyncs the
@@ -9461,11 +9477,11 @@ fn retired_lifetime_in_return_type_desyncs_the_rest_of_the_item() {
         expect![[r#"
             23..24: expected `;`
             25..26: expected a type
-            27..30: expected an item (`static`, `const`, `type` or `trait`)
-            31..32: expected an item (`static`, `const`, `type` or `trait`)
-            33..34: expected an item (`static`, `const`, `type` or `trait`)
-            35..36: expected an item (`static`, `const`, `type` or `trait`)
-            36..37: expected an item (`static`, `const`, `type` or `trait`)
+            27..30: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            31..32: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            33..34: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            35..36: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            36..37: expected an item (`static`, `const`, `type`, `trait` or `extern`)
         "#]],
     );
 }
@@ -9497,12 +9513,12 @@ fn retired_lifetime_in_struct_field_desyncs_the_rest_of_the_item() {
         expect![[r#"
             22..23: borrow types are spelled postfix: `T.&` / `T.&mut`
             23..24: unterminated character literal: expected a closing `'`
-            24..25: expected an item (`static`, `const`, `type` or `trait`)
-            26..29: expected an item (`static`, `const`, `type` or `trait`)
-            30..31: expected an item (`static`, `const`, `type` or `trait`)
-            32..33: expected an item (`static`, `const`, `type` or `trait`)
-            34..35: expected an item (`static`, `const`, `type` or `trait`)
-            35..36: expected an item (`static`, `const`, `type` or `trait`)
+            24..25: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            26..29: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            30..31: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            32..33: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            34..35: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            35..36: expected an item (`static`, `const`, `type`, `trait` or `extern`)
         "#]],
     );
     // The tail cascade is identical, and both snippets actually run the
@@ -9524,11 +9540,11 @@ fn retired_lifetime_in_struct_field_desyncs_the_rest_of_the_item() {
         expect![[r#"
             20..21: expected `}`
             22..23: expected a type
-            24..27: expected an item (`static`, `const`, `type` or `trait`)
-            28..29: expected an item (`static`, `const`, `type` or `trait`)
-            30..31: expected an item (`static`, `const`, `type` or `trait`)
-            32..33: expected an item (`static`, `const`, `type` or `trait`)
-            33..34: expected an item (`static`, `const`, `type` or `trait`)
+            24..27: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            28..29: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            30..31: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            32..33: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            33..34: expected an item (`static`, `const`, `type`, `trait` or `extern`)
         "#]],
     );
 }
@@ -13271,8 +13287,9 @@ fn bound_shape_rules() {
                       WHITESPACE@37..38 " "
                       FN_TYPE@38..51
                         FN_KW@38..40 "fn"
-                        L_PAREN@40..41 "("
-                        R_PAREN@41..42 ")"
+                        PARAM_LIST@40..42
+                          L_PAREN@40..41 "("
+                          R_PAREN@41..42 ")"
                         WHITESPACE@42..43 " "
                         RET_TYPE@43..51
                           THIN_ARROW@43..45 "->"
@@ -14932,67 +14949,329 @@ fn outlives_clauses_ride_the_with_clause_grammar() {
     );
 }
 
-// ---- `extern fn` — host import declarations ----------------------------
+// ---- `extern static` — host import declarations -------------------------
 
 #[test]
-fn an_extern_fn_declaration_parses_as_a_bodyless_fn_literal() {
-    // `extern` rides the same modifier slot `const` does: one FN_LITERAL
-    // node with one more token child, and no BLOCK_EXPR under it.
+fn an_import_is_a_declaration_with_no_initializer() {
+    // `extern static name: TYPE;` — the marker leads the ITEM, the item has
+    // no `=` at all, and the signature is an ordinary `unsafe fn` TYPE in
+    // annotation position (named parameters and all).
     check(
-        "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;",
+        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;",
         expect![[r#"
-            SOURCE_FILE@0..61
-              STATIC_ITEM@0..61
-                STATIC_KW@0..6 "static"
+            SOURCE_FILE@0..69
+              STATIC_ITEM@0..69
+                EXTERN_KW@0..6 "extern"
                 WHITESPACE@6..7 " "
-                NAME@7..11
-                  IDENT@7..11 "read"
-                WHITESPACE@11..12 " "
-                EQ@12..13 "="
+                STATIC_KW@7..13 "static"
                 WHITESPACE@13..14 " "
-                FN_LITERAL@14..60
-                  EXTERN_KW@14..20 "extern"
-                  WHITESPACE@20..21 " "
-                  FN_KW@21..23 "fn"
-                  PARAM_LIST@23..53
-                    L_PAREN@23..24 "("
-                    PARAM@24..40
-                      BIND_PAT@24..27
-                        NAME@24..27
-                          IDENT@24..27 "buf"
-                      COLON@27..28 ":"
-                      WHITESPACE@28..29 " "
-                      RAW_PTR_TYPE@29..40
-                        PATH_TYPE@29..31
-                          NAME_REF@29..31
-                            IDENT@29..31 "u8"
-                        DOT@31..32 "."
-                        AMP@32..33 "&"
-                        RAW_KW@33..36 "raw"
-                        WHITESPACE@36..37 " "
-                        MUT_KW@37..40 "mut"
-                    COMMA@40..41 ","
-                    WHITESPACE@41..42 " "
-                    PARAM@42..52
-                      BIND_PAT@42..45
-                        NAME@42..45
-                          IDENT@42..45 "len"
-                      COLON@45..46 ":"
-                      WHITESPACE@46..47 " "
-                      PATH_TYPE@47..52
-                        NAME_REF@47..52
-                          IDENT@47..52 "usize"
-                    R_PAREN@52..53 ")"
-                  WHITESPACE@53..54 " "
-                  RET_TYPE@54..60
-                    THIN_ARROW@54..56 "->"
-                    WHITESPACE@56..57 " "
-                    PATH_TYPE@57..60
-                      NAME_REF@57..60
-                        IDENT@57..60 "i64"
-                SEMICOLON@60..61 ";"
+                NAME@14..18
+                  IDENT@14..18 "read"
+                COLON@18..19 ":"
+                WHITESPACE@19..20 " "
+                FN_TYPE@20..68
+                  UNSAFE_KW@20..26 "unsafe"
+                  WHITESPACE@26..27 " "
+                  FN_KW@27..29 "fn"
+                  PARAM_LIST@29..59
+                    L_PAREN@29..30 "("
+                    PARAM@30..46
+                      NAME@30..33
+                        IDENT@30..33 "buf"
+                      COLON@33..34 ":"
+                      WHITESPACE@34..35 " "
+                      RAW_PTR_TYPE@35..46
+                        PATH_TYPE@35..37
+                          NAME_REF@35..37
+                            IDENT@35..37 "u8"
+                        DOT@37..38 "."
+                        AMP@38..39 "&"
+                        RAW_KW@39..42 "raw"
+                        WHITESPACE@42..43 " "
+                        MUT_KW@43..46 "mut"
+                    COMMA@46..47 ","
+                    WHITESPACE@47..48 " "
+                    PARAM@48..58
+                      NAME@48..51
+                        IDENT@48..51 "len"
+                      COLON@51..52 ":"
+                      WHITESPACE@52..53 " "
+                      PATH_TYPE@53..58
+                        NAME_REF@53..58
+                          IDENT@53..58 "usize"
+                    R_PAREN@58..59 ")"
+                  WHITESPACE@59..60 " "
+                  RET_TYPE@60..68
+                    THIN_ARROW@60..62 "->"
+                    WHITESPACE@62..63 " "
+                    PATH_TYPE@63..68
+                      NAME_REF@63..68
+                        IDENT@63..68 "isize"
+                SEMICOLON@68..69 ";"
         "#]],
     );
+}
+
+#[test]
+fn a_fn_type_may_name_its_parameters() {
+    // The named list is the same `PARAM_LIST` a colon-declared member's
+    // signature writes — one tree shape for one thing. Names are
+    // documentation: nothing below the syntax layer keeps them, and the
+    // unnamed spelling still parses to bare child types.
+    check(
+        "static f: fn(x: usize) -> usize = fn(n: usize) -> usize { n };",
+        expect![[r#"
+            SOURCE_FILE@0..62
+              STATIC_ITEM@0..62
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                COLON@8..9 ":"
+                WHITESPACE@9..10 " "
+                FN_TYPE@10..31
+                  FN_KW@10..12 "fn"
+                  PARAM_LIST@12..22
+                    L_PAREN@12..13 "("
+                    PARAM@13..21
+                      NAME@13..14
+                        IDENT@13..14 "x"
+                      COLON@14..15 ":"
+                      WHITESPACE@15..16 " "
+                      PATH_TYPE@16..21
+                        NAME_REF@16..21
+                          IDENT@16..21 "usize"
+                    R_PAREN@21..22 ")"
+                  WHITESPACE@22..23 " "
+                  RET_TYPE@23..31
+                    THIN_ARROW@23..25 "->"
+                    WHITESPACE@25..26 " "
+                    PATH_TYPE@26..31
+                      NAME_REF@26..31
+                        IDENT@26..31 "usize"
+                WHITESPACE@31..32 " "
+                EQ@32..33 "="
+                WHITESPACE@33..34 " "
+                FN_LITERAL@34..61
+                  FN_KW@34..36 "fn"
+                  PARAM_LIST@36..46
+                    L_PAREN@36..37 "("
+                    PARAM@37..45
+                      BIND_PAT@37..38
+                        NAME@37..38
+                          IDENT@37..38 "n"
+                      COLON@38..39 ":"
+                      WHITESPACE@39..40 " "
+                      PATH_TYPE@40..45
+                        NAME_REF@40..45
+                          IDENT@40..45 "usize"
+                    R_PAREN@45..46 ")"
+                  WHITESPACE@46..47 " "
+                  RET_TYPE@47..55
+                    THIN_ARROW@47..49 "->"
+                    WHITESPACE@49..50 " "
+                    PATH_TYPE@50..55
+                      NAME_REF@50..55
+                        IDENT@50..55 "usize"
+                  WHITESPACE@55..56 " "
+                  BLOCK_EXPR@56..61
+                    L_BRACE@56..57 "{"
+                    WHITESPACE@57..58 " "
+                    PATH_EXPR@58..59
+                      NAME_REF@58..59
+                        IDENT@58..59 "n"
+                    WHITESPACE@59..60 " "
+                    R_BRACE@60..61 "}"
+                SEMICOLON@61..62 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn extern_static_error_forms() {
+    check_errors(
+        "extern static a: unsafe fn(n: i64) -> i64 = 1;\n\
+         extern static b: fn(n: i64) -> i64;\n\
+         extern static c: usize;\n\
+         extern static d;\n\
+         extern const e: unsafe fn() -> ();\n\
+         extern type F = usize;\n\
+         extern static g: unsafe fn::<T>(n: T) -> i64;\n\
+         extern static i: unsafe fn(n: _) -> _;\n\
+         extern static j: unsafe fn(n: _) -> i64 = fn(n: i64) -> i64 { n };\n\
+         static h: usize;\n",
+        expect![[r#"
+            42..45: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
+            64..81: an import must be declared `unsafe fn` for now: a safe-to-call import needs the declaration-side `unsafe` marker, and that marker does not exist yet
+            100..105: data imports are not supported yet — an import must have a function type
+            121..122: an import must declare its type: `extern static name: unsafe fn(...) -> T;`
+            124..130: only a `static` can be `extern`: an import declares one name with one type
+            159..165: only a `static` can be `extern`: an import declares one name with one type
+            208..213: an import cannot be generic: it has exactly one machine signature, and there is nothing to monomorphize it into
+            258..259: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
+            264..265: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
+            307..332: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
+            349..350: expected `=` followed by the item's value
+        "#]],
+    );
+}
+
+#[test]
+fn a_written_value_takes_an_extern_statics_annotation_out_of_the_import_rules() {
+    // `j` in `extern_static_error_forms`: the value wins, so the item is
+    // not an import and its annotation is an ordinary one — the `_` is
+    // filled from the body written on the same line. Only the initializer
+    // is refused, and none of the contract rules (which would each be a
+    // sentence that is not true of this program) fire.
+    let source = "extern static j: unsafe fn(n: _) -> i64 = fn(n: i64) -> i64 { n };";
+    let messages: Vec<_> = crate::parse(source)
+        .errors()
+        .iter()
+        .map(|e| e.message.clone())
+        .collect();
+    assert_eq!(
+        messages,
+        vec![
+            "an `extern static` has no initializer: the declaration is the whole \
+             contract, and an import sets nothing to anything"
+                .to_owned()
+        ]
+    );
+}
+
+#[test]
+fn the_retired_spelling_with_an_annotation_is_held_to_the_import_rules() {
+    // The retired form IS an import, so an annotation written on it is an
+    // IMPORT's annotation — retiring a spelling must not relax what the
+    // programs written in it are held to. And the annotation is the home
+    // the respelling keeps, so the migration message says outright that the
+    // initializer's own signature is dropped.
+    check_errors(
+        "static a: usize = extern fn(n: i64) -> i64;\n\
+         static b: fn(n: i64) -> i64 = extern fn(n: i64) -> i64;\n\
+         static c: unsafe fn(n: _) -> i64 = extern fn(n: i64) -> i64;\n\
+         static d = extern fn(n: i64) -> i64;\n",
+        expect![[r#"
+            10..15: data imports are not supported yet — an import must have a function type
+            18..42: a host import is a DECLARATION, not an initializer: write `extern static a: unsafe fn(...) -> T;` — the annotation is the contract, and this signature is dropped
+            54..71: an import must be declared `unsafe fn` for now: a safe-to-call import needs the declaration-side `unsafe` marker, and that marker does not exist yet
+            74..98: a host import is a DECLARATION, not an initializer: write `extern static b: unsafe fn(...) -> T;` — the annotation is the contract, and this signature is dropped
+            123..124: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
+            135..159: a host import is a DECLARATION, not an initializer: write `extern static c: unsafe fn(...) -> T;` — the annotation is the contract, and this signature is dropped
+            172..196: a host import is a DECLARATION, not an initializer: write `extern static d: unsafe fn(...) -> T;`
+        "#]],
+    );
+}
+
+#[test]
+fn a_fn_types_parameters_are_named_or_bare_at_every_index() {
+    // Decided PER PARAMETER, not per list: neither position changes what
+    // the other means, so all four mixtures are the same type written four
+    // ways — and none of them derails the item.
+    for source in [
+        "static f: fn(usize, usize) -> usize = g;",
+        "static f: fn(x: usize, y: usize) -> usize = g;",
+        "static f: fn(usize, y: usize) -> usize = g;",
+        "static f: fn(x: usize, usize) -> usize = g;",
+        "static f: fn(_: usize, usize) -> usize = g;",
+    ] {
+        assert_eq!(
+            crate::parse(source).errors(),
+            &[],
+            "`{source}` must parse clean"
+        );
+    }
+}
+
+#[test]
+fn a_fn_type_admits_no_patterns() {
+    // A fn LITERAL's parameters are patterns and they BIND; a fn type's
+    // name binds nothing, so the pattern grammar is not admitted at all
+    // (Rust draws the same line at fn-pointer types). Refused where it is
+    // written — never reinterpreted as something else.
+    check_errors(
+        "static a: fn(mut x: usize) -> usize = g;\n\
+         static b: fn(struct { x: usize }: usize) -> usize = g;\n\
+         static c: fn(x:) -> usize = g;\n",
+        expect![[r#"
+            13..16: a function type's parameters are not patterns: write `name: Type` or `Type`
+            73..74: a function type's parameters are not patterns: write `name: Type` or `Type`
+            109..111: this parameter has no type: a function type's parameters are `name: Type` or `Type`
+            111..112: expected a type
+        "#]],
+    );
+}
+
+#[test]
+fn removing_an_extern_statics_initializer_keeps_the_declaration() {
+    // The fix cuts the VALUE, not the contract: an import with its type
+    // taken away would be a second error where there was one, and the type
+    // is the whole of what the declaration says.
+    let source = "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize = f;";
+    let parse = crate::parse(source);
+    let err = parse
+        .errors()
+        .iter()
+        .find(|e| {
+            e.message
+                .starts_with("an `extern static` has no initializer")
+        })
+        .expect("the initializer is refused");
+    let fix = err.fix.as_ref().expect("with a removal fix");
+    let fixed = apply_fix(source, fix);
+    assert_eq!(
+        fixed,
+        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;"
+    );
+    assert_eq!(crate::parse(&fixed).errors(), &[]);
+}
+
+#[test]
+fn the_retired_initializer_form_rewrites_to_the_declaration() {
+    // `static read = extern fn(...);` is RETIRED (G22):
+    // an import sets nothing to anything, so it is spelled as the
+    // declaration it is. Superset-parsed into the same FN_LITERAL it always
+    // produced — never a silent reinterpretation — and rewritten by a fix.
+    let source = "static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;";
+    let parse = crate::parse(source);
+    let [err] = parse.errors() else {
+        panic!("expected exactly one error, got {:?}", parse.errors());
+    };
+    assert_eq!(
+        err.message,
+        "a host import is a DECLARATION, not an initializer: \
+         write `extern static read: unsafe fn(...) -> T;`"
+    );
+    let fix = err.fix.as_ref().expect("the rewrite is offered");
+    assert_eq!(
+        apply_fix(source, fix),
+        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;"
+    );
+    // And the rewrite is the accepted form.
+    assert_eq!(crate::parse(&apply_fix(source, fix)).errors(), &[]);
+}
+
+#[test]
+fn the_retired_form_offers_no_rewrite_it_cannot_make_correctly() {
+    // A body, `const extern fn`, a binder, a `const` item: each was its own
+    // refusal under the old spelling, and each is now covered by the one
+    // retirement message —
+    // but a fix that produced a second broken item would be worse than
+    // none, so those shapes get the message alone.
+    for source in [
+        "static a = extern fn(n: i64) -> i64 { n };",
+        "static b = extern fn::<T>(n: T) -> i64;",
+        "static c = const extern fn(n: i64) -> i64;",
+        "const d = extern fn(n: i64) -> i64;",
+    ] {
+        let parse = crate::parse(source);
+        let err = parse
+            .errors()
+            .iter()
+            .find(|e| e.message.starts_with("a host import is a DECLARATION"))
+            .unwrap_or_else(|| panic!("no retirement error for `{source}`"));
+        assert!(err.fix.is_none(), "`{source}` must offer no rewrite");
+    }
 }
 
 #[test]
@@ -15009,38 +15288,20 @@ fn a_half_written_fn_modifier_prefix_is_reported_not_asserted() {
          static e = unsafe extern extern;\n\
          static f = unsafe const extern;\n",
         expect![[r#"
-            11..16: an `extern fn` cannot be `const`: a host import is a call out of the program, and const evaluation has no host
+            11..23: a host import is a DECLARATION, not an initializer: write `extern static a: unsafe fn(...) -> T;`
             23..24: expected `fn`
-            43..48: an `extern fn` cannot be `const`: a host import is a call out of the program, and const evaluation has no host
+            36..48: a host import is a DECLARATION, not an initializer: write `extern static b: unsafe fn(...) -> T;`
             48..49: expected `fn`
-            74..79: an `extern fn` cannot be `const`: a host import is a call out of the program, and const evaluation has no host
-            80..86: an `extern fn` must be a `static`'s initializer — `static name = extern fn(...) -> T;` — because the item's name is the name the host is asked for
+            74..86: a host import is a DECLARATION, not an initializer: write `extern static name: unsafe fn(...) -> T;`
             87..88: expected `fn`
-            102..108: an `extern fn` must be a `static`'s initializer — `static name = extern fn(...) -> T;` — because the item's name is the name the host is asked for
-            109..114: an `extern fn` cannot be `const`: a host import is a call out of the program, and const evaluation has no host
+            102..114: a host import is a DECLARATION, not an initializer: write `extern static name: unsafe fn(...) -> T;`
             114..115: expected `fn`
-            135..141: expected an expression
-            142..148: expected an item (`static`, `const`, `type` or `trait`)
-            148..149: expected an item (`static`, `const`, `type` or `trait`)
-            168..173: an `extern fn` cannot be `const`: a host import is a call out of the program, and const evaluation has no host
+            133..134: expected `;`
+            135..141: expected `{`: `unsafe` blocks are blocks
+            142..148: expected `static` after `extern`: an import declares one name with one type
+            148..149: expected `static` after `extern`: an import declares one name with one type
             168..180: an `unsafe fn` literal is not supported yet; the `unsafe fn(...)` type is live, so annotate the value and write a plain `fn`
             180..181: expected `fn`
-        "#]],
-    );
-}
-
-#[test]
-fn extern_fn_error_forms() {
-    check_errors(
-        "static a = extern fn(n: i64) -> i64 { n };\n\
-         static b = extern fn::<T>(n: T) -> i64;\n\
-         static c = const extern fn(n: i64) -> i64;\n\
-         const d = extern fn(n: i64) -> i64;\n",
-        expect![[r#"
-            36..41: an `extern fn` declares a host import and has no body; the implementation lives on the other side of the boundary
-            63..68: an `extern fn` cannot be generic: an import has exactly one machine signature, and there is nothing to monomorphize it into
-            94..99: an `extern fn` cannot be `const`: a host import is a call out of the program, and const evaluation has no host
-            136..142: an `extern fn` must be a `static`'s initializer — `static name = extern fn(...) -> T;` — because the item's name is the name the host is asked for
         "#]],
     );
 }
@@ -15155,6 +15416,10 @@ fn without_and_with_compose_in_either_order() {
 
 #[test]
 fn without_clause_misplacements_and_unknown_capabilities() {
+    // Every item head parses the clause and refuses it in its own words —
+    // an import too, though it has no `= rhs` for the clause to trail: one
+    // sentence beats a parse cascade, and an import IS a `static` item, so
+    // it is already the `static` sentence.
     check_errors(
         "static x = 5 without forget;\n\
          trait T = requires {} without forget;\n\
@@ -15162,7 +15427,8 @@ fn without_clause_misplacements_and_unknown_capabilities() {
          type B = struct {} without send;\n\
          type C = enum::<@a without forget> { X };\n\
          type D = enum::<const N: usize without forget> { X };\n\
-         type E = struct {} without;\n",
+         type E = struct {} without;\n\
+         extern static rd: unsafe fn(n: usize) -> isize without forget;\n",
         expect![[r#"
             13..20: a capability opt-out belongs on a `type` declaration; a `static` has whatever capabilities its type has
             51..58: a capability opt-out belongs on a `type` declaration, not on a `trait`
@@ -15171,6 +15437,7 @@ fn without_clause_misplacements_and_unknown_capabilities() {
             152..159: a region parameter names a duration, not a value, so it has no capability to opt out of
             206..213: a const parameter's values are always plain data, so it has no capability to opt out of
             255..256: expected a capability name after `without` (`without forget`)
+            304..311: a capability opt-out belongs on a `type` declaration; a `static` has whatever capabilities its type has
         "#]],
     );
 }

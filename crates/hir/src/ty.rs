@@ -1983,6 +1983,13 @@ pub fn signature_needs_annotation<'db>(db: &'db dyn Db, item: ItemId<'db>) -> bo
     if item.member(db).is_some() {
         return false;
     }
+    // A HOST IMPORT is nothing BUT its annotation, so "add a type
+    // annotation to its definition" is advice that cannot be taken. What is
+    // wrong with the contract — a `_` left in it, a type that is not a
+    // function — is refused where it is written.
+    if crate::is_host_import(db, item) {
+        return false;
+    }
     if let Some(data) = crate::item_data(db, item).as_ref() {
         // A generic item is never "needs annotation": its scheme either is
         // complete (fully-annotated rule) or the *definition* carries the

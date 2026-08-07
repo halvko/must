@@ -156,6 +156,13 @@ fn classify_ident(
         (NAME, TYPE_PARAM) | (NAME, CONST_PARAM) => {
             Some((HlTag::TypeParameter, HlMods(HlMods::DECLARATION)))
         }
+        // A fn TYPE's parameter name (`unsafe fn(buf: u8.&raw mut, ...)`).
+        // It binds nothing — it is a signature's spelling — but it is a
+        // parameter name all the same, and reading it unstyled next to
+        // every other `fn`'s parameters is just a hole. (A colon-declared
+        // member's signature reaches the same class through `BIND_PAT`
+        // below, for the same reason.)
+        (NAME, PARAM) => Some((HlTag::Parameter, HlMods(HlMods::DECLARATION))),
         // A variant declared inside an `enum` literal.
         (NAME, ENUM_VARIANT) => Some((HlTag::EnumMember, HlMods(HlMods::DECLARATION))),
         // A payload binding in a variant pattern declares a plain local.

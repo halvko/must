@@ -47,7 +47,7 @@ pub enum UnsafeCheckDiagnostic {
     /// The squiggle (and MIR's trap) lands on the call expression: the
     /// call is the operation that must not run.
     BuiltinCallOutsideUnsafe { call: ExprId, builtin: Builtin },
-    /// A call of an `extern fn` — a host import — outside any `unsafe { ...
+    /// A call of a host import — an `extern static` — outside any `unsafe { ...
     /// }` block. Same rule, different reason: an import's behavior is not
     /// written in this language, so nothing here can establish it is sound.
     ///
@@ -116,8 +116,8 @@ pub fn unsafe_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<UnsafeCheckD
 
 struct CheckCtx<'db> {
     /// Consulted for exactly one cross-item question: does this call reach
-    /// an `extern fn` declaration? ([`crate::is_extern_fn`].) Asked only so
-    /// the message can NAME the import — the type rule catches the call
+    /// an `extern static` declaration? ([`crate::is_host_import`].) Asked only
+    /// so the message can NAME the import — the type rule catches the call
     /// either way, since an import's type is an `unsafe fn`.
     db: &'db dyn Db,
     body: &'db Body,
@@ -186,6 +186,9 @@ impl CheckCtx<'_> {
             ExprData::NameRef(_)
             | ExprData::Missing
             | ExprData::Literal(_)
+            // The import DECLARATION itself: naming a host function runs
+            // nothing, so it is free exactly as a mention of one is.
+            | ExprData::ExternImport
             | ExprData::ElidedVariant { .. } => {}
             // Both lists a path can carry — the owner's turbofish and a
             // second segment's own — hold ordinary const-arg expressions,
@@ -233,7 +236,7 @@ impl CheckCtx<'_> {
                                 builtin,
                             });
                     } else if let Some(Resolution::Item(loc)) = self.resolutions.get(callee_name)
-                        && crate::is_extern_fn(self.db, loc.to_id(self.db))
+                        && crate::is_host_import(self.db, loc.to_id(self.db))
                     {
                         // A host import named DIRECTLY. Its type is an
                         // `unsafe fn` too, so the type rule below would
@@ -353,11 +356,7 @@ impl CheckCtx<'_> {
             ExprData::ConstBlock { body } => self.check_expr(*body, in_unsafe),
             // A separate function: it runs under any caller, so it declares
             // its own unsafety — the region resets.
-            ExprData::FnLiteral { body, .. } => {
-                if let Some(body) = body {
-                    self.check_expr(*body, false);
-                }
-            }
+            ExprData::FnLiteral { body, .. } => self.check_expr(*body, false),
         }
     }
 }

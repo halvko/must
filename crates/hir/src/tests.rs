@@ -13526,102 +13526,260 @@ fn a_bind_shadowing_a_variant_warns_through_a_borrow_too() {
     );
 }
 
-// ---- `extern fn` — host imports ----------------------------------------
+// ---- `extern static` — host imports ------------------------------------
 
 #[test]
-fn an_extern_fn_has_an_unsafe_fn_type() {
+fn an_import_declaration_has_an_unsafe_fn_type() {
     // The import's type carries its price: `unsafe fn(...)`. Still a
     // first-class function value — annotatable, bindable, passable — but
     // one whose CALLS need the marker wherever they happen, which is what
     // the declaration alone could never say once the value escaped.
+    //
+    // The declaration writes NO expression — its root is synthesized and
+    // owns no syntax node (nothing here is that expression), so the type is
+    // read where a reader can see it: at a mention.
     check_infer(
-        "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;",
+        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+         static held = fn() -> () { let f = read; };",
         expect![[r#"
-            14..60 'extern fn(buf: u8...': unsafe fn(u8.&raw mut, usize) -> i64
-            24..27 'buf': u8.&raw mut
-            42..45 'len': usize
+            82..110 'fn() -> () { let ...': fn()
+            93..110 '{ let f = read; }': ()
+            99..100 'f': unsafe fn(u8.&raw mut, usize) -> i64
+            103..107 'read': unsafe fn(u8.&raw mut, usize) -> i64
         "#]],
     );
 }
 
 #[test]
-fn calling_an_extern_fn_outside_unsafe_is_rejected() {
+fn an_imports_unwritten_return_type_is_unit() {
+    // G22's rule: there is no body for anything
+    // to infer from and no call site may decide it, so the one thing a
+    // missing return can mean here is "nothing comes back". (Every other fn
+    // type's elided return is still inference's business.)
+    check_infer(
+        "extern static tick: unsafe fn(n: i64);\n\
+         static held = fn() -> () { let f = tick; };",
+        expect![[r#"
+            53..81 'fn() -> () { let ...': fn()
+            64..81 '{ let f = tick; }': ()
+            70..71 'f': unsafe fn(i64)
+            74..78 'tick': unsafe fn(i64)
+        "#]],
+    );
+}
+
+#[test]
+fn calling_an_import_outside_unsafe_is_rejected() {
     check_diagnostics(
-        "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
          static f = fn(p: u8.&raw mut) -> i64 { read(p, 1) };",
         expect![[r#"
-            101..111: calling the host import `read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
+            107..117: calling the host import `read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
         "#]],
     );
 }
 
 #[test]
-fn calling_an_extern_fn_in_a_const_context_is_rejected() {
+fn calling_an_import_in_a_const_context_is_rejected() {
     // Not `NonConstFnCall`: "marking it `const fn` would allow this" is
-    // advice that cannot be taken, because `const extern fn` is itself
-    // rejected. The honest refusal names the missing host.
+    // advice that cannot be taken — an import is a DECLARATION, and there
+    // is no const spelling of one to reach for. The honest refusal names
+    // the missing host.
     check_diagnostics(
-        "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
          static f = const fn(p: u8.&raw mut) -> i64 { unsafe { read(p, 1) } };",
         expect![[r#"
-            116..120: cannot call the host import `read` in a const context; there is no host at compile time (this `const fn` is always a const context at 73..78)
+            122..126: cannot call the host import `read` in a const context; there is no host at compile time (this `const fn` is always a const context at 79..84)
         "#]],
     );
 }
 
 #[test]
-fn taking_an_extern_fn_as_a_value_is_free_and_its_call_is_gated() {
-    // Pricing the MENTION (`let f = unsafe { read };`) was the stopgap for
-    // a call site that could not name what it was calling. Unsafety in the
-    // TYPE removes the need: `f` is an `unsafe fn`, so the call is where
-    // the marker is demanded — which is both the honest place and the one a
-    // reader of the call can act on. Binding, passing and returning an
-    // import are ordinary things to do.
+fn taking_an_import_as_a_value_is_free_and_its_call_is_gated() {
+    // The old stopgap priced the MENTION (`let f = unsafe { read };`)
+    // because the call site could not name what it was calling. Unsafety in
+    // the TYPE removes the need: `f` is an `unsafe fn`, so the call is
+    // where the marker is demanded — which is both the honest place and the
+    // one a reader of the call can act on. Binding, passing and returning
+    // an import are now ordinary things to do.
     check_diagnostics(
-        "static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;\n\
+        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;\n\
          static bound = fn() -> () { let f = read; };\n\
          static loose = fn(p: u8.&raw mut) -> isize { let f = read; f(p, 1) };\n\
          static vouched = fn(p: u8.&raw mut) -> isize { let f = read; unsafe { f(p, 1) } };\n\
          static called = fn(p: u8.&raw mut) -> isize { unsafe { read(p, 1) } };",
         expect![[r#"
-            168..175: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            174..181: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
 
 #[test]
-fn an_extern_fn_with_a_body_is_not_a_host_import() {
+fn the_retired_form_still_means_what_it_meant() {
+    // Retiring a spelling does not reinterpret programs written in it. The
+    // retired form still lowers to the same import, so it must still get the
+    // IMPORT's messages — above all the const one, whose whole point is
+    // that "marking it `const fn` would allow this" is advice that cannot
+    // be taken here. (The migration diagnostic rides along, as it should.)
+    check_diagnostics(
+        "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+         static direct = fn(p: u8.&raw mut) -> i64 { read(p, 1) };\n\
+         static at_compile_time = const fn(p: u8.&raw mut) -> i64 { unsafe { read(p, 1) } };",
+        expect![[r#"
+            14..60: a host import is a DECLARATION, not an initializer: write `extern static read: unsafe fn(...) -> T;`
+            106..116: calling the host import `read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
+            188..192: cannot call the host import `read` in a const context; there is no host at compile time (this `const fn` is always a const context at 145..150)
+        "#]],
+    );
+}
+
+#[test]
+fn the_retired_form_with_no_written_return_is_still_unit() {
+    // The retired spelling gets the unwritten-return rule too — it MEANS
+    // the same import, and an import's elided return is `()`. Nothing here
+    // may fall back to inference: the item's own contract is what every
+    // mention reads, and a free variable there would be a type no one wrote.
+    check_infer(
+        "static tick = extern fn(n: i64);\n\
+         static held = fn() -> () { let f = tick; };",
+        expect![[r#"
+            47..75 'fn() -> () { let ...': fn()
+            58..75 '{ let f = tick; }': ()
+            64..65 'f': unsafe fn(i64)
+            68..72 'tick': unsafe fn(i64)
+        "#]],
+    );
+}
+
+#[test]
+fn one_signature_two_spellings_is_one_type() {
+    // The declaration names its parameters (a contract a reader must be
+    // able to read); a fn TYPE elsewhere usually does not. The names stop
+    // at the syntax layer, so the two spellings must be the same type —
+    // otherwise a signature would depend on whether someone wrote `buf`.
+    check_diagnostics(
+        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;\n\
+         static held: unsafe fn(u8.&raw mut, usize) -> isize = read;",
+        expect![[""]],
+    );
+}
+
+#[test]
+fn an_extern_static_with_an_initializer_is_not_a_host_import() {
     // The syntax error stands (see `syntax`'s own test); what must not
     // happen is the item becoming an import ANYWAY, which would turn a
-    // written body into a run-time refusal naming a boundary the program
-    // never crossed. The body wins: an import exists only where the
-    // declaration is well formed, so neither the `unsafe` rule nor the
-    // const rule fires here.
+    // written value into a run-time refusal naming a boundary the program
+    // never crossed. The VALUE wins: an import exists only where the
+    // declaration is whole, so the const context refuses this call with the
+    // ORDINARY message (advice that can be taken — mark it `const fn`)
+    // rather than the import one (advice that cannot).
+    // The retired spelling in the initializer slot changes nothing: it wrote
+    // no marker on the ITEM, so an item carrying both is not it — two
+    // visible mistakes, still not an import.
     check_diagnostics(
-        "static bad = extern fn(n: i64) -> i64 { n };\n\
-         static f = fn() -> i64 { bad(1) };\n\
-         static g = const fn() -> i64 { bad(1) };",
+        "extern static bad: unsafe fn(n: i64) -> i64 = fn(n: i64) -> i64 { n };\n\
+         static f = fn() -> i64 { unsafe { bad(1) } };\n\
+         static g = const fn() -> i64 { unsafe { bad(1) } };\n\
+         extern static worse: unsafe fn(n: i64) -> i64 = extern fn(n: i64) -> i64;\n\
+         static h = const fn() -> i64 { unsafe { worse(1) } };",
         expect![[r#"
-            38..43: an `extern fn` declares a host import and has no body; the implementation lives on the other side of the boundary
-            111..114: cannot call `bad` in a const context; marking it `const fn` would allow this (`bad` is defined here at 7..10) (this `const fn` is always a const context at 91..96)
+            44..69: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
+            157..160: cannot call `bad` in a const context; marking it `const fn` would allow this (`bad` is defined here at 14..17) (this `const fn` is always a const context at 128..133)
+            215..241: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
+            217..241: a host import is a DECLARATION, not an initializer: write `extern static worse: unsafe fn(...) -> T;`
+            283..288: cannot call `worse` in a const context; marking it `const fn` would allow this (`worse` is defined here at 183..188) (this `const fn` is always a const context at 254..259)
         "#]],
     );
 }
 
 #[test]
 fn a_misplaced_extern_fn_is_not_a_host_import() {
-    // Same rule as the written body, for the other half of a well-formed
-    // declaration: an import's name IS its item's name, so an `extern fn`
-    // that is not a plain `static`'s initializer has no name to import
-    // under. Lowering it as an import anyway would refuse at run time under
-    // the ENCLOSING item's name. It lowers as an ordinary fn literal with a
-    // missing body instead — exactly what dropping `extern` would give.
+    // The other half of a well-formed declaration: an import's name IS its
+    // item's name, so a retired `extern fn` that is not a plain `static`'s
+    // initializer has no name to import under. Lowering it as an import
+    // anyway would refuse at run time under the ENCLOSING item's name. It
+    // lowers as an ordinary fn literal with a missing body instead —
+    // exactly what dropping `extern` would give. Only the retirement
+    // message fires; nothing here is an import.
     check_diagnostics(
         "static outer = fn() -> i64 { let f = extern fn(n: i64) -> i64; f(1) };\n\
          const copied = extern fn(n: i64) -> i64;",
         expect![[r#"
-            37..43: an `extern fn` must be a `static`'s initializer — `static name = extern fn(...) -> T;` — because the item's name is the name the host is asked for
-            86..92: an `extern fn` must be a `static`'s initializer — `static name = extern fn(...) -> T;` — because the item's name is the name the host is asked for
+            37..61: a host import is a DECLARATION, not an initializer: write `extern static name: unsafe fn(...) -> T;`
+            86..110: a host import is a DECLARATION, not an initializer: write `extern static copied: unsafe fn(...) -> T;`
+        "#]],
+    );
+}
+
+#[test]
+fn an_imports_contract_admits_no_holes() {
+    // `_` names a type the BODY determines, and an import has no body: the
+    // annotation is the whole contract, so a hole in it is unwritten for
+    // good. Refused where it is written (once per hole), and typed as an
+    // error here — otherwise the mention would read a free variable and the
+    // use site would be told to annotate a definition that already is.
+    check_diagnostics(
+        "extern static f: unsafe fn(n: _) -> i64;\n\
+         static g = fn() -> i64 { unsafe { f(1) } };",
+        expect![[r#"
+            30..31: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
+        "#]],
+    );
+}
+
+#[test]
+fn a_data_import_publishes_no_type_at_all() {
+    // A DATA import is reserved (G22), and reserved all the way down. The
+    // item's value is a host FUNCTION and nothing else, so a contract that
+    // is not a function type is no contract: recorded as an error in the
+    // item tree, so the root and every mention agree by construction.
+    // Publishing the written `usize` to mentions instead would hand the
+    // backend a value it cannot produce — one diagnostic on the file, and a
+    // program that runs to an internal error.
+    check_infer(
+        "extern static x: usize;\n\
+         static g = fn() -> usize { let y = x; y };\n\
+         static r: usize = extern fn(n: i64) -> i64;\n\
+         static h = fn() -> usize { r };",
+        expect![[r#"
+            35..65 'fn() -> usize { l...': fn() -> usize
+            49..65 '{ let y = x; y }': {error}
+            55..56 'y': {error}
+            59..60 'x': {error}
+            62..63 'y': {error}
+            122..141 'fn() -> usize { r }': fn() -> usize
+            136..141 '{ r }': {error}
+            138..139 'r': {error}
+        "#]],
+    );
+}
+
+#[test]
+fn a_data_imports_use_site_is_told_the_truth() {
+    // The reservation is refused where it is written, and the use site says
+    // what is wrong with the name it is using. "Add a type annotation" would
+    // be advice that cannot be taken on an item that IS an annotation.
+    check_diagnostics(
+        "extern static x: usize;\n\
+         static g = fn() -> usize { x };",
+        expect![[r#"
+            17..22: data imports are not supported yet — an import must have a function type
+        "#]],
+    );
+}
+
+#[test]
+fn a_safe_typed_imports_call_is_still_gated() {
+    // The one shape whose TYPE carries no `unsafe`: the declaration-side
+    // refusal is a reservation, not a rejection, so the item still declares
+    // an import and the call is still priced as one. Nothing but the
+    // item-level rule stands between this call and the host.
+    check_diagnostics(
+        "extern static now: fn() -> i64;\n\
+         static f = fn() -> i64 { now() };",
+        expect![[r#"
+            19..30: an import must be declared `unsafe fn` for now: a safe-to-call import needs the declaration-side `unsafe` marker, and that marker does not exist yet
+            57..62: calling the host import `now` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
         "#]],
     );
 }
@@ -13631,7 +13789,7 @@ fn a_misplaced_extern_fn_is_not_a_host_import() {
 /// A safe function, a host import (`unsafe fn`), and a higher-order
 /// function that takes either — the shapes every test below draws from.
 const UNSAFE_FN_PRELUDE: &str = "\
-static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;
+extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
 static safe_read = fn(buf: u8.&raw mut, len: usize) -> isize { 0 };
 ";
 
@@ -13675,7 +13833,7 @@ fn an_unsafe_fn_does_not_coerce_to_a_safe_fn() {
     check_unsafe_fn(
         "static f = fn() -> () { let g: fn(u8.&raw mut, usize) -> isize = read; };",
         expect![[r#"
-            197..201: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize` (expected `fn(u8.&raw mut, usize) -> isize` because of this annotation at 163..194)
+            203..207: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize` (expected `fn(u8.&raw mut, usize) -> isize` because of this annotation at 169..200)
         "#]],
     );
 }
@@ -13686,7 +13844,7 @@ fn calling_a_let_bound_unsafe_fn_needs_the_marker() {
         "static f = fn(p: u8.&raw mut) -> isize { let g = read; g(p, 1) };\n\
          static ok = fn(p: u8.&raw mut) -> isize { let g = read; unsafe { g(p, 1) } };",
         expect![[r#"
-            187..194: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            193..200: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -13699,7 +13857,7 @@ fn calling_an_unsafe_fn_parameter_needs_the_marker() {
         "static apply = fn(g: unsafe fn(u8.&raw mut, usize) -> isize, p: u8.&raw mut) -> isize { g(p, 1) };\n\
          static ok = fn(g: unsafe fn(u8.&raw mut, usize) -> isize, p: u8.&raw mut) -> isize { unsafe { g(p, 1) } };",
         expect![[r#"
-            220..227: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            226..233: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -13710,7 +13868,7 @@ fn calling_an_unsafe_fn_returned_from_a_function_needs_the_marker() {
         "static pick = fn() -> unsafe fn(u8.&raw mut, usize) -> isize { read };\n\
          static f = fn(p: u8.&raw mut) -> isize { pick()(p, 1) };",
         expect![[r#"
-            244..256: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            250..262: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -13722,7 +13880,7 @@ fn calling_an_unsafe_fn_out_of_a_record_field_needs_the_marker() {
              let h = struct { go = read }; h.go(p, 1) \
          };",
         expect![[r#"
-            203..213: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            209..219: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -13773,8 +13931,8 @@ fn the_conversion_is_shallow_but_a_literal_is_checked_per_part() {
              let h: fn() -> unsafe fn(usize) -> usize = g; \
          };",
         expect![[r#"
-            394..395: type mismatch: expected `struct { go: unsafe fn(u8.&raw mut, usize) -> isize }`, found `struct { go: fn(u8.&raw mut, usize) -> isize }` (expected `struct { go: unsafe fn(u8.&raw mut, usize) -> isize }` because of this annotation at 338..391)
-            503..504: type mismatch: expected `fn() -> unsafe fn(usize) -> usize`, found `fn() -> fn(usize) -> usize` (expected `fn() -> unsafe fn(usize) -> usize` because of this annotation at 467..500)
+            400..401: type mismatch: expected `struct { go: unsafe fn(u8.&raw mut, usize) -> isize }`, found `struct { go: fn(u8.&raw mut, usize) -> isize }` (expected `struct { go: unsafe fn(u8.&raw mut, usize) -> isize }` because of this annotation at 344..397)
+            509..510: type mismatch: expected `fn() -> unsafe fn(usize) -> usize`, found `fn() -> fn(usize) -> usize` (expected `fn() -> unsafe fn(usize) -> usize` because of this annotation at 473..506)
         "#]],
     );
 }
@@ -13790,7 +13948,7 @@ fn a_safe_fn_parameter_refuses_an_import() {
          };\n\
          static f = fn(p: u8.&raw mut) -> isize { apply(read, p) };",
         expect![[r#"
-            271..275: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize`
+            277..281: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize`
         "#]],
     );
 }
@@ -13818,7 +13976,7 @@ fn a_generic_instantiated_at_an_unsafe_fn_keeps_the_price() {
          static f = fn(p: u8.&raw mut) -> isize { id(read)(p, 1) };\n\
          static ok = fn(p: u8.&raw mut) -> isize { unsafe { id(read)(p, 1) } };",
         expect![[r#"
-            211..225: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            217..231: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -13881,7 +14039,7 @@ fn an_item_level_unsafe_fn_annotation_lowers_the_same() {
         "static vouching: unsafe fn(u8.&raw mut, usize) -> isize = safe_read;\n\
          static f = fn(p: u8.&raw mut) -> isize { vouching(p, 1) };",
         expect![[r#"
-            242..256: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            248..262: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -13916,7 +14074,7 @@ fn a_join_of_imports_is_an_unsafe_fn_and_its_call_is_gated() {
              let g = if c { read } else { read }; unsafe { g(p, n) } \
          };",
         expect![[r#"
-            233..240: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            239..246: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -13948,8 +14106,8 @@ fn a_match_join_and_a_loop_break_join_mint_the_same_way() {
              let g = loop { if c { break read; }; break read; }; g(p, len) \
          };",
         expect![[r#"
-            245..254: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
-            379..388: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            251..260: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            385..394: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -13969,7 +14127,7 @@ fn a_join_mixing_a_safe_fn_and_an_import_settles_on_the_unsafe_one() {
              let g = if c { read } else { safe_read }; unsafe { g(p, n) } \
          };",
         expect![[r#"
-            238..245: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            244..251: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -13994,8 +14152,8 @@ fn a_chain_of_pending_joins_is_followed_to_its_unsafe_witness() {
              let g = if c { h } else { h }; unsafe { g(p, n) } \
          };",
         expect![[r#"
-            273..280: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
-            433..440: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            279..286: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            439..446: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -14041,7 +14199,7 @@ fn an_unconsumed_mixed_safety_join_is_a_branch_disagreement() {
     check_unsafe_fn(
         "static f = fn(c: bool) -> () { let g = if c { read } else { safe_read }; };",
         expect![[r#"
-            192..201: `if` branches have incompatible types: `unsafe fn(u8.&raw mut, usize) -> isize` vs `fn(u8.&raw mut, usize) -> isize`; add a type annotation to decide between them (this branch has type `unsafe fn(u8.&raw mut, usize) -> isize` at 178..182)
+            198..207: `if` branches have incompatible types: `unsafe fn(u8.&raw mut, usize) -> isize` vs `fn(u8.&raw mut, usize) -> isize`; add a type annotation to decide between them (this branch has type `unsafe fn(u8.&raw mut, usize) -> isize` at 184..188)
         "#]],
     );
 }
@@ -14076,7 +14234,7 @@ fn a_join_still_refuses_an_import_where_a_safe_fn_is_demanded() {
              let g: fn(u8.&raw mut, usize) -> isize = if c { read } else { safe_read }; \
          };",
         expect![[r#"
-            211..215: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize` (expected `fn(u8.&raw mut, usize) -> isize` because of this annotation at 170..201)
+            217..221: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize` (expected `fn(u8.&raw mut, usize) -> isize` because of this annotation at 176..207)
         "#]],
     );
 }

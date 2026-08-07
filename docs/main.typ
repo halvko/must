@@ -1962,18 +1962,42 @@ program can also declare a host import of its own, and the compiler learns
 nothing at all about what it does:
 
 ```must
-static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;
+extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
 ```
 
-`extern` sits exactly where `const` sits on a fn literal, and the literal
-has no body — the implementation is on the other side of the boundary. The
-DECLARATION IS THE WHOLE CONTRACT: the item's own name is the name the host
-is asked for (a compiled module imports it as `must.read`, `must.print`'s
-sibling), and the signature written here is the one machine signature the
-host must provide. An unwritten return type means `()`, since there is no
-body to infer one from. Four things follow, and each is the same sentence
-from a different side — an `extern fn` may not have a body, may not be
-`const`, may not be generic, and must be a `static`'s initializer.
+Read that as what it is: a DECLARATION. There is no `=` and no value,
+because an import does not set anything to anything — it promises that
+something with this name and this type exists, and whatever provides it is
+on the other side of the boundary.
+
+THE DECLARATION IS THE WHOLE CONTRACT: the item's own name is the name the
+host is asked for (a compiled module imports it as `must.read`,
+`must.print`'s sibling), and the type written here is the one machine
+signature the host must provide. An unwritten return type means `()`, since
+there is no body to infer one from, and nothing in the type may be left to
+inference either: a `_` in it would leave part of the contract unwritten,
+with no body to write it. Everything refused is that same sentence from
+another side — an `extern static` may not have an initializer, may not be a
+`const`/`type`/`trait`, and must declare a function type, written in full.
+
+The `unsafe` is written, not implied — `extern static read: fn(...)` is
+refused. Two different things are unsafe about a boundary, and only one of
+them has a spelling today. DECLARING a signature is already a vouch: if the
+symbol out there is not shaped the way you said, the program is wrong before
+anything calls it, and nothing on this side can check that for you. CALLING
+is priced per function: `read` writes through your raw pointer, so it really
+is `unsafe fn`, while a correctly declared `now: fn() -> i64` would be
+perfectly safe to call. Must has no way to write the first vouch down yet, so
+for now every import is declared `unsafe fn` — that way the reader sees at
+least one sign that a boundary is being crossed. The safe-to-call import is a
+real shape waiting on that marker, not a rejected one.
+
+A DATA import (`extern static x: usize`) is a shape this spelling admits and
+the language does not support yet — it is refused rather than guessed at.
+
+The old spelling, `static read = extern fn(...) -> isize;`, is retired: it
+put an `=` in front of something that is not a value. It still parses and
+still means the same import, with a fix that rewrites it.
 
 An import's TYPE is `unsafe fn(...)`, so calling one requires `unsafe` —
 wherever the call happens:
@@ -2024,7 +2048,7 @@ runtime error: no host implementation for the import `launch_missiles`
 ```
 
 A compiled module has its own reservation: `must.print` is already imported
-for the builtin `print`, so an `extern fn` may not claim that name — a module
+for the builtin `print`, so an import may not claim that name — a module
 cannot import one name twice.
 
 Turning `read`'s bare count into something a Must program can match on is
@@ -2041,7 +2065,7 @@ The host provides one primitive, POSIX's `read`, declared by the program
 itself:
 
 ```must
-static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;
+extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
 ```
 
 Fill a caller-owned buffer with at most `len` bytes; answer how many, `0` at
@@ -2200,7 +2224,7 @@ second iteration disposed of something already gone.
 == Running compiled modules
 
 A compiled module's imports are `must.print(ptr, len)` plus whatever
-`extern fn` declarations the program itself made, and it exports one
+`extern static` declarations the program itself made, and it exports one
 function, `main` (the entry expression compiled in, chosen with `must-lsp
 compile -e <expression>`, default `main()`). Two tools in `tools/` run one:
 `wasm-run.mjs` from the command line, `playground.html` by opening it in a

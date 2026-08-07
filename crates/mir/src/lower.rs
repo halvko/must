@@ -1463,7 +1463,7 @@ impl LowerCtx<'_> {
             // A host import is exactly a signature, so there is nothing to
             // lower. The declaring item's name is what a backend imports
             // under and what the interpreter asks its host for.
-            ExprData::FnLiteral { body: None, .. } => {
+            ExprData::ExternImport => {
                 let sig = match self.ty(expr) {
                     Ty::Fn(f) => f.as_ref().clone(),
                     // Broken source; the declaration carries its own error.
@@ -1480,7 +1480,7 @@ impl LowerCtx<'_> {
             }
             ExprData::FnLiteral {
                 params,
-                body: Some(fn_body),
+                body: fn_body,
                 ..
             } => {
                 let ret_ty = match self.ty(expr) {

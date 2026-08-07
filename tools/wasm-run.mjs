@@ -8,7 +8,7 @@
 // What it does:
 //   - wires the builtin import, `must.print(ptr: i32, len: i32)`, to
 //     stdout (the bytes live in the module's own exported `memory`) — a
-//     module that declares `extern fn` imports of its own needs a host
+//     module that declares `extern static` imports of its own needs a host
 //     that knows them, which this is not;
 //   - calls the module's one exported function, `main`
 //     (`codegen_wasm::ENTRY_EXPORT` — see crates/codegen-wasm/src/lib.rs;

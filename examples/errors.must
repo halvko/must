@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 36 errors and 1 warning.
+// exactly: found 40 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -331,24 +331,60 @@ static retired_prefix_borrow = fn () -> () {
     let r = &x;
 };
 
-// 32. A host import called without the marker. `extern fn` declares a call
-//     OUT of the program, and what it does is written in a language this
-//     compiler never sees — so nothing on this side can establish that the
-//     call is sound, and the caller vouches with `unsafe` exactly as it
+// 32. A host import called without the marker. An `extern static` declares
+//     a call OUT of the program, and what it does is written in a language
+//     this compiler never sees — so nothing on this side can establish that
+//     the call is sound, and the caller vouches with `unsafe` exactly as it
 //     does for a raw-pointer deref (21 above).
 //     error: calling the host import `host_read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
-static host_read = extern fn(buf: u8.&raw mut, len: usize) -> isize;
+extern static host_read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
 static unvouched_import = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
 
-// 33. An `extern fn` with a body. The declaration is the whole contract:
-//     the item's name is the name the host is asked for and the signature
-//     is what the host must provide, so there is nothing here to define —
-//     the implementation lives on the other side of the boundary.
-//     error: an `extern fn` declares a host import and has no body; the implementation lives on the other side of the boundary
-//     quick fix offered: "Remove the body"
-static import_with_a_body = extern fn(n: usize) -> usize { n };
+// 33. The retired INITIALIZER spelling of an import. An import sets nothing
+//     to anything, so it is written as the declaration it is; the old form
+//     put an `=` in front of something that is not a value. Like the prefix
+//     borrow (31 above) it still parses and still means the same import —
+//     retiring a spelling must not reinterpret programs written in it — and
+//     a fix rewrites it.
+//     error: a host import is a DECLARATION, not an initializer: write `extern static retired_import: unsafe fn(...) -> T;`
+//     quick fix offered: "Rewrite as an `extern static` declaration"
+static retired_import = extern fn(n: usize) -> usize;
 
-// 34. A region written at a CALL SITE. Regions are elided at every call:
+// 34. An initializer on an `extern static`. The declaration is the whole
+//     contract — the item's name is the name the host is asked for and the
+//     annotation is the one machine signature it must provide — so there is
+//     nothing left to set. The value wins where one is written (this item
+//     is NOT an import), and the fix cuts the value, not the contract.
+//     error: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
+//     quick fix offered: "Remove the initializer"
+extern static import_with_a_value: unsafe fn(n: usize) -> usize = fn (n: usize) -> usize { n };
+
+// 35. An import declared safe to call. Two things are unsafe about a
+//     boundary and only one of them has a spelling: DECLARING the signature
+//     is already a vouch nothing on this side can check, while CALLING is
+//     priced per function by its type. A safe-to-call import is a real
+//     shape, blocked on the declaration-side marker rather than rejected —
+//     so the `unsafe` is required for now, and the fix writes it.
+//     error: an import must be declared `unsafe fn` for now: a safe-to-call import needs the declaration-side `unsafe` marker, and that marker does not exist yet
+//     quick fix offered: "Write `unsafe fn`"
+extern static safe_import: fn() -> ();
+
+// 36. A DATA import. The spelling admits it — an annotation is an
+//     annotation — but a function import's price rides its TYPE, and there
+//     is no `unsafe usize` for a data import's to ride. Reserved rather
+//     than guessed at, so granting it later deletes a diagnostic instead of
+//     inventing a syntax.
+//     error: data imports are not supported yet — an import must have a function type
+extern static a_data_import: usize;
+
+// 37. A hole in an import's contract. `_` names a type the BODY
+//     determines, and an import has no body — the declaration is the whole
+//     contract, so a piece of it left unwritten is unwritten for good.
+//     Refused once per hole, wherever in the signature it stands.
+//     error: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
+extern static a_partial_contract: unsafe fn(n: _) -> i64;
+
+// 38. A region written at a CALL SITE. Regions are elided at every call:
 //     a written turbofish spells the callee's type and const arguments
 //     only, and the callee's regions become fresh existentials of this
 //     call, solved from the arguments actually passed. Named or wildcard,
@@ -359,7 +395,7 @@ static import_with_a_body = extern fn(n: usize) -> usize { n };
 static first = fn::<@a, T>(r: T.&::<@a>) -> T { r.* };
 static region_at_a_call = fn::<@b>(p: usize.&::<@b>) -> usize { first::<@b, usize>(p) };
 
-// 35. A region parameter AFTER a type parameter in a binder. Regions come
+// 39. A region parameter AFTER a type parameter in a binder. Regions come
 //     first (`fn::<@a, T>`): a turbofish spells the binder minus its
 //     regions, and that subtraction only reads correctly when the elided
 //     part is a contiguous prefix. Checking itself does not need the
@@ -367,7 +403,7 @@ static region_at_a_call = fn::<@b>(p: usize.&::<@b>) -> usize { first::<@b, usiz
 //     error: region parameters come first in a binder; move `@a` before `T`
 static misordered_binder = fn::<T, @a>(r: T.&::<@a>) -> T { r.* };
 
-// 36. A region written on a BORROW expression. Regions are written only in
+// 40. A region written on a BORROW expression. Regions are written only in
 //     type positions, and a borrow is an operation: its region is inferred,
 //     and a body that wants to pin one says so in an annotation
 //     (`let q: _.&::<@c> = p.*.&;`). Named or wildcard, the whole list is

@@ -36,7 +36,7 @@ pub trait Mode {
     /// every host obeys one rule instead of re-deriving it.
     fn read_line(&mut self) -> Result<Option<String>, EvalError>;
 
-    /// The host primitive behind `extern fn read(buf, len) -> isize` — the
+    /// The host primitive behind the `read(buf, len) -> isize` import — the
     /// machine-shaped byte read, and the layer `read_line` would be built on
     /// if it were library code.
     ///
@@ -2161,7 +2161,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             .unwrap_or_default()
     }
 
-    /// Call a HOST IMPORT — `static name = extern fn(...) -> T;`.
+    /// Call a HOST IMPORT — `extern static name: unsafe fn(...) -> T;`.
     ///
     /// The interpreter is one particular host, and this is the whole set of
     /// primitives it provides. Dispatch is BY NAME, because the name is the
@@ -2207,7 +2207,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         }
     }
 
-    /// `extern fn read(buf: u8.&raw mut, len: usize) -> isize` — the one host
+    /// `read(buf: u8.&raw mut, len: usize) -> isize` — the one host
     /// primitive the interpreter provides, and the only place stdin enters
     /// the language below `read_line`.
     ///
@@ -2224,7 +2224,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         loc: &ItemLoc,
         origin: ExprId,
     ) -> Result<Value, EvalError> {
-        const SHAPE: &str = "fn(buf: u8.&raw mut, len: usize) -> isize";
+        const SHAPE: &str = "unsafe fn(buf: u8.&raw mut, len: usize) -> isize";
         // THE DECLARATION IS WHAT IS JUDGED, in full, before anything is
         // read or written.
         //

@@ -140,7 +140,7 @@
   general-purpose WASI runtime (wasmtime, wasmer, …) will <em>not</em> run
   these modules as-is — a <code>--wasi</code> shim is future work. This page
   supplies only the builtin import, so a program that declares
-  <code>extern fn</code> imports of its own needs a host that knows them.
+  <code>extern static</code> imports of its own needs a host that knows them.
 </div>
 
 <script src="must-wasm.js"></script>

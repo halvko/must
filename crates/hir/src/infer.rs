@@ -3614,6 +3614,25 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let sink = self.witness_sink.take();
         let ty = match &self.body.exprs[expr] {
             ExprData::Missing => Ty::Error,
+            // A HOST IMPORT *is* its declared type. There is no value here
+            // to infer from and nothing to check an annotation against, so
+            // the item's own contract is the answer, whole.
+            //
+            // What a BROKEN declaration types as is decided once, in
+            // `item_tree::import_contract`: a data import (reserved) and a
+            // hole in the contract both arrive here already erased, so the
+            // root and every mention — which read `ty::signature` off that
+            // same contract — cannot disagree about them.
+            //
+            // The `Ty::Fn` guard is the local half of the same rule, for
+            // the one shape the contract rule cannot erase: an import with
+            // no annotation at all arrives as a free variable, and NO CALL
+            // SITE MAY DECIDE an import's type. Group inference erases that
+            // leftover too, so this is a belt, not the only strap.
+            ExprData::ExternImport => match self.resolve_shallow(expected) {
+                ty @ Ty::Fn(_) => ty,
+                _ => Ty::Error,
+            },
             // ENTIRELY INFERRED, never defaulted: the literal is a
             // NUMBER-CLASS variable until a defining use pins it; `finish`
             // range-checks the pinned ones and reports the never-pinned
@@ -4674,9 +4693,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // `is_const` doesn't affect typing here.
                 is_const: _,
             } => {
-                // An `extern fn` has no body, so the literal itself is the
-                // only anchor a broken parameter pattern can be blamed on.
-                let pat_anchor = fn_body.unwrap_or(expr);
                 let param_tys: Vec<Ty> = params
                     .iter()
                     .map(|param| {
@@ -4703,9 +4719,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     .collect();
                 let ret = match ret_type {
                     Some(type_ref) => self.lower_type_ref(type_ref),
-                    // Nothing can infer an import's return type — there is
-                    // no body — so an unwritten one means exactly `()`.
-                    None if fn_body.is_none() => Ty::Unit,
                     None => self.fresh_var(),
                 };
                 let ret_cause = match ret_type {
@@ -4737,17 +4750,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // part, so a literal that disagrees with the slot inherits
                 // nothing and its body is checked on its own. `Ty::Error` is
                 // infectious and silent there for the same reason.
-                //
-                // An `extern fn` — the bodyless literal — gets an
-                // `unsafe fn(...)` signature here, and that is the whole of
-                // the import's price: what it does is written in a language
-                // this compiler never sees, so no call of it may run
-                // unvouched — not the direct one, and not one through a
-                // value it was bound to. The flag rides the TYPE precisely
-                // so it survives being passed around. (The
-                // annotation-derived path answers identically; see
-                // `item_tree::type_ref_from_fn_literal`.)
-                let own_sig = Ty::fn_type_with(fn_body.is_none(), param_tys.clone(), ret.clone());
+                let own_sig = Ty::fn_type(param_tys.clone(), ret.clone());
                 let reported = self.result.diagnostics.len();
                 let fn_ty = self.check(expr, own_sig.clone(), expected, cause);
                 // `check` poisons the unresolved numbers in what it was
@@ -4765,13 +4768,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // above, so a pattern whose type came from the position sees
                 // it.
                 for (param, ty) in params.iter().zip(&param_tys) {
-                    self.check_pat(param.pat, ty, pat_anchor);
+                    self.check_pat(param.pat, ty, *fn_body);
                 }
-                // An `extern fn` IS its signature: no body to check against
-                // the return type, no joins to resolve, no `return` target.
-                let Some(fn_body) = *fn_body else {
-                    return fn_ty;
-                };
+                let fn_body = *fn_body;
                 // The function is a unit that must be internally
                 // consistent: its joins solve (by depth) before any outer
                 // join consumes its type, and they never flatten into one —

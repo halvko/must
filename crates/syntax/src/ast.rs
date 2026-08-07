@@ -534,13 +534,54 @@ impl StaticItem {
     /// Whether the item is introduced by `const` (as opposed to `static`).
     /// Only the item's own leading keyword counts — a `const` starting the
     /// initializer (`static f = const fn ...`, `static x = const { ... }`)
-    /// belongs to the fn literal / const block, not to the item.
+    /// belongs to the fn literal / const block, not to the item. The
+    /// `extern` marker leads the keyword when it is there and is skipped
+    /// (`extern const x` parses; validation rejects it).
     pub fn is_const(&self) -> bool {
         self.syntax
             .children_with_tokens()
             .filter_map(|it| it.into_token())
-            .find(|it| !it.kind().is_trivia())
+            .find(|it| !it.kind().is_trivia() && it.kind() != EXTERN_KW)
             .is_some_and(|it| it.kind() == CONST_KW)
+    }
+    /// The `extern` marker of a HOST IMPORT declaration
+    /// (`extern static read: unsafe fn(...) -> isize;`) — the ITEM's own
+    /// token. An `extern` inside the initializer belongs to the RETIRED
+    /// `extern fn` literal, which is a node of its own.
+    pub fn extern_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, EXTERN_KW)
+    }
+    pub fn is_extern(&self) -> bool {
+        self.extern_token().is_some()
+    }
+    /// The `=` introducing an initializer, when the item has one. An
+    /// `extern static` has none: the declaration is the whole contract.
+    pub fn eq_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, EQ)
+    }
+    /// Whether this item DECLARES a host import — the one question hir
+    /// asks, and it has two right answers: the live spelling (the item's
+    /// own `extern` marker and no initializer) and the RETIRED one
+    /// (`static read = extern fn(...);`, a bodyless `extern fn` literal in
+    /// the initializer slot), which still means the same import because
+    /// retiring a spelling must not reinterpret programs written in it.
+    ///
+    /// A written value wins in both: `extern static x: T = v;` is an
+    /// ordinary item with a diagnostic, not an import whose initializer was
+    /// discarded, and a bodyless-literal check that the placement is right
+    /// (see [`FnLiteral::declares_host_import`]) keeps an ill-formed
+    /// declaration from being refused at run time under a name the program
+    /// never declared.
+    pub fn declares_host_import(&self) -> bool {
+        match self.body() {
+            // The retired spelling wrote no marker on the ITEM, so an item
+            // carrying both is not it: `extern static x: T = extern fn(...)`
+            // is a doubly-malformed declaration with a written value, and a
+            // written value always wins.
+            Some(Expr::FnLiteral(fn_lit)) => !self.is_extern() && fn_lit.declares_host_import(),
+            Some(_) => false,
+            None => self.is_extern() && !self.is_const(),
+        }
     }
 }
 
@@ -722,23 +763,28 @@ impl FnLiteral {
     pub fn is_const(&self) -> bool {
         self.const_token().is_some()
     }
-    /// The `extern` marker of a host-import declaration, if present. It
-    /// rides the same modifier slot `const` does, so an `extern fn` is one
-    /// `FN_LITERAL` node — the only structural difference is that it has no
-    /// [`Self::body`].
+    /// The `extern` marker of the RETIRED host-import spelling
+    /// (`static read = extern fn(...) -> T;`), if present. It rides the same
+    /// modifier slot `const` does, so an `extern fn` is one `FN_LITERAL`
+    /// node — the only structural difference is that it has no
+    /// [`Self::body`]. Superset-parsed: `validation` refuses it with a fix
+    /// that rewrites it as an `extern static` declaration.
     pub fn extern_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, EXTERN_KW)
     }
     pub fn is_extern(&self) -> bool {
         self.extern_token().is_some()
     }
-    /// Whether this literal actually DECLARES a host import: the `extern`
-    /// marker, no body, and the placement that gives the import its name —
-    /// a non-`const` `static`'s initializer. Validation reports the missing
-    /// body and the misplacement separately; lowering asks the whole
-    /// question at once, because an import that is not well formed would be
-    /// refused at run time under a name (the enclosing item's) the program
-    /// never declared.
+    /// Whether this literal actually DECLARES a host import in the retired
+    /// spelling: the `extern` marker, no body, and the placement that gives
+    /// the import its name — a non-`const` `static`'s initializer. The
+    /// retirement is a migration, never a reinterpretation, so a literal
+    /// that passes still means the same import it always did; one that does
+    /// not is an ordinary literal, because an import that is not well formed
+    /// would be refused at run time under a name (the enclosing item's) the
+    /// program never declared. Asked through
+    /// [`StaticItem::declares_host_import`], which answers for both
+    /// spellings at once.
     pub fn declares_host_import(&self) -> bool {
         self.is_extern()
             && self.body().is_none()
@@ -1335,29 +1381,28 @@ impl EnumVariant {
 }
 
 impl FnType {
-    /// The parameter types. A written fn TYPE spells them bare
-    /// (`fn(usize) -> R`) and they are direct children; the member
-    /// declaration spelling names them (`fn(n: usize) -> R`), which puts
-    /// them one level down under a `PARAM_LIST`. Reading through it keeps
-    /// this accessor honest for both shapes instead of silently answering
-    /// "no parameters" for the second.
-    pub fn param_types(&self) -> impl Iterator<Item = Type> + use<> {
-        let params: Vec<Type> = match child::<ParamList>(&self.syntax) {
-            Some(list) => list.params().filter_map(|p| p.ty()).collect(),
-            None => children(&self.syntax).collect(),
-        };
-        params.into_iter()
-    }
     pub fn ret_type(&self) -> Option<RetType> {
         child(&self.syntax)
     }
-    /// The NAMED parameter list of a colon-declared member signature
-    /// (`alloc: fn(n: usize, v: Self) -> R;`) — only that grammar path
-    /// produces one; a plain fn TYPE has bare [`Self::param_types`].
+    /// The parameter list. Every parameter is one `PARAM`, named
+    /// (`buf: u8.&raw mut` — documentation) or bare (`usize`), whichever
+    /// each one wrote; a colon-declared member's signature parses its own
+    /// (pattern-shaped) list into the same slot.
     pub fn param_list(&self) -> Option<ParamList> {
         child(&self.syntax)
     }
-    /// The `::<...>` binder of a colon-declared member signature.
+    /// The parameter TYPES in order — the names are documentation and
+    /// nothing below the syntax layer keeps them. `None` for a parameter
+    /// with no type written (a mistake with its own diagnostic).
+    pub fn params_types(&self) -> Vec<Option<Type>> {
+        match self.param_list() {
+            Some(list) => list.params().map(|p| p.ty()).collect(),
+            None => Vec::new(),
+        }
+    }
+    /// The `::<...>` binder — meaningful only on a colon-declared member's
+    /// signature (a requirement may be a generic fn); superset-parsed and
+    /// refused on every other fn type.
     pub fn generic_param_list(&self) -> Option<GenericParamList> {
         child(&self.syntax)
     }

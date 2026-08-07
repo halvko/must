@@ -214,6 +214,20 @@ pub enum ExprData {
     Unsafe {
         body: ExprId,
     },
+    /// The value of `extern static read: unsafe fn(...) -> T;` — the HOST
+    /// IMPORT itself.
+    ///
+    /// SYNTHESIZED, and the only expression in the language that is: the
+    /// declaration writes no value (an import sets nothing to anything), but
+    /// everything below hir wants a root to lower, type and evaluate, and a
+    /// node to blame. It stands where the declaration's TYPE is written,
+    /// which is the whole of what an import is.
+    ///
+    /// No sub-expressions and no fields: the type is the contract, and the
+    /// item's own name is what the host is asked for — both already live on
+    /// the item, and copying either here would be a second place for the
+    /// truth to live.
+    ExternImport,
     FnLiteral {
         /// Whether the literal was written `const fn`. Orthogonal to the
         /// enclosing item's own `static`/`const`; read by the separate
@@ -221,13 +235,7 @@ pub enum ExprData {
         is_const: bool,
         params: Vec<Param>,
         ret_type: Option<TypeRef>,
-        /// `None` for an `extern fn`, and only for an `extern fn` — a HOST
-        /// IMPORT declaration rather than a definition, and the one fn
-        /// literal in the language with nothing to check, lower or run. An
-        /// extern literal is exactly a signature: it has no body, because
-        /// the code it names is on the other side of the boundary, so
-        /// `None` IS the fact and nothing else records it.
-        body: Option<ExprId>,
+        body: ExprId,
     },
     /// `match scrutinee { arms }`. Typing-wise the arms are witnesses of
     /// one join (like `if`/`else` branches); dispatch-wise MIR decides
@@ -521,6 +529,21 @@ pub fn body_with_source_map<'db>(db: &'db dyn Db, item: ItemId<'db>) -> (Body, B
             .map(|expr| ctx.lower_expr(expr))
     } else {
         match item_source(db, item) {
+            // A HOST IMPORT declares no value, so its root is synthesized:
+            // one [`ExprData::ExternImport`]. Both spellings land here — the
+            // live declaration and the retired bodyless `extern fn` literal
+            // — so hir keeps ONE shape for one thing and nothing below can
+            // tell them apart. A written value means the item is not an
+            // import (`item_tree` reads the same predicate for its flag).
+            //
+            // Allocated WITHOUT a source-map entry, the [`ExprData::Missing`]
+            // precedent: no expression was written, so no syntax node IS this
+            // expression. Claiming one — the annotation, say — would put an
+            // expression id on a TYPE, and every "what is at this cursor?"
+            // walk would be free to believe it.
+            Some(syntax::ast::Item::StaticItem(it)) if it.declares_host_import() => {
+                Some(ctx.exprs.alloc(ExprData::ExternImport))
+            }
             Some(syntax::ast::Item::StaticItem(it)) => it.body().map(|expr| ctx.lower_expr(expr)),
             // A `trait` item's RHS is a declaration too — read by
             // `trait_requirements`, never lowered as a value.
@@ -925,17 +948,19 @@ impl LowerCtx {
                 let ret_type = it
                     .ret_type()
                     .map(|rt| rt.ty().map(TypeRef::from_ast).unwrap_or(TypeRef::Error));
-                // `None` IS the import, so an IMPORT only ever exists where
-                // the declaration is well formed — see
-                // `ast::FnLiteral::declares_host_import`. A written body, or
-                // a placement that gives the import no name of its own, is
-                // already a syntax error; lowering it as an import anyway
-                // would launder that error into a host refusal at run time
+                // Every literal that reaches here has a body. A HOST IMPORT
+                // — in either spelling — is intercepted by the static item's
+                // own root lowering and becomes [`ExprData::ExternImport`],
+                // so the one fn literal with nothing to check, lower or run
+                // never arrives as a literal at all. A misplaced `extern fn`
+                // (one that declares nothing, or that writes a body anyway)
+                // is a plain literal like any other: the superset rule keeps
+                // what the user wrote, and a missing body lowers to
+                // `Missing`. Lowering such a thing as an import would launder
+                // a visible syntax error into a host refusal at run time
                 // ("no host implementation for `bad`"), which blames the
-                // wrong side of a boundary the program never crossed. The
-                // superset rule applies instead: keep what the user wrote,
-                // and a missing body lowers to `Missing` like any other.
-                let body = (!it.declares_host_import()).then(|| self.lower_opt_expr(it.body()));
+                // wrong side of a boundary the program never crossed.
+                let body = self.lower_opt_expr(it.body());
                 self.alloc_expr(
                     ExprData::FnLiteral {
                         is_const,

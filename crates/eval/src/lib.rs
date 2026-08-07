@@ -41,7 +41,8 @@ pub enum Value {
     /// like every other scalar's.
     Char(char),
     Fn(FnValue),
-    /// A HOST IMPORT's value — what `static name = extern fn(...) -> T;`
+    /// A HOST IMPORT's value — what
+    /// `extern static name: unsafe fn(...) -> T;`
     /// evaluates to. There is no body on this side of the boundary, so it
     /// carries what a host judges instead: the declaring item, whose name is
     /// the name the host is asked for, and the SIGNATURE it was asked with.
@@ -314,7 +315,7 @@ impl Value {
             // everywhere a bare `a` would read as a name.
             Value::Char(c) => format!("{c:?}"),
             Value::Fn(_) => "fn".to_owned(),
-            Value::ExternFn { decl, .. } => format!("extern fn {}", decl.display_name()),
+            Value::ExternFn { decl, .. } => format!("host import {}", decl.display_name()),
             Value::Builtin(b) => format!("builtin {}", b.name()),
             Value::Record { fields } => {
                 if fields.is_empty() {

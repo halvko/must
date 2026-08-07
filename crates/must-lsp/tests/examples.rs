@@ -472,33 +472,59 @@ fn errors_checks_dirty_with_the_documented_count() {
             341 | static unvouched_import = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
                 |                                                          ^^^^^^^^^^^^^^^
 
-            error: an `extern fn` declares a host import and has no body; the implementation lives on the other side of the boundary
-              --> examples/errors.must:349:58
+            error: a host import is a DECLARATION, not an initializer: write `extern static retired_import: unsafe fn(...) -> T;`
+              --> examples/errors.must:351:25
                 |
-            349 | static import_with_a_body = extern fn(n: usize) -> usize { n };
-                |                                                          ^^^^^
-               = help: Remove the body
+            351 | static retired_import = extern fn(n: usize) -> usize;
+                |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+               = help: Rewrite as an `extern static` declaration
+
+            error: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
+              --> examples/errors.must:360:65
+                |
+            360 | extern static import_with_a_value: unsafe fn(n: usize) -> usize = fn (n: usize) -> usize { n };
+                |                                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+               = help: Remove the initializer
+
+            error: an import must be declared `unsafe fn` for now: a safe-to-call import needs the declaration-side `unsafe` marker, and that marker does not exist yet
+              --> examples/errors.must:370:28
+                |
+            370 | extern static safe_import: fn() -> ();
+                |                            ^^^^^^^^^^
+               = help: Write `unsafe fn`
+
+            error: data imports are not supported yet — an import must have a function type
+              --> examples/errors.must:378:30
+                |
+            378 | extern static a_data_import: usize;
+                |                              ^^^^^
+
+            error: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
+              --> examples/errors.must:385:48
+                |
+            385 | extern static a_partial_contract: unsafe fn(n: _) -> i64;
+                |                                                ^
 
             error: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
-              --> examples/errors.must:360:73
+              --> examples/errors.must:396:73
                 |
-            360 | static region_at_a_call = fn::<@b>(p: usize.&::<@b>) -> usize { first::<@b, usize>(p) };
+            396 | static region_at_a_call = fn::<@b>(p: usize.&::<@b>) -> usize { first::<@b, usize>(p) };
                 |                                                                         ^^
 
             error: region parameters come first in a binder; move `@a` before `T`
-              --> examples/errors.must:368:36
+              --> examples/errors.must:404:36
                 |
-            368 | static misordered_binder = fn::<T, @a>(r: T.&::<@a>) -> T { r.* };
+            404 | static misordered_binder = fn::<T, @a>(r: T.&::<@a>) -> T { r.* };
                 |                                    ^^
 
             error: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&::<@a> = x.&;`)
-              --> examples/errors.must:377:80
+              --> examples/errors.must:413:80
                 |
-            377 | static region_at_a_borrow = fn::<@c>(p: usize.&::<@c>) -> usize { let q = p.*.&::<@c>; q.* };
+            413 | static region_at_a_borrow = fn::<@c>(p: usize.&::<@c>) -> usize { let q = p.*.&::<@c>; q.* };
                 |                                                                                ^^^^^^
                = help: Drop the region argument
 
-            found 36 errors and 1 warning
+            found 40 errors and 1 warning
         "#]],
     );
 }

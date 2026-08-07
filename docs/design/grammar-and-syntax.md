@@ -65,7 +65,8 @@
   both literal forms from that one table: the design holds room for them, so calling either
   unknown would send the reader hunting for a spelling that is already spoken for.
 - **G16** Full keywords: `raw unsafe with impl for trait requires extern without` (`const`,
-  `struct`, `enum` are contextual expression-starters). One `keywords!` table generates the
+  `struct`, `enum` are contextual expression-starters). `extern` also OPENS an item, the
+  fifth after `static`/`const`/`type`/`trait` (G22). One `keywords!` table generates the
   set — `from_keyword`, `is_keyword`, and the table itself — so the highlighter (P10) and
   completions classify a keyword by asking, never by enumerating kinds.
 - **G15** `return` is an expression of type `Never`, constrained through the same seam tail
@@ -114,6 +115,18 @@
   colon-declared member signature's own `unsafe` stays reserved, and so does the marker on a
   fn LITERAL: the value's type carries the fact, so that spelling could only sugar an
   annotation.
+- **G22** An import is a declaration:
+  `extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;`. A type in
+  annotation position, no `=`, no value, because nothing is being set to anything. `extern`
+  leads the item. Every refusal restates that the declaration is the whole contract: an
+  initializer, a bare `fn` type, a non-fn type, a missing type, a type not written in full
+  (`_` has no body to be inferred from), `extern` on anything but a `static`. A written
+  initializer means it is not an import: the value wins and the marker is dropped, since
+  keeping it would turn a visible syntax error into a run-time refusal at a boundary the
+  program never crossed. An unwritten return type means `()`. Fn types may name
+  their parameters, decided per parameter, with the name dropped below syntax so both
+  spellings are one type. A fn type's parameters are not patterns: `mut` and destructuring
+  belong to a fn literal, whose parameters bind.
 
 ## Discarded
 
@@ -153,6 +166,11 @@
   they are full keywords like `raw` and `unsafe`; an identifier with one of those names now
   dies in a parse cascade with no reserved-word hint. **G16**
 - **Silent reinterpretation of a bare pattern name as a variant** — footgun. **G25**
+- **`static read = extern fn(...)`** — `=` followed by something that is not a value, so the
+  reader had to un-learn what `=` means. Retired with a rewriting fix; the old form still
+  parses into the same node, means the same import, and answers to the same refusals — an
+  annotation written on it is an import's annotation, and the initializer's own signature is
+  dropped, which the message says rather than doing silently. **G22**
 - **A null literal** — abstract memory has no address zero to spell. **Pointer ordering** —
   meaningless there. **G08**
 - **Region sigils that lost**: `'a` (a three-way contest for `'` with char literals and loop
@@ -185,6 +203,8 @@
   grouping (`(...)` is unit). Inherent to the design; for now the retired prefix spelling
   still builds such a type, and its migration reports without offering the rewrite, since
   no postfix text means the same thing. **G08 G26**
+- **A safe-to-call import gets a declaration-side vouch spelling** — G22's required `unsafe`
+  is conservative, blocked on that marker rather than rejected. **G22**
 - **A region in argument position gets painful** — nothing is unsayable, so this is
   ergonomics: ask why inference could not get there rather than putting the argument back on
   the operation. **Patterns grow type ascription** — a pattern is neither a type mention nor

@@ -360,6 +360,10 @@ enum Context {
     /// The nearest classifiable ancestor is a broken item directly under
     /// `SOURCE_FILE` — a bare identifier at the top level.
     ItemKeyword,
+    /// `extern ⟨caret⟩` — the import marker is written and the item keyword
+    /// that must follow it is not. Only one keyword may, so the list is one
+    /// entry long.
+    ItemKeywordAfterExtern,
     /// The first segment of a `PathType`.
     TypePosition,
     /// The first segment of a single-segment `PathExpr`.
@@ -483,6 +487,7 @@ pub(crate) fn completions(
 
     let mut items = match classify(&parent) {
         Some(Context::ItemKeyword) => keyword_items(ITEM_KEYWORDS, edit_range),
+        Some(Context::ItemKeywordAfterExtern) => keyword_items(&["static"], edit_range),
         Some(Context::TypePosition) => {
             let mut items = type_scope_items(db, file, edit_range);
             items.extend(builtin_type_items(edit_range));
@@ -703,11 +708,42 @@ fn match_awaiting_arms(
         })
 }
 
+/// Whether an item node carries the keyword that says which item it is —
+/// absent only while `extern` is written and the rest is not.
+fn has_item_keyword(item: &ast::StaticItem) -> bool {
+    item.syntax()
+        .children_with_tokens()
+        .filter_map(|it| it.into_token())
+        .any(|it| {
+            matches!(
+                it.kind(),
+                SyntaxKind::STATIC_KW
+                    | SyntaxKind::CONST_KW
+                    | SyntaxKind::TYPE_KW
+                    | SyntaxKind::TRAIT_KW
+            )
+        })
+}
+
 /// Classify the marker's parent node (in the speculative tree) into one of
 /// the contexts above. `None` for anything else (a brand-new `let`/param
 /// binding name, the enum segment of a qualified variant pattern before its
 /// `::`, …) — there's nothing sound to complete there.
 fn classify(parent: &SyntaxNode) -> Option<Context> {
+    // `extern ⟨caret⟩`: the marker is written and the item keyword that must
+    // follow it is not, so whatever the caret sits in belongs to an item the
+    // parser could not read. One keyword may follow, so that is the answer
+    // wherever in the wreckage the caret is. Told apart from typing an
+    // import's actual NAME (`extern static rea⟨caret⟩`) by the keyword the
+    // item does not have yet.
+    if parent
+        .ancestors()
+        .find_map(ast::StaticItem::cast)
+        .is_some_and(|item| item.extern_token().is_some() && !has_item_keyword(&item))
+    {
+        return Some(Context::ItemKeywordAfterExtern);
+    }
+
     if parent.kind() == SyntaxKind::ERROR {
         return parent
             .parent()
@@ -888,7 +924,7 @@ fn prefix_range(text: &str, offset: TextSize) -> TextRange {
 /// `tests::item_keywords_match_the_grammar` checks it in both directions.
 /// The type- and expression-position lists below have no equivalent single
 /// grammar rule to check against and stay a judgement call.
-const ITEM_KEYWORDS: &[&str] = &["static", "const", "type", "trait"];
+const ITEM_KEYWORDS: &[&str] = &["static", "const", "type", "trait", "extern"];
 
 /// The keywords that spell a TYPE where a type is expected: an `fn` type,
 /// its `unsafe fn` head, and a structural record. `enum` is deliberately

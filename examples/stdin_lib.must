@@ -6,10 +6,11 @@
 //
 // What is a language feature here, and what is not:
 //
-//   * a language feature: `extern fn` (the declaration), `read` (the host's
-//     byte move), `str_from_utf8` (the validity claim), the heap builtins,
-//     the borrow rules, and the `forget` capability (`Reader` is declared
-//     `without forget`, so a path that never calls `drop` is refused);
+//   * a language feature: `extern static` (the import declaration), `read`
+//     (the host's byte move), `str_from_utf8` (the validity claim), the heap
+//     builtins, the borrow rules, and the `forget` capability (`Reader` is
+//     declared `without forget`, so a path that never calls `drop` is
+//     refused);
 //   * NOT a language feature, and written below: buffering, finding a line
 //     boundary, stripping CRLF, deciding that a blank line is a line and
 //     that end-of-input is not, and handing a line out without copying it.
@@ -30,7 +31,13 @@
 // signed size) and because it is the type `offset` takes: the end of the
 // filled region is `offset(p, n)`, with nothing to convert. A compiled
 // module imports this as `must.read` — the declaration's own name.
-static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;
+//
+// It is a DECLARATION and nothing else: no `=`, because there is no value
+// here to write down. It promises that a name of this type exists, and what
+// provides it lives on the other side of the boundary. `unsafe fn` is
+// written out, not implied — an import is always unsafe to call, and the
+// type is where that is said.
+extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
 
 // The FIRST wrapper above the boundary, and the only job it has: turn one
 // machine word into something the type system makes you handle. Everything

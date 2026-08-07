@@ -43,6 +43,23 @@ pub struct ItemData {
     /// Only meaningful on a `type` item; `validation` rejects the clause
     /// everywhere else, and the flag stays `false` there.
     pub without_forget: bool,
+    /// `extern static read: unsafe fn(...) -> T;` — this item is a HOST
+    /// IMPORT: a DECLARATION that promises a name of this type exists and
+    /// leaves providing it to whatever is on the other side of the boundary.
+    ///
+    /// A name-level fact, and the ITEM's own: the declaration is the whole
+    /// contract, so nothing about an import is read out of a value. True for
+    /// the RETIRED spelling too (`static read = extern fn(...);`, a bodyless
+    /// `extern fn` literal) — retiring a spelling must not reinterpret the
+    /// programs written in it, so both spellings answer this one bit and
+    /// nothing below hir can tell them apart.
+    ///
+    /// Set only where the declaration is well formed — a written value means
+    /// the item is not an import (the value wins, exactly as a written body
+    /// did under the old spelling), so a visible syntax error is never
+    /// laundered into a run-time refusal naming a boundary the program never
+    /// crossed.
+    pub is_extern: bool,
 }
 
 /// One generic parameter of an item's binder, in declaration order — the
@@ -279,8 +296,18 @@ impl TypeRef {
         match ty {
             ast::Type::UnitType(_) => TypeRef::Unit,
             ast::Type::NeverType(_) => TypeRef::Never,
+            // Either parameter spelling — bare types (`fn(usize, str)`) or
+            // the NAMED list a host import's declaration writes
+            // (`unsafe fn(buf: u8.&raw mut, len: usize)`). The names are
+            // documentation and stop at the syntax layer: no call passes an
+            // argument by name, so two spellings of one signature must
+            // produce one type.
             ast::Type::FnType(it) => TypeRef::Fn {
-                params: it.param_types().map(TypeRef::from_ast).collect(),
+                params: it
+                    .params_types()
+                    .into_iter()
+                    .map(|ty| ty.map_or(TypeRef::Error, TypeRef::from_ast))
+                    .collect(),
                 ret: it
                     .ret_type()
                     .and_then(|rt| rt.ty())
@@ -552,6 +579,44 @@ pub(crate) fn const_arg_ref_from_ast(arg: &ast::ConstArg) -> ConstArgRef {
     }
 }
 
+/// What an import's written type MEANS as a contract (G22) — the one
+/// place hir reads an import's type from, because there is no value to
+/// read one off.
+///
+/// An UNWRITTEN return type means `()`, not an inference variable: there is
+/// no body for anything to infer from and no call site may decide it, so
+/// the one type a missing return can mean is the one that says "nothing
+/// comes back".
+///
+/// Anything else the declaration might say is NOT A CONTRACT, and is
+/// recorded as [`TypeRef::Error`] rather than published to mentions as a
+/// type the item's value does not have: a data import (a non-fn type) is
+/// reserved, and a `_` anywhere inside leaves part of the contract to an
+/// inference with nothing to run on. Both are refused where they are
+/// written; this is what keeps the refusal from also being a lie to every
+/// use site — an import's value is a host function and nothing else, so a
+/// signature no host function can have is no signature at all.
+///
+/// Import-specific on purpose. Every other fn type's elided return is
+/// inference's business, and nothing here touches that.
+fn import_contract(type_ref: TypeRef) -> TypeRef {
+    if type_ref.contains_hole() {
+        return TypeRef::Error;
+    }
+    match type_ref {
+        TypeRef::Fn {
+            params,
+            ret,
+            unsafe_to_call,
+        } => TypeRef::Fn {
+            params,
+            ret: Some(ret.unwrap_or_else(|| Box::new(TypeRef::Unit))),
+            unsafe_to_call,
+        },
+        _ => TypeRef::Error,
+    }
+}
+
 #[salsa::tracked(returns(ref))]
 pub fn item_tree(db: &dyn Db, file: SourceFile) -> ItemTree {
     let tree = parse(db, file).tree();
@@ -560,8 +625,17 @@ pub fn item_tree(db: &dyn Db, file: SourceFile) -> ItemTree {
         .map(|item| match &item {
             ast::Item::StaticItem(it) => {
                 let generics = generics_from_fn_literal(it.body());
+                let is_extern = it.declares_host_import();
                 let type_ref = if generics.is_empty() {
-                    TypeRef::from_opt_ast(it.ty()).or_else(|| type_ref_from_fn_literal(it.body()))
+                    TypeRef::from_opt_ast(it.ty())
+                        .map(|type_ref| {
+                            if is_extern {
+                                import_contract(type_ref)
+                            } else {
+                                type_ref
+                            }
+                        })
+                        .or_else(|| type_ref_from_fn_literal(it.body()))
                 } else {
                     // A generic item's contract is the binder signature —
                     // its literal's own (mandatory, TR06) annotations, which
@@ -582,6 +656,9 @@ pub fn item_tree(db: &dyn Db, file: SourceFile) -> ItemTree {
                     // Superset-parsed here (validation rejects it); a
                     // value item's capabilities are its type's.
                     without_forget: false,
+                    // Both spellings, one bit — and never where a value
+                    // is written (see `ast::StaticItem::declares_host_import`).
+                    is_extern,
                 }
             }
             ast::Item::TypeItem(it) => ItemData {
@@ -600,6 +677,9 @@ pub fn item_tree(db: &dyn Db, file: SourceFile) -> ItemTree {
                 // (`= struct { ... } without forget;`), in the same slot
                 // `with` groups use.
                 without_forget: item.without_clauses().any(|c| names_forget(&c)),
+                // Only a `static` can be `extern` (validation says so); a
+                // marker written here is superset-parsed and inert.
+                is_extern: false,
             },
             ast::Item::TraitItem(it) => ItemData {
                 name: item.name().map(|n| n.text()).unwrap_or_default(),
@@ -612,6 +692,7 @@ pub fn item_tree(db: &dyn Db, file: SourceFile) -> ItemTree {
                 generics: generics_from_param_list(
                     it.requires_def().and_then(|def| def.generic_param_list()),
                 ),
+                is_extern: false,
                 // Superset-parsed here too: a trait classifies types, so
                 // it has no capabilities of its own to shed.
                 without_forget: false,
@@ -807,10 +888,21 @@ fn type_ref_from_fn_literal(body: Option<ast::Expr>) -> Option<TypeRef> {
         .ret_type()
         .and_then(|rt| rt.ty())
         .map(|t| Box::new(TypeRef::from_ast(t)));
+    let declares_import = fn_lit.declares_host_import();
     let type_ref = TypeRef::Fn {
         params,
         ret,
-        unsafe_to_call: fn_lit.declares_host_import(),
+        unsafe_to_call: declares_import,
+    };
+    // The RETIRED import spelling gets the contract rule here, BEFORE the
+    // fully-typed gate: `static r = extern fn(len: usize);` has no `->` to
+    // read, and a `ret: None` would fail that gate and leave the import
+    // with no type at all. One rule for both spellings, so a retired
+    // program's import means exactly what its respelling would.
+    let type_ref = if declares_import {
+        import_contract(type_ref)
+    } else {
+        type_ref
     };
     type_ref.is_fully_typed().then_some(type_ref)
 }

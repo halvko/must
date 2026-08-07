@@ -20,6 +20,7 @@ fn at_expr_recovery(p: &Parser<'_>) -> bool {
             | CONST_KW
             | TYPE_KW
             | TRAIT_KW
+            | EXTERN_KW
             | LET_KW
             | ELSE_KW
             | WITH_KW
@@ -33,8 +34,10 @@ pub(crate) fn source_file(p: &mut Parser<'_>) {
     let m = p.start();
     while !p.at(EOF) {
         match p.current() {
-            STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW => item(p),
-            _ => p.err_and_bump("expected an item (`static`, `const`, `type` or `trait`)"),
+            STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW | EXTERN_KW => item(p),
+            _ => {
+                p.err_and_bump("expected an item (`static`, `const`, `type`, `trait` or `extern`)")
+            }
         }
     }
     m.complete(p, SOURCE_FILE);
@@ -42,6 +45,12 @@ pub(crate) fn source_file(p: &mut Parser<'_>) {
 
 fn item(p: &mut Parser<'_>) {
     let m = p.start();
+    // `extern static read: unsafe fn(...) -> T;` — a HOST IMPORT. The
+    // marker leads the whole item (it is the item that is declared, not a
+    // value that is written), and it rides the item's own token slot:
+    // superset here on every item keyword, validation rejects it anywhere
+    // but a `static`.
+    let is_extern = p.eat(EXTERN_KW);
     // `type Foo = expr;` shares the whole item shape with `static`/`const`
     // (superset parsing: a `: Type` annotation on a `type` item parses too;
     // validation rejects it with a removal fix). Only the node kind — and
@@ -51,7 +60,25 @@ fn item(p: &mut Parser<'_>) {
         TRAIT_KW => TRAIT_ITEM,
         _ => STATIC_ITEM,
     };
-    p.bump_any(); // STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW
+    if !is_extern || matches!(p.current(), STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW) {
+        p.bump_any(); // STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW
+    } else {
+        // `extern` with no item keyword after it — `extern fn g(...)`, the
+        // C spelling, above all. Nothing that follows can be the item this
+        // marker leads, so the declaration is unreadable as a whole: say
+        // the one thing that is wrong and take the rest of it as ERROR, in
+        // this item. Reading on instead cost one message PER TOKEN, all of
+        // them consequences of this one.
+        p.error("expected `static` after `extern`: an import declares one name with one type");
+        let e = p.start();
+        while !p.at(EOF) && !p.at(SEMICOLON) && !at_item_recovery(p) {
+            p.bump_any();
+        }
+        e.complete(p, ERROR);
+        p.eat(SEMICOLON);
+        m.complete(p, kind);
+        return;
+    }
     pattern(p, "expected a name for the item");
     if p.eat(COLON) {
         type_(p);
@@ -62,22 +89,7 @@ fn item(p: &mut Parser<'_>) {
         } else {
             expr(p);
         }
-        // Attachment `with`-chains trail the RHS: `type X = struct { ... }
-        // with { elements } with { ... };` (TR01). Parsed on any item
-        // kind (superset — validation rejects them on `static`/`const`
-        // items).
-        //
-        // `without forget` rides the SAME trailing slot, in either order
-        // (`} without forget with { ... }` and `} with { ... } without
-        // forget` both parse) — one loop, so the pair reads as a pair and
-        // no order is privileged by the grammar.
-        while p.at(WITH_KW) || p.at(WITHOUT_KW) {
-            if p.at(WITH_KW) {
-                with_group(p);
-            } else {
-                without_clause(p);
-            }
-        }
+        trailing_clauses(p);
         // Brace rule: items whose value ends in `}` don't need a `;`.
         // A value "ending" in `;` only happens in broken nesting (e.g. an
         // unclosed block) — demanding another `;` there is pure noise.
@@ -86,11 +98,43 @@ fn item(p: &mut Parser<'_>) {
         } else {
             p.expect_after_prev(SEMICOLON);
         }
+    } else if is_extern {
+        // THE DECLARATION IS THE WHOLE CONTRACT: an import sets nothing to
+        // anything — it promises that a name of this type exists, and the
+        // linker (or the host, or the environment) is what provides it. So
+        // there is no `=` to demand, and the `;` closes the item. The
+        // trailing clauses still parse here: an import is the fifth item
+        // head, and a clause written on one earns the same one-sentence
+        // refusal the other four give instead of a parse cascade.
+        trailing_clauses(p);
+        p.expect_after_prev(SEMICOLON);
     } else {
         p.error("expected `=` followed by the item's value");
         p.eat(SEMICOLON);
     }
     m.complete(p, kind);
+}
+
+/// The clauses that trail an item's head: attachment `with`-chains
+/// (`type X = struct { ... } with { elements } with { ... };`, TR01) and
+/// the capability opt-out `without forget`, in either order
+/// (`} without forget with { ... }` and `} with { ... } without forget`
+/// both parse) — one loop, so the pair reads as a pair and no order is
+/// privileged by the grammar.
+///
+/// Superset on every item head, `extern` included. An import is why this
+/// is a function and not a loop written once: it has no `= rhs` for a
+/// clause to trail, so it needs the same call from its own arm — without
+/// it a clause written on an import cascades instead of earning
+/// validation's one sentence.
+fn trailing_clauses(p: &mut Parser<'_>) {
+    while p.at(WITH_KW) || p.at(WITHOUT_KW) {
+        if p.at(WITH_KW) {
+            with_group(p);
+        } else {
+            without_clause(p);
+        }
+    }
 }
 
 // ---- trait declarations (sealed trait-syntax grammar, TR01) ------------
@@ -270,7 +314,7 @@ fn element_block(p: &mut Parser<'_>) {
 fn at_item_recovery(p: &Parser<'_>) -> bool {
     matches!(
         p.current(),
-        STATIC_KW | TYPE_KW | TRAIT_KW | LET_KW | CONST_KW
+        STATIC_KW | TYPE_KW | TRAIT_KW | LET_KW | CONST_KW | EXTERN_KW
     )
 }
 
@@ -278,7 +322,7 @@ fn at_item_recovery(p: &Parser<'_>) -> bool {
 /// member-shaped keyword openers — `type Item ...;` and `const N: usize;`
 /// are (reserved) members, so those prefixes stay inside the body.
 fn at_member_recovery(p: &Parser<'_>) -> bool {
-    matches!(p.current(), STATIC_KW | TRAIT_KW | LET_KW)
+    matches!(p.current(), STATIC_KW | TRAIT_KW | LET_KW | EXTERN_KW)
         || (p.at(CONST_KW) && !(p.nth(1) == IDENT && p.nth(2) == COLON))
 }
 
@@ -353,11 +397,17 @@ fn impl_element(p: &mut Parser<'_>) {
 
 /// A colon-declared member's fn signature: like a fn literal's head
 /// (named, annotated params; optional binder; return type) with no body —
-/// wrapped in `FN_TYPE` so it sits in the tree as the annotation it is. The
-/// plain fn TYPE grammar takes bare types, so the sealed spelling
-/// (`alloc: fn(n: usize, v: Self) -> R;`) needs its own production; the
-/// form itself is rejected, but it has to parse whole first for the
-/// rejection to be the only error.
+/// wrapped in `FN_TYPE` so it sits in the tree as the annotation it is.
+///
+/// What is left distinguishing it from [`anon_fn_type`], now that a plain
+/// fn type takes `name: Type` parameters too, is the parameter GRAMMAR: a
+/// requirement is written as the signature it is, every parameter named
+/// ([`param_list`], so hir can refuse a half-written one), while a fn
+/// type's names are optional documentation. Routed through the fn-type
+/// list instead, `m: fn(x, y: usize) -> R;` would stop being a
+/// half-written signature and silently become a parameter of type `x` —
+/// so the two productions stay apart until the requirement form is ruled
+/// on its own.
 fn member_decl_fn_signature(p: &mut Parser<'_>) {
     let m = p.start();
     // `dealloc: unsafe fn(...)` — an unsafe-to-call requirement; parses
@@ -644,8 +694,10 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
             return Some(const_block_expr(p));
         }
     }
-    // `extern` starts an expression only as an `extern fn` host-import
-    // declaration. A bare `extern` falls through to the catch-all.
+    // `extern` starts an expression only as `extern fn` — the RETIRED
+    // host-import initializer, superset-parsed so validation can rewrite it
+    // (`extern static name: unsafe fn(...)` is the live spelling). A bare
+    // `extern` opens an ITEM, so it falls through to the catch-all here.
     if p.at(EXTERN_KW) && at_fn_literal(p) {
         return Some(fn_literal(p));
     }
@@ -868,7 +920,7 @@ fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
         while !p.at(R_BRACE) && !p.at(EOF) {
             // Recover at the enclosing item, same as block statements:
             // an item keyword inside an arm list means the `}` is missing.
-            if matches!(p.current(), STATIC_KW | TYPE_KW | TRAIT_KW)
+            if matches!(p.current(), STATIC_KW | TYPE_KW | TRAIT_KW | EXTERN_KW)
                 || (p.at(CONST_KW) && !matches!(p.nth(1), FN_KW | L_BRACE))
             {
                 break;
@@ -1604,7 +1656,8 @@ fn scan_bare_angle_group(p: &Parser<'_>) -> Option<BareAngleGroup> {
             // angle counters and every bail but the brace — reads `nest`.
             EQ2 | NEQ | LTEQ | GTEQ | FAT_ARROW if nest == 0 => return None,
             SEMICOLON if nest == 0 => return None,
-            STATIC_KW | TRAIT_KW | TYPE_KW | LET_KW | WITH_KW | WITHOUT_KW | IMPL_KW | FOR_KW
+            STATIC_KW | TRAIT_KW | TYPE_KW | EXTERN_KW | LET_KW | WITH_KW | WITHOUT_KW
+            | IMPL_KW | FOR_KW
                 if nest == 0 =>
             {
                 return None;
@@ -1884,6 +1937,9 @@ fn block_expr(p: &mut Parser<'_>) -> CompletedMarker {
             // and `trait` never start an expression, so they always mean
             // an item.
             STATIC_KW | TYPE_KW | TRAIT_KW => break,
+            // A bare `extern` opens an ITEM (`extern static ...`); only the
+            // RETIRED `extern fn` initializer is an expression here.
+            EXTERN_KW if !at_fn_literal(p) => break,
             CONST_KW if !at_fn_literal(p) && p.nth(1) != L_BRACE => break,
             SEMICOLON => p.bump_any(),
             _ => {
@@ -2002,30 +2058,29 @@ fn borrow_op_generic_args(p: &mut Parser<'_>) {
     generic_arg_list(p);
 }
 
-/// An ANONYMOUS fn type — bare parameter types, no names: `fn(usize) ->
-/// usize`, or `unsafe fn(usize) -> usize`, which is a DIFFERENT type (a
-/// value of it may only be called inside `unsafe { ... }`). The `unsafe`
-/// token rides the same slot it does on a fn literal, so both spellings
-/// produce one `FN_TYPE` node and the flag is read off the token.
+/// A fn type — `fn(usize) -> usize`, or `unsafe fn(usize) -> usize`, which
+/// is a DIFFERENT type (a value of it may only be called inside
+/// `unsafe { ... }`). The `unsafe` token rides the same slot it does on a
+/// fn literal, so both spellings produce one `FN_TYPE` node and the flag is
+/// read off the token.
 ///
-/// Distinct from [`member_decl_fn_signature`], which parses the NAMED
-/// parameter list a colon-declared member writes; both complete `FN_TYPE`.
+/// Parameters may be NAMED (`unsafe fn(buf: u8.&raw mut, len: usize) ->
+/// isize`), which is how a host import's declaration spells its contract —
+/// a signature a reader must be able to read. The names are documentation:
+/// no call passes arguments by name, and hir keeps only the types.
 fn anon_fn_type(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.eat(UNSAFE_KW);
     p.bump(FN_KW);
-    if p.eat(L_PAREN) {
-        while !p.at(R_PAREN) && !p.at(EOF) {
-            let before = p.pos();
-            type_(p);
-            if !p.at(R_PAREN) {
-                p.expect(COMMA, "`,`");
-            }
-            if p.pos() == before {
-                break;
-            }
-        }
-        p.expect_after_prev(R_PAREN);
+    // A generic binder on a fn TYPE: superset (the colon-declared member
+    // signature is the one place it means something — see
+    // [`member_decl_fn_signature`]), refused by validation everywhere else
+    // with the reason, rather than by a bare "expected `(`".
+    if p.at(COLON2) && p.nth(1) == L_ANGLE {
+        generic_param_list(p);
+    }
+    if p.at(L_PAREN) {
+        fn_type_param_list(p);
     } else {
         p.error("expected `(`: function types are written `fn(...) -> ...`");
     }
@@ -2033,6 +2088,64 @@ fn anon_fn_type(p: &mut Parser<'_>) -> CompletedMarker {
         ret_type(p);
     }
     m.complete(p, FN_TYPE)
+}
+
+/// A fn TYPE's parameter list. Decided PER PARAMETER, not per list: a named
+/// parameter and a bare one may sit side by side, and neither position
+/// changes what the other means (`fn(usize, y: usize)` and
+/// `fn(x: usize, usize)` are the same type, written two ways).
+///
+/// Distinct from [`param_list`], which parses a fn LITERAL's parameters:
+/// those are PATTERNS and they BIND. A fn type's name binds nothing, so the
+/// pattern grammar is not admitted here at all — the same cut Rust makes on
+/// fn-pointer types (E0561) — and the shapes that only a pattern could mean
+/// are refused where they are written instead of being reinterpreted as
+/// something else.
+fn fn_type_param_list(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.bump(L_PAREN);
+    while !p.at(R_PAREN) && !p.at(EOF) {
+        let before = p.pos();
+        fn_type_param(p);
+        if !p.at(R_PAREN) {
+            p.expect(COMMA, "`,`");
+        }
+        if p.pos() == before {
+            break;
+        }
+    }
+    p.expect_after_prev(R_PAREN);
+    m.complete(p, PARAM_LIST);
+}
+
+/// One parameter of a fn TYPE: `Type`, or `name: Type` where the name is an
+/// identifier or `_` (documentation, kept in the tree, dropped below the
+/// syntax layer).
+fn fn_type_param(p: &mut Parser<'_>) {
+    let m = p.start();
+    // `mut` is a binding-mode marker and a fn type binds nothing. Consumed
+    // (so one written mistake costs the reader one message, not the rest of
+    // the list) and named where it stands.
+    if p.at(MUT_KW) {
+        p.error("a function type's parameters are not patterns: write `name: Type` or `Type`");
+        p.bump(MUT_KW);
+    }
+    if matches!(p.current(), IDENT | HOLE) && p.nth(1) == COLON {
+        let nm = p.start();
+        p.bump_any();
+        nm.complete(p, NAME);
+        p.bump(COLON);
+    }
+    type_(p);
+    // A pattern that PARSED as a type and then met its colon
+    // (`struct { x }: T`): same refusal, said at the colon that gives it
+    // away, and the annotation is consumed so the list stays readable.
+    if p.at(COLON) {
+        p.error("a function type's parameters are not patterns: write `name: Type` or `Type`");
+        p.bump(COLON);
+        type_(p);
+    }
+    m.complete(p, PARAM);
 }
 
 /// The core (non-postfix) type. Returns `None` only when nothing was parsed

@@ -142,12 +142,7 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
                     .flat_map(|p| body.pat_bindings(p.pat))
                     .collect(),
             });
-            // An `extern fn` still gets its parameter scope — the names are
-            // real, hoverable and completable; there is simply no body under
-            // it for them to be visible in.
-            if let Some(b) = b {
-                compute_expr_scopes(body, scopes, *b, scope);
-            }
+            compute_expr_scopes(body, scopes, *b, scope);
         }
         ExprData::Call { callee, args, .. } => {
             compute_expr_scopes(body, scopes, *callee, scope);
@@ -265,9 +260,13 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
         // An elided variant names nothing scopes can resolve: its one
         // segment is the VARIANT, resolved type-directed during
         // inference, exactly like a variant path's second segment.
+        // A host import declares no names of its own either: the parameter
+        // names in `unsafe fn(buf: ..., len: ...)` are a signature's
+        // spelling, and there is no body for them to be visible in.
         ExprData::Missing
         | ExprData::Literal(_)
         | ExprData::NameRef(_)
+        | ExprData::ExternImport
         | ExprData::ElidedVariant { .. }
         | ExprData::Continue => {}
     }

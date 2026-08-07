@@ -40,7 +40,7 @@ fn check_run(text: &str, entry: &str, expect: Expect) {
 /// `print` output: this is the injection side. The builtin `read_line`
 /// consumes it line-by-line (a final line with no trailing `\n` still
 /// reads, as the last `Line`, then `End` on the call after); a program
-/// that declares its own `extern fn read` import instead consumes it
+/// that declares its own `read` host import instead consumes it
 /// byte-wise, exactly as a real `read(2)` would.
 fn check_run_with_input(text: &str, entry: &str, input: &str, expect: Expect) {
     check_run_with_bytes(text, entry, input.as_bytes(), expect);
@@ -1005,7 +1005,7 @@ static entrypoint = (main(20));
     // `n + 1` tail, and the fn-literal blocks (the `return` terminators'
     // origin).
     let hir::body::ExprData::FnLiteral {
-        body: Some(main_fn_block),
+        body: main_fn_block,
         ..
     } = &main_body.exprs[main_body.root.unwrap()]
     else {
@@ -1021,7 +1021,7 @@ static entrypoint = (main(20));
         panic!("the let's initializer is a product");
     };
     let hir::body::ExprData::FnLiteral {
-        body: Some(helper_fn_block),
+        body: helper_fn_block,
         ..
     } = &helper_body.exprs[helper_body.root.unwrap()]
     else {
@@ -1128,7 +1128,7 @@ static entrypoint = (main());
     let (entry, main) = (item(&db, file, "entrypoint"), item(&db, file, "main"));
     let main_body = hir::body::body(&db, main);
     let hir::body::ExprData::FnLiteral {
-        body: Some(main_fn_block),
+        body: main_fn_block,
         ..
     } = &main_body.exprs[main_body.root.unwrap()]
     else {
@@ -6218,7 +6218,7 @@ fn a_raw_pointer_minted_from_a_borrow_is_path_filtered_too() {
     );
 }
 
-// ---- `extern fn read` — the host byte read ------------------------------
+// ---- the `read` import — the host byte read -----------------------------
 
 #[test]
 fn the_host_read_fills_a_byte_buffer_and_answers_the_count() {
@@ -6226,7 +6226,7 @@ fn the_host_read_fills_a_byte_buffer_and_answers_the_count() {
     // machine-shaped count, and no text policy anywhere — the bytes come
     // back as bytes.
     check_run_with_input(
-        "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
          static f = fn() -> i64 {\n\
              match alloc_array::<u8>(8) {\n\
                  AllocResult::Ok(p) => {\n\
@@ -6249,7 +6249,7 @@ fn the_host_read_fills_a_byte_buffer_and_answers_the_count() {
 #[test]
 fn the_host_read_reports_zero_at_end_of_input() {
     check_run(
-        "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
          static f = fn() -> i64 {\n\
              match alloc_array::<u8>(4) {\n\
                  AllocResult::Ok(p) => {\n\
@@ -6273,7 +6273,7 @@ fn an_import_this_host_does_not_provide_is_refused_by_name() {
     // provide a hook has denied the capability. Saying WHICH one is the
     // whole difference between a refusal and a crash.
     check_run(
-        "static launch_missiles = extern fn(n: i64) -> i64;\n\
+        "extern static launch_missiles: unsafe fn(n: i64) -> i64;\n\
          static f = fn() -> i64 { unsafe { launch_missiles(1) } };",
         "f()",
         expect![[r#"
@@ -6287,7 +6287,7 @@ fn the_host_read_refuses_a_buffer_shorter_than_the_request() {
     // Judged BEFORE the read runs: a read that consumed input and then
     // trapped would have eaten bytes nobody can get back.
     check_run_with_input(
-        "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
          static f = fn() -> i64 {\n\
              match alloc_array::<u8>(2) {\n\
                  AllocResult::Ok(p) => unsafe { read(p, 8) },\n\
@@ -6309,7 +6309,7 @@ fn a_zero_length_host_read_touches_nothing() {
     // can ask for "however much room is left" without a special case when
     // the answer is none. `0` here is NOT end of input.
     check_run_with_input(
-        "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
          static f = fn() -> i64 { unsafe { read(dangling::<u8>(), 0) } };",
         "f()",
         "hello",
@@ -6326,7 +6326,7 @@ fn the_host_read_invalidates_a_safe_borrow_of_the_bytes_it_writes() {
     // so reading through `m` afterwards is detected UB, exactly as it
     // would be after `p.*[3] = v`.
     check_run_with_input(
-        "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
          static f = fn() -> u8 {\n\
              let mut a: [u8; 4] = [1, 2, 3, 4];\n\
              let p = a[0].&raw mut;\n\
@@ -6348,7 +6348,7 @@ fn the_host_read_invalidates_a_safe_borrow_of_the_bytes_it_writes() {
 fn the_host_read_is_fine_with_no_live_borrow_of_the_buffer() {
     // The twin: the same write, with nothing borrowing the range.
     check_run_with_input(
-        "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
          static f = fn() -> u8 {\n\
              let mut a: [u8; 4] = [1, 2, 3, 4];\n\
              let p = a[0].&raw mut;\n\
@@ -6372,7 +6372,7 @@ fn the_host_read_judges_aliasing_before_consuming_input() {
     // requested length, before `self.mode.read`, is the one doing the
     // work.
     check_run_with_input(
-        "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
          static f = fn () -> u8 {\n\
              let mut a: [u8; 4] = [1, 2, 3, 4];\n\
              let m = a[0].&mut;\n\
@@ -6403,7 +6403,7 @@ fn the_host_read_judges_aliasing_before_consuming_input() {
 fn a_host_import_declared_with_the_wrong_signature_is_refused() {
     let program = |buf: &str, arg: &str, len: &str, ret: &str| {
         format!(
-            "static read = extern fn(buf: {buf}, len: usize) -> {ret};\n\
+            "extern static read: unsafe fn(buf: {buf}, len: usize) -> {ret};\n\
              static f = fn() -> {ret} {{\n\
                  match alloc_array::<u8>(8) {{\n\
                      ::Ok(p) => {{ unsafe {{ p.* = 0; }}; unsafe {{ read({arg}, {len}) }} }}\n\
@@ -6418,7 +6418,7 @@ fn a_host_import_declared_with_the_wrong_signature_is_refused() {
         &program("bool.&raw mut", "dangling::<bool>()", "8", "isize"),
         "f()",
         expect![[r#"
-            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `fn(buf: u8.&raw mut, len: usize) -> isize`
+            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
         "#]],
     );
     // A SHARED pointer: `read` writes, so read-only is as wrong as non-byte.
@@ -6426,7 +6426,7 @@ fn a_host_import_declared_with_the_wrong_signature_is_refused() {
         &program("u8.&raw", "p.*.&raw", "8", "isize"),
         "f()",
         expect![[r#"
-            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `fn(buf: u8.&raw mut, len: usize) -> isize`
+            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
         "#]],
     );
     // Not a pointer at all. These used to blame the compiler ("internal
@@ -6435,14 +6435,14 @@ fn a_host_import_declared_with_the_wrong_signature_is_refused() {
         &program("i64", "1", "8", "isize"),
         "f()",
         expect![[r#"
-            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `fn(buf: u8.&raw mut, len: usize) -> isize`
+            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
         "#]],
     );
     check_run(
         &program("str", "\"x\"", "8", "isize"),
         "f()",
         expect![[r#"
-            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `fn(buf: u8.&raw mut, len: usize) -> isize`
+            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
         "#]],
     );
     // A zero-length request touches no buffer, and is judged all the same:
@@ -6451,7 +6451,7 @@ fn a_host_import_declared_with_the_wrong_signature_is_refused() {
         &program("i64", "1", "0", "isize"),
         "f()",
         expect![[r#"
-            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `fn(buf: u8.&raw mut, len: usize) -> isize`
+            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
         "#]],
     );
     // A return type that is not a signed machine word.
@@ -6459,7 +6459,7 @@ fn a_host_import_declared_with_the_wrong_signature_is_refused() {
         &program("u8.&raw mut", "p", "8", "bool"),
         "f()",
         expect![[r#"
-            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `fn(buf: u8.&raw mut, len: usize) -> isize`
+            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
         "#]],
     );
 }
@@ -6473,7 +6473,7 @@ fn the_host_read_answers_in_whichever_signed_word_the_declaration_asked_for() {
     for spelling in ["isize", "i64"] {
         check_run_with_input(
             &format!(
-                "static read = extern fn(buf: u8.&raw mut, len: usize) -> {spelling};\n\
+                "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> {spelling};\n\
                  static f = fn() -> {spelling} {{\n\
                      match alloc_array::<u8>(8) {{\n\
                          ::Ok(p) => unsafe {{ read(p, 8) }},\n\
@@ -6498,7 +6498,7 @@ fn calling_a_host_import_through_a_binding_traps_with_the_squiggle_text() {
     // ran fine, and the CALL is what refused, because the call is the
     // operation and `g`'s type is what still knows a marker is owed.
     check_run_with_input(
-        "static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;\n\
+        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;\n\
          static f = fn() -> isize {\n\
              let g = read;\n\
              match alloc_array::<u8>(8) { ::Ok(p) => g(p, 8), ::Err => 0 }\n\
@@ -6512,7 +6512,7 @@ fn calling_a_host_import_through_a_binding_traps_with_the_squiggle_text() {
     // Vouched at the CALL, it runs — first-class-ness is priced, not
     // removed, and the binding itself never needed a marker.
     check_run_with_input(
-        "static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;\n\
+        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;\n\
          static f = fn() -> isize {\n\
              let g = read;\n\
              match alloc_array::<u8>(8) { ::Ok(p) => unsafe { g(p, 8) }, ::Err => 0 }\n\
@@ -6526,16 +6526,34 @@ fn calling_a_host_import_through_a_binding_traps_with_the_squiggle_text() {
 }
 
 #[test]
-fn an_extern_fn_with_a_body_is_not_an_import() {
+fn an_extern_static_with_an_initializer_is_not_an_import() {
     // The syntax error stands on its own; what must NOT happen is the item
     // becoming an import anyway and refusing by name at run time, which
-    // blames a boundary the program never crossed.
+    // blames a boundary the program never crossed. The written value is
+    // what runs.
     check_run(
-        "static bad = extern fn(n: i64) -> i64 { n + 1 };\n\
-         static f = fn() -> i64 { bad(1) };",
+        "extern static bad: unsafe fn(n: i64) -> i64 = fn(n: i64) -> i64 { n + 1 };\n\
+         static f = fn() -> i64 { unsafe { bad(1) } };",
         "f()",
         expect![[r#"
             => 2
+        "#]],
+    );
+}
+
+#[test]
+fn a_data_import_is_refused_where_it_is_mentioned() {
+    // A data import is reserved (G22), so there is no value for the
+    // interpreter to produce and no host to ask for one. The mention is
+    // what refuses, naming the item and what is wrong with it — the
+    // alternative is a `usize` no host function can be, carried into
+    // arithmetic that then blames the compiler for a program's mistake.
+    check_run(
+        "extern static x: usize;\n\
+         static f = fn() -> usize { x + 1 };",
+        "f()",
+        expect![[r#"
+            error[Trap]: cannot use `x`: its type annotation has errors
         "#]],
     );
 }

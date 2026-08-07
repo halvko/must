@@ -176,7 +176,7 @@ impl Traps {
 /// answer the name -> function-index map the emitter calls through.
 ///
 /// Reachability is monomorphization's answer, not a scan of the file: an
-/// `extern fn` nothing calls costs the module nothing, which is the same
+/// import nothing calls costs the module nothing, which is the same
 /// dead-code rule every other item follows. The module name is `must` and
 /// the field name is the declaring `static`'s own name — the declaration is
 /// the whole contract, and there is no override surface to disagree with it.
@@ -221,7 +221,7 @@ fn collect_extern_imports(
                 if module.imports_func(IMPORT_MODULE, name) {
                     return Err(CompileError::Rejected {
                         message: format!(
-                            "an `extern fn` may not be named `{name}`: this backend already \
+                            "an import may not be named `{name}`: this backend already \
                              imports `{IMPORT_MODULE}.{name}` for the builtin of that name, \
                              and a module cannot import one name twice"
                         ),
@@ -312,7 +312,7 @@ pub fn compile(db: &dyn Db, entry: &ItemLoc) -> Result<Artifact, CompileError> {
     // resolved each call site, signature included.
     //
     // `print` stays hand-written above — where `collect_extern_imports`
-    // sees it, and so reserves its name — rather than becoming an `extern fn`
+    // sees it, and so reserves its name — rather than becoming an import
     // declaration in every program: it is a builtin, and `str`'s (offset,
     // length) pair is a platform ABI this backend decided by accident (see
     // `platform-codegen-and-tooling.md`) — not something a user-written

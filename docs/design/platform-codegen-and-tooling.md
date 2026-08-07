@@ -5,7 +5,7 @@
 - **P01** Three layers, and the platform owns `main`. Layer 0 is bare: no platform, no
   effects; purity is checkable by a symbol scan. Layer 1 is platform hooks: effects are
   platform imports, so a host that does not provide a hook has statically denied the
-  capability, and a program declares its own hooks with `extern fn` (P05). Layer 2 is
+  capability, and a program declares its own hooks with `extern static` (P05). Layer 2 is
   batteries: day-to-day users write what they write today and never learn the word "platform";
   embedders replace layer 2, not the language. Const check's "no effects in const contexts" is
   the same judgment at a different boundary.
@@ -15,25 +15,21 @@
   errors cross a registered boundary and never unwind host frames; no raw pointers cross the
   boundary; no ambient authority. Items 1 and 3 rule out tracing GC and pervasive refcounting;
   item 4 is why traps map to a panic hook.
-- **P05** Host imports: the declaration is the whole contract. `static name = extern fn(...)
-  -> T;` — `extern` rides `const`'s modifier slot on the fn literal, there is no body, and an
-  unwritten return type means `()`. The item's own name is the import's field name, the module
-  is `must` (`print`'s sibling), and the written signature is the one machine signature the
-  host must provide. Four forms are rejected, each restating that one sentence: a body, `const
-  extern fn`, generic binders, and anywhere but a `static`'s initializer. There is no
-  symbol-override surface: config here would be a second place for the truth to live. Calling
-  an import requires `unsafe` wherever the call is, for the same reason a raw deref does —
-  what it does is written in a language this compiler never sees. Taking one is free; a call
-  through a binding is gated by the value's type (T19). The compiler validates no import
-  signature, since a compiler that did would have to know every host, which is the coupling
-  `extern` exists to avoid; each host judges the full declaration at the call and refuses by
-  name. The constant carries the declared signature rather than a host re-deriving it from
-  argument values, because no argument value can carry a pointee type: a value-inspecting
-  host would fill a boolean array with bytes and mint values the type system says cannot
-  exist. Names the compiler already imports are reserved, and the reserved set is the
-  module's own import list, so a new builtin import reserves itself. Claiming a reserved name
-  is rejected, not "unsupported": two imports of one (module, field) is a module an engine
-  resolves twice, a silent-wrong-answer class.
+- **P05** Host imports: the declaration is the whole contract (G22). The item's name is the
+  import's field name, the module is `must` (`print`'s sibling), and the annotation is the one
+  machine signature the host must provide. There is no symbol-override surface: config here
+  would be a second place for the truth to live. Calling an import requires `unsafe` wherever
+  the call is, for the same reason a raw deref does — what it does is written in a language
+  this compiler never sees. Taking one is free; a call through a binding is gated by the
+  value's type (T19). The compiler validates no import signature, since a compiler that did
+  would have to know every host, which is the coupling `extern` exists to avoid; each host
+  judges the full declaration at the call and refuses by name. The constant carries the
+  declared signature rather than a host re-deriving it from argument values, because no
+  argument value can carry a pointee type: a value-inspecting host would fill a boolean array
+  with bytes and mint values the type system says cannot exist. Names the compiler already
+  imports are reserved, and the reserved set is the module's own import list, so a new builtin
+  import reserves itself. Claiming a reserved name is rejected, not "unsupported": two imports
+  of one (module, field) is a module an engine resolves twice, a silent-wrong-answer class.
 - **P06** The wasm backend. A compiled module's entire host dependency is one builtin import,
   plus the imports the program itself declares (P05): no allocator, no GC, no unwinder, no
   scheduler, no support library, no start function, no runtime initialization; statics are
@@ -145,8 +141,9 @@
   convention, and "dictionaries resolve away completely" ends. **P06**
 - **An LIR is built** — the wasm backend's re-derived type arguments get fixed there, and
   guaranteed optimizations live there instead of being hoped for. **P08**
-- **FFI is designed** — it owns the `extern` surface, symbol mangling, export units, and
-  whether Must can claim no-alias equivalents on a native backend. **P05**
+- **FFI is designed** — it owns the `extern` surface (data imports are reserved there), symbol
+  mangling, export units, and whether Must can claim no-alias equivalents on a native backend.
+  **P05**
 - **The `str` platform ABI gets a second customer** — decide it on purpose before anything
   else depends on it. **P06**
 - **The editor extension gains a tree-sitter grammar** — the client then

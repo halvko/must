@@ -364,9 +364,14 @@ fn loop_hover(
 /// The item's const value, when it adds information beyond the type: a `fn`
 /// value is fully described by its signature, and a failed evaluation has
 /// its own diagnostic.
+///
+/// A HOST IMPORT is the same case for a sharper reason: the declaration sets
+/// nothing to anything, so hover must not answer with a `= …` the source
+/// does not have. Its signature is the whole of what is known about it.
 fn const_display(db: &RootDatabase, item: hir::ItemId<'_>) -> Option<String> {
     match eval::const_value(db, item) {
-        Ok(eval::Value::Fn(_) | eval::Value::Builtin(_)) | Err(_) => None,
+        Ok(eval::Value::Fn(_) | eval::Value::Builtin(_) | eval::Value::ExternFn { .. })
+        | Err(_) => None,
         Ok(value) => Some(value.display()),
     }
 }

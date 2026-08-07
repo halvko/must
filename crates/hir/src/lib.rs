@@ -224,7 +224,8 @@ pub fn synthetic_decl(db: &dyn Db, item: ItemId<'_>) -> Option<&'static scopes::
     scopes::synthetic_decl_named(item.name(db))
 }
 
-/// Whether `item` is a HOST IMPORT — `static name = extern fn(...) -> T;`.
+/// Whether `item` is a HOST IMPORT —
+/// `extern static read: unsafe fn(...) -> T;`.
 ///
 /// The fact lives on the ITEM, and it is a NARROW one. An import's *price*
 /// rides its TYPE — it is an `unsafe fn(...)`
@@ -233,23 +234,20 @@ pub fn synthetic_decl(db: &dyn Db, item: ItemId<'_>) -> Option<&'static scopes::
 /// What is left to this query is the pair of questions only the DECLARATION
 /// can answer: may it run in a const context (there is no host at compile
 /// time), and can a call site NAME the import it reaches — a better message
-/// than the type-driven one, available exactly at a direct mention. Both are
-/// body questions.
+/// than the type-driven one, available exactly at a direct mention.
 ///
-/// Its OWN query, for [`const_check::root_fn_is_const`]'s reason: every call
-/// site of a named item asks this, so an edit inside one item's body must
-/// reach other items' checks only when this value actually flips. Answered
-/// off the range-free [`body`] query underneath, so it backdates under every
-/// edit that does not change the declaration itself.
+/// One read of [`item_data`] — the DECLARATION, not the body. An import has
+/// no value expression to interrogate, and the RETIRED spelling
+/// (`static read = extern fn(...);`) sets the same flag off its bodyless
+/// literal, because retiring a form must not reinterpret programs written
+/// in it. Tracked rather than inlined at the two call sites: `item_data`
+/// churns on any edit to the declaration, this bit almost never does, so
+/// callers get the early cutoff.
 #[salsa::tracked]
-pub fn is_extern_fn<'db>(db: &'db dyn Db, item: ItemId<'db>) -> bool {
-    let lowered = body::body(db, item);
-    lowered.root.is_some_and(|root| {
-        matches!(
-            lowered.exprs[root],
-            body::ExprData::FnLiteral { body: None, .. }
-        )
-    })
+pub fn is_host_import<'db>(db: &'db dyn Db, item: ItemId<'db>) -> bool {
+    item_data(db, item)
+        .as_ref()
+        .is_some_and(|data| data.is_extern)
 }
 
 /// The item-tree entry for `item` (its contract, constness, name).
@@ -302,6 +300,9 @@ pub fn item_data<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<item_tree::I
             // A member is a value item; only a `type` declaration sheds a
             // capability.
             without_forget: false,
+            // A member is DEFINED where it is declared; an import is the
+            // one value in the language that is not.
+            is_extern: false,
         });
     }
     if let Some(decl) = synthetic_decl(db, item) {
@@ -312,6 +313,7 @@ pub fn item_data<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<item_tree::I
             generics: decl.generics.clone(),
             // A compiler-provided declaration sheds nothing.
             without_forget: false,
+            is_extern: false,
         });
     }
     item_tree::item_tree(db, item.file(db))

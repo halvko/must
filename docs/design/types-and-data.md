@@ -133,23 +133,24 @@
   runtime consequence: the conversion moves no bits, it declines a permission. A join takes
   the LUB wherever it has a check site or a consuming call to convert at; an unannotated,
   unconsumed mixed-safety join has neither, so it is a branch disagreement asking for an
-  annotation. Two populations get the type without writing it: host imports, and every
-  builtin that requires the marker and has a first-class fn type (`dealloc_array`,
-  `str_bytes`).
+  annotation. One population gets the type without writing it: every builtin that requires the
+  marker and has a first-class fn type (`dealloc_array`, `str_bytes`). An import writes it —
+  the declaration is the whole contract, and `unsafe` is part of what it says (G22).
 - **T20** A capability names something you can DO with a value. One exists, `forget` — let a
   value go with nothing done about it — and every type has it unless a `type` declaration
   sheds it with a trailing `without forget` clause, which rides `with`'s slot in either order
   and is parsed by one loop so neither is privileged. Capability names are ordinary name refs
   composed with `+`; `send`, `sync` and `destruct` are named in the doctrine and refused as
   not existing yet, the clause is superset-parsed and refused on `static`/`const`/`trait`
-  items and on region and const params, and a declaration sheds once. A type without `forget`
-  is linear: every path consumes a value of it exactly once. There is no destructor, no drop
-  glue and no unwinding; the checker is the whole mechanism, and codegen never learns the type
-  is linear (identical output bytes with and without the clause). Every type PARAMETER
-  requires `forget` unless written `T without forget`, checked at expression mentions and at
-  annotation arguments that name a concrete type — a signature is an instantiation edge no
-  expression crosses — with an opted-out parameter checked rigidly as possibly-linear inside
-  its own body. The bound is a promise about an API; containment is the safety net under it.
+  items — imports included, which have no `= rhs` for it to trail — and on region and const
+  params, and a declaration sheds once. A type without `forget` is linear: every path consumes
+  a value of it exactly once. There is no destructor, no drop glue and no unwinding; the
+  checker is the whole mechanism, and codegen never learns the type is linear (identical
+  output bytes with and without the clause). Every type PARAMETER requires `forget` unless
+  written `T without forget`, checked at expression mentions and at annotation arguments that
+  name a concrete type — a signature is an instantiation edge no expression crosses — with an
+  opted-out parameter checked rigidly as possibly-linear inside its own body. The bound is a
+  promise about an API; containment is the safety net under it.
 - **T21** Containment infects; indirection does not. A record, enum or array holding a linear
   is linear, and widening a variant never changes the answer. A borrow, a raw pointer or a
   `fn` type mentioning one keeps `forget`, because the obligation stayed with the owner, which

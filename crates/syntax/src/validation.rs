@@ -88,9 +88,15 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
                     });
                 }
             }
+        } else if let Some(fn_type) = ast::FnType::cast(node.clone()) {
+            validate_fn_type(&fn_type, &mut errors);
+        } else if let Some(static_item) = ast::StaticItem::cast(node.clone()) {
+            validate_extern_static(&static_item, &mut errors);
         } else if let Some(type_item) = ast::TypeItem::cast(node.clone()) {
+            reject_extern_marker(&node, &mut errors);
             reject_type_item_annotation(&type_item, &mut errors);
         } else if let Some(trait_item) = ast::TraitItem::cast(node.clone()) {
+            reject_extern_marker(&node, &mut errors);
             validate_trait_item(&trait_item, &mut errors);
         } else if let Some(type_param) = ast::TypeParam::cast(node.clone()) {
             validate_type_param_bounds(&type_param, &mut errors);
@@ -1476,72 +1482,325 @@ fn reject_stray_type_binder(
     });
 }
 
-/// `static name = extern fn(...) -> T;` — a host import declaration.
+/// The RETIRED initializer form of a host import,
+/// `static name = extern fn(...) -> T;`. Superset-parsed into the same
+/// `FN_LITERAL` it always produced (never a silent reinterpretation — the
+/// postfix-borrow migration precedent), and refused here with the rewrite.
 ///
-/// Everything rejected here is rejected because the DECLARATION IS THE WHOLE
-/// CONTRACT: the item's name is the import's field name, its signature is the
-/// one machine signature the host must provide, and there is no body because
-/// the body lives on the other side of the boundary.
+/// Why it is retired: an import **sets nothing to anything**. There is no
+/// value on the right-hand side to write down — the declaration promises
+/// that a name of this type exists and the host (or the linker, or the
+/// environment) is what provides it. That is a DECLARATION, so it is spelled
+/// like one: `extern static read: unsafe fn(...) -> T;`.
 fn validate_extern_fn(fn_literal: &ast::FnLiteral, errors: &mut Vec<SyntaxError>) {
-    if let Some(body) = fn_literal.body() {
+    let item = fn_literal.syntax().parent().and_then(ast::StaticItem::cast);
+    let name = item
+        .as_ref()
+        .and_then(|it| it.name())
+        .map(|n| n.text())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "name".to_owned());
+    // The rewrite is offered only for the shape it can rewrite CORRECTLY:
+    // a bodyless, non-`const`, non-generic literal initializing a plain
+    // `static`. The shapes the old spelling rejected (a body, `const extern fn`, a
+    // binder) keep the message alone — a fix that produced a second broken
+    // item would be worse than none.
+    let fix = item
+        .as_ref()
+        .filter(|item| !item.is_const() && item.extern_token().is_none() && item.ty().is_none())
+        .filter(|_| {
+            fn_literal.body().is_none()
+                && fn_literal.const_token().is_none()
+                && fn_literal.generic_param_list().is_none()
+        })
+        .and_then(|item| {
+            Some((
+                item,
+                item.name()?.syntax().text_range().end(),
+                fn_literal.extern_token()?,
+            ))
+        })
+        .map(|(item, name_end, extern_token)| Fix {
+            label: "Rewrite as an `extern static` declaration".to_owned(),
+            edits: vec![
+                TextEdit {
+                    range: TextRange::empty(item.syntax().text_range().start()),
+                    insert: "extern ".to_owned(),
+                },
+                // ` = extern` becomes `: unsafe`: the annotation slot takes
+                // the signature the initializer used to hold, and the
+                // import's price moves onto the TYPE where T19 put it.
+                TextEdit {
+                    range: TextRange::new(name_end, extern_token.text_range().end()),
+                    insert: ": unsafe".to_owned(),
+                },
+            ],
+        });
+    // The retired spelling with an ANNOTATION writes the signature TWICE.
+    // The annotation is the home hir keeps (the respelling has nowhere else
+    // to put it), so the message says so — an initializer signature that
+    // disagrees with it is dropped, and a migration never drops something
+    // silently.
+    let annotation = item
+        .as_ref()
+        .filter(|item| item.declares_host_import())
+        .and_then(|item| item.ty());
+    let twice = if annotation.is_some() {
+        " — the annotation is the contract, and this signature is dropped"
+    } else {
+        ""
+    };
+    errors.push(SyntaxError {
+        message: format!(
+            "a host import is a DECLARATION, not an initializer: write \
+             `extern static {name}: unsafe fn(...) -> T;`{twice}"
+        ),
+        range: fn_literal.syntax().text_range(),
+        fix,
+    });
+    // ... and that annotation is an IMPORT's annotation, held to the same
+    // rules the live spelling's is. Retiring a spelling must not relax what
+    // the programs written in it are held to.
+    if let Some(ty) = annotation {
+        validate_import_annotation(&ty, errors);
+    }
+}
+
+/// `extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;`
+/// — a HOST IMPORT declaration (G22).
+///
+/// Everything refused here is refused because the DECLARATION IS THE WHOLE
+/// CONTRACT: the item's name is the import's field name, the annotation is
+/// the one machine signature the host must provide, and there is nothing
+/// else — no value, no body, no second place for the truth to live.
+fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>) {
+    let Some(marker) = item.extern_token() else {
+        return;
+    };
+    // An item the parser could not read at all (`extern fn g(...)`, the C
+    // spelling: it recovers by taking the rest as one `ERROR`). Its message
+    // names the one thing that is wrong; ours would be a consequence.
+    if item
+        .syntax()
+        .children()
+        .any(|child| child.kind() == SyntaxKind::ERROR)
+    {
+        return;
+    }
+    // `extern const x` — `const` is copied per mention and an import is one
+    // identity. (Same message a stray `extern` on a `type`/`trait` item
+    // gets: one marker, one home.)
+    if item.is_const() {
         errors.push(SyntaxError {
-            message: "an `extern fn` declares a host import and has no body; \
-                      the implementation lives on the other side of the boundary"
+            message: EXTERN_ONLY_ON_STATIC.to_owned(),
+            range: marker.text_range(),
+            fix: None,
+        });
+        return;
+    }
+    if let Some(eq) = item.eq_token() {
+        let end = item
+            .body()
+            .map(|body| body.syntax().text_range().end())
+            .unwrap_or_else(|| eq.text_range().end());
+        let range = TextRange::new(eq.text_range().start(), end);
+        errors.push(SyntaxError {
+            message: "an `extern static` has no initializer: the declaration is the \
+                      whole contract, and an import sets nothing to anything"
                 .to_owned(),
-            range: body.syntax().text_range(),
+            range,
             fix: Some(Fix {
-                label: "Remove the body".to_owned(),
+                label: "Remove the initializer".to_owned(),
                 edits: vec![TextEdit {
-                    range: body.syntax().text_range(),
+                    // From the END OF THE DECLARATION — its annotation when
+                    // it has one, its name otherwise. Cutting from the name
+                    // would take the type with it, and the type is the whole
+                    // contract.
+                    range: TextRange::new(
+                        item.ty()
+                            .map(|ty| ty.syntax().text_range().end())
+                            .or_else(|| item.name().map(|n| n.syntax().text_range().end()))
+                            .unwrap_or_else(|| range.start()),
+                        end,
+                    ),
                     insert: String::new(),
                 }],
             }),
         });
     }
-    if let Some(const_token) = fn_literal.const_token() {
-        errors.push(SyntaxError {
-            message: "an `extern fn` cannot be `const`: a host import is a call \
-                      out of the program, and const evaluation has no host"
-                .to_owned(),
-            range: const_token.text_range(),
-            fix: None,
-        });
-    }
-    if let Some(binders) = fn_literal.generic_param_list() {
-        errors.push(SyntaxError {
-            message: "an `extern fn` cannot be generic: an import has exactly one \
-                      machine signature, and there is nothing to monomorphize it into"
-                .to_owned(),
-            range: binders.syntax().text_range(),
-            fix: None,
-        });
-    }
-    // The import's field name IS the item's name, so an anonymous `extern fn`
-    // — one that is not a top-level `static`'s initializer — has no name to
-    // import under. `const` is rejected with it: `const` is copied per
-    // mention and an import is one identity.
-    let parent = fn_literal.syntax().parent();
-    // `unsafe extern fn` already draws the `unsafe fn` LITERAL reservation
-    // on the wrapping node; a second error about placement would be noise.
-    if parent
-        .as_ref()
-        .is_some_and(|p| p.kind() == SyntaxKind::UNSAFE_BLOCK_EXPR)
-    {
+    // Everything below is about the CONTRACT, and only an item that
+    // actually declares an import has one: `extern static x: T = v;` is an
+    // ordinary item with a written value (the value wins, the marker is
+    // dropped), so refusing its annotation for having a `_` the body fills
+    // — or for not being a function type — would be a sentence that is not
+    // true of the program it is printed on.
+    if !item.declares_host_import() {
         return;
     }
-    let placed_well = parent
-        .and_then(ast::StaticItem::cast)
-        .is_some_and(|item| !item.is_const());
-    if !placed_well {
-        let range = fn_literal
-            .extern_token()
-            .map_or_else(|| fn_literal.syntax().text_range(), |t| t.text_range());
-        errors.push(SyntaxError {
-            message: "an `extern fn` must be a `static`'s initializer — \
-                      `static name = extern fn(...) -> T;` — because the item's \
-                      name is the name the host is asked for"
+    match item.ty() {
+        Some(ty) => validate_import_annotation(&ty, errors),
+        None => errors.push(SyntaxError {
+            message: "an import must declare its type: \
+                      `extern static name: unsafe fn(...) -> T;`"
                 .to_owned(),
-            range,
+            range: item
+                .name()
+                .map(|n| n.syntax().text_range())
+                .unwrap_or_else(|| marker.text_range()),
+            fix: None,
+        }),
+    }
+}
+
+/// The rules an import's ANNOTATION answers to — one home for them, because
+/// both spellings put the contract in the same place once the retired one
+/// writes an annotation at all (`static r: unsafe fn(...) -> T = extern
+/// fn(...);` is an import whose annotation is an import's annotation).
+fn validate_import_annotation(ty: &ast::Type, errors: &mut Vec<SyntaxError>) {
+    match ty {
+        ast::Type::FnType(fn_type) => {
+            // NOTHING in the contract may be left to inference. A `_` in an
+            // ordinary annotation names a type the body determines; an
+            // import has no body, and this type is what the host is judged
+            // against and what the backend emits — so an unwritten piece of
+            // it is unwritten for good.
+            for hole in fn_type
+                .syntax()
+                .descendants()
+                .filter(|node| node.kind() == SyntaxKind::HOLE_TYPE)
+            {
+                errors.push(SyntaxError {
+                    message: "an import's type must be written in full: the declaration \
+                              is the whole contract, and there is no body for `_` to be \
+                              inferred from"
+                        .to_owned(),
+                    range: hole.text_range(),
+                    fix: None,
+                });
+            }
+            // The written `unsafe` is REQUIRED (G22), and required
+            // CONSERVATIVELY — not as a law about imports.
+            //
+            // The split: DECLARING a signature is itself a vouch
+            // (a misdeclared import is undefined behavior before anything
+            // calls it), while CALLING is priced per function by its TYPE —
+            // `read` really is `unsafe fn`, but a correctly declared
+            // `now: fn() -> i64` would be safe to call. The declaration-side
+            // vouch has no spelling yet. Until it has one, accepting a
+            // safe-call import would leave the vouch obligation with no home
+            // at all: nothing written anywhere would say that someone
+            // checked this signature against the host. So every import
+            // carries the marker for now, and the message says "for now".
+            if fn_type.unsafe_token().is_none() {
+                let range = fn_type.syntax().text_range();
+                errors.push(SyntaxError {
+                    message: "an import must be declared `unsafe fn` for now: a \
+                              safe-to-call import needs the declaration-side `unsafe` \
+                              marker, and that marker does not exist yet"
+                        .to_owned(),
+                    range,
+                    fix: Some(Fix {
+                        label: "Write `unsafe fn`".to_owned(),
+                        edits: vec![TextEdit {
+                            range: TextRange::empty(range.start()),
+                            insert: "unsafe ".to_owned(),
+                        }],
+                    }),
+                });
+            }
+            // An import has exactly ONE machine signature, so there is
+            // nothing for a binder to range over and nothing to
+            // monomorphize it into. (The old spelling's refusal, restored
+            // at the shape the respell moved it to.)
+            if let Some(binder) = fn_type.generic_param_list() {
+                errors.push(SyntaxError {
+                    message: "an import cannot be generic: it has exactly one machine \
+                              signature, and there is nothing to monomorphize it into"
+                        .to_owned(),
+                    range: binder.syntax().text_range(),
+                    fix: None,
+                });
+            }
+        }
+        // A DATA import is newly expressible and is RESERVED (G22) —
+        // parse-and-reserve, so granting it later deletes a diagnostic
+        // instead of inventing a syntax.
+        other => errors.push(SyntaxError {
+            message: "data imports are not supported yet — an import must have \
+                      a function type"
+                .to_owned(),
+            range: other.syntax().text_range(),
+            fix: None,
+        }),
+    }
+}
+
+/// The one sentence every misplaced `extern` marker gets: the marker
+/// declares a NAME the host provides a value for, and only a `static`
+/// declares one of those.
+const EXTERN_ONLY_ON_STATIC: &str =
+    "only a `static` can be `extern`: an import declares one name with one type";
+
+/// Rules that hold of EVERY fn type, wherever it is written — an import's
+/// annotation is one fn type among many and gets no parameter grammar of
+/// its own (its extra refusals are in [`validate_extern_static`]).
+///
+/// The colon-declared MEMBER signature is the one shape excused: it parses
+/// the pattern-shaped [`grammar::param_list`] and its binder is live (a
+/// trait requirement may be a generic fn), so its own rules apply.
+fn validate_fn_type(fn_type: &ast::FnType, errors: &mut Vec<SyntaxError>) {
+    let parent_kind = fn_type.syntax().parent().map(|p| p.kind());
+    if parent_kind == Some(SyntaxKind::MEMBER) {
+        return;
+    }
+    // A generic function is declared by an ITEM; a type mentions instances
+    // of one. (An import's own version of this refusal says more and fires
+    // instead — see `validate_extern_static`.)
+    let is_import_annotation = fn_type
+        .syntax()
+        .parent()
+        .and_then(ast::StaticItem::cast)
+        .is_some_and(|item| item.is_extern());
+    if let Some(binder) = fn_type.generic_param_list()
+        && !is_import_annotation
+    {
+        errors.push(SyntaxError {
+            message: "a function type has no generic binder: a generic function is \
+                      declared by an item, and a type names one of its instances"
+                .to_owned(),
+            range: binder.syntax().text_range(),
+            fix: None,
+        });
+    }
+    // A parameter with a name and no type. The grammar admits `Type` and
+    // `name: Type`; anything with a name and nothing after the colon is a
+    // half-written signature, and a fn type has nothing to infer the rest
+    // from.
+    let Some(list) = fn_type.param_list() else {
+        return;
+    };
+    for param in list.params().filter(|p| p.ty().is_none()) {
+        errors.push(SyntaxError {
+            message: "this parameter has no type: a function type's parameters are \
+                      `name: Type` or `Type`"
+                .to_owned(),
+            range: param.syntax().text_range(),
+            fix: None,
+        });
+    }
+}
+
+/// A stray `extern` marker on a `type`/`trait` item — superset-parsed by
+/// `grammar::item` so the rest of the declaration still reads.
+fn reject_extern_marker(node: &SyntaxNode, errors: &mut Vec<SyntaxError>) {
+    let marker = node
+        .children_with_tokens()
+        .filter_map(|it| it.into_token())
+        .find(|it| it.kind() == SyntaxKind::EXTERN_KW);
+    if let Some(marker) = marker {
+        errors.push(SyntaxError {
+            message: EXTERN_ONLY_ON_STATIC.to_owned(),
+            range: marker.text_range(),
             fix: None,
         });
     }

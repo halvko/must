@@ -45,7 +45,7 @@ pub fn builtin_call_requires_unsafe(name: &str) -> String {
     format!("calling `{name}` requires an `unsafe {{ ... }}` block")
 }
 
-/// A call of an `extern fn` outside any `unsafe { ... }` block. The same rule
+/// A call of a host import outside any `unsafe { ... }` block. The same rule
 /// as [`DEREF_REQUIRES_UNSAFE`], and the reason is the boundary itself: what
 /// an import does is written in a language this compiler never sees, so
 /// nothing on this side can establish that calling it is sound. The caller
@@ -69,7 +69,7 @@ pub fn extern_call_requires_unsafe(name: &str) -> String {
 pub const UNSAFE_FN_VALUE_CALL_REQUIRES_UNSAFE: &str =
     "calling a value of `unsafe fn` type requires an `unsafe { ... }` block";
 
-/// An `extern fn` call in a const context — [`side_effect_call_in_const`]'s
+/// A host-import call in a const context — [`side_effect_call_in_const`]'s
 /// judgment at a different boundary, stated in its own words because "side
 /// effect" is the wrong noun for "there is nobody there".
 pub fn extern_call_in_const(name: &str) -> String {

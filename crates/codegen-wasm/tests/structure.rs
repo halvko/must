@@ -336,12 +336,12 @@ fn a_generic_cycle_at_the_caps_is_refused_by_name() {
 
 #[test]
 fn a_declared_host_import_becomes_a_real_wasm_import_and_is_called_through() {
-    // The `extern fn` mechanism, end to end at the module level: the
+    // The host-import mechanism, end to end at the module level: the
     // declaration's own name is the import's field name (module `must`,
     // `print`'s sibling), it lands in the import section, and the call
     // goes through it. Nothing here is `read`-specific — `read` itself
     // needs a raw pointer, which this backend refuses by name.
-    let source = "static host_tick = extern fn(n: i64) -> i64;\n\
+    let source = "extern static host_tick: unsafe fn(n: i64) -> i64;\n\
                   static main = fn () -> i64 { unsafe { host_tick(7) } };";
     let artifact = compile(source, "main()");
     let engine = wasmi::Engine::default();
@@ -385,7 +385,7 @@ fn an_import_whose_signature_has_no_wasm_shape_is_refused_by_name() {
     // names the IMPORT — which boundary is unavailable is the useful half.
     let message = harness::on_budget(|| {
         let db = RootDatabase::default();
-        let source = "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        let source = "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
                       static main = fn () -> i64 {\n\
                           let mut b: u8 = 0;\n\
                           unsafe { read(b.&raw mut, 1) }\n\
@@ -418,13 +418,13 @@ fn a_bound_host_import_compiles_but_a_stored_one_is_refused_by_name() {
     // the tracker CANNOT follow — stored in a record, or merged from
     // branches that disagree — is refused BY NAME rather than miscompiled.
     let db = RootDatabase::default();
-    let bound = "static tick = extern fn(n: i64) -> i64;\n\
+    let bound = "extern static tick: unsafe fn(n: i64) -> i64;\n\
                  static main = fn () -> i64 { let f = tick; unsafe { f(1) } };";
     let loc = harness::prepare(&db, bound, "main()");
     codegen_wasm::compile(&db, &loc).expect("a bound import is still a direct call");
 
     let db = RootDatabase::default();
-    let stored = "static tick = extern fn(n: i64) -> i64;\n\
+    let stored = "extern static tick: unsafe fn(n: i64) -> i64;\n\
                   static main = fn () -> i64 { \
                       let h = struct { go = tick }; unsafe { h.go(1) } \
                   };";
@@ -442,7 +442,7 @@ fn a_bound_host_import_compiles_but_a_stored_one_is_refused_by_name() {
 }
 
 #[test]
-fn an_extern_fn_may_not_claim_a_name_the_compiler_already_imports() {
+fn an_import_may_not_claim_a_name_the_compiler_already_imports() {
     // Two imports of one `(module, field)` is a module with two answers to
     // the same question — an engine resolves BOTH, so the program runs with
     // whichever the host happened to bind, silently. That is a wrong-answer
@@ -453,7 +453,7 @@ fn an_extern_fn_may_not_claim_a_name_the_compiler_already_imports() {
     // call that collects the program's imports.
     let (message, named) = harness::on_budget(|| {
         let db = RootDatabase::default();
-        let source = "static print = extern fn(offset: i64, len: i64) -> ();\n\
+        let source = "extern static print: unsafe fn(offset: i64, len: i64) -> ();\n\
                       static main = fn () -> () { unsafe { print(0, 0) }; };";
         let loc = harness::prepare(&db, source, "main()");
         let Err(err) = codegen_wasm::compile(&db, &loc) else {
@@ -464,7 +464,7 @@ fn an_extern_fn_may_not_claim_a_name_the_compiler_already_imports() {
     });
     assert_eq!(
         message,
-        "an `extern fn` may not be named `print`: this backend already imports \
+        "an import may not be named `print`: this backend already imports \
          `must.print` for the builtin of that name, and a module cannot import \
          one name twice"
     );

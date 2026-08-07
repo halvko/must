@@ -495,6 +495,9 @@ impl CheckCtx<'_> {
         match &self.body.exprs[expr] {
             ExprData::Missing
             | ExprData::Literal(_)
+            // A signature and nothing else: no value is produced from a
+            // linear one and none is consumed.
+            | ExprData::ExternImport
             | ExprData::ElidedVariant { .. }
             | ExprData::VariantPath { .. }
             | ExprData::GenericApp { .. } => Flow::Falls,
@@ -719,10 +722,6 @@ impl CheckCtx<'_> {
             }
             ExprData::FnLiteral { params, body, .. } => {
                 let (params, fn_body) = (params.clone(), *body);
-                let Some(fn_body) = fn_body else {
-                    // An `extern fn` — a signature, with nothing to check.
-                    return Flow::Falls;
-                };
                 // A nested body is checked in isolation: captures do not
                 // exist (MIR refuses them), so no obligation crosses the
                 // boundary in either direction.

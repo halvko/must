@@ -101,7 +101,7 @@ pub enum StaticVal {
     Unknown,
     Fn(FnRef),
     Builtin(Builtin),
-    /// A HOST IMPORT — `static name = extern fn(...) -> T;`. Statically
+    /// A HOST IMPORT — `extern static name: unsafe fn(...) -> T;`. Statically
     /// known by construction: an import is a declaration, and the
     /// declaration is the whole value, so it resolves through data and
     /// branches like any constant. The DECLARED signature rides along (an

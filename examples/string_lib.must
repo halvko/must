@@ -137,7 +137,7 @@ static to_owned = fn::<@a>(s: str.&::<@a>) -> String {
 // `Reader` is `without forget` here too, same as it is there, and `drop`
 // takes it apart the same way: the two copies agree.
 
-static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;
+extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
 
 type Fill = enum {
     More(u8.&raw mut),
