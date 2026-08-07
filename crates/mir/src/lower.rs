@@ -2255,6 +2255,16 @@ impl LowerCtx<'_> {
     fn lower_name_ref(&mut self, b: &mut BodyBuilder, expr: ExprId, name: &str) -> Operand {
         match self.resolutions.get(expr) {
             Some(Resolution::Local(binding)) => match b.local_for_binding.get(binding) {
+                // Reading a local of a type with no `forget` capability is
+                // a MOVE, and it is the one read that can be told apart
+                // from a copy without consulting the checker: a linear
+                // value cannot be duplicated, so a read of one is always
+                // the last read. The distinction exists for the ALIASING
+                // model alone (see `Operand::Move`) — every other consumer
+                // treats the two the same.
+                Some(&local) if !hir::capability::has_forget(self.db, &self.ty(expr)) => {
+                    Operand::Move(local.into())
+                }
                 Some(&local) => Operand::Copy(local.into()),
                 // A local of an enclosing function: a capture. The MIR
                 // diagnostic *is* the upstream diagnostic the trap borrows.
@@ -3127,7 +3137,9 @@ impl LowerCtx<'_> {
     /// it already is a bare local read, otherwise a fresh temp (typed as
     /// `expr`'s type) holding the operand's value.
     fn operand_root_local(&mut self, b: &mut BodyBuilder, op: Operand, expr: ExprId) -> LocalId {
-        if let Operand::Copy(place) = &op
+        // Either read flavor: a place-rooted operation's root is the same
+        // local whichever way the value came out of it.
+        if let Operand::Copy(place) | Operand::Move(place) = &op
             && place.projection.is_empty()
         {
             return place.local;

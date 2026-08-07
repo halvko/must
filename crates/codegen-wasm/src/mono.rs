@@ -497,13 +497,17 @@ impl<'db> Mono<'db> {
         op: &Operand,
     ) -> StaticVal {
         match op {
-            Operand::Copy(place) if place.projection.is_empty() => statics
+            // A MOVE is a copy plus an ALIASING fact, and this backend has
+            // no aliasing model to tell — linearity is check-time only, so
+            // the two lower identically and a linear program's bytes are
+            // the same as its forgettable twin's.
+            Operand::Copy(place) | Operand::Move(place) if place.projection.is_empty() => statics
                 .get(raw(place.local))
                 .cloned()
                 .unwrap_or(StaticVal::Unknown),
             // A function value hiding inside an aggregate: nothing tracks
             // it, so any call through it is refused (never miscompiled).
-            Operand::Copy(_) => StaticVal::Unknown,
+            Operand::Copy(_) | Operand::Move(_) => StaticVal::Unknown,
             Operand::Const(Const::Builtin(builtin)) => StaticVal::Builtin(*builtin),
             Operand::Const(Const::ExternFn { decl, sig }) => StaticVal::ExternFn {
                 decl: decl.clone(),
@@ -743,7 +747,11 @@ impl<'db> Mono<'db> {
                     "a host import used as a value (imports are callable, not data)",
                 ));
             }
-            Operand::Copy(place) => {
+            // A MOVE is a copy plus an ALIASING fact, and this backend has
+            // no aliasing model to tell — linearity is check-time only, so
+            // the two lower identically and a linear program's bytes are
+            // the same as its forgettable twin's.
+            Operand::Copy(place) | Operand::Move(place) => {
                 let mut ty = locals
                     .get(raw(place.local))
                     .cloned()

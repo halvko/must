@@ -199,6 +199,7 @@ fn render_terminator(kind: &TerminatorKind) -> String {
 fn operand(op: &Operand) -> String {
     match op {
         Operand::Copy(p) => place(p),
+        Operand::Move(p) => format!("move {}", place(p)),
         Operand::Const(c) => match c {
             Const::Unit => "()".to_owned(),
             Const::Int(v) => v.to_i128().to_string(),

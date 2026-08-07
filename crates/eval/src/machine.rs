@@ -1957,6 +1957,41 @@ impl<'db, M: Mode> Machine<'db, M> {
         }
     }
 
+    /// The aliasing half of a move: the local's storage no longer holds
+    /// what any borrow of it was taken of, so every borrow into its
+    /// allocation is invalidated — the identical root-level write access
+    /// `write_place` performs when a local is written by its own name.
+    ///
+    /// Only ADDRESS-TAKEN locals have an allocation, and only they can have
+    /// been borrowed, so a body that never borrows pays one map lookup.
+    fn invalidate_moved_local(
+        &mut self,
+        local: LocalId,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<(), EvalError> {
+        let Some(frame) = self.frames.last() else {
+            return Ok(());
+        };
+        if frame.promoted.is_empty() {
+            return Ok(());
+        }
+        let Some(&alloc) = frame.promoted.get(&local) else {
+            return Ok(());
+        };
+        let Some(&root) = self.borrow_roots.get(&alloc) else {
+            return Ok(());
+        };
+        self.aliasing_access(
+            Provenance(Some(root)),
+            alloc,
+            &[],
+            Access::Write,
+            loc,
+            origin,
+        )
+    }
+
     fn eval_operand(
         &mut self,
         loc: &ItemLoc,
@@ -2017,6 +2052,23 @@ impl<'db, M: Mode> Machine<'db, M> {
                             Some((loc.clone(), origin)),
                         )
                     })
+            }
+            // A MOVE reads exactly what a copy reads, and then says so to
+            // the aliasing model: the place no longer owns the value, so
+            // every borrow taken OF that place is stale from here on. That
+            // is the same event a write is (`s = mk(2);` already disabled
+            // them), which is why it reuses the same access — the only
+            // difference is that this one destroys by leaving rather than
+            // by overwriting.
+            Operand::Move(place) => {
+                let value = self.eval_operand(loc, body, &Operand::Copy(place.clone()), origin)?;
+                // Only a whole-local move ends the local's ownership. A
+                // projected move (never produced today) would end only the
+                // sub-place's, which needs the path rather than the root.
+                if place.projection.is_empty() {
+                    self.invalidate_moved_local(place.local, loc, origin)?;
+                }
+                Ok(value)
             }
             Operand::Const(c) => Ok(match c {
                 Const::Unit => Value::Unit,
@@ -3723,7 +3775,7 @@ impl<M> Machine<'_, M> {
                     "suspended here — the place was read while this exclusive borrow was live"
                 } else {
                     "invalidated here — the value was borrowed again, \
-                     or written through another borrow"
+                     written through another borrow, or moved away"
                 }
                 .to_owned(),
                 origin: Some(invalidated),
@@ -3743,8 +3795,8 @@ impl<M> Machine<'_, M> {
                 };
                 return Err(ub(&format!(
                     "{verb} through a borrow that is no longer valid: the value was \
-                     borrowed again, or written through another borrow, while this \
-                     borrow was still live"
+                     borrowed again, written through another borrow, or moved away, \
+                     while this borrow was still live"
                 )));
             }
             NodeState::Frozen if access == Access::Write => {

@@ -80,6 +80,9 @@
   The rule moves by design: "a referent this match can dispatch on lifts the lens" is defined
   by which patterns exist, so every future pattern-kind grant also changes the lens for
   borrowed scrutinees of that type.
+- **M15** A move is an invalidation event exactly as a write is: the storage no longer holds
+  what the borrow was taken of. It is one MIR operand produced from the type alone: a linear
+  cannot be duplicated, so a read of one is always the last read.
 - **M16** Must-consume is the dual of use-after-move: one walk, one fact per binding, so the
   checker that refuses a double disposal is the one that refuses a leak. No unwinding pays for
   it: a panic traps, so every exit from a scope is written in the source, and a checker that

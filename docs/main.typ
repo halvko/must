@@ -1477,6 +1477,40 @@ That makes `unwrap`'s shape the shape that works: hand the value back, or
 pass it on. A body that quietly drops a `T` on the floor is refused, which
 is the point.
 
+=== Borrows of a value that must be consumed
+
+Borrowing one consumes nothing, so this is fine:
+
+```must
+static held = fn () -> usize {
+    let r = make(1);
+    let n = peek(r.&);
+    r.drop();
+    n
+};
+```
+
+Holding the borrow *across* the consumption is not, and it is caught the
+same way holding one across a write is:
+
+```must
+static stale = fn () -> usize {
+    let r = make(1);
+    let b = r.&;
+    r.drop();
+    b.*.id        // undefined behavior, detected
+};
+```
+
+The aliasing model's event is "the storage no longer holds what the borrow
+was taken of", and *moving* a value is that event as surely as writing over
+it. The trap names both sites — where the borrow was created, and where it
+stopped being good.
+
+That check is dynamic, like every aliasing check today: the signature
+discipline is what makes borrows *shaped* correctly, and the interpreter is
+what catches a program that got the shape right and the order wrong.
+
 None of this reaches the generated code. A program using values that must be
 consumed compiles to exactly the same bytes as the same program without the
 `without forget` on its declaration: the clause decides which programs are

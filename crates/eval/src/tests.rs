@@ -690,9 +690,9 @@ fn a_borrowed_character_match_reads_through_the_borrow() {
          };",
         "f()",
         expect![[r#"
-            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
-              note: invalidated here — the value was borrowed again, or written through another borrow
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
     );
 }
@@ -5087,9 +5087,9 @@ fn two_exclusive_borrows_of_one_place_is_detected_ub() {
          };",
         "f()",
         expect![[r#"
-            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
-              note: invalidated here — the value was borrowed again, or written through another borrow
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
     );
 }
@@ -5110,9 +5110,9 @@ fn using_a_child_after_writing_through_its_parent_is_detected_ub() {
          static g = fn () -> usize { let mut n: usize = 1; f(n.&mut); n };",
         "g()",
         expect![[r#"
-            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
-              note: invalidated here — the value was borrowed again, or written through another borrow
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
     );
 }
@@ -5244,9 +5244,9 @@ fn two_exclusive_borrows_of_the_same_field_is_still_detected_ub() {
          };",
         "f()",
         expect![[r#"
-            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
-              note: invalidated here — the value was borrowed again, or written through another borrow
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
     );
 }
@@ -5269,9 +5269,9 @@ fn a_whole_struct_borrow_still_dominates_every_field() {
          };",
         "f()",
         expect![[r#"
-            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
-              note: invalidated here — the value was borrowed again, or written through another borrow
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
     );
 }
@@ -5541,9 +5541,9 @@ fn a_raw_write_past_a_live_safe_borrow_is_detected_ub() {
          };",
         "f()",
         expect![[r#"
-            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
-              note: invalidated here — the value was borrowed again, or written through another borrow
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
     );
 }
@@ -5564,9 +5564,9 @@ fn a_raw_pointer_minted_before_the_safe_borrow_still_shares_its_root() {
          };",
         "f()",
         expect![[r#"
-            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
-              note: invalidated here — the value was borrowed again, or written through another borrow
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
     );
 }
@@ -5607,9 +5607,9 @@ fn copy_through_the_destination_is_foreign_to_a_live_borrow_of_an_element() {
          };",
         "f()",
         expect![[r#"
-            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
-              note: invalidated here — the value was borrowed again, or written through another borrow
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
     );
 }
@@ -5674,9 +5674,9 @@ fn a_direct_write_to_a_borrowed_local_invalidates_the_borrow() {
          };",
         "f()",
         expect![[r#"
-            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
-              note: invalidated here — the value was borrowed again, or written through another borrow
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
     );
 }
@@ -5723,9 +5723,9 @@ fn an_implicit_degradation_mints_a_real_child_node() {
          };",
         "f()",
         expect![[r#"
-            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
-              note: invalidated here — the value was borrowed again, or written through another borrow
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
     );
 }
@@ -5746,9 +5746,9 @@ fn dynamic_ub_names_the_borrow_site_and_the_invalidating_site() {
          };",
         "f()",
         expect![[r#"
-            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
-              note: invalidated here — the value was borrowed again, or written through another borrow
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
     );
 }
@@ -5853,9 +5853,9 @@ fn a_containing_borrow_still_conflicts_with_a_payload_borrow() {
          };",
         "f()",
         expect![[r#"
-            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+            error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
-              note: invalidated here — the value was borrowed again, or written through another borrow
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
     );
 }
@@ -5877,9 +5877,9 @@ fn the_tag_read_of_a_shared_borrowed_match_goes_through_the_tree() {
          };",
         "f()",
         expect![[r#"
-            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
-              note: invalidated here — the value was borrowed again, or written through another borrow
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
     );
 }
@@ -6246,9 +6246,9 @@ fn the_host_read_invalidates_a_safe_borrow_of_the_bytes_it_writes() {
         "f()",
         "abcd",
         expect![[r#"
-            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
-              note: invalidated here — the value was borrowed again, or written through another borrow
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
     );
 }
@@ -6625,9 +6625,9 @@ fn a_borrowed_view_is_invalidated_when_the_reader_is_used_again() {
          };",
         "f()",
         expect![[r#"
-            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
-              note: invalidated here — the value was borrowed again, or written through another borrow
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
     );
 }
@@ -6742,9 +6742,9 @@ fn the_stdin_library_invalidates_a_line_when_the_reader_moves_on() {
         "f()",
         "one\ntwo\n",
         expect![[r#"
-            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
-              note: invalidated here — the value was borrowed again, or written through another borrow
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
         "#]],
     );
 }
@@ -6897,9 +6897,87 @@ fn str_bytes_is_foreign_to_a_live_borrow_of_a_byte_it_writes() {
          };",
         "f()",
         expect![[r#"
-            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
-              note: invalidated here — the value was borrowed again, or written through another borrow
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
+        "#]],
+    );
+}
+
+// ---- moving is an invalidation event ------------------------------------
+
+#[test]
+fn moving_a_value_invalidates_borrows_of_it_exactly_as_writing_does() {
+    // The aliasing model's event is "the storage no longer holds what the
+    // borrow was taken of", and a MOVE is that event as surely as a write
+    // is. Without this, a borrow of a value that was then consumed read
+    // stale bytes with nothing to say about it — while its write-shaped
+    // twin (below) was caught, which is what made the gap a bug rather
+    // than a limit.
+    check_run(
+        "type Lin = struct { id: usize } without forget with {\n\
+             impl Self {\n\
+                 eat = fn(s: Self) -> () { let Lin(struct { id }) = s; };\n\
+             }\n\
+         };\n\
+         static f = fn() -> usize {\n\
+             let s = Lin(struct { id = 1 });\n\
+             let b = s.&;\n\
+             s.eat();\n\
+             b.*.id\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
+        "#]],
+    );
+}
+
+#[test]
+fn the_write_shaped_twin_of_a_move_invalidation_says_the_same_thing() {
+    check_run(
+        "type Lin = struct { id: usize } without forget with {\n\
+             impl Self {\n\
+                 eat = fn(s: Self) -> () { let Lin(struct { id }) = s; };\n\
+             }\n\
+         };\n\
+         static f = fn() -> usize {\n\
+             let mut s = Lin(struct { id = 1 });\n\
+             let b = s.&;\n\
+             s = Lin(struct { id = 2 });\n\
+             let n = b.*.id;\n\
+             s.eat();\n\
+             n\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
+        "#]],
+    );
+}
+
+#[test]
+fn a_move_with_no_borrow_outstanding_costs_nothing_and_still_runs() {
+    // The invalidation is one map lookup on an address-taken local, so a
+    // body that never borrows pays for the distinction with nothing.
+    check_run(
+        "type Lin = struct { id: usize } without forget with {\n\
+             impl Self {\n\
+                 into_id = fn(s: Self) -> usize { let Lin(struct { id }) = s; id };\n\
+             }\n\
+         };\n\
+         static f = fn() -> usize {\n\
+             let s = Lin(struct { id = 7 });\n\
+             let t = s;\n\
+             t.into_id()\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 7
         "#]],
     );
 }

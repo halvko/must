@@ -464,7 +464,11 @@ impl<'a, 'db> Emitter<'a, 'db> {
             .operand_ty(&ctx.key, &ctx.locals, op)
             .map_err(|err| self.refuse(ctx, err, origin))?;
         match op {
-            Operand::Copy(place) => {
+            // A MOVE is a copy plus an ALIASING fact, and this backend has
+            // no aliasing model to tell — linearity is check-time only, so
+            // the two lower identically and a linear program's bytes are
+            // the same as its forgettable twin's.
+            Operand::Copy(place) | Operand::Move(place) => {
                 let base = self.read_place(ctx, place, origin)?;
                 Ok((Src::Locals(base), ty))
             }

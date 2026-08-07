@@ -332,6 +332,24 @@ pub enum Operand {
     /// detected UB — then the pointee, or the pointed-to element, is
     /// copied out).
     Copy(Place),
+    /// Read a place's current value and END the place's ownership of it: a
+    /// MOVE. Produced for reads of a local whose type has no `forget`
+    /// capability. Linear types are not the only values hir refuses to
+    /// duplicate — `T.&mut` is affine too, and lowers as a plain
+    /// [`Operand::Copy`] — but they are the one class whose read the
+    /// ALIASING model has to hear about: reading an exclusive borrow out is
+    /// a handoff the tree already tracks by that borrow's own node, while
+    /// reading a linear out means the OWNER's storage stops holding what a
+    /// borrow OF IT named. A move is an invalidation event exactly as a
+    /// write is, for that reason and no other.
+    ///
+    /// It carries the same value [`Operand::Copy`] does, and every consumer
+    /// that only wants the value treats the two identically (the wasm
+    /// backend does: linearity is check-time only, so the emitted bytes are
+    /// the same). Without the distinction, `let b = s.&; s.eat(); b.*.id`
+    /// read a stale value with nothing to say about it, while the
+    /// write-shaped twin (`s = mk(2);`) was caught.
+    Move(Place),
     Const(Const),
 }
 
