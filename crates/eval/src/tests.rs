@@ -3939,6 +3939,30 @@ static main = fn () -> () {
 }
 
 #[test]
+fn copy_of_zero_elements_is_legal_through_a_pointer_to_a_scalar() {
+    // The zero-length shortcut must hold for a pointer whose path does not
+    // address an array element at all, not only for `dangling()` (which
+    // happens to be shaped as element 0 of a registered, never-live
+    // array) and array-element pointers: `write_range`'s effect must not
+    // run when there is nothing to store, or this panics the interpreter
+    // instead of answering the copy's rule.
+    check_run(
+        r#"
+static main = fn () -> () {
+    let mut a: usize = 1;
+    let mut b: usize = 2;
+    unsafe { copy(a.&raw, b.&raw mut, 0) };
+    unsafe { copy(dangling::<usize>(), a.&raw mut, 0) };
+};
+"#,
+        "main()",
+        expect![[r#"
+            => ()
+        "#]],
+    );
+}
+
+#[test]
 fn copy_into_freed_allocation_is_detected_ub() {
     check_run(
         r#"
@@ -5679,6 +5703,32 @@ fn copy_through_the_source_is_foreign_to_a_live_borrow_of_an_element() {
 }
 
 #[test]
+fn copy_reports_a_dead_source_tag_before_a_destination_bounds_fault() {
+    // The observable half of `builtin_copy`'s "source before destination"
+    // order: a source whose OWN TAG is no longer valid — not merely
+    // foreign to a still-live borrow, which would only suspend it — faults
+    // at the read itself, so it is reported even though the destination
+    // (one element, asked to receive two) is also out of bounds.
+    check_run(
+        "static f = fn () -> u8 {\n\
+             let mut a: [u8; 2] = [1, 2];\n\
+             let mut b: [u8; 1] = [0];\n\
+             let m = a.&mut;\n\
+             let q = m.*[0].&raw;\n\
+             a[0] = 7;\n\
+             unsafe { copy(q, b[0].&raw mut, 2); }\n\
+             b[0]\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
+        "#]],
+    );
+}
+
+#[test]
 fn a_borrow_tag_is_not_part_of_pointer_equality() {
     // Two pointers to the same place must compare EQUAL however they were
     // derived — one through a `.&mut` (so it carries that borrow's
@@ -6313,6 +6363,32 @@ fn the_host_read_is_fine_with_no_live_borrow_of_the_buffer() {
     );
 }
 
+#[test]
+fn the_host_read_judges_aliasing_before_consuming_input() {
+    // The discriminating case for the PRE-consume judgement: with no input
+    // arriving, `read`'s post-consume `write_range` is never reached at
+    // all (`host_read` returns early on an empty read) — an empty-input
+    // run of this program traps only if the judgement on the FULL
+    // requested length, before `self.mode.read`, is the one doing the
+    // work.
+    check_run_with_input(
+        "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+         static f = fn () -> u8 {\n\
+             let mut a: [u8; 4] = [1, 2, 3, 4];\n\
+             let m = a[0].&mut;\n\
+             unsafe { read(a[0].&raw mut, 2); };\n\
+             m.*\n\
+         };",
+        "f()",
+        "",
+        expect![[r#"
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, written through another borrow, or moved away
+        "#]],
+    );
+}
+
 // ---- the host judges the DECLARATION, in full ---------------------------
 
 /// Every way of declaring `read` that this host does not provide.
@@ -6926,6 +7002,27 @@ fn str_bytes_of_the_empty_string_looks_at_no_pointer_at_all() {
         "f()",
         expect![[r#"
             => 0
+        "#]],
+    );
+}
+
+#[test]
+fn a_zero_length_str_bytes_is_legal_through_a_pointer_to_a_scalar() {
+    // The write-side twin of `copy_of_zero_elements_is_legal_through_a_
+    // pointer_to_a_scalar`: `write_range`'s zero-length shortcut must hold
+    // for ANY pointer, including one whose path does not address an array
+    // element, not only `dangling()` — which happens to be shaped as
+    // element 0 of a registered array and so cannot tell this apart from
+    // the ordinary case on its own.
+    check_run(
+        "static f = fn() -> u8 {\n\
+             let mut x: u8 = 9;\n\
+             unsafe { str_bytes(\"\", x.&raw mut); };\n\
+             x\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 9
         "#]],
     );
 }

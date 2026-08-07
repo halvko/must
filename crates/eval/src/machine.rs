@@ -1291,7 +1291,44 @@ impl<'db, M: Mode> Machine<'db, M> {
         // undefined behavior if this borrow was already invalidated —
         // exclusivity, enforced dynamically until the loan checker lands.
         self.aliasing_access(provenance, alloc, &path, Access::Write, loc, origin)?;
-        let allocation = self.memory.get_mut(&alloc).expect("checked just above");
+        let allocation = self.writable_allocation(alloc, loc, origin)?;
+        match project_path_mut(&mut allocation.value, &path) {
+            Ok(slot) => {
+                *slot = value;
+                Ok(())
+            }
+            Err(error) => Err(self.ptr_path_error(error, loc, origin)),
+        }
+    }
+
+    /// The writability judgement, and the only place it is spelled: a
+    /// `static`'s allocation is read-only, so a write through a pointer
+    /// into one is detected UB — whether the write is a single store
+    /// ([`Machine::write_through`]) or a whole range (judged by
+    /// [`Machine::judge_write_range`] on `write_range`'s behalf). Answers
+    /// the allocation itself: `write_through` passes and goes straight on
+    /// to mutating it; the range judgement passes and discards the handle,
+    /// since a range write re-navigates to its own element slot rather
+    /// than reusing this one. LIVENESS is the caller's to have judged
+    /// first (`allocation_for_deref`, directly or through
+    /// `checked_range`); this gate only asks whether the memory accepts
+    /// writes at all.
+    fn writable_allocation(
+        &mut self,
+        alloc: AllocId,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<&mut Allocation, EvalError> {
+        let allocation = self
+            .memory
+            .get_mut(&alloc)
+            .expect("liveness judged before the write");
+        // No test pins this message, and that is not an oversight: the
+        // verdict is UNREACHABLE from well-typed source today — statics
+        // hand out shared `.&raw` only (there is no `static mut`), and no
+        // pointer escapes const evaluation. It is the memory model's
+        // belt-and-braces until `static mut` (or an escape) makes it
+        // reachable; whoever lands one should pin it here.
         if !allocation.writable {
             return Err(EvalError {
                 kind: EvalErrorKind::UndefinedBehavior,
@@ -1300,13 +1337,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 notes: Vec::new(),
             });
         }
-        match project_path_mut(&mut allocation.value, &path) {
-            Ok(slot) => {
-                *slot = value;
-                Ok(())
-            }
-            Err(error) => Err(self.ptr_path_error(error, loc, origin)),
-        }
+        Ok(allocation)
     }
 
     /// Navigate a pointer's stored path inside a (live) allocation's
@@ -2246,63 +2277,33 @@ impl<'db, M: Mode> Machine<'db, M> {
             return Err(self.ill_typed("a `usize` length", len, loc, origin));
         };
         let len = usize::try_from(len).unwrap_or(usize::MAX);
-        if len == 0 {
-            // A zero-length request touches the buffer not at all, so the
-            // pointer is not judged either — the same rule `copy` follows
-            // for a zero-length copy, and it is what lets a caller ask for
-            // "however much room is left" without a special case when the
-            // answer is none.
-            if !matches!(buf, Value::Ptr { .. }) {
-                return Err(self.ill_typed("a raw pointer", buf, loc, origin));
-            }
-            return Ok(count_value(count_kind, 0));
-        }
-        // Judge the destination range BEFORE reading: a read that consumed
-        // input and then trapped would have eaten bytes nobody can get back.
-        let len_n = u128::from(len as u64);
-        self.copy_range(buf, len_n, "read", "buffer", loc, origin)?;
-        // Bounds are not the whole judgement. The host WRITES these bytes,
-        // so the aliasing tree hears about it exactly as it does for
-        // `copy`'s destination range (and for a plain `p.*[i] = v`): a live
-        // safe borrow of one of them must be foreign to this write, and the
-        // full REQUESTED length is what is judged — the host may fill any
-        // prefix of it, and the caller handed the whole range over either
-        // way.
-        if let Value::Ptr { alloc, path, tag } = buf {
-            self.aliasing_access_range(*tag, *alloc, path, len_n, Access::Write, loc, origin)?;
-        }
+        // Judge the destination range as a WRITE, for the FULL requested
+        // length, before reading: a read that consumed input and then
+        // trapped would have eaten bytes nobody can get back. This is the
+        // complete write judgement — bounds, aliasing, and writability
+        // ([`Machine::judge_write_range`]) — not bounds alone: a live safe
+        // borrow of one of these bytes must be foreign to this write
+        // exactly as it would be foreign to `p.*[i] = v`. A zero-length
+        // request judges only that `buf` is a pointer at all (`copy`'s
+        // rule), which is what lets a caller ask for "however much room
+        // is left" without a special case when the answer is none.
+        self.judge_write_range(buf, u128::from(len as u64), "read", "buffer", loc, origin)?;
         let mut bytes = Vec::new();
         let count = self.mode.read(&mut bytes, len)?;
         if bytes.is_empty() {
             return Ok(count_value(count_kind, count));
         }
-        let Value::Ptr { alloc, path, .. } = buf else {
-            unreachable!("copy_range verified the pointer shape");
-        };
-        let Some(PathElem::Index(head)) = path.last() else {
-            unreachable!("copy_range verified the element shape");
-        };
-        let head = *head as usize;
-        let allocation = self.memory.get_mut(alloc).expect("checked by copy_range");
-        if !allocation.writable {
-            return Err(EvalError {
-                kind: EvalErrorKind::UndefinedBehavior,
-                message: "write through a pointer into read-only memory (a `static`)".to_owned(),
-                origin: Some((loc.clone(), origin)),
-                notes: Vec::new(),
-            });
-        }
-        let parent = &path[..path.len() - 1];
-        let slot = match project_path_mut(&mut allocation.value, parent) {
-            Ok(slot) => slot,
-            Err(error) => return Err(self.ptr_path_error(error, loc, origin)),
-        };
-        let Value::Array(values) = slot else {
-            unreachable!("copy_range verified the array shape");
-        };
-        for (offset, byte) in bytes.iter().enumerate() {
-            values[head + offset] = Value::Int(hir::IntValue::U8(*byte));
-        }
+        // What was actually read is what is written, and a short read
+        // fills a PREFIX of the range judged above — so `write_range` here
+        // re-judges the narrower range it lands on, which the wider
+        // judgement above has already answered (bounds, aliasing, AND
+        // writability); the repeat is idempotent, since a second write
+        // through a still-valid tag finds nothing newly foreign to it.
+        let elements = bytes
+            .into_iter()
+            .map(|byte| Value::Int(hir::IntValue::U8(byte)))
+            .collect();
+        self.write_range(buf, elements, "read", "buffer", loc, origin)?;
         Ok(count_value(count_kind, count))
     }
 
@@ -2501,12 +2502,14 @@ impl<'db, M: Mode> Machine<'db, M> {
     /// elements. The interpreter still catches every case its typed memory
     /// can see — a freed allocation, a range that runs off the end,
     /// read-only memory, and a live safe borrow of one of the bytes — by
-    /// making exactly the judgements `copy`'s destination half makes, in
-    /// its order, rather than growing a second set of its own.
+    /// writing through [`Machine::write_range`], the same home `copy`'s
+    /// destination half and the host `read` builtin write through.
     ///
-    /// A zero-length string looks at no pointer at all, matching the
-    /// blesses' rule from the other side: the empty string is written by
-    /// writing nothing.
+    /// A zero-length string still requires `dst` to be a pointer (the
+    /// shape [`Machine::checked_range`] always checks) but judges no
+    /// bounds, aliasing, or writability for it — matching the blesses'
+    /// rule from the other side: the empty string is written by writing
+    /// nothing.
     fn builtin_str_bytes(
         &mut self,
         text: &Value,
@@ -2522,54 +2525,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             .iter()
             .map(|byte| Value::Int(hir::IntValue::U8(*byte)))
             .collect();
-        if bytes.is_empty() {
-            if !matches!(dst, Value::Ptr { .. }) {
-                return Err(self.ill_typed("a raw pointer", dst, loc, origin));
-            }
-            return Ok(Value::Unit);
-        }
-        let n = bytes.len() as u128;
-        self.copy_range(dst, n, "str_bytes", "destination", loc, origin)?;
-        // The aliasing check rides the write exactly as it does for
-        // `copy`'s destination half — and, like `copy`, after the bytes to
-        // be written are already materialized. Writing a range is not a
-        // route around the tree: a live safe borrow of one of these bytes
-        // must be foreign to this write, same as `p.*[i] = v` would be.
-        if let Value::Ptr { alloc, path, tag } = dst {
-            self.aliasing_access_range(*tag, *alloc, path, n, Access::Write, loc, origin)?;
-        }
-        let Value::Ptr {
-            alloc,
-            path,
-            tag: _,
-        } = dst
-        else {
-            unreachable!("copy_range verified the pointer shape");
-        };
-        let Some(PathElem::Index(head)) = path.last() else {
-            unreachable!("copy_range verified the element shape");
-        };
-        let head = *head as usize;
-        let allocation = self.memory.get_mut(alloc).expect("checked by copy_range");
-        if !allocation.writable {
-            return Err(EvalError {
-                kind: EvalErrorKind::UndefinedBehavior,
-                message: "write through a pointer into read-only memory (a `static`)".to_owned(),
-                origin: Some((loc.clone(), origin)),
-                notes: Vec::new(),
-            });
-        }
-        let parent = &path[..path.len() - 1];
-        let slot = match project_path_mut(&mut allocation.value, parent) {
-            Ok(slot) => slot,
-            Err(error) => return Err(self.ptr_path_error(error, loc, origin)),
-        };
-        let Value::Array(values) = slot else {
-            unreachable!("copy_range verified the array shape");
-        };
-        for (offset, byte) in bytes.into_iter().enumerate() {
-            values[head + offset] = byte;
-        }
+        self.write_range(dst, bytes, "str_bytes", "destination", loc, origin)?;
         Ok(Value::Unit)
     }
 
@@ -2926,8 +2882,16 @@ impl<'db, M: Mode> Machine<'db, M> {
     /// DEFINED, not UB. Deliberately bypasses the tracked-uninit read gate:
     /// `copy` transports poison silently (a copy of a partially-written
     /// buffer must not lie); only reading an element AS A VALUE traps.
-    /// Liveness, writability and range validity are checked exactly like
-    /// derefs — violations are detected UB.
+    /// Liveness, writability, range validity, and aliasing are checked
+    /// exactly like derefs — violations are detected UB. The source is
+    /// judged and read in full ([`Machine::read_range`]) before the
+    /// destination is judged and written ([`Machine::write_range`]); a
+    /// source that is merely foreign to a live borrow does not fault here —
+    /// it SUSPENDS that borrow, same as any other read through the tag —
+    /// but a program whose source read faults outright (a read through a
+    /// borrow whose tag is no longer valid) AND whose destination is out
+    /// of bounds reports the source fault first, memmove's own statement
+    /// of "read, then write".
     fn builtin_copy(
         &mut self,
         src: &Value,
@@ -2947,68 +2911,12 @@ impl<'db, M: Mode> Machine<'db, M> {
         // A zero-length copy is valid through ANY pointers — dangling
         // included (Rust's rule, and what lets a growing container copy
         // its 0 elements out of the never-allocated `dangling()` buffer
-        // without a special case).
-        if n == 0 {
-            if !matches!(src, Value::Ptr { .. }) {
-                return Err(self.ill_typed("a raw pointer", src, loc, origin));
-            }
-            if !matches!(dst, Value::Ptr { .. }) {
-                return Err(self.ill_typed("a raw pointer", dst, loc, origin));
-            }
-            return Ok(Value::Unit);
-        }
-        // Read the source range out in full first (the memmove trick), and
-        // range-check the destination through the same shared judgement.
-        let elements = self
-            .copy_range(src, n, "copy", "source", loc, origin)?
-            .to_vec();
-        self.copy_range(dst, n, "copy", "destination", loc, origin)?;
-        // The aliasing check rides the copy exactly like an ordinary deref
-        // does for `read_place`/`write_through`: `copy` is memmove, not a
-        // route around the tree — a live safe borrow of one of the `n`
-        // destination elements must be foreign to this write (and of a
-        // source element, to this read), same as `p.* = v;`/`p.*` would
-        // be for a single element.
-        if let Value::Ptr { alloc, path, tag } = src {
-            self.aliasing_access_range(*tag, *alloc, path, n, Access::Read, loc, origin)?;
-        }
-        if let Value::Ptr { alloc, path, tag } = dst {
-            self.aliasing_access_range(*tag, *alloc, path, n, Access::Write, loc, origin)?;
-        }
-        let Value::Ptr {
-            alloc,
-            path,
-            tag: _,
-        } = dst
-        else {
-            unreachable!("copy_range verified the pointer shape");
-        };
-        let Some(PathElem::Index(head)) = path.last() else {
-            unreachable!("copy_range verified the element shape");
-        };
-        let head = *head as usize;
-        // Writability mirrors `write_through` — the one write-side check
-        // `copy_range` (a read judgement) doesn't make.
-        let allocation = self.memory.get_mut(alloc).expect("checked by copy_range");
-        if !allocation.writable {
-            return Err(EvalError {
-                kind: EvalErrorKind::UndefinedBehavior,
-                message: "write through a pointer into read-only memory (a `static`)".to_owned(),
-                origin: Some((loc.clone(), origin)),
-                notes: Vec::new(),
-            });
-        }
-        let parent = &path[..path.len() - 1];
-        let slot = match project_path_mut(&mut allocation.value, parent) {
-            Ok(slot) => slot,
-            Err(error) => return Err(self.ptr_path_error(error, loc, origin)),
-        };
-        let Value::Array(values) = slot else {
-            unreachable!("copy_range verified the array shape");
-        };
-        for (offset, element) in elements.into_iter().enumerate() {
-            values[head + offset] = element;
-        }
+        // without a special case). `read_range`/`write_range` still check
+        // that `src`/`dst` are pointers at all ([`Machine::checked_range`]'s
+        // shape check runs even for `n == 0`), but judge no bounds,
+        // aliasing, or writability for a range with nothing in it.
+        let elements = self.read_range(src, n, "copy", "source", loc, origin)?;
+        self.write_range(dst, elements, "copy", "destination", loc, origin)?;
         Ok(Value::Unit)
     }
 
@@ -3043,26 +2951,13 @@ impl<'db, M: Mode> Machine<'db, M> {
         }) else {
             return Err(self.ill_typed("a `usize` byte count", len, loc, origin));
         };
-        // A zero-length bless judges no pointer at all — `copy`'s rule, and
-        // it is what lets a line scanner bless an empty line (a bare "\n",
-        // or a buffer's very start) with no special case. The empty string
-        // is valid UTF-8, so both spellings answer the same thing.
-        if len == 0 {
-            if !matches!(p, Value::Ptr { .. }) {
-                return Err(self.ill_typed("a raw pointer", p, loc, origin));
-            }
-            return Ok(self.blessed(builtin, String::new(), loc));
-        }
-        let elements = self
-            .copy_range(p, len, name, "buffer", loc, origin)?
-            .to_vec();
-        // The aliasing check rides a bless exactly like it rides `copy`:
-        // reading the range is not a route around the tree, so a live safe
-        // borrow of one of the bytes must be foreign to this read, same as
-        // `p.*[i]` would be.
-        if let Value::Ptr { alloc, path, tag } = p {
-            self.aliasing_access_range(*tag, *alloc, path, len, Access::Read, loc, origin)?;
-        }
+        // A zero-length bless still requires `p` to be a pointer (the
+        // shape [`Machine::checked_range`] always checks) but judges no
+        // bounds, aliasing, or written-ness for it — `copy`'s rule, and it
+        // is what lets a line scanner bless an empty line (a bare "\n", or
+        // a buffer's very start) with no special case. The empty string is
+        // valid UTF-8, so both spellings answer the same thing.
+        let elements = self.read_range(p, len, name, "buffer", loc, origin)?;
         let mut bytes = Vec::with_capacity(elements.len());
         for element in &elements {
             match element {
@@ -3114,13 +3009,18 @@ impl<'db, M: Mode> Machine<'db, M> {
         }
     }
 
-    /// The shared `copy` range judgement: `p` must be a live pointer
-    /// addressing an array element, and `n` elements starting there must
-    /// sit inside the array — out of range on either side is detected UB
-    /// (deref-like on both ends, the same UB-detection spirit as A03/A04).
-    /// Returns the `n` source elements (clones — the read-before-write
-    /// that makes overlap defined).
-    fn copy_range(
+    /// The BOUNDS half of the shared range judgement, common to a read and
+    /// a write alike: `p` must be a pointer, and — unless `n == 0` — a
+    /// LIVE one addressing an array element, with `n` elements starting
+    /// there sitting inside the array (deref-like on both ends, the same
+    /// UB-detection spirit as A03/A04). A zero-length range checks only
+    /// that `p` is a pointer at all and answers empty without walking the
+    /// allocation — dangling included, `copy`'s rule — which is what lets
+    /// a zero-length read or write through ANY pointer, live or not,
+    /// answer nothing rather than a special case. Neither aliasing nor
+    /// writability is this function's to judge: see [`Machine::read_range`]
+    /// and [`Machine::judge_write_range`].
+    fn checked_range(
         &self,
         p: &Value,
         n: u128,
@@ -3137,6 +3037,9 @@ impl<'db, M: Mode> Machine<'db, M> {
         else {
             return Err(self.ill_typed("a raw pointer", p, loc, origin));
         };
+        if n == 0 {
+            return Ok(&[]);
+        }
         let allocation = self.allocation_for_deref(*alloc, loc, origin)?;
         let Some(PathElem::Index(head)) = path.last() else {
             return Err(EvalError {
@@ -3165,6 +3068,118 @@ impl<'db, M: Mode> Machine<'db, M> {
             });
         }
         Ok(&values[head as usize..(head + n) as usize])
+    }
+
+    /// The READ half: bounds ([`Machine::checked_range`]) plus the
+    /// aliasing tree — a live safe borrow of one of the `n` elements must
+    /// be foreign to this read, same as an ordinary `p.*[i]` would be
+    /// ([`Machine::aliasing_access_range`]). Returns the elements read
+    /// (clones — `copy`'s read-before-write is what makes its overlap
+    /// defined). A zero-length range judges neither bounds nor aliasing,
+    /// per [`Machine::checked_range`].
+    fn read_range(
+        &mut self,
+        p: &Value,
+        n: u128,
+        what: &str,
+        role: &str,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<Vec<Value>, EvalError> {
+        let elements = self.checked_range(p, n, what, role, loc, origin)?.to_vec();
+        if n == 0 {
+            return Ok(elements);
+        }
+        let Value::Ptr { alloc, path, tag } = p else {
+            unreachable!("checked_range verified the pointer shape");
+        };
+        self.aliasing_access_range(*tag, *alloc, path, n, Access::Read, loc, origin)?;
+        Ok(elements)
+    }
+
+    /// The WRITE judgement, without the store: bounds
+    /// ([`Machine::checked_range`]), then the aliasing tree — a live safe
+    /// borrow of one of the `n` elements must be foreign to this write,
+    /// same as an ordinary `p.*[i] = v` would be
+    /// ([`Machine::aliasing_access_range`]) — then writability
+    /// ([`Machine::writable_allocation`]). This is the half a primitive
+    /// that must judge a write BEFORE consuming its input needs (the host
+    /// `read` builtin, on the full requested length, before it draws from
+    /// stdin); [`Machine::write_range`] is this plus the store. A
+    /// zero-length range judges only that `dst` is a pointer, per
+    /// [`Machine::checked_range`].
+    fn judge_write_range(
+        &mut self,
+        dst: &Value,
+        n: u128,
+        what: &str,
+        role: &str,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<(), EvalError> {
+        self.checked_range(dst, n, what, role, loc, origin)?;
+        if n == 0 {
+            return Ok(());
+        }
+        let Value::Ptr { alloc, path, tag } = dst else {
+            unreachable!("checked_range verified the pointer shape");
+        };
+        self.aliasing_access_range(*tag, *alloc, path, n, Access::Write, loc, origin)?;
+        self.writable_allocation(*alloc, loc, origin)?;
+        Ok(())
+    }
+
+    /// The WRITE twin of [`Machine::read_range`], complete:
+    /// [`Machine::judge_write_range`] (bounds, aliasing, writability), then
+    /// the elements land IN PLACE, one per array element. `what` and
+    /// `role` name the primitive and its pointer in the range diagnostics,
+    /// spelled exactly as [`Machine::read_range`] spells them. A
+    /// zero-length write judges only that `dst` is a pointer, per
+    /// [`Machine::checked_range`], and stores nothing — the same shortcut
+    /// [`Machine::read_range`] and [`Machine::judge_write_range`] take, and
+    /// this home must take it too: `dst` is not guaranteed to address an
+    /// array element when there is nothing to store.
+    fn write_range(
+        &mut self,
+        dst: &Value,
+        elements: Vec<Value>,
+        what: &str,
+        role: &str,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<(), EvalError> {
+        self.judge_write_range(dst, elements.len() as u128, what, role, loc, origin)?;
+        if elements.is_empty() {
+            return Ok(());
+        }
+        let Value::Ptr {
+            alloc,
+            path,
+            tag: _,
+        } = dst
+        else {
+            unreachable!("judge_write_range verified the pointer shape");
+        };
+        let Some(PathElem::Index(head)) = path.last() else {
+            unreachable!("judge_write_range verified the element shape");
+        };
+        let head = *head as usize;
+        let parent = &path[..path.len() - 1];
+        let allocation = self
+            .memory
+            .get_mut(alloc)
+            .expect("judge_write_range judged liveness");
+        let slot = match project_path_mut(&mut allocation.value, parent) {
+            Ok(slot) => slot,
+            Err(error) => return Err(self.ptr_path_error(error, loc, origin)),
+        };
+        let Value::Array(values) = slot else {
+            unreachable!("judge_write_range verified the array shape");
+        };
+        for (offset, element) in elements.into_iter().enumerate() {
+            values[head + offset] = element;
+        }
+        Ok(())
     }
 
     /// `dangling::<T>()`: the reserved never-live pointer (there is no
@@ -3890,15 +3905,16 @@ impl<M> Machine<'_, M> {
         Ok(())
     }
 
-    /// `aliasing_access` for the `n` array elements a range builtin
-    /// touches (`copy` on either side, a bless on its buffer, `str_bytes`
-    /// on its destination), starting at
-    /// `path` (whose last step is the head element's `Index`) — one call
-    /// per element, since a node's path is an exact field/index chain and
-    /// cannot name a whole range at once. Reading or writing a range is
-    /// not a route around the tree: it must be exactly as foreign to a
-    /// live safe borrow of one of its elements as an ordinary
-    /// `p.*[i]`/`p.*[i] = v` would be.
+    /// `aliasing_access` for the `n` array elements a range judges,
+    /// starting at `path` (whose last step is the head element's `Index`)
+    /// — one call per element, since a node's path is an exact
+    /// field/index chain and cannot name a whole range at once. Reading or
+    /// writing a range is not a route around the tree: it must be exactly
+    /// as foreign to a live safe borrow of one of its elements as an
+    /// ordinary `p.*[i]`/`p.*[i] = v` would be. The two homes that call
+    /// this are [`Machine::read_range`]'s and [`Machine::judge_write_range`]'s
+    /// own aliasing step, so every range primitive built on them — present
+    /// or future — is covered by construction, not by a list of names.
     fn aliasing_access_range(
         &mut self,
         tag: Provenance,
@@ -3910,10 +3926,10 @@ impl<M> Machine<'_, M> {
         origin: ExprId,
     ) -> Result<(), EvalError> {
         let Some((PathElem::Index(head), prefix)) = path.split_last() else {
-            // `copy_range` already rejected a pointer whose path does not
-            // end in an `Index` — unreachable in practice, but a no-op
-            // rather than a panic if this is ever called before that
-            // check runs.
+            // `checked_range` already rejected a pointer whose path does
+            // not end in an `Index` — unreachable in practice, but a
+            // no-op rather than a panic if this is ever called before
+            // that check runs.
             return Ok(());
         };
         let mut elem_path = prefix.to_vec();
