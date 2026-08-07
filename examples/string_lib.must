@@ -134,10 +134,8 @@ static to_owned = fn::<@a>(s: str.&::<@a>) -> String {
 // ---- the reader (condensed from `stdin_lib.must` — the comments live
 // there; only the panic prefixes differ here) -----------------------------
 //
-// `Reader` stays forgettable here, same as it is there: its consuming
-// method is an ordinary `deinit`, not a `without forget` obligation like
-// `String`'s `drop`. Making the reader itself linear is a change to
-// `stdin_lib.must`, not to this file — this file is about `String`.
+// `Reader` is `without forget` here too, same as it is there, and `drop`
+// takes it apart the same way: the two copies agree.
 
 static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;
 
@@ -172,7 +170,7 @@ type Reader = struct {
     len: usize,
     eof: bool,
     line: str,
-} with {
+} without forget with {
     impl Self {
         next_line = fn::<@b>(r: Self.&mut::<@b>) -> Option::<str.&::<@b>> {
             loop {
@@ -226,8 +224,9 @@ type Reader = struct {
             };
         };
 
-        deinit = fn(r: Self) -> () {
-            unsafe { dealloc_array(r.buf, r.cap); };
+        drop = fn(r: Self) -> () {
+            let Reader(struct { buf, cap, .. }) = r;
+            unsafe { dealloc_array(buf, cap); };
         };
     }
 };
@@ -296,7 +295,7 @@ static main = fn () -> () {
     print(" bytes)\n");
     // The one path out of `main`, and it consumes both owners.
     longest.drop();
-    r.deinit();
+    r.drop();
 };
 
 static print_usize = fn (n: usize) -> () {

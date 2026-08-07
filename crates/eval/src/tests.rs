@@ -6686,12 +6686,14 @@ fn the_stdin_library_joins_lines_across_refills_and_strips_crlf() {
                  let mut r = reader_new(8);\n\
                  let m = r.&mut;\n\
                  let mut out = \"\";\n\
-                 loop {{\n\
+                 let done = loop {{\n\
                      match m.next_line() {{\n\
                          ::Some(line) => {{ out = join(out, line.*); }},\n\
                          ::None => break out,\n\
                      }}\n\
-                 }}\n\
+                 }};\n\
+                 r.drop();\n\
+                 done\n\
              }};\n\
              static join = fn(a: str, b: str) -> str {{\n\
                  if a == \"\" {{ tag(b) }} else {{ pair(a, tag(b)) }}\n\
@@ -6736,7 +6738,9 @@ fn the_stdin_library_invalidates_a_line_when_the_reader_moves_on() {
                      ::None => panic(\"no input\"),\n\
                  }};\n\
                  let second = m.next_line();\n\
-                 first.*\n\
+                 let out = first.*;\n\
+                 r.drop();\n\
+                 out\n\
              }};"
         ),
         "f()",
@@ -6760,7 +6764,9 @@ fn the_stdin_library_reports_bytes_that_are_not_text() {
              static f = fn() -> str {{\n\
                  let mut r = reader_new(8);\n\
                  let m = r.&mut;\n\
-                 match m.next_line() {{ ::Some(l) => l.*, ::None => \"none\" }}\n\
+                 let out = match m.next_line() {{ ::Some(l) => l.*, ::None => \"none\" }};\n\
+                 r.drop();\n\
+                 out\n\
              }};"
         ),
         "f()",
@@ -6784,7 +6790,9 @@ fn the_stdin_library_refuses_a_line_longer_than_its_buffer() {
              static f = fn() -> str {{\n\
                  let mut r = reader_new(4);\n\
                  let m = r.&mut;\n\
-                 match m.next_line() {{ ::Some(l) => l.*, ::None => \"none\" }}\n\
+                 let out = match m.next_line() {{ ::Some(l) => l.*, ::None => \"none\" }};\n\
+                 r.drop();\n\
+                 out\n\
              }};"
         ),
         "f()",

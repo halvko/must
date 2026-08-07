@@ -1897,6 +1897,13 @@ rather than assume. And a line copied out of its borrowed view survives the
 next refill only because `str` is an owned value today — "Owned strings"
 below builds `String`, the shape that keeps working once that changes.
 
+The reader itself cannot be dropped on the floor, either: `Reader` is
+declared `without forget`, so a path that never calls `drop` — leaking the
+buffer it owns — is refused at check time, not merely bad style. A `panic`
+never falls off the end, so a path that ends in one owes nothing. See
+"Values that must be consumed" for what that check does and what it
+refuses.
+
 == Owned strings
 
 `next_line`, above, hands back a *borrow* of the reader's own buffer, and

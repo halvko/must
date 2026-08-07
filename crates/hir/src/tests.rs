@@ -13245,3 +13245,91 @@ static main = fn(c: bool) -> Res {
         "#]],
     );
 }
+
+// ---- `Reader`: a heap-owning type declared `without forget` -------------
+
+/// The shipped `examples/stdin_lib.must` `Reader`, trimmed to what the
+/// checker sees — the buffering/line-scanning machinery is not the point
+/// here, only that the type owns a heap allocation, is declared `without
+/// forget`, and disposes of itself by being taken apart, exactly like
+/// `String.drop` above. `eof` stays in the trimmed type, unused by any test
+/// here, so `..` in `drop` has a forgettable field to actually skip.
+const READER_PRELUDE: &str = r#"
+type Reader = struct {
+    buf: u8.&raw mut,
+    cap: usize,
+    eof: bool,
+} without forget with {
+    impl Self {
+        drop = fn(r: Self) -> () {
+            let Reader(struct { buf, cap, .. }) = r;
+            unsafe { dealloc_array(buf, cap); };
+        };
+    }
+};
+static reader_new = fn(cap: usize) -> Reader {
+    let buf = match alloc_array::<u8>(cap) {
+        ::Ok(p) => p,
+        ::Err => panic("out of memory"),
+    };
+    Reader(struct { buf, cap, eof = false })
+};
+"#;
+
+fn check_reader(body: &str, expect: Expect) {
+    check_diagnostics(&format!("{READER_PRELUDE}{body}"), expect);
+}
+
+#[test]
+fn a_reader_dropped_on_the_one_path_is_clean() {
+    check_reader(
+        r#"
+static main = fn() -> () {
+    let r = reader_new(16);
+    r.drop();
+};
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn not_dropping_a_reader_is_a_check_error() {
+    // `Reader` owns an allocation and is `without forget`, so a path that
+    // never calls `drop` is refused (T20, M16).
+    check_reader(
+        r#"
+static leak = fn() -> () {
+    let r = reader_new(16);
+};
+"#,
+        expect![[r#"
+            510..541: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 520..521)
+        "#]],
+    );
+}
+
+#[test]
+fn a_reader_drop_that_only_reads_a_field_is_refused() {
+    // The obvious `drop` reads `r.buf`/`r.cap` and frees them — but a
+    // plain field read leaves `r` itself untouched by the checker, so `r`
+    // is still owed a consume. This is why `drop` above takes `r` apart
+    // instead of reading out of it.
+    check_diagnostics(
+        r#"
+type Reader = struct {
+    buf: u8.&raw mut,
+    cap: usize,
+} without forget with {
+    impl Self {
+        drop = fn(r: Self) -> () {
+            unsafe { dealloc_array(r.buf, r.cap); };
+        };
+    }
+};
+"#,
+        expect![[r#"
+            135..199: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 120..121)
+        "#]],
+    );
+}

@@ -8,7 +8,8 @@
 //
 //   * a language feature: `extern fn` (the declaration), `read` (the host's
 //     byte move), `str_from_utf8` (the validity claim), the heap builtins,
-//     and the borrow rules;
+//     the borrow rules, and the `forget` capability (`Reader` is declared
+//     `without forget`, so a path that never calls `drop` is refused);
 //   * NOT a language feature, and written below: buffering, finding a line
 //     boundary, stripping CRLF, deciding that a blank line is a line and
 //     that end-of-input is not, and handing a line out without copying it.
@@ -80,8 +81,13 @@ type Option = enum::<T> { Some(T), None };
 // caller holds is a borrow of the reader, and every later use of the reader
 // invalidates it. That is not a convention: it is the aliasing model, and
 // the interpreter enforces it.
+//
+// `without forget`: the Reader owns a heap allocation (`buf`), so letting
+// one go out of scope with nothing done about it is a leak. The compiler
+// refuses that — every path must call `drop`, panic-diverging paths
+// excepted (a `panic` never falls off the end, so it owes nothing there).
 type Reader = struct {
-    buf: u8.&raw mut,   // the allocation head, and what `deinit` frees
+    buf: u8.&raw mut,   // the allocation head, and what `drop` frees
     cap: usize,
     start: u8.&raw mut, // first byte of the line being assembled
     cur: u8.&raw mut,   // next byte to look at
@@ -89,7 +95,7 @@ type Reader = struct {
     len: usize,         // bytes of the current line so far — `cur - start`
     eof: bool,
     line: str,
-} with {
+} without forget with {
     impl Self {
         // The one operation. `@b` is the member's own region binder — a
         // member that borrows `Self` declares the region it borrows for —
@@ -170,8 +176,14 @@ type Reader = struct {
             };
         };
 
-        deinit = fn(r: Self) -> () {
-            unsafe { dealloc_array(r.buf, r.cap); };
+        // Consuming, not borrowing: a plain field read (`r.buf`) leaves `r`
+        // itself untouched by the checker, so disposal has to take the
+        // value APART — `String.drop`'s precedent in `string_lib.must` —
+        // which hands the obligation to `buf` and `cap`, the two parts
+        // anyone may forget.
+        drop = fn(r: Self) -> () {
+            let Reader(struct { buf, cap, .. }) = r;
+            unsafe { dealloc_array(buf, cap); };
         };
     }
 };
@@ -238,7 +250,7 @@ static main = fn () -> () {
     print(", bytes: ");
     print_usize(width);
     print("\n");
-    r.deinit();
+    r.drop();
 };
 
 // The long way round to `s.len()`, kept because it is what the walk
