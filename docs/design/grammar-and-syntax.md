@@ -77,9 +77,9 @@
   stops a call site minting `x.*.&raw mut` and laundering a region (M08).
 - **G25** A bare pattern name never reinterprets as a variant: it binds fresh with a
   shadowing warning, and `::Circle` is the variant spelling. The sigil also works in
-  expression position as reject-only sugar: it reads the position's expected type and nothing
-  else, so it resolves wherever an expectation reaches and is refused elsewhere with the
-  qualified spelling named. The qualified spelling stays canonical.
+  expression position as reject-only sugar: it reads the position's expected type (T05) and
+  nothing else, so it resolves wherever an expectation reaches and is refused elsewhere
+  with the qualified spelling named. The qualified spelling stays canonical.
 - **G26** A retired spelling migrates; it never reinterprets. Prefix `&x`, `&mut x`, `&T`
   and `&mut T` superset-parse into the same node the postfix form produces, with a
   corrective diagnostic and a rewriting fix — withheld where no postfix text means the

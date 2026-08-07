@@ -4512,9 +4512,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 let param_tys: Vec<Ty> = params
                     .iter()
                     .map(|param| {
-                        let ty = if let PatData::Bind(binding) = &self.body.pats[param.pat] {
-                            // The common case, unchanged: a bare name's own
-                            // annotation (if any) is the axiom.
+                        if let PatData::Bind(binding) = &self.body.pats[param.pat] {
+                            // The common case: a bare name's own annotation
+                            // (if any) is the axiom.
                             match &self.body.bindings[*binding].type_ref {
                                 Some(type_ref) => self.lower_type_ref(type_ref),
                                 None => self.fresh_var(),
@@ -4530,12 +4530,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     .declared_type_for_pat(param.pat)
                                     .unwrap_or_else(|| self.fresh_var()),
                             }
-                        };
-                        // A parameter pattern has no per-call site to blame
-                        // a broken destructure on; the whole body is the
-                        // best available anchor (every call runs it).
-                        self.check_pat(param.pat, &ty, pat_anchor);
-                        ty
+                        }
                     })
                     .collect();
                 let ret = match ret_type {
@@ -4545,14 +4540,59 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     None if fn_body.is_none() => Ty::Unit,
                     None => self.fresh_var(),
                 };
-                let ret_cause = ret_type.is_some().then_some(Cause::ReturnAnnotation(expr));
+                let ret_cause = match ret_type {
+                    Some(_) => Some(Cause::ReturnAnnotation(expr)),
+                    // Unwritten: the return type is whatever the position
+                    // supplied, so the POSITION is what a tail mismatch
+                    // inside the body points at ("because of this
+                    // annotation"/"because of this argument").
+                    None => cause,
+                };
+                // The literal's own signature is checked against its
+                // context HERE — before the parameters are destructured,
+                // before the body, and before any diverging-body default —
+                // so a written slot (`let f: fn() -> usize = fn { panic("x")
+                // };`) gets first say and everything the literal left
+                // unwritten is a fresh variable the structural unify binds
+                // to the slot's counterpart.
+                //
+                // BEFORE the body, not after, because the body's tail is
+                // checked against the RETURN type and the sanctioned
+                // variant→enum conversion happens at a CHECK: a tail
+                // `Option::Some(v)` needs `Option::<usize>` in hand while it
+                // is being checked, or it types as the tag-free variant and
+                // the literal mismatches as a WHOLE — squiggle on the
+                // literal, message about a type the reader never wrote.
+                //
+                // No arity guard is written here because `unify`'s `Fn` arm
+                // is one: it compares parameter counts before binding any
+                // part, so a literal that disagrees with the slot inherits
+                // nothing and its body is checked on its own. `Ty::Error` is
+                // infectious and silent there for the same reason.
+                let own_sig = Ty::fn_type(param_tys.clone(), ret.clone());
+                let reported = self.result.diagnostics.len();
+                let fn_ty = self.check(expr, own_sig.clone(), expected, cause);
+                // `check` poisons the unresolved numbers in what it was
+                // handed, so a mismatch is the whole story — but the parts
+                // this literal left unwritten are still bare variables
+                // here; the body mints their numbers afterwards. Re-poison
+                // once the body has run (below), or a literal that already
+                // mismatched as a whole also collects a no-defining-use
+                // diagnostic for a tail it was never going to keep.
+                let slot_mismatched = self.result.diagnostics.len() != reported;
+                self.result.type_of_expr.insert(expr, fn_ty.clone());
+                // A parameter pattern has no per-call site to blame a broken
+                // destructure on; the whole body is the best available
+                // anchor (every call runs it). Destructured after the check
+                // above, so a pattern whose type came from the position sees
+                // it.
+                for (param, ty) in params.iter().zip(&param_tys) {
+                    self.check_pat(param.pat, ty, pat_anchor);
+                }
                 // An `extern fn` IS its signature: no body to check against
                 // the return type, no joins to resolve, no `return` target.
                 let Some(fn_body) = *fn_body else {
-                    let ty = Ty::fn_type(param_tys, ret);
-                    let ty = self.check(expr, ty, expected, cause);
-                    self.result.type_of_expr.insert(expr, ty.clone());
-                    return ty;
+                    return fn_ty;
                 };
                 // The function is a unit that must be internally
                 // consistent: its joins solve (by depth) before any outer
@@ -4579,27 +4619,21 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 self.return_targets.pop();
                 self.loop_sinks = saved_loops;
                 self.scope_depth -= 1;
-                // The literal's own signature is checked against its
-                // context HERE — before any diverging-body default, and
-                // returning early exactly as the `Match` arm does — so a
-                // written slot (`let f: fn() -> usize = fn { panic("x") };`)
-                // gets first say: the structural unify below binds a still-
-                // free `ret` to the slot's return type when there is one.
-                let fn_ty = Ty::fn_type(param_tys, ret.clone());
-                let fn_ty = self.check(expr, fn_ty, expected, cause);
-                self.result.type_of_expr.insert(expr, fn_ty.clone());
                 // `check`'s `!`-coerces-to-anything shortcut leaves a still-
                 // free expectation unbound rather than pinning it to `!`
                 // (right, in general: a witness that happens to diverge must
                 // not force a join's other branches to `!` too), and the
-                // slot check just above may already have bound `ret` to
-                // whatever the context demanded. Only when NEITHER
-                // determined it — `ret` is still genuinely free — does the
-                // body's own divergence become the answer: a body that
-                // never completes says nothing about what the function
-                // produces, so `!` is the honest one.
+                // slot check above may already have bound `ret` to whatever
+                // the context demanded. Only when NEITHER determined it —
+                // `ret` is still genuinely free — does the body's own
+                // divergence become the answer: a body that never completes
+                // says nothing about what the function produces, so `!` is
+                // the honest one.
                 if matches!(self.resolve_shallow(&ret), Ty::Infer(_)) {
                     self.adopt(&ret, &body_ty);
+                }
+                if slot_mismatched {
+                    poison_unresolved_number(self.table, &own_sig);
                 }
                 return fn_ty;
             }

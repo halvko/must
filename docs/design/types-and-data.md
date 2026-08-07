@@ -56,6 +56,49 @@
   at the tail. `Never` coerces to anything on the actual side, but an item's own so-concluded
   signature is as fixed as any other (T13: `fn() -> T` is invariant, so `!` in return position
   never widens to something else on a later use's say-so).
+- **T05** The expectation register, exhaustive because two rules depend on it (the `::` sigil,
+  G25, and the variant→enum conversion, which happens at a check):
+
+  | position | expectation |
+  |---|---|
+  | an annotation — `let`, parameter, item | the written type |
+  | a written return type | the written type |
+  | a `return` expression | the enclosing literal's return type |
+  | a call argument | the callee's parameter type |
+  | an argument at a trait member's `Self` position | none — checked once `Self` is known |
+  | a record-literal field | the field's declared type |
+  | an array element | the expected element type |
+  | an assignment's RHS | the assigned place's type |
+  | a `Newtype` constructor's argument | the declared underlying type |
+  | a const generic argument | the declared const parameter's type |
+  | the right operand of `==`/`!=` | the left operand's type |
+  | an arithmetic or comparison operand | a shared number variable |
+  | an `if` condition | `bool` |
+  | the then-branch of an `if` with no `else` | `()` |
+  | an array-repeat count, an index | `usize` |
+  | a `let` destructured by a `Newtype` pattern | the pattern's type |
+  | an unannotated `fn` literal's parameters and return | the position's, taken apart |
+  | a block's tail, a `const` or `unsafe` block's body | the enclosing expectation, unchanged |
+  | a join leaf (an `if`/`match` branch, a `break` value) | none; see the Re-evaluate entry |
+  | a scrutinee, a callee, an expression statement, an unannotated `let` | none |
+  | a receiver — of a field, an index, a deref, a borrow or `&raw` | none |
+
+  A position missing from this table is a bug in the table.
+- **T06** An unannotated `fn` literal takes its signature from its position. The literal's
+  signature — fresh variables wherever it wrote nothing — is checked against the position's
+  expectation before its parameters are destructured and before its body is inferred, so an
+  unwritten parameter or return type is the slot's. The literal's own annotations still win,
+  and a `Newtype` parameter pattern still names its own type first: both are lowered first,
+  and only a still-free variable can be bound. How much is inherited is `unify`'s answer, not
+  a rule of its own — arity first, then the parameters in order, the return last, stopping at
+  the first disagreement — so a literal of the wrong arity inherits nothing, and one whose
+  written part disagrees inherits only what was bound before that part, which is also what
+  the whole-literal mismatch names. It has to happen before the body rather than by unifying
+  the finished type afterwards, because the tail is checked against the return type and the
+  variant→enum conversion happens at a check: with no expected return the tail types as the
+  tag-free variant and the whole literal mismatches, naming a type the reader never wrote.
+  A mismatch in the body names the position as its reason — nothing was written on the
+  literal, so the slot that supplied the type is what there is to point at.
 - **T15** `str` is a primitive; `Vec`, `String` and `Slice` are library types, and slices
   are not primitive. Interpolation is a library feature. Proof: a `String` written in Must,
   where the representation, allocation, copy, read-back and free are all ordinary code.
@@ -152,6 +195,19 @@
 - **Linear types meet concurrency** — a linear inside a shared handle, sent across a thread,
   or stranded in a deadlocked one are combinations no API can build today. That API's ruling
   decides whether "exactly once on every path" survives threads. **T20**
+- **Expectations reach join leaves.** An `if`/`match` branch or a `break` value in witness
+  position is inferred against a fresh variable, so outer pressure cannot leak into a
+  branch's honest type and the construct's expectation meets the join's result only after
+  every leaf has been visited. Both rules that read the register stop there: the `::` sigil
+  (G25) does not resolve in a leaf, and a `fn` literal in one takes nothing from the position.
+  Lifting it means a second expectation channel threaded through the join solver, which fixes
+  both at once and is purely additive. **T05 T12**
+- **Fn-literal arguments are checked in argument order.** A literal handed to a GENERIC callee
+  ahead of the argument that would pin the callee's variables sees free parameter types, so
+  `apply(fn(t) { t.n }, c)` is refused when `apply` is generic in its parameter — while the
+  same call is fine against a monomorphic `apply`, and fine against the generic one when a
+  turbofish (`apply::<Counter, usize>(..)`) or an earlier argument has already pinned it.
+  Deferring literal arguments until the others have been checked is the fix. **T06**
 - **A conversion is wanted in depth** — variance. Judge it with the borrow subsystem's
   variance question (M09). **T13**
 - **Dynamic strings** force the `let s2 = s;` cost question `str` currently dodges. Staging

@@ -9595,6 +9595,280 @@ static main = fn() -> usize {
     );
 }
 
+// ---- an fn literal takes its signature from its position ---------------
+//
+// An unannotated parameter or return type on a `fn` literal comes from the
+// EXPECTATION at the position the literal sits in, before the body is
+// checked. Recorded with its scope, because it has a sharp edge: a join
+// leaf has no expectation to give, so a literal in witness position keeps
+// its own fresh variables and mismatches as a whole.
+
+#[test]
+fn an_annotation_flows_its_signature_into_the_literal() {
+    // The bug this rule fixes, in its smallest form and with nothing
+    // generic in sight: the tail is a VARIANT, the sanctioned variant→enum
+    // conversion happens at a CHECK, and the check is against the
+    // literal's RETURN type — so the expected `Option::<usize>` has to be
+    // in hand while the tail is checked. Before the rule this was
+    // "expected `fn(usize) -> Option::<usize>`, found `fn(usize) ->
+    // Option::<usize>::Some`", with the squiggle on the whole literal
+    // rather than on anything the reader could act on.
+    //
+    // Both annotation positions, because they are different axioms: an
+    // ITEM's own annotation, and a `let` binding's.
+    check_diagnostics(
+        r#"
+type Option = enum::<T> { Some(T), None };
+static item_annotation: fn(usize) -> Option::<usize> = fn(t) { Option::Some(t) };
+static let_annotation = fn(n: usize) -> Option::<usize> {
+    let f: fn(usize) -> Option::<usize> = fn(t) { Option::Some(t) };
+    f(n)
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_field_an_element_and_a_return_all_carry_the_expectation() {
+    // The register in `types-and-data.md` claims to be exhaustive, so the
+    // four positions that are neither an annotation nor a call argument
+    // are pinned here — for BOTH rules that turn on it: the `::` sigil
+    // (which needs an expected ENUM) and the fn-literal rule (which needs
+    // an expected SIGNATURE).
+    check_diagnostics(
+        r#"
+type Option = enum::<T> { Some(T), None };
+type Box = struct { v: Option::<usize>, fs: [fn(usize) -> Option::<usize>; 1] };
+static field_and_element = fn(n: usize) -> Box {
+    Box(struct { v = ::Some(n), fs = [fn(t) { ::Some(t) }] })
+};
+static returned_sigil = fn(n: usize) -> Option::<usize> { return ::Some(n); };
+static returned_literal = fn() -> fn(usize) -> Option::<usize> {
+    return fn(t) { Option::Some(t) };
+};
+static assigned_rhs = fn(n: usize) -> Box {
+    let mut b = Box(struct { v = ::None, fs = [fn(t) { ::Some(t) }] });
+    b.v = ::Some(n);
+    b.fs = [fn(t) { Option::Some(t) }];
+    b
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn the_registers_other_enum_capable_positions_carry_it_too() {
+    // The rest of the register's rows that can hold an ENUM, pinned for
+    // the `::` sigil the same way: the right operand of `==`/`!=` takes
+    // the left operand's type, and the three pass-through positions — a
+    // block's tail, a `const` block's body and an `unsafe` block's body —
+    // hand the enclosing expectation straight down. (A `Newtype`
+    // constructor's argument is an expectation position too, but its
+    // underlying type is always a `struct`/`enum` literal, so no sigil
+    // can land there.)
+    check_diagnostics(
+        r#"
+type Option = enum::<T> { Some(T), None };
+static eq_operand = fn(o: Option::<usize>, n: usize) -> bool { o == ::Some(n) };
+static block_tail = fn(n: usize) -> Option::<usize> { { ::Some(n) } };
+static const_block = fn() -> Option::<usize> { const { ::Some(1) } };
+static unsafe_block = fn(n: usize) -> Option::<usize> { unsafe { ::Some(n) } };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn an_argument_position_flows_its_signature_into_the_literal() {
+    // The same rule at the position that matters most in practice — a
+    // literal handed to a higher-order function — in isolation from
+    // members and from `let`.
+    check_diagnostics(
+        r#"
+type Option = enum::<T> { Some(T), None };
+static apply = fn::<T, U>(g: fn(T) -> U, t: T) -> U { g(t) };
+static main = fn(n: usize) -> Option::<usize> {
+    apply::<usize, Option::<usize>>(fn(t) { Option::Some(t) }, n)
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn an_expected_signature_names_the_literals_parameters() {
+    // The PARAMETER half of the same rule: an unannotated parameter takes
+    // its type from the position too, so the body may use it for real
+    // (`t.n` needs `t` to be a `Counter`, and nothing in the literal says
+    // so). The literal's own annotation still wins where there is one.
+    check_infer(
+        r#"
+type Counter = struct { n: usize };
+static apply = fn(g: fn(Counter) -> usize, c: Counter) -> usize { g(c) };
+static main = fn(c: Counter) -> usize { apply(fn(t) { t.n }, c) };
+"#,
+        expect![[r#"
+            52..109 'fn(g: fn(Counter)...': fn(fn(Counter) -> usize, Counter) -> usize
+            55..56 'g': fn(Counter) -> usize
+            80..81 'c': Counter
+            101..109 '{ g(c) }': usize
+            103..104 'g': fn(Counter) -> usize
+            103..107 'g(c)': usize
+            105..106 'c': Counter
+            125..176 'fn(c: Counter) ->...': fn(Counter) -> usize
+            128..129 'c': Counter
+            149..176 '{ apply(fn(t) { t...': usize
+            151..156 'apply': fn(fn(Counter) -> usize, Counter) -> usize
+            151..174 'apply(fn(t) { t.n...': usize
+            157..170 'fn(t) { t.n }': fn(Counter) -> usize
+            160..161 't': Counter
+            163..170 '{ t.n }': usize
+            165..166 't': Counter
+            165..168 't.n': usize
+            172..173 'c': Counter
+        "#]],
+    );
+}
+
+#[test]
+fn an_expected_signature_reaches_a_destructuring_parameter() {
+    // The other parameter-lowering path: a pattern parameter with no
+    // annotation of its own and no `Newtype` head to name its type. It
+    // asks the position, and the destructure then checks against what came
+    // back.
+    check_diagnostics(
+        r#"
+static apply = fn(
+    g: fn(struct { x: usize, y: usize }) -> usize,
+    p: struct { x: usize, y: usize },
+) -> usize { g(p) };
+static main = fn(p: struct { x: usize, y: usize }) -> usize {
+    apply(fn(struct { x, y }) { x + y }, p)
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn an_inherited_return_type_is_an_axiom_position_for_the_sigil() {
+    // A consequence worth pinning rather than discovering: the `::`
+    // variant sigil resolves wherever an expectation reaches, so giving a
+    // literal's body one opened a NEW axiom position for it. Recorded in
+    // `types-and-data.md`'s expectation register.
+    check_diagnostics(
+        r#"
+type Option = enum::<T> { Some(T), None };
+static f: fn(usize) -> Option::<usize> = fn(t) { ::Some(t) };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn an_expectation_of_the_wrong_arity_is_not_inherited() {
+    // The guard: the expectation is only a signature for this literal when
+    // it AGREES on parameter count. A literal that takes two parameters at
+    // a one-parameter position must keep its own fresh variables and
+    // mismatch as a whole — inheriting positionally from a list of the
+    // wrong length would put the wrong type on the wrong name and blame
+    // the body for it.
+    check_diagnostics(
+        r#"
+static apply = fn(g: fn(usize) -> usize, n: usize) -> usize { g(n) };
+static main = fn(n: usize) -> usize { apply(fn(a, b) { n }, n) };
+"#,
+        expect![[r#"
+            115..129: type mismatch: expected `fn(usize) -> usize`, found `fn(_, _) -> usize`
+        "#]],
+    );
+}
+
+#[test]
+fn an_inherited_return_type_points_at_the_position_it_came_from() {
+    // A tail mismatch inside the literal names the POSITION as its
+    // reason: the return type was not written on the literal, so the slot
+    // that supplied it is the only thing there is to point at — and the
+    // reader did write that. (The second complaint is the join-leaf limit
+    // below, not this rule.)
+    check_diagnostics(
+        r#"
+type Option = enum::<T> { Some(T), None };
+static f: fn(bool) -> Option::<usize> = fn(b) { if b { 1 } else { ::None } };
+"#,
+        expect![[r#"
+            92..118: every branch produces `{number}`, but `Option::<usize>` is needed (expected `Option::<usize>` because of this annotation at 54..81)
+            110..116: cannot resolve `::None` without an expected type — write `Enum::None`
+        "#]],
+    );
+}
+
+#[test]
+fn a_literal_that_mismatches_its_slot_does_not_also_blame_its_tail() {
+    // A signature that disagrees is the whole story. The unwritten return
+    // is still a bare variable when the mismatch is reported, so `check`'s
+    // unresolved-number poisoning cannot reach the number the BODY mints
+    // afterwards; it runs again once the body is in. Without that, a
+    // literal that already mismatched as a whole also collects a
+    // "no defining use" complaint about a tail nothing was going to keep.
+    check_diagnostics(
+        r#"
+static apply = fn(g: fn(usize) -> usize, n: usize) -> usize { g(n) };
+static arity = fn(n: usize) -> usize { apply(fn(a, b) { 1 }, n) };
+static param: fn(usize) -> usize = fn(t: str) { 1 };
+"#,
+        expect![[r#"
+            116..130: type mismatch: expected `fn(usize) -> usize`, found `fn(_, _) -> {error}`
+            173..189: type mismatch: expected `fn(usize) -> usize`, found `fn(str) -> {error}` (expected `fn(usize) -> usize` because of this annotation at 152..170)
+        "#]],
+    );
+}
+
+#[test]
+fn an_unknown_type_in_the_slot_is_inherited_silently() {
+    // Why no `Ty::Error` filtering is written at the literal: `unify`
+    // binds `{error}` to the literal's parameter like any other type and
+    // errors are infectious and silent, so the body's use of it is
+    // accepted and the unknown type is reported once, where it is written.
+    check_diagnostics(
+        r#"
+static apply = fn(g: fn(Bogus) -> usize, n: usize) -> usize { n };
+static main = fn(n: usize) -> usize { apply(fn(t) { t.n }, n) };
+"#,
+        expect![[r#"
+            25..30: unknown type `Bogus`
+        "#]],
+    );
+}
+
+#[test]
+fn the_expectation_does_not_reach_a_join_leaf() {
+    // THE SCOPE LIMIT, pinned so the claim stays honest: a literal in
+    // WITNESS position (an `if`/`match` branch whose value is the join's)
+    // gets NO expectation — a join leaf has none to give, the register's
+    // "none" row and the "Expectations reach join leaves" entry in
+    // `types-and-data.md`, hit here by a program with no `match` in it.
+    // The literal types as a tag-free variant return and mismatches,
+    // exactly as every literal did before this rule.
+    //
+    // The fix is that entry's, not this rule's: it is about where an
+    // expectation reaches, not about what a literal does with one.
+    check_diagnostics(
+        r#"
+type Option = enum::<T> { Some(T), None };
+static pick = fn(b: bool) -> fn(usize) -> Option::<usize> {
+    if b { fn(t) { Option::Some(t) } } else { fn(t) { Option::Some(t) } }
+};
+"#,
+        expect![[r#"
+            115..140: type mismatch: expected `fn(usize) -> Option::<usize>`, found `fn(usize) -> Option::<usize>::Some` (expected `fn(usize) -> Option::<usize>` because of this return type at 70..101)
+            150..175: type mismatch: expected `fn(usize) -> Option::<usize>`, found `fn(usize) -> Option::<usize>::Some` (expected `fn(usize) -> Option::<usize>` because of this return type at 70..101)
+        "#]],
+    );
+}
+
 // ---- second-segment generic arguments -----------------------------------
 //
 // A turbofish on a path's SECOND segment parses into a real node of its

@@ -765,6 +765,18 @@ exactly as fixed as any other return type: `fn() -> T` is invariant (no
 subtyping anywhere), so nothing widens it later on someone else's
 say-so.
 
+That slot settles more than a diverging body. A literal written where a
+`fn` type is expected takes its unwritten parameter *and* return types
+from the slot before its body is checked, so with
+`apply = fn (g: fn (Counter) -> usize, c: Counter) -> usize` the call
+`apply(fn (t) { t.n }, c)` needs no annotation on `t` — the slot's
+parameter types have to be known already, which a generic `apply` waiting
+on a later argument for them would not be. It also extends the sigil's
+own list of positions: the body of a `fn` literal that itself sits at
+one of those now has an expected type too, so a call argument typed
+`fn () -> Shape` lets `::Point` type-check inside `fn () { ::Point }`
+written right there, with nothing annotated.
+
 `return` targets the *nearest enclosing function literal*, and function
 literals bound it the way they bound everything else: a `return` inside a
 `fn` nested in another function returns from the inner literal, leaving
