@@ -6,7 +6,7 @@
 //! any item being forced is a const context regardless of the driving mode.
 
 use base_db::Db;
-use hir::{Builtin, ExprId, IntKind, ItemLoc, Ty};
+use hir::{Builtin, ConstLegality, ExprId, IntKind, ItemLoc, Ty};
 use la_arena::ArenaMap;
 use mir::{
     AggregateKind, BodyId, Const, LocalData, LocalId, MirBody, MirLowered, Operand, ProjElem,
@@ -2352,6 +2352,34 @@ impl<'db, M: Mode> Machine<'db, M> {
                 ))
             }
         };
+        // The const fence, in one place: [`hir::ConstLegality`] carries WHY
+        // a builtin is refused, so this guard renders the same reason the
+        // checker already showed as a squiggle — defense in depth, since
+        // const-check plants a trap at every refused call it can see; this
+        // is the machine's own guarantee. `panic` stays `Legal` (the one
+        // side effect const contexts allow), so it reaches the dispatch
+        // below untouched.
+        if self.const_depth > 0 {
+            match builtin.const_legality() {
+                ConstLegality::Legal => {}
+                ConstLegality::HostEffect => {
+                    return Err(EvalError {
+                        kind: EvalErrorKind::NotConst,
+                        message: hir::diag::side_effect_call_in_const(builtin.name()),
+                        origin: Some((loc.clone(), origin)),
+                        notes: Vec::new(),
+                    });
+                }
+                ConstLegality::HeapFence => {
+                    return Err(EvalError {
+                        kind: EvalErrorKind::NotConst,
+                        message: hir::diag::heap_call_in_const(builtin.name()),
+                        origin: Some((loc.clone(), origin)),
+                        notes: Vec::new(),
+                    });
+                }
+            }
+        }
         match builtin {
             Builtin::Panic => {
                 expect_args(self, 1)?;
@@ -2365,16 +2393,6 @@ impl<'db, M: Mode> Machine<'db, M> {
                     notes: Vec::new(),
                 })
             }
-            // Defense in depth: const-check plants a trap at every `print`
-            // call it can see in a const context, so this refusal is
-            // normally shadowed — it stays as the machine's own guarantee
-            // that const evaluation never performs I/O.
-            Builtin::Print if self.const_depth > 0 => Err(EvalError {
-                kind: EvalErrorKind::NotConst,
-                message: hir::diag::side_effect_call_in_const(builtin.name()),
-                origin: Some((loc.clone(), origin)),
-                notes: Vec::new(),
-            }),
             Builtin::Print => {
                 expect_args(self, 1)?;
                 let Value::Str(text) = &args[0] else {
@@ -2383,15 +2401,6 @@ impl<'db, M: Mode> Machine<'db, M> {
                 self.mode.print(text)?;
                 Ok(Value::Unit)
             }
-            // Defense in depth, same split as `print`: const-check plants
-            // the trap it can see; this is the machine's own guarantee
-            // that const evaluation never performs I/O.
-            Builtin::ReadLine if self.const_depth > 0 => Err(EvalError {
-                kind: EvalErrorKind::NotConst,
-                message: hir::diag::side_effect_call_in_const(builtin.name()),
-                origin: Some((loc.clone(), origin)),
-                notes: Vec::new(),
-            }),
             Builtin::ReadLine => {
                 expect_args(self, 0)?;
                 Ok(match self.mode.read_line()? {
@@ -2423,18 +2432,6 @@ impl<'db, M: Mode> Machine<'db, M> {
                     },
                 })
             }
-            // The eager const fence (ruled C04), machine side — the same
-            // defense-in-depth split as `print`: const-check plants the
-            // trap the editor already showed, this refusal is the
-            // machine's own guarantee that const evaluation never touches
-            // the heap (relaxing it later is a grant; the reverse would be
-            // a retraction).
-            Builtin::AllocArray | Builtin::DeallocArray if self.const_depth > 0 => Err(EvalError {
-                kind: EvalErrorKind::NotConst,
-                message: hir::diag::heap_call_in_const(builtin.name()),
-                origin: Some((loc.clone(), origin)),
-                notes: Vec::new(),
-            }),
             Builtin::AllocArray => {
                 expect_args(self, 1)?;
                 self.builtin_alloc_array(&args[0], loc, origin)

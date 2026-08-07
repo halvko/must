@@ -100,9 +100,11 @@ struct CheckCtx<'db> {
     db: &'db dyn Db,
     body: &'db Body,
     resolutions: &'db ArenaMap<ExprId, Resolution>,
-    /// Consulted for exactly one question: is this `.*` through a raw
-    /// pointer or through a safe borrow? Safety is a property of the
-    /// pointer's flavor, and only inference knows the flavor.
+    /// Consulted for the two questions name resolution cannot answer: is
+    /// this `.*` through a raw pointer or through a safe borrow (safety is
+    /// a property of the pointer's FLAVOR, and only inference knows it),
+    /// and does this dot-call reach a builtin MEMBER (resolved by
+    /// inference, so `resolutions` never mentions it).
     infer: &'db crate::infer::InferenceResult,
     diagnostics: Vec<UnsafeCheckDiagnostic>,
 }
@@ -181,38 +183,42 @@ impl CheckCtx<'_> {
                 }
             }
             ExprData::Call { callee, args, .. } => {
-                // The unsafe builtins: freeing invalidates every pointer
-                // into the allocation, and `copy` writes through a raw
-                // pointer — misuse of either is UB, so the CALL needs the
-                // marker, exactly like a deref. The callee may be a bare
-                // name or a turbofish mention of one.
+                // The builtins whose `Builtin::requires_unsafe` answers
+                // true carry a precondition whose violation is UB, so the
+                // CALL needs the marker, exactly like a deref. The callee
+                // may be a bare name or a turbofish mention of one.
                 let callee_name = match &self.body.exprs[*callee] {
                     ExprData::GenericApp { base, .. } => *base,
                     _ => *callee,
                 };
                 if !in_unsafe {
-                    match self.resolutions.get(callee_name) {
-                        Some(Resolution::Builtin(builtin)) if builtin.requires_unsafe() => {
-                            self.diagnostics.push(
-                                UnsafeCheckDiagnostic::BuiltinCallOutsideUnsafe {
-                                    call: expr,
-                                    builtin: *builtin,
-                                },
-                            );
-                        }
+                    // A builtin named directly (`copy(p, q, n)`) or reached
+                    // through the DOT as a member (`s.len()`): the one
+                    // shared lookup, so the marker cannot special-case
+                    // members. Both current members are safe, but that is
+                    // their property's answer, not something the mechanism
+                    // should assume.
+                    if let Some(builtin) = self
+                        .infer
+                        .builtin_of_call(self.resolutions.get(callee_name), expr)
+                        && builtin.requires_unsafe()
+                    {
+                        self.diagnostics
+                            .push(UnsafeCheckDiagnostic::BuiltinCallOutsideUnsafe {
+                                call: expr,
+                                builtin,
+                            });
+                    } else if let Some(Resolution::Item(loc)) = self.resolutions.get(callee_name)
+                        && crate::is_extern_fn(self.db, loc.to_id(self.db))
+                    {
                         // A host import. The marker is required at the CALL
                         // for the same reason it is for `copy`: this is the
                         // operation that must not run unvouched.
-                        Some(Resolution::Item(loc))
-                            if crate::is_extern_fn(self.db, loc.to_id(self.db)) =>
-                        {
-                            self.diagnostics
-                                .push(UnsafeCheckDiagnostic::ExternCallOutsideUnsafe {
-                                    call: expr,
-                                    name: loc.display_name().to_owned(),
-                                });
-                        }
-                        _ => {}
+                        self.diagnostics
+                            .push(UnsafeCheckDiagnostic::ExternCallOutsideUnsafe {
+                                call: expr,
+                                name: loc.display_name().to_owned(),
+                            });
                     }
                 }
                 self.check_callee(*callee, in_unsafe);

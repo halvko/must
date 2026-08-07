@@ -151,6 +151,28 @@ pub struct InferenceResult {
     pub diagnostics: Vec<InferenceDiagnostic>,
 }
 
+impl InferenceResult {
+    /// The BUILTIN, if any, that the call `call` reaches — one lookup for
+    /// both ways a builtin is named. A name resolution answers directly
+    /// (`copy(p, q, n)`); a dot-call has none at all (a builtin member
+    /// never appears in `resolutions`), so the dot-call table answers
+    /// instead. The two cases never overlap, so nothing here "wins"
+    /// between them — this is one name for "which builtin, if any".
+    ///
+    /// [`crate::unsafe_check`] reaches every builtin call through this one
+    /// helper. [`crate::const_check`]'s named path calls
+    /// [`Builtin::const_legality`] directly and uses this helper only for
+    /// its dot-call arm — either way, every path ends at
+    /// [`Builtin::const_legality`] / [`Builtin::requires_unsafe`], never a
+    /// re-derived guess.
+    pub fn builtin_of_call(&self, callee: Option<&Resolution>, call: ExprId) -> Option<Builtin> {
+        match callee {
+            Some(Resolution::Builtin(builtin)) => Some(*builtin),
+            _ => self.builtin_member_of_expr.get(call).copied(),
+        }
+    }
+}
+
 /// What is wrong with a written region argument.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegionArgProblem {

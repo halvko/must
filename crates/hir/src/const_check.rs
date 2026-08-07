@@ -9,26 +9,22 @@
 //!
 //! Inside a const context the only calls allowed are direct calls of items
 //! whose initializer is a `const fn` literal, direct calls of `const fn`
-//! literals themselves, and the builtins that perform no I/O and allocate
-//! nothing: `panic` only ends the evaluation, the address primitives are
-//! pure, and a copy writes only through pointers whose targets already
-//! exist in const memory. The refusals name their own reason — `print` has
-//! an effect, and the allocating pair (`alloc_array`/`dealloc_array`) is
-//! held back by the eager const fence (C04) until an interning design
-//! lifts it.
-//! Everything else is rejected conservatively: const-ness is not part of
-//! function types (yet), so for a parameter, a let-bound value, or any
-//! other expression it is simply not known — even when a human can see
-//! what the value must be. For the same reason no wrappers around an
-//! item's root expression are peeled: only a literal `const fn`
-//! initializer makes an item const-callable.
+//! literals themselves, and the builtins whose [`Builtin::const_legality`]
+//! answers `Legal` — no side effect except panicking, and no allocation
+//! until an interning design lifts the eager fence (C04). Everything
+//! else is rejected conservatively: const-ness is not part of function
+//! types (yet), so for a parameter, a let-bound value, or any other
+//! expression it is simply not known — even when a human can see what the
+//! value must be. For the same reason no wrappers around an item's root
+//! expression are peeled: only a literal `const fn` initializer makes an
+//! item const-callable.
 
 use base_db::Db;
 use la_arena::ArenaMap;
 
 use crate::body::{Body, ExprData, ExprId, Stmt, body};
 use crate::infer::{InferenceResult, infer};
-use crate::scopes::{Builtin, Resolution, resolutions};
+use crate::scopes::{Builtin, ConstLegality, Resolution, resolutions};
 use crate::{ItemId, ItemLoc, diag};
 
 /// Range-free (keyed by HIR ids); ranges are attached by the diagnostics
@@ -292,16 +288,23 @@ impl CheckCtx<'_> {
     /// context; reject it unless it is known to be const-callable.
     fn check_callee(&mut self, call: ExprId, callee: ExprId) {
         match &self.body.exprs[callee] {
+            // A BUILTIN member dot-call. It is reached through the dot, not
+            // through a name resolution, so `check_named_callee` never sees
+            // it — but the question is the same one, and so is the answer:
+            // the builtin's own [`Builtin::const_legality`], looked up
+            // through `builtin_of_call` (the dot-call arm's only route to a
+            // `Builtin`; a named callee is judged directly, below).
+            ExprData::Field { .. }
+                if let Some(builtin) = self
+                    .infer
+                    .builtin_of_call(self.resolutions.get(callee), call) =>
+            {
+                self.check_builtin_callee(callee, builtin)
+            }
             // A dot-call: when inference resolved it to an inherent member,
             // the member is a statically known fn item — judge its literal's
             // marker exactly like a named callee's. A field-valued callee
             // (no member resolution) stays the conservative value call.
-            // A BUILTIN member dot-call. `next_char` is pure — decoding a
-            // `str` observes nothing outside its own arguments — so it is
-            // const-legal, for the same reason the pointer builtins below
-            // are. Judged here rather than in `check_named_callee` because
-            // a builtin member is reached through the dot, never by name.
-            ExprData::Field { .. } if self.infer.builtin_member_of_expr.contains_idx(call) => {}
             ExprData::Field { .. } => match self.infer.member_of_expr.get(call) {
                 Some(member) => match root_fn_is_const(self.db, member.to_id(self.db)) {
                     Some(true) => {}
@@ -404,48 +407,10 @@ impl CheckCtx<'_> {
             Some(Resolution::TraitItem(_)) => self
                 .diagnostics
                 .push(ConstCheckDiagnostic::ValueCall { callee }),
-            // The one side effect const contexts allow — and the pointer
-            // builtins that allocate nothing: `add`/`dangling` are pure
-            // and `copy` writes only through pointers whose targets already
-            // exist in const memory (would-be UB there is a deterministic
-            // detected trap; the escape rule guards the results).
-            // `next_char` cannot arrive by name — it is a member, judged
-            // by the dot arm above — but it is const-legal for the same
-            // reason those are: it is pure.
-            Some(Resolution::Builtin(
-                Builtin::Panic
-                | Builtin::Add
-                | Builtin::Offset
-                | Builtin::Copy
-                | Builtin::Dangling
-                | Builtin::NextChar
-                // The two blesses join them for `next_char`'s reason: they
-                // are PURE. Reading bytes and deciding whether they spell a
-                // string observes nothing outside the arguments — and the
-                // heap fence already stops the interesting cases, since
-                // there is no const-context way to get a buffer.
-                | Builtin::StrFromUtf8
-                | Builtin::StrFromUtf8Unchecked
-                // `len` is pure like `next_char`; `str_bytes` is const-legal
-                // like `copy` — it writes only through a pointer whose
-                // target already exists in const memory.
-                | Builtin::StrLen
-                | Builtin::StrBytes,
-            )) => {}
-            Some(Resolution::Builtin(builtin @ (Builtin::Print | Builtin::ReadLine))) => {
-                self.diagnostics.push(ConstCheckDiagnostic::SideEffectCall {
-                    callee,
-                    builtin: *builtin,
-                });
-            }
-            // The eager const fence (C04): heap allocation waits for the
-            // interning design.
-            Some(Resolution::Builtin(builtin @ (Builtin::AllocArray | Builtin::DeallocArray))) => {
-                self.diagnostics.push(ConstCheckDiagnostic::HeapCall {
-                    callee,
-                    builtin: *builtin,
-                });
-            }
+            // A builtin named directly. WHICH builtins a const context
+            // accepts is the enum's question, not this module's — and it is
+            // asked in the one place a builtin MEMBER's dot-call asks it.
+            Some(Resolution::Builtin(builtin)) => self.check_builtin_callee(callee, *builtin),
             Some(Resolution::Local(_)) => self
                 .diagnostics
                 .push(ConstCheckDiagnostic::ValueCall { callee }),
@@ -462,5 +427,24 @@ impl CheckCtx<'_> {
             // Unresolved: already reported by name resolution.
             None => {}
         }
+    }
+
+    /// A builtin called in a const context — reached by NAME
+    /// (`copy(p, q, n)`) or through the DOT as a member (`s.len()`). Both
+    /// arrive here, so neither way of naming a builtin can dodge the
+    /// judgement the other gets.
+    ///
+    /// The verdict AND its reason are [`Builtin::const_legality`]'s
+    /// answer; all this module does is render the reason as the matching
+    /// diagnostic. No per-builtin knowledge lives here — the match is on
+    /// the REASON and exhaustive, so a new kind of refusal has to be given
+    /// its wording rather than silently inheriting another's.
+    fn check_builtin_callee(&mut self, callee: ExprId, builtin: Builtin) {
+        let diagnostic = match builtin.const_legality() {
+            ConstLegality::Legal => return,
+            ConstLegality::HostEffect => ConstCheckDiagnostic::SideEffectCall { callee, builtin },
+            ConstLegality::HeapFence => ConstCheckDiagnostic::HeapCall { callee, builtin },
+        };
+        self.diagnostics.push(diagnostic);
     }
 }

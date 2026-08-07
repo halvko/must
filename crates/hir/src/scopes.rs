@@ -418,6 +418,30 @@ pub enum Builtin {
     StrBytes,
 }
 
+/// What const evaluation does with a call of a builtin, and when it
+/// refuses, WHY ([`Builtin::const_legality`]).
+///
+/// The reason is part of the property rather than something a caller
+/// re-derives from the variant: the two refusals mean different things and
+/// have different futures — a host effect is refused forever (const
+/// evaluation cannot have one), while the heap fence is a fence, which the
+/// interning design (C06) is expected to lift. A caller that had to guess
+/// would have to carry its own list of which builtins are heap-shaped,
+/// which is exactly the second table this property exists to abolish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConstLegality {
+    /// No side effect and no host dependence: callable during const
+    /// evaluation.
+    Legal,
+    /// Refused: an effect the compiler cannot perform on the program's
+    /// behalf — `print` and `read_line` reach the host.
+    HostEffect,
+    /// Refused by the eager const fence (C04): const-built heap values
+    /// wait for the interning design (C06), and refusing at the call keeps
+    /// the later relaxation a grant, not a retraction.
+    HeapFence,
+}
+
 impl Builtin {
     pub fn by_name(name: &str) -> Option<Builtin> {
         match name {
@@ -484,28 +508,81 @@ impl Builtin {
 
     /// Whether calling this builtin requires an enclosing
     /// `unsafe { ... }` block — exactly the operations that carry a
-    /// precondition whose violation is UB even without a visible deref:
-    /// freeing invalidates every pointer into the allocation, `copy`
-    /// writes through a raw pointer, `add` on a pointer that does not
-    /// address an array element (with `i > 0`) is detected UB at the call,
-    /// both blesses read a whole RANGE on the caller's word that it is
-    /// readable (the unchecked one additionally claiming the bytes spell a
-    /// string), and `str_bytes` WRITES a range on the same kind of word.
+    /// precondition whose violation is UB even without a visible deref;
+    /// each arm below says which precondition and why.
+    ///
+    /// Exhaustive on purpose, like [`Builtin::const_legality`]: safety is
+    /// a decision about a new builtin, not a default it inherits by being
+    /// left off a list.
     pub fn requires_unsafe(self) -> bool {
-        matches!(
-            self,
-            Builtin::DeallocArray
-                | Builtin::Copy
-                | Builtin::Add
-                | Builtin::Offset
-                | Builtin::StrFromUtf8
-                | Builtin::StrFromUtf8Unchecked
-                // Writes a RANGE through a raw pointer on the caller's
-                // word that it is writable — `copy`'s destination half,
-                // with the length coming from the text instead of an
-                // argument.
-                | Builtin::StrBytes
-        )
+        match self {
+            // Freeing invalidates every pointer into the allocation,
+            // `copy` writes through a raw pointer, and `add`/`offset` on a
+            // pointer that does not address an array element is detected
+            // UB at the call.
+            Builtin::DeallocArray | Builtin::Copy | Builtin::Add | Builtin::Offset => true,
+            // Both blesses read a RANGE through a raw pointer on the
+            // caller's word that it is readable, and the unchecked one
+            // additionally claims the bytes spell a string.
+            Builtin::StrFromUtf8 | Builtin::StrFromUtf8Unchecked => true,
+            // Writes a RANGE through a raw pointer on the caller's word
+            // that it is writable — `copy`'s destination half, with the
+            // length coming from the text instead of an argument.
+            Builtin::StrBytes => true,
+            // Nothing to vouch for. The effects (`print`, `panic`,
+            // `read_line`) have no precondition, allocating cannot UB, a
+            // `dangling` pointer is hazardous only at a deref — which
+            // carries its own marker — and the two `str` MEMBERS read what
+            // the receiver already holds.
+            Builtin::Print
+            | Builtin::Panic
+            | Builtin::AllocArray
+            | Builtin::ReadLine
+            | Builtin::Dangling
+            | Builtin::NextChar
+            | Builtin::StrLen => false,
+        }
+    }
+
+    /// Whether this builtin may be CALLED during const evaluation, and
+    /// when not, WHY — no side effect and no host dependence means what a
+    /// const context computes is what every run would have computed.
+    ///
+    /// The reason travels with the verdict because the two refusals are
+    /// different judgements with different futures (see
+    /// [`ConstLegality`]), and because a caller that renders them must not
+    /// have to re-derive which builtin is which.
+    ///
+    /// Orthogonal to [`Builtin::requires_unsafe`] — unsafe operations are
+    /// legal in const evaluation (every would-be UB there is a
+    /// deterministic detected trap), so `copy` and the blesses are
+    /// const-legal despite their markers.
+    ///
+    /// The one home for the question: both ways a builtin is reached — by
+    /// NAME and through the DOT as a member — ask it here, and the
+    /// exhaustive match means a new variant cannot reach either checker
+    /// without an answer.
+    pub fn const_legality(self) -> ConstLegality {
+        match self {
+            // Pure: `panic` is the one side effect a const context allows,
+            // pointer arithmetic and `dangling` only compute addresses,
+            // and the `str` operations read and decode bytes — none of
+            // them observes anything outside its own arguments.
+            Builtin::Panic
+            | Builtin::Add
+            | Builtin::Offset
+            | Builtin::Dangling
+            | Builtin::NextChar
+            | Builtin::StrLen
+            | Builtin::StrFromUtf8
+            | Builtin::StrFromUtf8Unchecked => ConstLegality::Legal,
+            // They WRITE, but only through a pointer whose target already
+            // exists in const memory: nothing outside the evaluation can
+            // see it, and the escape rule in `eval` guards the results.
+            Builtin::Copy | Builtin::StrBytes => ConstLegality::Legal,
+            Builtin::Print | Builtin::ReadLine => ConstLegality::HostEffect,
+            Builtin::AllocArray | Builtin::DeallocArray => ConstLegality::HeapFence,
+        }
     }
 
     /// Whether this builtin takes a pointer argument in BOTH raw flavors —
@@ -513,15 +590,36 @@ impl Builtin {
     /// type says. Such a builtin is not first-class (a mention that is not
     /// a call has no type to be a value at) and its call is intercepted by
     /// the checker instead of being checked against a signature.
+    ///
+    /// Exhaustive on purpose, like [`Builtin::const_legality`] and
+    /// [`Builtin::requires_unsafe`]: a new builtin's pointer shape is a
+    /// decision, not something it inherits by being left off a list.
     pub fn flavor_polymorphic(self) -> bool {
-        matches!(
-            self,
+        match self {
+            // Each reads (the blesses) or moves (`add`/`offset`) through a
+            // pointer whose flavor the caller chose, and `copy` reads its
+            // source the same way — no one `fn` type says that.
             Builtin::Add
-                | Builtin::Offset
-                | Builtin::Copy
-                | Builtin::StrFromUtf8
-                | Builtin::StrFromUtf8Unchecked
-        )
+            | Builtin::Offset
+            | Builtin::Copy
+            | Builtin::StrFromUtf8
+            | Builtin::StrFromUtf8Unchecked => true,
+            // A single fixed flavor each, so an ordinary `fn` type says
+            // it: `str_bytes` WRITES through `u8.&raw mut` only,
+            // `dealloc_array` frees a `.&raw mut` allocation only, and
+            // `dangling` PRODUCES a pointer rather than taking one.
+            Builtin::StrBytes | Builtin::DeallocArray | Builtin::Dangling => false,
+            // No pointer argument to be polymorphic in at all:
+            // `alloc_array` takes a count, `next_char`/`len` read through
+            // the receiver's own representation, and
+            // `print`/`panic`/`read_line` take no pointer either.
+            Builtin::Print
+            | Builtin::Panic
+            | Builtin::AllocArray
+            | Builtin::ReadLine
+            | Builtin::NextChar
+            | Builtin::StrLen => false,
+        }
     }
 }
 

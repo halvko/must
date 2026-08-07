@@ -7462,6 +7462,101 @@ static first = const {
 }
 
 #[test]
+fn every_builtin_answers_its_properties() {
+    use crate::{Builtin, ConstLegality};
+
+    // The property TABLE, written out: what each builtin answers when
+    // asked whether const evaluation accepts it (and if not, why), whether
+    // calling it needs `unsafe`, and whether it takes a pointer argument
+    // in both raw flavors. All three properties are EXHAUSTIVE matches on
+    // the enum, so it is the compiler, not this test, that forces a new
+    // builtin to have answers; what this adds is that a CHANGED answer
+    // must be changed twice, deliberately.
+    //
+    // What it does NOT probe is the wiring — that the checkers actually
+    // consult the properties. Nothing can, until a builtin exists whose
+    // answers differ from the current members' (both are pure and safe,
+    // so a member path that ignored the table entirely would still pass
+    // every test in this file). That half is held by construction
+    // instead: every path — const_check's named callee, const_check's
+    // dot-call via `InferenceResult::builtin_of_call`, unsafe_check's
+    // named and dot-call arms alike — ends at `Builtin::const_legality`
+    // / `Builtin::requires_unsafe`, and none of them names a builtin.
+    const ALL: [Builtin; 14] = [
+        Builtin::Print,
+        Builtin::Panic,
+        Builtin::AllocArray,
+        Builtin::DeallocArray,
+        Builtin::Add,
+        Builtin::Offset,
+        Builtin::Copy,
+        Builtin::Dangling,
+        Builtin::ReadLine,
+        Builtin::NextChar,
+        Builtin::StrFromUtf8,
+        Builtin::StrFromUtf8Unchecked,
+        Builtin::StrLen,
+        Builtin::StrBytes,
+    ];
+
+    // `(const_legality, requires_unsafe, flavor_polymorphic)` per builtin.
+    fn expected(builtin: Builtin) -> (ConstLegality, bool, bool) {
+        match builtin {
+            // The host effects: refused by const evaluation, safe to
+            // call, no pointer argument.
+            Builtin::Print | Builtin::ReadLine => (ConstLegality::HostEffect, false, false),
+            // The heap pair: const-FENCED, not effectful (C04) — and
+            // freeing is UNSAFE because it invalidates every pointer into
+            // the allocation, while allocating cannot UB. Neither takes a
+            // flavor-polymorphic pointer: `alloc_array` takes a count,
+            // and `dealloc_array` frees one fixed flavor.
+            Builtin::AllocArray => (ConstLegality::HeapFence, false, false),
+            Builtin::DeallocArray => (ConstLegality::HeapFence, true, false),
+            // Pure and safe: `panic` is the one effect const contexts
+            // allow, `dangling` only names an address, and the two `str`
+            // MEMBERS read what the receiver already holds. None reads a
+            // caller-supplied pointer in either flavor.
+            Builtin::Panic | Builtin::Dangling | Builtin::NextChar | Builtin::StrLen => {
+                (ConstLegality::Legal, false, false)
+            }
+            // Const-legal AND unsafe — the two properties are orthogonal:
+            // pointer arithmetic and range reads carry preconditions
+            // nothing checks, but const evaluation detects every would-be
+            // UB as a deterministic trap, so it need not refuse them. All
+            // four read a pointer in either raw flavor.
+            Builtin::Add
+            | Builtin::Offset
+            | Builtin::Copy
+            | Builtin::StrFromUtf8
+            | Builtin::StrFromUtf8Unchecked => (ConstLegality::Legal, true, true),
+            // Const-legal and unsafe like the group above, but a WRITE
+            // through one fixed flavor (`u8.&raw mut`) rather than a read
+            // through either — not flavor-polymorphic.
+            Builtin::StrBytes => (ConstLegality::Legal, true, false),
+        }
+    }
+
+    for builtin in ALL {
+        assert_eq!(
+            (
+                builtin.const_legality(),
+                builtin.requires_unsafe(),
+                builtin.flavor_polymorphic()
+            ),
+            expected(builtin),
+            "{}: (const_legality, requires_unsafe, flavor_polymorphic)",
+            builtin.name()
+        );
+    }
+    // A duplicated entry would silently stand in for a missing one.
+    for (i, a) in ALL.iter().enumerate() {
+        for b in &ALL[..i] {
+            assert_ne!(a, b, "{} listed twice", a.name());
+        }
+    }
+}
+
+#[test]
 fn a_character_const_argument_type_checks_by_kind() {
     // `char` is in the annotation-representable const domain because it
     // fell out of the same machinery `usize`/`str`/`bool` use, not because
