@@ -1695,4 +1695,12 @@ impl FieldExpr {
     pub fn name_ref(&self) -> Option<NameRef> {
         child(&self.syntax)
     }
+    /// The MEMBER's own turbofish (`s.flat_map::<usize>`), when present —
+    /// the dot-call spelling of the same arguments
+    /// [`PathExpr::member_generic_arg_list`] carries. A field access has no
+    /// binder of its own, so a written list here only ever belongs to a
+    /// member the dot-call resolves to (inference says so).
+    pub fn member_generic_arg_list(&self) -> Option<GenericArgList> {
+        child::<MemberGenericArgs>(&self.syntax)?.generic_arg_list()
+    }
 }

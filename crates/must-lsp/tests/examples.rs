@@ -400,79 +400,85 @@ fn errors_checks_dirty_with_the_documented_count() {
             214 |     const { if true { return 1; }; 0 }
                 |                       ^^^^^^^^
 
-            error: a member's own generic arguments are not supported yet: arguments written on `Measured::size` cannot be applied here
-              --> examples/errors.must:232:53
+            error: `Measured::size` takes no generic arguments
+              --> examples/errors.must:233:53
                 |
-            232 | static member_own_turbofish = fn () -> () { let f = Measured::size::<usize>; };
+            233 | static member_own_turbofish = fn () -> () { let f = Measured::size::<usize>; };
                 |                                                     ^^^^^^^^^^^^^^^^^^^^^^^
 
-            error: `len` is a field of `Sized`, not a member — fields are reached through a value: `value.len`
-              --> examples/errors.must:240:55
+            error: `Counted::step` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)
+              --> examples/errors.must:246:62
                 |
-            240 | static field_through_the_type = fn () -> () { let n = Sized::len; };
+            246 | static member_own_const_turbofish = fn (n: usize) -> usize { Counted::step::<3>(n) };
+                |                                                              ^^^^^^^^^^^^^^^^^^^^^
+
+            error: `len` is a field of `Sized`, not a member — fields are reached through a value: `value.len`
+              --> examples/errors.must:254:55
+                |
+            254 | static field_through_the_type = fn () -> () { let n = Sized::len; };
                 |                                                       ^^^^^^^^^^
-               = note: `Sized` is defined here (examples/errors.must:239:6)
+               = note: `Sized` is defined here (examples/errors.must:253:6)
 
             error: `Self` names the implementer, so it cannot be `_`: write the type (`Trait::<Self = Type>::member`), or use the short form `Trait::member(...)` where an argument determines `Self`
-              --> examples/errors.must:253:45
+              --> examples/errors.must:267:45
                 |
-            253 | static self_hole = fn (n: usize) -> usize { Countable::<Self = _>::count(n) };
+            267 | static self_hole = fn (n: usize) -> usize { Countable::<Self = _>::count(n) };
                 |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
             error: using this borrow where a longer-lived one is expected needs `@a` to outlive `@b`, which this signature does not declare; add `@a: @b` to the binder
-              --> examples/errors.must:262:80
+              --> examples/errors.must:276:80
                 |
-            262 | static undeclared_outlives = fn::<@a, @b>(x: usize.&::<@a>) -> usize.&::<@b> { x };
+            276 | static undeclared_outlives = fn::<@a, @b>(x: usize.&::<@a>) -> usize.&::<@b> { x };
                 |                                                                                ^
 
             error: cannot resolve `::Point` without an expected type — write `Enum::Point`
-              --> examples/errors.must:272:53
+              --> examples/errors.must:286:53
                 |
-            272 | static sigil_without_a_type = fn () -> () { let s = ::Point; };
+            286 | static sigil_without_a_type = fn () -> () { let s = ::Point; };
                 |                                                     ^^^^^^^
 
             error: `bump` takes `Self.&mut`, and a borrow is never inserted for an owned receiver — write `.&mut.bump(...)`
-              --> examples/errors.must:289:5
+              --> examples/errors.must:303:5
                 |
-            289 |     c.bump()
+            303 |     c.bump()
                 |     ^^^^^^^^
-               = note: `bump` is defined here (examples/errors.must:284:9)
+               = note: `bump` is defined here (examples/errors.must:298:9)
 
             error: generic arguments use the turbofish: write `Boxed::<...>`
-              --> examples/errors.must:300:37
+              --> examples/errors.must:314:37
                 |
-            300 | static bare_angle_generics = fn (b: Boxed<usize>) -> usize { b.value };
+            314 | static bare_angle_generics = fn (b: Boxed<usize>) -> usize { b.value };
                 |                                     ^^^^^^^^^^^^
                = help: Insert `::`
 
             error: cannot call `read_line` in a const context; const evaluation cannot have side effects
-              --> examples/errors.must:308:29
+              --> examples/errors.must:322:29
                 |
-            308 | static read_line_in_const = read_line();
+            322 | static read_line_in_const = read_line();
                 |                             ^^^^^^^^^
-               = note: this item's initializer is a const context (examples/errors.must:308:1)
+               = note: this item's initializer is a const context (examples/errors.must:322:1)
 
             error: borrows are spelled postfix: `x.&` / `x.&mut`
-              --> examples/errors.must:317:13
+              --> examples/errors.must:331:13
                 |
-            317 |     let r = &x;
+            331 |     let r = &x;
                 |             ^^
                = help: Rewrite as postfix
 
             error: calling the host import `host_read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
-              --> examples/errors.must:327:58
+              --> examples/errors.must:341:58
                 |
-            327 | static unvouched_import = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
+            341 | static unvouched_import = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
                 |                                                          ^^^^^^^^^^^^^^^
 
             error: an `extern fn` declares a host import and has no body; the implementation lives on the other side of the boundary
-              --> examples/errors.must:335:58
+              --> examples/errors.must:349:58
                 |
-            335 | static import_with_a_body = extern fn(n: usize) -> usize { n };
+            349 | static import_with_a_body = extern fn(n: usize) -> usize { n };
                 |                                                          ^^^^^
                = help: Remove the body
 
-            found 32 errors and 1 warning
+            found 33 errors and 1 warning
         "#]],
     );
 }

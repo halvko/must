@@ -1289,14 +1289,18 @@ fn reject_nested_generic_binder(fn_literal: &ast::FnLiteral, errors: &mut Vec<Sy
     // binder (a requirement may be a generic fn — Display's `fmt` over
     // `W: Write`), so the whole binder is live there.
     //
-    // An INHERENT member's binder is live for REGIONS and reserved for
-    // everything else. The split is not arbitrary: the type's own type and
-    // const params already flow into every member, so a member-own one is
-    // redundant sugar. A region has no such source — regions on type
-    // declarations are themselves reserved — so a member that takes a
-    // borrow of `Self` has nowhere else to bind the per-call region it
-    // needs, and with no elision it may not decline to name one. Granting
-    // the other two kinds deletes the two errors below and nothing else.
+    // An INHERENT member's binder is live for REGIONS and TYPES, and
+    // reserved for CONSTS. Types were the redundant-sugar case only for as
+    // long as a member could not say anything the owner's binder could not
+    // already say; `flat_map = fn::<U>(f: fn(T) -> Option::<U>, s: Self)`
+    // is the counter-example — `U` varies per CALL, and no binder on
+    // `Option` can express that. Consts stay reserved on a different
+    // ground entirely, and the message says so: a const argument is part
+    // of an INSTANCE's identity, so it would have to reach
+    // `Rvalue::Instantiate`'s argument list and the mangled symbol — and
+    // the one place a member's arguments are carried reads them off the
+    // receiver's own type, which cannot supply what the receiver does not
+    // have. Granting it deletes the error below and nothing else here.
     if fn_literal
         .syntax()
         .parent()
@@ -1307,14 +1311,11 @@ fn reject_nested_generic_binder(fn_literal: &ast::FnLiteral, errors: &mut Vec<Sy
         }
         for param in generic_param_list.params() {
             let message = match &param {
-                ast::GenericParam::RegionParam(_) => continue,
-                ast::GenericParam::TypeParam(_) => {
-                    "a member's own type parameters are not supported yet \
-                     (the type's own binders are already in scope)"
-                }
+                ast::GenericParam::RegionParam(_) | ast::GenericParam::TypeParam(_) => continue,
                 ast::GenericParam::ConstParam(_) => {
                     "a member's own const parameters are not supported yet \
-                     (the type's own binders are already in scope)"
+                     (a const argument is part of an instance's identity, and a \
+                     member's arguments are read off the receiver's own type)"
                 }
             };
             errors.push(SyntaxError {

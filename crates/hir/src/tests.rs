@@ -9872,16 +9872,17 @@ static pick = fn(b: bool) -> fn(usize) -> Option::<usize> {
 // ---- second-segment generic arguments -----------------------------------
 //
 // A turbofish on a path's SECOND segment parses into a real node of its
-// own (`syntax`'s `MEMBER_GENERIC_ARGS`) and is refused HERE, by what the
-// segment names: a MEMBER's own binder is future-legal and reserved, a
-// VARIANT's arguments are the owner's and misplaced. The split cannot live
-// in the parser — it does not know which is which.
+// own (`syntax`'s `MEMBER_GENERIC_ARGS`) and is judged HERE, by what the
+// segment names: a MEMBER's own binder SPENDS it, a VARIANT's arguments
+// are the owner's and misplaced. The split cannot live in the parser — it
+// does not know which is which.
 
 #[test]
-fn member_own_generic_arguments_are_reserved() {
-    // The reserve voice: the form will become legal (member-own binders
-    // are declared future), so it says "not supported yet" rather than
-    // correcting the spelling.
+fn member_own_generic_arguments_are_matched_against_the_members_own_binder() {
+    // A member with no binder of its own takes no arguments — the same
+    // arity report a non-generic item's turbofish gets, naming the member.
+    // (The list is not the OWNER's and never falls back to it; that claim
+    // is `member_own_generic_arguments_do_not_instantiate_the_owner`.)
     check_diagnostics(
         r#"
 type Measured = struct { n: usize } with {
@@ -9893,7 +9894,7 @@ static main = fn() -> usize {
 };
 "#,
         expect![[r#"
-            144..167: a member's own generic arguments are not supported yet: arguments written on `Measured::size` cannot be applied here
+            144..167: `Measured::size` takes no generic arguments
         "#]],
     );
 }
@@ -9924,8 +9925,10 @@ fn member_own_generic_arguments_do_not_instantiate_the_owner() {
     // The failure mode the ERROR node used to prevent structurally, now
     // prevented by the tree itself: were `::<usize>` read as the OWNER's
     // list, this program would be exactly `Pair::<usize>::first(p)` and
-    // would check CLEAN. It must not. One reservation, and the path
-    // produces no value.
+    // would check CLEAN. It must not — `first` declares no binder of its
+    // own, so its own list is empty and one argument is one too many. The
+    // OWNER's arguments still come from inference (from `p`), which is
+    // what the type side below pins.
     check_diagnostics(
         r#"
 type Pair = struct::<T> { a: T, b: T } with {
@@ -9937,11 +9940,11 @@ static main = fn() -> usize {
 };
 "#,
         expect![[r#"
-            188..208: a member's own generic arguments are not supported yet: arguments written on `Pair::first` cannot be applied here; if these are meant for `Pair`, write `Pair::<...>::first`
+            188..208: `Pair::first` takes no generic arguments; if these are meant for `Pair`, write `Pair::<...>::first`
         "#]],
     );
-    // And the type side of the same claim: the callee is an error, not an
-    // instantiated `fn(Pair::<usize>) -> usize`.
+    // And the type side of the same claim: the OWNER's argument came from
+    // `p`, never from the written list.
     check_infer(
         r#"
 type Pair = struct::<T> { a: T, b: T } with {
@@ -9952,9 +9955,9 @@ static main = fn(p: Pair::<usize>) -> usize { Pair::first::<usize>(p) };
         expect![[r#"
             116..173 'fn(p: Pair::<usiz...': fn(Pair::<usize>) -> usize
             119..120 'p': Pair::<usize>
-            146..173 '{ Pair::first::<u...': {error}
-            148..168 'Pair::first::<usize>': {error}
-            148..171 'Pair::first::<usi...': {error}
+            146..173 '{ Pair::first::<u...': usize
+            148..168 'Pair::first::<usize>': fn(Pair::<usize>) -> usize
+            148..171 'Pair::first::<usi...': usize
             169..170 'p': Pair::<usize>
         "#]],
     );
@@ -9976,7 +9979,7 @@ static main = fn() -> usize {
 };
 "#,
         expect![[r#"
-            188..217: a member's own generic arguments are not supported yet: arguments written on `Pair::first` cannot be applied here
+            188..217: `Pair::first` takes no generic arguments
         "#]],
     );
 }
@@ -10039,54 +10042,96 @@ static main = fn() -> usize {
 }
 
 #[test]
-fn trait_member_own_generic_arguments_are_reserved_in_both_forms() {
-    // A trait requirement MAY already carry its own binder (`fmt::<W>`),
-    // so the trait side is where member generics will land first. Applying
-    // one at the use site is reserved in the value form and in the TR01
-    // short/named call forms alike — a call must not run with the written
-    // arguments quietly dropped.
+fn trait_member_own_type_generic_arguments_are_spendable_in_both_forms() {
+    // A trait requirement has always been allowed its own binder; what
+    // changed is that the use site may now SPELL its type arguments — in
+    // the value form and in the TR01 short/named call forms alike, through
+    // the one `matched_member_args` every member path shares.
     check_diagnostics(
         r#"
-trait D = requires { n: fn(k: usize) -> Self; } with {
-    impl usize { n = fn(k: usize) -> usize { k }; }
+trait D = requires { n: fn::<T>(t: T, s: Self) -> usize; } with {
+    impl usize { n = fn::<T>(t: T, s: usize) -> usize { s }; }
 };
 static value = fn() -> usize {
     let f = D::<Self = usize>::n::<usize>;
     0
 };
-static called = fn() -> usize { D::n::<usize>(3) };
+static called = fn(s: usize) -> usize { D::n::<usize>(1, s) };
+"#,
+        expect![[r#""#]],
+    );
+    // And the binder-less report on a requirement with none of its own —
+    // the same sentence an inherent member gets, named for the trait whose
+    // requirement it is, and with NO `{owner}::<...>::{member}` hint: that
+    // spelling collides with the separately reserved generic-trait form.
+    check_diagnostics(
+        r#"
+trait D = requires { n: fn(s: Self) -> usize; } with {
+    impl usize { n = fn(s: usize) -> usize { s }; }
+};
+static value = fn() -> usize {
+    let f = D::<Self = usize>::n::<usize>;
+    0
+};
+static called = fn(s: usize) -> usize { D::n::<usize>(s) };
 "#,
         expect![[r#"
-            154..183: a member's own generic arguments are not supported yet: arguments written on `D::n` cannot be applied here
-            226..239: a member's own generic arguments are not supported yet: arguments written on `D::n` cannot be applied here
+            154..183: `D::n` takes no generic arguments
+            234..250: `D::n` takes no generic arguments
+        "#]],
+    );
+}
+
+#[test]
+fn a_member_reached_through_a_borrow_is_named_by_its_impl_head() {
+    // Every message about a member's own arguments names a spelling a
+    // program could CONTAIN. A trait-impl member's item name is already the
+    // written `head::member` form, so it is passed through — naming it from
+    // the RECEIVER's rendered type instead would report `usize.&::peek` for
+    // the ordinary `Self.&` member, which is not a path.
+    check_diagnostics(
+        r#"
+trait Peek = requires {
+    none: fn::<@a>(s: Self.&::<@a>) -> usize;
+    one: fn::<@a, U>(u: U, s: Self.&mut::<@a>) -> usize;
+    counted: fn::<@a, const N: usize>(s: Self.&::<@a>) -> usize;
+} with {
+    impl usize {
+        none = fn::<@a>(s: usize.&::<@a>) -> usize { 1 };
+        one = fn::<@a, U>(u: U, s: usize.&mut::<@a>) -> usize { 1 };
+        counted = fn::<@a, const N: usize>(s: usize.&::<@a>) -> usize { N };
+    }
+};
+static f = fn::<@a>(n: usize.&::<@a>, m: usize.&mut::<@a>) -> usize {
+    n.none::<bool>() + m.one::<bool, str>(true) + n.counted::<3>()
+};
+"#,
+        expect![[r#"
+            506..522: `usize::none` takes no generic arguments
+            525..549: `usize::one` takes 1 generic argument, found 2
+            552..568: `usize::counted` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)
         "#]],
     );
 }
 
 #[test]
 fn member_own_generic_arguments_on_a_trait_declaring_its_own_binder() {
-    // Unlike an inherent member (whose own generics are refused at
-    // declaration), a trait requirement MAY already declare one
-    // (`fmt::<W: Write>`) — so the reservation here must not claim the
-    // member "has no binder of its own", and must not hint at
-    // `Display::<...>::fmt` (that spelling collides with the separately
-    // reserved generic-TRAIT form). Checked in both the value and the
-    // TR01 short-call forms.
+    // The requirement's own BOUND rides its binder to the use site: a
+    // spelled argument is checked against it, exactly as a free generic
+    // fn's turbofish argument is.
     check_diagnostics(
         r#"
-trait Write = requires { push: fn(s: str, w: Self) -> Self; };
+trait Write = requires { push: fn(s: str, w: Self) -> Self; } with {
+    impl usize { push = fn(s: str, w: usize) -> usize { w }; }
+};
 trait Display = requires { fmt: fn::<W: Write>(w: W, x: Self) -> W; } with {
-    impl usize { fmt = fn::<W: Write>(w: W, x: usize) -> W { w }; }
+    impl bool { fmt = fn::<W: Write>(w: W, x: bool) -> W { w }; }
 };
-static value = fn() -> usize {
-    let f = Display::fmt::<usize>;
-    0
-};
-static called = fn() -> usize { Display::fmt::<usize>(0, 1) };
+static ok = fn(w: usize, x: bool) -> usize { Display::fmt::<usize>(w, x) };
+static bad = fn(w: str, x: bool) -> str { Display::fmt::<str>(w, x) };
 "#,
         expect![[r#"
-            255..276: a member's own generic arguments are not supported yet: arguments written on `Display::fmt` cannot be applied here
-            319..340: a member's own generic arguments are not supported yet: arguments written on `Display::fmt` cannot be applied here
+            400..425: the bound `W: Write` is not satisfied here: `str` does not implement `Write`
         "#]],
     );
 }
@@ -10094,11 +10139,10 @@ static called = fn() -> usize { Display::fmt::<usize>(0, 1) };
 #[test]
 fn member_own_generic_arguments_infer_the_owners_const_args_exactly_once() {
     // Regression: the owner's turbofish const args used to be inferred
-    // TWICE on the trait path through this reservation —
-    // `trait_path_self_arg` types every const in `vp_args` regardless of
-    // whether it finds `Self`, so `reserve_member_own_args` /
-    // `infer_qualified_trait_call` must never re-infer them. One
-    // type-mismatch, not two, in both the value and called forms.
+    // TWICE on the trait path — `trait_path_self_arg` types every const in
+    // `vp_args` regardless of whether it finds `Self`, so nothing under
+    // `infer_qualified_trait_call` may re-infer them. One type-mismatch,
+    // not two, in both the value and called forms.
     check_diagnostics(
         r#"
 trait D = requires { n: fn(k: usize) -> Self; } with {
@@ -10112,33 +10156,25 @@ static called = fn() -> usize { D::<const { 1 + true }>::n::<usize>(3) };
 "#,
         expect![[r#"
             154..189: `D` takes no generic arguments
-            154..189: a member's own generic arguments are not supported yet: arguments written on `D::n` cannot be applied here
+            154..189: a member value is impl-specific, so it must name the implementer: `D::<Self = Type>::n`
             170..174: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 168..169)
             232..267: `D` takes no generic arguments
-            232..267: a member's own generic arguments are not supported yet: arguments written on `D::n` cannot be applied here
+            232..270: `D::n` takes no generic arguments
+            232..270: cannot infer `Self` for `D::n`: no argument determines the implementing type — annotate an argument
             248..252: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 246..247)
         "#]],
     );
 }
 
 #[test]
-fn the_member_generic_program_the_future_will_make_legal() {
-    // The owner's own example, pinned as it behaves TODAY — the commit
-    // that lands member TYPE generics should have to change exactly these
-    // two lines and nothing else:
+fn the_member_generic_program_the_future_made_legal() {
+    // The program the reservation was written against, now checking
+    // clean — the whole grant, in one example: the DECLARATION's binder is
+    // live (`syntax::validation` no longer refuses the type half) and the
+    // USE site's arguments are spent on it.
     //
-    //   1. the DECLARATION's binder (`syntax::validation`'s reservation),
-    //   2. the USE site's arguments (this module's reservation).
-    //
-    // Both are diagnostics over a REAL parse: no ERROR nodes, no grammar
-    // change pending. Deleting them is the whole grant.
-    //
-    // The REGION half of the binder is no longer reserved (see
-    // `inherent_member_own_region_binder_is_live`): a member-own region has
-    // no other source, and it needs no use-site spelling either, because a
-    // region argument is always inferred. So the reservation narrowed from
-    // the whole binder list to the individual type/const params — which is
-    // why the range here covers `T`, not `::<T>`.
+    // Neither half ever needed a grammar change: both were always
+    // diagnostics over a REAL parse, and deleting them was the grant.
     check_diagnostics(
         r#"
 type Measured = struct { n: usize } with {
@@ -10151,9 +10187,590 @@ static main = fn() -> usize {
     0
 };
 "#,
+        expect![[r#""#]],
+    );
+}
+
+// ---- member-own TYPE binders --------------------------------------------
+//
+// The acid test for the whole arc, and the reason it was asked for: the
+// five `Option` members — two of which (`flat_map`, `map`) cannot be
+// written at all without a member-own type binder — over a forgettable
+// payload and a linear one. The two programs differ by exactly one
+// type-level clause.
+
+/// The five members, shared so the payload cases below cannot drift apart.
+const OPTION_MEMBERS: &str = r#"    impl Self {
+        is_some = const fn::<@local>(s: Self.&::<@local>) -> bool {
+            match s {
+                ::Some(_) => true,
+                ::None => false,
+            }
+        }
+        unwrap = const fn(s: Self) -> T {
+            match s {
+                ::Some(t) => t,
+                ::None => panic("unwrap was called on a ::None value"),
+            }
+        }
+        flat_map = fn::<U>(f: fn(T) -> Option::<U>, s: Self) -> Option::<U> {
+            match s {
+                ::Some(v) => { f(v) }
+                ::None => { Option::None }
+            }
+        }
+        map = fn::<U>(f: fn(T) -> U, s: Self) -> Option::<U> {
+            s.flat_map(fn(t) { Option::Some(f(t)) })
+        }
+        as_ref = fn::<@a>(s: Self.&::<@a>) -> Option::<T.&::<@a>> {
+            match s {
+                ::Some(t) => Option::Some(t),
+                ::None => Option::None,
+            }
+        }
+    }"#;
+
+#[test]
+fn the_five_option_members_check_clean_over_a_forgettable_payload() {
+    check_diagnostics(
+        &format!(
+            "\ntype Option = enum::<T> {{\n    Some(T),\n    None,\n}} with {{\n{OPTION_MEMBERS}\n}}\n"
+        ),
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn the_five_option_members_check_clean_over_a_linear_payload() {
+    // The SAME five bodies with `without forget` on the binder — the one
+    // type-level clause that says the payload may be linear. Nothing in
+    // `flat_map` or `map` moves a `T` twice or drops one, so nothing here
+    // should fire; a spurious linear diagnostic would mean the member's
+    // own `U` had quietly leaked into the payload's obligations.
+    check_diagnostics(
+        &format!(
+            "\ntype Option = enum::<T without forget> {{\n    Some(T),\n    None,\n}} with {{\n{OPTION_MEMBERS}\n}}\n"
+        ),
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn the_five_option_members_check_clean_over_option_of_string() {
+    // The acid test's point, exercised on the real linear type: `String`
+    // is `without forget`, so `Option::<String>` is the instantiation the
+    // type-level clause exists for. All five members, and `flat_map`/`map`
+    // over a payload that must be consumed.
+    check_string(
+        &format!(
+            r#"
+type Option = enum::<T without forget> {{
+    Some(T),
+    None,
+}} with {{
+{OPTION_MEMBERS}
+}}
+static length = fn(s: String) -> usize {{ let n = s.&.len(); s.drop(); n }};
+static wrap_length = fn(s: String) -> Option::<usize> {{ Option::Some(length(s)) }};
+static via_map = fn(text: str) -> usize {{
+    let o: Option::<String> = Option::Some(to_owned(text.&));
+    o.map(length).unwrap()
+}};
+static via_flat_map = fn(text: str) -> usize {{
+    let o: Option::<String> = Option::Some(to_owned(text.&));
+    o.flat_map::<usize>(wrap_length).unwrap()
+}};
+"#
+        ),
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_member_own_type_param_is_inferred_from_the_call() {
+    // No turbofish: `U` is an ordinary inference variable at the call site,
+    // pinned by the argument exactly as a free generic fn's would be.
+    check_infer(
+        r#"
+type Option = enum::<T> { Some(T), None } with {
+    impl Self {
+        map_to = fn::<U>(f: fn(T) -> U, s: Self) -> U {
+            match s { ::Some(t) => f(t), ::None => panic("none") }
+        }
+    }
+};
+static width = fn(n: usize) -> bool { n > 2 };
+static main = fn(o: Option::<usize>) -> bool { o.map_to(width) };
+"#,
         expect![[r#"
-            80..81: a member's own type parameters are not supported yet (the type's own binders are already in scope)
-            167..190: a member's own generic arguments are not supported yet: arguments written on `Measured::size` cannot be applied here
+            223..253 'fn(n: usize) -> b...': fn(usize) -> bool
+            226..227 'n': usize
+            244..253 '{ n > 2 }': bool
+            246..247 'n': usize
+            246..251 'n > 2': bool
+            250..251 '2': usize
+            269..319 'fn(o: Option::<us...': fn(Option::<usize>) -> bool
+            272..273 'o': Option::<usize>
+            300..319 '{ o.map_to(width) }': bool
+            302..303 'o': Option::<usize>
+            302..310 'o.map_to': fn(fn(usize) -> bool, Option::<usize>) -> bool
+            302..317 'o.map_to(width)': bool
+            311..316 'width': fn(usize) -> bool
+        "#]],
+    );
+}
+
+#[test]
+fn a_member_own_type_param_is_spellable_at_both_call_spellings() {
+    // The two use-site spellings of the same instantiation: the dot-call's
+    // own turbofish (a NEW grammar position — see `syntax`'s
+    // `member_turbofish_on_a_dot_call`) and the qualified path's, which
+    // has parsed into `MEMBER_GENERIC_ARGS` since the reservation.
+    check_diagnostics(
+        r#"
+type Option = enum::<T> { Some(T), None } with {
+    impl Self {
+        map_to = fn::<U>(f: fn(T) -> U, s: Self) -> U {
+            match s { ::Some(t) => f(t), ::None => panic("none") }
+        }
+    }
+};
+static width = fn(n: usize) -> bool { n > 2 };
+static dotted = fn(o: Option::<usize>) -> bool { o.map_to::<bool>(width) };
+static pathed = fn(o: Option::<usize>) -> bool { Option::map_to::<bool>(width, o) };
+static owner_and_member = fn(o: Option::<usize>) -> bool {
+    Option::<usize>::map_to::<bool>(width, o)
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_written_member_type_argument_is_checked_against_the_call() {
+    // The turbofish PINS the parameter, so a disagreeing argument is an
+    // ordinary mismatch at the argument — the same thing a free generic
+    // fn's turbofish does.
+    check_diagnostics(
+        r#"
+type Option = enum::<T> { Some(T), None } with {
+    impl Self {
+        map_to = fn::<U>(f: fn(T) -> U, s: Self) -> U {
+            match s { ::Some(t) => f(t), ::None => panic("none") }
+        }
+    }
+};
+static width = fn(n: usize) -> bool { n > 2 };
+static wrong = fn(o: Option::<usize>) -> usize { o.map_to::<usize>(width) };
+"#,
+        expect![[r#"
+            322..327: type mismatch: expected `fn(usize) -> usize`, found `fn(usize) -> bool`
+        "#]],
+    );
+}
+
+#[test]
+fn a_member_own_type_param_is_rigid_inside_the_body() {
+    // Rigid-parameter checking (TR07), unchanged by whose binder the param
+    // came from: the body is checked ONCE against a rigid `U`, so an
+    // operation `U` does not support is refused at the DEFINITION, not at
+    // some instantiation.
+    check_diagnostics(
+        r#"
+type Wrap = struct { n: usize } with {
+    impl Self {
+        bad = fn::<U>(u: U, w: Self) -> usize { u + w.n };
+    }
+};
+"#,
+        expect![[r#"
+            104..105: type mismatch: expected `{number}`, found `U` (`+` requires `{number}` operands at 106..107)
+        "#]],
+    );
+}
+
+#[test]
+fn the_forget_default_bound_applies_to_a_member_own_type_param() {
+    // A member's `U` is a type parameter like any other: it requires
+    // `forget` unless it says otherwise, and the check happens at the
+    // instantiation edge the member call is.
+    check_diagnostics(
+        r#"
+type Wrap = struct { n: usize } with {
+    impl Self {
+        take = fn::<U>(u: U, w: Self) -> usize { w.n };
+        take_linear = fn::<U without forget>(u: U, w: Self) -> U { u };
+    }
+};
+type Lin = struct { n: usize } without forget with {
+    impl Self { sink = fn(l: Self) -> usize { let Lin(struct { n }) = l; n }; }
+};
+static refused = fn(w: Wrap, l: Lin) -> usize { w.take(l) };
+static allowed = fn(w: Wrap, l: Lin) -> usize { w.take_linear(l).sink() };
+"#,
+        expect![[r#"
+            377..386: `Lin` cannot be a `U`: `Lin` is declared `without forget`, and `U` requires `forget` (every type parameter does unless it is written `U without forget`)
+        "#]],
+    );
+}
+
+#[test]
+fn a_member_own_type_binder_composes_with_its_region_binder() {
+    // Both halves of the member's own binder at once, in the order the
+    // owner's binder is extended: regions stay always-inferred (no
+    // spelling at the call), the type is the one the turbofish spells.
+    check_diagnostics(
+        r#"
+type Cell = struct::<T> { v: T } with {
+    impl Self {
+        pick = fn::<@b, U>(alt: U, c: Self.&::<@b>) -> U { alt };
+    }
+};
+static f = fn::<@a>(c: Cell::<usize>.&::<@a>) -> bool { c.pick::<bool>(true) };
+static g = fn::<@a>(c: Cell::<usize>.&::<@a>) -> bool { c.pick(true) };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_member_own_type_param_shadows_a_same_named_owner_param() {
+    // Two `T`s in one binder — the owner's and the member's. The member's
+    // is written LAST and wins inside the member, which is the rule
+    // `scopes` already applies to a binder's const params (and the rule
+    // local shadowing follows). `Self` is unaffected: it is the owner at
+    // the OWNER's binder, whatever the member renamed on top of it.
+    check_diagnostics(
+        r#"
+type P = struct::<T> { a: T } with {
+    impl Self {
+        m = fn::<T>(t: T, p: Self) -> T { t };
+    }
+};
+static main = fn(p: P::<usize>) -> bool { p.m::<bool>(true) };
+static plain = fn(p: P::<usize>) -> usize { p.a };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn every_refused_member_turbofish_still_types_its_const_arguments() {
+    // THE INVARIANT: every expression in a body gets a type, and a const
+    // argument inside a member turbofish is an ordinary expression. It is
+    // easy to lose on the exits that refuse the PATH for some other
+    // reason, because those return before anything looks at the list — so
+    // the freeing is structural (one wrapper per entry point, the spend
+    // sites TAKE), and this pins one probe per family of exit.
+    //
+    // `const { 1 + true }` is the probe: if the argument were never
+    // inferred, its own mismatch would go missing.
+    check_diagnostics(
+        r#"
+type Shape = enum::<T> { Circle(T), Point } with {
+    impl Self { area = fn(s: Self) -> usize { 1 }; }
+};
+trait D = requires { n: fn(s: Self) -> usize; } with {
+    impl usize { n = fn(s: usize) -> usize { s }; }
+};
+static nope = fn() -> usize { Shape::missing::<const { 1 + true }>(1) };
+static variant = fn() -> usize { let c = Shape::Circle::<const { 1 + true }>; 0 };
+static wrong_ns = fn() -> usize { let f = D::gone::<const { 1 + true }>; 0 };
+static no_impl = fn() -> usize { let f = D::<Self = bool>::n::<const { 1 + true }>; 0 };
+static on_a_value = fn(n: usize) -> usize { n.oops::<const { 1 + true }>(); 0 };
+"#,
+        expect![[r#"
+            255..262: `Shape` has no variant `missing` (`Shape` is defined here at 6..11)
+            277..281: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 275..276)
+            332..367: a variant has no generic arguments of its own: they belong to the owner — write `Shape::<...>::Circle`
+            360..364: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 358..359)
+            416..445: `D` has no requirement `gone`
+            438..442: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 436..437)
+            493..534: `bool` does not implement `D`
+            527..531: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 525..526)
+            585..615: no field or member `oops` on `usize`
+            606..610: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 604..605)
+        "#]],
+    );
+}
+
+#[test]
+fn a_refused_member_turbofish_says_nothing_it_cannot_back_up() {
+    // The other half of the invariant: the const arguments are consumed
+    // SILENTLY on every path that is already refusing the call. "`map_to`
+    // takes no generic arguments" is a lie about a member that HAS a
+    // binder, and piling it on an unrelated refusal is the noise the
+    // infectious-and-silent rule exists to prevent. Not one of the
+    // programs below may produce it.
+    check_diagnostics(
+        r#"
+type Option = enum::<T> { Some(T), None } with {
+    impl Self { map_to = fn::<U>(f: fn(T) -> U, s: Self) -> U { panic("x") }; }
+};
+type Holder = struct { go: fn(usize) -> usize };
+static half_typed = fn(o: Option::<usize>) -> usize { o.map_to::<>; 0 };
+static wrong_name = fn(o: Option::<usize>) -> usize { o.map_two::<usize>(1) };
+static on_broken = fn(o: Nope) -> usize { o.map_to::<usize>(1) };
+// A BARE INTEGER is the only const-arg form that can produce the
+// no-defining-use diagnostic, so it is the only probe that can catch the
+// noise coming back: the list is dropped, and a number nobody kept must
+// not be told to annotate itself. (`const { ... }` cannot show this — a
+// block's contents are inferred whatever happens to the list.)
+static dropped_number = fn(h: Holder) -> usize { h.go::<3>(1) };
+static unknown_number = fn(h: Holder) -> usize { h.nope::<3>(1) };
+"#,
+        expect![[r#"
+            236..248: `map_to` is a member fn, not a field; call it: `.map_to(...)`
+            309..330: no field or member `map_two` on `Option::<usize>`
+            359..363: unknown type `Nope`
+            801..810: `go` takes no generic arguments
+            866..880: no field or member `nope` on `Holder`
+        "#]],
+    );
+}
+
+#[test]
+fn a_binderless_member_refuses_even_an_empty_turbofish() {
+    // `::<>` is a WRITTEN list: accepting it silently would make the
+    // spelling mean two things. One sentence for every binder-less
+    // turbofish, the same one a non-generic item's gets.
+    check_diagnostics(
+        r#"
+type Measured = struct { n: usize } with {
+    impl Self { size = fn(m: Self) -> usize { m.n }; }
+};
+trait D = requires { n: fn(s: Self) -> usize; } with {
+    impl usize { n = fn(s: usize) -> usize { s }; }
+};
+static empty_inherent = fn(m: Measured) -> usize { m.size::<>() };
+static empty_impl = fn(s: usize) -> usize { s.n::<>() };
+static empty_path = fn(m: Measured) -> usize { Measured::size::<>(m) };
+"#,
+        expect![[r#"
+            263..275: `Measured::size` takes no generic arguments
+            323..332: `usize::n` takes no generic arguments
+            383..401: `Measured::size` takes no generic arguments
+        "#]],
+    );
+}
+
+#[test]
+fn a_member_turbofish_has_no_nameable_argument() {
+    // TR01 gives v1 exactly ONE nameable argument, a trait's `Self`, and it
+    // is written on the OWNER's list. A member's own arguments are
+    // positional; a name here is refused rather than swallowed.
+    //
+    // WHICH refusal is the owner's to decide, and both sentences below are
+    // true of their own program. An INHERENT owner (the first two) has no
+    // `Self` argument at all, so it gets the same not-a-trait sentence any
+    // other non-trait list gets. A TRAIT's member (the last three) does
+    // have one, one segment to the left, so denying the trait-ness would
+    // be false about what the reader can see — there the wrong thing is
+    // the POSITION, and the message names the spelling that has it.
+    check_diagnostics(
+        r#"
+type Option = enum::<T> { Some(T), None } with {
+    impl Self { map_to = fn::<U>(f: fn(T) -> U, s: Self) -> U { panic("x") }; }
+};
+trait Pk = requires { pick: fn::<U>(alt: U, s: Self) -> U; } with {
+    impl usize { pick = fn::<U>(alt: U, s: usize) -> U { alt }; }
+};
+static width = fn(n: usize) -> bool { n > 2 };
+static dotted = fn(o: Option::<usize>) -> bool { o.map_to::<Self = bool>(width) };
+static pathed = fn(o: Option::<usize>) -> bool { Option::map_to::<Self = bool>(width, o) };
+static impl_dot = fn(n: usize) -> bool { n.pick::<Self = bool>(true) };
+static trait_path = fn(n: usize) -> bool { Pk::pick::<Self = bool>(true, n) };
+static bound = fn::<T: Pk>(x: T) -> bool { x.pick::<Self = bool>(true) };
+"#,
+        expect![[r#"
+            366..396: only a trait has a `Self` argument to name
+            449..478: only a trait has a `Self` argument to name
+            533..560: a member's own generic arguments are positional: `Self` is the owner's, one segment to the left (`Trait::<Self = Type>::member`)
+            607..639: a member's own generic arguments are positional: `Self` is the owner's, one segment to the left (`Trait::<Self = Type>::member`)
+            686..713: a member's own generic arguments are positional: `Self` is the owner's, one segment to the left (`Trait::<Self = Type>::member`)
+        "#]],
+    );
+}
+
+#[test]
+fn cannot_infer_a_member_own_param_names_the_spelling_that_pins_it() {
+    // The one prompt that exists to send a reader to the member
+    // turbofish, so it has to name a turbofish the reader can WRITE — and
+    // that is the SITE's answer, not the member's. At a dot-call the
+    // member stands alone (`.fresh::<...>(...)`); at a path the qualified
+    // name carries the list (`Option::fresh::<...>`, `Mk::mk::<...>`); and
+    // a trait member VALUE is impl-specific, so there the bare path is
+    // itself refused and the implementer naming is part of the spelling
+    // (`Mk::<Self = usize>::mk::<...>`). Blame follows the site too — a
+    // requirement's own `U` is `Mk::mk`'s, not `Mk`'s. Every spelling
+    // below is checked clean when written out.
+    check_diagnostics(
+        r#"
+type Option = enum::<T> { Some(T), None } with {
+    impl Self { fresh = fn::<U>(s: Self) -> U { panic("x") }; }
+};
+trait Mk = requires { mk: fn::<U>(s: Self) -> U; } with {
+    impl usize { mk = fn::<U>(s: usize) -> U { panic("x") }; }
+};
+static a = fn(o: Option::<usize>) -> usize { o.fresh(); 1 };
+static b = fn(o: Option::<usize>) -> usize { Option::fresh(o); 1 };
+static c = fn(n: usize) -> usize { n.mk(); 1 };
+static d = fn(n: usize) -> usize { Mk::mk(n); 1 };
+static e = fn::<T: Mk>(x: T) -> usize { x.mk(); 1 };
+static f = fn(n: usize) -> usize { let g = Mk::<Self = usize>::mk; g(n); 1 };
+"#,
+        expect![[r#"
+            286..295: cannot infer the type parameter `U` of `Option::fresh`; write `.fresh::<...>(...)` to specify it
+            347..360: cannot infer the type parameter `U` of `Option::fresh`; write `Option::fresh::<...>` to specify it
+            405..411: cannot infer the type parameter `U` of `usize::mk`; write `.mk::<...>(...)` to specify it
+            453..462: cannot infer the type parameter `U` of `Mk::mk`; write `Mk::mk::<...>` to specify it (defined here at 123..125)
+            509..515: cannot infer the type parameter `U` of `Mk::mk`; write `.mk::<...>(...)` to specify it (defined here at 123..125)
+            565..587: cannot infer the type parameter `U` of `Mk::mk`; write `Mk::<Self = usize>::mk::<...>` to specify it
+        "#]],
+    );
+}
+
+#[test]
+fn a_bound_directed_dot_call_spends_a_member_turbofish() {
+    // The THIRD spend site, and the one no test reached: a rigid receiver
+    // resolves through the enclosing dictionary, and the REQUIREMENT's own
+    // binder is instantiated there — so its type arguments are spellable
+    // exactly as a concrete receiver's are.
+    check_diagnostics(
+        r#"
+trait D = requires { pick: fn::<U>(alt: U, s: Self) -> U; } with {
+    impl usize { pick = fn::<U>(alt: U, s: usize) -> U { alt }; }
+};
+static generic = fn::<T: D>(x: T) -> bool { x.pick::<bool>(true) };
+static inferred = fn::<T: D>(x: T) -> bool { x.pick(true) };
+static main = fn() -> bool { generic::<usize>(1) };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_member_turbofish_argument_is_named_in_the_blame() {
+    // `Cause::MemberGenericArg`: the hint reads the MEMBER's list, which
+    // hangs one level down inside `MEMBER_GENERIC_ARGS` — under a dot-call
+    // callee here, under a path in the second program. Sharing
+    // `Cause::GenericArg`'s renderer would have pointed at the OWNER's
+    // argument instead, which is the wrong node and the wrong `usize`.
+    check_diagnostics(
+        r#"
+type Cell = struct::<T> { v: T } with {
+    impl Self { pick = fn::<U>(alt: U, c: Self) -> U { alt }; }
+};
+static dotted = fn(c: Cell::<usize>) -> bool { c.pick::<bool>(1) };
+static pathed = fn(c: Cell::<usize>) -> bool { Cell::<usize>::pick::<bool>(1, c) };
+"#,
+        expect![[r#"
+            170..171: type mismatch: expected `bool`, found `{number}` (because this member argument instantiated the parameter to `bool` at 164..168)
+            251..252: type mismatch: expected `bool`, found `{number}` (because this member argument instantiated the parameter to `bool` at 245..249)
+        "#]],
+    );
+}
+
+#[test]
+fn two_same_named_parameters_are_told_apart_in_the_message() {
+    // `shadowed_param_note`, both branches. ONE binder declaring the name
+    // twice (a member shadowing its owner's `T`) is the blessed case, so
+    // its mismatch has to be actionable — "expected `T`, found `T`" is not.
+    // Indices count every kind, which is why the member's `T` here is 1 and
+    // not 0, and why the message says so.
+    check_diagnostics(
+        r#"
+type P = struct::<T> { a: T } with {
+    impl Self {
+        bad = fn::<T>(t: T, p: Self) -> T { p.a };
+    }
+};
+"#,
+        expect![[r#"
+            98..101: type mismatch: expected `T`, found `T` — `P::bad` declares `T` twice (the owner's parameters come first, then the member's own, and every kind counts — regions included): this position wants the one at binder index 1, the value has the one at index 0 — rename one of them (expected `T` because of this return type at 91..95)
+        "#]],
+    );
+    // The pair need not be the WHOLE type: the shape the blessing invites
+    // most is `Self` against `Owner::<T>`, where the two `T`s sit one
+    // constructor down and the plain message reads "expected `P::<T>`,
+    // found `P::<T>`". A borrow of one is the same case one more
+    // constructor down, and pins that regions count in the index (the
+    // member's `T` is 2 there, not 1).
+    check_diagnostics(
+        r#"
+type P = struct::<T> { a: T } with {
+    impl Self {
+        nested = fn::<T>(t: T, p: Self) -> P::<T> { p };
+        deep = fn::<@x, T>(t: T, p: Self.&::<@x>) -> P::<T>.&::<@x> { p };
+    }
+};
+"#,
+        expect![[r#"
+            106..107: type mismatch: expected `P::<T>`, found `P::<T>` — `P::nested` declares `T` twice (the owner's parameters come first, then the member's own, and every kind counts — regions included): this position wants the one at binder index 1, the value has the one at index 0 — rename one of them (expected `P::<T>` because of this return type at 94..103)
+            181..182: type mismatch: expected `P::<T>.&::<@x>`, found `P::<T>.&::<@x>` — `P::deep` declares `T` twice (the owner's parameters come first, then the member's own, and every kind counts — regions included): this position wants the one at binder index 2, the value has the one at index 0 — rename one of them (expected `P::<T>.&::<@x>` because of this return type at 161..178)
+        "#]],
+    );
+    // The note's OTHER branch (two different items each declaring the
+    // name) is UNREACHABLE today and is not pinned as behaviour, because
+    // there is no program that produces it: a param cannot escape its
+    // body, so every cross-item mention instantiates to fresh variables
+    // and two rigid params only ever meet inside ONE binder. Both shapes
+    // below are the near-misses, and both check clean — which is the
+    // claim, and what would break first if that invariant ever moved.
+    check_diagnostics(
+        r#"
+type P = struct::<T> { a: T } with {
+    impl Self {
+        one = fn::<T>(t: T, p: Self) -> T { P::two(t, p) };
+        two = fn::<T>(t: T, p: Self) -> T { t };
+    }
+};
+static f = fn::<T>(x: T) -> T { g(x) };
+static g = fn::<T>(x: T) -> T { x };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_member_own_const_argument_is_the_one_reservation_left() {
+    // What `MemberOwnConstArgs` still says, and the only shape that can
+    // still say it: an INHERENT member cannot declare a const parameter at
+    // all (`syntax::validation` refuses it), so this needs a trait
+    // requirement — whose own binder has always been live — and the
+    // refusal is of the WHOLE list, in both the called and the dot forms.
+    check_diagnostics(
+        r#"
+trait D = requires { n: fn::<const N: usize>(s: Self) -> usize; } with {
+    impl usize { n = fn::<const N: usize>(s: usize) -> usize { N }; }
+};
+static called = fn(s: usize) -> usize { D::n::<3>(s) };
+static dotted = fn(s: usize) -> usize { s.n::<3>() };
+"#,
+        expect![[r#"
+            187..199: `D::n` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)
+            243..253: `usize::n` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)
+        "#]],
+    );
+}
+
+#[test]
+fn a_member_turbofish_lands_only_on_a_member() {
+    // The dot's new turbofish position is spendable on a MEMBER and on
+    // nothing else the dot can reach: an fn-typed field carries the call
+    // as a VALUE (no binder), and a builtin member has no binder either.
+    // One refusal for both, stated on the name.
+    check_diagnostics(
+        r#"
+type Holder = struct { go: fn(usize) -> usize };
+static field_call = fn(h: Holder) -> usize { h.go::<usize>(1) };
+static builtin_call = fn(s: str, i: usize) -> usize { let c = s.next_char::<usize>(i); i };
+static plain_field = fn(h: Holder) -> fn(usize) -> usize { h.go::<usize> };
+"#,
+        expect![[r#"
+            95..108: `go` takes no generic arguments
+            177..197: `next_char` takes no generic arguments
+            266..279: `go` takes no generic arguments
         "#]],
     );
 }
@@ -10968,14 +11585,13 @@ fn a_dot_through_a_borrow_is_reserved_with_its_escape_named() {
 
 #[test]
 fn an_inherent_members_own_region_binder_is_live() {
-    // The reservation on a member's own binder is now REGIONS ONLY, and the
-    // split is not arbitrary: the owner's type and const params already
-    // flow into every member ("the type's own binders are already in
-    // scope"), so a member-own one is redundant sugar. A REGION has no such
-    // source — regions on type declarations are themselves reserved — so a
-    // member taking a borrow of `Self` has nowhere else to bind the
-    // per-call region it needs, and with no elision it may not decline to
-    // name one.
+    // A member-own REGION was the first half of the binder to go live, and
+    // it is the half with no alternative at all: regions on type
+    // declarations are themselves reserved, so a member taking a borrow of
+    // `Self` has nowhere else to bind the per-call region it needs, and
+    // with no elision it may not decline to name one. (The TYPE half is
+    // live too — TR10 — and spelled at the use site; only CONSTS are still
+    // reserved.)
     check_diagnostics(
         r#"
 type Map = struct::<K, V> { n: usize } with {
@@ -11037,10 +11653,11 @@ static f = fn::<@a>(c: Cell.&::<@a>, p: usize.&::<@a>) -> usize { c.widen(p).* }
 }
 
 #[test]
-fn a_member_own_type_or_const_binder_stays_reserved_precisely() {
-    // The OTHER two kinds keep their reservation, now stated per kind and
+fn a_member_own_const_binder_stays_reserved_precisely() {
+    // The one kind that keeps its reservation, still stated per kind and
     // squiggling the individual param rather than the whole list — so a
-    // mixed binder grants the region and refuses only what is refused.
+    // mixed binder grants the region and the type and refuses only the
+    // const.
     check_diagnostics(
         r#"
 type Measured = struct { n: usize } with {
@@ -11050,8 +11667,7 @@ type Measured = struct { n: usize } with {
 };
 "#,
         expect![[r#"
-            84..85: a member's own type parameters are not supported yet (the type's own binders are already in scope)
-            87..101: a member's own const parameters are not supported yet (the type's own binders are already in scope)
+            87..101: a member's own const parameters are not supported yet (a const argument is part of an instance's identity, and a member's arguments are read off the receiver's own type)
         "#]],
     );
 }

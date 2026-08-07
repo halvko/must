@@ -504,7 +504,7 @@ impl CheckCtx<'_> {
                 }
                 Flow::Falls
             }
-            ExprData::Field { receiver, name } => {
+            ExprData::Field { receiver, name, .. } => {
                 let (receiver, broken_name) = (*receiver, name.is_empty());
                 // `s.` — a consumption the user is in the middle of typing.
                 // The parse error covers it; a leak reported beside it

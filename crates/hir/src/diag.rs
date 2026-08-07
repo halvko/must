@@ -159,6 +159,13 @@ pub fn named_arg_not_self(name: &str) -> String {
     )
 }
 
+/// `Owner::member::<Self = Type>` — `Self` named in a MEMBER's own list.
+/// The owner is perfectly free to be a trait, so the not-a-trait sentence
+/// would deny what the reader can see; what is wrong is the POSITION.
+pub const NAMED_ARG_OWNERS_SELF: &str = "a member's own generic arguments are positional: \
+     `Self` is the owner's, one segment to the left \
+     (`Trait::<Self = Type>::member`)";
+
 /// `Trait::<Self = _>::member` — the `Self` argument written as a HOLE.
 /// `Self` names the implementer, which is the whole point of the named
 /// form: the member it denotes is impl-specific, so a hole there declines

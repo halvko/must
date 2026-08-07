@@ -85,13 +85,14 @@
   the house pattern for every derived or marker judgment. `clone` for heap-owning types is
   hand-written by ruling: it must read the stored allocator, so it is not derivable even in
   principle. Introspection replaces derive.
-- **TR10** Member-own binders, REGIONS only. An inherent member's binder is the owner's
-  followed by its own, so the owner keeps the low indices and nothing downstream moves; a
-  trait-impl member's binder is its own alone. The member's own half carries regions and
-  nothing else: they are inferred and minted fresh at every call, are never spelled at a use
-  site, and are not positions in any written argument list — which is what lets a member
-  borrow `Self` for a region the owner's binder has no way to supply. A member's own type and
-  const parameters stay reserved, per kind.
+- **TR10** Member-own binders. An inherent member's binder is the owner's followed by its own,
+  so the owner keeps the low indices and nothing downstream moves; the member's own half is in
+  declaration order, kinds interleaved as written. At the use site a member's own type
+  arguments are spellable, in both spellings of one instantiation and in the trait forms;
+  regions are inferred and are not positions in that list. A member with no binder takes no
+  arguments, including an empty `::<>`. There are three spend sites (inherent member,
+  trait-impl member, bound-directed requirement), each of which consumes the written list, so
+  no already-refused path adds a second diagnostic.
 
 ## Discarded
 
@@ -103,11 +104,11 @@
   anchoring). **TR01**
 - **Auto-ref to dodge the receiver wall** — the bounded reborrow exception (G14) dissolves the
   wall instead. **TR01**
-- **Member-own TYPE binders** — still reserved: the owner's type parameters already flow into
-  every member signature and body, and a member's own would need a use-site spelling that does
-  not exist. **Member-own CONST binders** — still reserved for a different reason: a const
-  argument is part of an instance's identity, and a member's arguments are read off the
-  receiver's type, which cannot supply one. **TR10**
+- **Member-own type binders as redundant sugar** — refuted: true about scope, false about
+  need. An owner's binder is fixed per value, a member's own varies per call. Check any "you
+  could already say that" objection against "could you say it per call". **Member-own const
+  binders** — still reserved: a const argument is part of an instance's identity, and a
+  member's arguments are read off the receiver's type, which cannot supply one. **TR10**
 - **`dyn` / trait objects in v1** — no customer; brings vtable layout, object safety and
   post-erasure lifetime questions. **Named / first-class impls** — a named impl is a
   dictionary you can pass, which reintroduces incoherence and breaks applicative identity: the
@@ -163,6 +164,9 @@
   rigidity transplanted, no new inference domain. **TR08**
 - **Member-own const binders** — trip-wire: instantiation grows a member-side argument list,
   or instance identity moves off the receiver's type. **TR10**
+- **Separate item and member turbofish rules** — the member list spells its TYPE parameters
+  only while the item list is positional over the whole binder, `@_` included; trip-wire: the
+  item turbofish stops spelling regions, or member consts land. **TR10**
 - **Derive replacement is designed** — introspection. **TR12**
 - **A `send` assertion form** is owed and unruled: the mitigation for the private-field semver
   hazard, which is inherent to derived-from-structure. **TR09**

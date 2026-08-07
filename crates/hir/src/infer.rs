@@ -640,6 +640,15 @@ pub enum InferenceDiagnostic {
         /// The mentioned name, carried so [`Self::message`] renders without
         /// the body in hand.
         name: String,
+        /// The owner's display name when the arguments plausibly belong to
+        /// it rather than to the binder-less thing they were written on:
+        /// `Owner::member::<usize>` where `member` has no binder of its own
+        /// but `Owner` does, and the path does not already write
+        /// `Owner::<...>`. `None` everywhere else — for a trait owner (that
+        /// spelling collides with the separately reserved generic-trait
+        /// form), a non-generic owner (the hint would trade one refusal for
+        /// another), and every non-member mention.
+        owner_list_hint: Option<String>,
     },
     /// `_` written in a *const* argument position. Const args are never
     /// inferred (TR06: running an instance backwards is
@@ -694,10 +703,20 @@ pub enum InferenceDiagnostic {
     CannotInferGenericParam {
         /// The referencing expression.
         expr: ExprId,
-        /// The generic item.
+        /// The generic item (its declaration is the related location).
         item: ItemLoc,
         /// The undetermined type parameter's name.
         param: String,
+        /// What the use site CALLS the binder that declares it. Not
+        /// `item.display_name()`: a member's own binder is blamed on the
+        /// member (`Option::fresh`), and a requirement's on the
+        /// requirement — not on the trait its `ItemLoc` names.
+        owner: String,
+        /// How THIS site can write the turbofish that pins it. The
+        /// spelling is the site's to give, not the item's: a member value
+        /// reached through a trait cannot write the bare path its
+        /// `ItemLoc` renders.
+        spelling: TurbofishSpelling,
     },
     /// A generic type parameter instantiated with a type that has no
     /// `forget` capability, where the parameter did not opt out of the
@@ -1159,31 +1178,43 @@ pub enum InferenceDiagnostic {
         /// The call expression (where MIR traps).
         expr: ExprId,
     },
-    /// `Measured::size::<usize>` — generic arguments written on a MEMBER's
-    /// own name at a USE site. A RESERVATION, not a correction: it says
-    /// nothing about whether the member HAS a binder — an inherent
-    /// member's own generics are separately refused at declaration, while
-    /// a trait requirement may already declare one (`fmt::<W: Write>`) —
-    /// only that applying one here, on the second segment, is not
-    /// supported yet. The path parses as exactly the tree its future
-    /// meaning will keep; granting the use site deletes this diagnostic
-    /// and moves no grammar.
-    MemberOwnGenericArgs {
+    /// Generic arguments written at a use site on a member whose own
+    /// binder declares a CONST parameter — the last kind still reserved,
+    /// and the last thing this diagnostic says.
+    ///
+    /// The other two kinds are live and spelled differently, which is why
+    /// they are not positions in the written list at all: a member's
+    /// REGIONS are per-call existentials and always inferred (there has
+    /// never been a spelling for one), and its TYPE parameters are exactly
+    /// what the list spends. So a member with no const parameter never
+    /// reaches this; a member with one refuses the WHOLE list, because a
+    /// list matched positionally past a reserved hole is worse than no
+    /// list. Granting member-own const generics deletes it; the grammar
+    /// does not move (it never did — `MEMBER_GENERIC_ARGS` has parsed
+    /// since the reservation was written).
+    MemberOwnConstArgs {
         /// The path expression (carries the squiggle).
         expr: ExprId,
-        /// The owner's display name — a type or a trait.
-        owner: String,
-        /// The member's name.
-        member: String,
-        /// Whether `{owner}::<...>::{member}` is worth hinting at: `owner`
-        /// is a type with a binder of its own to receive the arguments,
-        /// and the path does not already write one. False for a trait
-        /// (that spelling collides with the separately reserved
-        /// generic-trait form), a non-generic type (the hint would just
-        /// trade this diagnostic for "takes no generic arguments"), or a
-        /// path that already writes `{owner}::<...>::{member}` (nothing
-        /// left to suggest).
-        suggest_owner_list: bool,
+        /// The owner-qualified spelling of the member (`Display::fmt`).
+        path: String,
+    },
+    /// A member turbofish whose length does not match the member's own
+    /// binder (`Option::map::<usize, bool>`). The item twin is
+    /// [`Self::GenericArgCount`], and both render through
+    /// [`crate::diag::generic_arg_count`] — but a member is not an item:
+    /// it has no `ItemLoc` whose display name is the spelling that selects
+    /// it (`item_source` answers `None` for every member id, so there is
+    /// no declaration to point at either), so the report carries the
+    /// owner-qualified path itself.
+    MemberGenericArgCount {
+        /// The path or dot-call callee the list is written on.
+        expr: ExprId,
+        /// The owner-qualified spelling of the member (`Option::map`).
+        path: String,
+        /// How many TYPE parameters the member's own binder declares — its
+        /// regions are always inferred and are not positions in the list.
+        expected: usize,
+        found: usize,
     },
     /// `Shape::Circle::<usize>` — generic arguments written on a VARIANT.
     /// A CORRECTION, not a reservation: a variant is a case of its enum
@@ -1203,10 +1234,44 @@ pub enum InferenceDiagnostic {
         /// (the hint would just trade this diagnostic for "takes no
         /// generic arguments") or a path that already writes
         /// `{owner}::<...>::{variant}` (nothing left to suggest) — the
-        /// same condition `MemberOwnGenericArgs`'s field of the same name
-        /// gates.
+        /// same condition [`Self::NotGeneric`]'s `owner_list_hint` gates
+        /// for a binder-less MEMBER.
         suggest_owner_list: bool,
     },
+}
+
+/// How a use site can WRITE the turbofish that pins a binder. An item's
+/// own name always carries its list; a member's does not, so the spelling
+/// is the SITE's to state — suggesting one the site cannot contain sends
+/// the reader to a form the compiler then refuses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurbofishSpelling {
+    /// The name carries the list: `f::<...>`, `Option::fresh::<...>`,
+    /// `Mk::mk::<...>`.
+    Path,
+    /// A dot-call, where the member stands alone: `.fresh::<...>(...)` —
+    /// the shape [`InferenceDiagnostic::MemberNotCalled`] already uses.
+    Dot,
+    /// A member VALUE reached through a trait. Such a value is
+    /// impl-specific (TR01), so the bare `Trait::member` path is refused
+    /// here and the implementer naming is part of the spelling. Carries
+    /// the qualifier up to the member — `Mk::<Self = usize>`.
+    NamedSelf(String),
+}
+
+impl TurbofishSpelling {
+    /// The turbofish this site can write to pin `owner`'s binder, where
+    /// `owner` is the blame name (`Option::fresh`, `Mk::mk`, or a plain
+    /// item name).
+    fn write(&self, owner: &str) -> String {
+        match self {
+            Self::Path => format!("{owner}::<...>"),
+            Self::Dot => format!(".{}::<...>(...)", bare_member_name(owner)),
+            Self::NamedSelf(qualifier) => {
+                format!("{qualifier}::{}::<...>", bare_member_name(owner))
+            }
+        }
+    }
 }
 
 /// Why a named generic argument is refused — see
@@ -1219,6 +1284,10 @@ pub enum NamedArgReason {
     /// `Self = ...` on something that is not a trait — only a trait has a
     /// `Self` argument.
     NotATrait,
+    /// `Self = ...` in a MEMBER's own turbofish. The owner may well be a
+    /// trait, so `NotATrait` would deny something the reader can see; the
+    /// `Self` they mean belongs to the owner's list, one segment left.
+    OwnersSelf,
     /// `Self` supplied twice in one argument list.
     Duplicate,
     /// `Self = _` — the argument is a HOLE. `Self` names the implementer,
@@ -1388,7 +1457,8 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::GenericTraitReserved { expr, .. }
             | InferenceDiagnostic::MemberCallAmbiguity { expr, .. }
             | InferenceDiagnostic::NestedBoundUse { expr }
-            | InferenceDiagnostic::MemberOwnGenericArgs { expr, .. }
+            | InferenceDiagnostic::MemberOwnConstArgs { expr, .. }
+            | InferenceDiagnostic::MemberGenericArgCount { expr, .. }
             | InferenceDiagnostic::VariantOwnGenericArgs { expr, .. }
             | InferenceDiagnostic::AddrOfNonPlace { expr }
             | InferenceDiagnostic::BorrowNonPlace { expr }
@@ -1472,11 +1542,29 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::TypeMismatch {
                 expected, actual, ..
             } => {
-                let base = format!(
-                    "type mismatch: expected `{}`, found `{}`",
-                    expected.display(),
-                    actual.display()
-                );
+                let (want_str, got_str) = (expected.display(), actual.display());
+                let base = format!("type mismatch: expected `{want_str}`, found `{got_str}`");
+                // TWO DIFFERENT PARAMETERS THAT SHARE A NAME. A member may
+                // bind a `T` of its own beside the owner's (last one wins
+                // inside the member — the rule a binder's const params
+                // already follow), so the plain message can read "expected
+                // `T`, found `T`", which is unactionable.
+                //
+                // The gate is the RENDERINGS coming out equal from unequal
+                // types, which is exactly when the base message says
+                // nothing — and the pair is looked for anywhere inside
+                // either type, not just at the top: the shape the rule
+                // invites most is `Self` against `P::<T>`, where the two
+                // `T`s are nested one constructor down and the message
+                // reads "expected `P::<T>`, found `P::<T>`". Two unresolved
+                // variables also render alike; they find no pair and fall
+                // through to the plain message.
+                if want_str == got_str
+                    && expected != actual
+                    && let Some((want, got)) = shadowed_param_pair(expected, actual)
+                {
+                    return format!("{base} — {}", shadowed_param_note(want, got));
+                }
                 // A nominal/structural near-miss: the found record may even
                 // be the declared shape, but a named type never coerces —
                 // say how to actually make one.
@@ -1550,6 +1638,7 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::NamedGenericArg { name, reason, .. } => match reason {
                 NamedArgReason::NotSelf => crate::diag::named_arg_not_self(name),
                 NamedArgReason::NotATrait => crate::diag::named_arg_not_a_trait("Self"),
+                NamedArgReason::OwnersSelf => crate::diag::NAMED_ARG_OWNERS_SELF.to_owned(),
                 NamedArgReason::Duplicate => "`Self` is given more than once".to_owned(),
                 NamedArgReason::Hole => crate::diag::NAMED_ARG_SELF_HOLE.to_owned(),
             },
@@ -1824,8 +1913,22 @@ impl InferenceDiagnostic {
                 found,
                 ..
             } => crate::diag::generic_arg_count(item.display_name(), *expected, *found),
-            InferenceDiagnostic::NotGeneric { name, .. } => {
-                crate::diag::takes_no_generic_args(name)
+            InferenceDiagnostic::NotGeneric {
+                name,
+                owner_list_hint,
+                ..
+            } => {
+                let base = crate::diag::takes_no_generic_args(name);
+                match owner_list_hint {
+                    Some(owner) => {
+                        let member = name.rsplit("::").next().unwrap_or(name);
+                        format!(
+                            "{base}; if these are meant for `{owner}`, write \
+                             `{owner}::<...>::{member}`"
+                        )
+                    }
+                    None => base,
+                }
             }
             InferenceDiagnostic::ConstArgHole { .. } => crate::diag::CONST_ARG_HOLE.to_owned(),
             InferenceDiagnostic::UnexpectedRegionArg { param, .. } => {
@@ -1848,12 +1951,16 @@ impl InferenceDiagnostic {
                     item.display_name()
                 )
             }
-            InferenceDiagnostic::CannotInferGenericParam { item, param, .. } => {
+            InferenceDiagnostic::CannotInferGenericParam {
+                param,
+                owner,
+                spelling,
+                ..
+            } => {
+                let write = spelling.write(owner);
                 format!(
-                    "cannot infer the type parameter `{param}` of `{}`; \
-                     write `{}::<...>` to specify it",
-                    item.display_name(),
-                    item.display_name()
+                    "cannot infer the type parameter `{param}` of `{owner}`; \
+                     write `{write}` to specify it"
                 )
             }
             InferenceDiagnostic::ForgetBoundUnsatisfied {
@@ -2103,26 +2210,17 @@ impl InferenceDiagnostic {
                  capture the dictionary)"
                     .to_owned()
             }
-            InferenceDiagnostic::MemberOwnGenericArgs {
-                owner,
-                member,
-                suggest_owner_list,
+            InferenceDiagnostic::MemberOwnConstArgs { path, .. } => format!(
+                "`{path}` declares a const parameter of its own, and const member \
+                 arguments are not supported yet (a member's type arguments are \
+                 written here; its region arguments are always inferred)"
+            ),
+            InferenceDiagnostic::MemberGenericArgCount {
+                path,
+                expected,
+                found,
                 ..
-            } => {
-                if *suggest_owner_list {
-                    format!(
-                        "a member's own generic arguments are not supported yet: \
-                         arguments written on `{owner}::{member}` cannot be applied \
-                         here; if these are meant for `{owner}`, write \
-                         `{owner}::<...>::{member}`"
-                    )
-                } else {
-                    format!(
-                        "a member's own generic arguments are not supported yet: \
-                         arguments written on `{owner}::{member}` cannot be applied here"
-                    )
-                }
-            }
+            } => crate::diag::generic_arg_count(path, *expected, *found),
             InferenceDiagnostic::VariantOwnGenericArgs {
                 owner,
                 variant,
@@ -2377,12 +2475,42 @@ struct PendingNumberLiteral {
     var: Ty,
 }
 
+/// What a use site knows about the member it reached and the member's
+/// `ItemLoc` cannot say: how the site NAMES it, how a turbofish would be
+/// written there, and what sits one segment to its left. Passed as one
+/// value because every message about a member's own arguments needs the
+/// same answers, and re-deriving them per message is how two of them came
+/// to disagree.
+struct MemberSite {
+    /// The owner-qualified naming used in every such message
+    /// (`Option::map`, `usize::n`, `Mk::mk`).
+    path: String,
+    /// How this site writes the member's own turbofish.
+    spelling: TurbofishSpelling,
+    /// Whether the segment to the member's left is a TRAIT. It decides
+    /// what a written `Self` is told: on a trait's member the name is
+    /// merely misplaced ([`NamedArgReason::OwnersSelf`]), on an inherent
+    /// owner there is no `Self` to name at all
+    /// ([`NamedArgReason::NotATrait`]).
+    owner_is_trait: bool,
+    /// A GENERIC owner whose own list this path left unwritten — the one
+    /// place a list the member cannot take may still have a home, one
+    /// segment to the left (`Owner::<...>::member`).
+    owner_hint: Option<String>,
+}
+
 /// One instantiation of a generic item's scheme at a mention: which fresh
 /// variable stands for which of the item's type params.
 struct PendingInstantiation {
     /// The mentioning expression (a `NameRef` or `GenericApp`).
     expr: ExprId,
     item: ItemLoc,
+    /// The blame name and the spelling for
+    /// [`InferenceDiagnostic::CannotInferGenericParam`] — carried from the
+    /// site, because only the site knows how the binder can be WRITTEN (a
+    /// member's is not written the way its `ItemLoc` renders).
+    owner: String,
+    spelling: TurbofishSpelling,
     /// `(param name, the fresh variable, whether it opted out of the
     /// default `forget` bound)` per *type* param. The opt-out flag is
     /// CARRIED rather than re-derived at check time: a builtin's binder has
@@ -2563,7 +2691,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let mut root = place;
         loop {
             match &self.body.exprs[root] {
-                ExprData::Field { receiver, name } => {
+                ExprData::Field { receiver, name, .. } => {
                     segments.push(format!(".{name}"));
                     root = *receiver;
                 }
@@ -3052,6 +3180,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         expr: instantiation.expr,
                         item: instantiation.item.clone(),
                         param,
+                        owner: instantiation.owner.clone(),
+                        spelling: instantiation.spelling.clone(),
                     });
             }
         }
@@ -3304,7 +3434,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::TraitHasNoMember { .. }
                 | InferenceDiagnostic::BoundFnValue { .. }
                 | InferenceDiagnostic::GenericTraitReserved { .. }
-                | InferenceDiagnostic::MemberOwnGenericArgs { .. }
+                | InferenceDiagnostic::MemberOwnConstArgs { .. }
+                | InferenceDiagnostic::MemberGenericArgCount { .. }
                 | InferenceDiagnostic::VariantOwnGenericArgs { .. }
                 | InferenceDiagnostic::NestedBoundUse { .. } => {}
             }
@@ -3600,13 +3731,21 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 variant,
                 args,
                 member_args,
-            } => self.infer_variant_path(
-                expr,
-                *base,
-                variant,
-                args.as_deref(),
-                member_args.as_deref(),
-            ),
+            } => {
+                // The value-form entry point's free-at-exit wrapper — the
+                // twin of the dot-call's and the trait-call's. Two arms
+                // below SPEND the member turbofish (an inherent member's
+                // value, a named-`Self` trait member's); every other arm
+                // refuses the path for its own reason, and its leftover is
+                // consumed here, silently and exactly once.
+                let (base, variant) = (*base, variant.clone());
+                let (args, member_args) = (args.clone(), member_args.clone());
+                let mut unspent = member_args.as_deref();
+                let ty =
+                    self.infer_variant_path(expr, base, &variant, args.as_deref(), &mut unspent);
+                self.drop_member_args(&mut unspent);
+                ty
+            }
             // `::None` — the elided sigil in expression position. Resolved
             // against the position's EXPECTED type, which is why it is
             // read here and nowhere else.
@@ -3685,17 +3824,24 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         vp_args.clone(),
                         member_args.clone(),
                     );
-                    return self.infer_qualified_trait_call(
+                    // One free-at-exit wrapper per entry point that can
+                    // carry a member turbofish: the three spend sites TAKE
+                    // it, and whatever survives is consumed silently here
+                    // rather than at each of this call's many refusals.
+                    let mut unspent = member_args.as_deref();
+                    let ty = self.infer_qualified_trait_call(
                         expr,
                         callee,
                         trait_loc,
                         &variant,
                         vp_args.as_deref(),
-                        member_args.as_deref(),
+                        &mut unspent,
                         args,
                         expected,
                         cause,
                     );
+                    self.drop_member_args(&mut unspent);
+                    return ty;
                 }
                 // TR01 dot-call: `recv.name(a, b)` — but only the WRITTEN
                 // dot-call shape; `(recv.name)(...)` is an ordinary value
@@ -3706,10 +3852,25 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // — then the field; the call desugars to the member with
                 // recv as the LAST argument (arguments evaluate BEFORE the
                 // receiver binds).
-                if *dot_call && let ExprData::Field { receiver, name } = &self.body.exprs[*callee] {
+                if *dot_call
+                    && let ExprData::Field {
+                        receiver,
+                        name,
+                        member_args,
+                    } = &self.body.exprs[*callee]
+                {
                     let (callee, receiver, name) = (*callee, *receiver, name.clone());
-                    return self
-                        .infer_dot_call(expr, callee, receiver, &name, args, expected, cause);
+                    let member_args = member_args.clone();
+                    return self.infer_dot_call(
+                        expr,
+                        callee,
+                        receiver,
+                        &name,
+                        member_args.as_deref(),
+                        args,
+                        expected,
+                        cause,
+                    );
                 }
                 // `::Some(v)` — the elided sigil with payloads. The
                 // CALLEE is what carries the sigil, but the enum is in the
@@ -4207,17 +4368,35 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     .collect();
                 Ty::record(field_tys)
             }
-            ExprData::Field { receiver, name } => {
+            ExprData::Field {
+                receiver,
+                name,
+                member_args,
+            } => {
                 let receiver = *receiver;
                 let name = name.clone();
+                let mut member_args = member_args.as_deref();
                 let fresh = self.fresh_var();
                 let receiver_ty = self.infer_expr(receiver, &fresh);
                 if name.is_empty() {
                     // `a.` — the parse error covers it.
+                    self.drop_member_args(&mut member_args);
                     Ty::Error
                 } else {
                     let resolved = self.resolve_shallow(&receiver_ty);
                     let ty = self.field_access_ty(expr, receiver, &name, resolved);
+                    // `h.go::<usize>` NOT under call syntax: the dot selects
+                    // a FIELD, and a field has no binder — the third place
+                    // the refusal is true, and only when a field was
+                    // actually found. A dot that landed on a member
+                    // (`MemberNotCalled`), on nothing, or on a half-typed
+                    // `o.map::<` already carries its own diagnostic, and
+                    // that one is the whole story.
+                    if self.resolve_shallow(&ty).contains_error() {
+                        self.drop_member_args(&mut member_args);
+                    } else {
+                        self.refuse_member_args(expr, &name, &mut member_args);
+                    }
                     self.carry_borrow_projection(expr, receiver, &ty);
                     ty
                 }
@@ -5103,6 +5282,59 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         callee: ExprId,
         receiver: ExprId,
         name: &str,
+        member_args: Option<&[GenericArgData]>,
+        args: &[ExprId],
+        expected: &Ty,
+        cause: Option<Cause>,
+    ) -> Ty {
+        // A written member turbofish (`s.flat_map::<usize>(f)`) is
+        // spendable on THREE outcomes below — an inherent member, a
+        // trait-impl member, and a bound-directed requirement — and each
+        // TAKES it out of this slot.
+        //
+        // What is left over is consumed SILENTLY, and that is the whole
+        // design: the refusals that are TRUE ("a field takes no generic
+        // arguments", "a builtin member takes none") are written at the
+        // three sites where the target genuinely resolved and genuinely has
+        // no binder. Every other exit is a path already carrying its own
+        // diagnostic — a broken receiver, an ambiguous name, a member
+        // reached through the wrong receiver shape, or a half-typed
+        // `o.map::<` — and on those "`map` takes no generic arguments" is
+        // both noise and, usually, a lie.
+        //
+        // The `&mut` is what makes "exactly once" structural rather than a
+        // rule every exit has to remember. It buys that, and one thing
+        // more: an argument's const expression is typed WHERE IT LANDS —
+        // loudly at a spend site, quietly here — so `o.map::<3>(w)` reports
+        // the number the same way `id::<3>(1)` does, while a list nobody
+        // could spend stays silent. Typing the whole list up front instead
+        // would let the value be passed by value, at the price of that
+        // parity.
+        let mut unspent = member_args;
+        let ty = self.infer_dot_call_resolved(
+            expr,
+            callee,
+            receiver,
+            name,
+            &mut unspent,
+            args,
+            expected,
+            cause,
+        );
+        self.drop_member_args(&mut unspent);
+        ty
+    }
+
+    /// [`Self::infer_dot_call`]'s resolution proper — see there for what
+    /// `member_args` being a `&mut Option` buys.
+    #[allow(clippy::too_many_arguments)]
+    fn infer_dot_call_resolved(
+        &mut self,
+        expr: ExprId,
+        callee: ExprId,
+        receiver: ExprId,
+        name: &str,
+        member_args: &mut Option<&[GenericArgData]>,
         args: &[ExprId],
         expected: &Ty,
         cause: Option<Cause>,
@@ -5158,6 +5390,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 &receiver_ty,
                 &param,
                 name,
+                member_args,
                 args,
                 &callee_expectation,
                 receiver_shape,
@@ -5312,6 +5545,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         member_loc,
                         sig,
                         &callee_expectation,
+                        member_args,
                         args,
                     );
                     return self.finish_dot_call(expr, ret, expected, cause);
@@ -5329,6 +5563,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         &receiver_ty,
                         member_loc,
                         name,
+                        member_args,
                         args,
                         &callee_expectation,
                         receiver_shape,
@@ -5361,6 +5596,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         self.infer_args_broken(args);
                         return self.finish_dot_call(expr, Ty::Error, expected, cause);
                     }
+                    // Resolved, and a builtin member has no binder: one
+                    // of the three places the refusal is TRUE.
+                    self.refuse_member_args(callee, name, member_args);
                     let ty = self.infer_builtin_member_call(
                         expr,
                         callee,
@@ -5457,6 +5695,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 return self.finish_dot_call(expr, Ty::Error, expected, cause);
             }
         }
+        // The call is carried by the field's VALUE, and a value has no
+        // binder: the second place the refusal is true — but only when
+        // there IS a value. A field access that produced `{error}` (an
+        // unknown receiver type, a name that is no field) is already
+        // diagnosed, and errors are infectious and silent.
+        if !self.resolve_shallow(&callee_ty).contains_error() {
+            self.refuse_member_args(callee, name, member_args);
+        }
         let ty = self.call_of_value(expr, callee, args, callee_ty);
         self.finish_dot_call(expr, ty, expected, cause)
     }
@@ -5494,9 +5740,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
 
     /// The resolved-member half of a dot-call: instantiate the member's
     /// scheme at the RECEIVER's generic arguments (the receiver's type is
-    /// the turbofish a dot-call never spells), record the resolution for
-    /// MIR/IDE, and check the written arguments plus the receiver-as-last-
-    /// argument. Returns the call's (pre-`check`) type.
+    /// the turbofish a dot-call never spells for the OWNER's half) plus its
+    /// own binder (which a dot-call MAY spell: `s.flat_map::<usize>(f)`),
+    /// record the resolution for MIR/IDE, and check the written arguments
+    /// plus the receiver-as-last-argument. Returns the call's (pre-`check`)
+    /// type.
     #[allow(clippy::too_many_arguments)]
     fn infer_member_call(
         &mut self,
@@ -5508,23 +5756,40 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         member_loc: ItemLoc,
         sig: Ty,
         callee_expectation: &Ty,
+        member_args: &mut Option<&[GenericArgData]>,
         args: &[ExprId],
     ) -> Ty {
         // A member's binder is the OWNER's followed by its own (TR10), so
         // the receiver type's arguments map onto the owner's PREFIX
-        // position by position; everything past it is the member's own and
-        // is instantiated fresh per call, never spelled. A SHORT argument
-        // list — a mention that failed to resolve its own arguments — would
-        // leave the tail rigid and then blame a type parameter the user
-        // never wrote, so the member call is abandoned instead: the mention
-        // carries the error.
+        // position by position; everything past it is the member's own,
+        // instantiated fresh per call and spellable by the member
+        // turbofish. A SHORT argument list — a mention that failed to
+        // resolve its own arguments — would leave the tail rigid and then
+        // blame a type parameter the user never wrote, so the member call
+        // is abandoned instead: the mention carries the error.
         let owner_arity = self.owner_binder_arity(&member_loc);
         if named.args.len() != owner_arity {
             self.result.type_of_expr.insert(callee, Ty::Error);
             self.infer_args_broken(args);
             return Ty::Error;
         }
-        let (subst, const_subst) = owner_arg_subst(&named.args);
+        let (mut subst, const_subst) = owner_arg_subst(&named.args);
+        let generics = item_generics(self.db, member_loc.to_id(self.db)).to_vec();
+        subst.extend(self.member_own_type_subst(
+            expr,
+            callee,
+            &member_loc,
+            &sig,
+            &generics,
+            owner_arity,
+            member_args,
+            &MemberSite {
+                path: Self::member_path(named.decl.display_name(), member_loc.display_name()),
+                spelling: TurbofishSpelling::Dot,
+                owner_is_trait: false,
+                owner_hint: None,
+            },
+        ));
         let region_subst = self.member_own_region_subst(expr, &member_loc, owner_arity);
         let inst = instantiate_scheme(&sig, &member_loc, &subst, &const_subst);
         let inst = substitute_regions(&inst, &member_loc, &region_subst);
@@ -5633,6 +5898,286 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             callee_expectation,
             args,
         )
+    }
+
+    /// Consume a member turbofish that nothing could spend, SILENTLY —
+    /// the const arguments still get types (every expression in a body
+    /// must), and no diagnostic is added.
+    ///
+    /// This is the default for every exit: errors are infectious and
+    /// silent, and by the time a path gives up on a member turbofish it is
+    /// giving up on something already diagnosed. [`Self::refuse_member_args`]
+    /// is the deliberate opposite, and its claim has to be TRUE.
+    fn drop_member_args(&mut self, member_args: &mut Option<&[GenericArgData]>) {
+        if let Some(args) = member_args.take() {
+            // QUIET, and the `_quiet` is the whole point: a bare integer in
+            // a list nobody spent has no defining use, and telling the
+            // reader to annotate a number the program was never going to
+            // keep is the same noise the refusal above already avoids.
+            self.infer_const_args_free_quiet(args);
+        }
+    }
+
+    /// Refuse a member turbofish on a target that RESOLVED and simply has
+    /// no binder — a field, a builtin member, a member declaring none.
+    /// Only callable where "`name` takes no generic arguments" is a true
+    /// sentence about a thing that exists; everywhere else the silent
+    /// [`Self::drop_member_args`] is the answer.
+    fn refuse_member_args(
+        &mut self,
+        key: ExprId,
+        name: &str,
+        member_args: &mut Option<&[GenericArgData]>,
+    ) {
+        if member_args.is_some() {
+            self.push_not_generic(key, name);
+            self.drop_member_args(member_args);
+        }
+    }
+
+    /// Spend ONE written member-turbofish argument on the fresh variable
+    /// standing for the member's type parameter `param_name`. A type
+    /// argument joins the variable (a `_` hole lowers to a fresh variable
+    /// of its own — explicitly "infer this one"); anything else is the
+    /// ordinary wrong-kind report.
+    ///
+    /// `mention` is the node the member's argument list hangs off — the
+    /// qualified path or the dot-call's callee — and is what
+    /// [`Cause::MemberGenericArg`] points the blame at. It is not always
+    /// `key`: a dot-call's obligations are keyed on the CALL, while its
+    /// turbofish is written on the callee.
+    fn spend_member_arg(
+        &mut self,
+        key: ExprId,
+        mention: ExprId,
+        position: usize,
+        param_name: &str,
+        arg: &GenericArgData,
+        var: &Ty,
+    ) {
+        match arg {
+            GenericArgData::Type(type_ref) => {
+                let written = self.lower_type_ref(type_ref);
+                self.constraints.adopt(
+                    self.table,
+                    var,
+                    &written,
+                    Some(Cause::MemberGenericArg {
+                        mention,
+                        index: position as u32,
+                    }),
+                );
+            }
+            GenericArgData::Const(value) => {
+                let value = *value;
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::GenericArgKindMismatch {
+                        expr: key,
+                        param: param_name.to_owned(),
+                        param_is_const: false,
+                    });
+                // LOUD, unlike the quiet typing a list nobody spent gets
+                // (`drop_member_args`): this argument was matched to a
+                // slot and is being kept, so it is an expression of the
+                // body like any other. `o.map::<3>(w)` therefore also asks
+                // for an annotation on the `3` — exactly what the ITEM
+                // turbofish already says for `id::<3>(1)`. Same shape, same
+                // pair of messages; a member list that answered differently
+                // would be a fork nothing asked for.
+                let fresh = self.fresh_var();
+                self.infer_expr(value, &fresh);
+            }
+            GenericArgData::Region(_) => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::GenericArgKindMismatch {
+                        expr: key,
+                        param: param_name.to_owned(),
+                        param_is_const: false,
+                    });
+            }
+            // Already refused for the whole list by `matched_member_args`
+            // (`reject_named_args_because`): a member's own arguments are
+            // positional, and the one nameable argument v1 has is the
+            // OWNER's `Self`. Nothing further to say, and nothing to spend.
+            GenericArgData::Named { .. } => {}
+        }
+    }
+
+    /// Which written member-turbofish arguments may actually be SPENT on a
+    /// member's own binder. The list is positional over that binder's TYPE
+    /// parameters, and it is refused WHOLE — never in part — for the three
+    /// reasons a positional match cannot be trusted: the binder declares a
+    /// still-reserved CONST parameter (`MemberOwnConstArgs`), the member
+    /// has no spendable binder at all (`NotGeneric` — the same sentence
+    /// every other binder-less turbofish gets, INCLUDING for an empty
+    /// `::<>`, which is a written list like any other), or the count does
+    /// not line up (`GenericArgCount`). `None` means "spend nothing"; the
+    /// diagnostic and the const arguments' own inference are done.
+    ///
+    /// Every message here names the member through [`MemberSite::path`] —
+    /// ONE naming per site rather than three re-derivations from three
+    /// different sources.
+    fn matched_member_args<'args>(
+        &mut self,
+        key: ExprId,
+        site: &MemberSite,
+        generics: &[GenericParamData],
+        owner_arity: usize,
+        args: Option<&'args [GenericArgData]>,
+    ) -> Option<&'args [GenericArgData]> {
+        let path = site.path.as_str();
+        let args = args?;
+        // A member's binder has no nameable argument: `Self` is the OWNER's
+        // (TR01 gives v1 exactly one, on a trait's own list), and a member's
+        // own parameters are positional. Judged before anything else, so a
+        // named argument is never counted as a positional one. WHICH
+        // refusal depends on the owner: a trait's member is told the name
+        // is misplaced, an inherent owner's that there is no `Self` at all
+        // — the second sentence would be false of the first program, and
+        // the first sentence sends an inherent owner's reader to
+        // `Owner::<Self = ...>::member`, which is refused in turn.
+        let self_reason = if site.owner_is_trait {
+            NamedArgReason::OwnersSelf
+        } else {
+            NamedArgReason::NotATrait
+        };
+        self.reject_named_args_because(key, Some(args), self_reason);
+        let own = generics.iter().skip(owner_arity);
+        if own
+            .clone()
+            .any(|param| matches!(param.kind, GenericParamKind::Const(_)))
+        {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::MemberOwnConstArgs {
+                    expr: key,
+                    path: path.to_owned(),
+                });
+            self.infer_const_args_free_quiet(args);
+            return None;
+        }
+        let expected = own
+            .filter(|param| matches!(param.kind, GenericParamKind::Type))
+            .count();
+        if expected == 0 {
+            // Nothing to spend the list on — including the empty `::<>`,
+            // which is a written list and must not be silently ignored.
+            // (A member's REGIONS are not positions here; see
+            // `member_own_type_subst`. That is a divergence from the item
+            // turbofish, recorded as TR10 in `traits-and-generics.md`.)
+            // `owner_hint` is the one place the list may still have a
+            // home: the OWNER's binder, one segment to the left.
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::NotGeneric {
+                    expr: key,
+                    name: path.to_owned(),
+                    owner_list_hint: site.owner_hint.clone(),
+                });
+            self.infer_const_args_free_quiet(args);
+            return None;
+        }
+        if args.len() != expected {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::MemberGenericArgCount {
+                    expr: key,
+                    path: path.to_owned(),
+                    expected,
+                    found: args.len(),
+                });
+            self.infer_const_args_free_quiet(args);
+            return None;
+        }
+        Some(args)
+    }
+
+    /// The owner-qualified spelling of a member, for every message about
+    /// its own arguments. A trait-impl member's item name is already the
+    /// QUALIFIED `head::member` form (member items are keyed by it), so the
+    /// bare tail is taken — otherwise `usize::n` under the head `usize`
+    /// reads `usize::usize::n`.
+    ///
+    /// `owner_name` is a name that can be WRITTEN — the owner declaration's
+    /// or the trait's, never the receiver's rendered type: a `Self.&`
+    /// member reached through a borrow would otherwise be named
+    /// `usize.&::peek`, a spelling no program can contain. Where the
+    /// member's own item name is already the qualified form (a trait-impl
+    /// member at a dot-call), the callers pass it through instead of
+    /// calling this.
+    fn member_path(owner_name: &str, member_name: &str) -> String {
+        format!("{owner_name}::{}", bare_member_name(member_name))
+    }
+
+    /// Mint one fresh variable per member-own TYPE binder — unified with
+    /// the written turbofish argument when the use site spelled one — and
+    /// register them for the `forget` default bound and the cannot-infer
+    /// report. The TYPE half of instantiating a member at a use site; its
+    /// region twin is [`Self::member_own_region_subst`], and the two
+    /// compose exactly as [`instantiate_scheme`] and [`substitute_regions`]
+    /// do.
+    ///
+    /// `owner_arity` is where the member's own binder starts: an INHERENT
+    /// member's binder is the owner's followed by its own, so everything at
+    /// or past `owner_arity` is the member's (the owner's half comes off
+    /// the receiver's type, via [`owner_arg_subst`]); a TRAIT-IMPL member's
+    /// binder is its own alone and starts at 0.
+    ///
+    /// **What the written list spells: the member's own TYPE parameters, in
+    /// order, and nothing else.** A member's REGIONS are per-call
+    /// existentials with no use-site spelling — a region argument is always
+    /// inferred — so they are not positions in this list; leaving them out
+    /// is what lets `get = fn::<@b, U>(...)` be called `x.get::<usize>(...)`
+    /// rather than forcing a spelling for something that has none. CONST
+    /// member parameters stay reserved, and a member whose own binder
+    /// declares one refuses the WHOLE list rather than spending part of it.
+    #[allow(clippy::too_many_arguments)]
+    fn member_own_type_subst(
+        &mut self,
+        key: ExprId,
+        mention: ExprId,
+        member_loc: &ItemLoc,
+        sig: &Ty,
+        generics: &[GenericParamData],
+        owner_arity: usize,
+        member_args: &mut Option<&[GenericArgData]>,
+        site: &MemberSite,
+    ) -> FxHashMap<u32, Ty> {
+        let type_slots: Vec<u32> = member_own_type_slots(generics, owner_arity);
+        // TWO of the three spend sites (inherent and trait-impl members;
+        // the third is a requirement, in `instantiate_requirement_sig`).
+        // TAKING the list here is what tells the entry-point wrapper it was
+        // spent, so nothing below has to remember to say so.
+        let matched =
+            self.matched_member_args(key, site, generics, owner_arity, member_args.take());
+        let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
+        let mut pending: Vec<(String, Ty, bool)> = Vec::new();
+        for (position, &index) in type_slots.iter().enumerate() {
+            let param = &generics[index as usize];
+            let var = self.fresh_var();
+            if let Some(arg) = matched.map(|args| &args[position]) {
+                self.spend_member_arg(key, mention, position, &param.name, arg, &var);
+            }
+            pending.push((param.name.clone(), var.clone(), param.without_forget));
+            subst.insert(index, var);
+        }
+        if !sig.contains_error() && !pending.is_empty() {
+            self.pending_instantiations.push(PendingInstantiation {
+                expr: key,
+                item: member_loc.clone(),
+                owner: site.path.clone(),
+                spelling: site.spelling.clone(),
+                params: pending,
+            });
+        }
+        // The member's own bounds become obligations of this call. Slots
+        // over the OWNER's half of the binder find no variable in `subst`
+        // and are skipped — an owner's bounds are the type declaration's
+        // business, checked where the receiver was built.
+        self.push_bound_obligations(key, generics, &subst);
+        subst
     }
 
     /// Mint one fresh EXISTENTIAL per member-own REGION binder, and relate
@@ -5816,8 +6361,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
 
     /// Call a TRAIT-IMPL member on a concrete receiver: like
     /// [`Self::infer_member_call`], with the member's OWN binder
-    /// instantiated fresh (a dot-call spells no member turbofish) and its
-    /// bounds becoming obligations of this call.
+    /// instantiated at the written turbofish where there is one and fresh
+    /// otherwise, and its bounds becoming obligations of this call.
     #[allow(clippy::too_many_arguments)]
     fn infer_impl_member_call(
         &mut self,
@@ -5827,6 +6372,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         receiver_ty: &Ty,
         member_loc: ItemLoc,
         name: &str,
+        member_args: &mut Option<&[GenericArgData]>,
         args: &[ExprId],
         callee_expectation: &Ty,
         receiver_shape: ReceiverShape,
@@ -5857,7 +6403,20 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             return Ty::Error;
         }
         let generics = item_generics(self.db, member_id).to_vec();
-        let inst = self.instantiate_member_own_binder(expr, &member_loc, sig, &generics);
+        let inst = self.instantiate_member_own_binder(
+            expr,
+            callee,
+            &member_loc,
+            sig,
+            &generics,
+            member_args,
+            // Already the qualified `head::member` spelling — and the head
+            // is the one the impl WROTE, which the receiver's rendered type
+            // is not (a `Self.&` member reached through a borrow would be
+            // named `usize.&::peek`).
+            member_loc.display_name().to_owned(),
+            TurbofishSpelling::Dot,
+        );
         self.result.member_of_expr.insert(expr, member_loc);
         self.finish_receiver_call(
             expr,
@@ -5870,44 +6429,64 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         )
     }
 
-    /// Instantiate a member's OWN generic binder with fresh variables
-    /// (dot-calls and qualified calls spell no member turbofish), pushing
+    /// Instantiate a member's OWN generic binder — at the written
+    /// turbofish where the use site spelled one, fresh otherwise — pushing
     /// its bounds as obligations of `key` and its params for the
-    /// cannot-infer report. Requirement/impl-member const params have no
-    /// spelling at these call sites yet — left rigid (their exotic uses
-    /// surface as ordinary mismatches).
+    /// cannot-infer report. A TRAIT-IMPL member's binder is its own alone,
+    /// so it starts at index 0 — asserted below, not assumed.
+    ///
+    /// Both call sites reach a member through a TRAIT (an impl's, at a
+    /// dot-call; or the named-Self value form), which is what
+    /// [`MemberSite::owner_is_trait`] is set from here rather than passed.
+    #[allow(clippy::too_many_arguments)]
     fn instantiate_member_own_binder(
         &mut self,
         key: ExprId,
+        mention: ExprId,
         member_loc: &ItemLoc,
         sig: Ty,
         generics: &[GenericParamData],
+        member_args: &mut Option<&[GenericArgData]>,
+        path: String,
+        spelling: TurbofishSpelling,
     ) -> Ty {
+        let site = MemberSite {
+            path,
+            spelling,
+            owner_is_trait: true,
+            owner_hint: None,
+        };
         if generics.is_empty() {
+            // A member with no binder at all, handed arguments: the shared
+            // binder-less refusal, named the way every other one is.
+            self.refuse_member_args(key, &site.path, member_args);
             return sig;
         }
-        let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
-        let mut pending: Vec<(String, Ty, bool)> = Vec::new();
-        for (index, param) in generics.iter().enumerate() {
-            if matches!(param.kind, GenericParamKind::Type) {
-                let var = self.fresh_var();
-                pending.push((param.name.clone(), var.clone(), param.without_forget));
-                subst.insert(index as u32, var);
-            }
-        }
-        if !sig.contains_error() && !pending.is_empty() {
-            self.pending_instantiations.push(PendingInstantiation {
-                expr: key,
-                item: member_loc.clone(),
-                params: pending,
-            });
-        }
-        self.push_bound_obligations(key, generics, &subst);
+        // A TRAIT-IMPL member's binder is its own alone — its owner is
+        // non-generic by TR03 (impls attach to nominal types only), so
+        // nothing precedes it. ASSERTED rather than assumed: the day
+        // impls attach to generic types, this `0` is where the owner's
+        // half would have to come from.
+        debug_assert!(
+            crate::member_owner(self.db, member_loc.to_id(self.db))
+                .map(|owner| item_generics(self.db, owner).is_empty())
+                .unwrap_or(true),
+            "a trait-impl member's owner must be non-generic for owner_arity 0"
+        );
+        let subst = self.member_own_type_subst(
+            key,
+            mention,
+            member_loc,
+            &sig,
+            generics,
+            0,
+            member_args,
+            &site,
+        );
         // Regions too, and for the same reason a free fn's are minted at
         // its mention: left rigid, a member's `@b` survives into the
         // CALLER's body, where the outlives solver reads a region param's
-        // binder index as a node number. A trait-impl member's binder is
-        // its own alone (its owner is non-generic), so nothing precedes it.
+        // binder index as a node number.
         let region_subst = self.member_own_region_subst(key, member_loc, 0);
         let inst = instantiate_scheme(&sig, member_loc, &subst, &FxHashMap::default());
         substitute_regions(&inst, member_loc, &region_subst)
@@ -5925,6 +6504,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         receiver_ty: &Ty,
         param: &crate::ty::ParamTy,
         name: &str,
+        member_args: &mut Option<&[GenericArgData]>,
         args: &[ExprId],
         callee_expectation: &Ty,
         receiver_shape: ReceiverShape,
@@ -6012,10 +6592,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // receiver and the requirement's own binder fresh.
         let (inst, var_of) = self.instantiate_requirement_sig(
             expr,
+            callee,
             &trait_loc,
             &req,
             &sig_ref,
             Ty::Param(param.clone()),
+            member_args,
+            TurbofishSpelling::Dot,
         );
         self.push_bound_obligations(expr, &req.generics, &var_of);
         // A requirement whose signature is not fn-shaped is broken at its
@@ -6066,30 +6649,53 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     }
 
     /// Lower a requirement's signature with `Self` bound to `self_ty` and
-    /// the requirement's own binder instantiated fresh; returns the
-    /// instantiated fn type and the binder-index → variable map (for
+    /// the requirement's own binder instantiated — at the written member
+    /// turbofish where the use site spelled one, fresh otherwise; returns
+    /// the instantiated fn type and the binder-index → variable map (for
     /// obligations). The fresh vars register for the cannot-infer report,
     /// blamed on the trait.
+    #[allow(clippy::too_many_arguments)]
     fn instantiate_requirement_sig(
         &mut self,
         key: ExprId,
+        mention: ExprId,
         trait_loc: &ItemLoc,
         req: &crate::item_tree::TraitRequirement,
         sig_ref: &TypeRef,
         self_ty: Ty,
+        member_args: &mut Option<&[GenericArgData]>,
+        spelling: TurbofishSpelling,
     ) -> (Ty, FxHashMap<u32, Ty>) {
+        // THE THIRD spend site: a bound-directed dot-call and a qualified
+        // trait call both instantiate the REQUIREMENT, and both may spell
+        // its own type arguments. A requirement's owner is a trait by
+        // construction, so its site says so.
+        let site = MemberSite {
+            path: Self::member_path(trait_loc.display_name(), &req.name),
+            spelling,
+            owner_is_trait: true,
+            owner_hint: None,
+        };
+        let matched = self.matched_member_args(key, &site, &req.generics, 0, member_args.take());
         let mut scope = crate::ty::ParamScope::default();
         scope.types.insert("Self".to_owned(), self_ty);
         let mut var_of: FxHashMap<u32, Ty> = FxHashMap::default();
         let mut pending: Vec<(String, Ty, bool)> = Vec::new();
-        for (index, gp) in req.generics.iter().enumerate() {
-            if !matches!(gp.kind, GenericParamKind::Type) || gp.name.is_empty() {
+        // A requirement's signature is LOWERED fresh rather than
+        // substituted, so a written argument is joined onto the variable the
+        // scope carries — the same variable the lowering then reads.
+        for (position, &index) in member_own_type_slots(&req.generics, 0).iter().enumerate() {
+            let gp = &req.generics[index as usize];
+            let var = self.fresh_var();
+            if let Some(arg) = matched.map(|args| &args[position]) {
+                self.spend_member_arg(key, mention, position, &gp.name, arg, &var);
+            }
+            if gp.name.is_empty() {
                 continue;
             }
-            let var = self.fresh_var();
             scope.types.insert(gp.name.clone(), var.clone());
             pending.push((gp.name.clone(), var.clone(), gp.without_forget));
-            var_of.insert(index as u32, var);
+            var_of.insert(index, var);
         }
         // A requirement's REGION params are existentials of THIS call. The
         // signature is lowered fresh rather than substituted, so the fresh
@@ -6108,6 +6714,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             self.pending_instantiations.push(PendingInstantiation {
                 expr: key,
                 item: trait_loc.clone(),
+                owner: site.path.clone(),
+                spelling: site.spelling.clone(),
                 params: pending,
             });
         }
@@ -6130,7 +6738,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         trait_loc: ItemLoc,
         member: &str,
         vp_args: Option<&[GenericArgData]>,
-        member_args: Option<&[GenericArgData]>,
+        member_args: &mut Option<&[GenericArgData]>,
         args: &[ExprId],
         expected: &Ty,
         cause: Option<Cause>,
@@ -6139,10 +6747,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         self.result
             .expectation_of_expr
             .insert(callee, callee_expectation.clone());
-        // The member's OWN arguments are reserved in the called form too
-        // (`Display::fmt::<W>(...)`); inferred once here so their const
-        // values have types, and never spent.
-        self.infer_const_args_free(member_args.unwrap_or(&[]));
         // A RESERVED generic trait: nothing on it may go semantically
         // live (reserved for generic traits).
         if crate::traits::trait_is_generic(self.db, &trait_loc) {
@@ -6171,23 +6775,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             return self.finish_dot_call(expr, Ty::Error, expected, cause);
         };
         // `Display::fmt::<W>(...)` — the requirement's own binder applied
-        // at the use site. Reserved exactly as in the value form: the CALL
-        // is refused rather than run with the arguments dropped.
-        if member_args.is_some() {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::MemberOwnGenericArgs {
-                    expr: callee,
-                    owner: trait_loc.display_name().to_owned(),
-                    member: member.to_owned(),
-                    suggest_owner_list: false,
-                });
-            self.result.type_of_expr.insert(callee, Ty::Error);
-            // `vp_args`' consts are already typed: `trait_path_self_arg`
-            // above walked them regardless of whether it found `Self`.
-            self.infer_args_broken(args);
-            return self.finish_dot_call(expr, Ty::Error, expected, cause);
-        }
+        // at the use site. Spent inside `instantiate_requirement_sig`
+        // below, exactly as the dot-call form spends it; only a requirement
+        // that declares a still-reserved CONST parameter refuses the list,
+        // and that refusal comes from the shared `matched_member_args`.
         let req = requirements[member_index].clone();
         let Some(sig_ref) = req.sig.clone() else {
             // The requirement isn't fully written: the trait carries the
@@ -6202,8 +6793,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             Some(self_ty) => self_ty,
             None => self.fresh_var(),
         };
-        let (inst, var_of) =
-            self.instantiate_requirement_sig(expr, &trait_loc, &req, &sig_ref, self_var.clone());
+        let (inst, var_of) = self.instantiate_requirement_sig(
+            expr,
+            callee,
+            &trait_loc,
+            &req,
+            &sig_ref,
+            self_var.clone(),
+            member_args,
+            TurbofishSpelling::Path,
+        );
         self.push_bound_obligations(expr, &req.generics, &var_of);
         let inst_ty = self.check(callee, inst.clone(), &callee_expectation, None);
         self.result.type_of_expr.insert(callee, inst_ty);
@@ -6378,7 +6977,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let mut root = target;
         loop {
             match &self.body.exprs[root] {
-                ExprData::Field { receiver, name } => {
+                ExprData::Field { receiver, name, .. } => {
                     segments.push(format!(".{name}"));
                     root = *receiver;
                 }
@@ -6497,7 +7096,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let mut root = place;
         loop {
             match &self.body.exprs[root] {
-                ExprData::Field { receiver, name } => {
+                ExprData::Field { receiver, name, .. } => {
                     segments.push(format!(".{name}"));
                     root = *receiver;
                 }
@@ -6601,23 +7200,27 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// as construction heads.
     ///
     /// `member_args` are the SECOND segment's own written arguments
-    /// (`Measured::size::<usize>`), which no path may spend yet. They are
-    /// never merged into `args`: the reservation is stated by what the
-    /// segment turned out to NAME — a member (future-legal, reserved) or a
-    /// variant (never legal, corrected) — which is precisely the question
-    /// this function answers and the parser cannot.
+    /// (`Option::map::<bool>`). They are never merged into `args`, and
+    /// what happens to them is decided by what the segment turned out to
+    /// NAME — a MEMBER spends them on its own binder, a VARIANT never can
+    /// (a variant has no binder; its arguments are the owner's, misplaced)
+    /// — which is precisely the question this function answers and the
+    /// parser cannot. Passed by `&mut` so the two spending arms can TAKE
+    /// them: see the caller's wrapper for why that is the mechanism.
     fn infer_variant_path(
         &mut self,
         expr: ExprId,
         base: ExprId,
         variant: &str,
         args: Option<&[GenericArgData]>,
-        member_args: Option<&[GenericArgData]>,
+        member_args: &mut Option<&[GenericArgData]>,
     ) -> Ty {
-        // The second segment's own arguments are reserved on every path
-        // through this function, so their const values are inferred once,
-        // here, and never again: nothing below may consume them.
-        self.infer_const_args_free(member_args.unwrap_or(&[]));
+        // A MEMBER's own arguments are spendable (its type binder is live);
+        // a VARIANT's are a mistake for the owner's and never are. Only the
+        // member arms below TAKE `member_args`; every other exit leaves it
+        // for the caller's wrapper, which is what makes "every const
+        // argument gets a type, exactly once" hold without a call at each
+        // of this function's nine exits.
         let has_member_args = member_args.is_some();
         match self.resolutions.get(base) {
             Some(Resolution::TypeItem(loc)) => {
@@ -6629,18 +7232,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     // `Type::member` naming an inherent member is the G13
                     // escape — the type's own member, as a plain fn value.
                     if let Some(member) = self.member_of(&loc, variant) {
-                        if has_member_args {
-                            let suggest_owner_list =
-                                args.is_none() && !item_generics(self.db, item).is_empty();
-                            return self.reserve_member_own_args(
-                                expr,
-                                &loc,
-                                variant,
-                                args,
-                                suggest_owner_list,
-                            );
-                        }
-                        return self.infer_qualified_member_value(expr, &loc, member, args);
+                        return self.infer_qualified_member_value(
+                            expr,
+                            &loc,
+                            member,
+                            args,
+                            member_args,
+                        );
                     }
                     if self.push_trait_member_on_type(expr, &loc, variant) {
                         self.infer_const_args_free(args.unwrap_or(&[]));
@@ -6731,18 +7329,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         // win the name — they are the enum's own second
                         // segment).
                         if let Some(member) = self.member_of(&loc, variant) {
-                            if has_member_args {
-                                let suggest_owner_list =
-                                    args.is_none() && !item_generics(self.db, item).is_empty();
-                                return self.reserve_member_own_args(
-                                    expr,
-                                    &loc,
-                                    variant,
-                                    args,
-                                    suggest_owner_list,
-                                );
-                            }
-                            return self.infer_qualified_member_value(expr, &loc, member, args);
+                            return self.infer_qualified_member_value(
+                                expr,
+                                &loc,
+                                member,
+                                args,
+                                member_args,
+                            );
                         }
                         if !self.push_trait_member_on_type(expr, &loc, variant) {
                             self.result
@@ -6788,19 +7381,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     self.no_such_trait_member(expr, &loc, variant);
                     return Ty::Error;
                 }
-                // `Display::fmt::<W>` — the requirement's OWN binder. A
-                // trait member may already declare one (`fmt::<W: Write>`),
-                // so this is the reservation's home ground: applying it at
-                // the use site is what is not supported yet. `args`' consts
-                // are already typed by `trait_path_self_arg` above, so `None`
-                // here (never re-infer them).
-                if has_member_args {
-                    return self.reserve_member_own_args(expr, &loc, variant, None, false);
-                }
                 match named_self {
-                    Some(self_ty) => {
-                        self.infer_named_self_member_value(expr, &loc, variant, self_ty)
-                    }
+                    Some(self_ty) => self.infer_named_self_member_value(
+                        expr,
+                        &loc,
+                        variant,
+                        self_ty,
+                        member_args,
+                    ),
                     None => {
                         self.result.diagnostics.push(
                             InferenceDiagnostic::QualifiedTraitMemberValue {
@@ -6929,51 +7517,17 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         }
     }
 
-    /// State the member-own-binder reservation for a path whose second
-    /// segment named a MEMBER (`Measured::size::<usize>`,
-    /// `Display::fmt::<W>`) and stop: the value is refused rather than
-    /// produced with the arguments silently dropped.
-    ///
-    /// `suggest_owner_list` (see [`InferenceDiagnostic::MemberOwnGenericArgs`])
-    /// is the caller's to compute — it depends on whether `owner` has a
-    /// binder to receive the arguments and whether one is already written,
-    /// neither of which this function is positioned to judge for both its
-    /// callers (a trait owner is never generic here — `trait_is_generic`
-    /// filtered that above — so its call site always passes `false`).
-    ///
-    /// The OWNER's arguments are deliberately not judged here — the path is
-    /// already refused, and errors are infectious and silent — but their
-    /// const values are still inferred so every expression in the body has
-    /// a type.
-    fn reserve_member_own_args(
-        &mut self,
-        expr: ExprId,
-        owner: &ItemLoc,
-        member: &str,
-        args: Option<&[GenericArgData]>,
-        suggest_owner_list: bool,
-    ) -> Ty {
-        self.result
-            .diagnostics
-            .push(InferenceDiagnostic::MemberOwnGenericArgs {
-                expr,
-                owner: owner.display_name().to_owned(),
-                member: member.to_owned(),
-                suggest_owner_list,
-            });
-        self.infer_const_args_free(args.unwrap_or(&[]));
-        Ty::Error
-    }
-
     /// `Point::len` — a qualified reference to an INHERENT member (the G13
     /// escape naming the type's own member). An inherent member is an
     /// ordinary fn whose `Self` is simply its last parameter, so the
     /// reference IS its fn value: `Point::len(p)` is an ordinary call, and
     /// `let f = Point::len;` is legal (no dictionary is involved anywhere).
-    /// Written type arguments belong to the TYPE (`Pair::<usize>::first`) —
-    /// an inherent member's binder is the owner's — so the mention
-    /// instantiates the member exactly as a dot-call instantiates it at the
-    /// receiver's arguments.
+    /// Written type arguments on the FIRST segment belong to the TYPE
+    /// (`Pair::<usize>::first`) and those on the SECOND to the member
+    /// (`Option::flat_map::<usize>`) — an inherent member's binder is the
+    /// owner's followed by its own — so the mention instantiates the member
+    /// exactly as a dot-call instantiates it, the same two halves written
+    /// out instead of read off a receiver.
     ///
     /// TRAIT-impl members are deliberately unreachable here: their
     /// spellings are `Trait::member` and `Trait::<Self = Type>::member`, so
@@ -6986,11 +7540,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         owner: &ItemLoc,
         member: ItemLoc,
         args: Option<&[GenericArgData]>,
+        member_args: &mut Option<&[GenericArgData]>,
     ) -> Ty {
         let sig = signature(self.db, member.to_id(self.db));
         if sig.contains_error() {
             // The definition site carries the fully-annotated member rule's
-            // diagnostic; errors are infectious and silent.
+            // diagnostic; errors are infectious and silent (the member
+            // turbofish is consumed by the entry-point wrapper).
             self.infer_const_args_free(args.unwrap_or(&[]));
             return Ty::Error;
         }
@@ -6999,7 +7555,31 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // scheme — member schemes are keyed by the MEMBER's `ItemLoc` at the
         // owner's binder indices.
         let named = self.instantiate_type_mention(expr, owner, args);
-        let (subst, const_subst) = owner_arg_subst(&named.args);
+        let (mut subst, const_subst) = owner_arg_subst(&named.args);
+        let generics = item_generics(self.db, member.to_id(self.db)).to_vec();
+        // The one spelling where a list the member cannot take may still
+        // have a home: `Owner::<...>::member`, one segment to the left. Not
+        // offered when the owner has no binder either (that would trade one
+        // refusal for another) or when the path already writes the owner's
+        // list (nothing left to suggest).
+        let owner_hint = (args.is_none()
+            && !item_generics(self.db, owner.to_id(self.db)).is_empty())
+        .then(|| owner.display_name().to_owned());
+        subst.extend(self.member_own_type_subst(
+            expr,
+            expr,
+            &member,
+            &sig,
+            &generics,
+            named.args.len(),
+            member_args,
+            &MemberSite {
+                path: Self::member_path(owner.display_name(), member.display_name()),
+                spelling: TurbofishSpelling::Path,
+                owner_is_trait: false,
+                owner_hint,
+            },
+        ));
         // The member's OWN regions are per-MENTION existentials, exactly as
         // at a dot-call — a qualified spelling is the same instantiation
         // written differently, and leaving them rigid would launder every
@@ -7176,6 +7756,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         trait_loc: &ItemLoc,
         member: &str,
         self_ty: Ty,
+        member_args: &mut Option<&[GenericArgData]>,
     ) -> Ty {
         let resolved = self.resolve_shallow(&self_ty);
         if resolved.contains_error() {
@@ -7233,7 +7814,27 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 });
             return Ty::Error;
         }
-        let inst = self.instantiate_member_own_binder(expr, &member_loc, sig, &generics);
+        let inst = self.instantiate_member_own_binder(
+            expr,
+            expr,
+            &member_loc,
+            sig,
+            &generics,
+            member_args,
+            // Named for the spelling the use site WROTE
+            // (`Peek::<Self = usize>::peek`), not for the impl it resolved
+            // to.
+            Self::member_path(trait_loc.display_name(), member_loc.display_name()),
+            // And WRITABLE in that spelling only: a member value is
+            // impl-specific, so the bare `Peek::peek` a path elsewhere
+            // would carry is refused here (`QualifiedTraitMemberValue`).
+            // The implementer is the one the path already named.
+            TurbofishSpelling::NamedSelf(format!(
+                "{}::<Self = {}>",
+                trait_loc.display_name(),
+                resolved.display()
+            )),
+        );
         self.result.member_value_of_expr.insert(
             expr,
             QualifiedMemberValue {
@@ -7550,6 +8151,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             self.pending_instantiations.push(PendingInstantiation {
                 expr,
                 item: loc.clone(),
+                owner: loc.display_name().to_owned(),
+                spelling: TurbofishSpelling::Path,
                 params: pending,
             });
         }
@@ -7665,12 +8268,24 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// mention, a construction head — every named argument is refused here;
     /// the positional matching then treats it as an unusable argument.
     fn reject_named_args(&mut self, expr: ExprId, args: Option<&[GenericArgData]>) {
+        self.reject_named_args_because(expr, args, NamedArgReason::NotATrait);
+    }
+
+    /// [`Self::reject_named_args`] with `self_reason` for a written
+    /// `Self` — a member's own list needs one of its own, because there
+    /// the owner may BE a trait and the argument is still misplaced.
+    fn reject_named_args_because(
+        &mut self,
+        expr: ExprId,
+        args: Option<&[GenericArgData]>,
+        self_reason: NamedArgReason,
+    ) {
         for arg in args.unwrap_or(&[]) {
             let GenericArgData::Named { name, .. } = arg else {
                 continue;
             };
             let reason = if name == "Self" {
-                NamedArgReason::NotATrait
+                self_reason.clone()
             } else {
                 NamedArgReason::NotSelf
             };
@@ -7690,6 +8305,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             .push(InferenceDiagnostic::NotGeneric {
                 expr,
                 name: name.to_owned(),
+                owner_list_hint: None,
             });
     }
 
@@ -7870,6 +8486,22 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             if let GenericArgData::Const(value) = arg {
                 let fresh = self.fresh_var();
                 self.infer_expr(*value, &fresh);
+            }
+        }
+    }
+
+    /// [`Self::infer_const_args_free`] for a list that has just been
+    /// REFUSED: the arguments still get types, and a bare integer among
+    /// them is then silenced. Errors are infectious and silent — the
+    /// refusal is the whole story, and "cannot infer the type of this
+    /// number" on top of it is advice about a number the program was never
+    /// going to keep.
+    fn infer_const_args_free_quiet(&mut self, args: &[GenericArgData]) {
+        for arg in args {
+            if let GenericArgData::Const(value) = arg {
+                let fresh = self.fresh_var();
+                self.infer_expr(*value, &fresh);
+                poison_unresolved_number(self.table, &fresh);
             }
         }
     }
@@ -9084,6 +9716,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             self.pending_instantiations.push(PendingInstantiation {
                 expr: mention,
                 item: loc.clone(),
+                owner: loc.display_name().to_owned(),
+                spelling: TurbofishSpelling::Path,
                 params: pending,
             });
         }
@@ -9592,6 +10226,130 @@ fn owner_arg_subst(args: &[GenericArg]) -> (FxHashMap<u32, Ty>, FxHashMap<u32, C
         }
     }
     (subst, const_subst)
+}
+
+/// The first same-named but DIFFERENT pair of rigid parameters, one from
+/// each side of a mismatch — the pair whose shared name is why the two
+/// renderings came out equal. Both sides are searched WHOLE rather than in
+/// lockstep: the two occurrences need not sit at the same position (a `T`
+/// under `P::<T>` on one side can meet a bare `T` on the other), and the
+/// first one found is enough, because renaming it is the fix either way.
+fn shadowed_param_pair<'t>(
+    expected: &'t Ty,
+    actual: &'t Ty,
+) -> Option<(&'t crate::ty::ParamTy, &'t crate::ty::ParamTy)> {
+    let (mut want, mut got) = (Vec::new(), Vec::new());
+    collect_params(expected, &mut want);
+    collect_params(actual, &mut got);
+    want.into_iter().find_map(|w| {
+        got.iter()
+            .find(|g| g.name == w.name && **g != w)
+            .map(|g| (w, *g))
+    })
+}
+
+/// Every rigid parameter appearing anywhere in a type, in traversal order.
+/// Regions and const arguments carry no [`Ty::Param`], so only the type
+/// positions are walked.
+fn collect_params<'t>(ty: &'t Ty, out: &mut Vec<&'t crate::ty::ParamTy>) {
+    match ty {
+        Ty::Param(param) => out.push(param),
+        Ty::Fn(f) => {
+            for param in &f.params {
+                collect_params(param, out);
+            }
+            collect_params(&f.ret, out);
+        }
+        Ty::Record(rec) => {
+            for (_, field) in &rec.fields {
+                collect_params(field, out);
+            }
+        }
+        Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
+            for arg in args {
+                if let GenericArg::Ty(ty) = arg {
+                    collect_params(ty, out);
+                }
+            }
+        }
+        Ty::RawPtr { pointee, .. } => collect_params(pointee, out),
+        Ty::Borrow { referent, .. } => collect_params(referent, out),
+        Ty::Array { elem, .. } => collect_params(elem, out),
+        Ty::Infer(_)
+        | Ty::UnresolvedNumber
+        | Ty::Unit
+        | Ty::Never
+        | Ty::Int(_)
+        | Ty::Str
+        | Ty::Bool
+        | Ty::Char
+        | Ty::Error => {}
+    }
+}
+
+/// Tell two same-named rigid parameters apart, for the one message that has
+/// to. Range-free and db-free like the rest of
+/// [`InferenceDiagnostic::message`], which is why it speaks in BINDER
+/// POSITIONS rather than "the owner's" vs "the member's own": those two
+/// halves live in ONE binder (a member's is the owner's followed by its
+/// own — see `crate::item_data`), so telling them apart needs the owner's
+/// arity, which is a database question. The ordering rule is stated
+/// instead, and it is enough to act on: rename one of them.
+fn shadowed_param_note(want: &crate::ty::ParamTy, got: &crate::ty::ParamTy) -> String {
+    let name = &want.name;
+    // Two DIFFERENT items each declaring the name. Unreachable today, and
+    // for a reason worth stating rather than asserting: a param cannot
+    // escape its body (every mention of a generic item instantiates it to
+    // fresh variables — see [`instantiate_scheme`]'s note), so the only way
+    // two rigid params meet is inside one binder. Written for totality, and
+    // because the day associated types or `dyn` change that, the message
+    // that fires must not be the index one — the indices would belong to
+    // two different binders and mean nothing together.
+    if want.item != got.item {
+        return format!(
+            "two different items each declare a `{name}`: the expected one is \
+             `{}`'s, the found one is `{}`'s",
+            want.item.display_name(),
+            got.item.display_name(),
+        );
+    }
+    let item = match &want.item.member {
+        Some((member, _)) => format!("{}::{member}", want.item.name),
+        None => want.item.display_name().to_owned(),
+    };
+    // Binder indices count EVERY parameter kind — a member's `T` in
+    // `fn::<@b, T>` on a one-parameter owner is index 2, not 1 — so the
+    // message says so rather than leaving a reader who was just told
+    // "owner first, then the member's own" to arrive at 1 and doubt it.
+    format!(
+        "`{item}` declares `{name}` twice (the owner's parameters come first, then \
+         the member's own, and every kind counts — regions included): this position \
+         wants the one at binder index {want_i}, the value has the one at index \
+         {got_i} — rename one of them",
+        want_i = want.index,
+        got_i = got.index,
+    )
+}
+
+/// The member's own name out of an owner-qualified spelling
+/// (`Option::fresh` -> `fresh`) — what a dot-call and the named-Self value
+/// form write where the qualified path is not writable.
+fn bare_member_name(path: &str) -> &str {
+    path.rsplit("::").next().unwrap_or(path)
+}
+
+/// The BINDER INDICES of a member's own TYPE parameters, in order — the
+/// positions a written member turbofish spells (see
+/// `InferCtx::member_own_type_subst`). Regions and (reserved) consts are
+/// not positions in that list, so this is deliberately not `owner_arity..`.
+fn member_own_type_slots(generics: &[GenericParamData], owner_arity: usize) -> Vec<u32> {
+    generics
+        .iter()
+        .enumerate()
+        .skip(owner_arity)
+        .filter(|(_, param)| matches!(param.kind, GenericParamKind::Type))
+        .map(|(index, _)| index as u32)
+        .collect()
 }
 
 /// The generic binder of `item` — empty for non-generic items.

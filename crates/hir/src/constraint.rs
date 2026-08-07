@@ -80,6 +80,19 @@ pub enum Cause {
         /// binder index; positions align once arity checked out).
         index: u32,
     },
+    /// Axiom: a MEMBER turbofish argument instantiated a member's own type
+    /// parameter (`o.map::<bool>(f)` pinned `U`). Its own variant rather
+    /// than [`Self::GenericArg`] because the two read different NODES —
+    /// the owner's list hangs directly off the path, a member's hangs
+    /// inside `MEMBER_GENERIC_ARGS` under either a path or a field
+    /// expression — and because a member's list is positional over its
+    /// TYPE parameters only, so the position is not a binder index.
+    MemberGenericArg {
+        /// The mention: the qualified path, or the dot-call's callee.
+        mention: ExprId,
+        /// The argument's position in the MEMBER's own list.
+        index: u32,
+    },
     /// Conclusion: this sibling branch of a join produced the type.
     Branch(ExprId),
     /// Conclusion: in an equality, the first operand's type is what the
@@ -568,7 +581,8 @@ impl Constraints {
         true
     }
 
-    /// The [`Cause::GenericArg`]s recorded on `ty`'s variable (if it is
+    /// The turbofish causes ([`Cause::GenericArg`],
+    /// [`Cause::MemberGenericArg`]) recorded on `ty`'s variable (if it is
     /// one): why an instantiated type parameter has the type it has.
     /// Consulted by `InferCtx::check` on a direct mismatch — unlike the
     /// join solver, direct checks don't otherwise read the cause store, and
@@ -588,7 +602,12 @@ impl Constraints {
                 causes
                     .iter()
                     .copied()
-                    .filter(|cause| matches!(cause, Cause::GenericArg { .. }))
+                    .filter(|cause| {
+                        matches!(
+                            cause,
+                            Cause::GenericArg { .. } | Cause::MemberGenericArg { .. }
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default()

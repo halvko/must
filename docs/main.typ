@@ -367,8 +367,9 @@ A *raw* pointer to a type with members still never dot-calls them; write
 the deref yourself.
 
 The owner's generic binder is in scope in member signatures and bodies, and
-a dot-call never spells a turbofish — the receiver's type supplies the
-arguments:
+a dot-call never spells the OWNER's arguments — the receiver's type supplies
+them; a member's own type parameters are a separate list (see "Members with
+their own type parameters"):
 
 ```must
 type Box2 = struct::<T> { v: T } with {
@@ -880,6 +881,10 @@ Honest restrictions, all diagnosed:
   (`fn (o: Option::Some)` is rejected with that reason); use the whole
   generic enum, or a monomorphic enum, until it lands.
 
+A type's binder is not the only one a member sees: an inherent member may
+bind type parameters of its own, which vary per *call* rather than per
+value — see "Members with their own type parameters" below.
+
 == Raw pointers and unsafe
 
 Raw pointers reach places all the way down. The types are `T.&raw`
@@ -1180,9 +1185,7 @@ static twice = fn::<@a>(c: Counter.&mut::<@a>) -> usize {
 
 `@b` has nowhere else to come from: the type's own binder carries its type
 parameters, not regions, and nothing is elided. It is a fresh region at
-every call, so the two `c.bump()` calls above borrow independently. (Type
-and const parameters on a member are *not* supported yet — the owner's are
-already in scope, so a member-own one would only be sugar.)
+every call, so the two `c.bump()` calls above borrow independently.
 
 `c` there is already a borrow, and `c.bump()` does not dereference it —
 there is no auto-deref. It *reborrows*: the receiver is the last argument
@@ -1198,6 +1201,76 @@ local itself, which the exception forbids — so you write it, and
 borrow. A shared receiver never reaches a `Self.&mut` member at all, because
 shared never becomes exclusive. And a borrow receiver never reaches a member
 whose `Self` is a *value* — that would be auto-deref; write `c.*.take()`.
+
+=== Members with their own type parameters
+
+A member may also bind *type* parameters of its own, beside its regions.
+The reason is not sugar: a member-own type parameter varies *per call*, and
+no binder on the owning type can say that.
+
+```must
+type Option = enum::<T> { Some(T), None } with {
+    impl Self {
+        flat_map = fn::<U>(f: fn(T) -> Option::<U>, s: Self) -> Option::<U> {
+            match s {
+                ::Some(v) => { f(v) }
+                ::None => { Option::None }
+            }
+        }
+        map = fn::<U>(f: fn(T) -> U, s: Self) -> Option::<U> {
+            s.flat_map(fn(t) { Option::Some(f(t)) })
+        }
+    }
+};
+```
+
+`T` is the container's — one per `Option::<T>` — while `U` is the call's:
+`map` over the same `Option::<usize>` may produce an `Option::<bool>` at
+one site and an `Option::<str>` at the next.
+
+The member's binder is the owner's *followed by* its own, which is what
+makes the two halves reach the call site from different places. The owner's
+arguments come from the receiver's type; the member's own are inferred, or
+written in a turbofish on the member's own name — in either spelling:
+
+```
+o.map::<bool>(width)                     // the dot spelling
+Option::map::<bool>(width, o)            // the qualified spelling
+Option::<usize>::map::<bool>(width, o)   // both binders, spelled out
+```
+
+That written list spells the member's *type* parameters, in order, and only
+those. Its regions are not positions in it. A member's regions are fresh at
+every call, and a region argument at a mention constrains the borrow
+checker rather than the type — so while that holds, writing one buys
+nothing, and requiring the `@_` wildcard as a placeholder would make every
+borrow-taking generic member's call site carry a token that means "as
+before". This differs from a *free* function's turbofish, which is
+positional over its whole binder and does spell regions; the divergence is
+deliberate, and recorded with the conditions that would end it as TR10 in
+`docs/design/traits-and-generics.md`. A member with no binder of its own
+takes no arguments at all — including an empty `::<>` — and says so.
+
+The literal in `map`'s body is not annotated, and does not need to be: a
+`fn` literal takes its parameter and return types from the position it sits
+in, so `fn(t) { Option::Some(f(t)) }` gets both from `flat_map`'s parameter.
+That is a general rule, not a member one.
+
+Everything else follows the generics chapter unchanged. The body is checked
+*once*, with `U` rigid — so `U` supports nothing until bounds arrive, and
+`flat_map`'s "hand it back or pass it on" shape is exactly what a rigid
+parameter admits. `U` carries the default `forget` bound like every other
+type parameter, checked where the call spends the binder. And a member's own
+name may shadow one of the owner's, last declaration winning, the same rule
+the binder's const parameters already follow. Where the two then meet, the
+mismatch says which binder position each `T` is, because both render the
+same way.
+
+Const parameters on a member are *not* supported yet, and the reason is
+narrower than "sugar": a const argument is part of an instance's identity,
+and the one place a member's arguments are carried reads them off the
+receiver's own type — which cannot supply something the receiver does not
+have.
 
 === Outlives clauses
 

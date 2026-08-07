@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 32 errors and 1 warning.
+// exactly: found 33 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -214,22 +214,36 @@ static return_in_const_block = fn () -> usize {
     const { if true { return 1; }; 0 }
 };
 
-// 23. A turbofish on a qualified member's OWN name. The path is not
-//     malformed — it parses as the shape it will keep, with the arguments
-//     on the SEGMENT that was given them — it is RESERVED: a member's own
-//     binder carries REGIONS only (see 28 below), and a region argument is
-//     never spelled at a call anyway. The day type and const params join
-//     it, this diagnostic goes away and nothing else moves. (On a VARIANT
+// 23. A turbofish on a qualified member's OWN name, where the member has
+//     no binder of its own. A member MAY bind type parameters now
+//     (`map = fn::<U>(...)`), so this list is spendable in principle — it
+//     is this particular member that takes nothing, and the message is the
+//     one every binder-less turbofish gets. A member's REGIONS are not
+//     positions in the list (they are always inferred; see 28 below), so
+//     `size` would still take none even if it declared one. (On a VARIANT
 //     the same shape gets a different answer: a variant never gets a
 //     binder, so its arguments are the owner's, misplaced —
 //     `Shape::<usize>::Circle`.)
-//     error: a member's own generic arguments are not supported yet: arguments written on `Measured::size` cannot be applied here
+//     error: `Measured::size` takes no generic arguments
 type Measured = struct { n: usize } with {
     impl Self {
         size = fn (m: Self) -> usize { m.n };
     }
 };
 static member_own_turbofish = fn () -> () { let f = Measured::size::<usize>; };
+
+// 23b. The one member-argument RESERVATION that is left: a CONST parameter
+//     of a member's own. It needs a trait requirement to reach — an
+//     inherent member cannot declare one at all (that is a parse-time
+//     refusal, not this) — and the whole list is refused rather than
+//     spent in part. The ground is instance identity: a const argument is
+//     part of WHICH instance is called, and a member's arguments are read
+//     off the receiver's own type, which cannot supply one.
+//     error: `Counted::step` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)
+trait Counted = requires { step: fn::<const N: usize>(s: Self) -> usize; } with {
+    impl usize { step = fn::<const N: usize>(s: usize) -> usize { N }; }
+};
+static member_own_const_turbofish = fn (n: usize) -> usize { Counted::step::<3>(n) };
 
 // 24. A qualified path naming a FIELD: the field/member namespace split
 //     puts fields on VALUES and members on the type, so `Sized::len` is

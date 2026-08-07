@@ -7372,6 +7372,103 @@ fn path_accessors_keep_the_two_lists_apart() {
     );
 }
 
+#[test]
+fn member_turbofish_on_a_dot_call() {
+    // The second position for a member's own turbofish: the DOT spelling.
+    // It parses into the very same `MEMBER_GENERIC_ARGS` node the qualified
+    // spelling produces, one level inside the `FIELD_EXPR` — so
+    // everything downstream sees one thing, and a field access (which has
+    // no binder) still cannot be confused with the arguments written on it.
+    check(
+        "static s = fn () -> () { o.flat_map::<usize>(f); };",
+        expect![[r#"
+            SOURCE_FILE@0..51
+              STATIC_ITEM@0..51
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "s"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..50
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  PARAM_LIST@14..16
+                    L_PAREN@14..15 "("
+                    R_PAREN@15..16 ")"
+                  WHITESPACE@16..17 " "
+                  RET_TYPE@17..22
+                    THIN_ARROW@17..19 "->"
+                    WHITESPACE@19..20 " "
+                    UNIT_TYPE@20..22
+                      L_PAREN@20..21 "("
+                      R_PAREN@21..22 ")"
+                  WHITESPACE@22..23 " "
+                  BLOCK_EXPR@23..50
+                    L_BRACE@23..24 "{"
+                    WHITESPACE@24..25 " "
+                    EXPR_STMT@25..48
+                      CALL_EXPR@25..47
+                        FIELD_EXPR@25..44
+                          PATH_EXPR@25..26
+                            NAME_REF@25..26
+                              IDENT@25..26 "o"
+                          DOT@26..27 "."
+                          NAME_REF@27..35
+                            IDENT@27..35 "flat_map"
+                          MEMBER_GENERIC_ARGS@35..44
+                            COLON2@35..37 "::"
+                            GENERIC_ARG_LIST@37..44
+                              L_ANGLE@37..38 "<"
+                              TYPE_ARG@38..43
+                                PATH_TYPE@38..43
+                                  NAME_REF@38..43
+                                    IDENT@38..43 "usize"
+                              R_ANGLE@43..44 ">"
+                        ARG_LIST@44..47
+                          L_PAREN@44..45 "("
+                          PATH_EXPR@45..46
+                            NAME_REF@45..46
+                              IDENT@45..46 "f"
+                          R_PAREN@46..47 ")"
+                      SEMICOLON@47..48 ";"
+                    WHITESPACE@48..49 " "
+                    R_BRACE@49..50 "}"
+                SEMICOLON@50..51 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn the_dot_member_turbofish_has_its_own_accessor() {
+    // The AST half: `FieldExpr::member_generic_arg_list()` is the dot
+    // spelling's twin of `PathExpr::member_generic_arg_list()`, and a plain
+    // field access has none.
+    use crate::ast::{self, AstNode};
+    let field_of = |text: &str| {
+        crate::parse(text)
+            .syntax_node()
+            .descendants()
+            .find_map(ast::FieldExpr::cast)
+            .expect("a field expression")
+    };
+    let with_args = field_of("static s = fn () -> () { o.map::<bool>(f); };");
+    assert_eq!(
+        with_args
+            .member_generic_arg_list()
+            .map(|list| list.syntax().text().to_string()),
+        Some("<bool>".to_owned())
+    );
+    assert_eq!(
+        with_args.name_ref().map(|n| n.text()),
+        Some("map".to_owned())
+    );
+
+    let plain = field_of("static s = fn () -> () { o.map(f); };");
+    assert!(plain.member_generic_arg_list().is_none());
+}
+
 // ---- bare-angle generics (the missing-turbofish typo) -------------------
 //
 // `Option<T>` for `Option::<T>` (Rust muscle memory) is the most
@@ -11188,7 +11285,6 @@ type A = struct { x: usize } with {
               WHITESPACE@147..148 "\n"
             error 61..66: associated consts are not supported yet
             error 89..90: a member must be defined as an `fn` literal
-            error 109..110: a member's own type parameters are not supported yet (the type's own binders are already in scope)
         "#]],
     );
 }

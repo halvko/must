@@ -3744,6 +3744,167 @@ type Counter = struct { n: usize } with {
 }
 
 #[test]
+fn hover_on_a_member_with_its_own_type_binder_shows_the_binder() {
+    // A member's OWN type parameter is part of its signature, and hover
+    // renders it rigid — `U`, not a resolved type — because that is what
+    // the DECLARATION says. (The owner's `T` reads the same way; the two
+    // halves of the binder are indistinguishable here, deliberately.)
+    check_hover(
+        r#"
+type Option = enum::<T> { Some(T), None } with {
+    impl Self {
+        map_to$0 = fn::<U>(f: fn(T) -> U, s: Self) -> U {
+            match s { ::Some(t) => f(t), ::None => panic("none") }
+        }
+    }
+};
+"#,
+        "```must
+map_to: fn(fn(T) -> U, Option::<T>) -> U
+```",
+    );
+}
+
+#[test]
+fn hover_on_a_member_turbofish_call_shows_the_instantiated_signature() {
+    // At the USE site the same member reads instantiated — the owner's
+    // argument from the receiver, the member's own from the turbofish.
+    check_hover(
+        r#"
+type Option = enum::<T> { Some(T), None } with {
+    impl Self {
+        map_to = fn::<U>(f: fn(T) -> U, s: Self) -> U {
+            match s { ::Some(t) => f(t), ::None => panic("none") }
+        }
+    }
+};
+static width = fn(n: usize) -> bool { n > 2 };
+static main = fn(o: Option::<usize>) -> bool { o.map_to$0::<bool>(width) };
+"#,
+        "```must
+map_to: fn(fn(usize) -> bool, Option::<usize>) -> bool
+```",
+    );
+}
+
+#[test]
+fn completions_survive_a_member_turbofish() {
+    // The dot's new turbofish position, at the three places a user's
+    // cursor lands while typing one: inside the argument list, right after
+    // it, and inside the call's arguments. None may panic, and the last
+    // must still see the locals in scope.
+    for fixture_text in [
+        r#"
+type Option = enum::<T> { Some(T), None } with {
+    impl Self { map_to = fn::<U>(f: fn(T) -> U, s: Self) -> U { panic("x") }; }
+};
+static main = fn(o: Option::<usize>, w: fn(usize) -> bool) -> bool { o.map_to::<b$0>(w) };
+"#,
+        r#"
+type Option = enum::<T> { Some(T), None } with {
+    impl Self { map_to = fn::<U>(f: fn(T) -> U, s: Self) -> U { panic("x") }; }
+};
+static main = fn(o: Option::<usize>, w: fn(usize) -> bool) -> bool { o.map_to::<bool>$0(w) };
+"#,
+    ] {
+        let (analysis, _file, pos) = fixture(fixture_text);
+        let _ = analysis.completions(pos);
+    }
+    check_completions(
+        r#"
+type Option = enum::<T> { Some(T), None } with {
+    impl Self { map_to = fn::<U>(f: fn(T) -> U, s: Self) -> U { panic("x") }; }
+};
+static main = fn(o: Option::<usize>, wide: fn(usize) -> bool) -> bool {
+    o.map_to::<bool>(wid$0)
+};
+"#,
+        expect_test::expect![[r#"
+            wide Variable (fn(usize) -> bool)
+            panic Function (fn(str) -> !)
+            o Variable (Option::<usize>)
+            AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            NextChar Enum (enum { Char(char, usize), End })
+            Option Enum (enum { Some(T), None })
+            ReadLineResult Enum (enum { Line(str), End })
+            Utf8Result Enum (enum { Ok(str), Err })
+            main Function (fn(Option::<usize>, fn(usize) -> bool) -> bool)
+            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
+            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
+            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
+            dangling Function (fn::<T>() -> T.&raw mut)
+            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
+            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
+            print Function (fn(str))
+            read_line Function (fn() -> ReadLineResult)
+            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
+            const Keyword
+            false Keyword
+            fn Keyword
+            if Keyword
+            loop Keyword
+            match Keyword
+            struct Keyword
+            true Keyword
+            unsafe Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn a_dot_call_with_a_member_turbofish_still_highlights_as_a_function() {
+    // The member name keeps its `function` token with the new node sitting
+    // beside it — `MEMBER_GENERIC_ARGS` is a CHILD of the `FIELD_EXPR`, so
+    // the call is still the field expression's parent and the resolution
+    // lookup is unchanged.
+    check_highlights(
+        r#"type C = struct { n: usize } with {
+    impl Self { pick = fn::<U>(alt: U, c: Self) -> U { alt }; }
+};
+static main = fn(c: C) -> bool { c.pick::<bool>(true) };
+"#,
+        expect_test::expect![[r#"
+            0..4 "type" Keyword
+            5..6 "C" Type.declaration
+            7..8 "=" Operator
+            9..15 "struct" Keyword
+            21..26 "usize" Type.defaultLibrary
+            29..33 "with" Keyword
+            40..44 "impl" Keyword
+            45..49 "Self" Type
+            52..56 "pick" Function.declaration
+            57..58 "=" Operator
+            59..61 "fn" Keyword
+            63..64 "<" Operator
+            64..65 "U" TypeParameter.declaration
+            65..66 ">" Operator
+            67..70 "alt" Parameter.declaration
+            72..73 "U" TypeParameter
+            75..76 "c" Parameter.declaration
+            78..82 "Self" Type
+            84..86 "->" Operator
+            87..88 "U" TypeParameter
+            91..94 "alt" Parameter
+            103..109 "static" Keyword
+            110..114 "main" Function.declaration.static
+            115..116 "=" Operator
+            117..119 "fn" Keyword
+            120..121 "c" Parameter.declaration
+            123..124 "C" Type
+            126..128 "->" Operator
+            129..133 "bool" Type.defaultLibrary
+            136..137 "c" Parameter
+            138..142 "pick" Function
+            144..145 "<" Operator
+            145..149 "bool" Type.defaultLibrary
+            149..150 ">" Operator
+            151..155 "true" Keyword
+        "#]],
+    );
+}
+
+#[test]
 fn hover_inside_member_body_resolves_locals() {
     check_hover(
         r#"

@@ -679,6 +679,42 @@ static main = fn () -> usize {
 }
 
 #[test]
+fn a_member_own_type_param_monomorphizes_per_instantiation() {
+    // A member's OWN type argument, which is erased at the MIR boundary
+    // like every other type argument and re-derived by `mono::unify` from
+    // the concrete call site. Two `U`s of different LAYOUT through one
+    // member body is the thing that has to survive that round trip.
+    check(
+        r#"
+type Option = enum::<T> { Some(T), None } with {
+    impl Self {
+        unwrap = const fn(s: Self) -> T {
+            match s { ::Some(t) => t, ::None => panic("none") }
+        }
+        flat_map = fn::<U>(f: fn(T) -> Option::<U>, s: Self) -> Option::<U> {
+            match s {
+                ::Some(v) => { f(v) }
+                ::None => { Option::None }
+            }
+        }
+    }
+};
+type Wide = struct { a: usize, b: usize };
+static twice = fn (n: usize) -> Option::<usize> { Option::Some(n + n) };
+static spread = fn (n: usize) -> Option::<Wide> { Option::Some(Wide(struct { a = n, b = n + 1 })) };
+static main = fn () -> usize {
+    let n = Option::Some(3).flat_map(twice).unwrap();
+    let w = Option::Some(10).flat_map::<Wide>(spread).unwrap();
+    let none: Option::<usize> = Option::None;
+    let z = Option::unwrap(Option::flat_map::<usize>(twice, Option::Some(1)));
+    n + w.a + w.b + z
+}
+"#,
+        "main()",
+    );
+}
+
+#[test]
 fn const_generics_instantiate_and_forward() {
     check(
         r#"

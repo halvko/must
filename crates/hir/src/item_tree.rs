@@ -856,17 +856,17 @@ pub struct MemberData {
     pub home: MemberHome,
     /// The member's OWN generic binder (`fmt = fn::<W: Write>(...)`) —
     /// live in full for trait-impl members (a requirement may be a generic
-    /// fn); for an INHERENT member only its REGION params are live, and
+    /// fn); for an INHERENT member its REGION and TYPE params are live, and
     /// they are APPENDED to the owner's binder by [`crate::item_data`].
     ///
-    /// Why regions and only regions: an inherent member already sees the
-    /// owner's type and const params ("the type's own binders are already
-    /// in scope"), so a member-own *type* binder is redundant sugar and
-    /// stays reserved. A REGION has no such source — regions on type
-    /// declarations are themselves reserved — so a borrow-taking member
-    /// (`get = fn::<@b>(k: K, m: Self.&mut::<@b>)`) has nowhere else to
-    /// bind the per-call region it needs, and with no elision it cannot
-    /// decline to name one. The type/const halves are rejected in
+    /// Why not const: a member-own REGION or TYPE parameter is erased —
+    /// nothing about the call's identity depends on it (regions vanish
+    /// outright, type arguments are recovered by unification at the
+    /// monomorphizing backend) — while a CONST parameter *is* instance
+    /// identity, and the one place a member's arguments are carried
+    /// (`Rvalue::Instantiate`, whose const-arg list is read off the
+    /// receiver's own type at the owner's binder indices) has no slot for
+    /// one that the receiver cannot supply. The const half is rejected in
     /// `syntax::validation::reject_nested_generic_binder` and dropped here.
     pub generics: Vec<GenericParamData>,
 }
@@ -904,13 +904,13 @@ pub fn type_members<'db>(db: &'db dyn Db, item: crate::ItemId<'db>) -> Vec<Membe
                 _ => Vec::new(),
             };
             let generics = match &source.home {
-                // Regions only — see [`MemberData::generics`]. A type or
-                // const param here is a reserved spelling with its own
+                // Regions and types — see [`MemberData::generics`]. A const
+                // param here is a reserved spelling with its own
                 // diagnostic; dropping it leaves its mentions resolving to
                 // the owner's binder (or nothing), exactly as before.
                 MemberHome::Inherent => own
                     .into_iter()
-                    .filter(|param| matches!(param.kind, GenericParamKind::Region))
+                    .filter(|param| !matches!(param.kind, GenericParamKind::Const(_)))
                     .collect(),
                 MemberHome::TraitImpl { .. } => own,
             };

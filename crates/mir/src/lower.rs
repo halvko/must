@@ -362,15 +362,23 @@ impl LowerCtx<'_> {
                 InferenceDiagnostic::MemberNotCalled { expr, .. } => {
                     self.value_traps.insert(*expr, diag.message());
                 }
-                // Generic arguments written on a path's SECOND segment —
-                // reserved on a member, misplaced on a variant. Either way
-                // the PATH is what cannot produce a value; in the called
-                // form the diagnostic already sits on the callee path, so
-                // the trap lands before the call, exactly like the
-                // member-value refusals below.
-                InferenceDiagnostic::MemberOwnGenericArgs { expr, .. }
+                // Generic arguments written on a member or a variant —
+                // reserved (a member's own consts), miscounted, or
+                // misplaced (a variant's belong to the enum). The list is
+                // written on the path, but a member's entry points key the
+                // report on the CALL (that is the range the squiggle
+                // covers), so the trap has to be keyed the same way it is
+                // reported: a call whose path was refused must not execute
+                // — otherwise the callee runs and reports something else
+                // (a reserved const parameter read in the impl's body).
+                InferenceDiagnostic::MemberOwnConstArgs { expr, .. }
+                | InferenceDiagnostic::MemberGenericArgCount { expr, .. }
                 | InferenceDiagnostic::VariantOwnGenericArgs { expr, .. } => {
-                    self.value_traps.insert(*expr, diag.message());
+                    if matches!(self.body.exprs[*expr], ExprData::Call { .. }) {
+                        self.call_traps.insert(*expr, diag.message());
+                    } else {
+                        self.value_traps.insert(*expr, diag.message());
+                    }
                 }
                 // A bare trait name (or a member value with no implementer
                 // named, one that would capture a dictionary, an associated
@@ -1210,7 +1218,7 @@ impl LowerCtx<'_> {
             // `receiver.field` lowers to a positional projection: the
             // receiver's record type is already resolved by inference, so
             // the field name becomes an index into its sorted field list.
-            ExprData::Field { receiver, name } => {
+            ExprData::Field { receiver, name, .. } => {
                 // No field name at all (`a.`): the parse error covers it,
                 // same invented-but-generic wording as a missing operand.
                 if name.is_empty() {
@@ -2581,7 +2589,7 @@ impl LowerCtx<'_> {
                     let mut projection = Vec::with_capacity(chain.len());
                     for &link in chain.iter().rev() {
                         match &self.body.exprs[link] {
-                            ExprData::Field { receiver, name } => {
+                            ExprData::Field { receiver, name, .. } => {
                                 match self.field_index(*receiver, name) {
                                     Some(index) => projection.push(crate::ProjElem::Field(index)),
                                     // No index and no diagnosed trap above:
@@ -3038,7 +3046,7 @@ impl LowerCtx<'_> {
         projection.extend(lead);
         for &link in chain.iter().rev() {
             match &self.body.exprs[link] {
-                ExprData::Field { receiver, name } => {
+                ExprData::Field { receiver, name, .. } => {
                     let index = self.field_index(*receiver, name)?;
                     projection.push(crate::ProjElem::Field(index));
                 }
@@ -3307,19 +3315,18 @@ impl LowerCtx<'_> {
     /// The callee operand of a resolved member call: the member item's
     /// value — instantiated with the RECEIVER type's const-argument values
     /// when the owner's binder declares const params (the receiver's type
-    /// is the turbofish a dot-call never spells; its values live in the
-    /// annotation-representable const domain, so they lower to plain
-    /// constants — or to a forwarded `ConstParam` read inside a generic
-    /// body). Type params need nothing (erasure).
+    /// supplies the OWNER's arguments, which a dot-call never spells; their
+    /// values live in the annotation-representable const domain, so they
+    /// lower to plain constants — or to a forwarded `ConstParam` read inside
+    /// a generic body). Type params need nothing (erasure).
     ///
-    /// INVARIANT this rests on: a member's binder IS its owner's, verbatim
-    /// (`hir::item_data` clones the owner's generics for a member, and
-    /// inherent members declare none of their own — the grammar has no
-    /// member binder to declare). So the receiver type's argument list maps
-    /// onto the member's binder position by position, which is what makes
-    /// `receiver_args.get(index)` right. When member-own binders land, the
-    /// member's binder becomes owner ∪ own while the receiver still supplies
-    /// only the owner prefix, and this indexing has to be revisited.
+    /// INVARIANT this rests on: the owner's binder is the LOW-INDEX PREFIX
+    /// of a member's (TR10 — `hir::item_data` puts the owner's generics
+    /// first and the member's own after them), and only the owner's half can
+    /// carry const params, because member-own const parameters are still
+    /// refused (`syntax::validation`). So every index `receiver_args` is
+    /// asked for lands in the owner prefix, which is what makes
+    /// `receiver_args.get(index)` right.
     fn member_callee_operand(
         &mut self,
         b: &mut BodyBuilder,

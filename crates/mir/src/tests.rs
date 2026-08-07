@@ -1334,11 +1334,11 @@ static s = Shape::Missing;
 }
 
 #[test]
-fn member_own_generic_args_traps_with_the_reservation() {
-    // Without the `MemberOwnGenericArgs` arm in `value_traps`, lowering
-    // falls through to the unrelated (and doubly wrong) "cannot use a
-    // variant" trap: `size` names a member, not a variant, and
-    // `Measured`'s declaration has no errors.
+fn member_generic_args_the_binder_cannot_receive_trap_at_the_path() {
+    // Without these arms in `value_traps`, lowering falls through to the
+    // unrelated (and doubly wrong) "cannot use a variant" trap: `size`
+    // names a member, not a variant, and `Measured`'s declaration has no
+    // errors.
     check_mir(
         r#"
 type Measured = struct { n: usize } with {
@@ -1349,13 +1349,47 @@ static s = Measured::size::<usize>;
         expect![[r#"
             item Measured:
             item s:
-            fn b0() -> {error} {
-              _0: {error}  // return
-              _1: {error}
+            fn b0() -> fn(Measured) -> usize {
+              _0: fn(Measured) -> usize  // return
+              _1: fn(Measured) -> usize
               bb0:
-                _1 = trap "a member's own generic arguments are not supported yet: arguments written on `Measured::size` cannot be applied here" -> bb1
+                _1 = trap "`Measured::size` takes no generic arguments" -> bb1
               bb1:
                 _0 = _1
+                return
+            }
+        "#]],
+    );
+    // And the kind still reserved: a member whose own binder declares a
+    // CONST parameter refuses the whole list. The report is keyed on the
+    // CALL (that is the range the squiggle covers), so the trap REPLACES
+    // the call rather than following it — otherwise the impl body runs and
+    // reports the reserved `N` instead of the refusal the reader was
+    // shown.
+    check_mir(
+        r#"
+trait Counted = requires { step: fn::<const N: usize>(s: Self) -> usize; } with {
+    impl usize { step = fn::<const N: usize>(s: usize) -> usize { N }; }
+};
+static s = fn(n: usize) -> usize { Counted::step::<3>(n) };
+"#,
+        expect![[r#"
+            item Counted:
+            item s:
+            fn b0(_1: usize) -> usize {
+              _0: usize  // return
+              _1: usize  // param n
+              _2: usize
+              bb0:
+                _2 = trap "`Counted::step` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)" -> bb1
+              bb1:
+                _0 = _2
+                return
+            }
+            fn b1() -> fn(usize) -> usize {
+              _0: fn(usize) -> usize  // return
+              bb0:
+                _0 = fn b0
                 return
             }
         "#]],

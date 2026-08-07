@@ -153,6 +153,12 @@ pub enum ExprData {
         /// Empty when the name is missing (broken source, e.g. `a.`); the
         /// parse error covers it, inference stays silent.
         name: String,
+        /// The dot segment's OWN written turbofish (`s.flat_map::<usize>`),
+        /// when present — the MEMBER's arguments, the twin of
+        /// [`ExprData::VariantPath::member_args`]. A field has no binder,
+        /// so a list here is only ever spendable when the dot-call resolves
+        /// to a member; every other outcome refuses it by name.
+        member_args: Option<Vec<GenericArgData>>,
     },
     /// `[e1, e2, e3]`: an array literal — the length is the element count.
     ArrayLit {
@@ -784,7 +790,22 @@ impl LowerCtx {
             ast::Expr::FieldExpr(it) => {
                 let receiver = self.lower_opt_expr(it.receiver());
                 let name = it.name_ref().map(|n| n.text()).unwrap_or_default();
-                self.alloc_expr(ExprData::Field { receiver, name }, it.syntax())
+                // `s.flat_map::<usize>` — the MEMBER's own turbofish, the
+                // dot-call spelling of `ExprData::VariantPath::member_args`.
+                // Lowered for real and kept out of any owner list, exactly
+                // as the qualified form's is: the owner's arguments come
+                // from the RECEIVER's type here, and are never written.
+                let member_args = it
+                    .member_generic_arg_list()
+                    .map(|list| self.lower_generic_args(list));
+                self.alloc_expr(
+                    ExprData::Field {
+                        receiver,
+                        name,
+                        member_args,
+                    },
+                    it.syntax(),
+                )
             }
             ast::Expr::ArrayExpr(it) => {
                 if it.is_repeat() {

@@ -4635,8 +4635,9 @@ type Box2 = struct::<T> { v: T } with {
 }
 
 // A const-generic owner: the member reads the binder's `N`, supplied by
-// the RECEIVER's type (the turbofish a dot-call never spells) — and one
-// member forwards it to another through a dot-call on `Self`.
+// the RECEIVER's type (the owner's arguments, which a dot-call never
+// spells) — and one member forwards it to another through a dot-call on
+// `Self`.
 #[test]
 fn const_generic_member_reads_the_receivers_const_arg() {
     check_run(
@@ -4925,6 +4926,46 @@ static main = fn() -> usize {
         "main()",
         expect![[r#"
             => 19
+        "#]],
+    );
+}
+
+#[test]
+fn a_member_own_type_param_runs_at_every_spelling() {
+    // The member-own TYPE binder end to end: inferred at the call,
+    // spelled on the dot, and spelled on the qualified path — the same
+    // instantiation, three ways, all of them running.
+    check_run(
+        r#"
+type Option = enum::<T> { Some(T), None } with {
+    impl Self {
+        unwrap = const fn(s: Self) -> T {
+            match s { ::Some(t) => t, ::None => panic("none") }
+        }
+        flat_map = fn::<U>(f: fn(T) -> Option::<U>, s: Self) -> Option::<U> {
+            match s {
+                ::Some(v) => { f(v) }
+                ::None => { Option::None }
+            }
+        }
+    }
+};
+static twice = fn(n: usize) -> Option::<usize> { Option::Some(n + n) };
+static label = fn(n: usize) -> Option::<str> { Option::Some("hit") };
+static main = fn() -> usize {
+    let inferred = Option::Some(3).flat_map(twice).unwrap();
+    let dotted = Option::Some(4).flat_map::<usize>(twice).unwrap();
+    let pathed = Option::unwrap(Option::flat_map::<usize>(twice, Option::Some(5)));
+    // A SECOND instantiation of the same member, at a different `U`: the
+    // member's own binder varies per call, which is the whole point.
+    print(Option::Some(1).flat_map(label).unwrap());
+    inferred + dotted + pathed
+};
+"#,
+        "main()",
+        expect![[r#"
+            output: "hit"
+            => 24
         "#]],
     );
 }

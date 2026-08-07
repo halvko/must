@@ -263,8 +263,8 @@ pub fn item_data<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<item_tree::I
             .iter()
             .find(|m| m.name == member_name && m.disambiguator == member_dis)?;
         // An INHERENT member's binder is the owner's (the type's params
-        // flow into member signatures and bodies) PLUS its own REGION
-        // params, APPENDED. The owner's params keep indices `0..arity`,
+        // flow into member signatures and bodies) PLUS its own REGION and
+        // TYPE params, APPENDED. The owner's params keep indices `0..arity`,
         // which is what [`crate::ty::member_self_ty`] relies on when it
         // re-spells the owner's binder at the MEMBER's `ItemLoc`, and what
         // lets a dot-call read the owner's substitution straight off the
@@ -692,7 +692,8 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     // LAST declaration of the name, so a repeat leaves the earlier
     // parameter unnameable rather than ambiguous. Reported at the second
     // occurrence, pointing at the first. Per LIST, not per item: two
-    // binders are two namespaces, whoever owns them.
+    // binders are two namespaces, whoever owns them — which is what leaves
+    // a member's own `T` free to shadow its owner's.
     let named = |name: ast::Name| (name.text(), name.syntax().text_range());
     for list in parse(db, file)
         .syntax_node()
@@ -1256,6 +1257,38 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                                     message: format!(
                                         "because `{param_name}` was instantiated to `{}` \
                                          by this argument",
+                                        expected.display()
+                                    ),
+                                }]
+                            }
+                            // The MEMBER's own list, which hangs one level
+                            // down inside `MEMBER_GENERIC_ARGS` — under a
+                            // path (`Option::map::<bool>`) or under a field
+                            // expression (`o.map::<bool>(f)`). Deliberately
+                            // NOT folded into the arm above: that one reads
+                            // the OWNER's list off the same node, so a
+                            // shared arm would point at `Option::<usize>`'s
+                            // argument when the member's was written.
+                            Cause::MemberGenericArg { mention, index } => {
+                                let Some(node) = ast_for_expr(*mention) else {
+                                    return Vec::new();
+                                };
+                                let list = ast::PathExpr::cast(node.clone())
+                                    .and_then(|path| path.member_generic_arg_list())
+                                    .or_else(|| {
+                                        ast::FieldExpr::cast(node)?.member_generic_arg_list()
+                                    });
+                                let Some(arg) =
+                                    list.and_then(|list| list.args().nth(*index as usize))
+                                else {
+                                    return Vec::new();
+                                };
+                                vec![RelatedInfo {
+                                    file,
+                                    range: arg.syntax().text_range(),
+                                    message: format!(
+                                        "because this member argument instantiated the \
+                                         parameter to `{}`",
                                         expected.display()
                                     ),
                                 }]

@@ -596,6 +596,13 @@ fn expr_bp(p: &mut Parser<'_>, min_bp: u8) -> Option<CompletedMarker> {
             // `name_ref` asserts it is at IDENT, so guard first.
             if p.at(IDENT) {
                 name_ref(p);
+                // `s.flat_map::<usize>(f)` — the MEMBER's own turbofish, in
+                // the one position a dot-call can spell it. Parsed into the
+                // same `MEMBER_GENERIC_ARGS` node the qualified spelling
+                // uses (`Option::flat_map::<usize>`), so the two forms are
+                // one thing to everything downstream; whether the name
+                // turns out to be a member at all is inference's question.
+                member_generic_args(p);
             } else {
                 p.error("expected a field name after `.`");
             }
@@ -1447,15 +1454,14 @@ fn generic_arg_list(p: &mut Parser<'_>) {
 /// difference, and it is what keeps `PathExpr::generic_arg_list()` meaning
 /// the OWNER's list — no consumer can read one as the other by accident.
 ///
-/// Nothing is diagnosed here. `size::<usize>` on a member is FUTURE-LEGAL
-/// by declared intent (member-own binders are reserved, not rejected: one
-/// day `size = fn::<T>(m: Self, t: T) -> usize` will declare one and
-/// `Measured::size::<usize>` will apply it), so it parses as the tree it
-/// really is and hir states the reservation — granting it later deletes a
-/// diagnostic instead of changing the grammar. `Shape::Circle::<usize>`
-/// parses the same shape and gets hir's variant-flavored correction: the
-/// two readings differ by what the segment NAMES, which is not a question
-/// the parser can answer.
+/// Nothing is diagnosed here. A member's own TYPE parameters are legal:
+/// `size = fn::<T>(m: Self, t: T) -> usize` declares one, and the qualified
+/// spelling `Measured::size::<usize>` applies it through this very list.
+/// Member-own CONST parameters stay reserved, and are refused at the
+/// DECLARATION (`syntax::validation`) rather than here, so this list needs
+/// no judgement of its own. `Shape::Circle::<usize>` parses the same shape
+/// and gets hir's variant-flavored correction: the two readings differ by
+/// what the segment NAMES, which is not a question the parser can answer.
 ///
 /// A no-op unless the two-token `COLON2 L_ANGLE` lookahead is there — the
 /// same unambiguous gate every other turbofish uses.
