@@ -2003,8 +2003,23 @@ program, so the ordinary pipe invocation works:
 printf 'a\nb\nc\n' | must-lsp run examples/stdin.must
 ```
 
+For a file, redirection is the way to feed it — same wiring, no producer
+process needed:
+
+```
+must-lsp run program.must < input.txt
+```
+
 A prompt written with no trailing newline still reaches the terminal before
 the program waits: `read_line` flushes the output buffer before it reads.
+
+Typing input by hand at an interactive terminal works too, with one caveat
+that is the terminal's own, not Must's: a terminal holds one line at a
+time, and a single line longer than it will hold is silently cut short —
+many short lines paste fine. On an interactive terminal, `run` writes a
+one-time note to stderr before the first read blocks:
+`reading from stdin — end input with Ctrl-D`. Piped or redirected input
+never sees it.
 
 Two contexts have no real stdin to offer and say so honestly rather than
 inventing one: the debug adapter (a debugged program's `read_line` always

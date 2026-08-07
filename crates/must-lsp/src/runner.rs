@@ -6,7 +6,7 @@
 //! reaches a trap, then crashes with the diagnostic the editor would show,
 //! located.
 
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 
 use base_db::{RootDatabase, SourceFile};
 use eval::{EvalErrorKind, Machine, RunMode, Value};
@@ -29,8 +29,12 @@ pub fn run(path: &str, expr: &str) -> i32 {
     let stdout = std::io::stdout();
     // Real, locked, line-buffered stdin — `read_line`'s source in `run`
     // mode (the CLI's `must-lsp run program.must < input.txt` contract).
+    // Wrapped so a program that blocks on an interactive terminal gets a
+    // one-time heads-up before it does; piped/redirected input (the
+    // ordinary case) passes through untouched and silent.
     let stdin = std::io::stdin();
-    match evaluate(text, path, expr, stdout.lock(), stdin.lock()) {
+    let input = TtyHintReader::new(stdin.lock());
+    match evaluate(text, path, expr, stdout.lock(), input) {
         Ok(Some(value)) => {
             println!("{value}");
             0
@@ -46,6 +50,87 @@ pub fn run(path: &str, expr: &str) -> i32 {
             eprintln!("{rendered}");
             1
         }
+    }
+}
+
+/// Wraps a [`std::io::BufRead`] and, the first time a byte is drawn from it,
+/// prints a one-time note to `hint_out` if `is_tty` says the source is an
+/// interactive terminal. Piped or redirected input (`is_tty: false`) is
+/// never touched — the `must-lsp run program.must < input.txt` contract
+/// stays completely silent.
+///
+/// Sits underneath `RunMode::input`, so one flag covers BOTH stdin entry
+/// points: the `read_line` builtin, whose `BufRead::read_line` reaches this
+/// through the default `fill_buf`/`consume` loop, and the `read(buf, len)`
+/// host primitive, which calls `Read::read` directly. Whichever fires first
+/// prints the hint; the other finds `hinted` already set and stays quiet.
+///
+/// The hint carries no prefix word (P09): `error:`, `warning:` and the rest
+/// each say something is wrong with the program, and a note about the
+/// process waiting is not one of those. Nothing is flushed here: on the
+/// `read_line` path `RunMode::read_line` flushes its output first (P03),
+/// which is what keeps an unterminated prompt ahead of this note, while the
+/// `read(buf, len)` primitive flushes nothing yet — there a prompt written
+/// without a newline can still trail the note (recorded under P09).
+struct TtyHintReader<R, H> {
+    inner: R,
+    is_tty: bool,
+    hinted: bool,
+    hint_out: H,
+}
+
+impl<R: IsTerminal> TtyHintReader<R, std::io::Stderr> {
+    /// The CLI's real construction: the flag is the wrapped reader's own
+    /// `is_terminal()`, and the hint goes to stderr — the channel this
+    /// process reports on out of band from program output.
+    fn new(inner: R) -> Self {
+        let is_tty = inner.is_terminal();
+        Self::with_hint_out(inner, is_tty, std::io::stderr())
+    }
+}
+
+impl<R, H: Write> TtyHintReader<R, H> {
+    /// The test seam: the sink stands in for stderr and `is_tty` is passed
+    /// in rather than derived, so an in-memory reader exercises hinting and
+    /// silence alike. `run`'s own wiring — `is_terminal()` on the locked
+    /// stdin it wraps — has no in-process seam and is not unit-tested:
+    /// faking a terminal for it would take a new dependency.
+    fn with_hint_out(inner: R, is_tty: bool, hint_out: H) -> Self {
+        Self {
+            inner,
+            is_tty,
+            hinted: false,
+            hint_out,
+        }
+    }
+
+    fn maybe_hint(&mut self) {
+        if self.is_tty && !self.hinted {
+            self.hinted = true;
+            let _ = writeln!(self.hint_out, "reading from stdin — end input with Ctrl-D");
+        }
+    }
+}
+
+impl<R: std::io::Read, H: Write> std::io::Read for TtyHintReader<R, H> {
+    /// No retry loop here: a short read from `inner` comes back as a short
+    /// read from this wrapper, exactly as `RunMode::read`'s host-primitive
+    /// contract requires (a short read is real and is not end of input — a
+    /// future change must not "fix" that by looping here).
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.maybe_hint();
+        self.inner.read(buf)
+    }
+}
+
+impl<R: std::io::BufRead, H: Write> std::io::BufRead for TtyHintReader<R, H> {
+    fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+        self.maybe_hint();
+        self.inner.fill_buf()
+    }
+
+    fn consume(&mut self, amt: usize) {
+        self.inner.consume(amt)
     }
 }
 
@@ -627,6 +712,124 @@ static main = fn () -> () {
             expect_test::expect![[r#"
                 exhausted, by value
             "#]],
+        );
+    }
+
+    /// A `Write` that logs a tagged event instead of keeping the bytes
+    /// (eval's `FlushLog`, with a tag): two of them sharing one log make
+    /// the ORDER of writes across two independent sinks observable.
+    struct TaggedWrite {
+        tag: &'static str,
+        log: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+
+    impl std::io::Write for TaggedWrite {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.log.borrow_mut().push(format!(
+                "{} write {:?}",
+                self.tag,
+                String::from_utf8_lossy(buf)
+            ));
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.log.borrow_mut().push(format!("{} flush", self.tag));
+            Ok(())
+        }
+    }
+
+    /// Whichever entry point draws the first byte — the `read_line` builtin
+    /// (`BufRead::read_line`, reaching `fill_buf`) or the `read` host
+    /// primitive (`Read::read` directly) — prints the hint exactly once;
+    /// the other sees `hinted` already set and stays quiet.
+    #[test]
+    fn tty_hint_fires_once_across_both_entry_points() {
+        use std::io::{BufRead, Read};
+
+        let mut hint_out = Vec::new();
+        let mut reader = super::TtyHintReader::with_hint_out(
+            std::io::Cursor::new(b"a\nb\n".to_vec()),
+            true,
+            &mut hint_out,
+        );
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read_line");
+        assert_eq!(line, "a\n");
+        let mut byte = [0u8; 1];
+        reader.read_exact(&mut byte).expect("read");
+
+        assert_eq!(
+            String::from_utf8(hint_out).unwrap(),
+            "reading from stdin — end input with Ctrl-D\n"
+        );
+    }
+
+    /// `is_tty: false` — the piped/redirected case, and the CLI's default —
+    /// never hints, no matter which entry point draws first or how many
+    /// times either draws.
+    #[test]
+    fn tty_hint_never_fires_when_not_a_tty() {
+        use std::io::{BufRead, Read};
+
+        let mut hint_out = Vec::new();
+        let mut reader = super::TtyHintReader::with_hint_out(
+            std::io::Cursor::new(b"a\nb\n".to_vec()),
+            false,
+            &mut hint_out,
+        );
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("read_line");
+        let mut byte = [0u8; 1];
+        reader.read_exact(&mut byte).expect("read");
+
+        assert!(hint_out.is_empty());
+    }
+
+    /// The ordering the hint depends on, through the real call path: a
+    /// program's unterminated prompt is flushed by `read_line` (P03) before
+    /// the wrapper's note reaches stderr, so the prompt never appears to
+    /// lag behind a note about the read it is waiting on.
+    #[test]
+    fn the_prompt_is_flushed_before_the_hint_is_written() {
+        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let input = super::TtyHintReader::with_hint_out(
+            std::io::Cursor::new(b"ada\n".to_vec()),
+            true,
+            TaggedWrite {
+                tag: "hint",
+                log: log.clone(),
+            },
+        );
+        super::evaluate(
+            r#"
+static main = fn {
+    print("name? ");
+    match read_line() {
+        ::Line(s) => print(s),
+        ::End => print("!"),
+    };
+};
+"#
+            .to_owned(),
+            "test.must",
+            "main()",
+            TaggedWrite {
+                tag: "out",
+                log: log.clone(),
+            },
+            input,
+        )
+        .expect("the program runs clean");
+
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                "out write \"name? \"",
+                "out flush",
+                "hint write \"reading from stdin — end input with Ctrl-D\\n\"",
+                "out write \"ada\"",
+            ]
         );
     }
 }

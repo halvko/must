@@ -63,8 +63,16 @@
   for a usage or file-IO failure; `check` likewise. `compile` exits 0 once a module is
   written, 1 on a refusal (an unsupported construct, named and located), 2 on a usage or
   file-IO failure, and `check`'s own exit code when the file does not check clean (nothing
-  is written in that case). Warnings never affect the exit code. Failure kinds have fixed
-  prefix words. The frame limit is 10,000, and the message quotes the number.
+  is written in that case). Warnings never affect the exit code. A diagnostic line carries a
+  fixed prefix word per kind — `error:`, `warning:`, `panicked:`, `runtime error:`,
+  `undefined behavior:`, `usage:` — each naming something wrong with the program or the
+  invocation, and a line that reports nothing wrong carries none, so a prefixed line always
+  means something is wrong. Unprefixed accordingly: `run`'s one-time note to stderr on a real
+  terminal, `reading from stdin — end input with Ctrl-D`, written before the first stdin read
+  blocks. Piped or redirected stdin never sees it. On the `read_line` path the note follows
+  that read's own flush (P03), so it cannot overtake a program's own unterminated prompt; the
+  `read(buf, len)` primitive flushes nothing first, so there a prompt can still trail the
+  note. The frame limit is 10,000, and the message quotes the number.
 - **P11** The debugger runs in-process on the const-eval interpreter (X08): same MIR, same
   machine, same UB findings.
 - **P12** `match` completions. Two things keyed off the scrutinee: an
@@ -131,6 +139,9 @@
 - **`print` as an ordinary declared import** — `str`'s (offset, length) pair is a platform ABI
   this backend decided by accident, and no user-written signature can spell it today.
   **P03 P05**
+- **A `Mode`-level terminal hook** — eval's `Mode` stays terminal-ignorant across all of its
+  constructions; the hint belongs to the CLI's own wrapper under `RunMode::input`. **A `note:`
+  prefix on the hint** — `= note:` already means a sub-line of a failure report. **P09**
 
 ## Re-evaluate when
 
@@ -146,6 +157,9 @@
   **P05**
 - **The `str` platform ABI gets a second customer** — decide it on purpose before anything
   else depends on it. **P06**
+- **`RunMode::read` flushes before it blocks too** — the stdin hint's ordering guarantee
+  holds only on the `read_line` path today, so the note can precede a newline-less prompt
+  written before a `read(buf, len)` call. **P09 P03**
 - **The editor extension gains a tree-sitter grammar** — the client then
   re-indents multi-line snippet bodies and the template's absolute indentation
   doubles. One function to fix; recorded because nobody would connect the

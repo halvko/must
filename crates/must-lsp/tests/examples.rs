@@ -1088,6 +1088,15 @@ fn stdin_runs() {
         0,
         expect!["read exactly the expected line count\n"],
     );
+    // A piped stdin is never a terminal, so `run`'s one-time stdin hint
+    // stays out of the way entirely: nothing at all reaches stderr.
+    let (_stdout, stderr, code) = spawn_with_timeout_input(
+        &["run", "examples/stdin.must"],
+        "run examples/stdin.must (stderr)",
+        Some("a\nb\nc\n"),
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stderr, "", "a piped run should say nothing on stderr");
     // A different line count still terminates cleanly on genuine
     // end-of-input (no hang waiting for a fourth line) and takes the
     // other branch.
