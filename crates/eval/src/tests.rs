@@ -667,7 +667,7 @@ fn a_borrowed_character_match_dispatches_through_the_borrow() {
              let a = '(';\n\
              let b = ')';\n\
              let z = 'z';\n\
-             classify(a.&::<@_>) + classify(b.&::<@_>) * 10 + classify(z.&::<@_>) * 100\n\
+             classify(a.&) + classify(b.&) * 10 + classify(z.&) * 100\n\
          };",
         "f()",
         expect![[r#"
@@ -684,7 +684,7 @@ fn a_borrowed_character_match_reads_through_the_borrow() {
     check_run(
         "static f = fn() -> usize {\n\
              let mut c = 'a';\n\
-             let m = c.&mut::<@_>;\n\
+             let m = c.&mut;\n\
              c = 'b';\n\
              match m { 'a' => 1, _ => 0 }\n\
          };",
@@ -5168,7 +5168,7 @@ fn using_a_child_after_writing_through_its_parent_is_detected_ub() {
     check_run(
         "static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
          static f = fn::<@a>(m: usize.&mut::<@a>) -> () {\n\
-             let child = m.*.&mut::<@_>;\n\
+             let child = m.*.&mut;\n\
              set(m, 5);\n\
              set(child, 9);\n\
          };\n\

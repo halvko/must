@@ -201,6 +201,7 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             // apart by the missing `DOT`. `x.&raw` stays a distinct node
             // (`AddrOfExpr`) and never lands here.
             reject_prefix_borrow_expr(&borrow_expr, &mut errors);
+            reject_region_arg_on_borrow_expr(&borrow_expr, &mut errors);
         } else if let Some(borrow_type) = ast::BorrowType::cast(node.clone()) {
             // `T.&::<@a>` / `T.&mut::<@a>` and the RETIRED prefix spellings
             // `&T` / `&mut T` — mirror of the expression-side split above
@@ -1268,6 +1269,54 @@ fn reject_prefix_borrow_type(borrow: &ast::BorrowType, errors: &mut Vec<SyntaxEr
         message: "borrow types are spelled postfix: `T.&` / `T.&mut`".to_owned(),
         range,
         fix,
+    });
+}
+
+/// A region argument on an expression-position borrow — `x.&::<@a>`,
+/// `p.*.&mut::<@_>`. Regions are written only in type positions, and a
+/// borrow is an operation (G11), so the whole list is refused whatever it
+/// holds: a borrow's turbofish can only ever have carried a region, so
+/// there is no other argument to keep and no name to resolve first, and
+/// `@_` says nothing an omitted turbofish does not. The wrong-kind case
+/// (`x.&::<usize>`) folds in — a kind message presupposes a slot, and an
+/// operation has none; the type side keeps its kind and arity messages
+/// because there a slot exists. Twin of `hir::diag::REGION_ARG_AT_MENTION`
+/// (the same rule at a call), phrased to read as one sentence with it. The
+/// type-position `T.&::<@a>` is untouched. The example follows the
+/// operator, so copying it keeps `.&mut` exclusive.
+fn region_arg_at_borrow(mutable: bool) -> String {
+    let op = if mutable { ".&mut" } else { ".&" };
+    format!(
+        "regions are inferred at a borrow, never written: drop this argument — \
+         a region belongs in a type position, so assert it with an annotation \
+         (`let r: _{op}::<@a> = x{op};`)"
+    )
+}
+
+/// Reports [`region_arg_at_borrow`] with the one-token fix: delete the
+/// turbofish. A turbofish is the `::` plus the list, and the `::` is bumped
+/// into the borrow node ahead of the list (`grammar::borrow_op_generic_args`),
+/// so the range is contiguous. The fix is not semantics-neutral — the
+/// argument constrained, so deleting it drops an assertion rather than
+/// relocating one; the message names the annotation that keeps it.
+fn reject_region_arg_on_borrow_expr(borrow: &ast::BorrowExpr, errors: &mut Vec<SyntaxError>) {
+    let (Some(colon2), Some(args)) = (borrow.colon2_token(), borrow.generic_arg_list()) else {
+        return;
+    };
+    let range = TextRange::new(
+        colon2.text_range().start(),
+        args.syntax().text_range().end(),
+    );
+    errors.push(SyntaxError {
+        message: region_arg_at_borrow(borrow.is_mut()),
+        range,
+        fix: Some(Fix {
+            label: "Drop the region argument".to_owned(),
+            edits: vec![TextEdit {
+                range,
+                insert: String::new(),
+            }],
+        }),
     });
 }
 

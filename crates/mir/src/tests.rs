@@ -2902,7 +2902,7 @@ fn a_reborrow_through_a_borrow_stays_a_borrow() {
     // borrow, visible in the IR.
     check_mir(
         "static f = fn::<@a>(m: usize.&mut::<@a>) -> () {\n\
-             let child = m.*.&mut::<@_>;\n\
+             let child = m.*.&mut;\n\
              let r = m.*.&raw mut;\n\
          };",
         expect![[r#"

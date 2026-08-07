@@ -556,9 +556,11 @@ fn expr_bp(p: &mut Parser<'_>, min_bp: u8) -> Option<CompletedMarker> {
         // Postfix address-of `x.&raw` / `x.&raw mut` — the dual of `.*`,
         // sitting in the same field-access tier so it chains greedily
         // (`x.&raw mut.*`, `p.*.&raw mut`) — and its SAFE siblings
-        // `x.&` / `x.&mut` (DOT AMP without `raw`), which carry an optional
-        // region turbofish of their own (`x.&mut::<@a>`; body-local
-        // annotations normally write `@_`). Lexed DOT AMP [raw] [mut];
+        // `x.&` / `x.&mut` (DOT AMP without `raw`). Those still ACCEPT the
+        // borrow operator's turbofish (`x.&mut::<@a>`) even though a
+        // region there is refused: parsing the superset is what lets
+        // validation name the argument and offer to delete it, rather than
+        // the parser inventing a recovery. Lexed DOT AMP [raw] [mut];
         // checked before the plain field arm so the `.` never half-parses
         // as a broken field access.
         if p.at(DOT) && p.nth(1) == AMP {
@@ -1978,9 +1980,12 @@ fn type_(p: &mut Parser<'_>) {
     }
 }
 
-/// The borrow operator's OWN turbofish — `T.&::<@a>`, `x.&mut::<@_>`. A
-/// no-op unless the two-token `COLON2 L_ANGLE` lookahead is there (the same
-/// unambiguous gate every other turbofish uses); the list is an ordinary
+/// The borrow operator's OWN turbofish. In a TYPE position (`T.&::<@a>`)
+/// this is where regions are written, and a signature still requires it;
+/// after an EXPRESSION (`x.&mut::<@a>`) the same shape parses here and is
+/// then refused by validation. A no-op unless the two-token
+/// `COLON2 L_ANGLE` lookahead is there (the same unambiguous gate every
+/// other turbofish uses); the list is an ordinary
 /// [`generic_arg_list`], so a wrong-kind argument (`T.&::<usize>`) parses
 /// into the tree it really is and hir says what was expected.
 ///

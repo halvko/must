@@ -1508,9 +1508,16 @@ impl BorrowExpr {
     pub fn is_mut(&self) -> bool {
         self.mut_token().is_some()
     }
-    /// The borrow operator's OWN turbofish (`x.&mut::<@a>`), when written.
-    /// A borrow node has no other generic-argument child, so this direct
-    /// lookup is unambiguous.
+    /// The `::` of the operator's own turbofish — a direct child, ahead of
+    /// [`Self::generic_arg_list`].
+    pub fn colon2_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, COLON2)
+    }
+    /// The borrow operator's OWN turbofish (`x.&mut::<@a>`), when written
+    /// — a REFUSED shape, kept in the tree so `validation` can name it and
+    /// offer the one-token fix (regions are written only in type
+    /// positions). A borrow node has no other generic-argument child, so
+    /// this direct lookup is unambiguous.
     pub fn generic_arg_list(&self) -> Option<GenericArgList> {
         child(&self.syntax)
     }

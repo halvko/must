@@ -14606,10 +14606,13 @@ fn region_params_come_first_in_a_binder() {
 }
 
 #[test]
-fn borrow_expressions_take_their_own_turbofish() {
-    // The region rides the BORROW OPERATOR's turbofish, not the referent
-    // type's — `x.&mut::<@a>`, one list hanging off the borrow node, so no
-    // consumer can read it as anything else's arguments.
+fn a_borrow_expressions_turbofish_parses_and_is_refused() {
+    // The borrow OPERATOR's turbofish still parses on the expression side —
+    // one `GENERIC_ARG_LIST` hanging off the `BORROW_EXPR`, exactly where
+    // the type-side spelling puts it. That is deliberate superset-parsing,
+    // and the refusal below is what it buys: the argument is in the tree,
+    // so validation can name it and hand back the one-token fix instead of
+    // the parser guessing at a recovery.
     check(
         "static f = fn () -> () { let a = x.&; let b = y.&mut::<@r>; };",
         expect![[r#"
@@ -14682,6 +14685,82 @@ fn borrow_expressions_take_their_own_turbofish() {
                     WHITESPACE@59..60 " "
                     R_BRACE@60..61 "}"
                 SEMICOLON@61..62 ";"
+            error 52..58: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&mut::<@a> = x.&mut;`)
+        "#]],
+    );
+}
+
+/// **Regions are written only in TYPE positions; operations never carry
+/// them.** A borrow is an operation, so its turbofish is refused — in every
+/// form the grammar can build it. `@_` goes with the named forms: an
+/// omitted turbofish already means "infer it", so the wildcard is a token
+/// that buys nothing, and letting it survive would leave the rule reading
+/// "regions are inferred at a borrow, except when you say so".
+#[test]
+fn a_region_argument_on_a_borrow_expression_is_refused() {
+    // Shared and exclusive, named and wildcard.
+    check_errors(
+        "static f = fn::<@a>(p: usize.&::<@a>) -> () {\n\
+             let q = p.*.&::<@a>;\n\
+             let r = p.*.&mut::<@a>;\n\
+             let s = p.*.&::<@_>;\n\
+             let t = p.*.&mut::<@_>;\n\
+         };",
+        expect![[r#"
+            59..65: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&::<@a> = x.&;`)
+            83..89: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&mut::<@a> = x.&mut;`)
+            104..110: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&::<@a> = x.&;`)
+            128..134: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&mut::<@a> = x.&mut;`)
+        "#]],
+    );
+    // A wrong-kind argument and a two-element list get the same one
+    // sentence: an operation has no slot for a kind or an arity message
+    // to presuppose (the TYPE side keeps both).
+    check_errors(
+        "static f = fn::<@a, @b>(p: usize.&::<@a>) -> () {\n\
+             let q = p.*.&::<usize>;\n\
+             let r = p.*.&::<@a, @b>;\n\
+         };",
+        expect![[r#"
+            63..72: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&::<@a> = x.&;`)
+            87..97: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&::<@a> = x.&;`)
+        "#]],
+    );
+}
+
+/// The fix is the one-token delete, `::` through `>`, leaving the bare
+/// operator; the message's example follows the operator, so copying it
+/// keeps an exclusive borrow exclusive.
+#[test]
+fn the_region_argument_fix_drops_the_turbofish() {
+    let src = "static f = fn::<@a>(p: usize.&::<@a>) -> () { let r = p.*.&mut::<@a>; };";
+    let parse = crate::parse(src);
+    let err = parse
+        .errors()
+        .iter()
+        .find(|e| e.message.starts_with("regions are inferred at a borrow"))
+        .expect("expected the refusal");
+    assert!(err.message.ends_with("(`let r: _.&mut::<@a> = x.&mut;`)"));
+    let fix = err.fix.as_ref().expect("expected a fix");
+    assert_eq!(fix.label, "Drop the region argument");
+    assert_eq!(
+        apply_fix(src, fix),
+        "static f = fn::<@a>(p: usize.&::<@a>) -> () { let r = p.*.&mut; };"
+    );
+}
+
+/// The refusal reaches a borrow wherever the postfix tier can chain one —
+/// it is a property of the OPERATOR, not of the shape of its operand.
+#[test]
+fn a_region_argument_is_refused_on_a_nested_borrow_too() {
+    check_errors(
+        "static f = fn::<@a>(p: usize.&::<@a>, arr: [usize; 2].&::<@a>) -> () {\n\
+             let q = p.*.&::<@a>;\n\
+             let r = arr.*[0].&::<@a>;\n\
+         };",
+        expect![[r#"
+            84..90: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&::<@a> = x.&;`)
+            110..116: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&::<@a> = x.&;`)
         "#]],
     );
 }

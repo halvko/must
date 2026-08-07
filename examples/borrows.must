@@ -92,7 +92,7 @@ static longer = fn::<@a: @b, @b>(x: usize.&::<@a>) -> usize.&::<@b> {
 // lives — which is the same reborrow the calls above perform implicitly,
 // written out.
 static through = fn::<@a>(m: usize.&mut::<@a>) -> usize {
-    let inner = m.*.&mut::<@_>;
+    let inner = m.*.&mut;
     set_to(inner, 40);
     m.*
 };

@@ -187,20 +187,19 @@ pub enum ExprData {
         mutable: bool,
         place: ExprId,
     },
-    /// `place.&` / `place.&mut` (optionally `place.&mut::<@a>`): a SAFE
-    /// borrow of a place. The operand lowers as an ordinary expression, so
-    /// its reads resolve and hover works; inference restricts it to places,
-    /// exactly as [`Self::AddrOf`] does.
-    ///
-    /// The region is optional here and REQUIRED in a type annotation, and
-    /// that asymmetry is the no-elision rule read correctly: a signature's
-    /// regions are parameters and must be named, a body's are existentials
-    /// and are inferred. An omitted turbofish means the same thing `@_`
+    /// `place.&` / `place.&mut`: a SAFE borrow of a place. The operand
+    /// lowers as an ordinary expression, so its reads resolve and hover
+    /// works; inference restricts it to places, exactly as [`Self::AddrOf`]
     /// does.
+    ///
+    /// It carries no region: regions are written only in type positions,
+    /// and a borrow is an operation (G11). The operator's turbofish
+    /// (`x.&mut::<@a>`) still parses, is refused by `syntax::validation`,
+    /// and never reaches this node; a body pins the region from an
+    /// annotation instead (`let r: _.&::<@a> = x.&;`).
     Borrow {
         mutable: bool,
         place: ExprId,
-        region: Option<crate::item_tree::RegionRef>,
     },
     /// `receiver.*`: reads through a raw pointer OR a safe borrow. Which
     /// one decides whether an `unsafe` block is needed (flavor determines
@@ -842,22 +841,16 @@ impl LowerCtx {
                 let receiver = self.lower_opt_expr(it.receiver());
                 self.alloc_expr(ExprData::Deref { receiver }, it.syntax())
             }
+            // The borrow operator's turbofish is not read here. It parses
+            // so that `validation` can name it and offer the one-token
+            // delete (G11); lowering steps over it, so recovery is "as if
+            // it had not been written" — the G10 call-site precedent.
             ast::Expr::BorrowExpr(it) => {
                 let place = self.lower_opt_expr(it.receiver());
-                let region = it
-                    .generic_arg_list()
-                    .and_then(|list| list.args().next())
-                    .map(|arg| match arg {
-                        ast::GenericArg::RegionArg(region) => {
-                            crate::item_tree::RegionRef::from_ast(&region)
-                        }
-                        _ => crate::item_tree::RegionRef::Error,
-                    });
                 self.alloc_expr(
                     ExprData::Borrow {
                         mutable: it.is_mut(),
                         place,
-                        region,
                     },
                     it.syntax(),
                 )

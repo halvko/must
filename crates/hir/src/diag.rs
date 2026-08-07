@@ -149,7 +149,9 @@ pub fn takes_no_generic_args(name: &str) -> String {
 /// one exception: a TYPE's own list (`Pair::<@a>(...)`). A type declaration
 /// binds no region yet, so a region there is a wrong-kind argument for a
 /// type slot (`GenericArgKindMismatch`), not an elision, and the list stays
-/// positional over the whole binder.
+/// positional over the whole binder. Its twin at a borrow EXPRESSION
+/// (`x.&::<@a>`) is `syntax::validation`'s `region_arg_at_borrow`; the two
+/// are phrased to read as one sentence.
 pub const REGION_ARG_AT_MENTION: &str = "regions are inferred at calls, never written: drop this argument — \
      a turbofish spells type and const arguments only";
 
@@ -274,8 +276,10 @@ pub const REGION_ON_TYPE_DECL: &str =
 /// after the operation the user attempted, not the rule it broke.
 pub const MOVE_OUT_OF_BORROW: &str = "cannot move out of a borrow";
 
-/// A borrow's turbofish carrying the wrong number of arguments. A borrow
-/// takes exactly one thing: how long it is good for.
+/// A borrow TYPE's turbofish carrying the wrong number of arguments. A
+/// borrow type takes exactly one thing: how long it is good for. An
+/// expression-position borrow has no argument slot at all (refused whole
+/// by `syntax::validation`), so there is nothing there to miscount.
 pub fn borrow_region_arity(found: usize) -> String {
     format!("a safe borrow takes exactly one region argument (`T.&::<@a>`), found {found}")
 }

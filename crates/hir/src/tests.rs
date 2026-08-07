@@ -11447,7 +11447,7 @@ fn a_deref_in_place_position_projects_instead_of_copying() {
         "r.*.x",
         "{ r.*.x = 9; 0 }",
         "r.*.q.*",
-        "{ let m = r.*.x.&mut::<@a>; 0 }",
+        "{ let m = r.*.x.&mut; 0 }",
     ] {
         check_diagnostics(
             &format!("static f = fn::<@a>(r: {ty}) -> usize {{ {body} }};"),
@@ -11505,11 +11505,7 @@ fn a_borrow_behind_a_borrow_projects_and_reborrows() {
     // a place, not a value — and `bb.*` in an argument position is a
     // reborrow (M07), which suspends the parent instead of copying it.
     let ty = "usize.&mut::<@a>.&mut::<@b>";
-    for body in [
-        "bb.*.*",
-        "{ bb.*.* = 5; 0 }",
-        "{ let c = bb.*.*.&mut::<@a>; 0 }",
-    ] {
+    for body in ["bb.*.*", "{ bb.*.* = 5; 0 }", "{ let c = bb.*.*.&mut; 0 }"] {
         check_diagnostics(
             &format!("static f = fn::<@a, @b>(bb: {ty}) -> usize {{ {body} }};"),
             expect![[r#""#]],
@@ -11585,9 +11581,9 @@ fn an_exclusive_borrow_of_an_item_points_at_its_definition() {
 #[test]
 fn shared_parent_cannot_launder_into_an_exclusive_child() {
     check_diagnostics(
-        "static f = fn::<@a>(r: usize.&::<@a>) -> () { let m = r.*.&mut::<@_>; };",
+        "static f = fn::<@a>(r: usize.&::<@a>) -> () { let m = r.*.&mut; };",
         expect![[r#"
-            54..68: cannot borrow `.&mut` through `usize.&::<@a>`: an exclusive borrow needs a `.&mut` parent
+            54..62: cannot borrow `.&mut` through `usize.&::<@a>`: an exclusive borrow needs a `.&mut` parent
         "#]],
     );
 }
@@ -11624,9 +11620,9 @@ fn a_shared_step_anywhere_in_a_place_refuses_a_write() {
         ),
         (
             nested,
-            "{ let c = b.*.*.&mut::<@a>; 0 }",
+            "{ let c = b.*.*.&mut; 0 }",
             expect![[r#"
-                74..90: cannot borrow `.&mut` through `usize.&mut::<@a>.&::<@b>`: an exclusive borrow needs a `.&mut` parent
+                74..84: cannot borrow `.&mut` through `usize.&mut::<@a>.&::<@b>`: an exclusive borrow needs a `.&mut` parent
             "#]],
         ),
         (
@@ -11692,20 +11688,20 @@ fn a_raw_mut_step_grants_the_permission_it_carries() {
     // is the advice that works.
     check_diagnostics(
         "static f = fn::<@a>(pb: usize.&mut::<@a>.&raw) -> () \
-         { unsafe { let c = pb.*.*.&mut::<@a>; }; };",
+         { unsafe { let c = pb.*.*.&mut; }; };",
         expect![[r#"
-            72..89: cannot borrow `.&mut` through `usize.&mut::<@a>.&raw`: an exclusive borrow needs a `.&raw mut` parent
+            72..83: cannot borrow `.&mut` through `usize.&mut::<@a>.&raw`: an exclusive borrow needs a `.&raw mut` parent
         "#]],
     );
     check_diagnostics(
         "static f = fn::<@a>(pb: usize.&mut::<@a>.&raw mut) -> () \
-         { unsafe { let c = pb.*.*.&mut::<@a>; }; };",
+         { unsafe { let c = pb.*.*.&mut; }; };",
         expect![[r#""#]],
     );
     // And a non-`mut` binding holding a `.&mut` still writes: the root's
     // own mutability is a different rule, about reassigning the binding.
     check_diagnostics(
-        "static f = fn () -> usize { let mut n: usize = 1; let b = n.&mut::<@_>; b.* = 5; n };",
+        "static f = fn () -> usize { let mut n: usize = 1; let b = n.&mut; b.* = 5; n };",
         expect![[r#""#]],
     );
 }
@@ -11734,12 +11730,110 @@ fn an_exclusive_borrow_cannot_be_minted_through_a_raw_pointer() {
     );
 }
 
+/// An unknown region name is reported where region names are WRITTEN — a
+/// TYPE position. The expression-side spelling this used to check
+/// (`n.&::<@q>`) is refused before any name is resolved, so the annotation
+/// is the only place left that can ask the question at all.
 #[test]
 fn a_region_name_must_be_declared() {
     check_diagnostics(
-        "static f = fn () -> () { let n: usize = 1; let r = n.&::<@q>; };",
+        "static f = fn () -> () { let n: usize = 1; let r: usize.&::<@q> = n.&; };",
         expect![[r#"
-            51..60: no region named `@q` is in scope; declare it in the binder (`fn::<@q>`)
+            60..62: no region named `@q` is in scope; declare it in the binder (`fn::<@q>`)
+        "#]],
+    );
+}
+
+/// The trade the ruling makes, both halves in one place.
+///
+/// The expression-side region argument was NOT inert — it became the
+/// borrow's region outright, and `x.&::<@a>` over a local reported the
+/// escape. It is refused anyway, because the ANNOTATION is the same
+/// assertion written where regions belong: `let r: usize.&::<@a> = n.&;`
+/// reports that escape, at that site, with no argument on the operation.
+/// Nothing was lost, which is what makes the refusal a spelling cut rather
+/// than a semantic one — and this test fails the day that stops being
+/// true.
+#[test]
+fn an_annotation_is_what_pins_a_borrows_region_now() {
+    // Refused, and the region is not read: the escape is NOT reported,
+    // because the borrow got a fresh existential as if nothing had been
+    // written.
+    check_diagnostics(
+        "static f = fn::<@a>() -> () { let n: usize = 1; let r = n.&::<@a>; };",
+        expect![[r#"
+            59..65: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&::<@a> = x.&;`)
+        "#]],
+    );
+    // The replacement, carrying the very obligation the argument used to.
+    check_diagnostics(
+        "static f = fn::<@a>() -> () { let n: usize = 1; let r: usize.&::<@a> = n.&; };",
+        expect![[r#"
+            71..74: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
+        "#]],
+    );
+    // And with no assertion at either site, the borrow is just a borrow.
+    check_diagnostics(
+        "static f = fn::<@a>() -> () { let n: usize = 1; let r = n.&; };",
+        expect![[r#""#]],
+    );
+}
+
+/// `_.&::<@a>` — a HOLE referent under a written region — is the GENERAL
+/// form of the assertion, and the one to reach for. Spelling the referent
+/// out is the special case that happens to work for simple types.
+///
+/// Three things pinned here, because each was found by trying and each
+/// would be silently lost:
+///
+/// 1. it reports the escape over a plain local, which is the ordinary case;
+/// 2. it is the ONLY spelling that works for an fn-typed value —
+///    `(fn() -> usize).&::<@a>` does not parse (`(...)` is unit, and a
+///    postfix borrow of a fn type is unspellable — G08) and
+///    `fn() -> usize.&::<@a>` glues the region to the RETURN type, which
+///    describes a different type entirely and mismatches instead;
+/// 3. it gives ARGUMENT position an in-place form through a block, so the
+///    refusal cost no expressiveness there either.
+#[test]
+fn a_hole_referent_is_the_general_region_assertion() {
+    // 1. The ordinary case: the assertion bites.
+    check_diagnostics(
+        "static f = fn::<@a>() -> () { let n: usize = 1; let q: _.&::<@a> = n.&; };",
+        expect![[r#"
+            67..70: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
+        "#]],
+    );
+    // 2. An fn-typed value, where no spelled-out referent is available.
+    check_diagnostics(
+        "static f = fn::<@a>() -> () {\n\
+             let g = fn() -> usize { 1 };\n\
+             let q: _.&::<@a> = g.&;\n\
+         };",
+        expect![[r#"
+            78..81: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
+        "#]],
+    );
+    // The long form does NOT mean this — the region binds the RETURN type,
+    // so it describes a `fn` returning a borrow and mismatches.
+    check_diagnostics(
+        "static f = fn::<@a>() -> () {\n\
+             let g = fn() -> usize { 1 };\n\
+             let q: fn() -> usize.&::<@a> = g.&;\n\
+         };",
+        expect![[r#"
+            90..93: type mismatch: expected `fn() -> usize.&::<@a>`, found `fn() -> usize.&` (expected `fn() -> usize.&::<@a>` because of this annotation at 66..87)
+        "#]],
+    );
+    // 3. Argument position, in place — the cost the ruling first recorded
+    // as "no in-place form", which was wrong.
+    check_diagnostics(
+        "static take = fn::<@a>(r: usize.&::<@a>) -> usize { r.* };\n\
+         static f = fn::<@a>() -> usize {\n\
+             let n: usize = 1;\n\
+             take({ let q: _.&::<@a> = n.&; q })\n\
+         };",
+        expect![[r#"
+            136..139: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
         "#]],
     );
 }
@@ -11875,13 +11969,14 @@ fn an_explicit_mut_reborrow_needs_the_parents_region_to_outlive_it() {
 
 #[test]
 fn an_explicit_reborrow_with_a_named_region_still_needs_the_bound() {
-    // Spelling the target region out (`x.*.&::<@a>`) is the same event as
-    // leaving it to inference — the region comes from the write, but the
-    // outlives edge it incurs is identical.
+    // Pinning the target region with an annotation (`_.&::<@a>`) is the
+    // same event as leaving it to inference — the region comes from the
+    // annotation rather than the return, but the outlives edge it incurs
+    // is identical.
     check_diagnostics(
-        "static f = fn::<@a, @b>(x: usize.&::<@b>) -> usize.&::<@a> { x.*.&::<@a> };",
+        "static f = fn::<@a, @b>(x: usize.&::<@b>) -> usize.&::<@a> { let r: _.&::<@a> = x.*.&; r };",
         expect![[r#"
-            61..72: using this borrow where a longer-lived one is expected needs `@b` to outlive `@a`, which this signature does not declare; add `@b: @a` to the binder
+            80..85: using this borrow where a longer-lived one is expected needs `@b` to outlive `@a`, which this signature does not declare; add `@b: @a` to the binder
         "#]],
     );
 }

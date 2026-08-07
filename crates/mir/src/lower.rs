@@ -318,8 +318,7 @@ impl LowerCtx<'_> {
                 // cannot be produced is the borrow.
                 InferenceDiagnostic::DotThroughBorrow { expr, .. }
                 | InferenceDiagnostic::BorrowNonPlace { expr }
-                | InferenceDiagnostic::MoveOutOfBorrow { expr, .. }
-                | InferenceDiagnostic::RegionArg { expr, .. } => {
+                | InferenceDiagnostic::MoveOutOfBorrow { expr, .. } => {
                     self.value_traps.insert(*expr, diag.message());
                 }
                 InferenceDiagnostic::BorrowMutImmutable { borrow, .. }
@@ -1416,7 +1415,7 @@ impl LowerCtx<'_> {
             // them is `Rvalue::Borrow`'s tag minting, which the
             // interpreter uses to detect exclusivity violations
             // dynamically until the loan checker lands.
-            ExprData::Borrow { mutable, place, .. } => {
+            ExprData::Borrow { mutable, place } => {
                 if self.value_traps.contains_key(&expr) {
                     return Operand::Const(Const::Unit);
                 }

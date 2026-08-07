@@ -491,7 +491,14 @@ fn errors_checks_dirty_with_the_documented_count() {
             368 | static misordered_binder = fn::<T, @a>(r: T.&::<@a>) -> T { r.* };
                 |                                    ^^
 
-            found 35 errors and 1 warning
+            error: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&::<@a> = x.&;`)
+              --> examples/errors.must:377:80
+                |
+            377 | static region_at_a_borrow = fn::<@c>(p: usize.&::<@c>) -> usize { let q = p.*.&::<@c>; q.* };
+                |                                                                                ^^^^^^
+               = help: Drop the region argument
+
+            found 36 errors and 1 warning
         "#]],
     );
 }

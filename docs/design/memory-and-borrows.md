@@ -150,6 +150,9 @@
 - **Body-local region names as binders** — a signature region is universal and a body region
   existential, so a body-local name asserts that two regions coincide; it is an annotation,
   not a binder. **M06**
+- **"Bodies infer, signatures declare" as the boundary** — a named region in a body annotation
+  genuinely constrains, and a nested literal's parameter annotations are signatures inside a
+  body. Replaced by type-position-versus-operation (G11), which cuts nothing. **M06**
 - **Stacked Borrows** — it contradicts M08 (direct-raw-borrow-then-use-the-place is what it
   calls UB); it forbids read-read reordering, so the planned optimizer would be illegal on day
   one; its two known patches paper over the reference-to-raw decay Must designed out; and "SB
@@ -184,13 +187,6 @@
 - **Elision rules come back for measurement** — needs an instrument that says which candidate
   rule would have supplied each written region. Without it the corpus reports that all of it
   hurts, which selects no rule. **M06**
-- **The body-annotation half of "bodies infer, signatures declare" is decided** — parked, not
-  ruled. The boundary today: a signature hand-writes every region it binds, a body infers
-  its own at every call and borrow. A named region in a body annotation
-  (`let r: usize.&::<@a> = p;`) genuinely constrains, and a nested fn literal's parameter
-  annotations are a signature inside a body, so that boundary does not say which side
-  either falls on. Open with it: what introduces a rigid-region obligation mid-body if the
-  annotation cannot. **M06**
 - **The move-versus-reborrow rule needs an explicit ruling** — proposed: always reborrow when
   the target region permits it, move only when it requires the source's full region.
   Reject-only under the erasure law. **M07**

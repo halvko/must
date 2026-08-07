@@ -173,15 +173,6 @@ impl InferenceResult {
     }
 }
 
-/// What is wrong with a written region argument.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RegionArgProblem {
-    /// A name no enclosing binder declares.
-    Unknown(String),
-    /// Something that is not a region at all (`x.&::<usize>`).
-    NotARegion,
-}
-
 /// One qualified member reference used as a VALUE — see
 /// [`InferenceResult::member_value_of_expr`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -942,11 +933,6 @@ pub enum InferenceDiagnostic {
         /// The governing pointer's type.
         ty: Ty,
     },
-    /// A region argument that names nothing, or that is not a region.
-    RegionArg {
-        expr: ExprId,
-        problem: RegionArgProblem,
-    },
     /// Reading `x.*` where the referent cannot be copied — safe `.*` yields
     /// a PLACE, and reading a place copies it, which an affine value
     /// forbids.
@@ -1513,7 +1499,6 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::AddrOfNonPlace { expr }
             | InferenceDiagnostic::BorrowNonPlace { expr }
             | InferenceDiagnostic::DotThroughBorrow { expr, .. }
-            | InferenceDiagnostic::RegionArg { expr, .. }
             | InferenceDiagnostic::MoveOutOfBorrow { expr, .. } => *expr,
             InferenceDiagnostic::BorrowMutImmutable { root, .. }
             | InferenceDiagnostic::BorrowMutItem { root, .. } => *root,
@@ -2109,13 +2094,6 @@ impl InferenceDiagnostic {
                  for the new borrow to be bounded by",
                 ty.display()
             ),
-            InferenceDiagnostic::RegionArg { problem, .. } => match problem {
-                RegionArgProblem::Unknown(name) => crate::diag::unknown_region(name),
-                RegionArgProblem::NotARegion => {
-                    "a borrow's turbofish takes exactly one region argument (`x.&mut::<@a>`)"
-                        .to_owned()
-                }
-            },
             InferenceDiagnostic::MoveOutOfBorrow { ty, .. } => format!(
                 "{}: `{}` cannot be copied",
                 crate::diag::MOVE_OUT_OF_BORROW,
@@ -2863,47 +2841,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         }
     }
 
-    /// The region a borrow EXPRESSION carries. An omitted turbofish and a
-    /// written `@_` mean the same thing — mint an existential — because a
-    /// body's regions are inference variables, not parameters. A named
-    /// region resolves against the enclosing binder, so a body may pin a
-    /// borrow to one of its own signature's regions.
-    fn borrow_expr_region(&mut self, expr: ExprId, written: Option<&RegionRef>) -> Region {
-        let Some(written) = written else {
-            return self.fresh_region();
-        };
-        match written {
-            RegionRef::Wildcard => self.fresh_region(),
-            RegionRef::Named(name) => match self.type_params.regions.get(name) {
-                Some(region) => region.clone(),
-                None => {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::RegionArg {
-                            expr,
-                            problem: RegionArgProblem::Unknown(name.clone()),
-                        });
-                    Region::Error
-                }
-            },
-            RegionRef::Join(parts) => Region::Join(
-                parts
-                    .iter()
-                    .map(|part| self.borrow_expr_region(expr, Some(part)))
-                    .collect(),
-            ),
-            RegionRef::Error => {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::RegionArg {
-                        expr,
-                        problem: RegionArgProblem::NotARegion,
-                    });
-                Region::Error
-            }
-        }
-    }
-
     /// Judge the recorded `.*` reads. Reading `x.*` copies the referent —
     /// legal exactly when the referent IS copyable — the rule M07 makes
     /// load-bearing, and the reason safe `.*` needed a ruling at all. But
@@ -3468,7 +3405,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::BorrowNonPlace { .. }
                 | InferenceDiagnostic::BorrowMutImmutable { .. }
                 | InferenceDiagnostic::BorrowMutItem { .. }
-                | InferenceDiagnostic::RegionArg { .. }
                 | InferenceDiagnostic::IndexOutOfBounds { .. }
                 | InferenceDiagnostic::EmptyArrayNeedsAnnotation { .. }
                 | InferenceDiagnostic::ArrayConstArg { .. }
@@ -4651,17 +4587,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             // as `.&raw`: the operand reads like any expression (so field
             // chains report their own problems), then the place rules are
             // judged on its structure.
-            ExprData::Borrow {
-                mutable,
-                place,
-                region,
-            } => {
+            ExprData::Borrow { mutable, place } => {
                 let mutable = *mutable;
                 let place = *place;
-                let written = region.clone();
                 let fresh = self.fresh_var();
                 let place_ty = self.infer_expr(place, &fresh);
-                let region = self.borrow_expr_region(expr, written.as_ref());
+                // Always fresh: a borrow is an operation, and operations
+                // carry no region (G11). Pinning it is an annotation's
+                // job, which constrains this very variable from a type
+                // position.
+                let region = self.fresh_region();
                 self.check_borrow_place(expr, mutable, place, region.clone());
                 Ty::borrow(mutable, region, place_ty)
             }

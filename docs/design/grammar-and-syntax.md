@@ -23,9 +23,9 @@
   nodes with a targeted migration diagnostic, never a silent reinterpretation, and the
   retired prefix safe borrows `&x`/`&mut x`, `&T`/`&mut T` migrate the same way (G26).
   Plain `x.&` / `x.&mut` and the type twins `T.&` / `T.&mut`, with no `raw`, are the SAFE
-  borrows, with a region turbofish of their own (`x.&mut::<@a>`) — optional on the borrow
-  expression (inferred when omitted) but required on the type form `T.&`/`T.&mut`
-  everywhere, since no elision exists yet for a hand-written type.
+  borrows; the type form carries the region turbofish (`T.&::<@a>`), required everywhere,
+  since no elision exists yet for a hand-written type, and the expression form carries none
+  (G11).
 - **G09** The region sigil is `@`: `@a`, wildcard `@_`, join `@a + @b`, binder slot
   `fn::<@a, T, const N>`, outlives clause `@a: @b`. Chosen because `@` is unclaimed; migrating
   it would be mechanical.
@@ -35,6 +35,10 @@
   suppresses the arity report, since no count is trustworthy until it is dropped.
   `fn::<T, @a>` is a syntax error: a turbofish spells the binder minus its regions, which only
   reads correctly when the elided part is a contiguous prefix.
+- **G11** Regions are written only in type positions; an operation never carries one.
+  `x.&::<@a>` is refused; the annotation says the same thing at the same site. The general
+  form is `_.&::<@a>`, a hole referent under a written region, the only spelling that works
+  for an fn-typed value. This is a spelling cut, not a semantic one.
 - **G12** Record literals construct with `=`: `struct { x = 1 }`, spelled out
   `struct { a: usize = 10 }`. Colon means has-type, everywhere, so a field's annotation is a
   real type and fn, pointer and array field types are first class. Shorthand `struct { x }` is
@@ -126,9 +130,10 @@
   type position only** — two spellings for one concept, the wart turbofish-everywhere kills.
   **G06**
 - **Written region arguments at a mention** (`f::<@p, @q>`) — a call spells no region, and
-  the substitution they fed was retired with them. **`@_` on a call** — an omitted
-  turbofish already means it. **Refusing the whole list when one region is written** —
-  per-argument refusal keeps the rest usable. **G10**
+  the substitution they fed was retired with them. **`@_` on a call or a borrow operation** —
+  an omitted turbofish already means it, and an operation has no slot for a kind message to
+  presuppose. **Refusing the whole list when one region is written** — per-argument refusal
+  keeps the rest usable. **G10 G11**
 - **`x: 1` record construction** — colon is has-type. **G12**
 - **A hard error on field/member collisions** — non-local under two impl homes, and it
   outlaws the getter idiom. **Fall-through to a same-named field** — silent action at a
@@ -173,6 +178,10 @@
   grouping (`(...)` is unit). Inherent to the design; for now the retired prefix spelling
   still builds such a type, and its migration reports without offering the rewrite, since
   no postfix text means the same thing. **G08 G26**
+- **A region in argument position gets painful** — nothing is unsayable, so this is
+  ergonomics: ask why inference could not get there rather than putting the argument back on
+  the operation. **Patterns grow type ascription** — a pattern is neither a type mention nor
+  an operation, so G11 is silent there today. **G11**
 - **Parked gaps**, none ruled: `&&`/`||`; comparison chaining (parses, then type-errors, where
   non-associativity would be clearer); loop labels; compound assignment;
   assignment-as-expression; record rest; match-arm record patterns; a line-continuation

@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 35 errors and 1 warning.
+// exactly: found 36 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -366,3 +366,12 @@ static region_at_a_call = fn::<@b>(p: usize.&::<@b>) -> usize { first::<@b, usiz
 //     order, so the binder still works as declared.
 //     error: region parameters come first in a binder; move `@a` before `T`
 static misordered_binder = fn::<T, @a>(r: T.&::<@a>) -> T { r.* };
+
+// 36. A region written on a BORROW expression. Regions are written only in
+//     type positions, and a borrow is an operation: its region is inferred,
+//     and a body that wants to pin one says so in an annotation
+//     (`let q: _.&::<@c> = p.*.&;`). Named or wildcard, the whole list is
+//     refused, and the fix drops it.
+//     error: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&::<@a> = x.&;`)
+//     quick fix offered: "Drop the region argument"
+static region_at_a_borrow = fn::<@c>(p: usize.&::<@c>) -> usize { let q = p.*.&::<@c>; q.* };

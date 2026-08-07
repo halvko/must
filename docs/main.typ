@@ -1046,7 +1046,8 @@ it postfix, except where postfix would bind somewhere else (a borrow of a
 `fn(..) -> T` has no postfix spelling at all).
 
 Every borrow says how long it is good for. That is its *region*, spelled
-`@a`, and it rides the borrow operator's own turbofish:
+`@a`, and it is written where types are written — on the borrow *type*'s
+own turbofish:
 
 ```must
 static get = fn::<@a>(r: usize.&::<@a>) -> usize {
@@ -1062,16 +1063,33 @@ differ only in their regions lower to identical code, no region reaches a
 monomorphization key, and no backend ever sees one. A region can therefore
 reject a program and can never change what it does.
 
+"Where types are written" is the whole rule: a region appears only in a
+type position, and an operation never carries one. The borrow `x.&` is an
+operation, so `x.&::<@a>` and `x.&mut::<@_>` are refused, with a fix that
+drops the argument. A body that wants to pin a borrow's region says so in
+an annotation, and the general form leaves the referent as a hole:
+
+```must
+let q: _.&::<@a> = p.*.&;    // the assertion, checked like any other
+let inner = m.*.&mut;        // nothing to assert, nothing to write
+```
+
+The hole matters for an fn-typed value, where `fn() -> usize.&::<@a>` would
+bind the region to the return type. The annotation is a checked assertion,
+not a comment: over a local it reports that the borrow outlives its
+storage, and against a shorter-lived parameter it reports the missing
+outlives clause.
+
 Nothing is elided in a *signature*. Every region a signature binds is
 written by hand, on purpose, until enough real code exists to say which
 elision rule would have earned its keep — so `usize.&` on its own is an
 error naming the spelling rather than a guess. Inside a *body* the situation
 is different: there the regions are inference variables, not parameters, so
-`@_` says "there is a region here, work it out" and an omitted turbofish on
-a borrow expression means the same. `@_` in a signature is rejected: a
-signature's regions are parameters, and the binder is where a parameter
-gets the name its outlives clauses and its other mentions refer to — `@_`
-there leaves the contract unstated.
+`@_` says "there is a region here, work it out" in an annotation, and a
+borrow with no annotation at all means the same. `@_` in a signature is
+rejected: a signature's regions are parameters, and the binder is where a
+parameter gets the name its outlives clauses and its other mentions refer to
+— `@_` there leaves the contract unstated.
 
 At a *call site* regions are elided entirely. A written turbofish spells the
 callee's type and const arguments, in order, and nothing else:
@@ -1084,19 +1102,19 @@ static main = fn::<@b>(p: usize.&::<@b>) -> usize {
 };
 ```
 
-Writing a region there — `@a` or `@_` — is refused, one argument at a time,
-so the rest of the list still counts. There is nothing for it to pin: the
-callee's regions become fresh existentials of *this* call, which the borrow
-checker solves from the arguments actually passed, so `@_` would be a token
-meaning "as before" on every borrow-taking generic call in the program. A
-type argument can be genuinely undetermined; a region never is. This is
-also why regions come first in a binder: what a turbofish spells is the
-binder minus its regions, and that subtraction only reads correctly when
-the elided part is a contiguous prefix — `fn::<T, @a>` is a syntax error
-naming the fix. The one list none of this reaches is a *type's* own
-(`Pair::<usize>`, as a type or in a construction call): a type declaration
-binds no region yet, so that list is positional over its whole binder and a
-region written in it is simply a wrong argument.
+Writing a region there — `@a` or `@_` — is refused, the borrow's rule
+again, one argument at a time, so the rest of the list still counts. There
+is nothing for it to pin: the callee's regions become fresh existentials of
+*this* call, which the borrow checker solves from the arguments actually
+passed, so `@_` would be a token meaning "as before" on every borrow-taking
+generic call in the program. A type argument can be genuinely undetermined;
+a region never is. This is also why regions come first in a binder: what a
+turbofish spells is the binder minus its regions, and that subtraction only
+reads correctly when the elided part is a contiguous prefix — `fn::<T, @a>`
+is a syntax error naming the fix. The one list none of this reaches is a
+*type's* own (`Pair::<usize>`, as a type or in a construction call): a type
+declaration binds no region yet, so that list is positional over its whole
+binder and a region written in it is simply a wrong argument.
 
 Two regions can be joined. `usize.&::<@a + @b>` is a borrow good for as long
 as *both* last — the largest region every listed region outlives — so `+`

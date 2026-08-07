@@ -418,6 +418,11 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     // no amount of type information changes that. Lowering stays permissive
     // (a region-less borrow gets `Region::Error` and checking continues),
     // which is the house split — recovery in the lowerer, the story here.
+    //
+    // These are the TYPE-position judgements. The expression-position twin
+    // (`x.&::<@a>`, a region written on an operation) needs no binder at
+    // all — the whole list is refused whatever it holds — so it lives one
+    // layer out, in `syntax::validation`.
     for borrow in parse(db, file)
         .syntax_node()
         .descendants()
