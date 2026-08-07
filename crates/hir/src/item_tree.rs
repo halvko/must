@@ -144,9 +144,15 @@ pub enum Constness {
 pub enum TypeRef {
     Unit,
     Never,
+    /// `fn(...) -> ...`, and its unsafe-to-call twin `unsafe fn(...) ->
+    /// ...`. The two are DIFFERENT types (see [`crate::ty::FnTy`]), so the
+    /// marker is part of the annotation, not a separate note about it.
     Fn {
         params: Vec<TypeRef>,
         ret: Option<Box<TypeRef>>,
+        /// `unsafe fn(...)`: calling a value of this type needs an
+        /// `unsafe { ... }` block.
+        unsafe_to_call: bool,
     },
     /// `T.&raw` / `T.&raw mut` — a raw pointer type.
     RawPtr {
@@ -279,6 +285,7 @@ impl TypeRef {
                     .ret_type()
                     .and_then(|rt| rt.ty())
                     .map(|t| Box::new(TypeRef::from_ast(t))),
+                unsafe_to_call: it.is_unsafe(),
             },
             ast::Type::RawPtrType(it) => match it.ty() {
                 Some(inner) => TypeRef::RawPtr {
@@ -369,7 +376,7 @@ impl TypeRef {
             | TypeRef::Path(_)
             | TypeRef::Variant { .. }
             | TypeRef::Error => false,
-            TypeRef::Fn { params, ret } => {
+            TypeRef::Fn { params, ret, .. } => {
                 params.iter().any(TypeRef::contains_hole)
                     || ret.as_ref().is_some_and(|r| r.contains_hole())
             }
@@ -394,7 +401,7 @@ impl TypeRef {
             | TypeRef::Path(_)
             | TypeRef::Variant { .. }
             | TypeRef::Error => true,
-            TypeRef::Fn { params, ret } => {
+            TypeRef::Fn { params, ret, .. } => {
                 params.iter().all(TypeRef::is_fully_typed)
                     && ret.as_ref().is_some_and(|r| r.is_fully_typed())
             }
@@ -456,7 +463,7 @@ impl TypeRef {
             TypeRef::Array { .. } => true,
             TypeRef::RawPtr { inner, .. } | TypeRef::Borrow { inner, .. } => inner.mentions_array(),
             TypeRef::Record(fields) => fields.iter().any(|(_, ty)| ty.mentions_array()),
-            TypeRef::Fn { params, ret } => {
+            TypeRef::Fn { params, ret, .. } => {
                 params.iter().any(TypeRef::mentions_array)
                     || ret.as_ref().is_some_and(|ret| ret.mentions_array())
             }
@@ -777,6 +784,16 @@ fn generics_from_param_list(list: Option<ast::GenericParamList>) -> Vec<GenericP
 /// type-param names inside stay syntactic (`TypeRef::Path("T")`) and are
 /// bound to rigid [`crate::ty::Ty::Param`]s only during lowering, against
 /// [`ItemData::generics`].
+///
+/// A HOST IMPORT's synthesized type is `unsafe fn(...)`: what an import does
+/// is written in a language this compiler never sees, so a value of it may
+/// only be called under an `unsafe { ... }` marker — and now that the marker
+/// is demanded by the TYPE, the fact travels with the value instead of being
+/// re-derived from the declaration at every mention. The question is asked
+/// through [`ast::FnLiteral::declares_host_import`], the same predicate
+/// `body::lower` uses to decide there is no body at all — one home, so the
+/// annotation-derived type and the inferred one cannot disagree about which
+/// literal is an import.
 fn type_ref_from_fn_literal(body: Option<ast::Expr>) -> Option<TypeRef> {
     let ast::Expr::FnLiteral(fn_lit) = body? else {
         return None;
@@ -790,7 +807,11 @@ fn type_ref_from_fn_literal(body: Option<ast::Expr>) -> Option<TypeRef> {
         .ret_type()
         .and_then(|rt| rt.ty())
         .map(|t| Box::new(TypeRef::from_ast(t)));
-    let type_ref = TypeRef::Fn { params, ret };
+    let type_ref = TypeRef::Fn {
+        params,
+        ret,
+        unsafe_to_call: fn_lit.declares_host_import(),
+    };
     type_ref.is_fully_typed().then_some(type_ref)
 }
 
@@ -1147,6 +1168,13 @@ fn type_ref_from_decl_signature(fn_type: &ast::FnType) -> Option<TypeRef> {
         .ret_type()
         .and_then(|rt| rt.ty())
         .map(|t| Box::new(TypeRef::from_ast(t)));
-    let type_ref = TypeRef::Fn { params, ret };
+    let type_ref = TypeRef::Fn {
+        params,
+        ret,
+        // The early return above rules out the `unsafe` marker on this
+        // path: an unsafe-to-call REQUIREMENT is still reserved, so
+        // nothing here can lower one.
+        unsafe_to_call: false,
+    };
     type_ref.is_fully_typed().then_some(type_ref)
 }

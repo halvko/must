@@ -122,6 +122,20 @@
   name would be a trap. `str_bytes(s, dst)` writes those bytes into storage the caller owns;
   `unsafe`, with the marker about the destination as the bless's is about the source. Both
   retire toward the str-view fork.
+- **T19** Unsafety lives in the function type. `unsafe fn(usize) -> usize` is distinct from
+  `fn(usize) -> usize`; calling a value of it needs an `unsafe` block, while taking, passing,
+  returning and forgetting one are free. The type is the only thing that travels with a value
+  through a `let`, an argument, a return or a field, so the call site always knows. Coercion
+  is one-way, safe to unsafe, applied at check sites and never inferred backwards through a
+  variable, the same discipline as variant→enum. It is shallow: no variance, so a formed
+  `struct { go: fn() }` does not convert, while a record LITERAL does, field by field,
+  because a literal's fields are checked one at a time against the annotation. It has no
+  runtime consequence: the conversion moves no bits, it declines a permission. A join takes
+  the LUB wherever it has a check site or a consuming call to convert at; an unannotated,
+  unconsumed mixed-safety join has neither, so it is a branch disagreement asking for an
+  annotation. Two populations get the type without writing it: host imports, and every
+  builtin that requires the marker and has a first-class fn type (`dealloc_array`,
+  `str_bytes`).
 - **T20** A capability names something you can DO with a value. One exists, `forget` — let a
   value go with nothing done about it — and every type has it unless a `type` declaration
   sheds it with a trailing `without forget` clause, which rides `with`'s slot in either order
@@ -175,6 +189,12 @@
   alias hands back arithmetic and ordering, which is how a non-character gets built. **T16**
 - **A borrowed `str` representation, today** — needs a byte-range path element the aliasing
   model deliberately lacks (M11), and every `str` consumer would learn a second shape. **T17**
+- **Value-position pricing for host imports** — a mention outside `unsafe` was an error, on
+  the reasoning that a bound import cannot be named at the call. The reasoning survives; the
+  mechanism priced the wrong event (taking a function runs nothing), named the wrong site, and
+  could not reach a function handed to a body that never mentions it. **A distinguished
+  "import type"** — one type constructor serves imports, unsafe builtins and user code, which
+  makes the call gate a single rule. **T19**
 
 ## Re-evaluate when
 
@@ -208,8 +228,13 @@
   same call is fine against a monomorphic `apply`, and fine against the generic one when a
   turbofish (`apply::<Counter, usize>(..)`) or an earlier argument has already pinned it.
   Deferring literal arguments until the others have been checked is the fix. **T06**
-- **A conversion is wanted in depth** — variance. Judge it with the borrow subsystem's
-  variance question (M09). **T13**
+- **A conversion is wanted in depth** — variance. Fn-safety is the strongest covariance
+  candidate, since it is the one conversion that moves no bits and only invariance refuses it.
+  Judge it with the borrow subsystem's variance question (M09). **T13 T19**
+- **`const fn` types** — constness and unsafety are a product, not two states of one flag: a
+  second bool on the fn type, never an enum state alongside `unsafe`. The signpost is already
+  in the diagnostics, which refuse a call through a value because whether it is a `const fn`
+  is not known from its type. **T19**
 - **Dynamic strings** force the `let s2 = s;` cost question `str` currently dodges. Staging
   rule: keep literal `str` rodata-able and let dynamic strings arrive with an explicit
   allocating conversion. **T15**

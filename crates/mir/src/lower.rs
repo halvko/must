@@ -434,15 +434,13 @@ impl LowerCtx<'_> {
                 hir::UnsafeCheckDiagnostic::BuiltinCallOutsideUnsafe { call, .. }
                 // A host-import call lands the same way, for the same
                 // reason: the call is the operation that must not run.
-                | hir::UnsafeCheckDiagnostic::ExternCallOutsideUnsafe { call, .. } => {
+                | hir::UnsafeCheckDiagnostic::ExternCallOutsideUnsafe { call, .. }
+                // And so does a call through a VALUE of `unsafe fn` type,
+                // which is the same operation reached one indirection
+                // later. Taking the value is free and lowers normally —
+                // only the call refuses.
+                | hir::UnsafeCheckDiagnostic::UnsafeFnValueCallOutsideUnsafe { call } => {
                     self.call_traps.insert(*call, diag.message());
-                }
-                // Taking an import as a VALUE is not a call and not a
-                // deref, so it goes through `value_traps`: the mention is
-                // lowered as an ordinary read, and the read is what must
-                // not produce anything.
-                hir::UnsafeCheckDiagnostic::ExternValueOutsideUnsafe { expr, .. } => {
-                    self.value_traps.insert(*expr, diag.message());
                 }
             }
         }
@@ -1472,6 +1470,7 @@ impl LowerCtx<'_> {
                     _ => hir::FnTy {
                         params: Vec::new(),
                         ret: Ty::Error,
+                        unsafe_to_call: true,
                     },
                 };
                 Operand::Const(Const::ExternFn {

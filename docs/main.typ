@@ -972,7 +972,67 @@ C.&raw` is `false`), but const-mention identity is deliberately
 unspecified: a compiler may merge or split immutable copies. Compare
 static-derived addresses; never const-derived ones.
 
-Still reserved: `unsafe fn`.
+=== Unsafety is part of a function's type
+
+`unsafe fn(usize) -> usize` is a type, distinct from `fn(usize) -> usize`.
+Calling a *value* of it needs the marker, wherever that call happens:
+
+```must
+static apply = fn (g: unsafe fn(usize) -> usize, x: usize) -> usize {
+    unsafe { g(x) }
+};
+```
+
+Why the type and not the declaration: once a function is bound to a name,
+passed as an argument or stored in a field, the call site says only that
+*something* is being called. The declaration is nowhere in sight. The type
+is the one thing still travelling with the value, so the type is what
+carries the obligation — through `let`, through parameters, through returns,
+through record fields, through a generic instantiated at it.
+
+Taking such a value costs nothing. Binding it, passing it and returning it
+run no code, so none of them needs a marker; only the call does.
+
+Conversion goes ONE WAY. A safe `fn` may be used wherever an `unsafe fn`
+is expected — a function that needs no vouching is welcome in a position
+willing to vouch — and never the reverse:
+
+```must
+static twice = fn (x: usize) -> usize { x + x };
+static ok = fn () -> usize { apply(twice, 21) };        // safe -> unsafe
+static risky = fn (g: unsafe fn(usize) -> usize) -> usize {
+    let safe_only: fn(usize) -> usize = g;              // type mismatch
+    safe_only(1)
+};
+```
+
+The refusal is an ordinary type mismatch, and it renders both types in
+full — which means the two lines it shows differ by exactly the one token
+that is the whole story.
+
+Two kinds of function have an `unsafe fn` type without anyone writing one:
+a host import (the "Host imports" chapter), and the builtins that both
+require the marker and have a function type at all — `dealloc_array` and
+`str_bytes`. (`copy`, `add`, `offset` and the two blesses are polymorphic
+in a pointer's flavor, so they have no single `fn` type to carry anything;
+they are not values, and never were.) That first pair closes a real hole:
+`let d = dealloc_array::<usize>; d(p, 1);` used to run with no marker
+anywhere, because the check looked at the *name* being called, and once the
+builtin was a value there was no name left to look at.
+
+To give a function of your own an `unsafe fn` type, annotate the value:
+
+```must
+static f: unsafe fn(usize) -> usize = fn (x: usize) -> usize { x };
+static call_f = fn () -> usize { unsafe { f(1) } };
+```
+
+The marker on the literal itself — `unsafe fn (x: usize) -> usize { ... }`
+— is still refused. It is the annotation that would be sugared away, and it
+declares nothing the type does not already say.
+
+None of this reaches the backend: `unsafe fn` is a check-time distinction,
+and the same program with and without the marker compiles to the same bytes.
 
 == Heap allocation
 
@@ -1915,11 +1975,12 @@ body to infer one from. Four things follow, and each is the same sentence
 from a different side — an `extern fn` may not have a body, may not be
 `const`, may not be generic, and must be a `static`'s initializer.
 
-Calling one requires `unsafe` — and so does taking one as a value:
+An import's TYPE is `unsafe fn(...)`, so calling one requires `unsafe` —
+wherever the call happens:
 
 ```must
 static f = fn (p: u8.&raw mut) -> isize { unsafe { read(p, 8) } };
-static g = fn () -> () { let h = unsafe { read }; };
+static g = fn (p: u8.&raw mut) -> isize { let h = read; unsafe { h(p, 8) } };
 ```
 
 The reason is the boundary itself. A raw-pointer deref needs the marker
@@ -1928,11 +1989,12 @@ it does is written in a language this compiler never sees, so nothing on
 this side can establish that calling it is sound. You vouch, which is what
 the marker has always meant.
 
-The value-position half is what keeps that promise. Once an import is bound
-to a name, the call site says only that *something* is being called — so the
-last place a reader can see which import is in play is where the value is
-taken, and that is where the marker belongs. An import is still an ordinary
-function value: you can bind it, pass it, return it. You just say so.
+The type is what carries that from the declaration to the call. An import is
+an ordinary function value — bind it, pass it, return it, put it in a record
+— and every one of those is free, because none of them runs anything. The
+call is where you say so, and the call always knows, because the obligation
+came along in the value's type — see "Unsafety is part of a function's
+type" under "Raw pointers and unsafe".
 
 Calling one in a const context is an error for the same reason `print` is:
 there is no host at compile time.

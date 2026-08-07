@@ -1186,9 +1186,10 @@ fn prefix_borrow_expr(p: &mut Parser<'_>) -> CompletedMarker {
 
 /// `unsafe { ... }` — an expression-position block that marks a checker
 /// region (deref of a raw pointer is legal inside). Same shape as
-/// `const { ... }`. `unsafe fn` superset-parses (the literal becomes the
-/// node's child) so validation can reject it with an honest "not
-/// supported yet"; any other non-block body gets the wrap-in-braces
+/// `const { ... }`. An `unsafe fn` LITERAL superset-parses (the literal
+/// becomes the node's child) so validation can reject that spelling with
+/// an honest "not supported yet" — the `unsafe fn(...)` TYPE is live and
+/// parses in `type_ref`; any other non-block body gets the wrap-in-braces
 /// treatment, like `if` branches.
 fn unsafe_block_expr(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
@@ -1196,7 +1197,8 @@ fn unsafe_block_expr(p: &mut Parser<'_>) -> CompletedMarker {
     if p.at(L_BRACE) {
         block_expr(p);
     } else if at_fn_literal(p) {
-        // Reserved: `unsafe fn ...` parses whole, validation rejects it.
+        // Reserved: an `unsafe fn` LITERAL parses whole, validation
+        // rejects it.
         fn_literal(p);
     } else if at_expr_recovery(p) {
         p.error("expected `{`: `unsafe` blocks are blocks");
@@ -2000,6 +2002,39 @@ fn borrow_op_generic_args(p: &mut Parser<'_>) {
     generic_arg_list(p);
 }
 
+/// An ANONYMOUS fn type — bare parameter types, no names: `fn(usize) ->
+/// usize`, or `unsafe fn(usize) -> usize`, which is a DIFFERENT type (a
+/// value of it may only be called inside `unsafe { ... }`). The `unsafe`
+/// token rides the same slot it does on a fn literal, so both spellings
+/// produce one `FN_TYPE` node and the flag is read off the token.
+///
+/// Distinct from [`member_decl_fn_signature`], which parses the NAMED
+/// parameter list a colon-declared member writes; both complete `FN_TYPE`.
+fn anon_fn_type(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.eat(UNSAFE_KW);
+    p.bump(FN_KW);
+    if p.eat(L_PAREN) {
+        while !p.at(R_PAREN) && !p.at(EOF) {
+            let before = p.pos();
+            type_(p);
+            if !p.at(R_PAREN) {
+                p.expect(COMMA, "`,`");
+            }
+            if p.pos() == before {
+                break;
+            }
+        }
+        p.expect_after_prev(R_PAREN);
+    } else {
+        p.error("expected `(`: function types are written `fn(...) -> ...`");
+    }
+    if p.at(THIN_ARROW) {
+        ret_type(p);
+    }
+    m.complete(p, FN_TYPE)
+}
+
 /// The core (non-postfix) type. Returns `None` only when nothing was parsed
 /// (the `_ => error` arm), so the postfix loop in [`type_`] has no operand.
 fn type_core(p: &mut Parser<'_>) -> Option<CompletedMarker> {
@@ -2044,28 +2079,19 @@ fn type_core(p: &mut Parser<'_>) -> Option<CompletedMarker> {
             type_(p);
             m.complete(p, BORROW_TYPE)
         }
-        FN_KW => {
-            let m = p.start();
-            p.bump(FN_KW);
-            if p.eat(L_PAREN) {
-                while !p.at(R_PAREN) && !p.at(EOF) {
-                    let before = p.pos();
-                    type_(p);
-                    if !p.at(R_PAREN) {
-                        p.expect(COMMA, "`,`");
-                    }
-                    if p.pos() == before {
-                        break;
-                    }
-                }
-                p.expect_after_prev(R_PAREN);
-            } else {
-                p.error("expected `(`: function types are written `fn(...) -> ...`");
-            }
-            if p.at(THIN_ARROW) {
-                ret_type(p);
-            }
-            m.complete(p, FN_TYPE)
+        // `fn(...) -> ...` and its unsafe-to-call twin, `unsafe fn(...) ->
+        // ...`. One arm because they are ONE type constructor differing in
+        // one bit: unsafety lives in the function type.
+        FN_KW => anon_fn_type(p),
+        UNSAFE_KW if p.nth(1) == FN_KW => anon_fn_type(p),
+        // `unsafe` in type position with no `fn` after it. The marker
+        // belongs to a FUNCTION type and to nothing else, so say that once
+        // and parse the real type that follows — a wrong marker must not
+        // cost the reader the rest of the item.
+        UNSAFE_KW => {
+            p.error("`unsafe` marks a FUNCTION type: `unsafe fn(...) -> ...`");
+            p.bump(UNSAFE_KW);
+            return type_core(p);
         }
         IDENT => {
             let m = p.start();

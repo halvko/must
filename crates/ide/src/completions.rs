@@ -35,9 +35,10 @@
 //! `0` — the candidate's type equals the expectation (a `fn`-typed
 //! candidate matches a `fn`-typed expectation as a value: *passing*, not
 //! calling); `1` — it widens to it ([`hir::widens_to`]: variant→its enum,
-//! `!`→anything), or it is a `fn` whose *return* type matches/widens
-//! (calling it would satisfy the position); `2` — no match, or nothing
-//! known (keywords always; any candidate without an expectation).
+//! `!`→anything, safe `fn`→the corresponding `unsafe fn`), or it is a
+//! `fn` whose *return* type matches/widens (calling it would satisfy the
+//! position); `2` — no match, or nothing known (keywords always; any
+//! candidate without an expectation).
 //!
 //! [`Provenance`] tiers are two digits wide and spaced by tens (`00`, `10`,
 //! `20`, …), not consecutive integers: `Gold` — a context's single best
@@ -889,11 +890,12 @@ fn prefix_range(text: &str, offset: TextSize) -> TextRange {
 /// grammar rule to check against and stay a judgement call.
 const ITEM_KEYWORDS: &[&str] = &["static", "const", "type", "trait"];
 
-/// The keywords that spell a TYPE where a type is expected: an `fn` type
-/// and a structural record. `enum` is deliberately absent — an enum literal
-/// declares a type, so it is spellable only on a `type` item's right-hand
-/// side ([`type_item_rhs_items`]), never in an annotation.
-const TYPE_KEYWORDS: &[&str] = &["fn", "struct"];
+/// The keywords that spell a TYPE where a type is expected: an `fn` type,
+/// its `unsafe fn` head, and a structural record. `enum` is deliberately
+/// absent — an enum literal declares a type, so it is spellable only on a
+/// `type` item's right-hand side ([`type_item_rhs_items`]), never in an
+/// annotation.
+const TYPE_KEYWORDS: &[&str] = &["fn", "struct", "unsafe"];
 
 fn keyword_items(words: &[&str], edit_range: TextRange) -> Vec<CompletionItem> {
     words

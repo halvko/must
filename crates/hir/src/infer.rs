@@ -3009,7 +3009,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             (TypeRef::Array { elem, .. }, Ty::Array { elem: lowered, len }) => {
                 Ty::array(self.mint_wildcard_regions(elem, lowered), len.clone())
             }
-            (TypeRef::Fn { params, ret }, Ty::Fn(f)) => Ty::fn_type(
+            (TypeRef::Fn { params, ret, .. }, Ty::Fn(f)) => f.rebuilt(
                 params
                     .iter()
                     .zip(&f.params)
@@ -4737,7 +4737,17 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // part, so a literal that disagrees with the slot inherits
                 // nothing and its body is checked on its own. `Ty::Error` is
                 // infectious and silent there for the same reason.
-                let own_sig = Ty::fn_type(param_tys.clone(), ret.clone());
+                //
+                // An `extern fn` — the bodyless literal — gets an
+                // `unsafe fn(...)` signature here, and that is the whole of
+                // the import's price: what it does is written in a language
+                // this compiler never sees, so no call of it may run
+                // unvouched — not the direct one, and not one through a
+                // value it was bound to. The flag rides the TYPE precisely
+                // so it survives being passed around. (The
+                // annotation-derived path answers identically; see
+                // `item_tree::type_ref_from_fn_literal`.)
+                let own_sig = Ty::fn_type_with(fn_body.is_none(), param_tys.clone(), ret.clone());
                 let reported = self.result.diagnostics.len();
                 let fn_ty = self.check(expr, own_sig.clone(), expected, cause);
                 // `check` poisons the unresolved numbers in what it was
@@ -5174,7 +5184,19 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             Ty::Infer(var) => {
                 let params: Vec<Ty> = args.iter().map(|_| self.fresh_var()).collect();
                 let ret = self.fresh_var();
-                if self.adopt(&Ty::Infer(var), &Ty::fn_type(params.clone(), ret.clone())) {
+                // A call learns the callee's SHAPE and must not invent its
+                // SAFETY — but committing the variable to a `Ty::Fn` means
+                // naming one, so the answer is asked for rather than
+                // guessed: a join that has not solved yet is the one thing
+                // that can still be holding the value, and its witnesses
+                // know. Anything else (a mutually-recursive item signature,
+                // the usual case here) is safe, and can only be safe: an
+                // inferred signature is never an import's.
+                let unsafe_to_call = self
+                    .constraints
+                    .pending_join_mints_unsafe_fn(self.table, var);
+                let shape = Ty::fn_type_with(unsafe_to_call, params.clone(), ret.clone());
+                if self.adopt(&Ty::Infer(var), &shape) {
                     for (i, &arg) in args.iter().enumerate() {
                         self.infer_expr(arg, &params[i]);
                     }
@@ -9970,6 +9992,22 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             // tagged at this edge, so hover past it shows the enum.
             return resolved_expected;
         }
+        // SAFE fn → UNSAFE fn, the one directed conversion on function
+        // types and the only one there will be: a value that needs no
+        // vouching is welcome in a position willing to vouch. Nothing is
+        // recorded for MIR — unlike variant → enum this converts no bits,
+        // it only declines a permission the position was not going to use.
+        // The judgement itself lives in `Constraints`, next to the widening,
+        // because the JOIN solver is a check site too and has to make
+        // exactly this call.
+        if self.constraints.coerce_fn_to_unsafe(
+            self.table,
+            &resolved_actual,
+            &resolved_expected,
+            expr,
+        ) {
+            return resolved_expected;
+        }
         let mut reasons: Vec<Cause> = cause.into_iter().collect();
         // When a turbofish pinned the expected side, say so: direct checks
         // don't otherwise consult the cause store (only the join solver
@@ -10160,6 +10198,25 @@ fn peel_blocks(body: &Body, mut expr: ExprId) -> ExprId {
 /// The type of a builtin, the one resolution and checking use. `pub` so the
 /// editor's dot-completions render exactly what a call would check against.
 pub fn builtin_type(builtin: Builtin, file: SourceFile) -> Ty {
+    priced(builtin, builtin_type_unpriced(builtin, file))
+}
+
+/// Stamp the safety flag onto a builtin's fn type from the ONE home for the
+/// question, [`Builtin::requires_unsafe`] — so a builtin cannot be unsafe to
+/// call by name and safe to call through a binding, or vice versa, and so a
+/// new unsafe builtin gets the right VALUE type by answering the property it
+/// already has to answer. Non-fn shapes (the flavor-polymorphic builtins,
+/// which have no one fn type and are not first-class) pass through.
+fn priced(builtin: Builtin, ty: Ty) -> Ty {
+    match ty {
+        Ty::Fn(f) if builtin.requires_unsafe() => {
+            Ty::unsafe_fn_type(f.params.clone(), f.ret.clone())
+        }
+        ty => ty,
+    }
+}
+
+fn builtin_type_unpriced(builtin: Builtin, file: SourceFile) -> Ty {
     match builtin {
         Builtin::Print => Ty::fn_type(vec![Ty::Str], Ty::Unit),
         Builtin::Panic => Ty::fn_type(vec![Ty::Str], Ty::Never),
@@ -10292,7 +10349,10 @@ fn builtin_scheme(builtin: Builtin, file: SourceFile) -> (ItemLoc, Ty) {
             unreachable!("not a scheme-shaped builtin")
         }
     };
-    (loc, sig)
+    // Same stamp as the monomorphic path: `dealloc_array`'s SCHEME is an
+    // `unsafe fn`, so every instantiation of it is one, and taking it as a
+    // value carries the call's price with it.
+    (loc, priced(builtin, sig))
 }
 
 /// The type/const halves of a member's substitution, read off the OWNER's
@@ -10470,7 +10530,7 @@ fn instantiate_scheme(
             .get(&param.index)
             .cloned()
             .unwrap_or_else(|| ty.clone()),
-        Ty::Fn(f) => Ty::fn_type(
+        Ty::Fn(f) => f.rebuilt(
             f.params
                 .iter()
                 .map(|p| instantiate_scheme(p, item, subst, const_subst))
@@ -10557,7 +10617,7 @@ fn substitute_regions(ty: &Ty, item: &ItemLoc, subst: &FxHashMap<u32, Region>) -
             substitute_one_region(region, item, subst),
             substitute_regions(referent, item, subst),
         ),
-        Ty::Fn(f) => Ty::fn_type(
+        Ty::Fn(f) => f.rebuilt(
             f.params
                 .iter()
                 .map(|p| substitute_regions(p, item, subst))

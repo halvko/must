@@ -23,7 +23,7 @@
 
 use ena::unify::{InPlace, InPlaceUnificationTable, Snapshot};
 use la_arena::ArenaMap;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ItemLoc;
 use crate::body::{BindingId, ExprId};
@@ -273,6 +273,74 @@ impl Constraints {
         self.joins.push(join);
     }
 
+    /// Whether a join that has NOT been solved yet will fill `var` with a
+    /// function value that must be vouched for — asked by a CALL whose
+    /// callee is still a free variable.
+    ///
+    /// A call learns the callee's SHAPE (its arity, and the types either
+    /// side of it) and has no business deciding its SAFETY: safety is
+    /// decided by whatever produces the value. Usually the value is already
+    /// there and the question does not arise; when it comes from a join
+    /// that solves later, its witnesses are the only thing that knows, so
+    /// they are asked here rather than guessed at.
+    ///
+    /// ANY unsafe witness is enough, and that is the least upper bound
+    /// rather than a lenient approximation of one: a safe `fn` converts to
+    /// an `unsafe fn` and nothing converts back, so a join with one unsafe
+    /// leaf can only be an `unsafe fn`. Guessing safe instead is what made
+    /// `let g = if c { read } else { read }; g(p, n)` refuse a value every
+    /// branch actually produced, blaming a shape nothing in the source
+    /// asked for.
+    ///
+    /// The question is transitive, because joins are: a witness that is
+    /// itself a free variable can be another pending join's result (`let h
+    /// = if d { read } else { read }; let g = if c { h } else { h };`), and
+    /// stopping at the first hop would mint `safe` for exactly the program
+    /// above one `let` further away. Witnesses that are free variables no
+    /// pending join fills contribute nothing, as before.
+    pub(crate) fn pending_join_mints_unsafe_fn(
+        &self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        var: TyVar,
+    ) -> bool {
+        // Collected first: `resolve_shallow` needs the table mutably, and
+        // the joins live behind `&self`.
+        let candidates: Vec<(Ty, Vec<Ty>)> = self
+            .joins
+            .iter()
+            .map(|join| {
+                (
+                    join.result.clone(),
+                    join.witnesses.iter().map(|w| w.ty.clone()).collect(),
+                )
+            })
+            .collect();
+        let mut seen = FxHashSet::default();
+        let mut pending = vec![table.find(var)];
+        while let Some(root) = pending.pop() {
+            if !seen.insert(root) {
+                continue;
+            }
+            for (result, witnesses) in &candidates {
+                if !matches!(resolve_shallow(table, result), Ty::Infer(v) if table.find(v) == root)
+                {
+                    continue;
+                }
+                for ty in witnesses {
+                    match resolve_shallow(table, ty) {
+                        Ty::Fn(f) if f.unsafe_to_call => return true,
+                        // Another join's result, most likely — follow it.
+                        // A free variable nothing fills adds no root and so
+                        // says nothing either way.
+                        Ty::Infer(w) => pending.push(table.find(w)),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        false
+    }
+
     pub(crate) fn take_widenings(&mut self) -> Vec<(ExprId, VariantTy)> {
         std::mem::take(&mut self.widenings)
     }
@@ -486,7 +554,7 @@ impl Constraints {
             ),
             Ty::Fn(f) => {
                 let params = f.params.iter().map(|p| self.freshen_regions(p)).collect();
-                Ty::fn_type(params, self.freshen_regions(&f.ret))
+                f.rebuilt(params, self.freshen_regions(&f.ret))
             }
             // A borrow inside a generic argument is as much the join's own
             // region as a top-level one: without this the join's result
@@ -736,8 +804,15 @@ impl Constraints {
             // Same-kind only: `u8` never unifies with `u32` — no implicit
             // mixing, an ordinary type mismatch (no conversions in v1).
             (Ty::Int(k1), Ty::Int(k2)) => k1 == k2,
+            // Exact, like everything else here, and that includes the
+            // SAFETY flag: `fn(usize)` and `unsafe fn(usize)` are two types,
+            // and going from the first to the second is a directed
+            // conversion applied at check sites (`InferCtx::check`), never
+            // an equation — the same discipline variant → enum follows, and
+            // for the same reason: inferring it backwards through a variable
+            // would let an `unsafe fn` arrive where a safe one was promised.
             (Ty::Fn(f1), Ty::Fn(f2)) => {
-                f1.params.len() == f2.params.len() && {
+                f1.unsafe_to_call == f2.unsafe_to_call && f1.params.len() == f2.params.len() && {
                     let params_ok = f1
                         .params
                         .iter()
@@ -909,6 +984,50 @@ impl Constraints {
             }
         }
         Some(variant)
+    }
+
+    /// SAFE `fn` → `unsafe fn`, the one directed conversion on function
+    /// types — applied where unification has already failed, at both check
+    /// sites (a direct one in `InferCtx::check`, and a join's witness loop
+    /// below). ONE home, because two would drift: `hir::widens_to` answers
+    /// the same question for the editor's ranker and has no table to relate
+    /// through, so it stays the predicate and this stays the operation.
+    ///
+    /// Written as "relate `actual` against the expectation MADE SAFE"
+    /// rather than as a shape comparison, so parameters and results still
+    /// unify — an expectation may be `unsafe fn(usize) -> _`, and a generic
+    /// instantiated here still gets its variables pinned.
+    ///
+    /// ONE-WAY by construction: the mirrored case does not exist, so an
+    /// `unsafe fn` in a safe `fn` position falls through to the ordinary
+    /// mismatch, whose two rendered types differ by the one token that is
+    /// the whole story. Returns `true` when the conversion applied; there
+    /// is nothing to hand back, because it converts no bits — a caller
+    /// records no edge for MIR, unlike [`Self::widen_to_enum`].
+    pub(crate) fn coerce_fn_to_unsafe(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        actual: &Ty,
+        expected: &Ty,
+        origin: ExprId,
+    ) -> bool {
+        let (Ty::Fn(a), Ty::Fn(b)) = (
+            resolve_shallow(table, actual),
+            resolve_shallow(table, expected),
+        ) else {
+            return false;
+        };
+        if a.unsafe_to_call || !b.unsafe_to_call {
+            return false;
+        }
+        let expected_safe = Ty::fn_type(b.params.clone(), b.ret.clone());
+        self.relate(table, actual, &expected_safe, origin, None)
+        // NOT recorded on the expression: the caller returns the EXPECTED
+        // type, so hover past a converted edge reads `unsafe fn(...)` — the
+        // type the value has in the position it landed in. That is a
+        // decision, and it is the one variant → enum already made: the
+        // conversion happened HERE, and showing the pre-conversion type
+        // afterwards would describe a value that no longer exists.
     }
 
     /// Solve all deferred joins, emitting blame-attributed diagnostics.
@@ -1085,6 +1204,11 @@ impl Constraints {
         // are culprits.
         let mut siblings: Vec<Cause> = Vec::new();
         let mut widened = 0usize;
+        // Leaves that passed through the safe-fn → `unsafe fn` conversion.
+        // Counted for exactly one thing, the same one `widened` is counted
+        // for: a witness that converted is not a culprit, so the conflict
+        // below is not unanimous and must not be reported as one.
+        let mut coerced = 0usize;
         let mut culprits: Vec<(&Witness, Ty)> = Vec::new();
         for witness in &join.witnesses {
             match resolve_shallow(table, &witness.ty) {
@@ -1157,6 +1281,22 @@ impl Constraints {
                         // lie.
                         self.widenings.push((witness.blame, variant));
                         widened += 1;
+                    } else if self.coerce_fn_to_unsafe(table, &witness.ty, &expected, witness.blame)
+                    {
+                        // A SAFE fn leaf meeting an `unsafe fn` context —
+                        // the second check site the direct one has, and it
+                        // was missing here for the reason the reborrow arm
+                        // above was missing before it: a join is a check
+                        // site, and every conversion a direct check
+                        // performs it must perform too, or wrapping a value
+                        // in an `if` changes what the language accepts.
+                        // Records nothing: unlike a widening this converts
+                        // no bits, so there is no edge for MIR to act on.
+                        //
+                        // Not a sibling, for the widening's reason — "this
+                        // branch has type `unsafe fn(...)`" would lie about
+                        // a leaf that is a safe `fn`.
+                        coerced += 1;
                     } else {
                         culprits.push((witness, actual));
                     }
@@ -1174,6 +1314,7 @@ impl Constraints {
             // yet.
             let unanimous = siblings.is_empty()
                 && widened == 0
+                && coerced == 0
                 && culprits.iter().all(|(_, ty)| *ty == culprits[0].1);
             if unanimous {
                 // The leaves agree with each other and only contradict the
@@ -1347,7 +1488,7 @@ pub(crate) fn resolve_fully(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty)
         Ty::Fn(f) => {
             let params = f.params.iter().map(|p| resolve_fully(table, p)).collect();
             let ret = resolve_fully(table, &f.ret);
-            Ty::fn_type(params, ret)
+            f.rebuilt(params, ret)
         }
         Ty::RawPtr { mutable, pointee } => Ty::raw_ptr(*mutable, resolve_fully(table, pointee)),
         // The REGION is carried through untouched: it is not this table's
@@ -1395,7 +1536,7 @@ fn render_unresolved_numbers(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty
             TyVarValue::UnknownNumber => Ty::UnresolvedNumber,
             _ => ty.clone(),
         },
-        Ty::Fn(f) => Ty::fn_type(
+        Ty::Fn(f) => f.rebuilt(
             f.params
                 .iter()
                 .map(|p| render_unresolved_numbers(table, p))

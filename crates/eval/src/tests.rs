@@ -6491,10 +6491,12 @@ fn the_host_read_answers_in_whichever_signed_word_the_declaration_asked_for() {
 }
 
 #[test]
-fn taking_a_host_import_as_a_value_traps_with_the_squiggle_text() {
+fn calling_a_host_import_through_a_binding_traps_with_the_squiggle_text() {
     // The check-time diagnostic and the trap are the same sentence — the
     // house rule — so a program that reaches the host through a binding
-    // cannot execute it unvouched.
+    // cannot execute it unvouched. Note WHERE the trap is: taking the value
+    // ran fine, and the CALL is what refused, because the call is the
+    // operation and `g`'s type is what still knows a marker is owed.
     check_run_with_input(
         "static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;\n\
          static f = fn() -> isize {\n\
@@ -6504,15 +6506,15 @@ fn taking_a_host_import_as_a_value_traps_with_the_squiggle_text() {
         "f()",
         "hi",
         expect![[r#"
-            error[Trap]: taking the host import `read` as a value requires an `unsafe { ... }` block; a value can be called from anywhere, so vouching happens where it is taken
+            error[Trap]: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
-    // Vouched at the point the value is taken, it runs — first-class-ness is
-    // priced, not removed.
+    // Vouched at the CALL, it runs — first-class-ness is priced, not
+    // removed, and the binding itself never needed a marker.
     check_run_with_input(
         "static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;\n\
          static f = fn() -> isize {\n\
-             let g = unsafe { read };\n\
+             let g = read;\n\
              match alloc_array::<u8>(8) { ::Ok(p) => unsafe { g(p, 8) }, ::Err => 0 }\n\
          };",
         "f()",

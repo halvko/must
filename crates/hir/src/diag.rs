@@ -57,17 +57,17 @@ pub fn extern_call_requires_unsafe(name: &str) -> String {
     )
 }
 
-/// An `extern fn` mentioned as a VALUE — bound, passed, returned — outside
-/// any `unsafe { ... }` block. The marker moves to where the value is TAKEN
-/// because that is the last place a reader can see which import is in play:
-/// once it is a value, the call site says only that something is being
-/// called. Nothing here forbids first-class imports; it prices them.
-pub fn extern_value_requires_unsafe(name: &str) -> String {
-    format!(
-        "taking the host import `{name}` as a value requires an `unsafe {{ ... }}` block; \
-         a value can be called from anywhere, so vouching happens where it is taken"
-    )
-}
+/// A call THROUGH A VALUE whose type is `unsafe fn(...)`, outside any
+/// `unsafe { ... }` block — a bound host import, an unsafe builtin passed
+/// as an argument, a record field holding either, a parameter declared
+/// `unsafe fn(...)`.
+///
+/// It names no function because the call site knows none: what it knows is
+/// the callee's TYPE, and the type is exactly the thing that says a marker
+/// is owed — so that is what the message says. Taking such a value is free;
+/// running it is not.
+pub const UNSAFE_FN_VALUE_CALL_REQUIRES_UNSAFE: &str =
+    "calling a value of `unsafe fn` type requires an `unsafe { ... }` block";
 
 /// An `extern fn` call in a const context — [`side_effect_call_in_const`]'s
 /// judgment at a different boundary, stated in its own words because "side

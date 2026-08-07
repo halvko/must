@@ -6824,7 +6824,7 @@ static f = fn (p: str.&raw mut) {
             33..72 '{     unsafe { de...': ()
             39..69 'unsafe { dealloc_...': ()
             46..69 '{ dealloc_array(p...': ()
-            48..61 'dealloc_array': fn(str.&raw mut, usize)
+            48..61 'dealloc_array': unsafe fn(str.&raw mut, usize)
             48..67 'dealloc_array(p, 1)': ()
             62..63 'p': str.&raw mut
             65..66 '1': usize
@@ -13529,15 +13529,15 @@ fn a_bind_shadowing_a_variant_warns_through_a_borrow_too() {
 // ---- `extern fn` — host imports ----------------------------------------
 
 #[test]
-fn an_extern_fn_has_an_ordinary_fn_type() {
-    // The import is deliberately NOT a distinguished type: it is a
-    // `fn(...) -> T` like any other, so it is annotatable, passable and
-    // callable with nothing new to learn. What makes it an import is the
-    // DECLARATION, which is why the checkers ask the item, not the type.
+fn an_extern_fn_has_an_unsafe_fn_type() {
+    // The import's type carries its price: `unsafe fn(...)`. Still a
+    // first-class function value — annotatable, bindable, passable — but
+    // one whose CALLS need the marker wherever they happen, which is what
+    // the declaration alone could never say once the value escaped.
     check_infer(
         "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;",
         expect![[r#"
-            14..60 'extern fn(buf: u8...': fn(u8.&raw mut, usize) -> i64
+            14..60 'extern fn(buf: u8...': unsafe fn(u8.&raw mut, usize) -> i64
             24..27 'buf': u8.&raw mut
             42..45 'len': usize
         "#]],
@@ -13570,19 +13570,21 @@ fn calling_an_extern_fn_in_a_const_context_is_rejected() {
 }
 
 #[test]
-fn taking_an_extern_fn_as_a_value_requires_unsafe() {
-    // `let f = read; f(buf, 8)` used to reach the host with no marker
-    // anywhere: the call site says only that SOMETHING is being called, so
-    // the last place a reader can see which import is in play is where the
-    // value is taken. That is where the marker goes — imports stay
-    // first-class, they are just priced.
+fn taking_an_extern_fn_as_a_value_is_free_and_its_call_is_gated() {
+    // Pricing the MENTION (`let f = unsafe { read };`) was the stopgap for
+    // a call site that could not name what it was calling. Unsafety in the
+    // TYPE removes the need: `f` is an `unsafe fn`, so the call is where
+    // the marker is demanded — which is both the honest place and the one a
+    // reader of the call can act on. Binding, passing and returning an
+    // import are ordinary things to do.
     check_diagnostics(
         "static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;\n\
-         static loose = fn() -> () { let f = read; };\n\
-         static vouched = fn() -> () { let f = unsafe { read }; };\n\
+         static bound = fn() -> () { let f = read; };\n\
+         static loose = fn(p: u8.&raw mut) -> isize { let f = read; f(p, 1) };\n\
+         static vouched = fn(p: u8.&raw mut) -> isize { let f = read; unsafe { f(p, 1) } };\n\
          static called = fn(p: u8.&raw mut) -> isize { unsafe { read(p, 1) } };",
         expect![[r#"
-            100..104: taking the host import `read` as a value requires an `unsafe { ... }` block; a value can be called from anywhere, so vouching happens where it is taken
+            168..175: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -13620,6 +13622,461 @@ fn a_misplaced_extern_fn_is_not_a_host_import() {
         expect![[r#"
             37..43: an `extern fn` must be a `static`'s initializer — `static name = extern fn(...) -> T;` — because the item's name is the name the host is asked for
             86..92: an `extern fn` must be a `static`'s initializer — `static name = extern fn(...) -> T;` — because the item's name is the name the host is asked for
+        "#]],
+    );
+}
+
+// ---- `unsafe fn` — unsafety lives in the function type ------------------
+
+/// A safe function, a host import (`unsafe fn`), and a higher-order
+/// function that takes either — the shapes every test below draws from.
+const UNSAFE_FN_PRELUDE: &str = "\
+static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;
+static safe_read = fn(buf: u8.&raw mut, len: usize) -> isize { 0 };
+";
+
+fn check_unsafe_fn(body: &str, expect: Expect) {
+    check_diagnostics(&format!("{UNSAFE_FN_PRELUDE}{body}"), expect);
+}
+
+#[test]
+fn an_unsafe_fn_annotation_is_a_type_of_its_own() {
+    check_infer(
+        "static run = fn(g: unsafe fn(usize) -> usize, x: usize) -> usize { unsafe { g(x) } };",
+        expect![[r#"
+            13..84 'fn(g: unsafe fn(u...': fn(unsafe fn(usize) -> usize, usize) -> usize
+            16..17 'g': unsafe fn(usize) -> usize
+            46..47 'x': usize
+            65..84 '{ unsafe { g(x) } }': usize
+            67..82 'unsafe { g(x) }': usize
+            74..82 '{ g(x) }': usize
+            76..77 'g': unsafe fn(usize) -> usize
+            76..80 'g(x)': usize
+            78..79 'x': usize
+        "#]],
+    );
+}
+
+#[test]
+fn a_safe_fn_coerces_to_an_unsafe_fn() {
+    // The one directed conversion: a function that needs no vouching is
+    // welcome in a position willing to vouch. Nothing is converted at run
+    // time — the position simply declines to use a permission it has.
+    check_unsafe_fn(
+        "static f = fn() -> () { let g: unsafe fn(u8.&raw mut, usize) -> isize = safe_read; };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn an_unsafe_fn_does_not_coerce_to_a_safe_fn() {
+    // The other direction is the unsound one, and the two rendered types
+    // differ by the one token that is the whole story.
+    check_unsafe_fn(
+        "static f = fn() -> () { let g: fn(u8.&raw mut, usize) -> isize = read; };",
+        expect![[r#"
+            197..201: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize` (expected `fn(u8.&raw mut, usize) -> isize` because of this annotation at 163..194)
+        "#]],
+    );
+}
+
+#[test]
+fn calling_a_let_bound_unsafe_fn_needs_the_marker() {
+    check_unsafe_fn(
+        "static f = fn(p: u8.&raw mut) -> isize { let g = read; g(p, 1) };\n\
+         static ok = fn(p: u8.&raw mut) -> isize { let g = read; unsafe { g(p, 1) } };",
+        expect![[r#"
+            187..194: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn calling_an_unsafe_fn_parameter_needs_the_marker() {
+    // The parameter never saw a declaration: its TYPE is the whole reason
+    // the marker is owed, which is the point of moving unsafety here.
+    check_unsafe_fn(
+        "static apply = fn(g: unsafe fn(u8.&raw mut, usize) -> isize, p: u8.&raw mut) -> isize { g(p, 1) };\n\
+         static ok = fn(g: unsafe fn(u8.&raw mut, usize) -> isize, p: u8.&raw mut) -> isize { unsafe { g(p, 1) } };",
+        expect![[r#"
+            220..227: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn calling_an_unsafe_fn_returned_from_a_function_needs_the_marker() {
+    check_unsafe_fn(
+        "static pick = fn() -> unsafe fn(u8.&raw mut, usize) -> isize { read };\n\
+         static f = fn(p: u8.&raw mut) -> isize { pick()(p, 1) };",
+        expect![[r#"
+            244..256: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn calling_an_unsafe_fn_out_of_a_record_field_needs_the_marker() {
+    check_unsafe_fn(
+        "static f = fn(p: u8.&raw mut) -> isize { \
+             let h = struct { go = read }; h.go(p, 1) \
+         };",
+        expect![[r#"
+            203..213: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn passing_an_import_to_a_higher_order_function_carries_the_price() {
+    // THE HOLE the declaration-side rule could not see: `apply(read, ...)`
+    // hands the import to a body that never mentions it. The body's own
+    // parameter type is now what demands the marker — so the price arrives
+    // with the value instead of being left behind at the mention.
+    check_unsafe_fn(
+        "static apply = fn(g: unsafe fn(u8.&raw mut, usize) -> isize, p: u8.&raw mut) -> isize { \
+             unsafe { g(p, 1) } \
+         };\n\
+         static f = fn(p: u8.&raw mut) -> isize { apply(read, p) };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_fn_literal_takes_its_parameter_types_from_an_unsafe_fn_position() {
+    // The literal's expectation is a `Ty::Fn` whatever its safety, so the
+    // unwritten parameter and return types are still inherited from the
+    // position — and the finished (safe) literal then coerces into it.
+    check_unsafe_fn(
+        "static f = fn() -> () { let g: unsafe fn(usize) -> usize = fn(x) { x + 1 }; };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn the_conversion_is_shallow_but_a_literal_is_checked_per_part() {
+    // Shallow means the conversion never reaches INSIDE a formed value or
+    // through a fn's own return type — both refuse, and both name the whole
+    // type. A record LITERAL is the case worth stating separately, because
+    // it looks like an exception and is not one: its fields are checked one
+    // by one against the annotation, so each field converts on its own and
+    // no record ever converted at all.
+    check_unsafe_fn(
+        "static built = fn() -> () { \
+             let r: struct { go: unsafe fn(u8.&raw mut, usize) -> isize } = \
+                 struct { go = safe_read }; \
+         };\n\
+         static formed = fn(v: struct { go: fn(u8.&raw mut, usize) -> isize }) -> () { \
+             let r: struct { go: unsafe fn(u8.&raw mut, usize) -> isize } = v; \
+         };\n\
+         static returned = fn(g: fn() -> fn(usize) -> usize) -> () { \
+             let h: fn() -> unsafe fn(usize) -> usize = g; \
+         };",
+        expect![[r#"
+            394..395: type mismatch: expected `struct { go: unsafe fn(u8.&raw mut, usize) -> isize }`, found `struct { go: fn(u8.&raw mut, usize) -> isize }` (expected `struct { go: unsafe fn(u8.&raw mut, usize) -> isize }` because of this annotation at 338..391)
+            503..504: type mismatch: expected `fn() -> unsafe fn(usize) -> usize`, found `fn() -> fn(usize) -> usize` (expected `fn() -> unsafe fn(usize) -> usize` because of this annotation at 467..500)
+        "#]],
+    );
+}
+
+#[test]
+fn a_safe_fn_parameter_refuses_an_import() {
+    // The other half of the hole, and the reason the coercion is one-way:
+    // a body that promised to call its argument WITHOUT a marker may not be
+    // handed something that owes one. The refusal lands at the argument.
+    check_unsafe_fn(
+        "static apply = fn(g: fn(u8.&raw mut, usize) -> isize, p: u8.&raw mut) -> isize { \
+             g(p, 1) \
+         };\n\
+         static f = fn(p: u8.&raw mut) -> isize { apply(read, p) };",
+        expect![[r#"
+            271..275: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize`
+        "#]],
+    );
+}
+
+#[test]
+fn a_safe_fn_argument_coerces_at_an_unsafe_fn_parameter() {
+    // The coercion at an ARGUMENT, not just an annotation: `apply` promises
+    // to vouch, and a function that needs no vouching still fits.
+    check_unsafe_fn(
+        "static apply = fn(g: unsafe fn(u8.&raw mut, usize) -> isize, p: u8.&raw mut) -> isize { \
+             unsafe { g(p, 1) } \
+         };\n\
+         static f = fn(p: u8.&raw mut) -> isize { apply(safe_read, p) };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_generic_instantiated_at_an_unsafe_fn_keeps_the_price() {
+    // Through a BINDER: `T` is instantiated at `unsafe fn(...)`, the value
+    // makes a round trip through a generic body that knows nothing about
+    // it, and the call on the other side still owes the marker.
+    check_unsafe_fn(
+        "static id = fn::<T>(t: T) -> T { t };\n\
+         static f = fn(p: u8.&raw mut) -> isize { id(read)(p, 1) };\n\
+         static ok = fn(p: u8.&raw mut) -> isize { unsafe { id(read)(p, 1) } };",
+        expect![[r#"
+            211..225: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn an_unsafe_fn_is_writable_as_an_explicit_generic_argument() {
+    // The type is spellable everywhere a type is: a turbofish argument
+    // reaches the same `type_core`, so `T` can be pinned at an `unsafe fn`
+    // by hand and the instantiated signature keeps the marker.
+    check_unsafe_fn(
+        "static id = fn::<T>(t: T) -> T { t };\n\
+         static f = fn(p: u8.&raw mut) -> isize { \
+             unsafe { id::<unsafe fn(u8.&raw mut, usize) -> isize>(read)(p, 1) } \
+         };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn an_unsafe_builtin_taken_as_a_value_carries_its_price() {
+    // The documented pre-existing hole, closed by the same rule: taking
+    // `dealloc_array` as a value used to launder the marker away entirely.
+    // Its TYPE is an `unsafe fn` now, so the call answers for it.
+    check_diagnostics(
+        "static f = fn(p: usize.&raw mut) -> () { let d = dealloc_array::<usize>; d(p, 1) };\n\
+         static ok = fn(p: usize.&raw mut) -> () { \
+             let d = dealloc_array::<usize>; unsafe { d(p, 1) } \
+         };",
+        expect![[r#"
+            73..80: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn a_safe_builtin_taken_as_a_value_keeps_its_safe_type() {
+    // The flag comes from `Builtin::requires_unsafe` and nowhere else, so
+    // a builtin with nothing to vouch for stays exactly as first-class and
+    // exactly as callable as it was.
+    check_infer(
+        "static f = fn() -> () { let p = print; p(\"hi\") };",
+        expect![[r#"
+            11..48 'fn() -> () { let ...': fn()
+            22..48 '{ let p = print; ...': ()
+            28..29 'p': fn(str)
+            32..37 'print': fn(str)
+            39..40 'p': fn(str)
+            39..46 'p("hi")': ()
+            41..45 '"hi"': str
+        "#]],
+    );
+}
+
+#[test]
+fn an_item_level_unsafe_fn_annotation_lowers_the_same() {
+    // A different lowering path from a `let`'s (`lower_decl_ty`, outside
+    // every binder), so it is checked separately: the marker must survive
+    // there too, and the coercion must still apply.
+    check_unsafe_fn(
+        "static vouching: unsafe fn(u8.&raw mut, usize) -> isize = safe_read;\n\
+         static f = fn(p: u8.&raw mut) -> isize { vouching(p, 1) };",
+        expect![[r#"
+            242..256: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn an_unsafe_fn_value_is_forgettable_like_any_signature() {
+    // Indirection does not infect: an `unsafe fn` is a signature, not an
+    // inhabitant, so it has `forget` like every other fn type and the
+    // capability rules never look at the flag — bare, and inside a record
+    // that is itself dropped on the floor.
+    check_unsafe_fn(
+        "static f = fn() -> () { \
+             let g: unsafe fn(u8.&raw mut, usize) -> isize = read; \
+             let held = struct { go = g }; \
+         };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_join_of_imports_is_an_unsafe_fn_and_its_call_is_gated() {
+    // THE MINT-FROM-UNKNOWN. The call runs before the join solves, so it is
+    // the call that has to commit `g`'s variable to a function shape — and
+    // a call has no business naming a safety. Guessing safe here refused a
+    // value every branch produced, blaming `fn(...)`, a shape nothing in
+    // the source asked for. The witnesses are asked instead.
+    check_unsafe_fn(
+        "static gated = fn(c: bool, p: u8.&raw mut, n: usize) -> isize { \
+             let g = if c { read } else { read }; g(p, n) \
+         };\n\
+         static ok = fn(c: bool, p: u8.&raw mut, n: usize) -> isize { \
+             let g = if c { read } else { read }; unsafe { g(p, n) } \
+         };",
+        expect![[r#"
+            233..240: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn a_join_of_safe_functions_stays_safe_when_called() {
+    // The other half of the same mint: nothing here produces an obligation,
+    // so nothing may invent one. (Guessing UNSAFE instead of SAFE would
+    // have made this the bug, in the direction that demands markers nobody
+    // owes.)
+    check_unsafe_fn(
+        "static other = fn(buf: u8.&raw mut, len: usize) -> isize { 1 };\n\
+         static f = fn(c: bool, p: u8.&raw mut, n: usize) -> isize { \
+             let g = if c { safe_read } else { other }; g(p, n) \
+         };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_match_join_and_a_loop_break_join_mint_the_same_way() {
+    // The sink is shared machinery, so the fix has to be too: `match` arms
+    // and `break` values reach the same mint by the same path.
+    check_unsafe_fn(
+        "static by_match = fn(k: char, p: u8.&raw mut, len: usize) -> isize { \
+             let g = match k { \'a\' => read, _ => read }; g(p, len) \
+         };\n\
+         static by_break = fn(c: bool, p: u8.&raw mut, len: usize) -> isize { \
+             let g = loop { if c { break read; }; break read; }; g(p, len) \
+         };",
+        expect![[r#"
+            245..254: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            379..388: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn a_join_mixing_a_safe_fn_and_an_import_settles_on_the_unsafe_one() {
+    // The least upper bound under the one-way conversion: safe converts up,
+    // nothing converts back, so a join with one unsafe leaf can only be an
+    // `unsafe fn` — and the safe leaf converts INTO the join, at the join.
+    // The call is gated, which is the honest answer: one of the two things
+    // `g` may be needs vouching.
+    check_unsafe_fn(
+        "static gated = fn(c: bool, p: u8.&raw mut, n: usize) -> isize { \
+             let g = if c { read } else { safe_read }; g(p, n) \
+         };\n\
+         static ok = fn(c: bool, p: u8.&raw mut, n: usize) -> isize { \
+             let g = if c { read } else { safe_read }; unsafe { g(p, n) } \
+         };",
+        expect![[r#"
+            238..245: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn a_chain_of_pending_joins_is_followed_to_its_unsafe_witness() {
+    // The witness question is TRANSITIVE, because joins are: `g`'s
+    // witnesses are `h`, whose own join has not solved either, so a
+    // one-hop question would see no function at all and mint safe —
+    // reproducing the refusal above one `let` further away.
+    check_unsafe_fn(
+        "static gated = fn(c: bool, d: bool, p: u8.&raw mut, n: usize) -> isize { \
+             let h = if d { read } else { read }; \
+             let g = if c { h } else { h }; g(p, n) \
+         };\n\
+         static mixed = fn(c: bool, d: bool, p: u8.&raw mut, n: usize) -> isize { \
+             let h = if d { read } else { read }; \
+             let g = if c { h } else { safe_read }; g(p, n) \
+         };\n\
+         static ok = fn(c: bool, d: bool, p: u8.&raw mut, n: usize) -> isize { \
+             let h = if d { read } else { read }; \
+             let g = if c { h } else { h }; unsafe { g(p, n) } \
+         };",
+        expect![[r#"
+            273..280: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            433..440: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+        "#]],
+    );
+}
+
+#[test]
+fn a_converted_fn_takes_the_type_of_the_position_it_landed_in() {
+    // The conversion happened HERE: past a converted edge the recorded type
+    // is the EXPECTED one, so hover on the argument reads `unsafe fn(...)`
+    // — the type the value has where it landed. Same decision as
+    // variant -> enum, and it is what makes the coercion invisible
+    // downstream.
+    check_infer(
+        "static takes = fn(g: unsafe fn(usize) -> usize) -> () { };\n\
+         static twice = fn(x: usize) -> usize { x + x };\n\
+         static call = fn() -> () { takes(twice) };",
+        expect![[r#"
+            15..57 'fn(g: unsafe fn(u...': fn(unsafe fn(usize) -> usize)
+            18..19 'g': unsafe fn(usize) -> usize
+            54..57 '{ }': ()
+            74..105 'fn(x: usize) -> u...': fn(usize) -> usize
+            77..78 'x': usize
+            96..105 '{ x + x }': usize
+            98..99 'x': usize
+            98..103 'x + x': usize
+            102..103 'x': usize
+            121..148 'fn() -> () { take...': fn()
+            132..148 '{ takes(twice) }': ()
+            134..139 'takes': fn(unsafe fn(usize) -> usize)
+            134..146 'takes(twice)': ()
+            140..145 'twice': unsafe fn(usize) -> usize
+        "#]],
+    );
+}
+
+#[test]
+fn an_unconsumed_mixed_safety_join_is_a_branch_disagreement() {
+    // The LUB is taken where the join has somewhere to convert AT — a check
+    // site, or a consuming call that mints the callee shape. With neither,
+    // the family vote runs instead, and a fn type is its own family with
+    // the flag inside its identity: two branches tie, so the join is
+    // reported as the branch disagreement it is and the message names the
+    // fix (an annotation; a call would do as well).
+    check_unsafe_fn(
+        "static f = fn(c: bool) -> () { let g = if c { read } else { safe_read }; };",
+        expect![[r#"
+            192..201: `if` branches have incompatible types: `unsafe fn(u8.&raw mut, usize) -> isize` vs `fn(u8.&raw mut, usize) -> isize`; add a type annotation to decide between them (this branch has type `unsafe fn(u8.&raw mut, usize) -> isize` at 178..182)
+        "#]],
+    );
+}
+
+#[test]
+fn a_join_converts_a_safe_branch_at_an_unsafe_fn_annotation() {
+    // THE SECOND CHECK SITE. A join is a check site, so every conversion a
+    // direct check performs it must perform too — otherwise wrapping a
+    // value in an `if` changes what the language accepts. Three positions,
+    // because each reaches the witness loop with a different axiom behind
+    // the expectation: an annotation, an argument, a return type.
+    check_unsafe_fn(
+        "static takes = fn(g: unsafe fn(u8.&raw mut, usize) -> isize) -> () { };\n\
+         static annotated = fn(c: bool) -> () { \
+             let g: unsafe fn(u8.&raw mut, usize) -> isize = if c { read } else { safe_read }; \
+         };\n\
+         static argument = fn(c: bool) -> () { takes(if c { read } else { safe_read }) };\n\
+         static returned = fn(c: bool) -> unsafe fn(u8.&raw mut, usize) -> isize { \
+             if c { read } else { safe_read } \
+         };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_join_still_refuses_an_import_where_a_safe_fn_is_demanded() {
+    // The conversion stayed one-way inside the join too: the branch that
+    // owes a marker is the culprit, named on its own, and the safe branch
+    // is not dragged in with it.
+    check_unsafe_fn(
+        "static f = fn(c: bool) -> () { \
+             let g: fn(u8.&raw mut, usize) -> isize = if c { read } else { safe_read }; \
+         };",
+        expect![[r#"
+            211..215: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize` (expected `fn(u8.&raw mut, usize) -> isize` because of this annotation at 170..201)
         "#]],
     );
 }

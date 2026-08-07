@@ -226,11 +226,15 @@ pub fn synthetic_decl(db: &dyn Db, item: ItemId<'_>) -> Option<&'static scopes::
 
 /// Whether `item` is a HOST IMPORT — `static name = extern fn(...) -> T;`.
 ///
-/// The fact lives on the ITEM, not on the type: an extern's type is an
-/// ordinary `Ty::Fn`, deliberately, so an import is annotatable, passable and
-/// callable exactly like any other function value. What the checkers need to
-/// know is which *declaration* a given call reaches, and that is a body
-/// question.
+/// The fact lives on the ITEM, and it is a NARROW one. An import's *price*
+/// rides its TYPE — it is an `unsafe fn(...)`
+/// (see [`ty::FnTy`]), which is what demands the marker at every call,
+/// including the ones reached through a binding, an argument or a field.
+/// What is left to this query is the pair of questions only the DECLARATION
+/// can answer: may it run in a const context (there is no host at compile
+/// time), and can a call site NAME the import it reaches — a better message
+/// than the type-driven one, available exactly at a direct mention. Both are
+/// body questions.
 ///
 /// Its OWN query, for [`const_check::root_fn_is_const`]'s reason: every call
 /// site of a named item asks this, so an edit inside one item's body must
@@ -1564,8 +1568,10 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             });
         }
 
-        // Unsafe-check findings: a raw-pointer deref outside any
-        // `unsafe { ... }` block. Messages render in
+        // Unsafe-check findings: the two operation families that need an
+        // `unsafe { ... }` block — a raw-pointer deref, and a CALL whose
+        // callee is an unsafe builtin, a host import, or any value of
+        // `unsafe fn` type. Messages render in
         // `UnsafeCheckDiagnostic::message` (shared with MIR's traps).
         for diag in unsafe_check::unsafe_check(db, item) {
             let Some(ptr) = source_map.node_for_expr(diag.expr()) else {

@@ -137,15 +137,17 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
         } else if let Some(param) = ast::Param::cast(node.clone()) {
             require_mut_names_a_binding(param.mut_token(), param.pat(), &mut errors);
         } else if let Some(unsafe_block) = ast::UnsafeBlockExpr::cast(node.clone()) {
-            // Reserved: `unsafe fn` parses whole (its real payoff is
-            // API-contract signalling, which wants doc conventions before
-            // mechanism); any other non-block body gets the ordinary
-            // wrap-in-braces treatment. The parser reports the
-            // missing-body case itself.
+            // Reserved: an `unsafe fn` LITERAL parses whole so validation
+            // can refuse it by name. The `unsafe fn(...)` TYPE is live; a
+            // marker on the literal would declare nothing the value's type
+            // does not already say, so the spelling stays undecided. Any
+            // other non-block body gets the ordinary wrap-in-braces
+            // treatment. The parser reports the missing-body case itself.
             match unsafe_block.expr() {
                 Some(ast::Expr::FnLiteral(fn_lit)) => errors.push(SyntaxError {
-                    message: "`unsafe fn` is not supported yet; use `unsafe { ... }` blocks \
-                              inside a plain `fn`"
+                    message: "an `unsafe fn` literal is not supported yet; the \
+                              `unsafe fn(...)` type is live, so annotate the value \
+                              and write a plain `fn`"
                         .to_owned(),
                     range: fn_lit.syntax().text_range(),
                     fix: None,
@@ -689,7 +691,7 @@ fn validate_member(member: &ast::Member, errors: &mut Vec<SyntaxError>) {
     }
     match member.value() {
         Some(ast::Expr::FnLiteral(_)) => {}
-        // `name = unsafe fn ...` — the existing `unsafe fn` reservation
+        // `name = unsafe fn ...` — the `unsafe fn` LITERAL reservation
         // already fires on the wrapped literal; adding a second error here
         // would be noise.
         Some(ast::Expr::UnsafeBlockExpr(inner))
@@ -1519,8 +1521,8 @@ fn validate_extern_fn(fn_literal: &ast::FnLiteral, errors: &mut Vec<SyntaxError>
     // import under. `const` is rejected with it: `const` is copied per
     // mention and an import is one identity.
     let parent = fn_literal.syntax().parent();
-    // `unsafe extern fn` already draws the `unsafe fn` reservation on the
-    // wrapping node; a second error about placement would be noise.
+    // `unsafe extern fn` already draws the `unsafe fn` LITERAL reservation
+    // on the wrapping node; a second error about placement would be noise.
     if parent
         .as_ref()
         .is_some_and(|p| p.kind() == SyntaxKind::UNSAFE_BLOCK_EXPR)

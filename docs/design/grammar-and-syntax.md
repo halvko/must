@@ -107,6 +107,13 @@
   A repeated literal arm is an unreachable-arm warning keyed on the value, not on its
   rendering. Every literal kind parses into the pattern node; validation names the kinds not
   supported yet.
+- **G23** `unsafe fn(...)` is a type, not a modifier (T19): the same modifier slot on a fn type
+  that `const` rides on a fn literal, so both spellings are one `FN_TYPE` node. The type
+  grammar claims the keyword outright, since no other type can begin with `unsafe`, so a bare
+  `unsafe` in type position is a named mistake and the type after it still parses. A
+  colon-declared member signature's own `unsafe` stays reserved, and so does the marker on a
+  fn LITERAL: the value's type carries the fact, so that spelling could only sugar an
+  annotation.
 
 ## Discarded
 

@@ -406,6 +406,42 @@ fn an_import_whose_signature_has_no_wasm_shape_is_refused_by_name() {
 }
 
 #[test]
+fn a_bound_host_import_compiles_but_a_stored_one_is_refused_by_name() {
+    // `let f = read;` is ORDINARY source since unsafety moved into the
+    // type — it used to need an `unsafe` marker — so what the backend does
+    // with a function value became a question people can reach by writing
+    // something perfectly legal. Both halves pinned, because the honest
+    // statement is a pair and not a slogan:
+    //
+    // a binding compiles (the static-value tracker follows it to the one
+    // import it can only be, and the call is a direct call), and a value
+    // the tracker CANNOT follow — stored in a record, or merged from
+    // branches that disagree — is refused BY NAME rather than miscompiled.
+    let db = RootDatabase::default();
+    let bound = "static tick = extern fn(n: i64) -> i64;\n\
+                 static main = fn () -> i64 { let f = tick; unsafe { f(1) } };";
+    let loc = harness::prepare(&db, bound, "main()");
+    codegen_wasm::compile(&db, &loc).expect("a bound import is still a direct call");
+
+    let db = RootDatabase::default();
+    let stored = "static tick = extern fn(n: i64) -> i64;\n\
+                  static main = fn () -> i64 { \
+                      let h = struct { go = tick }; unsafe { h.go(1) } \
+                  };";
+    let loc = harness::prepare(&db, stored, "main()");
+    let Err(codegen_wasm::CompileError::Unsupported(refusal)) = codegen_wasm::compile(&db, &loc)
+    else {
+        panic!("the backend must refuse a call through a value it cannot follow");
+    };
+    assert_eq!(
+        refusal.message(),
+        "a call through a function value that is not statically known \
+         (function values stored in data, or merged from several branches) \
+         is not supported by the wasm backend yet"
+    );
+}
+
+#[test]
 fn an_extern_fn_may_not_claim_a_name_the_compiler_already_imports() {
     // Two imports of one `(module, field)` is a module with two answers to
     // the same question — an engine resolves BOTH, so the program runs with
@@ -468,4 +504,28 @@ static main = fn () -> usize {
         "a checked-linear type must have no codegen consequence at all"
     );
     assert_eq!(linear.instances, plain.instances);
+}
+
+/// `unsafe fn` is CHECK-TIME ONLY, by the same argument and pinned the same
+/// way. The flag decides which programs the checker accepts — where an
+/// `unsafe { ... }` block is required, and which coercion is legal — and
+/// codegen never learns a function type carried it: there is no second
+/// calling convention, no wrapper, no tag on a function value. Same program
+/// with and without the marker, same bytes.
+#[test]
+fn an_unsafe_fn_type_changes_nothing_about_the_emitted_module() {
+    const PROGRAM: &str = r#"
+static twice = fn (x: usize) -> usize { x + x };
+static apply = fn (g: PLACEHOLDERfn(usize) -> usize, x: usize) -> usize {
+    unsafe { g(x) }
+};
+static main = fn () -> usize { apply(twice, 21) };
+"#;
+    let priced = compile(&PROGRAM.replace("PLACEHOLDER", "unsafe "), "main()");
+    let plain = compile(&PROGRAM.replace("PLACEHOLDER", ""), "main()");
+    assert_eq!(
+        priced.wasm, plain.wasm,
+        "unsafety in a function type must have no codegen consequence at all"
+    );
+    assert_eq!(priced.instances, plain.instances);
 }

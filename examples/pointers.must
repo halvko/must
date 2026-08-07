@@ -91,5 +91,7 @@ static main = fn () -> () {
 // Writes through pointee fields (`p.*.x = ...`), pointers into array
 // elements (`a[i].&raw mut`), and address-of through a deref
 // (`unsafe { p.*.x.&raw mut }` — computing an address through a pointer is
-// itself a deref, so it needs `unsafe`) all work.
-// Still reserved: `unsafe fn`.
+// itself a deref, so it needs `unsafe`) all work. `unsafe fn(...)` is a type
+// of its own too: calling a VALUE of one needs the marker wherever the call
+// is (see `docs/main.typ`, "Unsafety is part of a function's type"). The
+// marker on a fn LITERAL is still reserved; annotate the value instead.

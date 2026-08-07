@@ -463,10 +463,45 @@ pub struct ParamTy {
     pub name: std::sync::Arc<str>,
 }
 
+/// A function type: its parameters, its result, and whether CALLING a value
+/// of it needs an `unsafe { ... }` block.
+///
+/// Unsafety lives HERE, in the type, and not on the declaration that
+/// produced the value. The reason is the hole a declaration-side rule
+/// cannot close: once a function is bound to a name, passed as an argument
+/// or stored in a field, the call site says only that *something* is being
+/// called — so the only thing that can still demand a marker AT THE CALL is
+/// the value's own type. `unsafe fn(...)` therefore travels with the value,
+/// through let bindings, parameters, returns, record fields and generic
+/// instantiation alike.
+///
+/// The two are DIFFERENT types: they unify only with themselves (see
+/// `Constraints::unify`), with ONE directed conversion at check sites — a
+/// safe `fn` may be used where an `unsafe fn` is expected (a value that
+/// needs no vouching is fine in a position that would accept vouching),
+/// never the reverse. That conversion is a no-op at run time; nothing is
+/// recorded for MIR, unlike a variant → enum widening.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FnTy {
     pub params: Vec<Ty>,
     pub ret: Ty,
+    /// `unsafe fn(...)`: a value of this type may only be CALLED inside an
+    /// `unsafe { ... }` block. It says nothing about the value's other
+    /// uses — binding it, passing it, returning it and forgetting it are
+    /// all free, because none of them runs anything.
+    pub unsafe_to_call: bool,
+}
+
+impl FnTy {
+    /// The same function type with new parts — the rebuild every structural
+    /// map over a `Ty` wants (substitution, region erasure, resolution).
+    /// It exists so that those maps cannot silently drop the flag:
+    /// rebuilding through [`Ty::fn_type`] would turn every `unsafe fn` that
+    /// survives a substitution into a safe one, which is precisely the
+    /// direction the coercion is not allowed to go.
+    pub fn rebuilt(&self, params: Vec<Ty>, ret: Ty) -> Ty {
+        Ty::fn_type_with(self.unsafe_to_call, params, ret)
+    }
 }
 
 /// Identity of a nominal type mention: the declaration plus the full
@@ -582,24 +617,42 @@ pub struct VariantTy {
     pub name: std::sync::Arc<str>,
 }
 
-/// The implicit-conversion lattice, checked where unification fails at a
-/// check site (an annotation, a call argument, a join edge): `!` widens to
-/// everything (divergence produces no value to convert), and a variant type
-/// widens to *its* enum — that one is a real runtime conversion (the tag is
-/// injected; see `mir`'s `WidenToEnum`). Nothing else widens, and only
-/// shallowly: no variance through `fn` types or record fields. Unification
-/// itself stays equational — `unify(Variant, Named)` is false.
+/// The implicit-conversion lattice as a PREDICATE — "would a value of
+/// `actual` be accepted where `expected` is wanted, other than by being the
+/// same type". Three edges, and they are the whole list:
 ///
-/// Declaration-level only: the enum's generic ARGS must additionally agree
-/// (widening preserves them — `Option::<usize>::Some` widens to
-/// `Option::<usize>`, never to `Option::<str>`). The two check sites
-/// (`InferCtx::check` and the join solver) unify the args through
-/// `Constraints::widen_to_enum`; this predicate alone is not the whole
-/// judgement for a generic enum.
+/// - `!` converts to everything (divergence produces no value to convert);
+/// - a variant type converts to *its* enum — a real runtime conversion (the
+///   tag is injected; see `mir`'s `WidenToEnum`);
+/// - a safe `fn` converts to the corresponding `unsafe fn` — no runtime
+///   conversion at all, just a permission the position declines to use.
+///
+/// Only shallowly: no variance through `fn` parameters or results, record
+/// fields, or generic arguments. Unification itself stays equational —
+/// `unify(Variant, Named)` and `unify(fn, unsafe fn)` are both false.
+///
+/// Declaration-level only, and that is why this is not the whole judgement
+/// at a real check site: an enum's generic ARGS must additionally agree
+/// (`Option::<usize>::Some` converts to `Option::<usize>`, never to
+/// `Option::<str>`), and two fn types' parameters and results must unify.
+/// The check sites (`InferCtx::check` and the join solver) run the
+/// OPERATIONS — `Constraints::widen_to_enum` and
+/// `Constraints::coerce_fn_to_unsafe` — which relate those parts through
+/// the table. This predicate exists for the one consumer that has no table
+/// and needs no diagnostics: the editor's completion ranker, which must
+/// rank a legal candidate as legal, and which is why the list lives in one
+/// place instead of being re-derived per consumer.
 pub fn widens_to(actual: &Ty, expected: &Ty) -> bool {
     match (actual, expected) {
         (Ty::Never, _) => true,
         (Ty::Variant(variant), Ty::Named(named)) => variant.decl == named.decl,
+        // Parameters and result are compared by EQUALITY, not unified:
+        // this predicate has no table to unify through, and a candidate
+        // whose parameters are merely unifiable is not yet known to belong
+        // here. Only the safety marker is allowed to differ.
+        (Ty::Fn(a), Ty::Fn(b)) => {
+            !a.unsafe_to_call && b.unsafe_to_call && a.params == b.params && a.ret == b.ret
+        }
         _ => false,
     }
 }
@@ -621,8 +674,31 @@ impl RecordTy {
 }
 
 impl Ty {
+    /// A SAFE `fn(...) -> ...` — callable anywhere. The default
+    /// constructor: everything that builds a function type from parts
+    /// without a safety question to answer (a literal, a builtin, a
+    /// constructor's shape) is safe. A site that KNOWS the answer is
+    /// `unsafe` says so with [`Ty::unsafe_fn_type`]; a site that carries
+    /// the answer in a variable uses [`Ty::fn_type_with`].
     pub fn fn_type(params: Vec<Ty>, ret: Ty) -> Ty {
-        Ty::Fn(Arc::new(FnTy { params, ret }))
+        Ty::fn_type_with(false, params, ret)
+    }
+
+    /// An `unsafe fn(...) -> ...` — a value of it may only be CALLED inside
+    /// an `unsafe { ... }` block.
+    pub fn unsafe_fn_type(params: Vec<Ty>, ret: Ty) -> Ty {
+        Ty::fn_type_with(true, params, ret)
+    }
+
+    /// A function type whose safety is not a constant at the construction
+    /// site: a written type reference, a host import's inferred signature,
+    /// a join's minted callee shape.
+    pub fn fn_type_with(unsafe_to_call: bool, params: Vec<Ty>, ret: Ty) -> Ty {
+        Ty::Fn(Arc::new(FnTy {
+            params,
+            ret,
+            unsafe_to_call,
+        }))
     }
 
     pub fn raw_ptr(mutable: bool, pointee: Ty) -> Ty {
@@ -653,7 +729,7 @@ impl Ty {
             } => Ty::borrow(*mutable, Region::Erased, referent.erase_regions()),
             Ty::RawPtr { mutable, pointee } => Ty::raw_ptr(*mutable, pointee.erase_regions()),
             Ty::Array { elem, len } => Ty::array(elem.erase_regions(), len.clone()),
-            Ty::Fn(f) => Ty::fn_type(
+            Ty::Fn(f) => f.rebuilt(
                 f.params.iter().map(Ty::erase_regions).collect(),
                 f.ret.erase_regions(),
             ),
@@ -849,9 +925,13 @@ impl Ty {
                     .map(Ty::display)
                     .collect::<Vec<_>>()
                     .join(", ");
+                // The marker LEADS, exactly where it is written: a mismatch
+                // between the two fn types has to read as the one-token
+                // difference it is.
+                let marker = if f.unsafe_to_call { "unsafe " } else { "" };
                 match &f.ret {
-                    Ty::Unit => format!("fn({params})"),
-                    ret => format!("fn({params}) -> {}", ret.display()),
+                    Ty::Unit => format!("{marker}fn({params})"),
+                    ret => format!("{marker}fn({params}) -> {}", ret.display()),
                 }
             }
             Ty::RawPtr { mutable, pointee } => {
@@ -1220,7 +1300,11 @@ pub(crate) fn lower_type_ref_in(
     match value {
         TypeRef::Unit => Ty::Unit,
         TypeRef::Never => Ty::Never,
-        TypeRef::Fn { params, ret } => {
+        TypeRef::Fn {
+            params,
+            ret,
+            unsafe_to_call,
+        } => {
             let params = params
                 .iter()
                 .map(|param_ty| lower_type_ref_in(db, file, param_ty, table, scope))
@@ -1231,7 +1315,7 @@ pub(crate) fn lower_type_ref_in(
                 .map(|ret_ty| lower_type_ref_in(db, file, ret_ty, table, scope))
                 .unwrap_or_else(|| Ty::Infer(table.new_key(TyVarValue::Unknown)));
 
-            Ty::fn_type(params, ret)
+            Ty::fn_type_with(*unsafe_to_call, params, ret)
         }
         TypeRef::RawPtr { mutable, inner } => {
             Ty::raw_ptr(*mutable, lower_type_ref_in(db, file, inner, table, scope))
@@ -1639,7 +1723,7 @@ pub fn enum_variants<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<Vec<(Str
 fn erase_infer(ty: &Ty) -> Ty {
     match ty {
         Ty::Infer(_) | Ty::UnresolvedNumber => Ty::Error,
-        Ty::Fn(f) => Ty::fn_type(
+        Ty::Fn(f) => f.rebuilt(
             f.params.iter().map(erase_infer).collect(),
             erase_infer(&f.ret),
         ),
@@ -1693,7 +1777,7 @@ pub fn substitute_args(ty: &Ty, decl: &ItemLoc, args: &[GenericArg]) -> Ty {
             Some(GenericArg::Ty(ty)) => ty.clone(),
             _ => Ty::Error,
         },
-        Ty::Fn(f) => Ty::fn_type(
+        Ty::Fn(f) => f.rebuilt(
             f.params
                 .iter()
                 .map(|param| substitute_args(param, decl, args))

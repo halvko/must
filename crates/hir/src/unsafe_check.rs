@@ -6,6 +6,15 @@
 //! safe (creating a pointer is harmless; the hazard is at the deref), and
 //! so is pointer comparison.
 //!
+//! CALLS are the second family, and there the question is asked of the
+//! callee's TYPE: `unsafe fn(...)` is a type of its own (see
+//! [`crate::ty::FnTy`]), and calling a value of it needs the marker. Two
+//! arms above it name what they are calling when they can — an unsafe
+//! builtin, a host import mentioned directly — purely so the message can
+//! say which; everything reached through a VALUE is judged by the type,
+//! which is the only thing that still knows. Taking such a value is free:
+//! binding, passing and returning a function run nothing.
+//!
 //! The region is lexical *within a function*: an `unsafe` block covers
 //! everything written inside it, `const { ... }` blocks included (they are
 //! separate compile-time bodies, but the checker judges source regions, and
@@ -41,11 +50,22 @@ pub enum UnsafeCheckDiagnostic {
     /// A call of an `extern fn` — a host import — outside any `unsafe { ...
     /// }` block. Same rule, different reason: an import's behavior is not
     /// written in this language, so nothing here can establish it is sound.
+    ///
+    /// The DIRECT call keeps its own variant, beside the type-driven one
+    /// below, for exactly one thing: the message can name the import.
+    /// Reaching the same import through a binding is the type's business.
     ExternCallOutsideUnsafe { call: ExprId, name: String },
-    /// An `extern fn` mentioned as a VALUE outside any `unsafe { ... }`
-    /// block. Without this, `let f = read; f(buf, 8)` reaches the host with
-    /// no marker anywhere — the call site cannot name what it is calling.
-    ExternValueOutsideUnsafe { expr: ExprId, name: String },
+    /// A call THROUGH A VALUE whose type is `unsafe fn(...)`, outside any
+    /// `unsafe { ... }` block. The general rule, and the one that closes
+    /// the hole none of the three above can see: `let f = read; f(buf, 8)`,
+    /// `apply(dealloc_array, p, n)`, a record field holding an import.
+    /// Once the function is a value, its TYPE is the only thing that still
+    /// knows a marker is owed — so the type is what gets asked.
+    ///
+    /// Nameless on purpose: the call site genuinely does not know which
+    /// function it is about to run, and a message that guessed would be
+    /// worse than one that says what is true.
+    UnsafeFnValueCallOutsideUnsafe { call: ExprId },
 }
 
 impl UnsafeCheckDiagnostic {
@@ -53,8 +73,8 @@ impl UnsafeCheckDiagnostic {
         match self {
             UnsafeCheckDiagnostic::DerefOutsideUnsafe { expr } => *expr,
             UnsafeCheckDiagnostic::BuiltinCallOutsideUnsafe { call, .. }
-            | UnsafeCheckDiagnostic::ExternCallOutsideUnsafe { call, .. } => *call,
-            UnsafeCheckDiagnostic::ExternValueOutsideUnsafe { expr, .. } => *expr,
+            | UnsafeCheckDiagnostic::ExternCallOutsideUnsafe { call, .. }
+            | UnsafeCheckDiagnostic::UnsafeFnValueCallOutsideUnsafe { call } => *call,
         }
     }
 
@@ -71,8 +91,8 @@ impl UnsafeCheckDiagnostic {
             UnsafeCheckDiagnostic::ExternCallOutsideUnsafe { name, .. } => {
                 diag::extern_call_requires_unsafe(name)
             }
-            UnsafeCheckDiagnostic::ExternValueOutsideUnsafe { name, .. } => {
-                diag::extern_value_requires_unsafe(name)
+            UnsafeCheckDiagnostic::UnsafeFnValueCallOutsideUnsafe { .. } => {
+                diag::UNSAFE_FN_VALUE_CALL_REQUIRES_UNSAFE.to_owned()
             }
         }
     }
@@ -96,15 +116,19 @@ pub fn unsafe_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<UnsafeCheckD
 
 struct CheckCtx<'db> {
     /// Consulted for exactly one cross-item question: does this call reach
-    /// an `extern fn` declaration? ([`crate::is_extern_fn`].)
+    /// an `extern fn` declaration? ([`crate::is_extern_fn`].) Asked only so
+    /// the message can NAME the import — the type rule catches the call
+    /// either way, since an import's type is an `unsafe fn`.
     db: &'db dyn Db,
     body: &'db Body,
     resolutions: &'db ArenaMap<ExprId, Resolution>,
-    /// Consulted for the two questions name resolution cannot answer: is
+    /// Consulted for the three questions name resolution cannot answer: is
     /// this `.*` through a raw pointer or through a safe borrow (safety is
-    /// a property of the pointer's FLAVOR, and only inference knows it),
-    /// and does this dot-call reach a builtin MEMBER (resolved by
-    /// inference, so `resolutions` never mentions it).
+    /// a property of the pointer's FLAVOR, and only inference knows it);
+    /// does this dot-call reach a builtin MEMBER (resolved by inference, so
+    /// `resolutions` never mentions it); and — the general call rule — is
+    /// the thing being called of `unsafe fn` type, which is a fact about a
+    /// VALUE and so has no name to resolve at all.
     infer: &'db crate::infer::InferenceResult,
     diagnostics: Vec<UnsafeCheckDiagnostic>,
 }
@@ -133,36 +157,36 @@ impl CheckCtx<'_> {
             _ => true,
         }
     }
-    /// Walk a call's CALLEE, which the `Call` arm has already judged as a
-    /// call. A bare name is finished there and has nothing beneath it, so
-    /// the value-position rule must not fire on it a second time; every
-    /// other callee shape (a turbofish, a call result, a field access)
-    /// still holds code to check.
-    fn check_callee(&mut self, callee: ExprId, in_unsafe: bool) {
-        if matches!(self.body.exprs[callee], ExprData::NameRef(_)) {
-            return;
-        }
-        self.check_expr(callee, in_unsafe);
+
+    /// Whether `callee` — the thing being called — has a type that demands
+    /// the marker: `unsafe fn(...)`.
+    ///
+    /// An unknown or broken callee answers `false`, the opposite default
+    /// from [`Self::derefs_a_raw_pointer`], and the asymmetry is deliberate.
+    /// A deref is an unsafe operation until something proves otherwise, so
+    /// ignorance must be strict there; a CALL is an ordinary operation and
+    /// only a known-unsafe type makes it otherwise, so ignorance here must
+    /// be quiet — demanding `unsafe` around every call whose callee failed
+    /// to infer would bury the real diagnostic under advice.
+    fn calls_an_unsafe_fn_value(&self, callee: ExprId) -> bool {
+        matches!(
+            self.infer.type_of_expr.get(callee),
+            Some(crate::ty::Ty::Fn(f)) if f.unsafe_to_call
+        )
     }
 
     fn check_expr(&mut self, expr: ExprId, in_unsafe: bool) {
         match &self.body.exprs[expr] {
-            // A name in VALUE position: `let f = read;`, an argument, a
-            // return. Not a call — the `Call` arm claimed those — so the
-            // import is escaping into a value, and the marker belongs here.
-            ExprData::NameRef(_) => {
-                if !in_unsafe
-                    && let Some(Resolution::Item(loc)) = self.resolutions.get(expr)
-                    && crate::is_extern_fn(self.db, loc.to_id(self.db))
-                {
-                    self.diagnostics
-                        .push(UnsafeCheckDiagnostic::ExternValueOutsideUnsafe {
-                            expr,
-                            name: loc.display_name().to_owned(),
-                        });
-                }
-            }
-            ExprData::Missing | ExprData::Literal(_) | ExprData::ElidedVariant { .. } => {}
+            // A name in VALUE position — `let f = read;`, an argument, a
+            // return — is FREE, whatever it names. Binding a function runs
+            // nothing; the price is charged where it is called, and the
+            // type is what carries the bill there (see the `Call` arm).
+            // With nothing left to judge here, a callee needs no special
+            // walk either: `check_expr` on it is now a plain recursion.
+            ExprData::NameRef(_)
+            | ExprData::Missing
+            | ExprData::Literal(_)
+            | ExprData::ElidedVariant { .. } => {}
             // Both lists a path can carry — the owner's turbofish and a
             // second segment's own — hold ordinary const-arg expressions,
             // so both are walked (the reserved one still contains code).
@@ -211,17 +235,27 @@ impl CheckCtx<'_> {
                     } else if let Some(Resolution::Item(loc)) = self.resolutions.get(callee_name)
                         && crate::is_extern_fn(self.db, loc.to_id(self.db))
                     {
-                        // A host import. The marker is required at the CALL
-                        // for the same reason it is for `copy`: this is the
-                        // operation that must not run unvouched.
+                        // A host import named DIRECTLY. Its type is an
+                        // `unsafe fn` too, so the type rule below would
+                        // catch it — this arm exists only to name the
+                        // import, which is worth a branch.
                         self.diagnostics
                             .push(UnsafeCheckDiagnostic::ExternCallOutsideUnsafe {
                                 call: expr,
                                 name: loc.display_name().to_owned(),
                             });
+                    } else if self.calls_an_unsafe_fn_value(*callee) {
+                        // THE GENERAL RULE: the callee's TYPE says a marker
+                        // is owed. Everything the two named arms above
+                        // cannot see arrives here — a bound import, an
+                        // unsafe builtin passed as an argument, a record
+                        // field, a parameter annotated `unsafe fn(...)`.
+                        self.diagnostics.push(
+                            UnsafeCheckDiagnostic::UnsafeFnValueCallOutsideUnsafe { call: expr },
+                        );
                     }
                 }
-                self.check_callee(*callee, in_unsafe);
+                self.check_expr(*callee, in_unsafe);
                 for &arg in args {
                     self.check_expr(arg, in_unsafe);
                 }

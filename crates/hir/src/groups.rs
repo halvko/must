@@ -306,7 +306,7 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
 fn erase_infer(ty: &Ty) -> Ty {
     match ty {
         Ty::Infer(_) => Ty::Error,
-        Ty::Fn(f) => Ty::fn_type(
+        Ty::Fn(f) => f.rebuilt(
             f.params.iter().map(erase_infer).collect(),
             erase_infer(&f.ret),
         ),

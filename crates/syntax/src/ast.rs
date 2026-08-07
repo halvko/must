@@ -1361,9 +1361,17 @@ impl FnType {
     pub fn generic_param_list(&self) -> Option<GenericParamList> {
         child(&self.syntax)
     }
-    /// The reserved `unsafe` marker of a colon-declared member signature.
+    /// The `unsafe` marker: `unsafe fn(usize) -> usize` is a type of its
+    /// own — a value of it may only be CALLED inside an `unsafe { ... }`
+    /// block, and a safe `fn` coerces to it (never back). On a
+    /// colon-declared member signature the marker is still RESERVED
+    /// (validation rejects it); everywhere else it is the live spelling.
     pub fn unsafe_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, UNSAFE_KW)
+    }
+    /// Whether calling a value of this type needs an `unsafe { ... }` block.
+    pub fn is_unsafe(&self) -> bool {
+        self.unsafe_token().is_some()
     }
 }
 
@@ -1551,7 +1559,8 @@ impl UnsafeBlockExpr {
         token(&self.syntax, UNSAFE_KW)
     }
     /// The body — a block when well-formed; a superset-parsed `fn` literal
-    /// for the reserved `unsafe fn` spelling (validation rejects it).
+    /// for the reserved `unsafe fn` LITERAL spelling (validation rejects
+    /// it; the `unsafe fn(...)` type is live).
     pub fn expr(&self) -> Option<Expr> {
         child(&self.syntax)
     }

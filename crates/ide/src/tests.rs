@@ -176,6 +176,39 @@ fn hover_item_name_shows_inferred_fn_type() {
 }
 
 #[test]
+fn a_nullary_unsafe_fn_gets_no_run_lens() {
+    // ▶ on a nullary host import has exactly one possible outcome — the
+    // unsafe-block refusal — so the button is not offered. Its safe
+    // neighbour still is, which is what keeps this a filter rather than a
+    // retreat.
+    let mut host = AnalysisHost::new();
+    let file = host.create_file(
+        "test.must".to_owned(),
+        "static tick = extern fn() -> ();\n\
+         static main = fn() -> () { };"
+            .to_owned(),
+    );
+    let names: Vec<String> = host
+        .snapshot()
+        .run_lenses(file)
+        .into_iter()
+        .map(|lens| lens.name)
+        .collect();
+    assert_eq!(names, vec!["main".to_owned()]);
+}
+
+#[test]
+fn hover_shows_the_unsafe_marker_on_a_fn_type() {
+    // The one-token difference is the whole of what a reader needs to know
+    // about a value here, so hover shows it exactly where it is written.
+    check_hover(
+        "static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;\n\
+         static main = fn { let g$0 = read; };",
+        "```must\ng: unsafe fn(u8.&raw mut, usize) -> isize\n```",
+    );
+}
+
+#[test]
 fn hover_static_use_shows_signature() {
     check_hover(
         r#"
@@ -1719,6 +1752,7 @@ static make_point = fn (x: usize) -> $0 { x };
             usize Keyword
             fn Keyword
             struct Keyword
+            unsafe Keyword
         "#]],
     );
 }
@@ -2370,6 +2404,52 @@ static main = fn {
             Utf8Result Enum (enum { Ok(str), Err })
             get_n Function (fn() -> usize)
             main Function (fn())
+            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
+            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
+            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
+            dangling Function (fn::<T>() -> T.&raw mut)
+            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
+            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
+            print Function (fn(str))
+            read_line Function (fn() -> ReadLineResult)
+            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
+            const Keyword
+            false Keyword
+            fn Keyword
+            if Keyword
+            loop Keyword
+            match Keyword
+            struct Keyword
+            true Keyword
+            unsafe Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_rank_a_safe_fn_under_an_unsafe_fn_expectation() {
+    // The THIRD consumer of the convertibility question, after the two
+    // check sites. A safe `fn` is legal in an `unsafe fn` position, so the
+    // ranker must say so — `hir::widens_to` is the one home it asks, which
+    // is why that edge was added there and not re-derived here.
+    check_completions(
+        r#"
+static helper: fn(usize) -> usize = fn (n: usize) -> usize { n };
+static other: fn(usize) -> str = fn (n: usize) -> str { "s" };
+static main = fn {
+    let f: unsafe fn(usize) -> usize = $0;
+};
+"#,
+        expect_test::expect![[r#"
+            helper Function (fn(usize) -> usize)
+            panic Function (fn(str) -> !)
+            AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            NextChar Enum (enum { Char(char, usize), End })
+            ReadLineResult Enum (enum { Line(str), End })
+            Utf8Result Enum (enum { Ok(str), Err })
+            main Function (fn())
+            other Function (fn(usize) -> str)
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))

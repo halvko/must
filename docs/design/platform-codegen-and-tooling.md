@@ -22,19 +22,18 @@
   host must provide. Four forms are rejected, each restating that one sentence: a body, `const
   extern fn`, generic binders, and anywhere but a `static`'s initializer. There is no
   symbol-override surface: config here would be a second place for the truth to live. Calling
-  an import requires `unsafe` for the same reason a raw deref does — what it does is written
-  in a language this compiler never sees — and so does taking one as a value, because once it
-  is bound the call site says only that something is being called, so the last place a reader
-  can see which import is in play is where the value is taken. Imports stay first-class; they
-  are priced, not removed. The compiler validates no import signature, since a compiler that
-  did would have to know every host, which is the coupling `extern` exists to avoid; each host
-  judges the full declaration at the call and refuses by name. The constant carries the
-  declared signature rather than a host re-deriving it from argument values, because no
-  argument value can carry a pointee type: a value-inspecting host would fill a boolean array
-  with bytes and mint values the type system says cannot exist. Names the compiler already
-  imports are reserved, and the reserved set is the module's own import list, so a new builtin
-  import reserves itself. Claiming a reserved name is rejected, not "unsupported": two imports
-  of one (module, field) is a module an engine resolves twice, a silent-wrong-answer class.
+  an import requires `unsafe` wherever the call is, for the same reason a raw deref does —
+  what it does is written in a language this compiler never sees. Taking one is free; a call
+  through a binding is gated by the value's type (T19). The compiler validates no import
+  signature, since a compiler that did would have to know every host, which is the coupling
+  `extern` exists to avoid; each host judges the full declaration at the call and refuses by
+  name. The constant carries the declared signature rather than a host re-deriving it from
+  argument values, because no argument value can carry a pointee type: a value-inspecting
+  host would fill a boolean array with bytes and mint values the type system says cannot
+  exist. Names the compiler already imports are reserved, and the reserved set is the
+  module's own import list, so a new builtin import reserves itself. Claiming a reserved name
+  is rejected, not "unsupported": two imports of one (module, field) is a module an engine
+  resolves twice, a silent-wrong-answer class.
 - **P06** The wasm backend. A compiled module's entire host dependency is one builtin import,
   plus the imports the program itself declares (P05): no allocator, no GC, no unwinder, no
   scheduler, no support library, no start function, no runtime initialization; statics are
@@ -150,8 +149,6 @@
   whether Must can claim no-alias equivalents on a native backend. **P05**
 - **The `str` platform ABI gets a second customer** — decide it on purpose before anything
   else depends on it. **P06**
-- **Unsafe function types are ruled** — whether taking an import as a value stays priced with
-  `unsafe`, or the gate moves to the value's type. **P05**
 - **The editor extension gains a tree-sitter grammar** — the client then
   re-indents multi-line snippet bodies and the template's absolute indentation
   doubles. One function to fix; recorded because nobody would connect the
