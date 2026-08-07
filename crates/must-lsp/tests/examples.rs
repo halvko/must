@@ -479,7 +479,19 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |                                                          ^^^^^
                = help: Remove the body
 
-            found 33 errors and 1 warning
+            error: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+              --> examples/errors.must:360:73
+                |
+            360 | static region_at_a_call = fn::<@b>(p: usize.&::<@b>) -> usize { first::<@b, usize>(p) };
+                |                                                                         ^^
+
+            error: region parameters come first in a binder; move `@a` before `T`
+              --> examples/errors.must:368:36
+                |
+            368 | static misordered_binder = fn::<T, @a>(r: T.&::<@a>) -> T { r.* };
+                |                                    ^^
+
+            found 35 errors and 1 warning
         "#]],
     );
 }

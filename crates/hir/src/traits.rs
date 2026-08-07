@@ -430,9 +430,10 @@ pub fn lower_requirement_sig(
 ///
 /// A REGION param matches a region param. Without that arm a requirement
 /// could not carry a region binder at all — and a requirement whose member
-/// borrows `Self` **must** carry one, because nothing is elided — so this
-/// single guard was what made the trait half of borrow-`Self` members
-/// unreachable, no matter how exactly the impl copied the requirement.
+/// borrows `Self` **must** carry one, because a signature elides nothing —
+/// so this single guard was what made the trait half of borrow-`Self`
+/// members unreachable, no matter how exactly the impl copied the
+/// requirement.
 ///
 /// Region outlives bounds compare POSITIONALLY, because they name sibling
 /// params rather than resolvable items: `@b: @a` means "the param at index

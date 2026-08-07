@@ -1055,22 +1055,48 @@ static get = fn::<@a>(r: usize.&::<@a>) -> usize {
 ```
 
 `@a` is a parameter of `get`, exactly as `T` would be, and it rides the same
-binder list — `fn::<@a, T, const N: usize>` declares one of each. Regions
-are nonetheless a *distinguished* kind: they are erased before anything is
-compiled. Two functions whose signatures differ only in their regions lower
-to identical code, no region reaches a monomorphization key, and no backend
-ever sees one. A region can therefore reject a program and can never change
-what it does.
+binder list — `fn::<@a, T, const N: usize>` declares one of each, and the
+regions come first in it. Regions are nonetheless a *distinguished* kind:
+they are erased before anything is compiled. Two functions whose signatures
+differ only in their regions lower to identical code, no region reaches a
+monomorphization key, and no backend ever sees one. A region can therefore
+reject a program and can never change what it does.
 
-Nothing is elided. Every region in a signature is written by hand, on
-purpose, until enough real code exists to say which elision rule would have
-earned its keep — so `usize.&` on its own is an error naming the spelling
-rather than a guess. Inside a *body* the situation is different: there the
-regions are inference variables, not parameters, so `@_` says "there is a
-region here, work it out" and an omitted turbofish on a borrow expression
-means the same. `@_` in a signature is rejected: a caller has to be able to
-name what they are choosing. A binder is where that naming happens, so `@_`
-is rejected there too — it asks for a region, it does not declare one.
+Nothing is elided in a *signature*. Every region a signature binds is
+written by hand, on purpose, until enough real code exists to say which
+elision rule would have earned its keep — so `usize.&` on its own is an
+error naming the spelling rather than a guess. Inside a *body* the situation
+is different: there the regions are inference variables, not parameters, so
+`@_` says "there is a region here, work it out" and an omitted turbofish on
+a borrow expression means the same. `@_` in a signature is rejected: a
+signature's regions are parameters, and the binder is where a parameter
+gets the name its outlives clauses and its other mentions refer to — `@_`
+there leaves the contract unstated.
+
+At a *call site* regions are elided entirely. A written turbofish spells the
+callee's type and const arguments, in order, and nothing else:
+
+```must
+static get_first = fn::<@a, T>(r: T.&::<@a>) -> T { r.* };
+
+static main = fn::<@b>(p: usize.&::<@b>) -> usize {
+    get_first::<usize>(p)
+};
+```
+
+Writing a region there — `@a` or `@_` — is refused, one argument at a time,
+so the rest of the list still counts. There is nothing for it to pin: the
+callee's regions become fresh existentials of *this* call, which the borrow
+checker solves from the arguments actually passed, so `@_` would be a token
+meaning "as before" on every borrow-taking generic call in the program. A
+type argument can be genuinely undetermined; a region never is. This is
+also why regions come first in a binder: what a turbofish spells is the
+binder minus its regions, and that subtraction only reads correctly when
+the elided part is a contiguous prefix — `fn::<T, @a>` is a syntax error
+naming the fix. The one list none of this reaches is a *type's* own
+(`Pair::<usize>`, as a type or in a construction call): a type declaration
+binds no region yet, so that list is positional over its whole binder and a
+region written in it is simply a wrong argument.
 
 Two regions can be joined. `usize.&::<@a + @b>` is a borrow good for as long
 as *both* last — the largest region every listed region outlives — so `+`
@@ -1184,8 +1210,10 @@ static twice = fn::<@a>(c: Counter.&mut::<@a>) -> usize {
 ```
 
 `@b` has nowhere else to come from: the type's own binder carries its type
-parameters, not regions, and nothing is elided. It is a fresh region at
-every call, so the two `c.bump()` calls above borrow independently.
+parameters, not regions, and a signature elides nothing. It is a fresh
+region at every call, so the two `c.bump()` calls above borrow
+independently — and nothing at those call sites names it, because a call
+site never spells a region.
 
 `c` there is already a borrow, and `c.bump()` does not dereference it —
 there is no auto-deref. It *reborrows*: the receiver is the last argument
@@ -1241,16 +1269,12 @@ Option::<usize>::map::<bool>(width, o)   // both binders, spelled out
 ```
 
 That written list spells the member's *type* parameters, in order, and only
-those. Its regions are not positions in it. A member's regions are fresh at
-every call, and a region argument at a mention constrains the borrow
-checker rather than the type — so while that holds, writing one buys
-nothing, and requiring the `@_` wildcard as a placeholder would make every
-borrow-taking generic member's call site carry a token that means "as
-before". This differs from a *free* function's turbofish, which is
-positional over its whole binder and does spell regions; the divergence is
-deliberate, and recorded with the conditions that would end it as TR10 in
-`docs/design/traits-and-generics.md`. A member with no binder of its own
-takes no arguments at all — including an empty `::<>` — and says so.
+those. Its regions are not positions in it — the same rule a free
+function's turbofish follows, for the same reason: a member's regions are
+fresh at every call and are solved from the arguments passed, so there is
+nothing at the call site for a written one to pin. A member with no binder
+of its own takes no arguments at all — including an empty `::<>` — and says
+so.
 
 The literal in `map`'s body is not annotated, and does not need to be: a
 `fn` literal takes its parameter and return types from the position it sits
@@ -1382,9 +1406,10 @@ payload binding writes the value it was matched from. See
 `examples/match_projection.must`, which runs.
 
 Also not yet supported: regions on type declarations (`struct::<@a, T>`),
-implied bounds, elision of any kind, and compiling a program that uses safe
-borrows to wasm — the backend refuses those by name rather than dropping the
-contract silently. See `examples/borrows.must`.
+implied bounds, elision in a *signature* (call sites already elide every
+region), and compiling a program that uses safe borrows to wasm — the
+backend refuses those by name rather than dropping the contract silently.
+See `examples/borrows.must`.
 
 == Values that must be consumed
 

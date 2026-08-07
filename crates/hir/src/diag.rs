@@ -140,6 +140,19 @@ pub fn takes_no_generic_args(name: &str) -> String {
     format!("`{name}` takes no generic arguments")
 }
 
+/// A REGION argument written in a mention's turbofish (`f::<@_, usize>`,
+/// `o.get::<@a>`). Regions are elided at every call site: a callee's
+/// regions become fresh existentials of the call, solved from the
+/// arguments actually passed, so there is nothing at the mention for a
+/// written one to pin. One sentence for every list a mention can carry —
+/// item, member, a trait's own — with or without a binder behind it, with
+/// one exception: a TYPE's own list (`Pair::<@a>(...)`). A type declaration
+/// binds no region yet, so a region there is a wrong-kind argument for a
+/// type slot (`GenericArgKindMismatch`), not an elision, and the list stays
+/// positional over the whole binder.
+pub const REGION_ARG_AT_MENTION: &str = "regions are inferred at calls, never written: drop this argument — \
+     a turbofish spells type and const arguments only";
+
 /// A named generic argument outside a trait's argument list (TR01 gives v1
 /// exactly one nameable argument, a trait's `Self`) — shared between
 /// inference and the annotation-position pass.
@@ -215,12 +228,14 @@ pub const FN_CONST_ARG: &str = "a function value cannot be a const argument (yet
 
 // ---- regions and safe borrows --------------------------------------------
 
-/// A safe borrow type written with no region (`T.&`). Elision is DEFERRED,
-/// not absent by accident: every region is hand-written until a corpus says
-/// which elision rule earns its keep, so the omission is reported rather
-/// than guessed at. The message names the spelling so the fix is copyable.
+/// A safe borrow type written with no region (`T.&`). SIGNATURE elision is
+/// DEFERRED, not absent by accident: every region a signature binds is
+/// hand-written until a corpus says which elision rule earns its keep, so
+/// the omission is reported rather than guessed at. The message names the
+/// spelling so the fix is copyable, and says "in a signature" because a
+/// call site elides every region ([`REGION_ARG_AT_MENTION`]).
 pub const BORROW_NEEDS_REGION: &str =
-    "a safe borrow must name its region (`T.&::<@a>`); regions are never elided yet";
+    "a safe borrow must name its region (`T.&::<@a>`); regions are not elided in a signature yet";
 
 /// `@_` written in a SIGNATURE. The wildcard says "there is a region here,
 /// infer it", which a body can answer and a signature cannot: a signature's

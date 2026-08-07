@@ -184,6 +184,13 @@
 - **Elision rules come back for measurement** — needs an instrument that says which candidate
   rule would have supplied each written region. Without it the corpus reports that all of it
   hurts, which selects no rule. **M06**
+- **The body-annotation half of "bodies infer, signatures declare" is decided** — parked, not
+  ruled. The boundary today: a signature hand-writes every region it binds, a body infers
+  its own at every call and borrow. A named region in a body annotation
+  (`let r: usize.&::<@a> = p;`) genuinely constrains, and a nested fn literal's parameter
+  annotations are a signature inside a body, so that boundary does not say which side
+  either falls on. Open with it: what introduces a rigid-region obligation mid-body if the
+  annotation cannot. **M06**
 - **The move-versus-reborrow rule needs an explicit ruling** — proposed: always reborrow when
   the target region permits it, move only when it requires the source's full region.
   Reject-only under the erasure law. **M07**

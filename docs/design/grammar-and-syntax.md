@@ -29,6 +29,12 @@
 - **G09** The region sigil is `@`: `@a`, wildcard `@_`, join `@a + @b`, binder slot
   `fn::<@a, T, const N>`, outlives clause `@a: @b`. Chosen because `@` is unclaimed; migrating
   it would be mechanical.
+- **G10** Region binders come first, and a call spells no region. A written turbofish spells
+  type and const arguments only; a written region, named or wildcard, is refused per argument,
+  so the fix is one token. Arity messages count spellable slots only, and a written region
+  suppresses the arity report, since no count is trustworthy until it is dropped.
+  `fn::<T, @a>` is a syntax error: a turbofish spells the binder minus its regions, which only
+  reads correctly when the elided part is a contiguous prefix.
 - **G12** Record literals construct with `=`: `struct { x = 1 }`, spelled out
   `struct { a: usize = 10 }`. Colon means has-type, everywhere, so a field's annotation is a
   real type and fn, pointer and array field types are first class. Shorthand `struct { x }` is
@@ -119,6 +125,10 @@
   it also hits three other mechanisms and buys about two characters per site. **Brackets in
   type position only** — two spellings for one concept, the wart turbofish-everywhere kills.
   **G06**
+- **Written region arguments at a mention** (`f::<@p, @q>`) — a call spells no region, and
+  the substitution they fed was retired with them. **`@_` on a call** — an omitted
+  turbofish already means it. **Refusing the whole list when one region is written** —
+  per-argument refusal keeps the rest usable. **G10**
 - **`x: 1` record construction** — colon is has-type. **G12**
 - **A hard error on field/member collisions** — non-local under two impl homes, and it
   outlaws the getter idiom. **Fall-through to a same-named field** — silent action at a
@@ -154,6 +164,10 @@
   land** — the defensive float grammar stops being free. **G06 G07**
 - **Tuples are built** — postfix turbofish on arbitrary expressions, construction,
   patterns, arity limits and the unit-tuple question. **G07**
+- **Regions on type declarations land** — decide whether a type mention's own list
+  (`Pair::<usize>`, as a type or in a construction call) elides them the way a call's does.
+  Today that binder has no region slot, so a region written there is a wrong-kind argument
+  and counts in the arity message rather than getting the call-site refusal. **G10**
 - **Someone wants a pointer or borrow to a fn type** — unspellable postfix
   (`fn() -> usize.&raw`, `fn() -> usize.&` bind to the return type) and there is no type
   grouping (`(...)` is unit). Inherent to the design; for now the retired prefix spelling

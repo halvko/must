@@ -13,9 +13,12 @@
 // a distinguished kind — they are erased before anything is compiled, so a
 // region can reject a program and can never change what it does.
 //
-// Nothing is elided yet. Every region in a signature is written out by
-// hand, deliberately, until enough code exists to say which elision rule
-// would have earned its keep.
+// Nothing is elided in a signature yet. Every region a signature binds is
+// written out by hand, deliberately, until enough code exists to say which
+// elision rule would have earned its keep. A CALL SITE is the opposite: it
+// never spells a region — the callee's regions are inferred from the
+// arguments passed, so a turbofish there spells type and const arguments
+// only.
 
 // ---- shared borrows -----------------------------------------------------
 

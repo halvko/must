@@ -697,6 +697,20 @@ pub enum InferenceDiagnostic {
         /// The parameter's declared name.
         param: String,
     },
+    /// A REGION argument written in a mention's turbofish. Regions are
+    /// elided at every call site, in both lists a mention can carry, so a
+    /// written one is refused on its own and the rest of the list still
+    /// spends ([`InferCtx::spellable_args`]).
+    RegionArgAtMention {
+        /// The expression the list hangs off: the item mention, or the
+        /// member's callee/path — see [`TurbofishList`].
+        expr: ExprId,
+        /// The argument's position in the WRITTEN list, so the report lands
+        /// on the region and not on the whole mention.
+        index: u32,
+        /// Which of the node's two lists it was written in.
+        list: TurbofishList,
+    },
     /// A turbofish argument of the wrong kind for its position: a value
     /// where the binder declares a type parameter, or a type where it
     /// declares a const parameter.
@@ -1296,6 +1310,19 @@ impl TurbofishSpelling {
     }
 }
 
+/// Which of the two turbofish lists one path node can carry an argument
+/// was written in. `Owner::<usize>::member::<bool>` has both on one node,
+/// so a position alone does not locate an argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurbofishList {
+    /// The name's own list: `f::<...>`, `Pair::<...>`, and the OWNER's
+    /// list of a qualified path (`Trait::<...>::member`).
+    Item,
+    /// The member's own list, one level down: `o.get::<...>`,
+    /// `Owner::member::<...>`.
+    Member,
+}
+
 /// Why a named generic argument is refused — see
 /// [`InferenceDiagnostic::NamedGenericArg`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1445,6 +1472,7 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::NotGeneric { expr, .. }
             | InferenceDiagnostic::ConstArgHole { expr }
             | InferenceDiagnostic::UnexpectedRegionArg { expr, .. }
+            | InferenceDiagnostic::RegionArgAtMention { expr, .. }
             | InferenceDiagnostic::GenericArgKindMismatch { expr, .. }
             | InferenceDiagnostic::MissingConstArgs { expr, .. }
             | InferenceDiagnostic::CannotInferGenericParam { expr, .. }
@@ -1955,6 +1983,9 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::ConstArgHole { .. } => crate::diag::CONST_ARG_HOLE.to_owned(),
             InferenceDiagnostic::UnexpectedRegionArg { param, .. } => {
                 crate::diag::unexpected_region_arg(param)
+            }
+            InferenceDiagnostic::RegionArgAtMention { .. } => {
+                crate::diag::REGION_ARG_AT_MENTION.to_owned()
             }
             InferenceDiagnostic::GenericArgKindMismatch {
                 param,
@@ -3423,6 +3454,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::NotGeneric { .. }
                 | InferenceDiagnostic::ConstArgHole { .. }
                 | InferenceDiagnostic::UnexpectedRegionArg { .. }
+                | InferenceDiagnostic::RegionArgAtMention { .. }
                 | InferenceDiagnostic::GenericArgKindMismatch { .. }
                 | InferenceDiagnostic::MissingConstArgs { .. }
                 | InferenceDiagnostic::CannotInferGenericParam { .. }
@@ -4417,7 +4449,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     if self.resolve_shallow(&ty).contains_error() {
                         self.drop_member_args(&mut member_args);
                     } else {
-                        self.refuse_member_args(expr, &name, &mut member_args);
+                        self.refuse_member_args(expr, expr, &name, &mut member_args);
                     }
                     self.carry_borrow_projection(expr, receiver, &ty);
                     ty
@@ -5620,7 +5652,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     }
                     // Resolved, and a builtin member has no binder: one
                     // of the three places the refusal is TRUE.
-                    self.refuse_member_args(callee, name, member_args);
+                    self.refuse_member_args(callee, callee, name, member_args);
                     let ty = self.infer_builtin_member_call(
                         expr,
                         callee,
@@ -5723,7 +5755,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // unknown receiver type, a name that is no field) is already
         // diagnosed, and errors are infectious and silent.
         if !self.resolve_shallow(&callee_ty).contains_error() {
-            self.refuse_member_args(callee, name, member_args);
+            self.refuse_member_args(callee, callee, name, member_args);
         }
         let ty = self.call_of_value(expr, callee, args, callee_ty);
         self.finish_dot_call(expr, ty, expected, cause)
@@ -5944,30 +5976,36 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// no binder — a field, a builtin member, a member declaring none.
     /// Only callable where "`name` takes no generic arguments" is a true
     /// sentence about a thing that exists; everywhere else the silent
-    /// [`Self::drop_member_args`] is the answer.
+    /// [`Self::drop_member_args`] is the answer. A written region is
+    /// refused first, on `mention` (the node the list hangs off), exactly
+    /// as a binder would refuse it ([`Self::owes_not_generic`]).
     fn refuse_member_args(
         &mut self,
         key: ExprId,
+        mention: ExprId,
         name: &str,
         member_args: &mut Option<&[GenericArgData]>,
     ) {
-        if member_args.is_some() {
+        if let Some(args) = *member_args
+            && self.owes_not_generic(mention, args, TurbofishList::Member)
+        {
             self.push_not_generic(key, name);
-            self.drop_member_args(member_args);
         }
+        self.drop_member_args(member_args);
     }
 
     /// Spend ONE written member-turbofish argument on the fresh variable
     /// standing for the member's type parameter `param_name`. A type
     /// argument joins the variable (a `_` hole lowers to a fresh variable
-    /// of its own — explicitly "infer this one"); anything else is the
+    /// of its own — explicitly "infer this one"); a const argument is the
     /// ordinary wrong-kind report.
     ///
     /// `mention` is the node the member's argument list hangs off — the
     /// qualified path or the dot-call's callee — and is what
     /// [`Cause::MemberGenericArg`] points the blame at. It is not always
     /// `key`: a dot-call's obligations are keyed on the CALL, while its
-    /// turbofish is written on the callee.
+    /// turbofish is written on the callee. `position` is the argument's
+    /// index in the WRITTEN list, which the blame renderer counts.
     fn spend_member_arg(
         &mut self,
         key: ExprId,
@@ -6010,45 +6048,48 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 let fresh = self.fresh_var();
                 self.infer_expr(value, &fresh);
             }
-            GenericArgData::Region(_) => {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::GenericArgKindMismatch {
-                        expr: key,
-                        param: param_name.to_owned(),
-                        param_is_const: false,
-                    });
-            }
-            // Already refused for the whole list by `matched_member_args`
-            // (`reject_named_args_because`): a member's own arguments are
-            // positional, and the one nameable argument v1 has is the
-            // OWNER's `Self`. Nothing further to say, and nothing to spend.
-            GenericArgData::Named { .. } => {}
+            // Already refused before matching — a region on its own
+            // (`spellable_args`: regions are inferred at every call), a
+            // named argument for the whole list (`reject_named_args_because`:
+            // a member's own arguments are positional, and the one nameable
+            // argument v1 has is the OWNER's `Self`). Nothing further to
+            // say, and nothing to spend.
+            GenericArgData::Region(_) | GenericArgData::Named { .. } => {}
         }
     }
 
     /// Which written member-turbofish arguments may actually be SPENT on a
-    /// member's own binder. The list is positional over that binder's TYPE
+    /// member's own binder — as POSITIONS in the written list, in binder
+    /// order, because a refused region makes the written position and the
+    /// spent one diverge. The list is positional over that binder's TYPE
     /// parameters, and it is refused WHOLE — never in part — for the three
     /// reasons a positional match cannot be trusted: the binder declares a
     /// still-reserved CONST parameter (`MemberOwnConstArgs`), the member
     /// has no spendable binder at all (`NotGeneric` — the same sentence
     /// every other binder-less turbofish gets, INCLUDING for an empty
     /// `::<>`, which is a written list like any other), or the count does
-    /// not line up (`GenericArgCount`). `None` means "spend nothing"; the
-    /// diagnostic and the const arguments' own inference are done.
+    /// not line up (`MemberGenericArgCount`). `None` means "spend nothing";
+    /// the diagnostic and the const arguments' own inference are done.
+    ///
+    /// A written REGION argument is refused on its own before any of that
+    /// and then dropped ([`Self::spellable_args`]) — the same rule and the
+    /// same sentence an item mention applies. A dropped region also
+    /// displaces the count, so no arity sentence is trustworthy about a
+    /// list the reader can see it in; the refusal stands alone.
     ///
     /// Every message here names the member through [`MemberSite::path`] —
     /// ONE naming per site rather than three re-derivations from three
-    /// different sources.
-    fn matched_member_args<'args>(
+    /// different sources. `mention` is the node the list hangs off, where
+    /// the per-argument refusal is reported.
+    fn matched_member_args(
         &mut self,
         key: ExprId,
+        mention: ExprId,
         site: &MemberSite,
         generics: &[GenericParamData],
         owner_arity: usize,
-        args: Option<&'args [GenericArgData]>,
-    ) -> Option<&'args [GenericArgData]> {
+        args: Option<&[GenericArgData]>,
+    ) -> Option<Vec<usize>> {
         let path = site.path.as_str();
         let args = args?;
         // A member's binder has no nameable argument: `Self` is the OWNER's
@@ -6066,6 +6107,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             NamedArgReason::NotATrait
         };
         self.reject_named_args_because(key, Some(args), self_reason);
+        let kept = self.spellable_args(mention, args, TurbofishList::Member);
+        let displaced = kept.len() != args.len();
         let own = generics.iter().skip(owner_arity);
         if own
             .clone()
@@ -6085,35 +6128,38 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             .count();
         if expected == 0 {
             // Nothing to spend the list on — including the empty `::<>`,
-            // which is a written list and must not be silently ignored.
-            // (A member's REGIONS are not positions here; see
-            // `member_own_type_subst`. That is a divergence from the item
-            // turbofish, recorded as TR10 in `traits-and-generics.md`.)
-            // `owner_hint` is the one place the list may still have a
-            // home: the OWNER's binder, one segment to the left.
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::NotGeneric {
-                    expr: key,
-                    name: path.to_owned(),
-                    owner_list_hint: site.owner_hint.clone(),
-                });
+            // which is a written list and must not be silently ignored. A
+            // list that held nothing but refused regions has already been
+            // told what is wrong with it. `owner_hint` is the one place
+            // the list may still have a home: the OWNER's binder, one
+            // segment to the left.
+            if !displaced || !kept.is_empty() {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::NotGeneric {
+                        expr: key,
+                        name: path.to_owned(),
+                        owner_list_hint: site.owner_hint.clone(),
+                    });
+            }
             self.infer_const_args_free_quiet(args);
             return None;
         }
-        if args.len() != expected {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::MemberGenericArgCount {
-                    expr: key,
-                    path: path.to_owned(),
-                    expected,
-                    found: args.len(),
-                });
+        if kept.len() != expected {
+            if !displaced {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::MemberGenericArgCount {
+                        expr: key,
+                        path: path.to_owned(),
+                        expected,
+                        found: kept.len(),
+                    });
+            }
             self.infer_const_args_free_quiet(args);
             return None;
         }
-        Some(args)
+        Some(kept)
     }
 
     /// The owner-qualified spelling of a member, for every message about
@@ -6172,15 +6218,17 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // the third is a requirement, in `instantiate_requirement_sig`).
         // TAKING the list here is what tells the entry-point wrapper it was
         // spent, so nothing below has to remember to say so.
-        let matched =
-            self.matched_member_args(key, site, generics, owner_arity, member_args.take());
+        let written = member_args.take();
+        let matched = self.matched_member_args(key, mention, site, generics, owner_arity, written);
         let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
         let mut pending: Vec<(String, Ty, bool)> = Vec::new();
         for (position, &index) in type_slots.iter().enumerate() {
             let param = &generics[index as usize];
             let var = self.fresh_var();
-            if let Some(arg) = matched.map(|args| &args[position]) {
-                self.spend_member_arg(key, mention, position, &param.name, arg, &var);
+            if let Some(at) = matched.as_ref().map(|kept| kept[position])
+                && let Some(arg) = written.map(|args| &args[at])
+            {
+                self.spend_member_arg(key, mention, at, &param.name, arg, &var);
             }
             pending.push((param.name.clone(), var.clone(), param.without_forget));
             subst.insert(index, var);
@@ -6481,7 +6529,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         if generics.is_empty() {
             // A member with no binder at all, handed arguments: the shared
             // binder-less refusal, named the way every other one is.
-            self.refuse_member_args(key, &site.path, member_args);
+            self.refuse_member_args(key, mention, &site.path, member_args);
             return sig;
         }
         // A TRAIT-IMPL member's binder is its own alone — its owner is
@@ -6698,7 +6746,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             owner_is_trait: true,
             owner_hint: None,
         };
-        let matched = self.matched_member_args(key, &site, &req.generics, 0, member_args.take());
+        let written = member_args.take();
+        let matched = self.matched_member_args(key, mention, &site, &req.generics, 0, written);
         let mut scope = crate::ty::ParamScope::default();
         scope.types.insert("Self".to_owned(), self_ty);
         let mut var_of: FxHashMap<u32, Ty> = FxHashMap::default();
@@ -6709,8 +6758,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         for (position, &index) in member_own_type_slots(&req.generics, 0).iter().enumerate() {
             let gp = &req.generics[index as usize];
             let var = self.fresh_var();
-            if let Some(arg) = matched.map(|args| &args[position]) {
-                self.spend_member_arg(key, mention, position, &gp.name, arg, &var);
+            if let Some(at) = matched.as_ref().map(|kept| kept[position])
+                && let Some(arg) = written.map(|args| &args[at])
+            {
+                self.spend_member_arg(key, mention, at, &gp.name, arg, &var);
             }
             if gp.name.is_empty() {
                 continue;
@@ -7660,11 +7711,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let args = args?;
         let mut self_ref: Option<TypeRef> = None;
         let mut positional = 0usize;
+        // A written region is refused first, per argument, as on every
+        // other list (regions are inferred at every call), and does not
+        // count as a positional argument the trait "takes none" of.
+        self.spellable_args(expr, args, TurbofishList::Item);
         for arg in args {
             match arg {
-                // A region argument never names `Self` and claims a
-                // positional slot like any other argument.
-                GenericArgData::Region(_) => positional += 1,
+                GenericArgData::Region(_) => {}
                 GenericArgData::Named { name, ty } if name == "Self" => {
                     if self_ref.is_some() {
                         self.result
@@ -7908,6 +7961,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// declared type and recorded for later use. `args: None` is a bare
     /// mention: type params are left to inference; const params error
     /// (never inferred). Returns the instantiated signature.
+    ///
+    /// **Regions are ELIDED here.** The written list is positional over the
+    /// binder's TYPE and CONST parameters only: a region parameter takes no
+    /// written argument, and a written region is refused per argument
+    /// ([`Self::spellable_args`]). It is the same rule a MEMBER's list
+    /// obeys, and the only rule — `fn::<@b, U>` is called `f::<usize>`
+    /// whether it is reached as an item or through a dot. Matching does not
+    /// need the regions to be a contiguous prefix (the filter takes them
+    /// out wherever they sit); the prefix rule (`require_regions_first` in
+    /// `syntax::validation`) is for the READER.
     fn instantiate_mention(
         &mut self,
         expr: ExprId,
@@ -7917,23 +7980,59 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         args: Option<&[GenericArgData]>,
     ) -> Ty {
         self.reject_named_args(expr, args);
+        // The binder indices a written argument may spend, in order.
+        let spellable: Vec<usize> = generics
+            .iter()
+            .enumerate()
+            .filter(|(_, param)| !matches!(param.kind, GenericParamKind::Region))
+            .map(|(index, _)| index)
+            .collect();
+        // Written-list positions, in binder order, once the regions are
+        // refused and dropped — so a list that only got the elision wrong
+        // still spends the rest.
         let matched_args = match args {
-            Some(args) if args.len() != generics.len() => {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::GenericArgCount {
-                        expr,
-                        item: loc.clone(),
-                        expected: generics.len(),
-                        found: args.len(),
-                    });
-                // No positional matching is trustworthy; the const-value
-                // expressions are still inferred (freely) so their
-                // contents get types and diagnostics.
-                self.infer_const_args_free(args);
-                None
+            Some(args) => {
+                let kept = self.spellable_args(expr, args, TurbofishList::Item);
+                // A dropped region DISPLACES the count: `id::<@z>(1)` on
+                // `fn::<T>` has one argument visible and none spendable,
+                // and "takes 1 generic argument, found 0" would be a false
+                // sentence about a list the reader can see. The refusal is
+                // the whole story until the region is gone.
+                let displaced = kept.len() != args.len();
+                if spellable.is_empty() {
+                    // A binder of regions ALONE has nothing spellable, so
+                    // "takes no generic arguments" is the true sentence
+                    // about it — the same one a binder-less item and a
+                    // member's list get. The empty `::<>` is included: a
+                    // written list is never silently ignored.
+                    if !displaced || !kept.is_empty() {
+                        self.push_not_generic(expr, loc.display_name());
+                    }
+                    self.infer_const_args_free(args);
+                    None
+                } else if kept.len() != spellable.len() {
+                    if !displaced {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::GenericArgCount {
+                                expr,
+                                item: loc.clone(),
+                                // The SPELLABLE slots only: telling a caller
+                                // that `fn::<@b, U>` "takes 2" would be
+                                // counting a position they may not write.
+                                expected: spellable.len(),
+                                found: kept.len(),
+                            });
+                    }
+                    // No positional matching is trustworthy; the const-value
+                    // expressions are still inferred (freely) so their
+                    // contents get types and diagnostics.
+                    self.infer_const_args_free(args);
+                    None
+                } else {
+                    Some(kept)
+                }
             }
-            Some(args) => Some(args),
             None => {
                 // A bare mention: const args are never inferred (TR06 —
                 // running an instance backwards is
@@ -7952,53 +8051,38 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 None
             }
         };
+        // Each binder slot's written argument, paired with its position in
+        // the WRITTEN list — no longer the binder index, because the
+        // regions in front of it spend nothing. A cause that points at a
+        // node needs the written position; substitution needs the binder
+        // one.
+        let mut written_for: Vec<Option<(u32, &GenericArgData)>> = vec![None; generics.len()];
+        if let (Some(kept), Some(args)) = (&matched_args, args) {
+            for (&slot, &at) in spellable.iter().zip(kept) {
+                written_for[slot] = Some((at as u32, &args[at]));
+            }
+        }
         let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
         let mut const_subst: FxHashMap<u32, ConstArgValue> = FxHashMap::default();
         let mut region_subst: FxHashMap<u32, Region> = FxHashMap::default();
         let mut pending: Vec<(String, Ty, bool)> = Vec::new();
         let mut const_args: Vec<(u32, ExprId)> = Vec::new();
         for (index, param) in generics.iter().enumerate() {
-            let written = matched_args.map(|args| &args[index]);
+            let arg_position = written_for[index].map(|(position, _)| position);
+            let written = written_for[index].map(|(_, arg)| arg);
             match &param.kind {
-                // A REGION parameter of the mentioned item. Regions are
-                // erased, so nothing is substituted into the SCHEME — but a
-                // WRITTEN region argument does constrain the borrow
-                // checker: it substitutes directly, exactly like
-                // `borrow_expr_region` treats a borrow expression's own
-                // turbofish. Without this a caller could write `@p`/`@q`
-                // at a mention and have it silently ignored in favor of a
-                // fresh existential, which also made a callee's declared
-                // bound (`fn::<@a, @b: @a>`) unreportable AS a callee
-                // bound: the fresh existential sits between the written
-                // regions and the obligation, so the violation surfaces at
-                // whichever argument's reborrow happens to carry the
-                // element across, blamed as an ordinary reborrow instead
-                // of the call that required it.
+                // A REGION parameter of the mentioned item. It spends no
+                // written argument — the elision — and nothing is
+                // substituted into the SCHEME either: regions are erased,
+                // so a region at a mention constrains the borrow checker,
+                // never the type. A fresh EXISTENTIAL per region parameter,
+                // exactly as an omitted turbofish on a borrow expression
+                // mints one: the callee's universals become this body's
+                // inference variables, and its outlives relations ride
+                // along as constraints between them
+                // (`push_region_binder_bounds`, below).
                 GenericParamKind::Region => {
-                    let var = match written {
-                        Some(GenericArgData::Region(region_ref)) => {
-                            self.borrow_expr_region(expr, Some(region_ref))
-                        }
-                        // No argument, or a name that belongs to a
-                        // different kind of parameter: infer it — a fresh
-                        // EXISTENTIAL, exactly as an omitted turbofish on
-                        // a borrow expression does. The callee's
-                        // universals become this body's inference
-                        // variables, and its outlives relations ride
-                        // along as constraints between them.
-                        None | Some(GenericArgData::Named { .. }) => self.fresh_region(),
-                        Some(GenericArgData::Type(_)) | Some(GenericArgData::Const(_)) => {
-                            self.result.diagnostics.push(
-                                InferenceDiagnostic::GenericArgKindMismatch {
-                                    expr,
-                                    param: param.name.clone(),
-                                    param_is_const: false,
-                                },
-                            );
-                            self.fresh_region()
-                        }
-                    };
-                    region_subst.insert(index as u32, var);
+                    region_subst.insert(index as u32, self.fresh_region());
                 }
                 GenericParamKind::Type => {
                     let var = self.fresh_var();
@@ -8013,9 +8097,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 self.table,
                                 &var,
                                 &written_ty,
-                                Some(Cause::GenericArg {
+                                arg_position.map(|at| Cause::GenericArg {
                                     mention: expr,
-                                    index: index as u32,
+                                    index: at,
+                                    param: index as u32,
                                 }),
                             );
                         }
@@ -8031,36 +8116,18 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             let fresh = self.fresh_var();
                             self.infer_expr(value, &fresh);
                         }
-                        // A region where a type belongs: same wrong-kind
-                        // report as a const, with nothing to infer from.
-                        Some(GenericArgData::Region(_)) => {
-                            self.result.diagnostics.push(
-                                InferenceDiagnostic::GenericArgKindMismatch {
-                                    expr,
-                                    param: param.name.clone(),
-                                    param_is_const: false,
-                                },
-                            );
-                        }
-                        // Refused at the list (`reject_named_args`): only a
-                        // trait has a nameable argument.
-                        Some(GenericArgData::Named { .. }) | None => {}
+                        // Refused and dropped before matching: a region
+                        // (`spellable_args`), a named argument
+                        // (`reject_named_args` — only a trait has a
+                        // nameable one).
+                        Some(GenericArgData::Region(_))
+                        | Some(GenericArgData::Named { .. })
+                        | None => {}
                     }
                     pending.push((param.name.clone(), var.clone(), param.without_forget));
                     subst.insert(index as u32, var);
                 }
                 GenericParamKind::Const(declared) => match written {
-                    // A region where a const belongs — wrong kind, nothing
-                    // to evaluate.
-                    Some(GenericArgData::Region(_)) => {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::GenericArgKindMismatch {
-                                expr,
-                                param: param.name.clone(),
-                                param_is_const: true,
-                            });
-                    }
                     Some(GenericArgData::Const(value)) => {
                         let value = *value;
                         let declared = self.lower_const_param_ty(declared);
@@ -8088,9 +8155,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         self.infer_expr_with(
                             value,
                             &declared,
-                            Some(Cause::GenericArg {
+                            arg_position.map(|at| Cause::GenericArg {
                                 mention: expr,
-                                index: index as u32,
+                                index: at,
+                                param: index as u32,
                             }),
                         );
                         if !fn_valued && !array_valued {
@@ -8137,9 +8205,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             });
                     }
                     // Already reported: `MissingConstArgs` (bare mention),
-                    // `GenericArgCount` (unmatchable list) or
-                    // `NamedGenericArg` (a named argument here).
-                    Some(GenericArgData::Named { .. }) | None => {}
+                    // `GenericArgCount` (unmatchable list),
+                    // `RegionArgAtMention` (a region, dropped before
+                    // matching) or `NamedGenericArg` (a named argument).
+                    Some(GenericArgData::Region(_)) | Some(GenericArgData::Named { .. }) | None => {
+                    }
                 },
             }
         }
@@ -8204,15 +8274,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     // Generic items never join groups, so an in-group
                     // member is non-generic by construction.
                     let member_sig = member_sig.clone();
-                    self.push_not_generic(expr, &base_name);
-                    self.infer_const_args_free(args);
+                    self.refuse_item_args(expr, &base_name, args);
                     return member_sig;
                 }
                 let target = loc.to_id(self.db);
                 let generics = item_generics(self.db, target);
                 if generics.is_empty() {
-                    self.push_not_generic(expr, &base_name);
-                    self.infer_const_args_free(args);
+                    self.refuse_item_args(expr, &base_name, args);
                     return signature(self.db, target);
                 }
                 let sig = signature(self.db, target);
@@ -8220,8 +8288,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             }
             Some(Resolution::Local(binding)) => {
                 let binding = *binding;
-                self.push_not_generic(expr, &base_name);
-                self.infer_const_args_free(args);
+                self.refuse_item_args(expr, &base_name, args);
                 self.result
                     .type_of_binding
                     .get(binding)
@@ -8230,8 +8297,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             }
             Some(Resolution::ConstParam(index)) => {
                 let index = *index;
-                self.push_not_generic(expr, &base_name);
-                self.infer_const_args_free(args);
+                self.refuse_item_args(expr, &base_name, args);
                 self.const_param_value_ty(index)
             }
             Some(Resolution::Builtin(builtin)) => {
@@ -8321,6 +8387,68 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         }
     }
 
+    /// Refuse every REGION argument in a mention's written list and answer
+    /// the positions of the arguments that remain — the SPELLABLE ones.
+    ///
+    /// One rule, in the one place both lists reach it: a turbofish spells
+    /// type and const arguments, and regions are inferred at every call.
+    /// Refusing per ARGUMENT rather than per list is what lets a use site
+    /// that only got the elision wrong (`f::<@_, usize>`) keep the rest of
+    /// its arguments and produce exactly one message. `expr` is the node
+    /// the list hangs off, and `list` says which of its lists it is.
+    fn spellable_args(
+        &mut self,
+        expr: ExprId,
+        args: &[GenericArgData],
+        list: TurbofishList,
+    ) -> Vec<usize> {
+        let mut kept = Vec::with_capacity(args.len());
+        for (index, arg) in args.iter().enumerate() {
+            if matches!(arg, GenericArgData::Region(_)) {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::RegionArgAtMention {
+                        expr,
+                        index: index as u32,
+                        list,
+                    });
+                continue;
+            }
+            kept.push(index);
+        }
+        kept
+    }
+
+    /// [`Self::spellable_args`] for a list its target has NOTHING to spend
+    /// on — an item, local, builtin or member with no binder, a trait's
+    /// own list. The regions are refused just the same, and the answer says
+    /// whether "takes no generic arguments" is still owed: it is unless the
+    /// list held nothing but refused regions, which were told the whole
+    /// story. The regions-only binder in [`Self::instantiate_mention`]
+    /// makes the same call, so `fn::<@a>` and no binder at all answer a
+    /// written list identically.
+    fn owes_not_generic(
+        &mut self,
+        expr: ExprId,
+        args: &[GenericArgData],
+        list: TurbofishList,
+    ) -> bool {
+        let kept = self.spellable_args(expr, args, list);
+        let displaced = kept.len() != args.len();
+        !displaced || !kept.is_empty()
+    }
+
+    /// A turbofish on a NAME with no binder to spend it on (a non-generic
+    /// item, a local, a const param, a monomorphic builtin): the regions
+    /// are refused per argument, the rest is told there is nothing to
+    /// spend it on, and the const arguments still get their types.
+    fn refuse_item_args(&mut self, expr: ExprId, name: &str, args: &[GenericArgData]) {
+        if self.owes_not_generic(expr, args, TurbofishList::Item) {
+            self.push_not_generic(expr, name);
+        }
+        self.infer_const_args_free(args);
+    }
+
     fn push_not_generic(&mut self, expr: ExprId, name: &str) {
         self.result
             .diagnostics
@@ -8349,8 +8477,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             return self.instantiate_mention(expr, loc, sig, &generics, args);
         }
         if let Some(args) = args {
-            self.push_not_generic(expr, builtin.name());
-            self.infer_const_args_free(args);
+            self.refuse_item_args(expr, builtin.name(), args);
             return builtin_type(builtin, self.file);
         }
         if builtin.flavor_polymorphic() {
@@ -9588,7 +9715,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 &written_ty,
                                 Some(Cause::GenericArg {
                                     mention,
+                                    // A type mention's list is WHOLE-binder
+                                    // positional (a type declaration's
+                                    // regions are reserved), so the binder
+                                    // index IS the written position here.
                                     index: index as u32,
+                                    param: index as u32,
                                 }),
                             );
                         }
@@ -9661,7 +9793,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 &declared,
                                 Some(Cause::GenericArg {
                                     mention,
+                                    // Whole-binder positional; see above.
                                     index: index as u32,
+                                    param: index as u32,
                                 }),
                             );
                             if fn_valued || array_valued {

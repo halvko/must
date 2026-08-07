@@ -114,6 +114,12 @@ impl OutlivesDiagnostic {
                     RegionConstraintReason::Invariance => {
                         "requiring these two borrows to be the same type"
                     }
+                    // Exhaustiveness only: under elision both ends of a
+                    // `CalleeBound` edge are the call's own fresh
+                    // existentials, so no rigid region ever violates it
+                    // here — the blame lands on the reborrow or return
+                    // that carried the element across (see the variant's
+                    // doc in `constraint.rs`).
                     RegionConstraintReason::CalleeBound => "calling this function",
                     // The user wrote a `match`, not a borrow — name that,
                     // for the same reason `Reborrow` names the use rather

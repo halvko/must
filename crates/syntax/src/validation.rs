@@ -94,6 +94,8 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             validate_trait_item(&trait_item, &mut errors);
         } else if let Some(type_param) = ast::TypeParam::cast(node.clone()) {
             validate_type_param_bounds(&type_param, &mut errors);
+        } else if let Some(params) = ast::GenericParamList::cast(node.clone()) {
+            require_regions_first(&params, &mut errors);
         } else if let Some(enum_expr) = ast::EnumExpr::cast(node.clone()) {
             let names = enum_expr
                 .variants()
@@ -1331,6 +1333,68 @@ fn reject_nested_generic_binder(fn_literal: &ast::FnLiteral, errors: &mut Vec<Sy
         range: generic_param_list.syntax().text_range(),
         fix: None,
     });
+}
+
+/// Region parameters come FIRST in every declared binder list
+/// (`fn::<@a, @b, T, U>`), before every type and const parameter.
+///
+/// The rule exists because regions are ELIDED at every mention: the written
+/// turbofish spells the binder's type and const parameters only. Eliding a
+/// contiguous PREFIX leaves the written arguments looking exactly like the
+/// parameters they spend — `fn::<@b, U>` called `f::<usize>` reads as one
+/// argument for one parameter. Eliding an interior slot would not:
+/// `fn::<T, @a, U>` called `f::<usize, bool>` would read as a list with a
+/// hole silently collapsed out of the middle of it, and a reader would have
+/// to know the binder to count. (Checking is *not* what needs the prefix:
+/// `instantiate_mention` filters the region slots out under any order. The
+/// reader is.)
+///
+/// Checked on the `GenericParamList` node, so it is one rule at every binder
+/// position — fn literals, `struct`/`enum` declarations, trait requirements
+/// — and a binder reads the same way wherever it is declared.
+fn require_regions_first(list: &ast::GenericParamList, errors: &mut Vec<SyntaxError>) {
+    let mut spellable: Option<String> = None;
+    for param in list.params() {
+        match &param {
+            ast::GenericParam::RegionParam(region) => {
+                let Some(earlier) = &spellable else {
+                    continue;
+                };
+                let name = region.name().unwrap_or_else(|| "@".to_owned());
+                errors.push(SyntaxError {
+                    message: format!(
+                        "region parameters come first in a binder; \
+                         move `{name}` before `{earlier}`"
+                    ),
+                    range: param.syntax().text_range(),
+                    fix: None,
+                });
+            }
+            // A nameless (broken) parameter still counts as one: the
+            // ordering is about the KINDS, and a placeholder keeps the
+            // message readable rather than skipping the check.
+            ast::GenericParam::TypeParam(type_param) => {
+                spellable = spellable.or_else(|| {
+                    Some(
+                        type_param
+                            .name()
+                            .map(|n| n.text())
+                            .unwrap_or_else(|| "T".to_owned()),
+                    )
+                });
+            }
+            ast::GenericParam::ConstParam(const_param) => {
+                spellable = spellable.or_else(|| {
+                    Some(
+                        const_param
+                            .name()
+                            .map(|n| n.text())
+                            .unwrap_or_else(|| "N".to_owned()),
+                    )
+                });
+            }
+        }
+    }
 }
 
 /// A generic binder on a `struct`/`enum` literal is only meaningful where

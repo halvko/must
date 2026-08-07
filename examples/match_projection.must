@@ -53,10 +53,12 @@ static project_in = fn::<@a, T>(s: Opt::<T>.&::<@a>) -> Opt::<T.&::<@a>> {
 };
 
 // The region really does come out at the caller's `@a`, so the result
-// outlives the match that produced it.
+// outlives the match that produced it. The turbofish spells `T` and
+// nothing else: `project_in`'s `@a` is elided, like every region at a
+// call site.
 static project_in_demo = fn() -> usize {
     let o: Opt::<usize> = Opt::<usize>::Some(41);
-    let projected = project_in::<@_, usize>(o.&);
+    let projected = project_in::<usize>(o.&);
     match projected {
         ::Some(t) => t.* + 1,
         ::None => 0,
@@ -151,7 +153,11 @@ static main = fn() -> usize {
     let deep = inner_or(nested.&, 0);
 
     let mut n: usize = 5;
-    let moved = unwrap_or_zero::<@_>(Opt::<usize.&mut::<@_>>::Some(n.&mut), 0);
+    // No turbofish at all: `unwrap_or_zero`'s binder is a region alone,
+    // and a region is never written at a call site. The `@_` inside the
+    // ANNOTATION is a different thing — that is a body saying "there is a
+    // region here, work it out".
+    let moved = unwrap_or_zero(Opt::<usize.&mut::<@_>>::Some(n.&mut), 0);
 
     // 101 + 33 + 7 + 5 + 42
     bumped + paired + deep + moved + project_in_demo()

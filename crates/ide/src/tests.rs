@@ -3540,6 +3540,31 @@ fn completions_do_not_panic_inside_a_generic_body() {
 }
 
 #[test]
+fn a_turbofish_never_completes_a_region() {
+    // Regions are elided at every call site, so nothing inside `::<` may
+    // offer one. Two independent reasons hold it — the candidate sources
+    // are the TYPE scope (no region is in it) and the `@` sigil lexes the
+    // completion marker into one `REGION_IDENT`, which the request does not
+    // survive. The test pins the OUTCOME, so either one moving is caught.
+    let (analysis, _file, pos) = fixture(
+        "static get = fn::<@a, T>(x: T.&::<@a>) -> T { x.* };\n\
+         static main = fn::<@b>(p: usize.&::<@b>) -> usize { get::<$0>(p) };",
+    );
+    let offered = analysis.completions(pos);
+    assert!(
+        !offered.iter().any(|item| item.label.starts_with('@')),
+        "a turbofish offered a region: {:?}",
+        offered.iter().map(|item| &item.label).collect::<Vec<_>>()
+    );
+    // And after the sigil there is nothing at all to offer.
+    let (analysis, _file, pos) = fixture(
+        "static get = fn::<@a, T>(x: T.&::<@a>) -> T { x.* };\n\
+         static main = fn::<@b>(p: usize.&::<@b>) -> usize { get::<@$0>(p) };",
+    );
+    assert!(analysis.completions(pos).is_empty());
+}
+
+#[test]
 fn hover_does_not_panic_on_a_rigid_param_annotation() {
     // Hover on the `T` of `x: T` inside a generic body.
     let (analysis, _file, pos) = fixture("static id = fn::<T>(x: T$0) -> T { x };");
@@ -4561,6 +4586,24 @@ static f = fn::<@a>(s: Opt::<usize>.&::<@a>) -> usize {
 };
 "#,
         "```must\nwhole: Opt::<usize>.&::<@a>\n```",
+    );
+}
+
+#[test]
+fn hover_shows_a_region_in_the_declaration_and_not_at_the_call() {
+    // The elision, as a reader sees it. A DECLARATION's regions are its
+    // parameters and are rendered — `@a` is what a caller's borrow has to
+    // satisfy. At a MENTION they have been instantiated to this call's own
+    // existentials, which have no spelling and print as a bare borrow: the
+    // hover never suggests a token the turbofish would refuse.
+    check_hover(
+        "static ge$0t = fn::<@a, T>(x: T.&::<@a>) -> T { x.* };",
+        "```must\nget: fn(T.&::<@a>) -> T\n```",
+    );
+    check_hover(
+        "static get = fn::<@a, T>(x: T.&::<@a>) -> T { x.* };\n\
+         static main = fn::<@b>(p: usize.&::<@b>) -> usize { ge$0t(p) };",
+        "```must\nget: fn(usize.&) -> usize\n```",
     );
 }
 

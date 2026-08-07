@@ -76,9 +76,17 @@ pub enum Cause {
     GenericArg {
         /// The turbofish mention expression (`ExprData::GenericApp`).
         mention: ExprId,
-        /// The argument's position in the turbofish list (= the param's
-        /// binder index; positions align once arity checked out).
+        /// The argument's position in the WRITTEN turbofish list — what the
+        /// renderer counts to find the node. Not the binder index: a fn
+        /// item's regions are elided, so the two diverge the moment a
+        /// binder declares one.
         index: u32,
+        /// The BINDER index of the parameter the argument instantiated,
+        /// RECORDED rather than re-derived. Producers know it exactly; a
+        /// renderer counting back from `index` would have to know which
+        /// kinds that producer elides, and the two producers elide
+        /// differently — a fn item's regions, a type mention's nothing.
+        param: u32,
     },
     /// Axiom: a MEMBER turbofish argument instantiated a member's own type
     /// parameter (`o.map::<bool>(f)` pinned `U`). Its own variant rather
@@ -242,11 +250,14 @@ pub enum RegionConstraintReason {
     /// each use mints its own reborrow.
     Invariance,
     /// A callee's declared outlives bound (`fn::<@a, @b: @a>`) travels
-    /// with the instantiation at a call site — the caller's own regions
-    /// must satisfy the bound the callee wrote, not a reborrow the caller
-    /// performed. The callee is a free fn, an inherent member or a trait
-    /// requirement; one reading serves all three
-    /// (`push_region_binder_bounds`).
+    /// with the instantiation at a call site, as an edge between the fresh
+    /// existentials that stand for its regions there. The callee is a free
+    /// fn, an inherent member or a trait requirement; one reading serves
+    /// all three (`push_region_binder_bounds`). Regions are elided at every
+    /// call, so no caller region is ever directly on this edge: a violation
+    /// surfaces where an argument's reborrow or the returned borrow carries
+    /// the element across, blamed as that use — this reason keeps the bound
+    /// ENFORCED, not reported.
     CalleeBound,
     /// A `match` on a BORROWED scrutinee bound a payload by borrow — the
     /// projection edge, `@scrutinee: @payload`. Structurally the same

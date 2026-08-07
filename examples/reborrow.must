@@ -52,8 +52,9 @@ type Map = struct::<K, V> {
     impl Self {
         // `@b` is the member's OWN region binder, and it has nowhere else
         // to come from: `Map`'s binder carries `K` and `V`, regions on type
-        // declarations are not a thing yet, and nothing is elided. So a
-        // member that borrows `Self` declares the region it borrows for.
+        // declarations are not a thing yet, and a signature elides nothing.
+        // So a member that borrows `Self` declares the region it borrows
+        // for.
         //
         // It is instantiated FRESH at every call, exactly like a free
         // function's — two calls in one body get two independent regions.
@@ -168,6 +169,7 @@ static counted_twice = fn::<@z, T: Counted>(t: T.&::<@z>) -> usize {
 static total_count = fn() -> usize {
     let c = Counter(struct { n = 20 });
     // Impl-directed on a concrete borrow receiver, then bound-directed on
-    // the same shape through the dictionary.
-    Counted::count(c.&) + counted_twice::<@_, Counter>(c.&)
+    // the same shape through the dictionary. `counted_twice::<@z, T>` is
+    // called spelling `T` alone: regions are elided at every call site.
+    Counted::count(c.&) + counted_twice::<Counter>(c.&)
 };

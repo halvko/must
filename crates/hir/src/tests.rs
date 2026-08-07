@@ -5156,6 +5156,22 @@ fn turbofish_pins_the_param_against_the_value_argument() {
 }
 
 #[test]
+fn a_region_bearing_binders_blame_names_the_binder_index() {
+    // `Cause::GenericArg` records the BINDER index (`param`) beside the
+    // WRITTEN position (`index`), and this is the shape where the two
+    // differ: `U` is binder slot 1 but written slot 0, because `@a` is
+    // never written. The blame must name `U` — not `@a` — and point at the
+    // written `usize`.
+    check_diagnostics(
+        "static f = fn::<@a, U>(x: U, p: usize.&::<@a>) -> U { x };\n\
+         static g = fn::<@b>(q: usize.&::<@b>) -> usize { f::<usize>(\"hi\", q) };",
+        expect![[r#"
+            119..123: type mismatch: expected `usize`, found `str` (because `U` was instantiated to `usize` by this argument at 112..117)
+        "#]],
+    );
+}
+
+#[test]
 fn turbofish_arity_mismatch() {
     check_diagnostics(
         "static id = fn::<T>(x: T) -> T { x };\nstatic g = fn () -> usize { id::<usize, usize>(4) };",
@@ -6056,7 +6072,7 @@ fn safe_borrow_type_without_a_region_is_reported() {
     check_diagnostics(
         "type Bad = struct { r: usize.& };",
         expect![[r#"
-            29..30: a safe borrow must name its region (`T.&::<@a>`); regions are never elided yet
+            29..30: a safe borrow must name its region (`T.&::<@a>`); regions are not elided in a signature yet
         "#]],
     );
 }
@@ -7060,7 +7076,7 @@ type Bad = struct { r: &x };
 "#,
         expect![[r#"
             12..13: cannot infer the type of this number: it has no defining use — add a type annotation
-            38..39: a safe borrow must name its region (`T.&::<@a>`); regions are never elided yet
+            38..39: a safe borrow must name its region (`T.&::<@a>`); regions are not elided in a signature yet
             38..40: borrow types are spelled postfix: `T.&` / `T.&mut`
             39..40: `x` is not a type
         "#]],
@@ -10752,6 +10768,211 @@ static empty_path = fn(m: Measured) -> usize { Measured::size::<>(m) };
 }
 
 #[test]
+fn an_item_turbofish_elides_regions_exactly_as_a_member_one_does() {
+    // One rule: the written list spells TYPE and CONST arguments,
+    // everywhere. `fn::<@b, U>` is called `f::<usize>` whether it is
+    // reached as an item, through a dot, or through the qualified form.
+    check_diagnostics(
+        r#"
+type Opt = enum::<T> { Some(T), None } with {
+    impl Self { pick = fn::<@b, U>(alt: U, s: Self.&::<@b>) -> U { alt }; }
+};
+static free = fn::<@b, U>(alt: U, x: usize.&::<@b>) -> U { alt };
+static counted = fn::<@b, T, const N: usize>(x: T.&::<@b>) -> usize { N };
+static main = fn::<@a>(p: usize.&::<@a>, o: Opt::<usize>.&::<@a>) -> usize {
+    let a: bool = free::<bool>(true, p);
+    let b: bool = o.pick::<bool>(true);
+    let c: bool = Opt::<usize>::pick::<bool>(true, o);
+    counted::<usize, 3>(p)
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_written_region_argument_is_refused_at_every_mention() {
+    // Regions are inferred at calls, never written — named or wildcard,
+    // and the SAME sentence in both lists, because there is no longer a
+    // rule to tell apart. The rest of the list still spends: a use site
+    // that got only the elision wrong gets exactly one message.
+    check_diagnostics(
+        r#"
+type Opt = enum::<T> { Some(T), None } with {
+    impl Self { pick = fn::<@b, U>(alt: U, s: Self.&::<@b>) -> U { alt }; }
+};
+static free = fn::<@b, U>(alt: U, x: usize.&::<@b>) -> U { alt };
+static main = fn::<@a>(p: usize.&::<@a>, o: Opt::<usize>.&::<@a>) -> usize {
+    let a: bool = free::<@_, bool>(true, p);
+    let b: bool = free::<@a, bool>(true, p);
+    let c: bool = o.pick::<@_, bool>(true);
+    let d: bool = Opt::<usize>::pick::<@a, bool>(true, o);
+    0
+};
+"#,
+        expect![[r#"
+            294..296: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            339..341: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            386..388: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            442..444: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+        "#]],
+    );
+}
+
+#[test]
+fn a_written_region_is_refused_on_a_requirement_and_a_builtin() {
+    // The remaining spellings of "everywhere": a requirement reached
+    // through a bound and through the qualified trait path, and a
+    // scheme-shaped builtin. Same helper, same sentence, and the type
+    // argument beside the region still spends.
+    check_diagnostics(
+        r#"
+type Counter = struct { n: usize };
+trait Counted = requires {
+    count: fn::<@b, U>(alt: U, s: Self.&::<@b>) -> U;
+} with {
+    impl Counter { count = fn::<@b, U>(alt: U, s: Counter.&::<@b>) -> U { alt }; }
+};
+static bounded = fn::<@z, T: Counted>(t: T.&::<@z>) -> usize {
+    t.count::<@z, usize>(1)
+};
+static qualified = fn::<@z>(c: Counter.&::<@z>) -> usize {
+    let r = alloc_array::<@z, usize>(2);
+    Counted::count::<@_, usize>(1, c)
+};
+"#,
+        expect![[r#"
+            290..292: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            392..394: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            428..430: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+        "#]],
+    );
+}
+
+#[test]
+fn a_written_region_on_a_binderless_name_is_refused_the_same_way() {
+    // A list its target has NOTHING to spend on — no binder at all, a
+    // local, a field, a monomorphic builtin, a trait's own list — refuses
+    // a region with the same sentence as a binder would, and owes "takes
+    // no generic arguments" only when something spellable is left beside
+    // it (`owes_not_generic`): the regions-only binder and the binder-less
+    // item answer `::<@_>` and `::<@_, usize>` identically.
+    check_diagnostics(
+        r#"
+type Holder = struct { go: fn(usize) -> usize };
+trait D = requires { n: fn(s: Self) -> usize; } with {
+    impl usize { n = fn(s: usize) -> usize { s }; }
+};
+static k = fn(x: usize) -> usize { x };
+static regionless = fn::<@b>(x: usize.&::<@b>) -> usize { 1 };
+static main = fn::<@a>(p: usize.&::<@a>, h: Holder) -> usize {
+    let a: usize = k::<@_>(1);
+    let b: usize = k::<@_, usize>(1);
+    let c: usize = regionless::<@a, usize>(p);
+    let d: usize = h.go::<@_>(1);
+    let e: usize = a::<@_>;
+    let f: usize = D::<@_, Self = usize>::n(3);
+    print::<@_>("x");
+    0
+};
+"#,
+        expect![[r#"
+            349..351: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            376..390: `k` takes no generic arguments
+            380..382: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            414..437: `regionless` takes no generic arguments
+            427..429: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            468..470: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            499..501: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            527..529: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            564..566: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+        "#]],
+    );
+}
+
+#[test]
+fn a_refused_region_argument_does_not_also_miscount_the_list() {
+    // The DISPLACING shape: a region written where the binder has none at
+    // all. Dropping it leaves nothing to spend, and "takes 1 generic
+    // argument, found 0" would be a false sentence about a list the reader
+    // can see one argument in. The refusal is the whole story, in both
+    // positions. The suppression is deliberately TOTAL, not
+    // count-conditional: the third case writes two spellable arguments for
+    // one slot, an accurate arity error on its own, and still gets the
+    // refusal alone — a reader who wrote a region cannot trust ANY count
+    // about that list until the region is dropped. One message, then
+    // re-check.
+    check_diagnostics(
+        r#"
+type Opt = enum::<T> { Some(T), None } with {
+    impl Self { pick = fn::<U>(alt: U, s: Self) -> U { alt }; }
+};
+static id = fn::<T>(x: T) -> T { x };
+static z1 = fn::<@a, T>(x: T, p: usize.&::<@a>) -> T { x };
+static main = fn::<@b>(o: Opt::<usize>, q: usize.&::<@b>) -> usize {
+    let a: usize = id::<@z>(1);
+    let b: bool = o.pick::<@a>(true);
+    let c: usize = z1::<@_, usize, bool>(1, q);
+    0
+};
+"#,
+        expect![[r#"
+            305..307: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            340..342: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            375..377: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+        "#]],
+    );
+}
+
+#[test]
+fn a_type_mentions_turbofish_argument_is_named_in_the_blame() {
+    // `Cause::GenericArg` is recorded by the TYPE-mention path too
+    // (`Pair::<usize>(...)`), and its hint was silently dropped: the
+    // renderer resolved the mention's base as `Resolution::Item` only, and
+    // a type name resolves to `TypeItem`.
+    check_diagnostics(
+        r#"
+type Pair = struct::<T> { a: T, b: T };
+static p = Pair::<usize>(struct { a = 1, b = true });
+"#,
+        expect![[r#"
+            86..90: type mismatch: expected `usize`, found `bool` (because `T` was instantiated to `usize` by this argument at 59..64)
+        "#]],
+    );
+}
+
+#[test]
+fn wrong_arity_counts_only_the_spellable_slots() {
+    // A binder's regions are not positions a caller may write, so they are
+    // not positions a caller may be told they got wrong: "`free` takes 2"
+    // for `fn::<@b, U>` would be counting something unspellable.
+    //
+    // The zero case: a REGIONS-ONLY binder is generic, so it is not "not
+    // generic" — but it has nothing spellable, and "takes no generic
+    // arguments" is the true sentence about what may be written. An item
+    // with no binder at all already says exactly that, so the two agree
+    // rather than inventing a second wording — region written or not, see
+    // `a_written_region_on_a_binderless_name_is_refused_the_same_way`.
+    check_diagnostics(
+        r#"
+static free = fn::<@b, U>(alt: U, x: usize.&::<@b>) -> U { alt };
+static regionless = fn::<@b>(x: usize.&::<@b>) -> usize { 1 };
+static main = fn::<@a>(p: usize.&::<@a>) -> usize {
+    let a: bool = free::<bool, usize>(true, p);
+    let b: usize = regionless::<usize>(p);
+    let c: usize = regionless::<>(p);
+    0
+};
+"#,
+        expect![[r#"
+            200..219: `free` takes 1 generic argument, found 2 (declared here at 8..12)
+            249..268: `regionless` takes no generic arguments
+            292..306: `regionless` takes no generic arguments
+        "#]],
+    );
+}
+
+#[test]
 fn a_member_turbofish_has_no_nameable_argument() {
     // TR01 gives v1 exactly ONE nameable argument, a trait's `Self`, and it
     // is written on the OWNER's list. A member's own arguments are
@@ -11163,7 +11384,7 @@ fn borrow_without_a_region_is_reported_not_guessed() {
     check_diagnostics(
         "static f = fn (r: usize.&) -> usize { r.* };",
         expect![[r#"
-            24..25: a safe borrow must name its region (`T.&::<@a>`); regions are never elided yet
+            24..25: a safe borrow must name its region (`T.&::<@a>`); regions are not elided in a signature yet
         "#]],
     );
 }
@@ -11171,8 +11392,9 @@ fn borrow_without_a_region_is_reported_not_guessed() {
 #[test]
 fn wildcard_region_is_a_body_answer_not_a_signature_one() {
     // `@_` says "there is a region here, infer it". A body can answer
-    // that; a signature cannot, because its regions are parameters the
-    // caller chooses.
+    // that; a signature cannot, because its regions are parameters, and a
+    // parameter needs the binder name that its outlives clauses and its
+    // other mentions refer to.
     check_diagnostics(
         "static f = fn::<@a>(r: usize.&::<@a>) -> usize { let s: usize.&::<@_> = r; s.* };",
         expect![[r#""#]],
@@ -11533,6 +11755,21 @@ fn regions_on_type_declarations_are_reserved() {
 }
 
 #[test]
+fn a_misordered_type_declaration_binder_is_told_twice() {
+    // The regions-come-first rule is checked on `GenericParamList`, so it
+    // reaches a TYPE declaration's binder too, where the region is also
+    // still reserved: two errors on one token — move it, and it is not
+    // supported yet. Pinned so the reservation's lifting sees the pair.
+    check_diagnostics(
+        "type Slice = struct::<T, @a> { n: usize };",
+        expect![[r#"
+            25..27: region parameters come first in a binder; move `@a` before `T`
+            25..27: region parameters on type declarations are not supported yet
+        "#]],
+    );
+}
+
+#[test]
 fn undeclared_outlives_is_rejected_and_the_clause_fixes_it() {
     check_diagnostics(
         "static f = fn::<@a, @b>(x: usize.&::<@a>) -> usize.&::<@b> { x };",
@@ -11556,40 +11793,44 @@ fn outlives_is_transitive_through_declared_bounds() {
 }
 
 #[test]
-fn a_written_region_argument_carries_the_calls_declared_bound() {
-    // `f::<@p, @q>` substitutes the CALLER's own regions directly, so
-    // `f`'s declared `@a: @b` becomes a direct obligation between `@p`
-    // and `@q` at THIS call — reported as `CalleeBound`, not laundered
-    // through whichever argument happens to carry the element across.
-    check_diagnostics(
-        "static f = fn::<@a: @b, @b>(x: usize.&::<@b>) -> usize.&::<@b> { x };\n\
-         static g = fn::<@p, @q>(x: usize.&::<@q>) -> usize.&::<@q> { f::<@p, @q>(x) };",
-        expect![[r#"
-            131..142: calling this function needs `@p` to outlive `@q`, which this signature does not declare; add `@p: @q` to the binder
-        "#]],
-    );
-    // Declaring the bound the call needs makes it clean.
-    check_diagnostics(
-        "static f = fn::<@a: @b, @b>(x: usize.&::<@b>) -> usize.&::<@b> { x };\n\
-         static g = fn::<@p: @q, @q>(x: usize.&::<@q>) -> usize.&::<@q> { f::<@p, @q>(x) };",
-        expect![[r#""#]],
-    );
-}
-
-#[test]
-fn an_omitted_region_argument_still_infers_freely() {
-    // No turbofish at all, and the wildcard, both still mean "infer this
-    // one" — a fresh existential, exactly as before this ruling: a
-    // written argument only changes anything when one is actually
-    // written.
+fn a_bare_mention_infers_its_regions_freely() {
+    // No turbofish at all: every region of the callee is a fresh
+    // existential of this call, solved from the arguments passed. (A
+    // written one is refused — see
+    // `a_written_region_argument_is_refused_at_every_mention`.)
     check_diagnostics(
         "static f = fn::<@a>(x: usize.&::<@a>) -> usize.&::<@a> { x };\n\
          static g = fn::<@p>(x: usize.&::<@p>) -> usize.&::<@p> { f(x) };",
         expect![[r#""#]],
     );
+}
+
+#[test]
+fn a_callees_declared_bound_still_binds_an_elided_call() {
+    // `f`'s `@a: @b` travels with the instantiation as an obligation
+    // between the two fresh existentials this call mints
+    // (`push_region_binder_bounds`), so a caller whose regions cannot
+    // satisfy it is refused. With no written region to stand between the
+    // caller's binder and the callee's, the blame lands on the argument
+    // whose reborrow carries the element across — never on the bound
+    // itself, which is why `CalleeBound` has no message of its own to pin.
     check_diagnostics(
-        "static f = fn::<@a>(x: usize.&::<@a>) -> usize.&::<@a> { x };\n\
-         static g = fn::<@p>(x: usize.&::<@p>) -> usize.&::<@p> { f::<@_>(x) };",
+        "static f = fn::<@a: @b, @b>(x: usize.&::<@a>) -> usize.&::<@b> { x };\n\
+         static g = fn::<@p, @q>(x: usize.&::<@p>) -> usize.&::<@q> { f(x) };",
+        expect![[r#"
+            133..134: using this borrow where a longer-lived one is expected needs `@p` to outlive `@q`, which this signature does not declare; add `@p: @q` to the binder
+        "#]],
+    );
+    // The same call with the bound declared, and a shape whose fresh
+    // existentials can satisfy the bound on their own, are both clean.
+    check_diagnostics(
+        "static f = fn::<@a: @b, @b>(x: usize.&::<@a>) -> usize.&::<@b> { x };\n\
+         static g = fn::<@p: @q, @q>(x: usize.&::<@p>) -> usize.&::<@q> { f(x) };",
+        expect![[r#""#]],
+    );
+    check_diagnostics(
+        "static f = fn::<@a: @b, @b>(x: usize.&::<@a>, y: usize.&::<@b>) -> usize { 1 };\n\
+         static g = fn::<@p, @q>(x: usize.&::<@p>, y: usize.&::<@q>) -> usize { f(x, y) };",
         expect![[r#""#]],
     );
 }
@@ -11785,10 +12026,10 @@ fn an_inherent_members_own_region_binder_is_live() {
     // A member-own REGION was the first half of the binder to go live, and
     // it is the half with no alternative at all: regions on type
     // declarations are themselves reserved, so a member taking a borrow of
-    // `Self` has nowhere else to bind the per-call region it needs, and
-    // with no elision it may not decline to name one. (The TYPE half is
-    // live too — TR10 — and spelled at the use site; only CONSTS are still
-    // reserved.)
+    // `Self` has nowhere else to bind the per-call region it needs, and a
+    // signature elides nothing, so it may not decline to name one. (The
+    // TYPE half is live too — TR10 — and spelled at the use site; only
+    // CONSTS are still reserved.)
     check_diagnostics(
         r#"
 type Map = struct::<K, V> { n: usize } with {
@@ -12013,8 +12254,9 @@ fn a_trait_requirement_may_carry_a_region_binder() {
     // `binders_match` had arms for Type and Const and none for Region, so
     // a region param in a requirement's binder made EVERY textually
     // identical impl member "not match". A `Self.&`-taking requirement
-    // must declare a region (nothing is elided), so that one guard was
-    // what made the trait half of borrow-`Self` members unreachable.
+    // must declare a region (a signature elides nothing), so that one
+    // guard was what made the trait half of borrow-`Self` members
+    // unreachable.
     //
     // All three kinds side by side, each with a conforming impl.
     check_diagnostics(
@@ -12195,7 +12437,7 @@ static inferred = fn() -> usize {
 };
 static explicit = fn() -> usize {
     let mut x: usize = 3;
-    let r = pick::<@_, usize>(x.&mut, true);
+    let r = pick::<usize>(x.&mut, true);
     0
 };
 "#,
@@ -12540,10 +12782,10 @@ fn blame_lands_on_the_obligation_that_introduced_the_element() {
 fn a_nested_fn_literal_may_infer_its_regions() {
     // Three intentional rules compose into what would otherwise be a
     // cliff: a nested literal cannot declare a binder, `@_` was refused in
-    // every parameter position, and nothing is elided — so no function
-    // literal in a body could take a borrow parameter at all. A nested
-    // literal's regions genuinely are body-local existentials, so `@_` is
-    // the true thing to say about them.
+    // every parameter position, and a signature elides nothing — so no
+    // function literal in a body could take a borrow parameter at all. A
+    // nested literal's regions genuinely are body-local existentials, so
+    // `@_` is the true thing to say about them.
     check_diagnostics(
         "static main = fn::<@a>(p: usize.&::<@a>) -> usize {\n\
              let f = fn (r: usize.&::<@_>) -> usize { r.* };\n\

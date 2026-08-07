@@ -14571,6 +14571,41 @@ fn a_bare_at_sign_is_an_error_that_names_the_spelling() {
 }
 
 #[test]
+fn region_params_come_first_in_a_binder() {
+    // Regions are elided at every call site, so what a turbofish spells is
+    // the binder MINUS its regions. That subtraction is only legible when
+    // the regions are a contiguous PREFIX: `fn::<T, @a>` called `f::<usize>`
+    // would read as a list with a slot collapsed out of the middle of it.
+    check_errors(
+        "static f = fn::<T, @a>(x: T.&::<@a>) -> () {};",
+        expect![[r#"
+            19..21: region parameters come first in a binder; move `@a` before `T`
+        "#]],
+    );
+    // Regions among themselves, and before everything spellable: fine.
+    check_errors(
+        "static f = fn::<@a, @b: @a, T, const N: usize>(x: T.&::<@b>) -> () {};",
+        expect![[r#""#]],
+    );
+    // The rule is about KINDS, so a const parameter in front counts too.
+    check_errors(
+        "static f = fn::<const N: usize, @a>(x: usize.&::<@a>) -> () {};",
+        expect![[r#"
+            32..34: region parameters come first in a binder; move `@a` before `N`
+        "#]],
+    );
+    // One binder rule, at every binder position — a trait requirement's own
+    // is checked by the same node, and nothing else reserves that shape, so
+    // the ordering error is the only one it produces.
+    check_errors(
+        "trait D = requires { size: fn::<T, @a>(x: T.&::<@a>, s: Self) -> usize; };",
+        expect![[r#"
+            35..37: region parameters come first in a binder; move `@a` before `T`
+        "#]],
+    );
+}
+
+#[test]
 fn borrow_expressions_take_their_own_turbofish() {
     // The region rides the BORROW OPERATOR's turbofish, not the referent
     // type's — `x.&mut::<@a>`, one list hanging off the borrow node, so no

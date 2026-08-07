@@ -109,6 +109,8 @@
   could already say that" objection against "could you say it per call". **Member-own const
   binders** — still reserved: a const argument is part of an instance's identity, and a
   member's arguments are read off the receiver's type, which cannot supply one. **TR10**
+- **Separate item and member turbofish rules** — its trip-wire fired (regions are elided at
+  every call site), so one rule replaces two. **TR10**
 - **`dyn` / trait objects in v1** — no customer; brings vtable layout, object safety and
   post-erasure lifetime questions. **Named / first-class impls** — a named impl is a
   dictionary you can pass, which reintroduces incoherence and breaks applicative identity: the
@@ -164,9 +166,6 @@
   rigidity transplanted, no new inference domain. **TR08**
 - **Member-own const binders** — trip-wire: instantiation grows a member-side argument list,
   or instance identity moves off the receiver's type. **TR10**
-- **Separate item and member turbofish rules** — the member list spells its TYPE parameters
-  only while the item list is positional over the whole binder, `@_` included; trip-wire: the
-  item turbofish stops spelling regions, or member consts land. **TR10**
 - **Derive replacement is designed** — introspection. **TR12**
 - **A `send` assertion form** is owed and unruled: the mitigation for the private-field semver
   hazard, which is inherent to derived-from-structure. **TR09**

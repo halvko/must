@@ -262,6 +262,7 @@ impl LowerCtx<'_> {
                 | InferenceDiagnostic::NotGeneric { expr, .. }
                 | InferenceDiagnostic::ConstArgHole { expr }
                 | InferenceDiagnostic::UnexpectedRegionArg { expr, .. }
+                | InferenceDiagnostic::RegionArgAtMention { expr, .. }
                 | InferenceDiagnostic::GenericArgKindMismatch { expr, .. }
                 | InferenceDiagnostic::MissingConstArgs { expr, .. }
                 | InferenceDiagnostic::CannotInferGenericParam { expr, .. }

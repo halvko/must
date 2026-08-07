@@ -31,7 +31,7 @@ pub use body::{BindingId, Body, BodySourceMap, ExprId, PatId, body_with_source_m
 pub use const_check::ConstCheckDiagnostic;
 pub use constraint::Cause;
 pub use constraint::{RegionConstraint, RegionConstraintReason};
-pub use infer::{InferenceDiagnostic, InferenceResult};
+pub use infer::{InferenceDiagnostic, InferenceResult, TurbofishList};
 pub use item_tree::{
     Constness, ItemKind, ItemTree, MemberHome, TypeDeclData, TypeRef, item_source,
     trait_requirements, type_decl,
@@ -411,7 +411,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 
     let item_name = |loc: &ItemLoc| item_source(db, loc.to_id(db)).and_then(|it| it.name());
 
-    // ---- regions: the no-elision rule, and the type-declaration reserve --
+    // ---- regions: signatures elide nothing, and the type-decl reserve ----
     //
     // Both are SYNTACTIC judgements, so they live here rather than in
     // inference: what is wrong with `T.&` is that a token is missing, and
@@ -485,9 +485,10 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
         // `@_` says "there is a region here, infer it" — an answer a BODY
         // can give and a SIGNATURE cannot, because a signature's regions
-        // are parameters the caller chooses. The two positions are told
-        // apart syntactically: a signature type sits under a `PARAM` or a
-        // `RET_TYPE`.
+        // are parameters, and a parameter needs the binder name that its
+        // outlives clauses and its other mentions refer to. The two
+        // positions are told apart syntactically: a signature type sits
+        // under a `PARAM` or a `RET_TYPE`.
         if !in_signature_position(borrow.syntax()) {
             continue;
         }
@@ -949,6 +950,21 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                         .map(|arg| arg.syntax().text_range())
                         .unwrap_or(range)
                 }
+                // The same narrowing for the elision rule's own refusal.
+                // The diagnostic is keyed on the node its list hangs off,
+                // so only WHICH list is left to choose.
+                InferenceDiagnostic::RegionArgAtMention { index, list, .. } => {
+                    let node = ptr.to_node(&syntax_root);
+                    let list = match list {
+                        TurbofishList::Item => {
+                            ast::PathExpr::cast(node).and_then(|path| path.generic_arg_list())
+                        }
+                        TurbofishList::Member => member_generic_arg_list(node),
+                    };
+                    list.and_then(|list| list.args().nth(*index as usize))
+                        .map(|arg| arg.syntax().text_range())
+                        .unwrap_or(range)
+                }
                 // Reported on the `match` keyword: the construct as a whole
                 // is what fails to cover — no single arm is the culprit.
                 InferenceDiagnostic::NonExhaustiveMatch { .. }
@@ -1220,10 +1236,19 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                                     });
                                 callee_hint.into_iter().chain(arg_hint).collect()
                             }
-                            Cause::GenericArg { mention, index } => {
+                            Cause::GenericArg {
+                                mention,
+                                index,
+                                param,
+                            } => {
                                 // Point at the turbofish argument that
-                                // instantiated the param, naming the param
-                                // from the mentioned item's binder.
+                                // instantiated the param. The param is READ
+                                // off the cause, never re-derived: `index`
+                                // is a position in the WRITTEN list, and
+                                // recovering a binder position from it would
+                                // mean knowing which kinds the producer
+                                // elided — a fn item elides its regions, a
+                                // type mention elides nothing.
                                 let Some(node) = ast_for_expr(*mention) else {
                                     return Vec::new();
                                 };
@@ -1236,12 +1261,13 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                                 let param_name = match &body.exprs[*mention] {
                                     body::ExprData::GenericApp { base, .. } => {
                                         match resolutions.get(*base) {
-                                            Some(Resolution::Item(loc)) => {
+                                            Some(Resolution::Item(loc))
+                                            | Some(Resolution::TypeItem(loc)) => {
                                                 item_data(db, loc.to_id(db)).as_ref().and_then(
                                                     |data| {
                                                         data.generics
-                                                            .get(*index as usize)
-                                                            .map(|param| param.name.clone())
+                                                            .get(*param as usize)
+                                                            .map(|p| p.name.clone())
                                                     },
                                                 )
                                             }
@@ -1264,25 +1290,17 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                                     ),
                                 }]
                             }
-                            // The MEMBER's own list, which hangs one level
-                            // down inside `MEMBER_GENERIC_ARGS` — under a
-                            // path (`Option::map::<bool>`) or under a field
-                            // expression (`o.map::<bool>(f)`). Deliberately
-                            // NOT folded into the arm above: that one reads
-                            // the OWNER's list off the same node, so a
-                            // shared arm would point at `Option::<usize>`'s
-                            // argument when the member's was written.
+                            // The MEMBER's own list. Deliberately NOT folded
+                            // into the arm above: that one reads the OWNER's
+                            // list off the same node, so a shared arm would
+                            // point at `Option::<usize>`'s argument when
+                            // the member's was written.
                             Cause::MemberGenericArg { mention, index } => {
                                 let Some(node) = ast_for_expr(*mention) else {
                                     return Vec::new();
                                 };
-                                let list = ast::PathExpr::cast(node.clone())
-                                    .and_then(|path| path.member_generic_arg_list())
-                                    .or_else(|| {
-                                        ast::FieldExpr::cast(node)?.member_generic_arg_list()
-                                    });
-                                let Some(arg) =
-                                    list.and_then(|list| list.args().nth(*index as usize))
+                                let Some(arg) = member_generic_arg_list(node)
+                                    .and_then(|list| list.args().nth(*index as usize))
                                 else {
                                     return Vec::new();
                                 };
@@ -2401,6 +2419,17 @@ fn in_reserved_with_region(node: &syntax::SyntaxNode) -> bool {
         && syntax::semantic_member_context(node).is_none()
 }
 
+/// A MEMBER's own turbofish list on the node that carries it: one level
+/// down inside `MEMBER_GENERIC_ARGS`, under a path
+/// (`Option::map::<bool>`) or under a field expression (`o.map::<bool>`).
+/// Deliberately not the path's own `generic_arg_list`, which is the OWNER's
+/// list on the same node.
+fn member_generic_arg_list(node: syntax::SyntaxNode) -> Option<ast::GenericArgList> {
+    ast::PathExpr::cast(node.clone())
+        .and_then(|path| path.member_generic_arg_list())
+        .or_else(|| ast::FieldExpr::cast(node)?.member_generic_arg_list())
+}
+
 /// The generic binder scoping a MEMBER context: the OWNER type
 /// declaration's binder list (on its RHS `struct`/`enum` literal), found by
 /// climbing from a `with`-group to its `type` item. `None` outside member
@@ -3204,20 +3233,21 @@ fn simple_error(range: TextRange, message: String) -> Diagnostic {
 ///
 /// The distinction is what makes `@_` legal in one place and not the other,
 /// and it is genuinely syntactic: an item's regions are its parameters, so
-/// they must be nameable by callers; a body's are inference variables, so
-/// declining to name one is the whole point.
+/// they need the binder names their outlives clauses and other mentions
+/// refer to; a body's are inference variables, so declining to name one is
+/// the whole point.
 ///
 /// A fn literal NESTED in a body is on the body's side of that line. Three
 /// intentional rules compose into what would otherwise be a cliff: a
 /// nested literal may not declare its own binder (generic literals are
 /// item-initializers only), `@_` was refused in every parameter position,
-/// and there is no elision — so no function literal in a body could take a
-/// borrow parameter BY ANY ROUTE. The smallest honest opening is to notice
-/// that a nested literal's regions genuinely ARE body-local existentials:
-/// it has no callers outside the body, nothing can instantiate it
-/// independently, and `@_` says exactly the true thing about them. The
-/// alternative was to reserve the whole shape by name, which buys a worse
-/// message for the same expressiveness.
+/// and a signature elides nothing — so no function literal in a body could
+/// take a borrow parameter BY ANY ROUTE. The smallest honest opening is to
+/// notice that a nested literal's regions genuinely ARE body-local
+/// existentials: it has no callers outside the body, nothing can
+/// instantiate it independently, and `@_` says exactly the true thing
+/// about them. The alternative was to reserve the whole shape by name,
+/// which buys a worse message for the same expressiveness.
 ///
 /// Known gap: the outlives module's escape check (`outlives.rs`) measures
 /// a borrow's reach only against the ENCLOSING ITEM's universals, so a

@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 33 errors and 1 warning.
+// exactly: found 35 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -347,3 +347,22 @@ static unvouched_import = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
 //     error: an `extern fn` declares a host import and has no body; the implementation lives on the other side of the boundary
 //     quick fix offered: "Remove the body"
 static import_with_a_body = extern fn(n: usize) -> usize { n };
+
+// 34. A region written at a CALL SITE. Regions are elided at every call:
+//     a written turbofish spells the callee's type and const arguments
+//     only, and the callee's regions become fresh existentials of this
+//     call, solved from the arguments actually passed. Named or wildcard,
+//     the region is refused one argument at a time, so `usize` still
+//     counts and the call is otherwise checked (see 23 above: a member's
+//     list gets the same sentence).
+//     error: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+static first = fn::<@a, T>(r: T.&::<@a>) -> T { r.* };
+static region_at_a_call = fn::<@b>(p: usize.&::<@b>) -> usize { first::<@b, usize>(p) };
+
+// 35. A region parameter AFTER a type parameter in a binder. Regions come
+//     first (`fn::<@a, T>`): a turbofish spells the binder minus its
+//     regions, and that subtraction only reads correctly when the elided
+//     part is a contiguous prefix. Checking itself does not need the
+//     order, so the binder still works as declared.
+//     error: region parameters come first in a binder; move `@a` before `T`
+static misordered_binder = fn::<T, @a>(r: T.&::<@a>) -> T { r.* };
