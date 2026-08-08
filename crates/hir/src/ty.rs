@@ -1560,6 +1560,17 @@ pub fn receiver_takes(receiver: ReceiverShape, position: SelfPosition) -> bool {
     }
 }
 
+/// The structural test whole: whether a member with this SIGNATURE takes a
+/// dot-call from a receiver of this shape, given the type standing for its
+/// `Self`. [`self_position_of`] and [`receiver_takes`] are the two halves;
+/// this is their composition, used only where no [`ItemId`] exists yet to
+/// go through [`member_self_position`] instead — a trait requirement's
+/// freshly-lowered signature, judged for bound-directed resolution and for
+/// completion's offers.
+pub fn dot_callable(sig: &Ty, self_ty: &Ty, receiver: ReceiverShape) -> bool {
+    self_position_of(sig, self_ty).is_some_and(|position| receiver_takes(receiver, position))
+}
+
 /// The [`ParamScope`] of `item`'s generic binder. For a MEMBER item the
 /// scope additionally binds `Self` to the owning type at its full binders
 /// — the one extra name member signatures and bodies resolve.

@@ -28,11 +28,13 @@ use crate::item_tree::{
     Constness, GenericArgRef, GenericParamData, GenericParamKind, TypeDeclData,
 };
 use crate::scopes::{Builtin, Resolution, resolutions, type_scope};
+use crate::traits::BoundDotCandidate;
 use crate::ty::{
     ConstArgValue, GenericArg, IntKind, IntValue, NamedTy, ParamScope, ReceiverShape, Region,
-    SelfPosition, Ty, TyVar, TyVarValue, VariantTy, builtin_type_by_name, enum_variants,
-    generic_param_scope, lower_type_ref_in, member_self_position, member_self_ty, receiver_takes,
-    self_position_of, signature, signature_needs_annotation, substitute_args, type_underlying_for,
+    SelfPosition, Ty, TyVar, TyVarValue, VariantTy, builtin_type_by_name, dot_callable,
+    enum_variants, generic_param_scope, lower_type_ref_in, member_self_position, member_self_ty,
+    receiver_takes, self_position_of, signature, signature_needs_annotation, substitute_args,
+    type_underlying_for,
 };
 use crate::{ItemId, ItemLoc, Severity, TypeRef, item_loc};
 
@@ -6319,6 +6321,20 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             .is_some_and(|position| receiver_takes(receiver, position))
     }
 
+    /// Every requirement the enclosing binder's bounds put on a rigid
+    /// receiver's dot — the shared enumeration and ownership check
+    /// ([`crate::traits::param_bound_candidates`]), read at THIS body's
+    /// binder. Bound-directed resolution picks from it by name; completion
+    /// offers what a receiver of the given shape can take.
+    fn bound_dot_candidates(&self, param: &crate::ty::ParamTy) -> Vec<BoundDotCandidate<'db>> {
+        crate::traits::param_bound_candidates(
+            self.db,
+            self.own_item.as_ref(),
+            self.own_generics,
+            param,
+        )
+    }
+
     /// Every trait that could answer `recv.name(...)` on a CONCRETE
     /// receiver (impl-directed, TR01 extended): the trait declares `name`
     /// AND is implemented for the receiver. In file order; whether each
@@ -6508,17 +6524,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         receiver_shape: ReceiverShape,
         resolved: &Ty,
     ) -> Ty {
-        let own = self.own_item.as_ref().is_some_and(|own| param.item == *own);
-        let bounds = if own {
-            self.own_generics
-                .get(param.index as usize)
-                .map(|p| p.bounds.clone())
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        let candidates =
-            crate::traits::bound_traits_providing_member(self.db, self.file, &bounds, name);
+        // The shared enumeration, narrowed to the written name by the
+        // shared rule — the same call completion makes for every name it
+        // considers offering.
+        let candidates = crate::traits::narrow_by_name(&self.bound_dot_candidates(param), name);
         let (trait_loc, member_index) = match candidates.len() {
             1 => candidates.into_iter().next().expect("len is 1"),
             0 => {
@@ -6606,18 +6615,20 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             self.infer_args_broken(args);
             return Ty::Error;
         }
-        // The SAME table the concrete path uses, over the requirement's
+        // The SAME predicate the concrete path uses, over the requirement's
         // freshly-lowered signature: a requirement whose `Self` parameter
         // is a BORROW takes a borrowed rigid receiver, which reborrows into
-        // it exactly as a nominal receiver does.
-        let position = self_position_of(&inst, &Ty::Param(param.clone()));
-        if !position.is_some_and(|position| receiver_takes(receiver_shape, position)) {
+        // it exactly as a nominal receiver does. The refusal re-reads the
+        // position because the MESSAGE names which of the three cases this
+        // is; admitting the call never does.
+        let self_ty = Ty::Param(param.clone());
+        if !dot_callable(&inst, &self_ty, receiver_shape) {
             let diagnostic = self.receiver_shape_refusal(
                 expr,
                 callee,
                 name,
                 receiver_shape,
-                position,
+                self_position_of(&inst, &self_ty),
                 resolved,
                 trait_loc,
             );
@@ -6720,7 +6731,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 params: pending,
             });
         }
-        let inst = lower_type_ref_in(self.db, self.file, sig_ref, self.table, &scope);
+        // The TRAIT's file resolves the names in a requirement's signature:
+        // that is where the signature is written, wherever the call is.
+        // (Inert while the world is one file — stated so this side and the
+        // offer side cannot come to answer it differently.)
+        let inst = lower_type_ref_in(self.db, trait_loc.file, sig_ref, self.table, &scope);
         (inst, var_of)
     }
 

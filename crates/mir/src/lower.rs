@@ -551,7 +551,7 @@ impl LowerCtx<'_> {
                         .unwrap_or(Ty::Error);
                     let ty = hir::traits::lower_requirement_sig(
                         self.db,
-                        file,
+                        &slot.trait_,
                         req,
                         &slot.trait_,
                         self_ty,

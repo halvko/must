@@ -44,7 +44,7 @@ pub use scopes::{
     read_line_result_loc, resolutions, synthetic_decl_loc, synthetic_decl_named, synthetic_decls,
     type_scope, utf8_result_loc,
 };
-pub use traits::{BoundSlot, bound_slots, dict_param_count};
+pub use traits::{BoundDotOffer, BoundSlot, bound_dot_offers, bound_slots, dict_param_count};
 pub use ty::{
     ConstArgValue, FnTy, GenericArg, IntKind, IntValue, NamedTy, ReceiverShape, Region, RegionVar,
     SelfPosition, Ty, VariantTy, dispatches_on, enum_variants, member_self_position,
@@ -2338,7 +2338,7 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
                 )),
             };
             let Some(expected) =
-                traits::lower_requirement_sig(db, file, req, &member_loc, self_key.to_ty())
+                traits::lower_requirement_sig(db, trait_loc, req, &member_loc, self_key.to_ty())
             else {
                 continue;
             };

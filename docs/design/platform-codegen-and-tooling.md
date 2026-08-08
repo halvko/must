@@ -111,6 +111,14 @@
   keyword table generates the set, the highlighter enumerates no kinds, and a drift guard
   walks the whole syntax-kind enum. The legend grows by appending, so existing indices never
   move.
+- **P15** A bound is a completion source. BOUND-directed dot-candidate enumeration has one
+  home, and the completion view asks resolution's selection rule rather than restating it, so
+  what `w.` offers follows what `w.push(x)` resolves to. A name carried by two bounds is
+  decided by name alone: receiver shape never narrows a bound-directed ambiguity, even when
+  only one candidate is shape-viable, so the call is a permanent refusal and completion
+  suppresses the name rather than offering a merged or shape-picked row. Two recorded
+  divergences from what a call there would resolve to: that suppression, and a nested body
+  still being offered its enclosing bounds.
 - **P13** The examples smoke target checks and runs every example against recorded snapshots
   under a timeout, so a hang fails naming the file, and a coverage guard fails if an example
   ships untested.
@@ -150,6 +158,9 @@
   fixed 64 with a separate address width.
 - **Closures land** — the backend needs a table, indirect calls and a real calling
   convention, and "dictionaries resolve away completely" ends. **P06**
+- **Name-only bound ambiguity bites in practice** — shape narrowing (picking the one bound
+  whose signature the receiver can actually take) is the named relaxation, on the condition
+  that the refusal keeps naming both traits and their spellings. **P15**
 - **An LIR is built** — the wasm backend's re-derived type arguments get fixed there, and
   guaranteed optimizations live there instead of being hoped for. **P08**
 - **FFI is designed** — it owns the `extern` surface (data imports are reserved there), symbol

@@ -254,7 +254,7 @@ fn trait_item_hover(
                 index: u32::MAX,
                 name: std::sync::Arc::from("Self"),
             });
-            let sig = hir::traits::lower_requirement_sig(db, loc.file, req, loc, self_ty)
+            let sig = hir::traits::lower_requirement_sig(db, loc, req, loc, self_ty)
                 .map(|ty| ty.display())
                 .unwrap_or_else(|| "fn(...)".to_owned());
             format!("{}: {};", req.name, sig)

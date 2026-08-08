@@ -296,6 +296,38 @@ fn completion_item_at_tier(
     }
 }
 
+/// A fn-shaped dot completion — an inherent member, a bound requirement, or
+/// a builtin member: ranked by [`type_tier`] against `tier_candidate` (the
+/// candidate's own type; a builtin has none to offer, so callers pass
+/// `None` and it sorts by the builtin band alone) and inserted as a call
+/// via [`fn_call_insert`], with `sig`'s receiver excluded from the written
+/// arity. All three call sites render identically; only the label,
+/// provenance and the tier candidate differ.
+fn fn_shaped_item(
+    label: impl Into<String>,
+    provenance: Provenance,
+    sig: &hir::Ty,
+    tier_candidate: Option<&hir::Ty>,
+    expected: Option<&hir::Ty>,
+    edit_range: TextRange,
+) -> CompletionItem {
+    let written_params = match sig {
+        hir::Ty::Fn(f) => f.params.len().saturating_sub(1),
+        _ => 0,
+    };
+    let tier = type_tier(tier_candidate, expected);
+    let mut item = completion_item(
+        label,
+        CompletionItemKind::Function,
+        provenance,
+        tier,
+        Some(sig.display()),
+        edit_range,
+    );
+    item.text_edit.insert = fn_call_insert(&item.label, written_params, tier);
+    item
+}
+
 /// The fn-call snippet for a `fn`-typed candidate (a file item, a
 /// builtin, or an inherent member): `name($1)` when it takes parameters,
 /// `name()` when it's zero-arity — except when `tier` is 0, meaning the
@@ -1305,6 +1337,15 @@ fn dispatch_ty(ty: &hir::Ty) -> &hir::Ty {
 /// can take, read off the same [`hir::receiver_takes`] table inference
 /// uses, so the dot never offers what a call would refuse (or hides what
 /// it would accept).
+///
+/// A RIGID receiver has neither fields nor an impl to look in, and its
+/// bounds are the only thing that re-opens its dot (TR07) — so its offers
+/// come from [`hir::bound_dot_offers`], over the same enumeration
+/// bound-directed resolution picks from, narrowed by the same rule. Two
+/// divergences from what a call there would resolve to are deliberate and
+/// documented at that function: a nested body still gets offers for what
+/// the captured-dictionary reservation refuses, and a name carried by two
+/// bounds is offered by neither.
 fn field_items(
     db: &RootDatabase,
     file: SourceFile,
@@ -1372,26 +1413,37 @@ fn field_items(
                 continue;
             }
             let sig = hir::signature(db, member_id);
-            // The receiver does not count toward the written arity, so a
+            // A member is fn-shaped, so it may satisfy the position when
+            // CALLED — the same ranking a top-level fn gets. The receiver
+            // does not count toward the written arity, so a
             // nullary-through-the-dot member inserts `name()`.
-            let written_params = match &sig {
-                hir::Ty::Fn(f) => f.params.len().saturating_sub(1),
-                _ => 0,
-            };
-            let tier = type_tier(Some(&sig), expected);
-            let mut item = completion_item(
+            items.push(fn_shaped_item(
                 hir::item_loc(db, member_id).display_name().to_owned(),
-                CompletionItemKind::Function,
                 Provenance::Item,
-                // A member is fn-shaped, so it may satisfy the position
-                // when CALLED — the same ranking a top-level fn gets.
-                tier,
-                Some(sig.display()),
+                &sig,
+                Some(&sig),
+                expected,
                 edit_range,
-            );
-            item.text_edit.insert = fn_call_insert(&item.label, written_params, tier);
-            items.push(item);
+            ));
         }
+    }
+    // A RIGID receiver's bounds — the whole of its dot. Which requirements
+    // survive resolution's narrowing and this receiver's shape is decided
+    // by `bound_dot_offers`, in hir, deliberately: were the filtering done
+    // here, the offered set and the callable set would start drifting on
+    // day one. This side renders what it is handed.
+    for offer in hir::bound_dot_offers(db, item, ty) {
+        // A requirement is fn-shaped like a member, so it earns the same
+        // ranking and the same call-shaped insert (its receiver — `Self`
+        // — does not count toward the written arity either).
+        items.push(fn_shaped_item(
+            offer.name,
+            Provenance::Item,
+            &offer.sig,
+            Some(&offer.sig),
+            expected,
+            edit_range,
+        ));
     }
     // BUILTIN members (`"...".next_char`), offered on the same dot. Ranked
     // as a builtin, like the builtin *functions* in expression position —
@@ -1399,22 +1451,17 @@ fn field_items(
     // sorting it below theirs here says the same thing.
     for &builtin in hir::Builtin::members_of(ty) {
         let sig = hir::infer::builtin_type(builtin, file);
-        // The receiver does not count toward the written arity here either.
-        let written_params = match &sig {
-            hir::Ty::Fn(f) => f.params.len().saturating_sub(1),
-            _ => 0,
-        };
-        let tier = type_tier(None, expected);
-        let mut item = completion_item(
+        // The receiver does not count toward the written arity here
+        // either. `None` tier candidate: a builtin ranks by its band
+        // alone, not by matching its own type against the expectation.
+        items.push(fn_shaped_item(
             builtin.name(),
-            CompletionItemKind::Function,
             Provenance::Builtin,
-            tier,
-            Some(sig.display()),
+            &sig,
+            None,
+            expected,
             edit_range,
-        );
-        item.text_edit.insert = fn_call_insert(&item.label, written_params, tier);
-        items.push(item);
+        ));
     }
     items
 }
