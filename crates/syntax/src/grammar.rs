@@ -1024,7 +1024,7 @@ fn skip_arm_body(p: &mut Parser<'_>) {
 /// scrutinee's enum, enum segment dropped), and the retired unqualified
 /// `Name(bindings...)` (still parsed as a `VARIANT_PAT` so `validation`
 /// can hand back an honest "write `::Name(...)`" error — patterns have no
-/// calls). Plus a LITERAL pattern (`'(' =>`), and the *reserved* `..`
+/// calls). Plus a LITERAL pattern (`'(' =>`, `0 =>`), and the *reserved* `..`
 /// (parses, validation rejects it). A bare name with no `::` and no parens
 /// is *always* a binding now — never reinterpreted type-directed as a
 /// variant (see `infer.rs`'s `check_match_pat` `PatData::Bind` arm). No
@@ -1032,10 +1032,14 @@ fn skip_arm_body(p: &mut Parser<'_>) {
 fn match_pattern(p: &mut Parser<'_>) {
     match p.current() {
         // A literal pattern. EVERY literal kind parses here, not just the
-        // character one that has semantics yet: `match n { 0 => ... }` is a
-        // thing people write, and the superset parse lets `validation` hand
-        // back "integer literal patterns are not supported yet" instead of
-        // the parser's blank "expected a pattern".
+        // two scalars that have semantics yet: `match s { "a" => ... }` is
+        // a thing people write, and the superset parse lets `validation`
+        // hand back "string literal patterns are not supported yet"
+        // instead of the parser's blank "expected a pattern". A NEGATIVE
+        // literal is deliberately NOT in the superset: `-1` is an operator
+        // applied to a literal, and taking it here would be the first step
+        // of a pattern *expression* grammar — reserved with the rest of
+        // the pattern language.
         INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW => {
             let m = p.start();
             let lit = p.start();

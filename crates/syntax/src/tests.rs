@@ -9884,15 +9884,43 @@ fn reserved_escapes_say_reserved_not_unknown() {
 }
 
 #[test]
-fn non_character_literal_patterns_are_refused_by_kind() {
+fn non_scalar_literal_patterns_are_refused_by_kind() {
     // The grammar takes every literal kind so this message can name the
-    // one that was written; only `char` has pattern semantics so far.
+    // one that was written; the two SCALARS (`char`, integers) have
+    // pattern semantics — `0 => 1` is silent here now — and the other two
+    // still do not.
     check_errors(
         "static x = fn (n) { match n { 0 => 1, \"s\" => 2, true => 3, _ => 0, } };",
         expect![[r#"
-            30..31: integer literal patterns are not supported yet; only character literals (`'x'`) can be matched
-            38..41: string literal patterns are not supported yet; only character literals (`'x'`) can be matched
-            48..52: boolean literal patterns are not supported yet; only character literals (`'x'`) can be matched
+            38..41: string literal patterns are not supported yet; only character (`'x'`) and integer (`0`) literals can be matched
+            48..52: boolean literal patterns are not supported yet; only character (`'x'`) and integer (`0`) literals can be matched
+        "#]],
+    );
+}
+
+#[test]
+fn a_negative_literal_pattern_does_not_parse() {
+    // Negative literals are reserved (G19), and deliberately outside the
+    // superset parse, so the parser's own "expected a pattern" is the
+    // whole answer — pinned so granting them is a decision, not a drift.
+    check_errors(
+        "static x = fn (n) { match n { -1 => 1, _ => 0, } };",
+        expect![[r#"
+            30..31: expected a pattern
+        "#]],
+    );
+}
+
+#[test]
+fn a_range_pattern_does_not_parse() {
+    // Ranges are reserved for their own reason (G19: exhaustiveness, not
+    // spelling) and are not in the superset parse either, so `0..=9`
+    // cascades into the parser's ordinary recovery.
+    check_errors(
+        "static x = fn (n) { match n { 0..=9 => 1, _ => 0, } };",
+        expect![[r#"
+            31..33: expected `=>`
+            33..34: expected `,`
         "#]],
     );
 }

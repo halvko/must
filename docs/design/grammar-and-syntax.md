@@ -137,11 +137,13 @@
   scan is line-bounded, unlike a string's, so a half-typed quote costs one odd token on its
   own line instead of the rest of the file. Known and accepted: two odd quotes on one line
   pair up.
-- **G19** Literal patterns bind nothing; dispatch is a chain of equality tests in source
-  order, first match wins. A `char` match always needs a `_` arm, as policy, not arithmetic.
-  A repeated literal arm is an unreachable-arm warning keyed on the value, not on its
-  rendering. Every literal kind parses into the pattern node; validation names the kinds not
-  supported yet.
+- **G19** Literal patterns (char, integer) bind nothing; dispatch is a chain of equality
+  tests in source order, first match wins. A scalar match always needs a `_` arm, as policy,
+  not arithmetic: a `u8` is listable in 256 arms and still needs it. A repeated literal arm is
+  an unreachable-arm warning keyed on the value, not on its rendering. An integer literal
+  pattern is scrutinee-typed: no suffix, no default, so the scrutinee is its defining use and
+  out-of-range reuses the expression side's check. Every literal kind parses into the pattern
+  node; validation names the kinds not supported yet.
 - **G23** `unsafe fn(...)` is a type, not a modifier (T19): the same modifier slot on a fn type
   that `const` rides on a fn literal, so both spellings are one `FN_TYPE` node. The type
   grammar claims the keyword outright, since no other type can begin with `unsafe`, so a bare
@@ -213,6 +215,11 @@
   parses into the same node, means the same import, and answers to the same refusals — an
   annotation written on it is an import's annotation, and the initializer's own signature is
   dropped, which the message says rather than doing silently. **G22**
+- **Negative literal patterns** — `-1` is an operator applied to a literal, so taking it is
+  the first step toward a pattern-expression grammar; and it collides with G03/G04:
+  `_ => { 1 }` newline `- 1,` already parses as one arm. **Ranges** — they ask what order a
+  scalar has and whether listing can exhaust a type, which is exhaustiveness work, not
+  spelling. **G19**
 - **A null literal** — abstract memory has no address zero to spell. **Pointer ordering** —
   meaningless there. **G08**
 - **Region sigils that lost**: `'a` (a three-way contest for `'` with char literals and loop

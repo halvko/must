@@ -534,6 +534,44 @@ static main = fn () -> bool {
 }
 
 #[test]
+fn integer_literal_patterns_dispatch() {
+    // Integer patterns lower to the character lowering's own equality
+    // chain, so the backend learns nothing new — but the CONSTANTS are
+    // typed at the scrutinee's width, and a narrow one (`u8`) must be
+    // emitted and compared at that width like every other narrow integer
+    // on this target. Both widths in one program, so a wrong-width
+    // constant would show up as a mismatch against the interpreter.
+    check(
+        r#"
+static narrow = fn (b: u8) -> usize {
+    match b {
+        0 => 1,
+        255 => 2,
+        _ => 0,
+    }
+};
+static wide = fn (d: usize) -> usize {
+    match d {
+        0 => 10,
+        4294967296 => 20,
+        _ => 0,
+    }
+};
+static main = fn () -> bool {
+    if narrow(0) == 1 { print("zero\n") } else { print("bad\n") };
+    if narrow(255) == 2 { print("max\n") } else { print("bad\n") };
+    if narrow(9) == 0 { print("other\n") } else { print("bad\n") };
+    if wide(0) == 10 { print("wide zero\n") } else { print("bad\n") };
+    if wide(4294967296) == 20 { print("past 32 bits\n") } else { print("bad\n") };
+    if wide(1) == 0 { print("wide other\n") } else { print("bad\n") };
+    narrow(255) == 2
+}
+"#,
+        "main()",
+    );
+}
+
+#[test]
 fn character_const_arguments_monomorphize() {
     // `char` reaches the const-argument domain through the same machinery
     // `usize`/`str`/`bool` use, which means it also reaches the INSTANCE

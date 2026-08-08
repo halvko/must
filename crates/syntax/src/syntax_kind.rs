@@ -123,9 +123,9 @@ pub enum SyntaxKind {
     RETURN_EXPR,
     ELIDED_VARIANT_EXPR,
     VARIANT_PAT,
-    /// A literal in match-arm position (`'(' => ...`). Superset-parses
-    /// every literal kind; `validation` allows only the character one so
-    /// far.
+    /// A literal in match-arm position (`'(' => ...`, `0 => ...`).
+    /// Superset-parses every literal kind; `validation` allows the two
+    /// scalars (character, integer) so far.
     LITERAL_PAT,
     WILDCARD_PAT,
     BIND_PAT,

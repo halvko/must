@@ -3544,13 +3544,14 @@ static f = fn (s: Shape) {
 
 /// Every layer of the scrutinee ranking in one body: a `let` in the
 /// cursor's own scope, one further out, a fn parameter, a file item — and a
-/// non-enum local, which stays where every local has always sorted.
+/// local the lens does not reach, which stays where every local has always
+/// sorted.
 const SCRUTINEE_LAYERS: &str = r#"
 type Shape = enum { Circle(usize), Point };
 static ambient: Shape = Shape::Point;
 static f = fn (param: Shape) {
     let outer: Shape = param;
-    let noise: usize = 1;
+    let noise: str = "x";
     {
         let near: Shape = outer;
         match $0
@@ -3579,7 +3580,8 @@ fn completions_match_scrutinee_ranks_by_definition_scope_distance() {
         completion_sort_text(SCRUTINEE_LAYERS, "ambient"),
         "2_08_ambient"
     );
-    // Not enum-typed: no lift at all, the ordinary local tier.
+    // A `str` dispatches on nothing: no lift at all, the ordinary local
+    // tier.
     assert_eq!(
         completion_sort_text(SCRUTINEE_LAYERS, "noise"),
         "2_10_noise"
@@ -3590,16 +3592,33 @@ fn completions_match_scrutinee_ranks_by_definition_scope_distance() {
 fn completions_match_scrutinee_lifts_a_character_typed_local() {
     // The scrutinee slot's lift follows `hir::dispatches_on`, so it follows
     // it to `char` too: a `char` local leads the slot the way an enum one
-    // does, while a `usize` local stays on the flat local tier.
+    // does, while a `str` local stays on the flat local tier.
     const CHAR_SCRUTINEE: &str = r#"
 static f = fn () {
-    let n = 0;
+    let s = "x";
     let c = 'x';
     match $0
 };
 "#;
     assert_eq!(completion_sort_text(CHAR_SCRUTINEE, "c"), "2_00_c");
-    assert_eq!(completion_sort_text(CHAR_SCRUTINEE, "n"), "2_10_n");
+    assert_eq!(completion_sort_text(CHAR_SCRUTINEE, "s"), "2_10_s");
+}
+
+#[test]
+fn completions_match_scrutinee_lifts_an_integer_typed_local() {
+    // The same rule discharging one more case: integer literal patterns
+    // exist, so an integer local is a scrutinee that dispatches and leads
+    // the slot. Nothing in ide was taught this — `hir::dispatches_on`
+    // widened and the ranking followed.
+    const INT_SCRUTINEE: &str = r#"
+static f = fn () {
+    let s = "x";
+    let n: usize = 1;
+    match $0
+};
+"#;
+    assert_eq!(completion_sort_text(INT_SCRUTINEE, "n"), "2_00_n");
+    assert_eq!(completion_sort_text(INT_SCRUTINEE, "s"), "2_10_s");
 }
 
 #[test]
@@ -3613,7 +3632,7 @@ fn completions_match_scrutinee_does_not_suppress_the_normal_set() {
             outer Variable (Shape)
             param Variable (Shape)
             ambient Constant (Shape)
-            noise Variable (usize)
+            noise Variable (str)
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
             NextChar Enum (enum { Char(char, usize), End })
             ReadLineResult Enum (enum { Line(str), End })
@@ -4907,13 +4926,13 @@ fn completions_match_scrutinee_lifts_a_borrowed_enum_typed_param() {
     // layer next to the owned ones.
     let fixture_text = r#"
 type Shape = enum { Circle(usize), Point };
-static f = fn::<@a>(s: Shape.&::<@a>, n: usize) {
+static f = fn::<@a>(s: Shape.&::<@a>, t: str) {
     match $0
 };
 "#;
     assert_eq!(completion_sort_text(fixture_text, "s"), "2_00_s");
-    // The control: a local the lens does not reach keeps the flat tier.
-    assert_eq!(completion_sort_text(fixture_text, "n"), "2_10_n");
+    // The control: a param the lens does not reach keeps the flat tier.
+    assert_eq!(completion_sort_text(fixture_text, "t"), "2_10_t");
 }
 
 // ---- a bound is a completion source ------------------------------------

@@ -485,8 +485,9 @@ pub enum InferenceDiagnostic {
     },
     /// A variant pattern on a scrutinee that has no variants (a builtin, a
     /// struct type, a record, ...). What CAN match such a scrutinee is
-    /// type-dependent — a `char` takes literal patterns too — so the
-    /// message asks the type rather than asserting a blanket rule.
+    /// type-dependent — the scalars (`char`, the integer types) take
+    /// literal patterns too — so the message asks the type rather than
+    /// asserting a blanket rule.
     NonEnumScrutineeVariantPat {
         /// The enclosing match expression (where MIR traps).
         match_expr: ExprId,
@@ -509,7 +510,8 @@ pub enum InferenceDiagnostic {
     /// A literal pattern whose type is not the scrutinee's (`'x'` in a
     /// match on a `usize`). The pattern-side twin of
     /// [`InferenceDiagnostic::TypeMismatch`]: a literal pattern's type is
-    /// definite, so the pattern — not the scrutinee — is at fault.
+    /// definite (`{number}` for an integer one — a number and nothing
+    /// else), so the pattern — not the scrutinee — is at fault.
     PatLiteralTypeMismatch {
         /// The enclosing match expression (where MIR traps).
         match_expr: ExprId,
@@ -519,6 +521,17 @@ pub enum InferenceDiagnostic {
         expected: Ty,
         /// The literal's own type.
         found: Ty,
+    },
+    /// An integer literal pattern whose magnitude doesn't fit `u128` — the
+    /// pattern-side twin of the expression form's `integer literal is too
+    /// large` (reported by [`crate::file_diagnostics`]' body walk, which
+    /// sees only expressions). It names no value any scrutinee could hold,
+    /// so there is nothing to range-check it against.
+    PatIntLiteralTooLarge {
+        /// The enclosing match expression (where MIR traps).
+        match_expr: ExprId,
+        /// The pattern (carries the squiggle).
+        pat: PatId,
     },
     /// A qualified variant pattern of a *different* enum than the
     /// scrutinee's (`Other::X` in a match on a `Shape`).
@@ -818,16 +831,25 @@ pub enum InferenceDiagnostic {
     /// pinned (never defaulted — T01): annotate. The squiggle
     /// lands on the literal; the type renders `{number}` everywhere.
     CannotInferNumberType {
-        /// The literal expression.
+        /// The literal expression — for a PATTERN literal the enclosing
+        /// match, where MIR traps.
         expr: ExprId,
+        /// `Some` when the literal is a match-arm pattern (`0 =>`), which
+        /// then carries the squiggle instead.
+        pat: Option<PatId>,
     },
     /// A literal that does not fit the integer type its defining use
     /// resolved it to (`300` in `u8`; `-1` in any unsigned type). Reported
     /// at resolution, range-checked with the sign applied (`-128` fits
-    /// `i8`).
+    /// `i8`). A PATTERN literal's defining use is its scrutinee, so this
+    /// is also what `match n { 300 => ... }` gets on a `u8`.
     IntLiteralOutOfRange {
-        /// The literal expression (carries the squiggle and the trap).
+        /// The literal expression (carries the squiggle and the trap) —
+        /// for a PATTERN literal the enclosing match, where MIR traps.
         expr: ExprId,
+        /// `Some` when the literal is a match-arm pattern (`300 =>`),
+        /// which then carries the squiggle instead.
+        pat: Option<PatId>,
         /// The literal as written, minus applied (`"-129"`), so the
         /// message renders without the body in hand.
         literal: String,
@@ -1434,9 +1456,9 @@ impl MemberCandidate {
 pub enum UnreachableReason {
     /// The variant is already covered by an earlier arm.
     VariantCovered(String),
-    /// The same literal is already matched by an earlier arm — rendered
-    /// pre-quoted (`'('`), so the message needs no knowledge of which
-    /// literal kind it was.
+    /// The same literal is already matched by an earlier arm — already
+    /// rendered (see [`CoveredLiteral::render`]), so the message needs no
+    /// knowledge of which literal kind it was.
     LiteralCovered(String),
     /// An earlier `_`/binding arm already matches anything.
     AfterCatchAll,
@@ -1445,6 +1467,35 @@ pub enum UnreachableReason {
     /// The scrutinee is variant-typed; this arm matches a different
     /// variant of its enum.
     OtherVariant { scrutinee: Ty },
+}
+
+/// One literal value an earlier arm already matched — the duplicate-arm
+/// warning's key, and deliberately a VALUE rather than its rendering.
+///
+/// Rendering is a display choice (a character is quoted, an integer is
+/// not), and a display choice must never double as an equality key: the
+/// day two spellings of one value render differently, or two values render
+/// alike, the warning would go wrong SILENTLY. Written literals already
+/// normalize before they reach here (`1_0` and `007` are the same `u128`),
+/// and the first grant that would break a rendered key is already named —
+/// negative literals, where `-0` and `0` are one value and two strings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CoveredLiteral {
+    Char(char),
+    Int(u128),
+}
+
+impl CoveredLiteral {
+    /// How the value reads inside the unreachable-arm message —
+    /// backticked like every other name that family quotes (a covered
+    /// VARIANT reads `` `Circle` ``, so a covered value reads `` `0` ``
+    /// and `` `'a'` ``: one family, one shape).
+    fn render(&self) -> String {
+        match self {
+            CoveredLiteral::Char(value) => format!("`{value:?}`"),
+            CoveredLiteral::Int(value) => format!("`{value}`"),
+        }
+    }
 }
 
 impl InferenceDiagnostic {
@@ -1484,7 +1535,7 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::ForgetBoundUnsatisfied { expr, .. }
             | InferenceDiagnostic::FnConstArg { expr }
             | InferenceDiagnostic::TypeConstArgUnsupported { expr, .. }
-            | InferenceDiagnostic::CannotInferNumberType { expr }
+            | InferenceDiagnostic::CannotInferNumberType { expr, .. }
             | InferenceDiagnostic::IntLiteralOutOfRange { expr, .. }
             | InferenceDiagnostic::DerefNonPointer { expr, .. }
             | InferenceDiagnostic::IndexNonArray { expr, .. }
@@ -1533,6 +1584,7 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::PatNoSuchVariant { match_expr, .. }
             | InferenceDiagnostic::PatWrongEnum { match_expr, .. }
             | InferenceDiagnostic::PatLiteralTypeMismatch { match_expr, .. }
+            | InferenceDiagnostic::PatIntLiteralTooLarge { match_expr, .. }
             | InferenceDiagnostic::BindShadowsVariant { match_expr, .. }
             | InferenceDiagnostic::PatArity { match_expr, .. }
             | InferenceDiagnostic::PatPathError { match_expr, .. }
@@ -1564,6 +1616,7 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::PatNoSuchVariant { pat, .. }
             | InferenceDiagnostic::PatWrongEnum { pat, .. }
             | InferenceDiagnostic::PatLiteralTypeMismatch { pat, .. }
+            | InferenceDiagnostic::PatIntLiteralTooLarge { pat, .. }
             | InferenceDiagnostic::BindShadowsVariant { pat, .. }
             | InferenceDiagnostic::PatArity { pat, .. }
             | InferenceDiagnostic::PatPathError { pat, .. }
@@ -1574,6 +1627,11 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::PatNotRecord { pat, .. }
             | InferenceDiagnostic::PatUnknownType { pat, .. }
             | InferenceDiagnostic::PatNamedTypeMismatch { pat, .. } => Some(*pat),
+            // The number-literal pair is sited: an EXPRESSION literal has
+            // no pattern and squiggles itself, a PATTERN literal squiggles
+            // the pattern and anchors on the enclosing match.
+            InferenceDiagnostic::CannotInferNumberType { pat, .. }
+            | InferenceDiagnostic::IntLiteralOutOfRange { pat, .. } => *pat,
             _ => None,
         }
     }
@@ -1854,11 +1912,12 @@ impl InferenceDiagnostic {
                 ),
             },
             // What CAN match is type-dependent since literal patterns
-            // arrived: a `char` takes those too, so the old blanket "only
-            // `_` or a binding" became false for exactly one type.
+            // arrived: the scalars take those too, so the old blanket "only
+            // `_` or a binding" is false for exactly those.
             InferenceDiagnostic::NonEnumScrutineeVariantPat { scrutinee, .. } => {
                 let writable = match scrutinee {
                     Ty::Char => "`_`, a binding, or a character literal",
+                    Ty::Int(_) => "`_`, a binding, or an integer literal",
                     _ => "only `_` or a binding",
                 };
                 format!(
@@ -1876,6 +1935,11 @@ impl InferenceDiagnostic {
                 expected.display(),
                 found.display()
             ),
+            // Word-for-word the expression form's: one fact, one sentence,
+            // wherever the literal was written.
+            InferenceDiagnostic::PatIntLiteralTooLarge { .. } => {
+                crate::diag::INT_LITERAL_TOO_LARGE.to_owned()
+            }
             InferenceDiagnostic::BindShadowsVariant { item, name, .. } => format!(
                 "`{name}` binds the whole value; write `::{name}` (or `{}::{name}`) to match the variant",
                 item.display_name()
@@ -2442,6 +2506,13 @@ pub(crate) struct InferCtx<'a, 'db> {
     /// against its resolved type — or reports the no-defining-use
     /// diagnostic when nothing ever pinned it (never defaulted — T01).
     pending_number_literals: Vec<PendingNumberLiteral>,
+    /// Matches that already told the user their scrutinee has no known
+    /// type ([`InferenceDiagnostic::VariantPatUnknownScrutinee`], which
+    /// names the fix: annotate the scrutinee). A PATTERN literal in such a
+    /// match has no width for the same one reason, so [`Self::finish`]
+    /// stays quiet about it rather than saying it twice — the arms are two
+    /// symptoms, the missing annotation is one fact.
+    unresolved_scrutinees: rustc_hash::FxHashSet<ExprId>,
     /// Literals directly under a unary minus (`-5`): their range check
     /// applies the sign (`-128` fits `i8`; plain `128` does not). Filled by
     /// the [`crate::body::ExprData::Neg`] arm before its operand is
@@ -2513,13 +2584,19 @@ struct PendingObligation {
     nested: bool,
 }
 
-/// One integer literal awaiting its post-traversal range/pinned check.
+/// One integer literal awaiting its post-traversal range/pinned check —
+/// written in expression position or as a match-arm PATTERN, which is the
+/// same question either way (a literal has no width until a defining use
+/// gives it one, and a pattern's defining use is its scrutinee).
 struct PendingNumberLiteral {
-    /// The literal expression.
+    /// The literal expression — for a pattern, the enclosing match.
     expr: ExprId,
+    /// `Some` when the literal is a match-arm pattern.
+    pat: Option<PatId>,
     /// The literal's magnitude as written.
     value: u128,
-    /// Whether a direct unary minus negates it.
+    /// Whether a direct unary minus negates it. Always `false` for a
+    /// pattern: negative literal patterns don't parse (reserved).
     negated: bool,
     /// The literal's NUMBER-CLASS variable.
     var: Ty,
@@ -2610,6 +2687,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             pending_instantiations: Vec::new(),
             pending_empty_arrays: Vec::new(),
             pending_number_literals: Vec::new(),
+            unresolved_scrutinees: rustc_hash::FxHashSet::default(),
             negated_literals: rustc_hash::FxHashSet::default(),
             pending_obligations: Vec::new(),
             const_block_depth: 0,
@@ -3203,6 +3281,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             .diagnostics
                             .push(InferenceDiagnostic::IntLiteralOutOfRange {
                                 expr: literal.expr,
+                                pat: literal.pat,
                                 literal: rendered,
                                 ty: Ty::Int(kind),
                             });
@@ -3211,6 +3290,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 Ty::Infer(var)
                     if matches!(self.table.probe_value(var), TyVarValue::UnknownNumber) =>
                 {
+                    // A PATTERN literal in a match that already reported an
+                    // unresolvable scrutinee stays quiet: both arms are
+                    // symptoms of one missing annotation, and that
+                    // diagnostic already names where to write it.
+                    if literal.pat.is_some() && self.unresolved_scrutinees.contains(&literal.expr) {
+                        continue;
+                    }
                     let root = self.table.find(var);
                     if !reported_number_roots.contains(&root) {
                         reported_number_roots.push(root);
@@ -3218,6 +3304,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             .diagnostics
                             .push(InferenceDiagnostic::CannotInferNumberType {
                                 expr: literal.expr,
+                                pat: literal.pat,
                             });
                     }
                 }
@@ -3279,8 +3366,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 InferenceDiagnostic::NotCallable { ty, .. } => {
                     *ty = resolve_finished(self.table, ty);
                 }
-                // `found` is always a definite `char` — resolved for
-                // symmetry, so the pair can never drift apart.
+                // `found` is always definite (`char`, or `{number}` for an
+                // integer pattern) — resolved for symmetry, so the pair
+                // can never drift apart.
                 InferenceDiagnostic::PatLiteralTypeMismatch {
                     expected, found, ..
                 } => {
@@ -3412,6 +3500,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::ArrayConstArg { .. }
                 | InferenceDiagnostic::CannotInferNumberType { .. }
                 | InferenceDiagnostic::IntLiteralOutOfRange { .. }
+                | InferenceDiagnostic::PatIntLiteralTooLarge { .. }
                 | InferenceDiagnostic::BuiltinNotFirstClass { .. }
                 | InferenceDiagnostic::NotDotCallable { .. }
                 | InferenceDiagnostic::MemberWantsBorrowReceiver { .. }
@@ -3644,6 +3733,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 if let Some(value) = value {
                     self.pending_number_literals.push(PendingNumberLiteral {
                         expr,
+                        pat: None,
                         value: *value,
                         negated: self.negated_literals.contains(&expr),
                         var: var.clone(),
@@ -8699,13 +8789,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // byte-identical to what it was before this existed.
         //
         // A referent this match can DISPATCH on lifts the lens (the same
-        // `dispatches_on` mir asks): an enum or a variant by tag, a `char`
-        // by equality against a literal pattern — `match c { 'a' => ... }`
-        // means the same thing whether `c` is a `char` or a `char.&`, and
-        // the equality test becomes a read THROUGH the borrow, so an
-        // invalidated scrutinee is caught at the `match`. A `struct.&` or a
-        // `usize.&` scrutinee stays `Scrutinee::Other` holding the BORROW
-        // type, exactly as before, so its diagnostics do not move.
+        // `dispatches_on` mir asks): an enum or a variant by tag, a SCALAR
+        // (`char`, the integer types) by equality against a literal pattern
+        // — `match c { 'a' => ... }` means the same thing whether `c` is a
+        // `char` or a `char.&`, and the equality test becomes a read
+        // THROUGH the borrow, so an invalidated scrutinee is caught at the
+        // `match`. A `struct.&` or a `str.&` scrutinee stays
+        // `Scrutinee::Other` holding the BORROW type, exactly as before, so
+        // its diagnostics do not move.
         let mut lens = None;
         let mut classify = self.resolve_shallow(&scrut_ty);
         if let Ty::Borrow {
@@ -8773,8 +8864,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let mut covered = vec![false; n_variants];
         // The literal values already matched, for the duplicate-arm warning
         // — a plain list, not a set-cover: the domain is far too big to
-        // enumerate, so this answers "seen before?" and nothing else.
-        let mut covered_literals: Vec<char> = Vec::new();
+        // enumerate, so this answers "seen before?" and nothing else. One
+        // list serves every literal kind because it holds VALUES (see
+        // [`CoveredLiteral`]), and the arms of one match all share a
+        // scrutinee type, so two kinds never meet in it.
+        let mut covered_literals: Vec<CoveredLiteral> = Vec::new();
         let mut catch_all = false;
         let mut all_diverge = true;
         for arm in arms {
@@ -8814,12 +8908,17 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     }
                 }
                 Cover::Literal => {
-                    if let PatData::Char(value) = self.body.pats[arm.pat] {
+                    let value = match self.body.pats[arm.pat] {
+                        PatData::Char(value) => Some(CoveredLiteral::Char(value)),
+                        PatData::Int(Some(value)) => Some(CoveredLiteral::Int(value)),
+                        _ => None,
+                    };
+                    if let Some(value) = value {
                         if covered_literals.contains(&value) {
                             self.push_unreachable(
                                 expr,
                                 arm.pat,
-                                UnreachableReason::LiteralCovered(format!("{value:?}")),
+                                UnreachableReason::LiteralCovered(value.render()),
                             );
                         } else {
                             covered_literals.push(value);
@@ -8967,6 +9066,62 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             });
     }
 
+    /// One LITERAL pattern meeting its scrutinee. A literal pattern binds
+    /// nothing, so agreement is the whole check — and it is the same
+    /// question for every literal kind, which is why both arms ask it here
+    /// instead of each writing its own half of it. `true` means the arm
+    /// covers something; `false` means the mismatch has been reported.
+    ///
+    /// Two things this does that neither arm did on its own:
+    ///
+    /// **The scrutinee is re-read PER ARM**, not taken from the `Scrutinee`
+    /// the arm loop was opened with. A literal arm can PIN a still-unknown
+    /// scrutinee, so by the time a later arm runs, "unknown" may be stale —
+    /// and the arms that pin are exactly the ones that must notice. While
+    /// one literal kind existed this was unobservable; with two, an arm
+    /// loop that trusted the pre-loop classification would accept
+    /// `match d { 0 => …, 'a' => … }` on an unannotated `d` and lower a
+    /// `char` equality test against a number.
+    ///
+    /// **`adopt`'s answer is checked.** Adoption IS the agreement test: it
+    /// already knows that a number-class variable takes only integer
+    /// scalars, that `Ty::Error` is infectious and silent, and that `u8` is
+    /// not `u32`. Nothing here restates those rules, so nothing here can
+    /// drift away from unification's.
+    ///
+    /// `asserts` is what the pattern claims — a definite `Ty::Char`, or the
+    /// fresh number variable an integer literal claims. `renders` is how
+    /// that claim reads in the diagnostic, which for a number variable is
+    /// `{number}` rather than a variable's own blank `_`.
+    fn literal_pat_agrees(
+        &mut self,
+        match_expr: ExprId,
+        pat: PatId,
+        scrut: &Scrutinee,
+        asserts: &Ty,
+        renders: Ty,
+    ) -> bool {
+        let scrut_ty = match scrut {
+            Scrutinee::Enum(named) => Ty::Named(named.clone()),
+            Scrutinee::Variant(variant) => Ty::Variant(variant.clone()),
+            Scrutinee::Other(ty) | Scrutinee::Unknown(ty) => ty.clone(),
+            Scrutinee::Error => Ty::Error,
+        };
+        if self.adopt(&scrut_ty, asserts) {
+            return true;
+        }
+        let expected = self.resolve_shallow(&scrut_ty);
+        self.result
+            .diagnostics
+            .push(InferenceDiagnostic::PatLiteralTypeMismatch {
+                match_expr,
+                pat,
+                expected,
+                found: renders,
+            });
+        false
+    }
+
     /// Check one arm's pattern against the scrutinee: resolve variant
     /// names (type-directed), type the pattern's bindings, and report what
     /// the pattern covers.
@@ -8988,39 +9143,61 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         match self.body.pats[pat].clone() {
             PatData::Missing => Cover::Nothing,
             PatData::Wildcard => Cover::All,
-            // A character literal pattern. It binds nothing, so the whole
-            // check is agreement with the scrutinee — and unlike a variant
+            // A character literal pattern. It binds nothing, so agreement
+            // with the scrutinee is the whole check — and unlike a variant
             // pattern there is no name to resolve type-directed: `'x'` is a
             // `char` before anything is known about what it is matched
             // against, which is exactly why it can carry the blame itself.
             PatData::Char(_) => {
-                let found = Ty::Char;
-                let scrut_ty = match scrut {
-                    Scrutinee::Enum(named) => Ty::Named(named.clone()),
-                    Scrutinee::Variant(variant) => Ty::Variant(variant.clone()),
-                    Scrutinee::Other(ty) | Scrutinee::Unknown(ty) => ty.clone(),
-                    Scrutinee::Error => Ty::Error,
-                };
-                // An UNKNOWN scrutinee is pinned by the pattern, the same
-                // way a qualified variant pattern pins one: a literal
-                // pattern is construction's mirror image too, and `'x'`
-                // says the value is a `char`.
-                if matches!(scrut, Scrutinee::Unknown(_)) {
-                    self.adopt(&scrut_ty, &found);
-                    return Cover::Literal;
+                if self.literal_pat_agrees(match_expr, pat, scrut, &Ty::Char, Ty::Char) {
+                    // Recorded so `arm_kind` can ask whether inference
+                    // AGREED, exactly as the integer arm's width read does
+                    // — a refused literal arm must not lower a live test.
+                    self.result.type_of_pat.insert(pat, Ty::Char);
+                    Cover::Literal
+                } else {
+                    Cover::Nothing
                 }
-                let resolved = self.resolve_shallow(&scrut_ty);
-                if !matches!(resolved, Ty::Char | Ty::Error) {
+            }
+            // An integer literal pattern. It binds nothing either, so it
+            // asks the same agreement question — but what it ASSERTS is
+            // weaker: `0` has no type of its own the way `'x'` does, so it
+            // claims only "this is a number" and the SCRUTINEE is the
+            // defining use that picks the width (the DEFINING-USE ruling,
+            // applied where a pattern meets a value). The range check is
+            // then exactly the machinery an expression literal uses — one
+            // pending literal, one post-traversal answer, no suffixes and
+            // no default width.
+            PatData::Int(value) => {
+                // A magnitude no integer type could hold names no matchable
+                // value. It asserts nothing, so it pins nothing and there is
+                // nothing to range-check — checked BEFORE agreement for
+                // that reason: a literal with no value must not drag the
+                // scrutinee into the number class on its way out.
+                let Some(value) = value else {
                     self.result
                         .diagnostics
-                        .push(InferenceDiagnostic::PatLiteralTypeMismatch {
-                            match_expr,
-                            pat,
-                            expected: resolved,
-                            found,
-                        });
+                        .push(InferenceDiagnostic::PatIntLiteralTooLarge { match_expr, pat });
+                    return Cover::Nothing;
+                };
+                // The number-class variable IS the assertion: adopting it
+                // pins a still-unknown scrutinee to "a number" and takes
+                // the width from an already-pinned one, in one step.
+                let var = self.fresh_number_var();
+                if !self.literal_pat_agrees(match_expr, pat, scrut, &var, Ty::UnresolvedNumber) {
                     return Cover::Nothing;
                 }
+                self.pending_number_literals.push(PendingNumberLiteral {
+                    expr: match_expr,
+                    pat: Some(pat),
+                    value,
+                    // Reserved: a negative literal pattern does not parse.
+                    negated: false,
+                    var: var.clone(),
+                });
+                // MIR reads the width back from here to build the constant
+                // its equality test compares against.
+                self.result.type_of_pat.insert(pat, var);
                 Cover::Literal
             }
             PatData::Bind(binding) => {
@@ -9106,6 +9283,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             self.result.diagnostics.push(
                                 InferenceDiagnostic::VariantPatUnknownScrutinee { match_expr, pat },
                             );
+                            self.unresolved_scrutinees.insert(match_expr);
                             self.bind_error(&bindings);
                             return Cover::Nothing;
                         }
@@ -9379,7 +9557,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     fn bind_pat_error(&mut self, pat: PatId) {
         self.result.type_of_pat.insert(pat, Ty::Error);
         match self.body.pats[pat].clone() {
-            PatData::Missing | PatData::Wildcard | PatData::Char(_) => {}
+            PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int(_) => {}
             PatData::Bind(binding) => {
                 self.result.type_of_binding.insert(binding, Ty::Error);
             }
@@ -9416,7 +9594,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         match self.body.pats[pat].clone() {
             // A literal pattern is refutable, so `binding_pattern`'s
             // grammar never produces one here; defensive, like `Variant`.
-            PatData::Missing | PatData::Wildcard | PatData::Char(_) => {}
+            PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int(_) => {}
             PatData::Bind(binding) => {
                 self.result.type_of_binding.insert(binding, ty.clone());
             }
@@ -10133,11 +10311,13 @@ enum Cover {
     /// Exactly one variant, by declaration index.
     Variant(u32),
     /// ONE value of the scrutinee, over a domain the set-cover does not
-    /// enumerate — a character literal pattern. It is a real, reachable arm
-    /// (so it participates in after-a-catch-all deadness) but it never
-    /// contributes to exhaustiveness: `char` has 1_112_064 values, so
-    /// covering it by listing is not a thing a program does, and the `_`
-    /// arm stays required.
+    /// enumerate — a LITERAL pattern, character or integer. It is a real,
+    /// reachable arm (so it participates in after-a-catch-all deadness) but
+    /// it never contributes to exhaustiveness, and that is a POLICY, not an
+    /// arithmetic: a `u8` could be covered by listing 256 arms, and Must
+    /// still requires the `_`. Covering a scalar by enumeration is not a
+    /// thing a program does, so the rule reads the same at every width
+    /// instead of turning on where the domain stops being small.
     Literal,
     /// Nothing (broken or rejected pattern, or an unreachable variant).
     Nothing,

@@ -1293,10 +1293,10 @@ fn expression_position_items(
 
 /// Whether a value of this type can be a `match` scrutinee that dispatches
 /// — [`hir::dispatches_on`] behind one peeled borrow, so an enum, one of
-/// its variants (legal, and simply has one reachable arm), a `char` (whose
-/// literal patterns dispatch by equality), or a borrow of any of them,
-/// because `match` looks through a borrow. The scrutinee slot's test for
-/// its leading layers.
+/// its variants (legal, and simply has one reachable arm), a scalar
+/// (`char`, the integer types, whose literal patterns dispatch by
+/// equality), or a borrow of any of them, because `match` looks through a
+/// borrow. The scrutinee slot's test for its leading layers.
 ///
 /// A `fn` returning an enum does NOT dispatch: calling it would produce a
 /// scrutinee, and "one step of production" is the unbuilt layer. The
@@ -1308,8 +1308,8 @@ fn dispatches_as_scrutinee(db: &RootDatabase, ty: &hir::Ty) -> bool {
 
 /// One borrow layer peeled off, if there is one; the type itself otherwise.
 /// Whether what comes back dispatches is [`hir::dispatches_on`]'s call —
-/// `usize.&` peels to a `usize` that dispatches on nothing, and a borrow of
-/// a borrow peels to a `Borrow`, which is right: neither `infer_match` nor
+/// `str.&` peels to a `str` that dispatches on nothing, and a borrow of a
+/// borrow peels to a `Borrow`, which is right: neither `infer_match` nor
 /// mir lifts a lens there either.
 ///
 /// `match` projects through borrows, so `s: Opt::<T>.&::<@a>` covers `Opt`'s

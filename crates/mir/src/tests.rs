@@ -3172,7 +3172,7 @@ static f = fn(o: Opt) -> usize {
     );
 }
 
-// ---- character literal patterns: dispatch by equality chain -------------
+// ---- literal patterns: dispatch by equality chain ----------------------
 
 #[test]
 fn a_character_match_lowers_to_a_chain_of_equality_tests() {
@@ -3230,6 +3230,62 @@ static f = fn (c: char) -> usize {
 }
 
 #[test]
+fn an_integer_match_lowers_to_the_same_equality_chain() {
+    // Integer patterns reuse the character lowering WHOLE — no switch, no
+    // jump table, no new operation. The one difference is where the
+    // constant's width comes from: inference resolved the pattern against
+    // the scrutinee, so the `Eq` compares a typed `u8` against a typed
+    // `u8` even though nothing in the source wrote a width.
+    check_mir(
+        r#"
+static f = fn (b: u8) -> usize {
+    match b {
+        0 => 1,
+        7 => 2,
+        _ => 0,
+    }
+};
+"#,
+        expect![[r#"
+            item f:
+            fn b0(_1: u8) -> usize {
+              _0: usize  // return
+              _1: u8  // param b
+              _2: u8
+              _3: usize
+              _4: bool
+              _5: bool
+              bb0:
+                _2 = _1
+                _4 = Eq(_2, 0)
+                if _4 -> [then: bb2, else: bb3]
+              bb1:
+                _0 = _3
+                return
+              bb2:
+                _3 = 1
+                goto -> bb1
+              bb3:
+                _5 = Eq(_2, 7)
+                if _5 -> [then: bb4, else: bb5]
+              bb4:
+                _3 = 2
+                goto -> bb1
+              bb5:
+                _3 = 0
+                goto -> bb1
+            }
+            fn b1() -> fn(u8) -> usize {
+              _0: fn(u8) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
 fn a_character_match_without_a_catch_all_traps_at_the_fall_through() {
     // The chain runs out, and the last `else` edge is the deferred error —
     // carrying the exact message the editor already showed, like every
@@ -3265,6 +3321,51 @@ static f = fn (c: char) -> usize {
             }
             fn b1() -> fn(char) -> usize {
               _0: fn(char) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn an_integer_match_without_a_catch_all_traps_the_same_way() {
+    // The `_` arm is required at EVERY width — a policy, not an
+    // arithmetic — so a `u8` match that lists a value still falls through
+    // to the deferred trap, carrying the message the editor showed. The
+    // character twin's shape, byte for byte apart from the type.
+    check_mir(
+        r#"
+static f = fn (b: u8) -> usize {
+    match b {
+        0 => 1,
+    }
+};
+"#,
+        expect![[r#"
+            item f:
+            fn b0(_1: u8) -> usize {
+              _0: usize  // return
+              _1: u8  // param b
+              _2: u8
+              _3: usize
+              _4: bool
+              bb0:
+                _2 = _1
+                _4 = Eq(_2, 0)
+                if _4 -> [then: bb2, else: bb3]
+              bb1:
+                _0 = _3
+                return
+              bb2:
+                _3 = 1
+                goto -> bb1
+              bb3:
+                _3 = trap "this `match` does not cover every possible `u8`; add a `_` arm" -> bb1
+            }
+            fn b1() -> fn(u8) -> usize {
+              _0: fn(u8) -> usize  // return
               bb0:
                 _0 = fn b0
                 return
@@ -4890,6 +4991,104 @@ static f = fn::<@a>(key: usize, val: usize, map: Map.&mut::<@a>, slot: usize.&mu
             711..714: using `map` mutably here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
               note at 643..646: this borrow was created here
               note at 747..750: and it is still used here
+        "#]],
+    );
+}
+
+#[test]
+fn a_borrowed_integer_match_tests_through_the_deref_too() {
+    // The lens generalises with the pattern kind: an integer referent
+    // dispatches by equality exactly as a character one does, so the test
+    // reads THROUGH the borrow here for the same reason, and the binder
+    // still takes the borrow itself.
+    check_mir(
+        r#"
+static f = fn::<@a>(d: usize.&::<@a>) -> usize {
+    match d {
+        0 => 1,
+        other => 0,
+    }
+};
+"#,
+        expect![[r#"
+            item f:
+            fn b0(_1: usize.&) -> usize {
+              _0: usize  // return
+              _1: usize.&  // param d
+              _2: usize.&
+              _3: usize
+              _4: bool
+              _5: usize.&  // other
+              bb0:
+                _2 = _1
+                _4 = Eq(_2.*, 0)
+                if _4 -> [then: bb2, else: bb3]
+              bb1:
+                _0 = _3
+                return
+              bb2:
+                _3 = 1
+                goto -> bb1
+              bb3:
+                _5 = _2
+                _3 = 0
+                goto -> bb1
+            }
+            fn b1() -> fn(usize.&) -> usize {
+              _0: fn(usize.&) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn a_refused_literal_arm_lowers_no_test() {
+    // A literal arm inference REFUSED is dead, the same way a wrong-enum
+    // variant arm is: no equality test between mismatched types is
+    // planted, and the arm body lowers into an orphan block nothing
+    // targets (`bb2`). Both literal kinds answer this identically —
+    // `'a'` against a `usize` used to emit a live `Eq(_2, 'a')` in the
+    // ENTRY block, ill-typed MIR behind nothing. The match's own value
+    // trap is unchanged: the refusal is still what the program dies of.
+    check_mir(
+        r#"
+static f = fn (d: usize) -> usize {
+    match d {
+        'a' => 1,
+        _ => 0,
+    }
+};
+"#,
+        expect![[r#"
+            item f:
+            fn b0(_1: usize) -> usize {
+              _0: usize  // return
+              _1: usize  // param d
+              _2: usize
+              _3: usize
+              _4: usize
+              bb0:
+                _2 = _1
+                _3 = 0
+                goto -> bb1
+              bb1:
+                _4 = trap "type mismatch: this `match` is on a `usize`, and `char` cannot match one" -> bb3
+              bb2:
+                _3 = 1
+                goto -> bb1
+              bb3:
+                _0 = _4
+                return
+            }
+            fn b1() -> fn(usize) -> usize {
+              _0: fn(usize) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
         "#]],
     );
 }

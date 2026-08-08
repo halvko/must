@@ -74,12 +74,12 @@
   matching an owned place copies or moves as before; no new pattern grammar. The scrutinee's
   flavour decides, all the way down. Each payload binder gets a fresh region bounded by the
   scrutinee's (bounded, not shortened, so it can take the parent's whole region, which is what
-  makes an `as_ref`-shaped member writable). The tag test — or, for a `char` referent, the
-  literal-equality test — is a read through the borrow, so an invalidated scrutinee is caught
-  at the match; a match that dispatches on nothing performs no tag test, and so no access.
-  The rule moves by design: "a referent this match can dispatch on lifts the lens" is defined
-  by which patterns exist, so every future pattern-kind grant also changes the lens for
-  borrowed scrutinees of that type.
+  makes an `as_ref`-shaped member writable). The tag test — or, for a scalar referent (`char`,
+  the integer types), the literal-equality test — is a read through the borrow, so an
+  invalidated scrutinee is caught at the match; a match that dispatches on nothing performs no
+  tag test, and so no access. The rule moves by design: "a referent this match can dispatch on
+  lifts the lens" is defined by which patterns exist, so every future pattern-kind grant also
+  changes the lens for borrowed scrutinees of that type.
 - **M14** Loans die when their root moves on, and the safety contract is the static check
   alone. The interpreter's tree is depth (raw pointers, freed allocations, paths the checker
   over-approximates) and is not what makes a safe borrow safe. The rule: no loan may still be
@@ -225,6 +225,9 @@
   what the language refuses is open. **M14**
 - **A borrowed `str` representation lands** — copying one out of a borrow stops being a copy,
   and the model needs a byte-range path element it deliberately lacks (T17). **M11**
+- **A borrowed scrutinee whose referent is unknown where the match is checked** — the lift is
+  decided there, so the pattern is refused against the borrow and the message names the
+  referent it later resolved to; re-decide the lift once the referent resolves. **M13**
 - **The no-reservation fork** — relaxing is pure UB removal; it was ruled ahead of the
   experiment that would justify it. **M10**
 - **Covariance is wanted** — the three rules in M09 keep it a one-query change. It revives the

@@ -329,7 +329,7 @@ pub struct Param {
     pub type_ref: Option<TypeRef>,
 }
 
-/// A pattern. Match-arm patterns (`Wildcard`/`Bind`/`Variant`/`Char`) stay
+/// A pattern. Match-arm patterns (`Wildcard`/`Bind`/`Variant`/`Char`/`Int`) stay
 /// deliberately flat (no nesting, or-patterns or guards — those land later
 /// as one coherent pattern-language feature); `Record` and
 /// `Newtype` are `let`/parameter patterns, construction's mirror image, and
@@ -353,11 +353,21 @@ pub enum PatData {
     /// value (`Foo(inner)`).
     Bind(BindingId),
     /// `'x'` — a character literal pattern: matches exactly this scalar
-    /// value, binds nothing. The only literal pattern so far (`validation`
-    /// rejects the others, which parse into the same node), so it carries a
-    /// bare `char`; the day another literal kind becomes a pattern this
-    /// generalizes to a [`LiteralData`].
+    /// value, binds nothing. Kept a bare `char` rather than the
+    /// [`LiteralData`] this doc once promised a second literal kind would
+    /// bring: a `LiteralData` pattern would admit `Str`/`Bool` arms that
+    /// nothing accepts, and a character literal that lowers at all already
+    /// names its value (a malformed one lowers as [`PatData::Missing`]),
+    /// which is exactly what [`PatData::Int`] cannot promise.
     Char(char),
+    /// `0` — an integer literal pattern: matches exactly this value, binds
+    /// nothing. Unlike [`PatData::Char`] it has NO type of its own — the
+    /// SCRUTINEE decides it, exactly as context decides an integer
+    /// literal's type in expression position; a literal that cannot
+    /// inhabit that type gets the ordinary out-of-range diagnostic. `None`
+    /// when the magnitude doesn't fit `u128`, the same partial reading
+    /// [`LiteralData::Int`] keeps and for the same reason.
+    Int(Option<u128>),
     /// `Circle(r)` / `Shape::Circle(r)`: a variant pattern, construction's
     /// mirror image. The variant resolves against the scrutinee's enum
     /// (bare) or the named enum (qualified) during inference.
@@ -413,9 +423,10 @@ impl Body {
     /// Every binding one pattern introduces, flattened in source order —
     /// the `let`/parameter counterpart of a scope's entries: a `Bind` binds
     /// itself, a `Record` its (possibly renamed) fields, a `Newtype`
-    /// whatever its inner pattern binds, and `Wildcard`/`Missing`/`Char`/`Variant`
-    /// (match-only in binding position; never produced there) bind nothing
-    /// beyond what's already covered by their own call sites.
+    /// whatever its inner pattern binds, and
+    /// `Wildcard`/`Missing`/`Char`/`Int`/`Variant` (match-only in binding
+    /// position; never produced there) bind nothing beyond what's already
+    /// covered by their own call sites.
     pub fn pat_bindings(&self, pat: PatId) -> Vec<(String, BindingId)> {
         let mut out = Vec::new();
         self.collect_pat_bindings(pat, &mut out);
@@ -424,7 +435,7 @@ impl Body {
 
     fn collect_pat_bindings(&self, pat: PatId, out: &mut Vec<(String, BindingId)>) {
         match &self.pats[pat] {
-            PatData::Missing | PatData::Wildcard | PatData::Char(_) => {}
+            PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int(_) => {}
             PatData::Bind(binding) => out.push((self.bindings[*binding].name.clone(), *binding)),
             PatData::Variant { bindings, .. } => {
                 out.extend(bindings.iter().map(|&b| (self.bindings[b].name.clone(), b)));
@@ -979,16 +990,22 @@ impl LowerCtx {
             ast::Pat::WildcardPat(it) => self.alloc_pat(PatData::Wildcard, it.syntax()),
             // Reserved syntax (validation rejects it): nothing to match.
             ast::Pat::RestPat(it) => self.alloc_pat(PatData::Missing, it.syntax()),
-            // Only the character literal has pattern semantics; the other
-            // literal kinds parse into this node so `validation` can name
-            // them, and lower as broken (their diagnostic is already
-            // written, and there is nothing to match on).
+            // The two SCALAR literals have pattern semantics; string and
+            // boolean literals parse into this node so `validation` can
+            // name them, and lower as broken (their diagnostic is already
+            // written, and there is nothing to match on). A malformed
+            // character literal lowers as broken for the same reason its
+            // expression form does — it names no value at all.
             ast::Pat::LiteralPat(it) => {
-                let value = match it.literal().and_then(|lit| lit.kind()) {
-                    Some(ast::LiteralKind::Char(token)) => syntax::char_literal_value(token.text()),
-                    _ => None,
+                let data = match it.literal().and_then(|lit| lit.kind()) {
+                    Some(ast::LiteralKind::Char(token)) => syntax::char_literal_value(token.text())
+                        .map_or(PatData::Missing, PatData::Char),
+                    Some(ast::LiteralKind::Int(token)) => {
+                        let text = token.text().replace('_', "");
+                        PatData::Int(text.parse().ok())
+                    }
+                    _ => PatData::Missing,
                 };
-                let data = value.map_or(PatData::Missing, PatData::Char);
                 self.alloc_pat(data, it.syntax())
             }
             ast::Pat::BindPat(it) => {

@@ -293,9 +293,16 @@ impl LowerCtx<'_> {
                 InferenceDiagnostic::EmptyArrayNeedsAnnotation { .. } => {}
                 // A literal with no width (no defining use) or one that
                 // doesn't fit its resolved width: the value cannot be
-                // produced — a value trap right on the literal.
-                InferenceDiagnostic::CannotInferNumberType { expr }
-                | InferenceDiagnostic::IntLiteralOutOfRange { expr, .. } => {
+                // produced — a value trap right on the literal. For a
+                // PATTERN literal `expr` is the enclosing match instead
+                // (a pattern is not a value; what cannot be produced is
+                // the match's), exactly as the broken-pattern family
+                // above keys itself.
+                InferenceDiagnostic::CannotInferNumberType { expr, .. }
+                | InferenceDiagnostic::IntLiteralOutOfRange { expr, .. }
+                | InferenceDiagnostic::PatIntLiteralTooLarge {
+                    match_expr: expr, ..
+                } => {
                     self.value_traps.insert(*expr, diag.message());
                 }
                 // An array value in a const-arg position: like `FnConstArg`
@@ -1109,7 +1116,10 @@ impl LowerCtx<'_> {
                                 // bind (a hole lowers as `Bind` above, and
                                 // a refutable pattern never reaches a
                                 // `let` — neither occurs in practice).
-                                PatData::Wildcard | PatData::Missing | PatData::Char(_) => {}
+                                PatData::Wildcard
+                                | PatData::Missing
+                                | PatData::Char(_)
+                                | PatData::Int(_) => {}
                                 // A destructuring pattern: stash the
                                 // initializer's value in a synthetic local,
                                 // then destructure out of it — the field
@@ -1633,7 +1643,7 @@ impl LowerCtx<'_> {
         // exactly the code it ran before this existed.
         //
         // The condition is the same predicate `infer_match` used —
-        // `hir::dispatches_on`, which a `char` referent satisfies by
+        // `hir::dispatches_on`, which a SCALAR referent satisfies by
         // literal equality just as an enum does by tag — so a `struct.&`
         // scrutinee still reaches the catch-all-only lowering as the
         // BORROW it is, and its trap message does not move.
@@ -1686,11 +1696,12 @@ impl LowerCtx<'_> {
                 }
                 .message();
                 // LITERAL arms dispatch by TESTING, not by table lookup:
-                // `char`'s value space is a million wide and nothing about
-                // it is dense, so a switch would be a table of holes. A
-                // chain of `==` tests reuses the machinery equality and
-                // `if` already have — no new terminator, no new operation
-                // for eval or the backend to learn.
+                // an arm list over a scalar is not dense at any width, so
+                // a switch would be a table of holes. A chain of `==` tests
+                // reuses the machinery equality and `if` already have — no
+                // new terminator, no new operation for eval or the backend
+                // to learn, and integer patterns landed inside it without
+                // adding one.
                 if arms
                     .iter()
                     .any(|arm| matches!(self.arm_kind(arm.pat, None), ArmKind::Literal(_)))
@@ -2022,9 +2033,11 @@ impl LowerCtx<'_> {
         Operand::Copy(dest.into())
     }
 
-    /// How an arm participates in dispatch: a variant arm (keyed by index,
-    /// only when its variant belongs to `scrut_enum`), a catch-all, or
-    /// dead (broken pattern, wrong enum — already diagnosed).
+    /// How an arm participates in dispatch: a literal arm (keyed by the
+    /// value it tests against), a variant arm (keyed by index, only when
+    /// its variant belongs to `scrut_enum`), a catch-all, or dead (broken
+    /// pattern, wrong enum, a literal pattern inference refused or whose
+    /// width never resolved — all already diagnosed).
     fn arm_kind(&self, pat: PatId, scrut_enum: Option<&ItemLoc>) -> ArmKind {
         match &self.body.pats[pat] {
             PatData::Missing => ArmKind::Dead,
@@ -2032,7 +2045,35 @@ impl LowerCtx<'_> {
             // A bare bind always binds the whole scrutinee — never a
             // variant (see `check_match_pat`), so always a catch-all.
             PatData::Bind(_) => ArmKind::CatchAll,
-            PatData::Char(c) => ArmKind::Literal(Const::Char(*c)),
+            // Both literal arms ask inference whether it AGREED, exactly
+            // as a variant arm asks `variant_of_pat`: a refused pattern is
+            // a dead arm, never a live test between mismatched types. For
+            // `char` the recorded type IS the whole answer (the token
+            // carries the value); a REFUSED `'a'` against a `usize`
+            // scrutinee therefore lowers no `Eq` at all.
+            PatData::Char(c) => match self.infer.type_of_pat.get(pat) {
+                Some(Ty::Char) => ArmKind::Literal(Const::Char(*c)),
+                _ => ArmKind::Dead,
+            },
+            // An integer literal pattern's WIDTH comes from inference too
+            // (the scrutinee is its defining use), so the same read
+            // answers agreement and builds the constant at once — the read
+            // `ExprData::Literal` does for an expression literal, from the
+            // pattern-side map. An unresolved or out-of-range one already
+            // carries a value trap on the match, so a dead arm here is
+            // never the whole story.
+            PatData::Int(value) => {
+                let iv = value.and_then(|value| match self.infer.type_of_pat.get(pat) {
+                    Some(&Ty::Int(kind)) => i128::try_from(value)
+                        .ok()
+                        .and_then(|value| hir::IntValue::new(kind, value)),
+                    _ => None,
+                });
+                match iv {
+                    Some(iv) => ArmKind::Literal(Const::Int(iv)),
+                    None => ArmKind::Dead,
+                }
+            }
             PatData::Variant { .. } => match self.infer.variant_of_pat.get(pat) {
                 Some(vt) if scrut_enum.is_none_or(|d| *d == vt.decl) => ArmKind::Variant(vt.index),
                 _ => ArmKind::Dead,
@@ -2068,7 +2109,7 @@ impl LowerCtx<'_> {
         match &self.body.pats[pat].clone() {
             // A literal pattern binds nothing: the test IS the whole
             // pattern (see `lower_match_literals`).
-            PatData::Missing | PatData::Wildcard | PatData::Char(_) => {}
+            PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int(_) => {}
             PatData::Bind(binding) => {
                 // A bare bind always binds the whole scrutinee (never
                 // narrowed to a variant), so it just aliases the value.
@@ -2183,7 +2224,7 @@ impl LowerCtx<'_> {
                     addressable: false,
                 })
             }
-            PatData::Variant { .. } | PatData::Char(_) => {
+            PatData::Variant { .. } | PatData::Char(_) | PatData::Int(_) => {
                 // Refutable shapes; never produced by `binding_pattern`'s
                 // grammar. Defensive.
                 b.alloc_local(LocalData {
@@ -2214,7 +2255,7 @@ impl LowerCtx<'_> {
         origin: ExprId,
     ) {
         match &self.body.pats[pat].clone() {
-            PatData::Missing | PatData::Wildcard | PatData::Char(_) => {}
+            PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int(_) => {}
             PatData::Bind(binding) => {
                 let local = self.alloc_binding_local(b, *binding);
                 b.push_assign(local, Rvalue::Use(value.clone()), origin);

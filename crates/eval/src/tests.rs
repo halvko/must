@@ -512,6 +512,43 @@ static main = fn () -> usize {
 }
 
 #[test]
+fn an_integer_match_dispatches_on_the_value() {
+    // The same equality chain, over the other scalar — including through
+    // a borrow, where the test is a read of the pointee place rather than
+    // of a detached copy. The widths come from the scrutinees, and two
+    // different ones (`u8`, `usize`) run the same written literals.
+    check_run(
+        r#"
+static classify = fn (b: u8) -> usize {
+    match b {
+        0 => 1,
+        7 => 2,
+        255 => 3,
+        _ => 0,
+    }
+};
+static borrowed = fn::<@a>(d: usize.&::<@a>) -> usize {
+    match d {
+        0 => 5,
+        _ => 9,
+    }
+};
+static main = fn () -> usize {
+    let zero = 0;
+    let three = 3;
+    classify(0) + classify(7) * 10 + classify(255) * 100 + classify(9) * 1000
+        + borrowed(zero.&) * 10000
+        + borrowed(three.&) * 100000
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 950321
+        "#]],
+    );
+}
+
+#[test]
 fn next_char_walks_a_string_and_ends_at_its_end() {
     // The index-threading walk: each step gives the scalar value AT `i`
     // and the index of the NEXT boundary, and `i == len` answers `End`.

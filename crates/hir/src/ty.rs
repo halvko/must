@@ -1668,9 +1668,9 @@ pub fn type_underlying<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<Ty> {
 }
 
 /// Whether a `match` on a value of this (shallow-resolved) type dispatches
-/// on it — an enum declaration, one of its variants, or `char`, whose
-/// literal patterns dispatch by equality rather than by a tag. Everything
-/// else can only be matched by a catch-all.
+/// on it — an enum declaration, one of its variants, or a scalar (`char`,
+/// the integer types), whose literal patterns dispatch by equality rather
+/// than by a tag. Everything else can only be matched by a catch-all.
 ///
 /// The one predicate every pass asks: inference uses it to decide whether
 /// a BORROWED scrutinee lifts the projection lens (M13 — `match` projects
@@ -1684,7 +1684,7 @@ pub fn dispatches_on(db: &dyn Db, ty: &Ty) -> bool {
     match ty {
         Ty::Named(named) => enum_variants(db, named.decl.to_id(db)).is_some(),
         Ty::Variant(_) => true,
-        Ty::Char => true,
+        Ty::Char | Ty::Int(_) => true,
         _ => false,
     }
 }

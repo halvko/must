@@ -737,8 +737,8 @@ Like every deferred error, running code that actually reaches an uncovered
 variant crashes with exactly the squiggle's message. Arms that can never
 run (after a catch-all, a variant already covered) are warnings, not
 errors. On a non-enum scrutinee only `_` or a binding can match (for
-now) — `char` is the one exception, whose literals are patterns too
-(see "Characters" below).
+now) — the scalars are the exception, since their literals are patterns
+too (see "Scalar literals are patterns" below).
 
 *Matching a BORROW projects through it.* A scrutinee of type
 `Opt::<T>.&::<@a>` dispatches on the enum behind the borrow, and each payload
@@ -801,18 +801,43 @@ on one variant pays nothing for the enum it belongs to. Arms naming the
 `match` is pure control flow, so it is const-legal — fine inside `const
 fn` bodies and `const { ... }` blocks.
 
-*Character literals are patterns* (`'(' => ...`) — see "Characters" below.
-They dispatch by equality rather than by a tag, and a `char` scrutinee
-always needs a `_` arm.
+*Scalar literals are patterns* — characters (`'(' => ...`, see "Characters"
+below) and integers (`0 => ...`). They dispatch by equality rather than by
+a tag, and a scalar scrutinee always needs a `_` arm. That is a rule, not
+an arithmetic: a `u8` could be covered by listing 256 arms and Must still
+asks for the `_`, because covering a scalar by enumeration is not a thing
+a program does.
+
+An integer literal pattern *takes its type from the scrutinee*, exactly as
+an integer literal in expression position takes its type from context.
+There are no suffixes and no default width: the same written `0` is a `u8`
+in one match and an `i64` in the next, and a literal the scrutinee's type
+cannot hold is the ordinary out-of-range error (`300` matched against a
+`u8`). A match on a value whose own type nothing pins gets the ordinary
+"no defining use" answer on the pattern — nothing defaults.
+
+```must
+static classify = fn (d: usize) -> str {
+    match d {
+        0 => "zero",
+        1 => "one",
+        _ => "many",
+    }
+};
+```
 
 Not in v1 (landing later as one coherent pattern-language feature): nested
-patterns, or-patterns (`0 | 1`), guards, literal patterns of the *other*
-kinds (integer, string, boolean — they parse, so the error names the kind
-that was written rather than shrugging), `if match`, `match ... else`, the
-statement form `match x => pat;`, and record patterns — though `..` is
-already reserved in pattern position for them. Nested patterns are the one
-whose absence is visible above: reaching into nested data through a borrow
-is spelled as two matches until they land.
+patterns, or-patterns (`0 | 1`), guards, *negative* literals (`-1` is an
+operator applied to a literal, so taking it here would be the first step
+of a pattern *expression* grammar), *ranges* (`0..=9` — a separate
+question, and a deeper one: it asks what order a scalar has, and whether
+listing ranges could exhaust a type and so retire the `_` arm), literal
+patterns of the *other* kinds (string, boolean — they parse, so the error
+names the kind that was written rather than shrugging), `if match`,
+`match ... else`, the statement form `match x => pat;`, and record
+patterns — though `..` is already reserved in pattern position for them.
+Nested patterns are the one whose absence is visible above: reaching into
+nested data through a borrow is spelled as two matches until they land.
 
 == Loops
 
