@@ -617,3 +617,32 @@ pub fn wildcard_skips_param(param: &str) -> String {
         forget_advice(param)
     )
 }
+
+/// A block-tailed expression continued by an infix or postfix token that
+/// sits on a LATER LINE than the `}` it continues.
+///
+/// Nothing here is wrong. A statement whose expression ends in `}` closes
+/// itself, and the expression grammar stays greedy across that brace, so
+/// `if c { } - 1` is one subtraction — the language never guesses which
+/// reading was meant. But when the continuation moved to its own line, the
+/// text says "new statement" and the grammar says "same expression", and
+/// only the author knows which. Hence a warning that names BOTH ways out:
+/// the separator that splits and the affirmation that keeps one expression.
+///
+/// The message names the separator in every case; whether it is also
+/// OFFERED as a quick fix is a narrower question, and
+/// [`crate::SplitPoint::could_begin_one`] answers it — where the split
+/// reading is not a program, the affirm route is the whole answer and the
+/// sentence still says the true thing about what the separator would do.
+///
+/// `split` supplies that separator because it is not always `;`: between
+/// match arms it is `,`, and a `;` there is a parse error.
+pub(crate) fn block_tail_continued(op: &str, split: crate::SplitPoint) -> String {
+    let (separator, started) = (split.separator(), split.started());
+    format!(
+        "this `{op}` continues the expression that ends with the `}}` above, \
+         rather than starting a new {started}; write `{separator}` after that \
+         `}}` to split them, or move the `{op}` up onto the same line (or \
+         parenthesize the whole expression) if one expression is what you meant"
+    )
+}

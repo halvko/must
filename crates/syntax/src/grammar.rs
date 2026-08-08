@@ -2136,7 +2136,9 @@ fn expr_stmt_or_tail(p: &mut Parser<'_>) {
         // the mirror image, and was accepted: a statement that genuinely
         // STARTS with a continuation-shaped token (`-x`, `(f)(x)`, `[a][0]`)
         // right after a block-tail statement needs an explicit `;` between
-        // the two to force the split.
+        // the two to force the split. Continuing across a LINE BREAK is
+        // warned about — not refused — one layer out, where trivia is
+        // visible (`hir::file_diagnostics`).
         if !value_closed_itself(p) {
             p.error_after_prev(SEMICOLON);
         }

@@ -14,6 +14,13 @@
 - **G02** `;` terminates, `,` separates (trailing comma tolerated), and a value ending in `}`
   needs no separator.
 - **G24** Evaluation order is left-to-right source order everywhere.
+- **G04** The cross-line continuation lint. G01's price: a statement that genuinely starts
+  with `-`, `(` or `[` after a block-tail statement needs an explicit `;` above it. A warning
+  fires on exactly that: a `}`-ended expression continued by a continuation token with a
+  newline between them, only where a separator could have ended it (expression statement,
+  block tail, match arm). On the same line there is no warning; the operator next to the `}`
+  is the affirmation. The newline is looked for in trivia, so a block comment spanning lines
+  also fires it. The split is offered as a fix only where the split reading is a program.
 - **G06** Turbofish everywhere. `::<...>` applies const and type arguments in every
   position; `[...]` means `Index` on a value. Each sigil names one operation. Turbofish
   is always spelled, and type-vs-const is routed by form, never by position, so trees
@@ -240,6 +247,8 @@
   grouping (`(...)` is unit). Inherent to the design; for now the retired prefix spelling
   still builds such a type, and its migration reports without offering the rewrite, since
   no postfix text means the same thing. **G08 G26**
+- **Negative integer literal patterns land** — revisit G04's arm-position fix gate, because a
+  token could then begin a pattern. **G04 G19**
 - **A safe-to-call import gets a declaration-side vouch spelling** — G22's required `unsafe`
   is conservative, blocked on that marker rather than rejected. **G22**
 - **`only` as a global keyword becomes a problem** — it cannot be an identifier anywhere,
@@ -249,6 +258,7 @@
   ergonomics: ask why inference could not get there rather than putting the argument back on
   the operation. **Patterns grow type ascription** — a pattern is neither a type mention nor
   an operation, so G11 is silent there today. **G11**
+- **The syntax layer gets a severity channel** — move G04's lint there. **G04**
 - **Parked gaps**, none ruled: `&&`/`||`; comparison chaining (parses, then type-errors, where
   non-associativity would be clearer); loop labels; compound assignment;
   assignment-as-expression; record rest; match-arm record patterns; a line-continuation

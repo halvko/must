@@ -158,6 +158,24 @@ static twice = fn (n: usize) -> usize {
 Drop that `;` and `(n)` stops being a new statement: it *calls* the `if` above
 it.
 
+Whenever a continuation like this sits on a different line from the `}` it
+continues — the shape that reads as two statements and parses as one — the
+compiler warns and names both ways out: insert the `;` to split them, or move
+the operator up onto the `}`'s line, or wrap the whole expression in
+parentheses, to say that one expression was meant. On the same line it stays
+quiet: written next to the `}`, a continuation is obviously deliberate.
+
+The `;` also comes as a quick fix — but only where splitting would leave a
+program. `-`, `(` and `[` can begin a statement, so those get the button; a `*`
+or a `.` cannot begin anything, so there the warning explains and leaves the
+edit to you.
+
+The same warning covers match arms, where `,` plays the `;`'s part — without it
+`_ => { 1 }` on one line and `- 1,` on the next is a single arm whose body is
+`{ 1 } - 1`, which type-checks and says nothing. No quick fix is offered there
+yet: no *continuation* token can begin a pattern, so the `,` would only trade
+the confusion for a parse error.
+
 == Variable declarations
 
 `let` is the only variable-declaration form. Possible sugars — an

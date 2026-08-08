@@ -538,6 +538,51 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         });
     }
 
+    // ---- the cross-line block-tail lint ---------------------------------
+    //
+    // A statement whose expression ends in `}` closes itself (the grammar's
+    // brace rule), and the expression grammar stays GREEDY across that
+    // brace: `if c { } - 1` is one subtraction, not a statement and a
+    // negation. That is the accepted price of never guessing — but when the
+    // continuing token sits on a LATER LINE than the `}` it continues, the
+    // text reads as two statements and parses as one expression, and only
+    // the author knows which was meant. So: a warning, and the two ways out.
+    // A match arm is the same trap with `,` for `;` — see `SplitPoint`.
+    //
+    // It lives here rather than in `syntax::validation` for one reason —
+    // validation speaks only errors, and this is not an error. It needs
+    // nothing else this layer has: no item tree, no types, only trivia.
+    for node in parse(db, file).syntax_node().descendants() {
+        let Some((brace, op, split)) = cross_line_block_tail(&node) else {
+            continue;
+        };
+        diagnostics.push(Diagnostic {
+            range: op.text_range(),
+            severity: Severity::Warning,
+            message: diag::block_tail_continued(op.text(), split),
+            // ONE machine-applicable fix, the likelier intent: split — and
+            // only where the split reading IS a program. A `.` or a `*`
+            // cannot begin a statement, and no continuation token can begin
+            // a pattern today, so inserting the separator there would take
+            // a file that compiles to one that does not parse. The warning
+            // still stands (both readings genuinely exist); what is withheld
+            // is the button, and the message's affirm route is then the
+            // whole answer. See `SplitPoint::could_begin_one`.
+            //
+            // The other way out — affirming the expression by moving the
+            // operator up or parenthesizing — is named in the message
+            // rather than offered, because a `Diagnostic` carries one fix.
+            fix: split.could_begin_one(op.kind()).then(|| syntax::Fix {
+                label: format!("Insert `{}` after `}}`", split.separator()),
+                edits: vec![syntax::TextEdit {
+                    range: TextRange::empty(brace.text_range().end()),
+                    insert: split.separator().to_owned(),
+                }],
+            }),
+            related: Vec::new(),
+        });
+    }
+
     // Duplicate definitions, discovered by `file_scope` (the analysis that
     // decides first-wins also knows about the losers); only the range
     // attachment happens here.
@@ -3360,6 +3405,163 @@ fn in_signature_position(node: &syntax::SyntaxNode) -> bool {
         }
     }
     in_param_or_ret
+}
+
+/// The expression shapes `grammar::expr_bp`'s loop builds by CONTINUING an
+/// already-parsed expression: the one that was there becomes the new node's
+/// leading operand. Exactly the set whose first token can be the `}` of the
+/// statement a reader thought had ended.
+fn continues_a_leading_operand(kind: syntax::SyntaxKind) -> bool {
+    use syntax::SyntaxKind::*;
+    matches!(
+        kind,
+        BIN_EXPR | CALL_EXPR | INDEX_EXPR | FIELD_EXPR | DEREF_EXPR | ADDR_OF_EXPR | BORROW_EXPR
+    )
+}
+
+/// If `node` continues a block-tailed operand across a line break: the `}`
+/// that ended the operand, the token that continued it, and the separator
+/// that would have split the two (see [`continuation_split_point`]).
+///
+/// The trivia is what is being asked about, so the scan walks TOKENS: any
+/// newline between the `}` and the continuation counts, whether it is in
+/// whitespace or inside a comment — `{ 3 } /* two
+/// lines */ - 2` reads as two statements just as strongly as a bare line
+/// break does, and block comments nest and span lines.
+fn cross_line_block_tail(
+    node: &syntax::SyntaxNode,
+) -> Option<(syntax::SyntaxToken, syntax::SyntaxToken, SplitPoint)> {
+    if !continues_a_leading_operand(node.kind()) {
+        return None;
+    }
+    // The LEADING operand, not any operand: `1 + if c { }` is continued by
+    // nothing, and the prefix spellings `&raw x` / `&mut x` share their node
+    // kinds with the postfix ones. Both are told apart by where the operand
+    // starts — a leading one starts where its parent does.
+    let operand = node.first_child()?;
+    if operand.text_range().start() != node.text_range().start() {
+        return None;
+    }
+    let brace = operand.last_token()?;
+    if brace.kind() != syntax::SyntaxKind::R_BRACE {
+        return None;
+    }
+    let split = continuation_split_point(node)?;
+    let mut crossed_a_line = false;
+    let mut next = brace.next_token();
+    let op = loop {
+        let token = next?;
+        if !token.kind().is_trivia() {
+            break token;
+        }
+        crossed_a_line |= token.text().contains('\n');
+        next = token.next_token();
+    };
+    crossed_a_line.then_some((brace, op, split))
+}
+
+/// What the next line looked like it was starting — everything the lint has
+/// to say differently between the two positions hangs off this.
+///
+/// An ENUM rather than a pair of strings, because nothing ties a separator
+/// to the thing it separates: `SplitPoint { separator: ";", started: "arm" }`
+/// would be constructible, and it is precisely the wrong answer (a `;`
+/// between match arms is a parse error). One value, three questions, no way
+/// to disagree with itself — and a third position, if one is ever added, has
+/// to answer all three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SplitPoint {
+    /// An expression statement, or a block's tail.
+    Statement,
+    /// A match arm.
+    Arm,
+}
+
+impl SplitPoint {
+    /// The separator that would have ended the first one.
+    pub(crate) fn separator(self) -> &'static str {
+        match self {
+            SplitPoint::Statement => ";",
+            SplitPoint::Arm => ",",
+        }
+    }
+
+    /// The noun for what the next line looked like it was starting.
+    pub(crate) fn started(self) -> &'static str {
+        match self {
+            SplitPoint::Statement => "statement",
+            SplitPoint::Arm => "arm",
+        }
+    }
+
+    /// Whether `continuation` could BEGIN one of these — the gate on
+    /// offering the split as a machine-applicable fix.
+    ///
+    /// The warning is always right that the two readings exist; the FIX is
+    /// only right when the split reading is a program. Most continuation
+    /// tokens cannot start anything: inserting the separator before a `*`
+    /// or a `.` turns a compiling file into a parse error, which is the
+    /// same objection this type already answers for `;`-between-arms — so
+    /// it is answered the same way, once, here.
+    ///
+    /// Statement position admits exactly the design's named price list:
+    /// `-` (negation), `(` (a parenthesized expression), `[` (an array
+    /// literal). Arm position admits NOTHING today — no continuation token
+    /// can begin a pattern — so every arm firing is a deliberate multi-line
+    /// body and the message's affirm route is the only honest answer. That
+    /// changes when negative literal patterns land (see
+    /// `grammar-and-syntax.md`'s Re-evaluate when).
+    pub(crate) fn could_begin_one(self, continuation: syntax::SyntaxKind) -> bool {
+        use syntax::SyntaxKind::*;
+        match self {
+            SplitPoint::Statement => matches!(continuation, MINUS | L_PAREN | L_BRACKET),
+            SplitPoint::Arm => false,
+        }
+    }
+}
+
+/// Where a continued expression sits, when that is somewhere a SEPARATOR
+/// could have ended it instead: an expression statement, a block's tail, or
+/// a match arm. That is the whole scope of the ambiguity — a place where the
+/// reader can believe the `}` finished something and the next line started
+/// something else.
+///
+/// A match arm is here because the identical trap lives there one level
+/// over: `match n { _ => { 1 }` newline `- 1, }` is ONE arm whose body is
+/// `{ 1 } - 1`, not an arm and a stray `- 1`, and the `,` that would have
+/// split them is exactly the `;`'s counterpart. (It also stands where
+/// negative literal patterns will land.) The item and member levels are
+/// deliberately NOT here, each for its own reason: what can follow an item
+/// value is another item, and every item starts with a keyword; what can
+/// follow a member's value is another member's NAME (or a reserved
+/// `type`/`const` member's keyword), the impl's `}`, and after that the
+/// group's next element head — `impl`, `unsafe` or `for` — or the group's
+/// own `}`. None of them is a continuation token, so no reader there can
+/// be misled.
+///
+/// In a value position (`let x = if c { }` newline `- 1;`) the continuation
+/// is the only reading there is, and an operator-led continuation line is
+/// ordinary formatting — `None`. Climbs through further continuations first,
+/// so a chain (`if c { }` newline `- 1 - 2`) asks the question once, about
+/// the whole chain.
+fn continuation_split_point(node: &syntax::SyntaxNode) -> Option<SplitPoint> {
+    let mut outermost = node.clone();
+    while let Some(parent) = outermost.parent() {
+        if continues_a_leading_operand(parent.kind())
+            && parent.text_range().start() == outermost.text_range().start()
+        {
+            outermost = parent;
+            continue;
+        }
+        return match parent.kind() {
+            syntax::SyntaxKind::EXPR_STMT | syntax::SyntaxKind::BLOCK_EXPR => {
+                Some(SplitPoint::Statement)
+            }
+            syntax::SyntaxKind::MATCH_ARM => Some(SplitPoint::Arm),
+            _ => None,
+        };
+    }
+    None
 }
 
 /// Whether this fn literal IS an item's (or member's) value — the thing
