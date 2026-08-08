@@ -5117,11 +5117,13 @@ static main = fn() -> usize { outer::<usize>(4) };
 
 // ---- safe borrows: the dynamic aliasing check ---------------------------
 //
-// Static exclusivity (loan liveness) is not built yet. Until it exists the
-// interpreter answers the same question dynamically, which is the house
-// pattern — the unsafe substrate gets checked at runtime while the static
-// story is built. The launch configuration is the ruled one: Tree Borrows'
-// structure with NO `Reserved` phase, so `&mut` starts `Unique`.
+// Static exclusivity is the loan checker's (`mir::loans`); the interpreter
+// answers the same question dynamically, as depth. Every SAFE program here
+// that traps is one the checker refuses too, and the trap is what stops it
+// when it is run regardless; the ones that mint a raw pointer check clean
+// (minting is no access, M08) and trap only here — that is the depth the
+// fence does not reach. The launch configuration is the ruled one: Tree
+// Borrows' structure with NO `Reserved` phase, so `&mut` starts `Unique`.
 
 #[test]
 fn a_borrow_reads_and_writes_the_place_it_borrows() {
@@ -5204,14 +5206,14 @@ fn many_shared_borrows_of_one_place_are_fine() {
 
 #[test]
 fn a_nested_literal_frame_escape_is_caught_dynamically() {
-    // Known gap in the static checker (see hir's
-    // `a_nested_fn_literals_own_frame_escape_is_not_yet_caught` and
-    // `docs/main.typ`'s "What is checked, and what is checked yet"): a
-    // borrow returned at `@_` from a nested literal never reaches a
+    // A borrow returned at `@_` from a nested literal never reaches a
     // universal of the ENCLOSING item, so the outlives module's escape
-    // check has nothing to reject. The interpreter still catches it,
-    // because the borrowed local's storage really is gone once the
-    // nested literal's own frame returns.
+    // check has nothing to reject (hir's
+    // `a_nested_fn_literals_own_frame_escape_is_not_the_escape_checks_finding`);
+    // the loan checker refuses it, because the loan is live where the
+    // literal's body returns. Run regardless, the interpreter catches it
+    // too: the borrowed local's storage really is gone once the nested
+    // literal's own frame returns.
     check_run(
         "static main = fn () -> usize {\n\
              let f = fn () -> usize.&::<@_> { let mut n = 7; n.& };\n\
@@ -5288,6 +5290,33 @@ fn writing_a_disjoint_sibling_field_does_not_disturb_a_borrow() {
         "f()",
         expect![[r#"
             => 59
+        "#]],
+    );
+}
+
+#[test]
+fn a_sibling_field_access_through_a_nested_pointer_runs_clean() {
+    // The static fence accepts this shape (mir's loan tests: the copy of
+    // `bb.*` into the temp `bb.*.*` is spelled through is no access);
+    // the tree agrees, `bb.*.*.f` and `bb.*.*.g` being disjoint paths
+    // through the same root.
+    check_run(
+        "type P = struct { f: usize, g: usize };\n\
+         static f = fn::<@a, @b>(bb: P.&mut::<@a>.&mut::<@b>) -> usize {\n\
+             let x = bb.*.*.g.&mut;\n\
+             let y = bb.*.*.f;\n\
+             bb.*.*.f = 3;\n\
+             x.* = x.* + y;\n\
+             x.* + bb.*.*.f\n\
+         };\n\
+         static main = fn () -> usize {\n\
+             let mut p: P = P(struct { f = 1, g = 2 });\n\
+             let mut q = p.&mut;\n\
+             f(q.&mut)\n\
+         };",
+        "main()",
+        expect![[r#"
+            => 6
         "#]],
     );
 }

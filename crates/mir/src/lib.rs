@@ -22,6 +22,7 @@
 //! carry [`ExprId`] provenance, and ranges are recovered through the body
 //! source map only at the diagnostic/debugger boundary.
 
+pub mod loans;
 mod lower;
 pub mod pretty;
 #[cfg(test)]
@@ -151,6 +152,20 @@ pub enum ProjElem {
     /// deref of a source chain is an ordinary read that produces the
     /// pointer), but the machine resolves it at any position.
     Deref,
+}
+
+/// Whether two projections from one root can name overlapping storage:
+/// one is a prefix of the other, element for element. The STATIC rule,
+/// conservative over MIR's canonical projections — an element index is
+/// not a static fact, so any two [`ProjElem::Index`] steps overlap where
+/// the interpreter's resolved indices would not. Element-granular, like
+/// the interpreter's own rule: nothing names less than one element.
+pub fn paths_overlap(a: &[ProjElem], b: &[ProjElem]) -> bool {
+    a.iter().zip(b).all(|(x, y)| match (x, y) {
+        (ProjElem::Field(x), ProjElem::Field(y)) => x == y,
+        (ProjElem::Index(_), ProjElem::Index(_)) | (ProjElem::Deref, ProjElem::Deref) => true,
+        _ => false,
+    })
 }
 
 impl From<LocalId> for Place {
@@ -515,3 +530,5 @@ impl MirDiagnostic {
 pub fn mir_lowered<'db>(db: &'db dyn Db, item: ItemId<'db>) -> MirLowered {
     lower::lower_item(db, item)
 }
+
+pub use loans::{AccessKind, LoanDiagnostic, StillUsed, loan_check};

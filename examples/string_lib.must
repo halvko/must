@@ -56,11 +56,12 @@ type String = struct {
         // out of `s`, which is a fresh, ordinary value the caller owns.
         //
         // What CATCHES the program that gets the shape right and the order
-        // wrong is dynamic, like every aliasing check today: consuming a
-        // value invalidates every borrow of it exactly as writing over it
-        // does, and a read through one afterwards is detected undefined
-        // behavior naming both sites. Static loan liveness is a later arc;
-        // the region is the discipline, the interpreter is the proof.
+        // wrong is the loan checker: consuming a value invalidates every
+        // borrow of it exactly as writing over it does, and a read through
+        // one afterwards is refused before the program runs, naming both
+        // sites. The interpreter detects the same thing dynamically, as
+        // depth: the region is the discipline, the checker is the fence,
+        // the interpreter is the proof.
         //
         // When the str-view fork lands on a borrowed representation, this
         // return type grows the region and the copy disappears; nothing

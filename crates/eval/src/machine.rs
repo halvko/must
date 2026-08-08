@@ -1289,7 +1289,8 @@ impl<'db, M: Mode> Machine<'db, M> {
         // The write half of the aliasing check. A write through a borrow
         // invalidates every borrow it is foreign to, and is itself
         // undefined behavior if this borrow was already invalidated —
-        // exclusivity, enforced dynamically until the loan checker lands.
+        // exclusivity, the dynamic half; `mir::loans` refuses the safe
+        // shapes before they run.
         self.aliasing_access(provenance, alloc, &path, Access::Write, loc, origin)?;
         let allocation = self.writable_allocation(alloc, loc, origin)?;
         match project_path_mut(&mut allocation.value, &path) {
@@ -3594,11 +3595,12 @@ fn root_origin(db: &dyn Db, loc: &ItemLoc) -> Option<(ItemLoc, ExprId)> {
 
 // ---- the aliasing tree (Tree Borrows structure, no-Reserved launch) -----
 //
-// Static exclusivity — which borrows may be live at once — is not built
-// yet (no loan liveness). Until it exists the INTERPRETER answers the
-// same question dynamically, which is the house pattern: the unsafe
-// substrate is checked at runtime while the static story is built
-// (`alloc_array`'s UB detection got exactly this treatment).
+// Static exclusivity — which borrows may be live at once — is the loan
+// checker's (`mir::loans`), and it is the safety contract for safe
+// borrows. The tree answers the same question dynamically, as DEPTH: it
+// reaches raw pointers, freed allocations and the paths the checker
+// over-approximates, and it is what stops a refused program that runs
+// anyway (a refusal plants no trap).
 //
 // The structure is Tree Borrows': every safe borrow mints a NODE that is a
 // child of the node its parent pointer speaks through, and an access

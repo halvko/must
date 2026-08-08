@@ -158,12 +158,14 @@ impl Analysis {
             })
             .collect();
         // MIR is a diagnostic producer like any other analysis (it finds
-        // what only the CFG can see — today: unsupported captures). Same
-        // aggregator pattern: findings travel with the query value, only
-        // ranges attach here. Lives above hir because hir can't see mir.
+        // what only the CFG can see — unsupported captures, and the loan
+        // liveness half of the borrow checker). Same aggregator pattern:
+        // findings travel with the query value, only ranges attach here.
+        // Lives above hir because hir can't see mir.
         for &item in hir::file_item_ids(&self.db, file) {
             let lowered = mir::mir_lowered(&self.db, item);
-            if lowered.diagnostics.is_empty() {
+            let loans = mir::loan_check(&self.db, item);
+            if lowered.diagnostics.is_empty() && loans.is_empty() {
                 continue;
             }
             let (_, source_map) = hir::body_with_source_map(&self.db, item);
@@ -177,6 +179,36 @@ impl Analysis {
                     message: diag.message(),
                     fix: None,
                     related: Vec::new(),
+                });
+            }
+            // A stale-loan refusal names three sites and the squiggle can
+            // sit on only one. The companions carry the interpreter's own
+            // vocabulary ("this borrow was created here"), so the static
+            // refusal and the dynamic detection read as one story told at
+            // two different times.
+            for diag in loans {
+                let Some(ptr) = source_map.node_for_expr(diag.expr()) else {
+                    continue;
+                };
+                let range = ptr.text_range();
+                let related = diag
+                    .related()
+                    .into_iter()
+                    .filter_map(|(expr, message)| {
+                        let ptr = source_map.node_for_expr(expr)?;
+                        (ptr.text_range() != range).then(|| RelatedInfo {
+                            file,
+                            range: ptr.text_range(),
+                            message: message.to_owned(),
+                        })
+                    })
+                    .collect();
+                diagnostics.push(Diagnostic {
+                    range,
+                    severity: Severity::Error,
+                    message: diag.message(),
+                    fix: None,
+                    related,
                 });
             }
         }

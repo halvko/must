@@ -1,7 +1,8 @@
 //! The outlives module: region inference and the universal-region check.
 //!
-//! This is the FIRST shipped module of the borrow checker, and it is
-//! deliberately the whole of one stage rather than a slice of several. Its
+//! This is the CFG-free half of the borrow checker — the other half, loan
+//! liveness, is `mir::loans` — and it is deliberately the whole of that
+//! half rather than a slice of several. Its
 //! entire output is a list of diagnostics — nothing it computes is consumed
 //! by lowering, layout, selection or identity, because the
 //! specialization-soundness law says regions may reject programs and never
@@ -29,25 +30,24 @@
 //!    that region has to reach a universal's end, the borrow outlives the
 //!    storage it points at — the local is gone by then.
 //!
-//! # What it does NOT do, and why that is not a gap
+//! # Where the CFG-free half ends
 //!
-//! It does not build a point set (which locations each region covers) and
-//! it does not read the MIR CFG. Under NLL a region's value is
-//! `points ∪ free regions`, propagated by subset — and subset propagation
-//! can never turn a point element into a free-region element. So the
-//! free-region half of every region's value, which is *exactly* what both
-//! checks above ask about, is computed here precisely, not approximately.
+//! Under NLL a region's value is `points ∪ free regions`, propagated by
+//! subset — and subset propagation can never turn a point element into a
+//! free-region element. So the free-region half of every region's value,
+//! which is *exactly* what both checks above ask about, is computed here
+//! precisely without a point set and without reading the CFG: for these
+//! two questions the CFG cannot change an answer, so this module does not
+//! consult it.
 //!
-//! Points earn their keep for the OTHER half of borrow checking — how long
-//! each loan is live, and therefore which pairs of loans conflict. Static
-//! loan liveness is not built yet; until it lands, the interpreter detects
-//! exclusivity violations dynamically.
-//!
-//! The CFG is not consulted here, because for the two checks this module
-//! owns it cannot change an answer. The seam is preserved rather than
-//! skipped: static loan liveness, when it lands, adds point elements to
-//! each region's value and a liveness-seeding pass over MIR, and nothing
-//! here changes shape.
+//! Points are the OTHER half of borrow checking — how long each loan is
+//! live, and therefore which accesses conflict with it. That half is
+//! flow-sensitive by nature and lives where the CFG is, in `mir::loans`
+//! (X06, X07). The seam between the two is [`region_cover`]: the outlives
+//! graph this module builds from the recorded obligations, closed under
+//! transitivity, which the MIR pass reads as "a region is live wherever a
+//! region it covers is live, and everywhere if it covers a universal".
+//! One graph definition ([`build_solver`]), read by both halves.
 
 use base_db::Db;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -158,12 +158,12 @@ impl OutlivesDiagnostic {
     }
 }
 
-/// One element a region's value may contain. This stage has exactly one
+/// One element a region's value may contain. This solver has exactly one
 /// kind: the END of a universal region — the point in the caller past
-/// which that region's guarantee no longer holds. Static loan liveness,
-/// when it lands, adds `Point(BlockId, usize)` here and seeds it from MIR
-/// liveness; every consumer below is written as a set operation so that
-/// addition changes no logic.
+/// which that region's guarantee no longer holds. The point half of a
+/// region's value (which CFG locations it covers) is never materialized
+/// here: `mir::loans` answers it by liveness over [`RegionCover`], so no
+/// element for it is needed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 enum RegionElement {
     /// `end(@a)`, identified by the universal's binder index.
@@ -320,8 +320,7 @@ impl Solver {
                 // Stricter than the set model can express, on a seam the
                 // module already owns: the principled fix is a
                 // `RegionElement` that can represent a meet, which is a
-                // region-value change and belongs with the point elements
-                // static loan liveness adds.
+                // region-value change.
                 self.meet_checks
                     .push((sup_node, nodes.clone(), origin, reason));
                 self.edges[sup_node.0 as usize].push(Edge {
@@ -406,6 +405,44 @@ impl Solver {
         longer == shorter || self.declared[longer as usize].contains(&shorter)
     }
 
+    /// The outlives graph closed under transitivity, as [`RegionCover`]
+    /// reads it: per node, every node its value must contain.
+    ///
+    /// A meet in the shorter position (`sup ⊇ ⋂ parts`) is closed over
+    /// EACH part here, where the value solver above intersects them. That
+    /// is the refusing direction for the cover's consumer — a loan region
+    /// counted as covering more is live at more points — and the meet's
+    /// own check stays with [`Solver::solve`]'s `meet_checks`.
+    fn cover(&self) -> Vec<Vec<u32>> {
+        let mut adjacency: Vec<Vec<u32>> = self
+            .edges
+            .iter()
+            .map(|edges| {
+                edges
+                    .iter()
+                    .flat_map(|edge| match &edge.kind {
+                        EdgeKind::From(sub) => vec![sub.0],
+                        EdgeKind::Meet(nodes) => nodes.iter().map(|node| node.0).collect(),
+                    })
+                    .collect()
+            })
+            .collect();
+        for (universal, bounds) in self.declared.iter().enumerate() {
+            adjacency[universal].extend(bounds.iter().copied());
+        }
+        transitive_closure(&adjacency)
+            .into_iter()
+            .enumerate()
+            .map(|(node, reached)| {
+                let mut covers: Vec<u32> = reached.into_iter().collect();
+                covers.push(node as u32);
+                covers.sort_unstable();
+                covers.dedup();
+                covers
+            })
+            .collect()
+    }
+
     /// The lowest-numbered universal whose end this region has to cover, if
     /// any — the escape check's whole question.
     ///
@@ -461,13 +498,15 @@ fn transitive_closure(bounds: &[Vec<u32>]) -> Vec<FxHashSet<u32>> {
     closed
 }
 
-/// Borrow-check one body's regions. A pure per-body query: it reads this
-/// item's inference result, its binder and its body, and nothing from any
-/// other body. That isolation is enforced by the query's signature rather
-/// than by convention — no cross-body facts can enter because there is
-/// nowhere for them to come from.
-#[salsa::tracked(returns(ref))]
-pub fn outlives_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<OutlivesDiagnostic> {
+/// The region graph of one body, edges recorded and not yet solved: the
+/// signature's universals seeded with their declared bounds, plus every
+/// obligation inference recorded. Shared by [`outlives_check`] (which
+/// solves it for universal ends) and [`region_cover`] (which closes it).
+fn build_solver<'db>(
+    db: &'db dyn Db,
+    item: ItemId<'db>,
+    infer: &'db crate::infer::InferenceResult,
+) -> Solver {
     let generics = crate::item_data(db, item)
         .as_ref()
         .map(|data| data.generics.clone())
@@ -494,7 +533,6 @@ pub fn outlives_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<OutlivesDi
         );
     }
 
-    let infer = crate::infer::infer(db, item);
     let mut solver = Solver::new(universal_names, declared_bounds, infer.region_count);
     for RegionConstraint {
         sup,
@@ -505,6 +543,65 @@ pub fn outlives_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<OutlivesDi
     {
         solver.add(sup, sub, *origin, *reason);
     }
+    solver
+}
+
+/// The outlives relation of one body, closed under transitivity: for every
+/// region node — the signature's universals first (at their binder index),
+/// then the body's existential variables — every node its value must
+/// contain, itself included.
+///
+/// The one region graph the borrow checker has, seen by both of its halves.
+/// [`outlives_check`] solves it for universal ends; `mir::loans` reads it
+/// as liveness: a region is live at a point wherever a region it covers is
+/// live there, and at every point if it covers a universal, because a
+/// signature's region outlives the whole body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegionCover {
+    universal_count: u32,
+    covers: Vec<Vec<u32>>,
+}
+
+impl RegionCover {
+    /// The graph node a region denotes, or `None` for a region that is not
+    /// a single solvable node (a join, an error, the erased region).
+    pub fn node(&self, region: &Region) -> Option<u32> {
+        match region {
+            Region::Param { index, .. } if *index < self.universal_count => Some(*index),
+            Region::Var(RegionVar(var)) => Some(self.universal_count + var),
+            _ => None,
+        }
+    }
+
+    /// Every node `node`'s value must contain, sorted; reflexive.
+    pub fn covers(&self, node: u32) -> &[u32] {
+        self.covers.get(node as usize).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether `node` is one of the signature's universals.
+    pub fn is_universal(&self, node: u32) -> bool {
+        node < self.universal_count
+    }
+}
+
+#[salsa::tracked(returns(ref))]
+pub fn region_cover<'db>(db: &'db dyn Db, item: ItemId<'db>) -> RegionCover {
+    let solver = build_solver(db, item, crate::infer::infer(db, item));
+    RegionCover {
+        universal_count: solver.universal_count,
+        covers: solver.cover(),
+    }
+}
+
+/// Borrow-check one body's regions. A pure per-body query: it reads this
+/// item's inference result, its binder and its body, and nothing from any
+/// other body. That isolation is enforced by the query's signature rather
+/// than by convention — no cross-body facts can enter because there is
+/// nowhere for them to come from.
+#[salsa::tracked(returns(ref))]
+pub fn outlives_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<OutlivesDiagnostic> {
+    let infer = crate::infer::infer(db, item);
+    let mut solver = build_solver(db, item, infer);
     solver.solve();
 
     let mut diagnostics = Vec::new();

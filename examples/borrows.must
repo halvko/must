@@ -165,8 +165,8 @@ static main = fn () -> () {
 
     // A join over two borrows, and a join over two FLAVORS. The exclusive
     // borrow is of a DIFFERENT local — borrowing `n` both ways at once is
-    // exactly the exclusivity violation the interpreter detects; static
-    // loan liveness would reject it too, once it lands.
+    // exactly the exclusivity violation the loan checker refuses (and the
+    // interpreter detects, if it is run regardless).
     print_usize(pick(n.&, n.&, true));
     let mut other: usize = 80;
     print_usize(pick_flavors(n.&, other.&mut, true));

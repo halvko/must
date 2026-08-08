@@ -25,8 +25,10 @@
   consumer so they share one semantics. Lowering is total: an ill-typed body still lowers,
   with traps that borrow a diagnostic an upstream analysis already reported, so flow
   analyses run past errors. MIR is decl-keyed, erased, and not SSA.
-- **X07** The borrow checker does not run on MIR. Outlives is CFG-free, computed over
-  obligations recorded by inference.
+- **X07** Outlives — the universal-region and escape checks — is CFG-free, computed over the
+  obligations inference recorded, because the CFG cannot change those answers. Loan liveness
+  is the flow-sensitive half of the borrow checker and is a MIR dataflow (X06), consuming
+  regions by provenance from the same recorded graph.
 - **X08** One interpreter serves const eval, `run` and the debugger: same MIR, same machine,
   same UB findings.
 - **X09** The interpreter is an oracle, not a spec. A detected-UB stop is a property of the
@@ -39,7 +41,9 @@
   same discipline decides two shapes directly rather than guessing them: a tagged-enum
   payload read is sized from the read's own destination type, never from variant order, and a
   `fn` literal's type at a call site is its real substituted signature, never a placeholder —
-  both are facts the backend already has, carried forward instead of re-derived wrong.
+  both are facts the backend already has, carried forward instead of re-derived wrong. A
+  loan's own region is recorded at the mint rather than read back off the use site's type,
+  which holds the target at an argument and the source at a receiver.
 - **X11** The specialization-soundness law, both halves together: selection and codegen are
   lifetime-erased, and every impl is always-applicable modulo lifetimes. Lifetimes reject
   programs, never choose behaviours. This licenses monomorphization at codegen, makes the

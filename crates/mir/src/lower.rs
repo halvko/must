@@ -1410,9 +1410,9 @@ impl LowerCtx<'_> {
             // `(alloc, path)` value. The region is already gone (see
             // `Self::ty`), and at runtime a borrow and a raw pointer to
             // the same place are the same machine word; what separates
-            // them is `Rvalue::Borrow`'s tag minting, which the
-            // interpreter uses to detect exclusivity violations
-            // dynamically until the loan checker lands.
+            // them is `Rvalue::Borrow`'s tag minting — the loan the
+            // checker (`crate::loans`) tracks, and the node the
+            // interpreter's aliasing tree creates.
             ExprData::Borrow { mutable, place } => {
                 if self.value_traps.contains_key(&expr) {
                     return Operand::Const(Const::Unit);

@@ -1521,42 +1521,58 @@ where they are told. Borrowing a local and letting it escape the body is
 rejected for the same reason, with `borrowed value does not live long
 enough`.
 
-=== What is checked, and what is checked *yet*
+=== What is checked
 
-The shipped checker is the outlives module: it collects each body's outlives
-obligations, solves for every region's value, and rejects the two things
-that stage can see — an undeclared relation between signature regions, and a
-borrow of a local that escapes. It is a pure per-body query whose entire
-output is diagnostics; nothing it computes is consumed by lowering, layout
-or selection.
+The borrow checker has two halves, and both are static. The outlives
+module collects each body's outlives obligations, solves for every region's
+value, and rejects an undeclared relation between signature regions and a
+borrow of a local that escapes. Loan liveness runs over the lowered
+control-flow graph and rejects a borrow that is still needed after the
+value it borrows was touched behind its back. Both are pure per-body
+queries whose entire output is diagnostics; nothing they compute is
+consumed by lowering, layout or selection.
 
-What it does not yet do is *exclusivity*: deciding statically which borrows
-may be live at once. Until that lands, the interpreter detects violations
-dynamically — writing through a borrow that was invalidated by a later
-borrow of the same place, using a borrow whose parent has been written
-through, or touching a borrowed local by its own name while a borrow of it
-is live — reported as undefined behavior where it happens, with the borrow
-site and the invalidating site both named. That is the same treatment raw
-pointers get, and it is interpreter quality rather than a language
-guarantee.
+The rule of the second half is one sentence: no borrow may still be live
+where something touches an overlapping part of the same place behind its
+back. *Live* means used again later, not still in scope — a view you have
+finished with is dead where you finished with it, which is what makes a
+loop that reads a line, uses it, and reads the next one perfectly ordinary
+code.
 
-The backstop reasons about *parts*, not whole values: two borrows collide
-only when the storage they name overlaps. So `w.a.&mut` and `w.b.&mut` are
-independent and may both be live, while a borrow of `w` and a borrow of
-`w.a` are not — one contains the other. Reads and writes are judged the
-same way, so neither `w.b = 5;` nor `let v = w.b;` disturbs a live borrow
-of `w.a`.
+Four things count as touching it behind its back, and they are the same
+four the interpreter enforces. Three of them are *writes*, and a write
+invalidates every borrow of an overlapping part, shared or exclusive:
 
-Four limits of that backstop are worth stating plainly rather than leaving
-to be discovered.
+Using the place *mutably* — writing `x.&mut`, or simply mentioning a `.&mut`
+you already hold, which mints a fresh reborrow.
 
-It is *dynamic*, so it reports a violation only on a path that actually
-runs. A branch never taken is never checked, and a program that passes on
-one input says nothing about another. The shape you are most likely to
-reach it through is the borrow-returning member this chapter taught you
-to write: call one twice, keep both results, and you hold two live `.&mut`s
-into the same value — exclusivity violated in plain sight, with the static
-half silent:
+*Assigning* to it — `n = 99`, or `r.*.f = v`. The borrow would read storage
+the assignment has already overwritten. Assigning to a borrow-typed local
+is the one write that reaches nothing: `p = q` replaces the pointer, so
+the borrows taken through the old one no longer stand in the way of the
+new one — they stay usable, and keep protecting what they point at. It
+also means you have finished with what `p` held, so the place that borrow
+was of is free again — `r = b.&mut; a = 5;` after `r = a.&mut;` is
+ordinary code, in a loop too.
+
+*Moving* the value away. That takes the storage every borrow of it points
+into. Disposing of a reader while one of its views is still needed is a
+compile error, not a run-time trap.
+
+The fourth is a *read* — taking a `.&` of the place, or just naming the
+local — and it invalidates only an *exclusive* borrow, which is the point of
+an exclusive borrow: while it lasts it is the only way to the value. Shared
+borrows are untouched by a read; any number of readers coexist.
+
+Parts, not whole values: two borrows collide only when the storage they
+name overlaps. So `w.a.&mut` and `w.b.&mut` are independent and may both be
+live, while a borrow of `w` and a borrow of `w.a` are not — one contains
+the other. Reads and writes are judged the same way, so neither `w.b = 5;`
+nor `let v = w.b;` disturbs a live borrow of `w.a`.
+
+So the shape you were most likely to reach undefined behavior through — a
+container with a borrow-returning member, the one this chapter just taught
+you to write — is a compile error:
 
 ```must
 type Cell = struct { n: usize } with {
@@ -1567,41 +1583,69 @@ type Cell = struct { n: usize } with {
 
 static two_writes = fn::<@a>(c: Cell.&mut::<@a>) -> () {
     let a = c.slot();
-    let b = c.slot();
-    a.* = 1;   // undefined behavior — reported when it runs, not when it checks
+    let b = c.slot();   // refused: `a` is still live here
+    a.* = 1;
     b.* = 2;
 };
 ```
 
-The second `c.slot()` invalidates `a`, so it is the write through `a` that
-traps; the interpreter reports it precisely, naming where that borrow was
-created and what invalidated it. Deciding it statically is loan liveness,
-the next stage, and this is its clearest customer.
+The refusal sits on the second use of `c` — the operation that cannot be
+honored — and names the other two sites: where the first borrow was
+created, and where it is still used. That is the same story the
+interpreter tells when it catches one at run time, told earlier.
 
-And its liveness notion is the FRAME, not the block. A borrow of a local
-declared in an inner block keeps working after that block ends, because the
-frame still owns the storage — the interpreter sees a live allocation and
-has nothing to object to. Statically that case belongs to loan liveness,
-which is the next stage. So a borrow of an inner-block local, read after its
-block ends, is caught by NEITHER layer today: the outlives module does not
-model it and the interpreter cannot see it. That shape stays uncaught until
-the loan checker lands.
+=== What the interpreter still adds
 
-And the escape check's reach is the ENCLOSING ITEM's universals, not every
-frame in the body. A nested function literal that returns a borrow of its
-own local at `@_` escapes that literal's frame without ever reaching a
-universal of the outer item, so the static checker sees it as clean —
-the interpreter still catches it, because the local's storage really is
-gone. Like the inner-block case above, this stays uncaught statically
-until static loan liveness lands.
+The interpreter's aliasing check is *depth*, not the fence. It runs the same
+rule dynamically, and it reaches what the static rule cannot see: raw
+pointers, freed allocations, and the places the checker approximates. A
+refused program is not stopped from running — no trap is planted for a
+refusal — and when it runs, this is what catches it. Its limits, and the
+checker's, are worth stating plainly rather than leaving to be discovered.
+
+It reports a violation only on a path that actually runs. A branch never
+taken is never checked, and a program that passes on one input says
+nothing about another. That is fine for what it is for.
+
+Its liveness notion is the FRAME, not the block, and so is the checker's:
+neither models the end of a block's storage, so a borrow of an inner-block
+local, read after its block ends, is caught by NEITHER layer. It is the one
+shape in this chapter that is neither rejected nor detected.
+
+In the other direction the static rule is deliberately stricter than the
+interpreter on two points. Reading a place around a live exclusive borrow
+only *suspends* that borrow at run time, so reading through it afterwards
+still works; the checker refuses the read outright, because an exclusive
+borrow you can read around is not exclusive. And every array index is
+treated as possibly the same as every other, because `arr[i]` is not
+something the checker can know — so a borrow of one element and a read of
+another are refused together, though they would run fine. A rule can
+always be relaxed later; it cannot be tightened without breaking programs
+that already compiled, which is why both go the strict way.
+
+One approximation is worth knowing about. A borrow stored into a local in
+one arm of a `match` counts as live in the other arm too, whenever that
+local is used after the match — even on the path where nothing was stored.
+Handing it back to the caller instead, by returning it or by storing it
+where the caller can see, is judged at the point it happens, so a lookup
+that returns the borrow it found and inserts otherwise is ordinary code.
+
+A nested function literal that returns a borrow of its own local at `@_` is
+refused as well: the borrow is still live where the literal's body returns,
+and the local is gone by then. That is the loan checker's finding rather
+than the escape check's, which measures a borrow's reach against the
+enclosing item's signature only.
 
 Finally, the reborrow is minted only where the position *wants* a borrow. A
 borrow-typed place read into a position with no borrow-typed expectation — a
 bare `let c = b;`, or a read of an affine field, `p.q` — copies the borrow
-verbatim instead: no reborrow is minted, nothing is suspended, and the
-interpreter sees one borrow where there are two, so both writes land.
-Closing that means minting the reborrow (or a move) regardless of
-expectation, which is a change to typing rather than to either checker.
+verbatim instead: no reborrow is minted and nothing is suspended, so the
+interpreter sees one borrow where there are two, and both writes land. The
+checker treats that copy as a move of the holder, which refuses it while a
+reborrow of the holder is still live, but two plain copies of one `.&mut`
+are both usable; closing that means minting the reborrow (or a move)
+regardless of expectation, which is a change to typing rather than to
+either checker.
 
 One more thing borrows do, covered where `match` is: matching a borrowed
 scrutinee binds *borrows* of the payloads rather than copies of them, so

@@ -13157,15 +13157,16 @@ fn a_nested_fn_literal_may_infer_its_regions() {
 }
 
 #[test]
-fn a_nested_fn_literals_own_frame_escape_is_not_yet_caught() {
-    // Known gap, documented at `in_signature_position` and in
-    // `docs/main.typ`'s "What is checked, and what is checked yet": the
-    // escape check measures a borrow's reach only against the ENCLOSING
-    // ITEM's universals. A borrow returned at `@_` from a nested literal
-    // escapes that literal's OWN frame without ever reaching a universal
-    // of the outer item, so this checks clean even though running it is a
-    // dangling-pointer trap (see eval's
-    // `a_nested_literal_frame_escape_is_caught_dynamically`).
+fn a_nested_fn_literals_own_frame_escape_is_not_the_escape_checks_finding() {
+    // The escape check measures a borrow's reach only against the
+    // ENCLOSING ITEM's universals (see `in_signature_position`). A borrow
+    // returned at `@_` from a nested literal escapes that literal's OWN
+    // frame without ever reaching a universal of the outer item, so it is
+    // clean HERE. It is the loan checker's finding instead: the loan is
+    // live where the literal's body returns (mir's
+    // `a_nested_literal_borrow_of_its_own_local_cannot_escape`), and eval's
+    // `a_nested_literal_frame_escape_is_caught_dynamically` is the trap it
+    // hits when run regardless.
     check_diagnostics(
         "static main = fn () -> usize {\n\
              let f = fn () -> usize.&::<@_> { let mut n = 7; n.& };\n\

@@ -5308,3 +5308,61 @@ static f = fn::<T: Show>(t: T) -> str {
         "show",
     );
 }
+
+#[test]
+fn a_tail_read_through_a_borrow_squiggles_the_read_only() {
+    // `r.*` in tail position is read into a temp and copied to the
+    // return slot; the refusal sits on the read, once, never on the
+    // block.
+    let src = "static g = fn::<@a, @b>(out: usize.&mut::<@a>.&mut::<@b>, r: usize.&mut::<@a>) -> usize { out.* = r; r.* };";
+    let (analysis, file, _pos) = fixture(&format!("{src}$0"));
+    let diagnostics = analysis.diagnostics(file);
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::Severity::Error)
+        .collect();
+    assert_eq!(errors.len(), 1, "diagnostics: {diagnostics:?}");
+    assert_eq!(&src[errors[0].range], "r.*");
+    assert!(
+        errors[0]
+            .message
+            .starts_with("reading `r.*` here invalidates an exclusive borrow of it"),
+        "{}",
+        errors[0].message
+    );
+}
+
+#[test]
+fn a_stale_loan_refusal_carries_its_companions() {
+    // The squiggle sits on the invalidating access; the two companions
+    // name the borrow's mint and the use that keeps it live, in the
+    // interpreter's own vocabulary.
+    let src = "static bump = fn::<@a>(m: usize.&mut::<@a>) -> () { m.* = m.* + 1; };\n\
+               static f = fn() -> usize { let mut n: usize = 1; let a = n.&mut; let b = n.&mut; bump(b); a.* };";
+    let (analysis, file, _pos) = fixture(&format!("{src}$0"));
+    let diagnostics = analysis.diagnostics(file);
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::Severity::Error)
+        .collect();
+    assert_eq!(errors.len(), 1, "diagnostics: {diagnostics:?}");
+    assert_eq!(&src[errors[0].range], "n.&mut");
+    assert!(
+        errors[0]
+            .message
+            .starts_with("using `n` mutably here invalidates a borrow of it that is still live"),
+        "{}",
+        errors[0].message
+    );
+    assert_eq!(
+        errors[0].related.len(),
+        2,
+        "related: {:?}",
+        errors[0].related
+    );
+    assert_eq!(errors[0].related[0].message, "this borrow was created here");
+    assert_eq!(&src[errors[0].related[0].range], "n.&mut");
+    assert!(errors[0].related[0].range.start() < errors[0].range.start());
+    assert_eq!(errors[0].related[1].message, "and it is still used here");
+    assert_eq!(&src[errors[0].related[1].range], "a.*");
+}

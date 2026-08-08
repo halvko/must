@@ -150,6 +150,24 @@ pub struct InferenceResult {
     /// is exactly this list — a compiler-inserted SAFE borrow of `x.*`
     /// where `x` is already a borrow, never of `x` itself and never raw.
     pub reborrows: ArenaMap<ExprId, bool>,
+    /// The region of the LOAN each expression mints — one entry per node
+    /// the interpreter's aliasing tree would create, which is exactly what
+    /// loan liveness (`mir::loans`) measures. The single source for a
+    /// loan's region AND for the region of the temp that holds it.
+    ///
+    /// Two populations, split the way [`Self::reborrows`] splits them:
+    ///
+    /// * a WRITTEN `place.&` / `place.&mut` records the fresh region the
+    ///   borrow minted, taken before the use site's reborrow can overwrite
+    ///   the expression's type with whatever the loan flowed into;
+    /// * an INSERTED reborrow records its TARGET, because the target is the
+    ///   child node and the source is its parent.
+    ///
+    /// Neither is reliably readable off [`Self::type_of_expr`]: that holds
+    /// the expected type at an argument (the target) and the actual one at
+    /// a member-call receiver (the source), and a consumer cannot tell the
+    /// two apart from the outside. Recorded, not re-derived (X10).
+    pub loan_regions: ArenaMap<ExprId, Region>,
     pub diagnostics: Vec<InferenceDiagnostic>,
 }
 
@@ -3237,6 +3255,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         result.region_count = self.constraints.region_count();
         result.region_constraints = self.constraints.take_region_edges();
         result.reborrows = reborrows;
+        // An inserted reborrow mints a node only at a PLACE — a written
+        // borrow reborrowed on the spot is already its own node, and
+        // recording the target there would name the parent's child twice
+        // and lose the loan. The same exception MIR materializes by.
+        for (expr, region) in self.constraints.take_reborrow_targets() {
+            if matches!(self.body.exprs[expr], ExprData::Borrow { .. }) {
+                continue;
+            }
+            result.loan_regions.insert(expr, region);
+        }
         for diag in result.diagnostics.iter_mut() {
             match diag {
                 InferenceDiagnostic::TypeMismatch {
@@ -4591,6 +4619,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // position.
                 let region = self.fresh_region();
                 self.check_borrow_place(expr, mutable, place, region.clone());
+                // Recorded before the use site's reborrow can overwrite
+                // this expression's type with what it flowed INTO — see
+                // `InferenceResult::loan_regions`.
+                self.result.loan_regions.insert(expr, region.clone());
                 Ty::borrow(mutable, region, place_ty)
             }
             ExprData::AddrOf { mutable, place } => {

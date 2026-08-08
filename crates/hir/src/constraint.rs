@@ -180,6 +180,17 @@ pub(crate) struct Constraints {
     /// to the interpreter's aliasing tree, which means the parent/child
     /// relation Tree Borrows models simply does not exist at runtime.
     reborrows: ArenaMap<ExprId, bool>,
+    /// The TARGET region of each inserted reborrow — the child node's own
+    /// region, which is what loan liveness measures.
+    ///
+    /// Recorded rather than read back off the use site's type, because a
+    /// use site does not consistently carry it: an ARGUMENT is inferred
+    /// against the parameter and records the target, while a member-call
+    /// RECEIVER is checked after the fact and keeps the source. Read from
+    /// the outside the two are indistinguishable, and reading the source
+    /// makes a reborrow of a parameter come out at the parameter's own
+    /// universal — a loan with no body-local extent at all.
+    reborrow_targets: Vec<(ExprId, Region)>,
     /// How many speculative snapshots are currently open.
     ///
     /// Region obligations are a plain `Vec` with no rollback of their own,
@@ -351,6 +362,10 @@ impl Constraints {
 
     pub(crate) fn take_reborrows(&mut self) -> ArenaMap<ExprId, bool> {
         std::mem::take(&mut self.reborrows)
+    }
+
+    pub(crate) fn take_reborrow_targets(&mut self) -> Vec<(ExprId, Region)> {
+        std::mem::take(&mut self.reborrow_targets)
     }
 
     /// Open a speculative unification. Every snapshot goes through here so
@@ -651,12 +666,15 @@ impl Constraints {
         } else {
             RegionConstraintReason::Reborrow
         };
-        self.push_outlives(r_src, r_tgt, origin, reason);
+        self.push_outlives(r_src, r_tgt.clone(), origin, reason);
         // Record the insertion so MIR can MATERIALIZE it. M07 says
         // degradation is not spelled `v.*.&` precisely "because the
         // explicit form produces exactly the same child node" — which is
         // only true if the implicit form produces one at all.
         self.reborrows.insert(origin, m_tgt);
+        // And the child node's region, for loan liveness — see
+        // `Constraints::reborrow_targets`.
+        self.reborrow_targets.push((origin, r_tgt));
         true
     }
 

@@ -80,9 +80,39 @@
   The rule moves by design: "a referent this match can dispatch on lifts the lens" is defined
   by which patterns exist, so every future pattern-kind grant also changes the lens for
   borrowed scrutinees of that type.
+- **M14** Loans die when their root moves on, and the safety contract is the static check
+  alone. The interpreter's tree is depth (raw pointers, freed allocations, paths the checker
+  over-approximates) and is not what makes a safe borrow safe. The rule: no loan may still be
+  live where an access foreign to it touches an overlapping part of the same root local, over
+  two access kinds mirroring the interpreter's:
+
+  | access | what it kills |
+  |---|---|
+  | write — a `&mut` mint, an assignment, a move of a whole local | every overlapping loan |
+  | read — a `.&` mint, or a by-name value read | overlapping exclusive loans only |
+
+  A `&mut` mint counts whether written or inserted for a mention of a borrow. A read spares
+  shared loans because readers coexist; a move is a write through the root, because it takes
+  away the storage every loan points into; an assignment is shallow, so `p = q` ends the loans
+  through `p.*` instead of conflicting with them. The shape is NLL over MIR: a region is live
+  where a local whose type mentions a region it covers is live, and everywhere if it covers a
+  universal; a loan is in scope forward from its mint until an assignment to its place or the
+  first point its region is not live, and once out it stays out — a holder's one region covers
+  every loan it ever held, so a holder reassigned after its old loan went dead does not revive
+  it (straight-line and loop reassignment are accepted; a reassignment on some paths only keeps
+  the loan on the others); a conflict is an in-scope loan of the same root over an overlapping
+  path. Overlap is the conservative rule over MIR's canonical projections — a prefix overlaps,
+  and any two element indices overlap. One hop is dated rather than taken everywhere: a
+  signature's region is live at every point with no holder, so a loan's flow into one is placed
+  at the obligation's own origin, and the loan is live through the universal from there on — not
+  in a sibling arm (the conditional-return case, `get_or_default`, is accepted). Forward scope
+  from the mint is what keeps a mint that returns from reaching the access beside it; no branch,
+  loop or departure rule exists, because reachability answers all of it.
 - **M15** A move is an invalidation event exactly as a write is: the storage no longer holds
-  what the borrow was taken of. It is one MIR operand produced from the type alone: a linear
-  cannot be duplicated, so a read of one is always the last read.
+  what the borrow was taken of. It is one MIR operand produced from the type alone — a linear
+  cannot be duplicated, so a read of one is always the last read — and the static rule reads
+  the same fact from the same place: a by-name read of a value that cannot be duplicated is a
+  move.
 - **M16** Must-consume is the dual of use-after-move: one walk, one fact per binding, so the
   checker that refuses a double disposal is the one that refuses a leak. No unwinding pays for
   it: a panic traps, so every exit from a scope is written in the source, and a checker that
@@ -175,6 +205,24 @@
 
 ## Re-evaluate when
 
+- **M19** The checker is NLL-shaped over MIR: local liveness, region liveness through the
+  recorded outlives graph, loans in scope forward from the mint until the region goes dead,
+  with the flow into a universal dated at its origin. What is deliberately still coarse:
+  every array index overlaps every other; a foreign read is refused outright; containment
+  is location-insensitive for every other hop, so a loan stored into a body-region slot in
+  one arm counts as live in the sibling arm when the slot is used afterwards (full origin
+  tracking, Polonius-style, would date every hop); a temp with more than one definition is
+  its own root and conflicts with nothing; an access reports the earliest-minted loan it
+  kills, once per access expression. Settled when precision is worth buying (below). **M14**
+- **MIR gains storage-end markers** — the checker's liveness notion is the frame, like the
+  interpreter's, so a borrow of an inner-block local read after its block ends is caught by
+  neither layer. **M12 M14**
+- **Precision is worth buying** — recorded over-refusals: every array index overlaps every
+  other; and the static rule is stricter than the interpreter on foreign reads, deliberately
+  (the ordinary NLL rule; the tree's freeze is operational semantics for unsafe code).
+  **M14 M19**
+- **A refusal plants no trap**, so a refused program still runs. Whether `run` should refuse
+  what the language refuses is open. **M14**
 - **A borrowed `str` representation lands** — copying one out of a borrow stops being a copy,
   and the model needs a byte-range path element it deliberately lacks (T17). **M11**
 - **The no-reservation fork** — relaxing is pure UB removal; it was ruled ahead of the
