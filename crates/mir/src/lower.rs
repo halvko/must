@@ -223,7 +223,8 @@ impl LowerCtx<'_> {
                 // edge to emit, so the expression itself is the operation
                 // that cannot execute — a value trap right there.
                 InferenceDiagnostic::BreakOutsideLoop { expr }
-                | InferenceDiagnostic::ContinueOutsideLoop { expr } => {
+                | InferenceDiagnostic::ContinueOutsideLoop { expr }
+                | InferenceDiagnostic::ReturnOutsideFn { expr } => {
                     self.value_traps.insert(*expr, diag.message());
                 }
                 // A `let`/parameter destructuring pattern that names an
@@ -1349,6 +1350,28 @@ impl LowerCtx<'_> {
                     // never observed.
                     None => Operand::Const(Const::Unit),
                 }
+            }
+            // The function-exit path, reached early: assign the return
+            // place and terminate with `Return` — literally what
+            // `lower_fn_inner` does with the body's tail value, so no new
+            // machinery is involved. Which body that is comes out
+            // structurally: `b` is one MIR body's builder, and `fn`
+            // literals and `const` blocks build their own, so a `return`
+            // can only ever reach the innermost of them.
+            ExprData::Return { value } => {
+                let op = match value {
+                    Some(value) => self.lower_expr(b, *value),
+                    // A bare `return;` returns `()`.
+                    None => Operand::Const(Const::Unit),
+                };
+                let ret = b.ret;
+                b.push_assign(ret, Rvalue::Use(op), expr);
+                b.terminate(TerminatorKind::Return, expr);
+                // Code after a `return` is unreachable; keep lowering it
+                // into a predecessor-less block (CFG stays total), like
+                // after a `break` or a diverging call.
+                b.current = b.new_block();
+                Operand::Const(Const::Unit)
             }
             ExprData::Continue => match b.loop_frames.last().copied() {
                 Some(frame) => {

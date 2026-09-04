@@ -3261,6 +3261,38 @@ fn every_canonical_keyword_classifies_as_a_keyword_highlight() {
     );
 }
 
+#[test]
+fn return_highlights_as_a_keyword_with_no_ide_change() {
+    // The keyword-table architecture, validated on a keyword added AFTER
+    // the highlighter was written: `return` reached `syntax_kind.rs`'s
+    // `keywords!` table as a one-line entry and NOTHING in this crate was
+    // touched to teach the highlighter about it. Rendered here on real
+    // code rather than only through the drift guard above, so the claim is
+    // legible.
+    check_highlights(
+        r#"static f = fn (c: bool) -> usize {
+    if c { return 1; };
+    return 2;
+};"#,
+        expect_test::expect![[r#"
+            0..6 "static" Keyword
+            7..8 "f" Function.declaration.static
+            9..10 "=" Operator
+            11..13 "fn" Keyword
+            15..16 "c" Parameter.declaration
+            18..22 "bool" Type.defaultLibrary
+            24..26 "->" Operator
+            27..32 "usize" Type.defaultLibrary
+            39..41 "if" Keyword
+            42..43 "c" Parameter
+            46..52 "return" Keyword
+            53..54 "1" Number
+            63..69 "return" Keyword
+            70..71 "2" Number
+        "#]],
+    );
+}
+
 // ---- trait-aware classification ---------------------------------------
 
 #[test]

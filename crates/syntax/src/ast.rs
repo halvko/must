@@ -196,6 +196,11 @@ ast_node!(
     ContinueExpr: CONTINUE_EXPR
 );
 ast_node!(
+    /// `return` with an optional value, exiting the enclosing body — the
+    /// nearest `fn` literal or `const` block.
+    ReturnExpr: RETURN_EXPR
+);
+ast_node!(
     /// `::<T, const V: usize>` — a generic fn literal's binder list.
     GenericParamList: GENERIC_PARAM_LIST
 );
@@ -374,6 +379,7 @@ ast_enum!(
     LoopExpr,
     BreakExpr,
     ContinueExpr,
+    ReturnExpr,
     ArrayExpr,
     IndexExpr,
     NegExpr
@@ -1017,6 +1023,16 @@ impl BreakExpr {
 impl ContinueExpr {
     pub fn continue_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, CONTINUE_KW)
+    }
+}
+
+impl ReturnExpr {
+    pub fn return_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, RETURN_KW)
+    }
+    /// The returned value; `None` for a bare `return` (which returns `()`).
+    pub fn expr(&self) -> Option<Expr> {
+        child(&self.syntax)
     }
 }
 

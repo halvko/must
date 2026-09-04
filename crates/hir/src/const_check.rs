@@ -186,7 +186,10 @@ impl CheckCtx<'_> {
             // compile-time loop); body and break values sit in the same
             // context as the loop.
             ExprData::Loop { body } => self.check_expr(*body, in_const),
-            ExprData::Break { value } => {
+            // `return` is pure control flow too — a `const fn` may exit
+            // early, and a `return` inside a `const { ... }` block yields
+            // that block's value. Its operand sits in the same context.
+            ExprData::Break { value } | ExprData::Return { value } => {
                 if let Some(value) = value {
                     self.check_expr(*value, in_const);
                 }

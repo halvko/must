@@ -1451,6 +1451,142 @@ fn infinite_loop_in_a_const_block_runs_out_of_fuel() {
     );
 }
 
+// ---- `return` end to end ----------------------------------------------
+
+#[test]
+fn return_skips_the_statements_after_it() {
+    // The observable proof that the early exit really happens: "after"
+    // never prints.
+    check_run(
+        r#"
+static f = fn (c: bool) -> usize {
+    print("before ");
+    if c { return 1; };
+    print("after ");
+    2
+};
+"#,
+        "f(true)",
+        expect![[r#"
+            before 
+            => 1
+        "#]],
+    );
+}
+
+#[test]
+fn without_the_early_exit_the_rest_still_runs() {
+    // The same function down the other edge — the contrast that makes the
+    // test above mean something.
+    check_run(
+        r#"
+static f = fn (c: bool) -> usize {
+    print("before ");
+    if c { return 1; };
+    print("after ");
+    2
+};
+"#,
+        "f(false)",
+        expect![[r#"
+            before 
+            after 
+            => 2
+        "#]],
+    );
+}
+
+#[test]
+fn return_leaves_a_loop_and_the_function_together() {
+    // A `break` would only leave the loop and fall into `999`; `return`
+    // leaves both.
+    check_run(
+        r#"
+static first_over = fn (limit: usize) -> usize {
+    let mut n = 0;
+    loop {
+        if limit < n { return n * 10; };
+        n = n + 1;
+    };
+    999
+};
+"#,
+        "first_over(2)",
+        expect![[r#"
+            => 30
+        "#]],
+    );
+}
+
+#[test]
+fn bare_return_evaluates_to_unit() {
+    check_run(
+        r#"
+static f = fn (c: bool) -> () {
+    if c { return; };
+    print("not taken");
+};
+"#,
+        "f(true)",
+        expect![[r#"
+            => ()
+        "#]],
+    );
+}
+
+#[test]
+fn return_in_a_nested_fn_literal_only_exits_that_literal() {
+    // `inner` returns early; the OUTER function carries on and prints
+    // after the call — the semantics people get wrong, run for real.
+    check_run(
+        r#"
+static f = fn () -> usize {
+    let inner = fn (n: usize) -> usize {
+        if n == 0 { return 100; };
+        n
+    };
+    let a = inner(0);
+    print("outer still running ");
+    a + 1
+};
+"#,
+        "f()",
+        expect![[r#"
+            outer still running 
+            => 101
+        "#]],
+    );
+}
+
+#[test]
+fn return_in_a_const_fn_evaluates_at_compile_time() {
+    check_const(
+        r#"
+static clamped = const fn (n: usize) -> usize {
+    if n > 10 { return 10; };
+    n
+};
+static x: usize = clamped(42);
+static y: usize = clamped(3);
+"#,
+        expect![[r#"
+            clamped = fn
+            x = 10
+            y = 3
+        "#]],
+    );
+}
+
+#[test]
+fn return_in_a_const_block_yields_the_blocks_value() {
+    check_const_blocks(
+        "static f = fn { let x: usize = const { if true { return 42; }; 0 }; };",
+        expect![[r#"
+            f#0 = 42
+        "#]],
+    );
+}
+
 // ---- record destructuring end to end ----
 
 #[test]

@@ -142,7 +142,7 @@ impl CheckCtx<'_> {
                 }
             }
             ExprData::Loop { body } => self.check_expr(*body, in_unsafe),
-            ExprData::Break { value } => {
+            ExprData::Break { value } | ExprData::Return { value } => {
                 if let Some(value) = value {
                     self.check_expr(*value, in_unsafe);
                 }

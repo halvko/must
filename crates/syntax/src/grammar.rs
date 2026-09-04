@@ -694,6 +694,7 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         LOOP_KW => loop_expr(p),
         BREAK_KW => break_expr(p),
         CONTINUE_KW => continue_expr(p),
+        RETURN_KW => return_expr(p),
         _ => {
             if at_expr_recovery(p) {
                 p.error("expected an expression");
@@ -984,6 +985,22 @@ fn continue_expr(p: &mut Parser<'_>) -> CompletedMarker {
     m.complete(p, CONTINUE_EXPR)
 }
 
+/// `return` with an optional value — `break`'s sibling, one tier up: it
+/// exits the enclosing *body* (a `fn` literal or a `const` block) instead
+/// of the enclosing `loop`. A primary expression (typed `!` by inference),
+/// so `let x = if c { 1 } else { return 0 };` and a `return` block tail
+/// need no statement-level special case. The optional value is gated on
+/// [`at_expr_start`] for exactly `break`'s reason: `return;` must not go
+/// hunting for a value past its own `;`.
+fn return_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump(RETURN_KW);
+    if at_expr_start(p) {
+        expr(p);
+    }
+    m.complete(p, RETURN_EXPR)
+}
+
 /// `[e1, e2, e3]` — an array literal — or `[e; N]` — the repeat form. One
 /// node kind for both: the `;` decides (see `ast::ArrayExpr`). Elements are
 /// ordinary expressions; the repeat count parses as an expression too and
@@ -1063,7 +1080,8 @@ fn unsafe_block_expr(p: &mut Parser<'_>) -> CompletedMarker {
 fn at_expr_start(p: &Parser<'_>) -> bool {
     match p.current() {
         INT_NUMBER | STRING | TRUE_KW | FALSE_KW | IDENT | L_PAREN | L_BRACE | L_BRACKET
-        | FN_KW | IF_KW | MATCH_KW | LOOP_KW | BREAK_KW | CONTINUE_KW | UNSAFE_KW | MINUS => true,
+        | FN_KW | IF_KW | MATCH_KW | LOOP_KW | BREAK_KW | CONTINUE_KW | RETURN_KW | UNSAFE_KW
+        | MINUS => true,
         CONST_KW => matches!(p.nth(1), FN_KW | L_BRACE),
         STRUCT_KW | ENUM_KW => at_type_literal_body(p),
         AMP => p.nth(1) == RAW_KW,

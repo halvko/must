@@ -856,8 +856,10 @@ static f = fn (s: bar) {};
 
 #[test]
 fn calling_a_diverging_value_is_never_not_error() {
-    // `{error}` here would be an error type with no diagnostic explaining
-    // it (the tripwire below would catch exactly this).
+    // The body's tail is `x()`, itself `!` (calling a diverging value stays
+    // diverging) — `f`'s unannotated return type is pinned to `!` from
+    // that alone, not left an unresolved `{error}` with no diagnostic to
+    // explain it.
     check_infer(
         r#"
 static f = fn {
@@ -866,8 +868,8 @@ static f = fn {
 };
 "#,
         expect![[r#"
-            12..54 'fn {     let x = ...': fn()
-            15..54 '{     let x = pan...': ()
+            12..54 'fn {     let x = ...': fn() -> !
+            15..54 '{     let x = pan...': !
             25..26 'x': !
             29..34 'panic': fn(str) -> !
             29..42 'panic("boom")': !
@@ -3291,7 +3293,7 @@ fn breakless_loop_types_never() {
     check_infer(
         "static f = fn { loop { } };",
         expect![[r#"
-            11..26 'fn { loop { } }': fn() -> _
+            11..26 'fn { loop { } }': fn() -> !
             14..26 '{ loop { } }': !
             16..24 'loop { }': !
             21..24 '{ }': ()
@@ -3308,7 +3310,7 @@ fn bare_break_is_a_unit_witness() {
             11..33 'fn { loop { break...': fn()
             14..33 '{ loop { break; } }': ()
             16..31 'loop { break; }': ()
-            21..31 '{ break; }': ()
+            21..31 '{ break; }': !
             23..28 'break': !
         "#]],
     );
@@ -3335,7 +3337,7 @@ static Point_or = fn (b: bool) -> Shape::Point { Shape::Point };
             72..176 '{     let s = loo...': ()
             82..83 's': Shape
             86..173 'loop {         if...': Shape
-            91..173 '{         if stop...': ()
+            91..173 '{         if stop...': !
             101..136 'if stop { break S...': ()
             104..108 'stop': bool
             109..136 '{ break Shape::Ci...': ()
@@ -3386,13 +3388,13 @@ static f = fn {
 };
 "#,
         expect![[r#"
-            12..81 'fn {     loop {  ...': fn() -> _
+            12..81 'fn {     loop {  ...': fn() -> !
             15..81 '{     loop {     ...': !
             21..79 'loop {         le...': !
             26..79 '{         let n =...': ()
             40..41 'n': {number}
             44..61 'loop { break 1; }': {number}
-            49..61 '{ break 1; }': ()
+            49..61 '{ break 1; }': !
             51..58 'break 1': !
             57..58 '1': {number}
             71..72 'n': {number}
@@ -3487,6 +3489,319 @@ static sum = const fn () -> usize {
 static x = sum();
 "#,
         expect![[r#""#]],
+    );
+}
+
+// ---- `return` ---------------------------------------------------------
+
+#[test]
+fn return_with_a_value_types_never_and_checks_the_operand() {
+    check_infer(
+        r#"
+static f = fn (n: usize) -> usize {
+    return n + 1;
+    0
+};
+"#,
+        expect![[r#"
+            12..62 'fn (n: usize) -> ...': fn(usize) -> usize
+            16..17 'n': usize
+            35..62 '{     return n + ...': usize
+            41..53 'return n + 1': !
+            48..49 'n': usize
+            48..53 'n + 1': usize
+            52..53 '1': usize
+            59..60 '0': usize
+        "#]],
+    );
+}
+
+#[test]
+fn bare_return_is_a_unit_return() {
+    // `return;` returns `()` — the same value a bare `break;` carries.
+    check_infer(
+        r#"
+static f = fn (c: bool) -> () {
+    if c { return; };
+};
+"#,
+        expect![[r#"
+            12..56 'fn (c: bool) -> (...': fn(bool)
+            16..17 'c': bool
+            31..56 '{     if c { retu...': ()
+            37..53 'if c { return; }': ()
+            40..41 'c': bool
+            42..53 '{ return; }': ()
+            44..50 'return': !
+        "#]],
+    );
+}
+
+#[test]
+fn return_as_a_block_tail_is_clean() {
+    check_diagnostics(
+        "static f = fn (n: usize) -> usize { return n };",
+        expect![""],
+    );
+}
+
+#[test]
+fn return_in_one_if_branch_lets_the_other_branch_win() {
+    // The `Never` join: a diverging branch does not vote, so `x` takes the
+    // surviving branch's type. Both the tail spelling (`return 0`) and the
+    // statement spelling (`return 0;`) diverge.
+    check_infer(
+        r#"
+static f = fn (c: bool) -> usize {
+    let x = if c { 1 } else { return 0 };
+    let y = if c { 2 } else { return 0; };
+    x + y
+};
+"#,
+        expect![[r#"
+            12..132 'fn (c: bool) -> u...': fn(bool) -> usize
+            16..17 'c': bool
+            34..132 '{     let x = if ...': usize
+            44..45 'x': usize
+            48..76 'if c { 1 } else {...': usize
+            51..52 'c': bool
+            53..58 '{ 1 }': usize
+            55..56 '1': usize
+            64..76 '{ return 0 }': !
+            66..74 'return 0': !
+            73..74 '0': usize
+            86..87 'y': usize
+            90..119 'if c { 2 } else {...': usize
+            93..94 'c': bool
+            95..100 '{ 2 }': usize
+            97..98 '2': usize
+            106..119 '{ return 0; }': !
+            108..116 'return 0': !
+            115..116 '0': usize
+            125..126 'x': usize
+            125..130 'x + y': usize
+            129..130 'y': usize
+        "#]],
+    );
+}
+
+#[test]
+fn return_from_inside_loop_match_and_nested_blocks_is_clean() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape, n: usize) -> usize {
+    { { if n == 0 { return 0; }; }; };
+    loop {
+        match s {
+            ::Circle(r) => return r,
+            ::Point => return n,
+        };
+    }
+};
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn return_mismatch_blames_the_operand_and_cites_the_return_type() {
+    // The annotated case: the OPERAND carries the squiggle and the written
+    // return type is the related note — the identical treatment the body's
+    // tail expression gets, because it is the identical check.
+    check_diagnostics(
+        r#"
+static f = fn (c: bool) -> usize {
+    if c { return "text"; };
+    0
+};
+"#,
+        expect![[r#"
+            54..60: type mismatch: expected `usize`, found `str` (expected `usize` because of this return type at 25..33)
+        "#]],
+    );
+}
+
+#[test]
+fn bare_return_mismatch_blames_the_return_keyword() {
+    // Nothing else exists to blame, so the `return` itself is squiggled.
+    check_diagnostics(
+        r#"
+static f = fn (c: bool) -> usize {
+    if c { return; };
+    0
+};
+"#,
+        expect![[r#"
+            47..53: type mismatch: expected `usize`, found `()` (expected `usize` because of this return type at 25..33)
+        "#]],
+    );
+}
+
+#[test]
+fn return_pins_an_inferred_return_type() {
+    // No `-> T` annotation anywhere: the `return` is the only thing that
+    // says what `f` produces, and it pins the signature exactly as a tail
+    // expression would.
+    check_infer(
+        r#"
+static f = fn (c: bool) {
+    if c { return "yes"; };
+    "no"
+};
+"#,
+        expect![[r#"
+            12..65 'fn (c: bool) {   ...': fn(bool) -> str
+            16..17 'c': bool
+            25..65 '{     if c { retu...': str
+            31..53 'if c { return "ye...': ()
+            34..35 'c': bool
+            36..53 '{ return "yes"; }': ()
+            38..50 'return "yes"': !
+            45..50 '"yes"': str
+            59..63 '"no"': str
+        "#]],
+    );
+}
+
+#[test]
+fn return_and_tail_must_agree_on_an_inferred_return_type() {
+    // The flip side: `return` feeds the SAME constraint the tail does, so
+    // two disagreeing producers are a mismatch, not a silent widening.
+    check_diagnostics(
+        r#"
+static f = fn (c: bool) {
+    if c { return "yes"; };
+    0
+};
+"#,
+        expect![[r#"
+            59..60: type mismatch: expected `str`, found `{number}`
+        "#]],
+    );
+}
+
+#[test]
+fn return_in_a_nested_fn_literal_returns_from_that_literal() {
+    // THE semantics people get wrong. `inner`'s `return` produces
+    // `inner`'s value; the outer fn carries on and returns a `str`. If it
+    // returned from the outer fn instead, `-> usize` on `inner` and
+    // `-> str` on the outer literal could not both be clean.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> str {
+    let inner = fn (m: usize) -> usize { return m + 1; };
+    if inner(n) == 0 { return "zero"; };
+    "more"
+};
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn return_in_a_nested_fn_literal_checks_against_that_literal() {
+    // Same boundary from the failing side: the inner literal's own return
+    // type is what the inner `return` is checked against — the outer
+    // `-> str` never enters the picture.
+    check_diagnostics(
+        r#"
+static f = fn () -> str {
+    let inner = fn () -> usize { return "text"; };
+    "ok"
+};
+"#,
+        expect![[r#"
+            67..73: type mismatch: expected `usize`, found `str` (expected `usize` because of this return type at 49..57)
+        "#]],
+    );
+}
+
+#[test]
+fn return_in_a_const_fn_is_clean() {
+    check_diagnostics(
+        r#"
+static clamped = const fn (n: usize) -> usize {
+    if n > 10 { return 10; };
+    n
+};
+static x = clamped(42);
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn return_in_a_const_block_leaves_the_const_block() {
+    // A `const` block is a compile-time body of its own (MIR lowers it to
+    // a separate body), so — exactly like the `break` boundary — a
+    // `return` inside one produces THAT block's value and cannot exit the
+    // surrounding function. Its operand is checked against the block's own
+    // expectation, here the `usize` annotation on `x`.
+    check_diagnostics(
+        r#"
+static f = fn () -> str {
+    let x: usize = const { if true { return 42; }; 0 };
+    "ok"
+};
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn return_in_a_const_block_checks_against_the_block_not_the_fn() {
+    check_diagnostics(
+        r#"
+static f = fn () -> str {
+    let x: usize = const { return "text"; };
+    "ok"
+};
+"#,
+        expect![[r#"
+            61..67: type mismatch: expected `usize`, found `str` (expected `usize` because of this annotation at 38..43)
+        "#]],
+    );
+}
+
+#[test]
+fn return_outside_a_function_errors() {
+    // An item initializer's own top level is a value expression, not a
+    // function body — there is nothing to leave.
+    check_diagnostics(
+        "static x = return 1;",
+        expect![[r#"
+            11..19: `return` outside of a function: there is no enclosing `fn` body to return from
+            18..19: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
+    );
+}
+
+#[test]
+fn statements_after_a_return_still_check() {
+    // No unreachable-code lint yet (that is its own round) — but the
+    // statements after a `return` must still type, resolve and hover
+    // exactly as written, and must not manufacture errors of their own.
+    check_infer(
+        r#"
+static f = fn (n: usize) -> usize {
+    return n;
+    let doubled = n + n;
+    doubled
+};
+"#,
+        expect![[r#"
+            12..89 'fn (n: usize) -> ...': fn(usize) -> usize
+            16..17 'n': usize
+            35..89 '{     return n;  ...': usize
+            41..49 'return n': !
+            48..49 'n': usize
+            59..66 'doubled': usize
+            69..70 'n': usize
+            69..74 'n + n': usize
+            73..74 'n': usize
+            80..87 'doubled': usize
+        "#]],
     );
 }
 
@@ -4011,7 +4326,6 @@ fn expectation_recorded_for_break_value() {
             26..62 'fn () -> usize { ...': fn() -> usize
             41..62 '{ loop { break 1;...': usize
             43..60 'loop { break 1; }': usize
-            48..60 '{ break 1; }': ()
             56..57 '1': usize
         "#]],
     );

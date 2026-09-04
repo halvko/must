@@ -46,6 +46,16 @@
   are contextual expression-starters). One `keywords!` table generates the set — `from_keyword`,
   `is_keyword`, and the table itself — so the highlighter (P10) and completions classify a
   keyword by asking, never by enumerating kinds.
+- **G15** `return` is an expression of type `Never`, constrained through the same seam tail
+  expressions use (an annotated return type blames the operand and cites the annotation; an
+  inferred one is pinned by `return e` exactly as by a tail). It targets the nearest enclosing
+  BODY — a `fn` literal or a `const { }` block, which is a body of its own and bounds `return`
+  the way it bounds `break`, so `return` inside one yields the block's value; `return` at an
+  item initializer's own top level is an error. A block with no tail, one of whose EXPRESSION
+  statements diverges (any of them, not only the last), is itself `!` (not `()`), so
+  `else { return 0; }` and `else { break; }` — with the semicolon everyone writes — type-check.
+  A `let` initializer that diverges is not counted yet — `let x = return 1;` types the block
+  off the binding, a step toward reachability analysis this rule isn't.
 - **G14** No auto-deref, ever, and no auto-ref. Resolution never reaches through a deref, so
   an outer name disappearing can never silently re-resolve; a pointer to a type with members
   does not dot-call them, because the receiver's type must BE the member's `Self`.

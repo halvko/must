@@ -207,6 +207,15 @@ pub enum ExprData {
     /// `continue`: restarts the enclosing `loop`'s body. Typed `!` like
     /// `break`.
     Continue,
+    /// `return` / `return value`: exits the enclosing BODY — the nearest
+    /// `fn` literal or `const` block — with the value (`()` when absent).
+    /// `break`'s sibling one tier up: an expression of type `!`, so
+    /// `let x = if c { 1 } else { return 0 };` composes through the never
+    /// machinery with no special casing. The value is checked against that
+    /// body's return type exactly as its tail expression is.
+    Return {
+        value: Option<ExprId>,
+    },
 }
 
 /// One turbofish argument, disambiguated by *form* at parse time (a
@@ -746,6 +755,10 @@ impl LowerCtx {
                 self.alloc_expr(ExprData::Break { value }, it.syntax())
             }
             ast::Expr::ContinueExpr(it) => self.alloc_expr(ExprData::Continue, it.syntax()),
+            ast::Expr::ReturnExpr(it) => {
+                let value = it.expr().map(|e| self.lower_expr(e));
+                self.alloc_expr(ExprData::Return { value }, it.syntax())
+            }
             ast::Expr::FnLiteral(it) => {
                 let is_const = it.is_const();
                 let params = it

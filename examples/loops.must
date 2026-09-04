@@ -2,11 +2,15 @@
 // (`let mut`, assignment as a statement). A loop is an expression: its
 // value is carried out by its breaks, so `if i == n { break acc; }` is
 // itself well-typed (`break` is the never type `!`, which widens into any
-// context) and running off the body's end just continues.
+// context) and running off the body's end just continues. `return` is the
+// same shape one tier up, and shares this file so the two sit side by side.
 //
-// Run: must-lsp run examples/loops.must -e 'sum_to(10)'         (=> 45)
-// Run: must-lsp run examples/loops.must -e 'sum_odds_below(10)' (=> 25)
-// Run: must-lsp run examples/loops.must -e 'sum_to_const'       (=> 45)
+// Run: must-lsp run examples/loops.must -e 'sum_to(10)'                (=> 45)
+// Run: must-lsp run examples/loops.must -e 'sum_odds_below(10)'        (=> 25)
+// Run: must-lsp run examples/loops.must -e 'sum_to_const'              (=> 45)
+// Run: must-lsp run examples/loops.must -e 'find_even_multiple(3, 20)' (=> 6)
+// Run: must-lsp run examples/loops.must -e 'find_even_multiple(5, 4)'  (=> 0)
+// Run: must-lsp run examples/loops.must -e 'find_even_multiple(0, 20)' (=> 0)
 
 // The accumulator pattern: `acc` and `i` are `mut` locals, stepped by
 // assignment statements (assignment is a statement here, not an
@@ -34,6 +38,25 @@ static sum_odds_below = fn (n: usize) -> usize {
         if is_even(i - 1) { continue; };
         acc = acc + (i - 1);
     }
+};
+
+// `return` leaves the FUNCTION; `break` leaves the LOOP. Both are here,
+// which is the clearest way to see the difference: the guard clause exits
+// before any work happens at all, the hit inside the loop exits
+// `find_even_multiple` outright (skipping everything below, including the
+// `0`), and the `break` only leaves the loop — so the `0` after it is what
+// a search that runs off its end answers. Like `break`, `return` is an
+// expression of type `!`, which is why `if step == 0 { return 0; }` needs
+// no special casing.
+static find_even_multiple = fn (step: usize, limit: usize) -> usize {
+    if step == 0 { return 0; };
+    let mut i = step;
+    loop {
+        if limit < i { break; };
+        if is_even(i) { return i; };
+        i = i + step;
+    };
+    0
 };
 
 // Loops (and local mutation) are const-legal, so the same accumulator

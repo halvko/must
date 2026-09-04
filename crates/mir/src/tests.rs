@@ -1725,6 +1725,205 @@ fn break_outside_loop_traps_with_the_diagnostic() {
     );
 }
 
+// ---- `return` ---------------------------------------------------------
+
+#[test]
+fn return_assigns_the_return_place_and_terminates() {
+    // The existing function-exit path, reached early: the same
+    // `_0 = <value>; return` pair the body's tail value lowers to. The
+    // statements after it lower into a predecessor-less block, so the CFG
+    // stays total and no execution can reach them.
+    check_mir(
+        r#"
+static f = fn (c: bool) -> usize {
+    if c { return 1; };
+    2
+};
+"#,
+        expect![[r#"
+            item f:
+            fn b0(_1: bool) -> usize {
+              _0: usize  // return
+              _1: bool  // param c
+              _2: ()
+              bb0:
+                if _1 -> [then: bb1, else: bb2]
+              bb1:
+                _0 = 1
+                return
+              bb2:
+                _2 = ()
+                goto -> bb4
+              bb3:
+                _2 = ()
+                goto -> bb4
+              bb4:
+                _0 = 2
+                return
+            }
+            fn b1() -> fn(bool) -> usize {
+              _0: fn(bool) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn bare_return_returns_unit() {
+    check_mir(
+        "static f = fn (c: bool) -> () { if c { return; }; };",
+        expect![[r#"
+            item f:
+            fn b0(_1: bool) -> () {
+              _0: ()  // return
+              _1: bool  // param c
+              _2: ()
+              bb0:
+                if _1 -> [then: bb1, else: bb2]
+              bb1:
+                _0 = ()
+                return
+              bb2:
+                _2 = ()
+                goto -> bb4
+              bb3:
+                _2 = ()
+                goto -> bb4
+              bb4:
+                _0 = ()
+                return
+            }
+            fn b1() -> fn(bool) {
+              _0: fn(bool)  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn return_inside_a_loop_leaves_the_function_not_the_loop() {
+    // A `break` jumps to the loop's exit block; a `return` in the same
+    // position terminates outright — the loop's exit is not involved.
+    check_mir(
+        r#"
+static f = fn (n: usize) -> usize {
+    loop {
+        if n == 0 { return 7; };
+    }
+};
+"#,
+        expect![[r#"
+            item f:
+            fn b0(_1: usize) -> usize {
+              _0: usize  // return
+              _1: usize  // param n
+              _2: usize
+              _3: bool
+              _4: ()
+              bb0:
+                goto -> bb1
+              bb1:
+                _3 = Eq(_1, 0)
+                if _3 -> [then: bb3, else: bb4]
+              bb2:
+                _0 = _2
+                return
+              bb3:
+                _0 = 7
+                return
+              bb4:
+                _4 = ()
+                goto -> bb6
+              bb5:
+                _4 = ()
+                goto -> bb6
+              bb6:
+                goto -> bb1
+            }
+            fn b1() -> fn(usize) -> usize {
+              _0: fn(usize) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn return_in_a_nested_fn_literal_terminates_that_body() {
+    // Structural: `b` is one MIR body's builder, and a `fn` literal builds
+    // its own, so the inner `return` can only terminate the inner body.
+    check_mir(
+        r#"
+static f = fn () -> usize {
+    let inner = fn () -> usize { return 1; };
+    inner()
+};
+"#,
+        expect![[r#"
+            item f:
+            fn b0() -> usize {
+              _0: usize  // return
+              bb0:
+                _0 = 1
+                return
+              bb1:
+                _0 = ()
+                return
+            }
+            fn b1() -> usize {
+              _0: usize  // return
+              _1: fn() -> usize  // inner
+              _2: usize
+              bb0:
+                _1 = fn b0
+                _2 = call _1() -> bb1
+              bb1:
+                _0 = _2
+                return
+            }
+            fn b2() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b1
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn return_outside_a_function_traps_with_the_diagnostic() {
+    check_mir(
+        "static x = return 1;",
+        expect![[r#"
+            item x:
+            fn b0() -> {error} {
+              _0: {error}  // return
+              _1: {number}
+              _2: {error}
+              bb0:
+                _1 = trap "cannot infer the type of this number: it has no defining use — add a type annotation" -> bb1
+              bb1:
+                _0 = _1
+                return
+              bb2:
+                _2 = trap "`return` outside of a function: there is no enclosing `fn` body to return from" -> bb3
+              bb3:
+                _0 = _2
+                return
+            }
+        "#]],
+    );
+}
+
 // ---- generics: real instances, no staging traps ----
 //
 // These replace the earlier `generic_mention_lowers_to_a_staging_trap`:

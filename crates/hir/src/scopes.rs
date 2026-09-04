@@ -216,7 +216,7 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
         ExprData::Loop { body: b } => {
             compute_expr_scopes(body, scopes, *b, scope);
         }
-        ExprData::Break { value } => {
+        ExprData::Break { value } | ExprData::Return { value } => {
             if let Some(value) = value {
                 compute_expr_scopes(body, scopes, *value, scope);
             }

@@ -632,6 +632,43 @@ blocks. Compile-time evaluation is fuel-bounded, so an infinite loop in an
 initializer is not a hung compiler but the ordinary
 "constant evaluation ran out of fuel" diagnostic at check time.
 
+== Early return
+
+`return value` leaves the enclosing function with that value; a bare
+`return` leaves it with `()`. It is `break`'s sibling one tier up — an
+*expression* of type `!`, not a statement form — so it composes wherever a
+value goes and needs no special casing anywhere:
+
+```must
+static classify = fn (n: usize) -> str {
+    if n == 0 { return "zero"; };
+    let parity = if n == 1 { "one" } else { return "many" };
+    parity
+};
+```
+
+The value is checked against the enclosing function's return type — the
+same check its tail expression gets. Where that type is written, a
+mismatch blames the returned value and cites the annotation; where it is
+being inferred, `return e` pins it exactly as a tail expression would, so
+an un-annotated `fn (c: bool) { if c { return "yes"; }; "no" }` is
+`fn(bool) -> str`.
+
+`return` targets the *nearest enclosing body*, and function literals bound
+it the way they bound everything else: a `return` inside a `fn` nested in
+another function returns from the inner literal, leaving the outer one
+running. `const { ... }` blocks are compile-time units of their own and
+bound it too — a `return` inside one produces that block's value. A
+`return` with no enclosing body at all (an item initializer's own top
+level, which is a value expression rather than a function) is an error,
+exactly like a `break` with no enclosing loop.
+
+`return` is const-legal: a `const fn` may exit early, and so may a
+`const { ... }` block.
+
+Statements after a `return` still type-check and still resolve — there is
+no unreachable-code lint yet.
+
 == Generics
 
 A generic item binds type and const params on the fn literal itself —

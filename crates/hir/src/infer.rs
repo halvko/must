@@ -472,6 +472,14 @@ pub enum InferenceDiagnostic {
         /// The continue expression.
         expr: ExprId,
     },
+    /// A `return` with no enclosing body to leave — an item initializer's
+    /// own top level, which is a value expression, not a function. (A `fn`
+    /// literal and a `const` block both ARE bodies, so a `return` inside
+    /// either is fine and leaves the innermost of them.)
+    ReturnOutsideFn {
+        /// The return expression.
+        expr: ExprId,
+    },
     /// A record-destructuring `let`/parameter pattern names a field its
     /// type doesn't have — the pattern-side sibling of
     /// [`Self::RecordLitExtraField`].
@@ -1051,6 +1059,7 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::MatchWithoutCatchAll { expr, .. }
             | InferenceDiagnostic::BreakOutsideLoop { expr }
             | InferenceDiagnostic::ContinueOutsideLoop { expr }
+            | InferenceDiagnostic::ReturnOutsideFn { expr }
             | InferenceDiagnostic::GenericArgCount { expr, .. }
             | InferenceDiagnostic::NotGeneric { expr, .. }
             | InferenceDiagnostic::ConstArgHole { expr }
@@ -1385,6 +1394,10 @@ impl InferenceDiagnostic {
             }
             InferenceDiagnostic::ContinueOutsideLoop { .. } => {
                 "`continue` outside of a loop: there is no enclosing `loop` to restart".to_owned()
+            }
+            InferenceDiagnostic::ReturnOutsideFn { .. } => {
+                "`return` outside of a function: there is no enclosing `fn` body to return from"
+                    .to_owned()
             }
             InferenceDiagnostic::PatUnknownField {
                 name, record_ty, ..
@@ -1738,6 +1751,22 @@ pub(crate) struct InferCtx<'a, 'db> {
     /// own); a `break`/`continue` with this empty is the outside-a-loop
     /// error.
     loop_sinks: Vec<usize>,
+    /// The return-target stack: for each BODY currently being inferred
+    /// (innermost last) — a `fn` literal or a `const` block — the type its
+    /// value must have, plus the [`Cause`] that made it expected. A
+    /// `return` checks its operand against the innermost entry, which is
+    /// literally the same check the body's TAIL expression gets: one
+    /// mechanism, so an annotated return type blames the operand and cites
+    /// the annotation, and an inferred one is pinned by `return e` exactly
+    /// as a tail would pin it.
+    ///
+    /// A `const` block pushes an entry for the same reason it resets
+    /// [`Self::loop_sinks`]: it is a compile-time unit of its own (MIR
+    /// lowers it to a separate body), so a `return` inside one can no more
+    /// exit the surrounding function than a `break` can leave it. Empty —
+    /// at an item initializer's top level — is the outside-a-function
+    /// error.
+    return_targets: Vec<(Ty, Option<Cause>)>,
     /// The item's own generic binder scope (type params → rigid
     /// [`Ty::Param`]s, const params → rigid [`ConstArgValue::Param`]s),
     /// applied by [`Self::lower_type_ref`] to every type annotation
@@ -1873,6 +1902,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             join_sinks: Vec::new(),
             witness_sink: None,
             loop_sinks: Vec::new(),
+            return_targets: Vec::new(),
             type_params: ParamScope::default(),
             own_generics: &[],
             own_item: None,
@@ -2139,6 +2169,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::BindShadowsVariant { .. }
                 | InferenceDiagnostic::BreakOutsideLoop { .. }
                 | InferenceDiagnostic::ContinueOutsideLoop { .. }
+                | InferenceDiagnostic::ReturnOutsideFn { .. }
                 | InferenceDiagnostic::PatBindingNeedsAnnotation { .. }
                 | InferenceDiagnostic::PatUnknownType { .. }
                 | InferenceDiagnostic::GenericArgCount { .. }
@@ -2704,6 +2735,19 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
             }
             ExprData::Block { stmts, tail } => {
+                // Whether some *statement* of this block DIVERGED — a
+                // `return;`/`break;`/`continue;`, or a call that never comes
+                // back. A tail-less block normally produces `()`, but a
+                // block execution never runs off the end of produces nothing
+                // at all: it is `!`, and the never machinery takes it from
+                // there. That is what makes the SEMICOLON spellings work —
+                // `else { return 0; }`, `else { break; }` — which without it
+                // would type `()` purely because of the trailing `;` and
+                // mismatch the branch they belong to. (Deliberately only
+                // statement position: `let x = return 1;` diverges too, but
+                // typing the block off a binding's initializer is a step
+                // towards the reachability analysis this isn't.)
+                let mut diverged = false;
                 for stmt in stmts {
                     match stmt {
                         Stmt::Let {
@@ -2868,7 +2912,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         }
                         Stmt::Expr(e) => {
                             let fresh_var = self.fresh_var();
-                            self.infer_expr(*e, &fresh_var);
+                            let ty = self.infer_expr(*e, &fresh_var);
+                            if matches!(self.resolve_shallow(&ty), Ty::Never) {
+                                diverged = true;
+                            }
                         }
                     }
                 }
@@ -2884,6 +2931,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         self.result.type_of_expr.insert(expr, ty.clone());
                         return ty;
                     }
+                    None if diverged => Ty::Never,
                     None => Ty::Unit,
                 }
             }
@@ -2904,9 +2952,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // bounds' dictionary (`const_block_depth`).
                 self.witness_sink = sink;
                 let saved_loops = std::mem::take(&mut self.loop_sinks);
+                // A body of its own, so it is also a `return` target: the
+                // block's own expectation is what a `return` inside it must
+                // produce (its tail's expectation, verbatim).
+                self.return_targets.push((expected.clone(), cause));
                 self.const_block_depth += 1;
                 let ty = self.infer_expr_with(*inner, expected, cause);
                 self.const_block_depth -= 1;
+                self.return_targets.pop();
                 self.loop_sinks = saved_loops;
                 self.result.type_of_expr.insert(expr, ty.clone());
                 return ty;
@@ -3285,9 +3338,30 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // exits a loop enclosing the literal (fns bound everything).
                 self.scope_depth += 1;
                 let saved_loops = std::mem::take(&mut self.loop_sinks);
-                self.infer_expr_with(*fn_body, &ret, ret_cause);
+                // A `return` in the body targets THIS literal — the same
+                // `ret`/`ret_cause` pair the tail below is checked against.
+                // Pushed (not swapped): an outer entry stays reachable only
+                // to the outer body, so a nested literal's `return` exits
+                // the nested literal.
+                self.return_targets.push((ret.clone(), ret_cause));
+                let body_ty = self.infer_expr_with(*fn_body, &ret, ret_cause);
+                self.return_targets.pop();
                 self.loop_sinks = saved_loops;
                 self.scope_depth -= 1;
+                // `check`'s `!`-coerces-to-anything shortcut leaves a still-
+                // free `expected` unbound rather than pinning it to `!`
+                // (right, in general: a witness that happens to diverge must
+                // not force a join's other branches to `!` too) — but an
+                // UNANNOTATED `ret` has exactly one determiner, this body, so
+                // leaving it unbound here resolves to `{error}`
+                // (needs-annotation) even though the body's divergence is a
+                // perfectly good answer. Pin it explicitly, only when `ret`
+                // is still free: an annotated `ret` is a concrete type by
+                // construction (`lower_type_ref` mints no variables) and
+                // stays exactly that even when the body diverges.
+                if matches!(self.resolve_shallow(&ret), Ty::Infer(_)) {
+                    self.unify(&ret, &body_ty);
+                }
                 Ty::fn_type(param_tys, ret)
             }
             ExprData::Match { scrutinee, arms } => {
@@ -3390,6 +3464,41 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     self.result
                         .diagnostics
                         .push(InferenceDiagnostic::BreakOutsideLoop { expr });
+                    Ty::Error
+                }
+            },
+            ExprData::Return { value } => match self.return_targets.last().cloned() {
+                Some((ret, ret_cause)) => {
+                    match value {
+                        // THE seam: the operand is checked against the
+                        // enclosing body's return type with that type's own
+                        // cause — the identical call the body's tail gets.
+                        // An annotated return type therefore blames the
+                        // operand and cites the annotation; an inferred one
+                        // is pinned here just as a tail would pin it.
+                        Some(value) => {
+                            self.infer_expr_with(*value, &ret, ret_cause);
+                        }
+                        // `return;` returns `()`. Nothing else carries the
+                        // blame, so the `return` keyword itself does.
+                        None => {
+                            self.check(expr, Ty::Unit, &ret, ret_cause);
+                        }
+                    }
+                    // The `return` expression itself never produces a value.
+                    Ty::Never
+                }
+                None => {
+                    // At an item initializer's top level: there is no
+                    // function to leave. The value is still inferred so its
+                    // contents get types and diagnostics.
+                    if let Some(value) = value {
+                        let fresh = self.fresh_var();
+                        self.infer_expr(*value, &fresh);
+                    }
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::ReturnOutsideFn { expr });
                     Ty::Error
                 }
             },
