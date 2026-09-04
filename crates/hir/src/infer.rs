@@ -175,6 +175,19 @@ pub enum InferenceDiagnostic {
         item: ItemLoc,
         found: usize,
     },
+    /// A `break` with no enclosing `loop`. Function literals and `const`
+    /// blocks reset the loop context — they are units of their own, so a
+    /// `break` inside one never exits a loop outside it.
+    BreakOutsideLoop {
+        /// The break expression.
+        expr: ExprId,
+    },
+    /// A `continue` with no enclosing `loop`; same boundaries as
+    /// [`Self::BreakOutsideLoop`].
+    ContinueOutsideLoop {
+        /// The continue expression.
+        expr: ExprId,
+    },
 }
 
 impl InferenceDiagnostic {
@@ -190,7 +203,9 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::RecordLitExtraField { expr, .. }
             | InferenceDiagnostic::NoSuchField { expr, .. }
             | InferenceDiagnostic::TypeNotValue { expr, .. }
-            | InferenceDiagnostic::TypeCtorArgCount { expr, .. } => *expr,
+            | InferenceDiagnostic::TypeCtorArgCount { expr, .. }
+            | InferenceDiagnostic::BreakOutsideLoop { expr }
+            | InferenceDiagnostic::ContinueOutsideLoop { expr } => *expr,
             InferenceDiagnostic::FieldOnUnknownType { receiver, .. } => *receiver,
             InferenceDiagnostic::IfBranchMismatch { else_expr, .. } => *else_expr,
             InferenceDiagnostic::AssignToImmutable { target, .. }
@@ -277,6 +292,12 @@ impl InferenceDiagnostic {
                     "cannot assign to `{}`: it is a builtin function",
                     builtin.name()
                 )
+            }
+            InferenceDiagnostic::BreakOutsideLoop { .. } => {
+                "`break` outside of a loop: there is no enclosing `loop` to exit".to_owned()
+            }
+            InferenceDiagnostic::ContinueOutsideLoop { .. } => {
+                "`continue` outside of a loop: there is no enclosing `loop` to restart".to_owned()
             }
             InferenceDiagnostic::RecordLitMissingFields { fields, .. } => {
                 let list = fields
@@ -368,6 +389,13 @@ pub(crate) struct InferCtx<'a, 'db> {
     /// initializers, call arguments, statements, conditions, …) it is
     /// `None` and an `if` there resolves as its own join.
     witness_sink: Option<usize>,
+    /// The loop-context stack: for each `loop` currently being inferred
+    /// (innermost last), the index of the join sink its `break` values are
+    /// witnesses of. Function literals and `const` blocks RESET it (a
+    /// `break` never escapes those boundaries — they are units of their
+    /// own); a `break`/`continue` with this empty is the outside-a-loop
+    /// error.
+    loop_sinks: Vec<usize>,
 }
 
 /// A join under construction. The root `if` of a nest opens one; every
@@ -403,6 +431,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             scope_depth: 0,
             join_sinks: Vec::new(),
             witness_sink: None,
+            loop_sinks: Vec::new(),
         }
     }
 
@@ -462,7 +491,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::AssignToBuiltin { .. }
                 | InferenceDiagnostic::FieldOnUnknownType { .. }
                 | InferenceDiagnostic::TypeNotValue { .. }
-                | InferenceDiagnostic::TypeCtorArgCount { .. } => {}
+                | InferenceDiagnostic::TypeCtorArgCount { .. }
+                | InferenceDiagnostic::BreakOutsideLoop { .. }
+                | InferenceDiagnostic::ContinueOutsideLoop { .. } => {}
             }
         }
         result
@@ -870,8 +901,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // Transparent for the join sink too, matching
                 // `peel_blocks`: an `if` at a `const` block's core is still
                 // in witness position.
+                // NOT transparent for the loop context: a `const` block is
+                // a compile-time unit of its own (MIR lowers it to a
+                // separate body), so a `break` inside it cannot exit a loop
+                // outside it.
                 self.witness_sink = sink;
+                let saved_loops = std::mem::take(&mut self.loop_sinks);
                 let ty = self.infer_expr_with(*inner, expected, cause);
+                self.loop_sinks = saved_loops;
                 self.result.type_of_expr.insert(expr, ty.clone());
                 return ty;
             }
@@ -1051,10 +1088,125 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // literal in witness position is one opaque leaf and its
                 // body-tail `if` is a root join of its own (the return type
                 // is the boundary the join resolves against).
+                // The loop context resets the same way: a `break` in the
+                // body never exits a loop enclosing the literal (fns bound
+                // everything).
                 self.scope_depth += 1;
+                let saved_loops = std::mem::take(&mut self.loop_sinks);
                 self.infer_expr_with(*fn_body, &ret, ret_cause);
+                self.loop_sinks = saved_loops;
                 self.scope_depth -= 1;
                 Ty::fn_type(param_tys, ret)
+            }
+            ExprData::Loop { body: loop_body } => {
+                // The BREAK VALUES are the witnesses of one join whose
+                // result is the loop's type. Statement vs. witness
+                // position, exactly as for `if`: a loop in witness position
+                // contributes its break values to the enclosing join,
+                // anywhere else it resolves a join of its own.
+                let (sink_index, is_root) = match sink {
+                    Some(index) => (index, false),
+                    None => {
+                        let result = self.fresh_var();
+                        self.join_sinks.push(JoinSink {
+                            result,
+                            witnesses: Vec::new(),
+                        });
+                        (self.join_sinks.len() - 1, true)
+                    }
+                };
+                let witnesses_before = self.join_sinks[sink_index].witnesses.len();
+                // The body's own tail value is discarded — running off the
+                // body's end continues the loop — so it is inferred free:
+                // only `break` produces the loop's value.
+                self.loop_sinks.push(sink_index);
+                let body_fresh = self.fresh_var();
+                self.infer_expr(*loop_body, &body_fresh);
+                self.loop_sinks.pop();
+                // Everything contributed to the sink during the body came
+                // from this loop's breaks (nested constructs in statement
+                // position open sinks of their own, LIFO): no contribution
+                // means no break ever carries a value out — the loop never
+                // finishes, `!`, and the never machinery (widening, no
+                // vote) takes it from there.
+                let broke_with_value =
+                    self.join_sinks[sink_index].witnesses.len() > witnesses_before;
+                if !is_root {
+                    // A nested loop types as the enclosing join's result,
+                    // exactly like a nested `if`.
+                    if broke_with_value {
+                        self.join_sinks[sink_index].result.clone()
+                    } else {
+                        Ty::Never
+                    }
+                } else {
+                    let JoinSink { result, witnesses } =
+                        self.join_sinks.pop().expect("sink pushed above");
+                    match witnesses.len() {
+                        // No break carries a value out: an infinite loop.
+                        0 => {
+                            self.unify(&result, &Ty::Never);
+                            Ty::Never
+                        }
+                        1 => {
+                            let ty = witnesses.into_iter().next().unwrap().ty;
+                            self.unify(&result, &ty);
+                            ty
+                        }
+                        _ => {
+                            self.constraints.push_join(Join {
+                                expr,
+                                depth: self.scope_depth,
+                                result: result.clone(),
+                                witnesses,
+                            });
+                            result
+                        }
+                    }
+                }
+            }
+            ExprData::Break { value } => match self.loop_sinks.last().copied() {
+                Some(sink_index) => {
+                    match value {
+                        Some(value) => {
+                            // The value sits in witness position of the
+                            // loop's join: an `if`/`loop` at its core
+                            // flattens its leaves into the same join, so
+                            // blame speaks about the leaves.
+                            let fresh = self.fresh_var();
+                            self.witness_sink = Some(sink_index);
+                            let value_ty = self.infer_expr(*value, &fresh);
+                            self.contribute_witness(sink_index, *value, &value_ty);
+                        }
+                        // `break;` is a witness of type `()`.
+                        None => self.contribute_witness(sink_index, expr, &Ty::Unit),
+                    }
+                    // The break expression itself never produces a value.
+                    Ty::Never
+                }
+                None => {
+                    // Outside any loop (or across a fn-literal/`const`
+                    // block boundary). The value is still inferred so its
+                    // contents get types and diagnostics.
+                    if let Some(value) = value {
+                        let fresh = self.fresh_var();
+                        self.infer_expr(*value, &fresh);
+                    }
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::BreakOutsideLoop { expr });
+                    Ty::Error
+                }
+            },
+            ExprData::Continue => {
+                if self.loop_sinks.is_empty() {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::ContinueOutsideLoop { expr });
+                    Ty::Error
+                } else {
+                    Ty::Never
+                }
             }
         };
 
@@ -1116,9 +1268,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     ///
     /// Two kinds of branch contribute nothing: a diverging branch (it
     /// doesn't vote, it widens — the join is decided by the surviving
-    /// leaves alone), and a branch whose tail is itself an `if`/`else` (it
-    /// was inferred with this sink as its witness position, so its leaves
-    /// are already in; that's the flattening).
+    /// leaves alone), and a branch whose tail is itself an `if`/`else` or a
+    /// `loop` (it was inferred with this sink as its witness position, so
+    /// its leaves — a loop's break values — are already in; that's the
+    /// flattening).
     fn contribute_witness(&mut self, sink: usize, branch: ExprId, ty: &Ty) {
         if matches!(self.resolve_shallow(ty), Ty::Never) {
             return;
@@ -1129,7 +1282,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             ExprData::If {
                 else_branch: Some(_),
                 ..
-            }
+            } | ExprData::Loop { .. }
         ) {
             return;
         }

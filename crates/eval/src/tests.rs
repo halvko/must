@@ -877,3 +877,161 @@ fn named_type_inequality_observes_field_values() {
         "#]],
     );
 }
+
+#[test]
+fn accumulator_loop_runs() {
+    // The mutability motivation: a mutable accumulator stepped by a loop.
+    check_run(
+        r#"
+static sum = fn () -> usize {
+    let mut acc = 0;
+    let mut i = 0;
+    loop {
+        if i == 10 { break acc; };
+        acc = acc + i;
+        i = i + 1;
+    }
+};
+"#,
+        "sum()",
+        expect![[r#"
+            => 45
+        "#]],
+    );
+}
+
+#[test]
+fn accumulator_loop_const_evaluates() {
+    // The same accumulator inside a `const fn`, forced at compile time.
+    check_const(
+        r#"
+static sum = const fn () -> usize {
+    let mut acc = 0;
+    let mut i = 0;
+    loop {
+        if i == 10 { break acc; };
+        acc = acc + i;
+        i = i + 1;
+    }
+};
+static answer = sum();
+"#,
+        expect![[r#"
+            sum = fn
+            answer = 45
+        "#]],
+    );
+}
+
+#[test]
+fn bare_break_carries_unit() {
+    check_run(
+        r#"
+static f = fn () {
+    let mut i = 0;
+    loop {
+        if i == 3 { break; };
+        i = i + 1;
+    }
+};
+"#,
+        "f()",
+        expect![[r#"
+            => ()
+        "#]],
+    );
+}
+
+#[test]
+fn continue_skips_work() {
+    // Sum 0..10 skipping the even numbers: 1 + 3 + 5 + 7 + 9 = 25.
+    check_run(
+        r#"
+static is_even = fn (n: usize) -> bool { (n / 2) * 2 == n };
+static sum_odd = fn () -> usize {
+    let mut acc = 0;
+    let mut i = 0;
+    loop {
+        if i == 10 { break acc; };
+        i = i + 1;
+        if is_even(i - 1) { continue; };
+        acc = acc + (i - 1);
+    }
+};
+"#,
+        "sum_odd()",
+        expect![[r#"
+            => 25
+        "#]],
+    );
+}
+
+#[test]
+fn nested_loops_inner_break_stays_inner() {
+    // 3 * 4: the inner loop finishes per outer iteration — its break never
+    // exits the outer loop.
+    check_run(
+        r#"
+static grid = fn () -> usize {
+    let mut total = 0;
+    let mut row = 0;
+    loop {
+        if row == 3 { break total; };
+        let mut col = 0;
+        total = total + loop {
+            if col == 4 { break col; };
+            col = col + 1;
+        };
+        row = row + 1;
+    }
+};
+"#,
+        "grid()",
+        expect![[r#"
+            => 12
+        "#]],
+    );
+}
+
+#[test]
+fn break_in_nested_if_exits_the_loop() {
+    check_run(
+        r#"
+static first_over = fn (limit: usize) -> usize {
+    let mut n = 0;
+    loop {
+        if limit < n {
+            if true { break n * 10; };
+        };
+        n = n + 1;
+    }
+};
+"#,
+        "first_over(2)",
+        expect![[r#"
+            => 30
+        "#]],
+    );
+}
+
+#[test]
+fn infinite_loop_in_an_initializer_runs_out_of_fuel() {
+    // Loops are const-legal; the machine's existing fuel budget is what
+    // bounds a runaway compile-time loop.
+    check_const(
+        "static spin = loop { };",
+        expect![[r#"
+            spin = error[NotConst]: constant evaluation ran out of fuel
+        "#]],
+    );
+}
+
+#[test]
+fn infinite_loop_in_a_const_block_runs_out_of_fuel() {
+    check_const_blocks(
+        "static f = fn { const { loop { } } };",
+        expect![[r#"
+            f#0 = error[NotConst]: constant evaluation ran out of fuel
+        "#]],
+    );
+}

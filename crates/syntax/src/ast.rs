@@ -129,6 +129,19 @@ ast_node!(
     FieldExpr: FIELD_EXPR
 );
 
+ast_node!(
+    /// `loop { ... }` — an infinite loop; its value is carried by `break`.
+    LoopExpr: LOOP_EXPR
+);
+ast_node!(
+    /// `break` with an optional value, exiting the enclosing `loop`.
+    BreakExpr: BREAK_EXPR
+);
+ast_node!(
+    /// `continue`, restarting the enclosing `loop`'s body.
+    ContinueExpr: CONTINUE_EXPR
+);
+
 ast_enum!(
     Expr: FnLiteral,
     CallExpr,
@@ -140,7 +153,10 @@ ast_enum!(
     BinExpr,
     IfExpr,
     RecordExpr,
-    FieldExpr
+    FieldExpr,
+    LoopExpr,
+    BreakExpr,
+    ContinueExpr
 );
 ast_enum!(
     Type: FnType,
@@ -563,5 +579,32 @@ impl FieldExpr {
     /// The field being accessed.
     pub fn name_ref(&self) -> Option<NameRef> {
         child(&self.syntax)
+    }
+}
+
+impl LoopExpr {
+    pub fn loop_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, LOOP_KW)
+    }
+    /// The language requires a block, but the parser accepts any expression
+    /// for resilience — validation flags non-block bodies.
+    pub fn body(&self) -> Option<Expr> {
+        child(&self.syntax)
+    }
+}
+
+impl BreakExpr {
+    pub fn break_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, BREAK_KW)
+    }
+    /// The carried value; `None` for a bare `break` (which carries `()`).
+    pub fn expr(&self) -> Option<Expr> {
+        child(&self.syntax)
+    }
+}
+
+impl ContinueExpr {
+    pub fn continue_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, CONTINUE_KW)
     }
 }

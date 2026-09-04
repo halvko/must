@@ -177,6 +177,9 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         L_BRACE => block_expr(p),
         FN_KW => fn_literal(p),
         IF_KW => if_expr(p),
+        LOOP_KW => loop_expr(p),
+        BREAK_KW => break_expr(p),
+        CONTINUE_KW => continue_expr(p),
         _ => {
             if at_expr_recovery(p) {
                 p.error("expected an expression");
@@ -227,6 +230,51 @@ fn if_expr(p: &mut Parser<'_>) -> CompletedMarker {
         }
     }
     m.complete(p, IF_EXPR)
+}
+
+/// `loop { ... }` — an infinite loop; `break`/`continue` steer it. The body
+/// parses with `block_expr` directly (bare braces stay blocks, no
+/// lookahead); like `if` branches, any other expression superset-parses and
+/// validation rejects it with a wrap-in-braces fix.
+fn loop_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump(LOOP_KW);
+    branch(p, "`loop` bodies");
+    m.complete(p, LOOP_EXPR)
+}
+
+/// `break` with an optional value. A primary expression (typed `!` by
+/// inference), so it composes in statement position through ordinary
+/// expression statements — and pathologies like `break loop { ... }` just
+/// fall out of the grammar.
+fn break_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump(BREAK_KW);
+    // A value only when the next token can start one: `break;` must not
+    // swallow its `;` (or the caller's recovery tokens) hunting for a value.
+    if at_expr_start(p) {
+        expr(p);
+    }
+    m.complete(p, BREAK_EXPR)
+}
+
+fn continue_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump(CONTINUE_KW);
+    m.complete(p, CONTINUE_EXPR)
+}
+
+/// Whether the current token can start an expression — the dispatch set of
+/// `primary_expr`, including its one-token-lookahead `const`/`struct`
+/// cases. Used where an expression is *optional* (a `break` value).
+fn at_expr_start(p: &Parser<'_>) -> bool {
+    match p.current() {
+        INT_NUMBER | STRING | TRUE_KW | FALSE_KW | IDENT | L_PAREN | L_BRACE | FN_KW | IF_KW
+        | LOOP_KW | BREAK_KW | CONTINUE_KW => true,
+        CONST_KW => matches!(p.nth(1), FN_KW | L_BRACE),
+        STRUCT_KW => p.nth(1) == L_BRACE,
+        _ => false,
+    }
 }
 
 /// Superset parsing, same deal as `fn` bodies: take any expression so the

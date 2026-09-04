@@ -1,0 +1,53 @@
+// Loops (`loop { ... }`, `break value;`, `continue;`) and mutability
+// (`let mut`, assignment as a statement). A loop is an expression: its
+// value is carried out by its breaks, so `if i == n { break acc; }` is
+// itself well-typed (`break` is the never type `!`, which widens into any
+// context) and running off the body's end just continues.
+//
+// Run: must-lsp run examples/loops.must -e 'sum_to(10)'         (=> 45)
+// Run: must-lsp run examples/loops.must -e 'sum_odds_below(10)' (=> 25)
+// Run: must-lsp run examples/loops.must -e 'sum_to_const'       (=> 45)
+
+// The accumulator pattern: `acc` and `i` are `mut` locals, stepped by
+// assignment statements (assignment is a statement here, not an
+// expression), and the loop exits via a value-carrying `break`.
+static sum_to = fn (n: usize) -> usize {
+    let mut acc = 0;
+    let mut i = 0;
+    loop {
+        if i == n { break acc; };
+        acc = acc + i;
+        i = i + 1;
+    }
+};
+
+static is_even = fn (n: usize) -> bool { (n / 2) * 2 == n };
+
+// `continue;` restarts the body immediately, skipping the rest — no
+// accumulation happens on the steps it fires on.
+static sum_odds_below = fn (n: usize) -> usize {
+    let mut acc = 0;
+    let mut i = 0;
+    loop {
+        if i == n { break acc; };
+        i = i + 1;
+        if is_even(i - 1) { continue; };
+        acc = acc + (i - 1);
+    }
+};
+
+// Loops (and local mutation) are const-legal, so the same accumulator
+// marked `const fn` runs entirely at compile time. Hover `sum_to_const` in
+// the editor and it shows the already-computed `usize = 45` — there is no
+// runtime call left to make.
+static sum_to_const_fn = const fn (n: usize) -> usize {
+    let mut acc = 0;
+    let mut i = 0;
+    loop {
+        if i == n { break acc; };
+        acc = acc + i;
+        i = i + 1;
+    }
+};
+
+static sum_to_const = sum_to_const_fn(10);

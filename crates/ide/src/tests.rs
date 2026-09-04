@@ -975,3 +975,54 @@ fn type_item_file_evaluates_cleanly() {
     let diagnostics = analysis.diagnostics(file);
     assert_eq!(diagnostics, Vec::new(), "diagnostics: {diagnostics:?}");
 }
+
+#[test]
+fn highlights_loop_break_continue_keywords() {
+    check_highlights(
+        "static f = fn { loop { if true { break 1; }; continue; } };",
+        expect_test::expect![[r#"
+            0..6 "static" Keyword
+            7..8 "f" Function.declaration.static
+            9..10 "=" Operator
+            11..13 "fn" Keyword
+            16..20 "loop" Keyword
+            23..25 "if" Keyword
+            26..30 "true" Keyword
+            33..38 "break" Keyword
+            39..40 "1" Number
+            45..53 "continue" Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn hover_on_loop_shows_its_type() {
+    check_hover(
+        r#"
+static f = fn () -> usize {
+    lo$0op {
+        break 42;
+    }
+};
+"#,
+        "```must\nloop { … }: usize\n```",
+    );
+}
+
+#[test]
+fn hover_on_breakless_loop_shows_never() {
+    check_hover(
+        "static f = fn { lo$0op { } };",
+        "```must\nloop { … }: !\n```",
+    );
+}
+
+#[test]
+fn hover_on_break_keyword_is_none() {
+    // `break` names nothing; hover stays quiet (and doesn't panic) on it
+    // and on its dangling outside-a-loop form.
+    let (analysis, _file, pos) = fixture("static f = fn { loop { bre$0ak 1; } };");
+    assert_eq!(analysis.hover(pos), None);
+    let (analysis, _file, pos) = fixture("static f = fn { bre$0ak; };");
+    assert_eq!(analysis.hover(pos), None);
+}

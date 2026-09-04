@@ -2360,3 +2360,206 @@ static f = fn { let p = Foo(struct { x: 1 }); p.x };
         "#]],
     );
 }
+
+#[test]
+fn loop_types_as_its_break_value() {
+    // The owner's motivating accumulator: break values are the witnesses of
+    // one join, and that join's result is the loop's type.
+    check_infer(
+        r#"
+static sum = fn () -> usize {
+    let mut acc = 0;
+    let mut i = 0;
+    loop {
+        if i == 10 { break acc; };
+        acc = acc + i;
+        i = i + 1;
+    }
+};
+"#,
+        expect![[r#"
+            14..166 'fn () -> usize { ...': fn() -> usize
+            29..166 '{     let mut acc...': usize
+            43..46 'acc': usize
+            49..50 '0': usize
+            64..65 'i': usize
+            68..69 '0': usize
+            75..164 'loop {         if...': usize
+            80..164 '{         if i ==...': ()
+            90..115 'if i == 10 { brea...': ()
+            93..94 'i': usize
+            93..100 'i == 10': bool
+            98..100 '10': usize
+            101..115 '{ break acc; }': ()
+            103..112 'break acc': !
+            109..112 'acc': usize
+            125..128 'acc': usize
+            131..134 'acc': usize
+            131..138 'acc + i': usize
+            137..138 'i': usize
+            148..149 'i': usize
+            152..153 'i': usize
+            152..157 'i + 1': usize
+            156..157 '1': usize
+        "#]],
+    );
+}
+
+#[test]
+fn breakless_loop_types_never() {
+    check_infer(
+        "static f = fn { loop { } };",
+        expect![[r#"
+            11..26 'fn { loop { } }': fn() -> _
+            14..26 '{ loop { } }': !
+            16..24 'loop { }': !
+            21..24 '{ }': ()
+        "#]],
+    );
+}
+
+#[test]
+fn bare_break_is_a_unit_witness() {
+    // `break;` carries `()` as the loop's value.
+    check_infer(
+        "static f = fn { loop { break; } };",
+        expect![[r#"
+            11..33 'fn { loop { break...': fn()
+            14..33 '{ loop { break; } }': ()
+            16..31 'loop { break; }': ()
+            21..31 '{ break; }': ()
+            23..28 'break': !
+        "#]],
+    );
+}
+
+#[test]
+fn loop_break_value_checks_against_the_return_annotation() {
+    check_diagnostics(
+        r#"
+static f = fn () -> usize {
+    loop {
+        break "text";
+    }
+};
+"#,
+        expect![[r#"
+            33..67: type mismatch: expected `usize`, found `str` (expected `usize` because of this return type at 18..26)
+        "#]],
+    );
+}
+
+#[test]
+fn nested_loops_inner_break_does_not_exit_the_outer() {
+    // The inner loop's break is the *inner* loop's value; the outer loop
+    // has no value-carrying break, so it types `!` and the fn returns `!`
+    // — pinned by the (clean) types below.
+    check_infer(
+        r#"
+static f = fn {
+    loop {
+        let n = loop { break 1; };
+        n;
+    }
+};
+"#,
+        expect![[r#"
+            12..81 'fn {     loop {  ...': fn() -> _
+            15..81 '{     loop {     ...': !
+            21..79 'loop {         le...': !
+            26..79 '{         let n =...': ()
+            40..41 'n': usize
+            44..61 'loop { break 1; }': usize
+            49..61 '{ break 1; }': ()
+            51..58 'break 1': !
+            57..58 '1': usize
+            71..72 'n': usize
+        "#]],
+    );
+}
+
+#[test]
+fn break_outside_loop_errors() {
+    check_diagnostics(
+        "static f = fn { break 1; };",
+        expect![[r#"
+            16..23: `break` outside of a loop: there is no enclosing `loop` to exit
+        "#]],
+    );
+}
+
+#[test]
+fn continue_outside_loop_errors() {
+    check_diagnostics(
+        "static f = fn { continue; };",
+        expect![[r#"
+            16..24: `continue` outside of a loop: there is no enclosing `loop` to restart
+        "#]],
+    );
+}
+
+#[test]
+fn dangling_break_at_top_level_errors() {
+    check_diagnostics(
+        "static x = break 1;",
+        expect![[r#"
+            11..18: `break` outside of a loop: there is no enclosing `loop` to exit
+        "#]],
+    );
+}
+
+#[test]
+fn break_inside_fn_literal_does_not_escape_the_loop() {
+    // A fn body is a fresh context: `break` never crosses a fn boundary,
+    // so this is the same outside-a-loop error.
+    check_diagnostics(
+        r#"
+static f = fn {
+    loop {
+        let g = fn { break 1; };
+        g();
+    }
+};
+"#,
+        expect![[r#"
+            49..56: `break` outside of a loop: there is no enclosing `loop` to exit
+        "#]],
+    );
+}
+
+#[test]
+fn break_inside_const_block_does_not_escape_the_loop() {
+    // A `const` block is a compile-time unit of its own (MIR lowers it to
+    // a separate body), so it bounds the loop context like a fn literal.
+    check_diagnostics(
+        r#"
+static f = fn {
+    loop {
+        let x = const { break 1; };
+    }
+};
+"#,
+        expect![[r#"
+            52..59: `break` outside of a loop: there is no enclosing `loop` to exit
+        "#]],
+    );
+}
+
+#[test]
+fn loop_in_const_fn_is_clean() {
+    check_diagnostics(
+        r#"
+static sum = const fn () -> usize {
+    let mut acc = 0;
+    let mut i = 0;
+    loop {
+        if i == 10 { break acc; };
+        acc = acc + i;
+        i = i + 1;
+    }
+};
+static x = sum();
+"#,
+        expect![[r#""#]],
+    );
+}

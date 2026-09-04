@@ -315,3 +315,43 @@ At runtime named types are fully erased: a `Point` value *is* its record
 value — same representation, structural equality under the hood. The type
 system alone keeps `Point` and bare records apart, so erased equality is
 only ever asked between two values of the same nominal type.
+
+== Loops
+
+`loop { ... }` is an expression: an infinite loop. `break;` and `break
+value;` exit it, `continue;` restarts the body. The loop's value is carried
+by its breaks — the break values are branches of one join, exactly like
+`if`/`else` branches, so they must agree on one type. The body's own tail
+value is discarded: running off the body's end just continues the loop.
+
+```
+static sum_to_ten = fn () -> usize {
+    let mut acc = 0;
+    let mut i = 0;
+    loop {
+        if i == 10 { break acc; };
+        acc = acc + i;
+        i = i + 1;
+    }
+};
+```
+
+A bare `break;` carries `()`. A loop no value-carrying break ever exits
+never finishes, so it types as the never type `!` (which widens into any
+context, like `panic`). `break` and `continue` are themselves expressions
+of type `!` — that is why `if i == 10 { break acc; }` needs no special
+casing.
+
+`break`/`continue` outside a loop is an error. Function literals bound the
+loop context like they bound everything else: a `break` inside a `fn`
+nested in a loop body does not exit the outer loop — it is the same error.
+`const { ... }` blocks are compile-time units of their own and bound it
+too.
+
+Labels don't exist yet: `break` and `continue` always target the innermost
+loop.
+
+Loops are const-legal — fine in `const fn` bodies and `const { ... }`
+blocks. Compile-time evaluation is fuel-bounded, so an infinite loop in an
+initializer is not a hung compiler but the ordinary
+"constant evaluation ran out of fuel" diagnostic at check time.

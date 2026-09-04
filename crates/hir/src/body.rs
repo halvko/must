@@ -94,6 +94,23 @@ pub enum ExprData {
         ret_type: Option<TypeRef>,
         body: ExprId,
     },
+    /// `loop { body }`: an infinite loop. Its value is carried by `break`s
+    /// — the break values are witnesses of one join whose result is the
+    /// loop's type; the body's own tail value is discarded (running off the
+    /// body's end continues the loop). No breaks at all: the loop types `!`.
+    Loop {
+        body: ExprId,
+    },
+    /// `break` / `break value`: exits the enclosing `loop`, carrying the
+    /// value (`()` when absent) as the loop's. An expression of type `!` —
+    /// it composes with the never machinery, so `if c { break; }` needs no
+    /// special casing.
+    Break {
+        value: Option<ExprId>,
+    },
+    /// `continue`: restarts the enclosing `loop`'s body. Typed `!` like
+    /// `break`.
+    Continue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -267,6 +284,15 @@ impl LowerCtx {
                 };
                 self.alloc_expr(ExprData::ConstBlock { body }, it.syntax())
             }
+            ast::Expr::LoopExpr(it) => {
+                let body = self.lower_opt_expr(it.body());
+                self.alloc_expr(ExprData::Loop { body }, it.syntax())
+            }
+            ast::Expr::BreakExpr(it) => {
+                let value = it.expr().map(|e| self.lower_expr(e));
+                self.alloc_expr(ExprData::Break { value }, it.syntax())
+            }
+            ast::Expr::ContinueExpr(it) => self.alloc_expr(ExprData::Continue, it.syntax()),
             ast::Expr::RecordExpr(it) => {
                 let fields = it
                     .fields()

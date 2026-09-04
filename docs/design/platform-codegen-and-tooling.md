@@ -12,3 +12,7 @@
 ## Discarded
 
 ## Re-evaluate when
+
+- **Two open debug-adapter bugs**, not decisions: with loops and unfueled run mode an infinite
+  loop hangs the session with no interrupt path; and breakpoint arrivals are deduped by
+  frame/line/column, so a breakpoint in a loop body fires once per frame. **P11**

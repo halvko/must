@@ -107,6 +107,13 @@ impl LowerCtx<'_> {
                 // Handled where the name is lowered, which also covers
                 // signatures broken by written-but-wrong annotations.
                 InferenceDiagnostic::NeedsAnnotation { .. } => {}
+                // A `break`/`continue` with no loop to go to: there is no
+                // edge to emit, so the expression itself is the operation
+                // that cannot execute — a value trap right there.
+                InferenceDiagnostic::BreakOutsideLoop { expr }
+                | InferenceDiagnostic::ContinueOutsideLoop { expr } => {
+                    self.value_traps.insert(*expr, diag.message());
+                }
                 // Reported on the assignment's target; the operation that
                 // must not execute is the write — `lower_assign_target`
                 // looks these up by target instead of the read path's
@@ -511,6 +518,70 @@ impl LowerCtx<'_> {
                 self.initializer_context = saved;
                 Operand::Const(Const::Fn(body_id))
             }
+            // The first cyclic CFGs: a header block the body re-enters (the
+            // back edge), an exit block the `break` edges target. The
+            // loop's value lives in a dedicated result local — every break
+            // stores into it (unit for a bare `break;`) before jumping to
+            // the exit. A loop with no breaks never targets the exit: like
+            // the continuation after a diverging call, it stays a
+            // predecessor-less block so the CFG remains total.
+            ExprData::Loop { body: loop_body } => {
+                let dest = b.temp(self.ty(expr));
+                let header = b.new_block();
+                let exit = b.new_block();
+                b.terminate(TerminatorKind::Goto { target: header }, expr);
+                b.current = header;
+                b.loop_frames.push(LoopFrame {
+                    header,
+                    exit,
+                    result: dest,
+                });
+                // The body's value is discarded: running off its end is the
+                // back edge to the header.
+                self.lower_expr(b, *loop_body);
+                b.terminate(TerminatorKind::Goto { target: header }, expr);
+                b.loop_frames.pop();
+                b.current = exit;
+                Operand::Copy(dest)
+            }
+            ExprData::Break { value } => {
+                let op = match value {
+                    Some(value) => self.lower_expr(b, *value),
+                    // A bare `break;` carries `()` as the loop's value.
+                    None => Operand::Const(Const::Unit),
+                };
+                match b.loop_frames.last().copied() {
+                    Some(frame) => {
+                        b.push_assign(frame.result, Rvalue::Use(op), expr);
+                        b.terminate(TerminatorKind::Goto { target: frame.exit }, expr);
+                        // Code after a break is unreachable; keep lowering
+                        // it into a predecessor-less block (CFG stays
+                        // total), like after a diverging call.
+                        b.current = b.new_block();
+                        Operand::Const(Const::Unit)
+                    }
+                    // Outside any loop: the outside-a-loop diagnostic
+                    // seeded a value trap on this expression — the
+                    // `lower_expr` wrapper plants it; this placeholder is
+                    // never observed.
+                    None => Operand::Const(Const::Unit),
+                }
+            }
+            ExprData::Continue => match b.loop_frames.last().copied() {
+                Some(frame) => {
+                    b.terminate(
+                        TerminatorKind::Goto {
+                            target: frame.header,
+                        },
+                        expr,
+                    );
+                    b.current = b.new_block();
+                    Operand::Const(Const::Unit)
+                }
+                // Same story as an outside-a-loop break: the pending value
+                // trap is the whole story.
+                None => Operand::Const(Const::Unit),
+            },
         }
     }
 
@@ -691,6 +762,15 @@ impl LowerCtx<'_> {
     }
 }
 
+/// One live `loop` during lowering: where `continue` goes (the header),
+/// where `break` goes (the exit), and the local carrying the loop's value.
+#[derive(Clone, Copy)]
+struct LoopFrame {
+    header: BlockId,
+    exit: BlockId,
+    result: LocalId,
+}
+
 struct BodyBuilder {
     locals: Arena<LocalData>,
     blocks: Arena<BlockData>,
@@ -699,6 +779,11 @@ struct BodyBuilder {
     ret: LocalId,
     entry: BlockId,
     current: BlockId,
+    /// The loops currently being lowered, innermost last. Lives on the
+    /// *builder* — one per MIR body — so `fn` literals and `const` blocks
+    /// (which lower to bodies of their own) reset it structurally: a
+    /// `break` in them can never target a block of the enclosing body.
+    loop_frames: Vec<LoopFrame>,
     /// Origin for the placeholder terminators of fresh blocks.
     fallback_origin: ExprId,
 }
@@ -727,6 +812,7 @@ impl BodyBuilder {
             ret,
             entry,
             current: entry,
+            loop_frames: Vec::new(),
             fallback_origin: origin,
         }
     }

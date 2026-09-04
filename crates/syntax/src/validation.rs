@@ -27,6 +27,12 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             {
                 require_block(&els, "`else` branches are blocks", &mut errors);
             }
+        } else if let Some(loop_expr) = ast::LoopExpr::cast(node.clone()) {
+            // Same superset as `if` branches: any expression parses as the
+            // body, only blocks are legal.
+            if let Some(body) = loop_expr.body() {
+                require_block(&body, "`loop` bodies are blocks", &mut errors);
+            }
         } else if let Some(assign) = ast::AssignStmt::cast(node.clone()) {
             if let Some(lhs) = assign.lhs() {
                 require_variable_target(&lhs, &mut errors);

@@ -1039,3 +1039,201 @@ static second = fn (p: Pair) -> usize { p.b };
         "#]],
     );
 }
+
+#[test]
+fn accumulator_loop_lowers_with_a_back_edge() {
+    // The first cyclic CFG: bb-header re-entered by the back edge at the
+    // body's end, break edges to the exit carrying the loop's value in a
+    // dedicated result local.
+    check_mir(
+        r#"
+static sum = fn () -> usize {
+    let mut acc = 0;
+    let mut i = 0;
+    loop {
+        if i == 10 { break acc; };
+        acc = acc + i;
+        i = i + 1;
+    }
+};
+"#,
+        expect![[r#"
+            item sum:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: usize  // acc
+              _2: usize  // i
+              _3: usize
+              _4: bool
+              _5: ()
+              _6: usize
+              _7: usize
+              bb0:
+                _1 = 0
+                _2 = 0
+                goto -> bb1
+              bb1:
+                _4 = Eq(_2, 10)
+                if _4 -> [then: bb3, else: bb4]
+              bb2:
+                _0 = _3
+                return
+              bb3:
+                _3 = _1
+                goto -> bb2
+              bb4:
+                _5 = ()
+                goto -> bb6
+              bb5:
+                _5 = ()
+                goto -> bb6
+              bb6:
+                _6 = Add(_1, _2)
+                _1 = _6
+                _7 = Add(_2, 1)
+                _2 = _7
+                goto -> bb1
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn break_with_value_stores_into_the_loop_result() {
+    check_mir(
+        "static f = fn () -> usize { loop { break 5; } };",
+        expect![[r#"
+            item f:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: usize
+              bb0:
+                goto -> bb1
+              bb1:
+                _1 = 5
+                goto -> bb2
+              bb2:
+                _0 = _1
+                return
+              bb3:
+                goto -> bb1
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn breakless_loop_has_an_unreachable_exit() {
+    // No break ever targets the exit block: it stays predecessor-less
+    // (like the continuation after a diverging call), and the code after
+    // the loop lowers into it so the CFG stays total.
+    check_mir(
+        "static f = fn { loop { }; 1 };",
+        expect![[r#"
+            item f:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: !
+              bb0:
+                goto -> bb1
+              bb1:
+                goto -> bb1
+              bb2:
+                _0 = 1
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn continue_jumps_to_the_header() {
+    check_mir(
+        r#"
+static f = fn (skip: bool) -> usize {
+    loop {
+        if skip { continue; };
+        break 1;
+    }
+};
+"#,
+        expect![[r#"
+            item f:
+            fn b0(_1: bool) -> usize {
+              _0: usize  // return
+              _1: bool  // param skip
+              _2: usize
+              _3: ()
+              bb0:
+                goto -> bb1
+              bb1:
+                if _1 -> [then: bb3, else: bb4]
+              bb2:
+                _0 = _2
+                return
+              bb3:
+                goto -> bb1
+              bb4:
+                _3 = ()
+                goto -> bb6
+              bb5:
+                _3 = ()
+                goto -> bb6
+              bb6:
+                _2 = 1
+                goto -> bb2
+              bb7:
+                goto -> bb1
+            }
+            fn b1() -> fn(bool) -> usize {
+              _0: fn(bool) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn break_outside_loop_traps_with_the_diagnostic() {
+    check_mir(
+        "static f = fn { break 1; };",
+        expect![[r#"
+            item f:
+            fn b0() -> () {
+              _0: ()  // return
+              _1: {error}
+              bb0:
+                _1 = trap "`break` outside of a loop: there is no enclosing `loop` to exit" -> bb1
+              bb1:
+                _0 = ()
+                return
+            }
+            fn b1() -> fn() {
+              _0: fn()  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}

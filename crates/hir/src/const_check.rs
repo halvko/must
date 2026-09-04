@@ -141,6 +141,17 @@ impl CheckCtx<'_> {
                     self.check_expr(*else_branch, in_const);
                 }
             }
+            // Loops, `break` and `continue` are pure control flow —
+            // const-legal (the eval machine's fuel bounds a runaway
+            // compile-time loop); body and break values sit in the same
+            // context as the loop.
+            ExprData::Loop { body } => self.check_expr(*body, in_const),
+            ExprData::Break { value } => {
+                if let Some(value) = value {
+                    self.check_expr(*value, in_const);
+                }
+            }
+            ExprData::Continue => {}
             ExprData::Block { stmts, tail } => {
                 for stmt in stmts {
                     match stmt {

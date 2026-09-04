@@ -3189,3 +3189,232 @@ fn type_item_annotation_rejected() {
         "#]],
     );
 }
+
+#[test]
+fn loop_with_break_and_continue_parses() {
+    check(
+        r#"
+static f = fn {
+    loop {
+        if done { break; };
+        continue;
+    }
+}
+"#,
+        expect![[r#"
+            SOURCE_FILE@0..82
+              WHITESPACE@0..1 "\n"
+              STATIC_ITEM@1..81
+                STATIC_KW@1..7 "static"
+                WHITESPACE@7..8 " "
+                NAME@8..9
+                  IDENT@8..9 "f"
+                WHITESPACE@9..10 " "
+                EQ@10..11 "="
+                WHITESPACE@11..12 " "
+                FN_LITERAL@12..81
+                  FN_KW@12..14 "fn"
+                  WHITESPACE@14..15 " "
+                  BLOCK_EXPR@15..81
+                    L_BRACE@15..16 "{"
+                    WHITESPACE@16..21 "\n    "
+                    LOOP_EXPR@21..79
+                      LOOP_KW@21..25 "loop"
+                      WHITESPACE@25..26 " "
+                      BLOCK_EXPR@26..79
+                        L_BRACE@26..27 "{"
+                        WHITESPACE@27..36 "\n        "
+                        EXPR_STMT@36..55
+                          IF_EXPR@36..54
+                            IF_KW@36..38 "if"
+                            WHITESPACE@38..39 " "
+                            PATH_EXPR@39..43
+                              NAME_REF@39..43
+                                IDENT@39..43 "done"
+                            WHITESPACE@43..44 " "
+                            BLOCK_EXPR@44..54
+                              L_BRACE@44..45 "{"
+                              WHITESPACE@45..46 " "
+                              EXPR_STMT@46..52
+                                BREAK_EXPR@46..51
+                                  BREAK_KW@46..51 "break"
+                                SEMICOLON@51..52 ";"
+                              WHITESPACE@52..53 " "
+                              R_BRACE@53..54 "}"
+                          SEMICOLON@54..55 ";"
+                        WHITESPACE@55..64 "\n        "
+                        EXPR_STMT@64..73
+                          CONTINUE_EXPR@64..72
+                            CONTINUE_KW@64..72 "continue"
+                          SEMICOLON@72..73 ";"
+                        WHITESPACE@73..78 "\n    "
+                        R_BRACE@78..79 "}"
+                    WHITESPACE@79..80 "\n"
+                    R_BRACE@80..81 "}"
+              WHITESPACE@81..82 "\n"
+        "#]],
+    );
+}
+
+#[test]
+fn break_with_value_parses() {
+    check(
+        "static f = fn { loop { break 1 + 2; } }",
+        expect![[r#"
+            SOURCE_FILE@0..39
+              STATIC_ITEM@0..39
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..39
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..39
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LOOP_EXPR@16..37
+                      LOOP_KW@16..20 "loop"
+                      WHITESPACE@20..21 " "
+                      BLOCK_EXPR@21..37
+                        L_BRACE@21..22 "{"
+                        WHITESPACE@22..23 " "
+                        EXPR_STMT@23..35
+                          BREAK_EXPR@23..34
+                            BREAK_KW@23..28 "break"
+                            WHITESPACE@28..29 " "
+                            BIN_EXPR@29..34
+                              LITERAL@29..30
+                                INT_NUMBER@29..30 "1"
+                              WHITESPACE@30..31 " "
+                              PLUS@31..32 "+"
+                              WHITESPACE@32..33 " "
+                              LITERAL@33..34
+                                INT_NUMBER@33..34 "2"
+                          SEMICOLON@34..35 ";"
+                        WHITESPACE@35..36 " "
+                        R_BRACE@36..37 "}"
+                    WHITESPACE@37..38 " "
+                    R_BRACE@38..39 "}"
+        "#]],
+    );
+}
+
+#[test]
+fn break_loop_pathology_parses() {
+    // `break` takes any expression as its value, so `break loop { ... }`
+    // falls out of the grammar (the inner loop is the carried value).
+    check(
+        "static f = fn { loop { break loop { break 1; }; } }",
+        expect![[r#"
+            SOURCE_FILE@0..51
+              STATIC_ITEM@0..51
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..51
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..51
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LOOP_EXPR@16..49
+                      LOOP_KW@16..20 "loop"
+                      WHITESPACE@20..21 " "
+                      BLOCK_EXPR@21..49
+                        L_BRACE@21..22 "{"
+                        WHITESPACE@22..23 " "
+                        EXPR_STMT@23..47
+                          BREAK_EXPR@23..46
+                            BREAK_KW@23..28 "break"
+                            WHITESPACE@28..29 " "
+                            LOOP_EXPR@29..46
+                              LOOP_KW@29..33 "loop"
+                              WHITESPACE@33..34 " "
+                              BLOCK_EXPR@34..46
+                                L_BRACE@34..35 "{"
+                                WHITESPACE@35..36 " "
+                                EXPR_STMT@36..44
+                                  BREAK_EXPR@36..43
+                                    BREAK_KW@36..41 "break"
+                                    WHITESPACE@41..42 " "
+                                    LITERAL@42..43
+                                      INT_NUMBER@42..43 "1"
+                                  SEMICOLON@43..44 ";"
+                                WHITESPACE@44..45 " "
+                                R_BRACE@45..46 "}"
+                          SEMICOLON@46..47 ";"
+                        WHITESPACE@47..48 " "
+                        R_BRACE@48..49 "}"
+                    WHITESPACE@49..50 " "
+                    R_BRACE@50..51 "}"
+        "#]],
+    );
+}
+
+#[test]
+fn dangling_break_at_top_level_parses() {
+    // Grammar-clean: `break` outside a loop is hir's error, not a parse
+    // error.
+    check(
+        "static x = break 1;",
+        expect![[r#"
+        SOURCE_FILE@0..19
+          STATIC_ITEM@0..19
+            STATIC_KW@0..6 "static"
+            WHITESPACE@6..7 " "
+            NAME@7..8
+              IDENT@7..8 "x"
+            WHITESPACE@8..9 " "
+            EQ@9..10 "="
+            WHITESPACE@10..11 " "
+            BREAK_EXPR@11..18
+              BREAK_KW@11..16 "break"
+              WHITESPACE@16..17 " "
+              LITERAL@17..18
+                INT_NUMBER@17..18 "1"
+            SEMICOLON@18..19 ";"
+    "#]],
+    );
+}
+
+#[test]
+fn loop_body_must_be_a_block() {
+    // Superset parsing, same as `if` branches: the expression body keeps
+    // the user's intent in the tree, validation rejects it with a fix.
+    check(
+        "static f = fn { loop 5 }",
+        expect![[r#"
+        SOURCE_FILE@0..24
+          STATIC_ITEM@0..24
+            STATIC_KW@0..6 "static"
+            WHITESPACE@6..7 " "
+            NAME@7..8
+              IDENT@7..8 "f"
+            WHITESPACE@8..9 " "
+            EQ@9..10 "="
+            WHITESPACE@10..11 " "
+            FN_LITERAL@11..24
+              FN_KW@11..13 "fn"
+              WHITESPACE@13..14 " "
+              BLOCK_EXPR@14..24
+                L_BRACE@14..15 "{"
+                WHITESPACE@15..16 " "
+                LOOP_EXPR@16..22
+                  LOOP_KW@16..20 "loop"
+                  WHITESPACE@20..21 " "
+                  LITERAL@21..22
+                    INT_NUMBER@21..22 "5"
+                WHITESPACE@22..23 " "
+                R_BRACE@23..24 "}"
+        error 21..22: `loop` bodies are blocks; wrap this expression in `{ }`
+    "#]],
+    );
+}

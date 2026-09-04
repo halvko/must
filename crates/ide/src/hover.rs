@@ -19,6 +19,9 @@ pub(crate) fn hover(
     if let Some(result) = const_block_hover(db, file, &root, offset) {
         return Some(result);
     }
+    if let Some(result) = loop_hover(db, file, &root, offset) {
+        return Some(result);
+    }
     let token = root
         .token_at_offset(offset)
         .find(|t| t.kind() == SyntaxKind::IDENT)?;
@@ -182,6 +185,36 @@ fn const_block_hover(
             ty.display(),
             value.display()
         ),
+        range: token.text_range(),
+    })
+}
+
+/// Hovering the `loop` keyword shows the loop's type — the join of its
+/// `break` values, or `!` for a loop no value-carrying break ever exits.
+fn loop_hover(
+    db: &RootDatabase,
+    file: SourceFile,
+    root: &SyntaxNode,
+    offset: TextSize,
+) -> Option<HoverResult> {
+    let token = root
+        .token_at_offset(offset)
+        .find(|t| t.kind() == SyntaxKind::LOOP_KW)?;
+    let loop_expr = ast::LoopExpr::cast(token.parent()?)?;
+    let item_node = loop_expr
+        .syntax()
+        .ancestors()
+        .find(|n| ast::Item::can_cast(n.kind()))?;
+    let index = root
+        .children()
+        .filter(|n| ast::Item::can_cast(n.kind()))
+        .position(|n| n == item_node)?;
+    let item = *hir::file_item_ids(db, file).get(index)?;
+    let (_, source_map) = hir::body_with_source_map(db, item);
+    let expr = source_map.expr_for_node(SyntaxNodePtr::new(loop_expr.syntax()))?;
+    let ty = hir::infer::infer(db, item).type_of_expr.get(expr)?.clone();
+    Some(HoverResult {
+        markup: format!("```must\nloop {{ … }}: {}\n```", ty.display()),
         range: token.text_range(),
     })
 }

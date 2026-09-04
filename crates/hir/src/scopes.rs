@@ -144,7 +144,17 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
         ExprData::Field { receiver, .. } => {
             compute_expr_scopes(body, scopes, *receiver, scope);
         }
-        ExprData::Missing | ExprData::Literal(_) | ExprData::NameRef(_) => {}
+        // A loop introduces no bindings of its own; its body is a block,
+        // which scopes itself.
+        ExprData::Loop { body: b } => {
+            compute_expr_scopes(body, scopes, *b, scope);
+        }
+        ExprData::Break { value } => {
+            if let Some(value) = value {
+                compute_expr_scopes(body, scopes, *value, scope);
+            }
+        }
+        ExprData::Missing | ExprData::Literal(_) | ExprData::NameRef(_) | ExprData::Continue => {}
     }
 }
 
