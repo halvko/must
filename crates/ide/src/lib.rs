@@ -129,7 +129,10 @@ impl Analysis {
             .into_iter()
             .map(|d| Diagnostic {
                 range: d.range,
-                severity: Severity::Error,
+                severity: match d.severity {
+                    hir::Severity::Error => Severity::Error,
+                    hir::Severity::Warning => Severity::Warning,
+                },
                 message: d.message,
                 // Syntax-level fixes always edit the file they diagnosed.
                 fix: d.fix.map(|fix| Fix {

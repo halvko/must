@@ -122,12 +122,22 @@ pub fn file_item_ids<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemId<'db>>
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub range: TextRange,
+    pub severity: Severity,
     pub message: String,
     pub fix: Option<syntax::Fix>,
     /// Other locations that explain this diagnostic (e.g. "first defined
     /// here" on a duplicate definition). Each carries its own file, which is
     /// not necessarily the one diagnosed (see [`RelatedInfo::file`]).
     pub related: Vec<RelatedInfo>,
+}
+
+/// Severity of a [`Diagnostic`]. `ide` maps this onto its own richer
+/// `Severity` (which additionally has `Info`, synthesized only at the ide
+/// layer for related-location companions — hir never produces those).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Error,
+    Warning,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,6 +158,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         .iter()
         .map(|err| Diagnostic {
             range: err.range,
+            severity: Severity::Error,
             message: err.message.clone(),
             fix: err.fix.clone(),
             related: Vec::new(),
@@ -174,6 +185,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             .unwrap_or_default();
         diagnostics.push(Diagnostic {
             range: second.syntax().text_range(),
+            severity: Severity::Error,
             message: diag::defined_multiple_times(&second.text()),
             fix: None,
             related,
@@ -193,6 +205,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         if ty::builtin_type_by_name(&name_ref.text()).is_none() {
             diagnostics.push(Diagnostic {
                 range: path_type.syntax().text_range(),
+                severity: Severity::Error,
                 message: format!("unknown type `{}`", name_ref.text()),
                 fix: None,
                 related: Vec::new(),
@@ -221,6 +234,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             };
             diagnostics.push(Diagnostic {
                 range: ptr.text_range(),
+                severity: Severity::Error,
                 message,
                 fix: None,
                 related: Vec::new(),
@@ -439,6 +453,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             related.retain(|r| !(r.file == file && r.range.contains_range(range)));
             diagnostics.push(Diagnostic {
                 range,
+                severity: Severity::Error,
                 message: diag.message(),
                 fix: None,
                 related,
@@ -463,6 +478,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 };
                 diagnostics.push(Diagnostic {
                     range: ptr.text_range(),
+                    severity: Severity::Error,
                     message: "internal error: this expression has type `{error}` but no \
                               error was reported — this is a bug in the Must language server"
                         .to_owned(),
@@ -472,6 +488,31 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 break 'items;
             }
         }
+    }
+
+    // Hole-named items (`static _ = ...` / `const _ = ...`) bind nothing, so
+    // their value can never be referenced — but they are still evaluated at
+    // check time (statics and consts evaluate eagerly; see
+    // `eval::const_value`, driven from `ide`), so a panicking initializer
+    // still reports its own error alongside this warning. A broken item
+    // with no name at all (a parse error, already reported above) gets
+    // nothing: `_` is a real, distinct token from an absent name (see
+    // `ast::Name::is_hole`), so this never fires for it.
+    // Runs after the tripwire above so a hole item alone never masks it.
+    for &item in file_item_ids(db, file) {
+        let Some(name) = item_source(db, item).and_then(|it| it.name()) else {
+            continue;
+        };
+        if !name.is_hole() {
+            continue;
+        }
+        diagnostics.push(Diagnostic {
+            range: name.syntax().text_range(),
+            severity: Severity::Warning,
+            message: "this item binds nothing and its value cannot be used".to_owned(),
+            fix: None,
+            related: Vec::new(),
+        });
     }
 
     diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));

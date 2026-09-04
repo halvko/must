@@ -131,6 +131,13 @@ impl Name {
             .map(|it| it.text().to_owned())
             .unwrap_or_default()
     }
+
+    /// Whether this name is the hole `_` rather than an identifier. A
+    /// `Name` node always wraps exactly one of `IDENT` or `HOLE` (see
+    /// `grammar::pattern`), so this is the complement of having text.
+    pub fn is_hole(&self) -> bool {
+        token(&self.syntax, HOLE).is_some()
+    }
 }
 
 impl NameRef {
