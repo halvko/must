@@ -145,6 +145,26 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             }
         } else if let Some(group) = ast::WithGroup::cast(node.clone()) {
             validate_with_group(&group, &mut errors);
+        } else if let Some(unsafe_element) = ast::UnsafeElement::cast(node.clone()) {
+            // Reserved (TR01): the `unsafe` modifier head — `unsafe impl
+            // send;` markers and `unsafe { ... }` element groups.
+            if let Some(token) = unsafe_element.unsafe_token() {
+                errors.push(SyntaxError {
+                    message: "`unsafe` impl elements are not supported yet".to_owned(),
+                    range: token.text_range(),
+                    fix: None,
+                });
+            }
+        } else if let Some(for_element) = ast::ForElement::cast(node.clone()) {
+            // Reserved (TR01): covered impls (`for Box::<Self> impl ...`),
+            // the anchor home.
+            if let Some(token) = for_element.for_token() {
+                errors.push(SyntaxError {
+                    message: "`for` (covered) impl elements are not supported yet".to_owned(),
+                    range: token.text_range(),
+                    fix: None,
+                });
+            }
         } else if let Some(impl_element) = ast::ImplElement::cast(node.clone()) {
             validate_impl_element(&impl_element, &mut errors);
         } else if let Some(member) = ast::Member::cast(node.clone()) {
@@ -164,9 +184,11 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
 }
 
 /// Whether `node` sits inside the one semantically supported element
-/// context: a `with { ... }` group directly on a `type` declaration,
+/// context: a plain `with { ... }` group directly on a `type` declaration,
 /// inside an `impl Self { ... }` element that is a DIRECT child of the
-/// group. Everything outside this context is covered by its own single
+/// group (not under a reserved `unsafe`/`for` head — those wrap their
+/// payload in their own node, so the parent-cast below already excludes
+/// them). Everything outside this context is covered by its own single
 /// "not supported yet" reservation, so member-level checks stay quiet
 /// there.
 pub fn in_inherent_member_context(node: &SyntaxNode) -> bool {
@@ -181,6 +203,7 @@ pub fn in_inherent_member_context(node: &SyntaxNode) -> bool {
         .syntax()
         .parent()
         .and_then(ast::WithGroup::cast)
+        .filter(ast::WithGroup::is_plain)
     else {
         return false;
     };
@@ -190,8 +213,9 @@ pub fn in_inherent_member_context(node: &SyntaxNode) -> bool {
         .is_some_and(|p| ast::TypeItem::can_cast(p.kind()))
 }
 
-/// The reservation check for one attachment group: `with`-chains attach to
-/// `type` declarations only.
+/// The reservation checks for one attachment group: `with`-chains attach
+/// to `type` declarations only, and only the plain form is supported
+/// (no binders, no clauses).
 fn validate_with_group(group: &ast::WithGroup, errors: &mut Vec<SyntaxError>) {
     let anchor = group
         .with_token()
@@ -205,6 +229,26 @@ fn validate_with_group(group: &ast::WithGroup, errors: &mut Vec<SyntaxError>) {
         errors.push(SyntaxError {
             message: "`with` attachment groups belong on `type` declarations only".to_owned(),
             range: anchor,
+            fix: None,
+        });
+        return;
+    }
+    if let Some(list) = group.generic_param_list() {
+        errors.push(SyntaxError {
+            message: "`with::<...>` binder groups are not supported yet".to_owned(),
+            range: list.syntax().text_range(),
+            fix: None,
+        });
+    }
+    for clause in group.clauses() {
+        let message = if clause.eq_token().is_some() {
+            "`with T = ...` pin groups are not supported yet"
+        } else {
+            "`with T: ...` constrained groups are not supported yet"
+        };
+        errors.push(SyntaxError {
+            message: message.to_owned(),
+            range: clause.syntax().text_range(),
             fix: None,
         });
     }
@@ -242,14 +286,30 @@ fn validate_impl_element(impl_element: &ast::ImplElement, errors: &mut Vec<Synta
 
 /// The member rules, applied only in the supported context (see
 /// [`in_inherent_member_context`]): members are `=`-defined `fn` literals;
-/// colon-declared members, type ascriptions and non-`fn` values are
-/// rejected (a declare-only inherent member is an unimplementable
-/// promise; the rest is reserved).
+/// colon-declared members, type ascriptions, associated types/consts and
+/// non-`fn` values are rejected (declare-only inherent members are
+/// unimplementable promises; the rest is reserved).
 fn validate_member(member: &ast::Member, errors: &mut Vec<SyntaxError>) {
     if !in_inherent_member_context(member.syntax()) {
         return;
     }
     let range = member.syntax().text_range();
+    if let Some(token) = member.type_token() {
+        errors.push(SyntaxError {
+            message: "associated types are not supported yet".to_owned(),
+            range: token.text_range(),
+            fix: None,
+        });
+        return;
+    }
+    if let Some(token) = member.const_token() {
+        errors.push(SyntaxError {
+            message: "associated consts are not supported yet".to_owned(),
+            range: token.text_range(),
+            fix: None,
+        });
+        return;
+    }
     match (member.colon_token(), member.eq_token()) {
         (Some(_), None) => {
             errors.push(SyntaxError {

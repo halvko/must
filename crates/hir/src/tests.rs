@@ -7000,6 +7000,49 @@ static main = fn() -> Light { Light::Red.flip() };
 }
 
 #[test]
+fn reserved_groups_mint_no_members() {
+    // A member inside a constrained group parses (and the group carries
+    // its reservation diagnostic) but resolves nothing.
+    check_diagnostics(
+        r#"
+type A = struct { x: usize } with T: copy {
+    impl Self {
+        get = fn(a: Self) -> usize { a.x };
+    }
+};
+static main = fn() -> usize { A(struct { x = 1 }).get() };
+"#,
+        expect![[r#"
+            35..42: `with T: ...` constrained groups are not supported yet
+            144..169: no field or member `get` on `A`
+        "#]],
+    );
+}
+
+#[test]
+fn reserved_member_spelling_mints_no_member() {
+    // A `type`-keyword member parses inside a plain `impl Self { ... }`
+    // (and validation flags its spelling as reserved) but must not mint a
+    // dot-callable item — a minted item here would make the "not
+    // supported yet" diagnostic a lie, since the member would still
+    // resolve and dot-call despite being reserved.
+    check_diagnostics(
+        r#"
+type A = struct { x: usize } with {
+    impl Self {
+        type get = fn(a: Self) -> usize { a.x };
+    }
+};
+static main = fn() -> usize { A(struct { x = 1 }).get() };
+"#,
+        expect![[r#"
+            61..65: associated types are not supported yet
+            141..166: no field or member `get` on `A`
+        "#]],
+    );
+}
+
+#[test]
 fn dot_call_on_type_without_members() {
     check_diagnostics(
         r#"

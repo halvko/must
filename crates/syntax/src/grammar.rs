@@ -22,6 +22,8 @@ fn at_expr_recovery(p: &Parser<'_>) -> bool {
             | LET_KW
             | ELSE_KW
             | WITH_KW
+            | IMPL_KW
+            | FOR_KW
     )
 }
 
@@ -84,13 +86,26 @@ fn item(p: &mut Parser<'_>) {
 // rejected by validation ("not supported yet", the house
 // parse-and-reserve pattern).
 
-/// `with { element* }` — one attachment group. There is exactly one
-/// element form, so the group is a bare brace block; the binder turbofish
-/// and the constrain/pin clause list are part of the sealed grammar and
-/// arrive with the rest of it.
+/// `with ::<binders>? clause,* { element* }` — one attachment group. The
+/// turbofish DECLARES fresh binders, a clause CONSTRAINS (`T: Bound`) or
+/// PINS (`T = usize`) an in-scope name; both are reserved (only the plain
+/// `with { ... }` form is supported). The brace holds the group's
+/// elements.
 fn with_group(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(WITH_KW);
+    if p.at(COLON2) && p.nth(1) == L_ANGLE {
+        generic_param_list(p);
+    }
+    // Clause list: `T: Bound + Bound, U = usize, ...` — each clause opens
+    // with an IDENT (the brace opens the element block, so the boundary is
+    // token-recognizable).
+    while p.at(IDENT) {
+        with_clause(p);
+        if !p.at(L_BRACE) && !p.eat(COMMA) {
+            break;
+        }
+    }
     if p.at(L_BRACE) {
         element_block(p);
     } else {
@@ -99,7 +114,25 @@ fn with_group(p: &mut Parser<'_>) {
     m.complete(p, WITH_GROUP);
 }
 
-/// `{ element* }` — a group's element block.
+/// One group clause: `T: Bound + Bound` (constrain) or `T = usize` (pin).
+/// Reserved (only plain groups are supported).
+fn with_clause(p: &mut Parser<'_>) {
+    let m = p.start();
+    name_ref(p);
+    if p.eat(COLON) {
+        type_(p);
+        while p.eat(PLUS) {
+            type_(p);
+        }
+    } else if p.eat(EQ) {
+        type_(p);
+    } else {
+        p.error("expected `:` (constrain) or `=` (pin) after the clause's name");
+    }
+    m.complete(p, WITH_CLAUSE);
+}
+
+/// `{ element* }` — a group's (or modifier head's) element block.
 fn element_block(p: &mut Parser<'_>) {
     p.bump(L_BRACE);
     while !p.at(R_BRACE) && !p.at(EOF) {
@@ -109,7 +142,7 @@ fn element_block(p: &mut Parser<'_>) {
         let before = p.pos();
         element(p);
         if p.pos() == before {
-            p.err_and_bump("expected an element (`impl`)");
+            p.err_and_bump("expected an element (`impl`, `unsafe` or `for`)");
         }
     }
     p.expect_after_prev(R_BRACE);
@@ -125,12 +158,47 @@ fn at_item_recovery(p: &Parser<'_>) -> bool {
     matches!(p.current(), STATIC_KW | TYPE_KW | LET_KW | CONST_KW)
 }
 
-/// One element of a `with` group. There is one form, the `impl`
-/// element; the modifier heads (`unsafe`, `for ⟨Type⟩`) are part of the
-/// sealed grammar and arrive with the rest of it.
+/// The member-loop recovery set: like [`at_item_recovery`] minus the
+/// member-shaped keyword openers — `type Item ...;` and `const N: usize;`
+/// are (reserved) members, so those prefixes stay inside the body.
+fn at_member_recovery(p: &Parser<'_>) -> bool {
+    matches!(p.current(), STATIC_KW | LET_KW)
+        || (p.at(CONST_KW) && !(p.nth(1) == IDENT && p.nth(2) == COLON))
+}
+
+/// One element of a `with` group: an `impl` element, or a modifier head
+/// (`unsafe`, `for ⟨Type⟩`) applying to the next element or a brace group
+/// (TR01; composition is `for` outside `unsafe`). Both modifier heads are
+/// reserved — the one supported form is the bare `impl` element.
 fn element(p: &mut Parser<'_>) {
-    if p.at(IMPL_KW) {
-        impl_element(p);
+    match p.current() {
+        IMPL_KW => impl_element(p),
+        UNSAFE_KW => {
+            let m = p.start();
+            p.bump(UNSAFE_KW);
+            element_or_group(p);
+            m.complete(p, UNSAFE_ELEMENT);
+        }
+        FOR_KW => {
+            let m = p.start();
+            p.bump(FOR_KW);
+            type_(p);
+            element_or_group(p);
+            m.complete(p, FOR_ELEMENT);
+        }
+        SEMICOLON => p.bump_any(),
+        _ => {}
+    }
+}
+
+/// A modifier head's payload: the next element, or `{ element* }`.
+fn element_or_group(p: &mut Parser<'_>) {
+    if p.at(L_BRACE) {
+        element_block(p);
+    } else if matches!(p.current(), IMPL_KW | UNSAFE_KW | FOR_KW) {
+        element(p);
+    } else {
+        p.error("expected an element (`impl`, `unsafe` or `for`) or `{`");
     }
 }
 
@@ -151,7 +219,7 @@ fn impl_element(p: &mut Parser<'_>) {
     if p.at(L_BRACE) {
         p.bump(L_BRACE);
         while !p.at(R_BRACE) && !p.at(EOF) {
-            if at_item_recovery(p) {
+            if at_member_recovery(p) {
                 break;
             }
             let before = p.pos();
@@ -168,15 +236,18 @@ fn impl_element(p: &mut Parser<'_>) {
 }
 
 /// A colon-declared member's fn signature: like a fn literal's head
-/// (named, annotated params; return type) with no body — wrapped in
-/// `FN_TYPE` so it sits in the tree as the annotation it is. The plain fn
-/// TYPE grammar takes bare types, so the sealed spelling
+/// (named, annotated params; optional binder; return type) with no body —
+/// wrapped in `FN_TYPE` so it sits in the tree as the annotation it is. The
+/// plain fn TYPE grammar takes bare types, so the sealed spelling
 /// (`alloc: fn(n: usize, v: Self) -> R;`) needs its own production; the
 /// form itself is rejected, but it has to parse whole first for the
 /// rejection to be the only error.
 fn member_decl_fn_signature(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(FN_KW);
+    if p.at(COLON2) && p.nth(1) == L_ANGLE {
+        generic_param_list(p);
+    }
     if p.at(L_PAREN) {
         param_list(p);
     } else {
@@ -189,24 +260,33 @@ fn member_decl_fn_signature(p: &mut Parser<'_>) {
 }
 
 /// One member of an impl body, the sealed member grammar: equals-defines
-/// (`name = fn(...) -> R { ... };`). The colon-declare form `name: fn(...);`
-/// superset-parses so validation can call it the unimplementable promise
-/// it is.
+/// (`name = fn(...) -> R { ... };`), colon-declares (`name: fn(...);` —
+/// parses, always rejected). `type Item = T;` and
+/// `const N: usize;` members parse into the same node (reserved:
+/// associated types/consts), distinguished by their leading keyword token.
 fn member(p: &mut Parser<'_>) {
     match p.current() {
         SEMICOLON => {
             p.bump_any();
             return;
         }
-        IDENT => {}
+        IDENT | TYPE_KW => {}
+        CONST_KW if p.nth(1) == IDENT => {}
         _ => {
             p.error("expected a member");
             return;
         }
     }
     let m = p.start();
+    // Reserved leading keywords: `type Item ...;` / `const N: usize;`.
+    if p.at(TYPE_KW) || p.at(CONST_KW) {
+        p.bump_any();
+    }
     pattern(p, "expected a member name");
     if p.eat(COLON) {
+        // The sealed colon-declare form spells NAMED params
+        // (`alloc: fn(n: usize, v: Self) -> R;`), which the plain fn TYPE
+        // grammar doesn't accept — parse a signature-shaped fn instead.
         if p.at(FN_KW) {
             member_decl_fn_signature(p);
         } else {

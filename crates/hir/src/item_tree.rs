@@ -667,11 +667,31 @@ pub fn semantic_member_sources(decl: &ast::TypeItem) -> Vec<(String, u32, ast::M
     let mut seen: rustc_hash::FxHashMap<String, u32> = rustc_hash::FxHashMap::default();
     let mut out = Vec::new();
     for group in decl.with_groups() {
-        for impl_element in group.elements() {
+        // A group with binders or clauses is reserved wholesale: an
+        // `impl Self { ... }` sitting directly in it would otherwise mint
+        // an unconditional member even though validation flags the group
+        // as unsupported.
+        if !group.is_plain() {
+            continue;
+        }
+        for element in group.elements() {
+            // `unsafe`/`for` heads wrap their `impl` element in their own
+            // node, so this direct-child enumeration already skips them —
+            // they are reserved and mint nothing.
+            let ast::Element::ImplElement(impl_element) = element else {
+                continue;
+            };
             if !impl_element.is_self_head() {
                 continue;
             }
             for member in impl_element.members() {
+                // Reserved spellings (`type`/`const` members) parse but
+                // mint nothing — validation flags them as not supported
+                // yet, and minting an item anyway would make that
+                // reservation a lie: the member would still dot-call.
+                if member.type_token().is_some() || member.const_token().is_some() {
+                    continue;
+                }
                 // Colon-declares and non-fn values mint nothing — they are
                 // rejected at the definition site (validation), and a
                 // minted item for them would have nothing to check.

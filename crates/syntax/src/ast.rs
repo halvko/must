@@ -272,9 +272,16 @@ ast_node!(
     NegExpr: NEG_EXPR
 );
 ast_node!(
-    /// `with { element* }` — one attachment group trailing a `type`
-    /// declaration (sealed trait-syntax grammar, TR01).
+    /// `with ::<binders>? clause,* { element* }` — one attachment group
+    /// trailing a `type` declaration (sealed trait-syntax grammar, TR01).
+    /// Only the plain form (`with { ... }`) is semantically supported;
+    /// binder/clause groups parse and are reserved.
     WithGroup: WITH_GROUP
+);
+ast_node!(
+    /// One group clause: `T: Bound + Bound` (constrain) or `T = usize`
+    /// (pin). Reserved.
+    WithClause: WITH_CLAUSE
 );
 ast_node!(
     /// `impl ⟨head⟩ { member* }` or the body-elided `impl ⟨head⟩;`. Only
@@ -283,9 +290,20 @@ ast_node!(
     ImplElement: IMPL_ELEMENT
 );
 ast_node!(
+    /// `unsafe ⟨element⟩` / `unsafe { element* }` — a modifier head
+    /// (TR01). Reserved.
+    UnsafeElement: UNSAFE_ELEMENT
+);
+ast_node!(
+    /// `for ⟨Type⟩ ⟨element⟩` / `for ⟨Type⟩ { element* }` — the covered
+    /// impl head (TR01). Reserved.
+    ForElement: FOR_ELEMENT
+);
+ast_node!(
     /// One member of an impl body: `name = fn(...) -> R { ... };`
-    /// (equals-defines) or `name: fn(...);` (colon-declares — parses so
-    /// validation can reject it).
+    /// (equals-defines), `name: fn(...);` (colon-declares — rejected), and
+    /// the reserved `type Item = T;` / `const N: usize;` spellings
+    /// (distinguished by their leading keyword token).
     Member: MEMBER
 );
 
@@ -391,12 +409,44 @@ impl StaticItem {
     }
 }
 
+ast_enum!(
+    /// One element of a [`WithGroup`]: an `impl` element or a modifier
+    /// head (`unsafe`/`for`) wrapping further elements.
+    Element: ImplElement,
+    UnsafeElement,
+    ForElement
+);
+
 impl WithGroup {
     pub fn with_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, WITH_KW)
     }
-    pub fn elements(&self) -> impl Iterator<Item = ImplElement> + use<> {
+    /// The `::<...>` binder list, when the group declares fresh binders
+    /// (reserved).
+    pub fn generic_param_list(&self) -> Option<GenericParamList> {
+        child(&self.syntax)
+    }
+    /// The constrain/pin clauses (reserved).
+    pub fn clauses(&self) -> impl Iterator<Item = WithClause> + use<> {
         children(&self.syntax)
+    }
+    /// Whether this is the plain, supported form: no binders, no
+    /// clauses.
+    pub fn is_plain(&self) -> bool {
+        self.generic_param_list().is_none() && self.clauses().next().is_none()
+    }
+    pub fn elements(&self) -> impl Iterator<Item = Element> + use<> {
+        children(&self.syntax)
+    }
+}
+
+impl WithClause {
+    pub fn name_ref(&self) -> Option<NameRef> {
+        child(&self.syntax)
+    }
+    /// The pin's `=` token (`T = usize`); a constrain clause has none.
+    pub fn eq_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, EQ)
     }
 }
 
@@ -426,7 +476,34 @@ impl ImplElement {
     }
 }
 
+impl UnsafeElement {
+    pub fn unsafe_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, UNSAFE_KW)
+    }
+}
+
+impl ForElement {
+    pub fn for_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, FOR_KW)
+    }
+}
+
 impl Member {
+    /// The leading keyword of the reserved associated-type spelling
+    /// (`type Item = T;`).
+    pub fn type_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, TYPE_KW)
+    }
+    /// The leading keyword of the reserved associated-const spelling
+    /// (`const N: usize;`). Only a *leading* `const` counts — a `const fn`
+    /// value's keyword belongs to the fn literal.
+    pub fn const_token(&self) -> Option<SyntaxToken> {
+        self.syntax
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .find(|it| !it.kind().is_trivia())
+            .filter(|it| it.kind() == CONST_KW)
+    }
     pub fn name(&self) -> Option<Name> {
         child(&self.syntax)
     }

@@ -51,13 +51,15 @@
 - **Dot-calling a module-level fn (UFCS-style)** — only members resolve through the dot,
   so a call site can never be silently re-routed to a distant module fn; the diagnostic
   says to call it directly instead. **G13**
-- **`with` and `impl` as contextual keywords** — the attachment grammar needs them at
+- **`with`, `impl` and `for` as contextual keywords** — the attachment grammar needs them at
   positions where an identifier is also legal, so they are full keywords like `raw` and
   `unsafe`; an identifier with one of those names now dies in a parse cascade with no
   reserved-word hint. **G13**
 - **Silent reinterpretation of a bare pattern name as a variant** — footgun. **G25**
 - **A null literal** — abstract memory has no address zero to spell. **Pointer ordering** —
   meaningless there. **G08**
+- **`<T as Trait>::m`** — bare angles violate turbofish-everywhere, and it spends `as`
+  while casts are undecided. **G06**
 
 ## Re-evaluate when
 

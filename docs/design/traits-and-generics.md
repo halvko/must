@@ -16,7 +16,9 @@
   body, the owner type at the member's own binders. Implemented so far: the inherent home,
   `impl Self { name = fn(...) -> R { ... }; }` on a `type` declaration. Trait declarations do
   not parse yet, and a member must spell its full signature — that is what lets a dot-call
-  resolve without running inference.
+  resolve without running inference. The rest of the element grammar (binder/clause groups,
+  `unsafe`/`for` modifier heads, trait and marker impl heads, associated types/consts) now
+  parses cleanly and is rejected as not supported yet, the house parse-and-reserve pattern.
 - **TR06** Generics are item-level only: no first-class generic values, no higher-rank types,
   schemes never enter the type. Instantiation identity is applicative: the key is
   `(ItemLoc, canonical args)`; for distinctness, wrap it in a `type` declaration. Bodies check
