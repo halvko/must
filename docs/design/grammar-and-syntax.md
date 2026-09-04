@@ -42,6 +42,11 @@
   `Type`'s own) is its own `QualifiedTraitMemberOnType` diagnostic, naming the trait spelling
   it should have used instead. There is no collision error at declaration — the getter idiom
   is legal.
+- **G17** String escapes are `\n \t \r \\ \" \0`; anything else after a backslash, and a
+  trailing lone backslash, is an error anchored at the escape inside the token. Strings stay
+  multiline — a literal newline inside a string is still legal. The lexer and the decoder
+  share one table (`syntax::unescape_char`), so they can never disagree about what is an
+  escape.
 - **G16** Full keywords: `raw unsafe with impl for trait requires` (`const`, `struct`, `enum`
   are contextual expression-starters). One `keywords!` table generates the set — `from_keyword`,
   `is_keyword`, and the table itself — so the highlighter (P10) and completions classify a

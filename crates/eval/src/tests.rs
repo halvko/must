@@ -238,6 +238,72 @@ fn run_hello() {
 }
 
 #[test]
+fn every_escape_reaches_the_value() {
+    // Each escape, cooked once during HIR lowering, observed as the
+    // string's runtime bytes, all six in one literal. `\0` is a NUL, not
+    // the character `0`.
+    check_const(
+        r#"static all = "\n\t\r\\\"\0";"#,
+        expect![[r#"
+            all = "\n\t\r\\\"\0"
+        "#]],
+    );
+}
+
+#[test]
+fn escapes_are_cooked_in_const_contexts() {
+    // A static initializer is a const context: the same one decoding runs,
+    // so the frozen constant already holds the real bytes.
+    check_const(
+        r#"
+static newline = "a\nb";
+static tab = "a\tb";
+static nul = "a\0b";
+static quote = "a\"b";
+static backslash = "a\\b";
+"#,
+        expect![[r#"
+            newline = "a\nb"
+            tab = "a\tb"
+            nul = "a\0b"
+            quote = "a\"b"
+            backslash = "a\\b"
+        "#]],
+    );
+}
+
+#[test]
+fn escapes_work_inside_a_const_block() {
+    // `const { ... }` re-enters compile time from runtime code; the value
+    // it freezes is the cooked string, not the raw token text.
+    check_run(
+        r#"static main = fn { print(const { "x\ty\n" }); };"#,
+        "main()",
+        expect![[r#"
+            x	y
+
+            => ()
+        "#]],
+    );
+}
+
+#[test]
+fn escapes_inside_a_multiline_string() {
+    // Strings stay multiline: a literal newline is still itself, and an
+    // escape in the same literal still decodes.
+    check_run(
+        "static main = fn { print(\"one\\ttwo\nthree\\n\"); };",
+        "main()",
+        expect![[r#"
+            one	two
+            three
+
+            => ()
+        "#]],
+    );
+}
+
+#[test]
 fn run_recursive_fib() {
     check_run(
         r#"

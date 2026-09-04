@@ -968,6 +968,15 @@ impl LowerCtx {
     }
 }
 
+/// The one place a string literal's token text becomes its value: every
+/// consumer (inference, MIR consts, const args, the machine) sees the cooked
+/// string. Escape spelling comes from [`syntax::unescape_char`], so the
+/// lexer's `unknown escape sequence` diagnostic and this decoder can never
+/// disagree about what is an escape.
+///
+/// Cooking changes the string's *length*, never anyone's source ranges:
+/// diagnostics are anchored on syntax nodes, and the raw token text stays
+/// in the green tree untouched.
 pub(crate) fn unescape(raw: &str) -> String {
     // Tolerates a missing closing quote (unterminated string literals).
     let inner = raw.strip_prefix('"').unwrap_or(raw);
@@ -979,12 +988,12 @@ pub(crate) fn unescape(raw: &str) -> String {
             out.push(c);
             continue;
         }
-        match chars.next() {
-            Some('n') => out.push('\n'),
-            Some('t') => out.push('\t'),
-            Some('r') => out.push('\r'),
-            Some(other) => out.push(other),
-            None => {}
+        // An unknown escape already carries a syntax error; keeping the
+        // escaped character is recovery, so the rest of the literal still
+        // reads sensibly in the editor. A trailing lone backslash yields
+        // `None` here — also already reported, and it contributes nothing.
+        if let Some(other) = chars.next() {
+            out.push(syntax::unescape_char(other).unwrap_or(other));
         }
     }
     out

@@ -867,6 +867,135 @@ static name = fn {
 }
 
 #[test]
+fn escaped_quote_does_not_end_the_string() {
+    // The token boundary is what escape handling is load-bearing for at the
+    // lexer level: `\"` keeps the literal open, so this is ONE string.
+    check(
+        r#"static s = "a\"b";"#,
+        expect![[r#"
+            SOURCE_FILE@0..18
+              STATIC_ITEM@0..18
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "s"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                LITERAL@11..17
+                  STRING@11..17 "\"a\\\"b\""
+                SEMICOLON@17..18 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn every_known_escape_is_accepted() {
+    // The whole conventional set, in one literal: no diagnostics.
+    let parse = crate::parse(r#"static s = "\n\t\r\0\\\"";"#);
+    assert_eq!(parse.errors(), &[], "known escapes must not be diagnosed");
+}
+
+#[test]
+fn unknown_escape_is_an_error_at_the_escape() {
+    // Anchored at the two-character escape, NOT at the whole literal — the
+    // rest of the string is fine and the squiggle should say so.
+    check(
+        r#"static s = "a\qb";"#,
+        expect![[r#"
+            SOURCE_FILE@0..18
+              STATIC_ITEM@0..18
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "s"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                LITERAL@11..17
+                  STRING@11..17 "\"a\\qb\""
+                SEMICOLON@17..18 ";"
+            error 13..15: unknown escape sequence `\q`
+        "#]],
+    );
+}
+
+#[test]
+fn each_bad_escape_in_a_literal_is_reported() {
+    let parse = crate::parse(r#"static s = "\q and \z";"#);
+    let messages: Vec<&str> = parse.errors().iter().map(|e| e.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        [
+            "unknown escape sequence `\\q`",
+            "unknown escape sequence `\\z`"
+        ]
+    );
+}
+
+#[test]
+fn control_characters_in_the_escape_message_are_rendered_not_embedded() {
+    // A backslash before a LITERAL newline (the C line-continuation idiom,
+    // which Must does not have) must not split the diagnostic across two
+    // lines, and a CR from a CRLF file must not travel raw inside an LSP
+    // message. The range still covers the two source characters. Rendered
+    // as a codepoint (`\u{a}`), never as `\n` — that two-character spelling
+    // IS a valid escape, so naming it here would call something legal
+    // unknown.
+    let parse = crate::parse("static s = \"a\\\nb\";");
+    let messages: Vec<&str> = parse.errors().iter().map(|e| e.message.as_str()).collect();
+    assert_eq!(messages, ["unknown escape sequence `\\u{a}`"]);
+    assert_eq!(
+        parse.errors()[0].range,
+        crate::TextRange::new(13.into(), 15.into())
+    );
+
+    let parse = crate::parse("static s = \"a\\\r\nb\";");
+    let messages: Vec<&str> = parse.errors().iter().map(|e| e.message.as_str()).collect();
+    assert_eq!(messages, ["unknown escape sequence `\\u{d}`"]);
+    for err in parse.errors() {
+        assert!(
+            !err.message.contains('\n') && !err.message.contains('\r'),
+            "a diagnostic must stay on one line: {:?}",
+            err.message
+        );
+    }
+}
+
+#[test]
+fn trailing_lone_backslash_is_an_error() {
+    // Only reachable at end of input: before a closing quote the backslash
+    // would have escaped the quote. Both errors are honest — the string is
+    // unterminated *and* ends on a dangling escape.
+    check(
+        r#"static s = "abc\"#,
+        expect![[r#"
+            SOURCE_FILE@0..16
+              STATIC_ITEM@0..16
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "s"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                LITERAL@11..16
+                  STRING@11..16 "\"abc\\"
+            error 11..16: unterminated string
+            error 15..16: a string cannot end with a lone `\`
+        "#]],
+    );
+}
+
+#[test]
+fn escapes_are_legal_inside_a_multiline_string() {
+    // Strings stay multiline (unchanged ruling); a literal newline and an
+    // escape coexist in one literal, and neither is diagnosed.
+    let parse = crate::parse("static s = \"line one\\n\nline two\\t\";");
+    assert_eq!(parse.errors(), &[]);
+}
+
+#[test]
 fn junk_between_items() {
     check(
         r#"

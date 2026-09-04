@@ -11,14 +11,24 @@ pub struct Token {
     pub len: TextSize,
 }
 
+/// An error at a range *inside* a token — a bad escape in a string literal.
+/// `range` is relative to the token's start. Token boundaries never depend
+/// on these: a malformed escape is a diagnostic, not a re-lex.
+struct InnerError {
+    range: std::ops::Range<usize>,
+    message: String,
+}
+
 pub fn tokenize(text: &str) -> (Vec<Token>, Vec<SyntaxError>) {
     let mut tokens = Vec::new();
     let mut errors = Vec::new();
+    let mut inner = Vec::new();
     let mut pos = 0;
 
     while pos < text.len() {
         let rest = &text[pos..];
-        let (kind, len, error) = next_token(rest);
+        inner.clear();
+        let (kind, len, error) = next_token(rest, &mut inner);
         debug_assert!(len > 0, "lexer must always make progress");
         if let Some(message) = error {
             let start = TextSize::new(pos as u32);
@@ -26,6 +36,16 @@ pub fn tokenize(text: &str) -> (Vec<Token>, Vec<SyntaxError>) {
             errors.push(SyntaxError {
                 message,
                 range,
+                fix: None,
+            });
+        }
+        for InnerError { range, message } in inner.drain(..) {
+            errors.push(SyntaxError {
+                message,
+                range: TextRange::new(
+                    TextSize::new((pos + range.start) as u32),
+                    TextSize::new((pos + range.end) as u32),
+                ),
                 fix: None,
             });
         }
@@ -39,8 +59,10 @@ pub fn tokenize(text: &str) -> (Vec<Token>, Vec<SyntaxError>) {
     (tokens, errors)
 }
 
-/// Lex one token from the start of `rest`. Returns (kind, length in bytes, error).
-fn next_token(rest: &str) -> (SyntaxKind, usize, Option<String>) {
+/// Lex one token from the start of `rest`. Returns (kind, length in bytes,
+/// whole-token error); errors covering only part of the token are pushed
+/// onto `inner`.
+fn next_token(rest: &str, inner: &mut Vec<InnerError>) -> (SyntaxKind, usize, Option<String>) {
     use SyntaxKind::*;
 
     let c = rest.chars().next().unwrap();
@@ -50,7 +72,7 @@ fn next_token(rest: &str) -> (SyntaxKind, usize, Option<String>) {
             let len = rest.find('\n').unwrap_or(rest.len());
             (COMMENT, len, None)
         }
-        '"' => scan_string(rest),
+        '"' => scan_string(rest, inner),
         '\'' => scan_lifetime(rest),
         c if is_ident_start(c) => {
             let len = scan_while(rest, is_ident_continue);
@@ -103,19 +125,67 @@ fn next_token(rest: &str) -> (SyntaxKind, usize, Option<String>) {
     }
 }
 
-// Strings are multiline, Rust-style. An unterminated one swallows the rest
-// of the file — accepting that beats the alternative: ending strings at
-// newlines double-errors the common "closing quote on the next line" case,
-// and editor quote auto-close makes unterminated strings rare in practice.
-fn scan_string(rest: &str) -> (SyntaxKind, usize, Option<String>) {
+/// The escape sequences a string literal may contain, C/Rust-conventional:
+/// `\n`, `\t`, `\r`, `\0`, `\\` and `\"`. `None` means "not an escape" —
+/// the lexer reports those as `unknown escape sequence`, so a backslash is
+/// never silently literal. Shared with HIR's literal lowering, which cooks
+/// the token text into the string's value: one table, one answer.
+pub fn unescape_char(c: char) -> Option<char> {
+    Some(match c {
+        'n' => '\n',
+        't' => '\t',
+        'r' => '\r',
+        '0' => '\0',
+        '\\' => '\\',
+        '"' => '"',
+        _ => return None,
+    })
+}
+
+/// Render the backslash-plus-`e` pair the user actually wrote, for a
+/// diagnostic. A printable `e` gets the backslash put back in front
+/// (`\q`). A CONTROL character (a literal newline, CR or tab — the C
+/// line-continuation idiom, or a bare CRLF line ending) is rendered as its
+/// `\u{..}` codepoint, never spelled `\n`/`\r`/`\t`: those two-character
+/// spellings ARE valid escapes (`unescape_char` accepts them), so using
+/// them here would tell the user their input is unknown while naming
+/// something legal — copy-pasting the message would "fix" nothing.
+/// Embedding the raw byte instead would split the message across lines, or
+/// smuggle a bare CR from a CRLF file into an LSP diagnostic. `e` is never
+/// `\` or `"` here — both are valid escapes.
+fn shown_escape(e: char) -> String {
+    if e.is_control() {
+        format!("\\u{{{:x}}}", e as u32)
+    } else {
+        format!("\\{e}")
+    }
+}
+
+// Strings are multiline, Rust-style — a literal newline inside a string is
+// legal. An unterminated one swallows the rest of the file — accepting that
+// beats the alternative: ending strings at newlines double-errors the common
+// "closing quote on the next line" case, and editor quote auto-close makes
+// unterminated strings rare in practice.
+fn scan_string(rest: &str, inner: &mut Vec<InnerError>) -> (SyntaxKind, usize, Option<String>) {
     let mut chars = rest.char_indices().skip(1);
     while let Some((i, c)) = chars.next() {
         match c {
             '"' => return (SyntaxKind::STRING, i + 1, None),
-            '\\' => {
-                // Escapes are not validated yet; skip whatever follows.
-                chars.next();
-            }
+            // A backslash always consumes the next character — that is what
+            // keeps `"\""` one token — but it must introduce a known escape.
+            '\\' => match chars.next() {
+                Some((_, e)) if unescape_char(e).is_some() => {}
+                Some((j, e)) => inner.push(InnerError {
+                    range: i..j + e.len_utf8(),
+                    message: format!("unknown escape sequence `{}`", shown_escape(e)),
+                }),
+                // Only reachable at end of input: before a closing quote a
+                // backslash would have escaped that quote instead.
+                None => inner.push(InnerError {
+                    range: i..i + 1,
+                    message: "a string cannot end with a lone `\\`".to_owned(),
+                }),
+            },
             _ => {}
         }
     }

@@ -40,6 +40,14 @@ tag) — anonymous and structural, matched by shape alone. Enums have no
 anonymous form: every enum lives behind a `type` item (see "Enums and
 variants" below).
 
+== String literals
+
+Strings are multiline — a literal newline inside a string literal is legal — and
+support six escapes: `\n \t \r \\ \" \0`. Anything else after a backslash is an
+error anchored at the escape itself, and a trailing lone backslash is an
+unterminated string. The lexer and the value decoder share one table, so they
+can never disagree about what counts as a valid escape.
+
 == Variable declarations
 
 `let` is the only variable-declaration form. Possible sugars — an

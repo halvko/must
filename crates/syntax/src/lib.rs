@@ -14,7 +14,7 @@ mod validation;
 
 use std::sync::Arc;
 
-pub use lexer::{Token, tokenize};
+pub use lexer::{Token, tokenize, unescape_char};
 pub use rowan::{TextRange, TextSize};
 pub use syntax_kind::{KEYWORDS, SyntaxKind};
 pub use validation::{
