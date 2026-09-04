@@ -666,17 +666,23 @@ being inferred, `return e` pins it exactly as a tail expression would, so
 an un-annotated `fn (c: bool) { if c { return "yes"; }; "no" }` is
 `fn(bool) -> str`.
 
-`return` targets the *nearest enclosing body*, and function literals bound
-it the way they bound everything else: a `return` inside a `fn` nested in
-another function returns from the inner literal, leaving the outer one
-running. `const { ... }` blocks are compile-time units of their own and
-bound it too — a `return` inside one produces that block's value. A
-`return` with no enclosing body at all (an item initializer's own top
-level, which is a value expression rather than a function) is an error,
-exactly like a `break` with no enclosing loop.
+`return` targets the *nearest enclosing function literal*, and function
+literals bound it the way they bound everything else: a `return` inside a
+`fn` nested in another function returns from the inner literal, leaving
+the outer one running. A `return` with no enclosing function at all (an
+item initializer's own top level, which is a value expression rather than
+a function) is an error, exactly like a `break` with no enclosing loop.
 
-`return` is const-legal: a `const fn` may exit early, and so may a
-`const { ... }` block.
+Inside a `const { ... }` block, `return` is *not supported yet*. What it
+ought to mean is leaving the enclosing function — but a `const` block is
+compiled as a body of its own, so carrying an exit across that boundary
+needs machinery that does not exist yet, and the other reading (yielding
+the block's value, the way a `const` block does bound `break`) would be a
+different construct wearing the same spelling. So it is refused outright,
+with a message saying exactly that. A `fn` literal *inside* a `const`
+block is its own body, so a `return` in that one is ordinary and legal.
+
+`return` is const-legal otherwise: a `const fn` may exit early.
 
 Statements after a `return` still type-check and still resolve — there is
 no unreachable-code lint yet.

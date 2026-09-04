@@ -474,9 +474,20 @@ pub enum InferenceDiagnostic {
     },
     /// A `return` with no enclosing body to leave — an item initializer's
     /// own top level, which is a value expression, not a function. (A `fn`
-    /// literal and a `const` block both ARE bodies, so a `return` inside
-    /// either is fine and leaves the innermost of them.)
+    /// literal IS a body, so a `return` inside one is fine and leaves that
+    /// literal; a `const` block is [`Self::ReturnInConstBlock`].)
     ReturnOutsideFn {
+        /// The return expression.
+        expr: ExprId,
+    },
+    /// A `return` whose nearest enclosing body is a `const { ... }` block.
+    /// Conceptually it bails from the OUTER fn body, and that needs
+    /// cross-body machinery no v1 pass has — so it is RESERVED rather than
+    /// given the reachable-but-wrong reading (yielding the block's value,
+    /// the way a `const` block bounds `break`). A `fn` literal nested
+    /// inside the block is its own body, so a `return` in THAT is
+    /// untouched.
+    ReturnInConstBlock {
         /// The return expression.
         expr: ExprId,
     },
@@ -1060,6 +1071,7 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::BreakOutsideLoop { expr }
             | InferenceDiagnostic::ContinueOutsideLoop { expr }
             | InferenceDiagnostic::ReturnOutsideFn { expr }
+            | InferenceDiagnostic::ReturnInConstBlock { expr }
             | InferenceDiagnostic::GenericArgCount { expr, .. }
             | InferenceDiagnostic::NotGeneric { expr, .. }
             | InferenceDiagnostic::ConstArgHole { expr }
@@ -1399,6 +1411,12 @@ impl InferenceDiagnostic {
                 "`return` outside of a function: there is no enclosing `fn` body to return from"
                     .to_owned()
             }
+            InferenceDiagnostic::ReturnInConstBlock { .. } => {
+                "`return` inside a `const` block is not supported yet: it would have to \
+                 leave the enclosing `fn` body, and a `const` block is compiled as a body \
+                 of its own"
+                    .to_owned()
+            }
             InferenceDiagnostic::PatUnknownField {
                 name, record_ty, ..
             } => {
@@ -1715,6 +1733,21 @@ pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
     ctx.finish()
 }
 
+/// One entry of [`InferCtx::return_targets`] — a body a `return` could be
+/// leaving.
+#[derive(Debug, Clone)]
+enum ReturnTarget {
+    /// A `fn` literal: the type its value must have (its own `-> T`, or
+    /// its inferred variable), and why that type is expected, for blame on
+    /// the operand.
+    Fn { ty: Ty, cause: Option<Cause> },
+    /// A `const { ... }` block: a body of its own, but a `return` landing
+    /// here is reserved — it should bail from the OUTER fn body, which
+    /// needs cross-body machinery no v1 pass has. Carries nothing: the
+    /// reservation is refused outright, never checked against anything.
+    ConstBlock,
+}
+
 pub(crate) struct InferCtx<'a, 'db> {
     db: &'db dyn Db,
     /// The file the body's annotations resolve type names in.
@@ -1762,11 +1795,11 @@ pub(crate) struct InferCtx<'a, 'db> {
     ///
     /// A `const` block pushes an entry for the same reason it resets
     /// [`Self::loop_sinks`]: it is a compile-time unit of its own (MIR
-    /// lowers it to a separate body), so a `return` inside one can no more
-    /// exit the surrounding function than a `break` can leave it. Empty —
-    /// at an item initializer's top level — is the outside-a-function
-    /// error.
-    return_targets: Vec<(Ty, Option<Cause>)>,
+    /// lowers it to a separate body). Its entry is MARKED, though — a
+    /// `return` landing on one is RESERVED, not checked (see
+    /// [`InferenceDiagnostic::ReturnInConstBlock`]). Empty — at an item
+    /// initializer's top level — is the outside-a-function error.
+    return_targets: Vec<ReturnTarget>,
     /// The item's own generic binder scope (type params → rigid
     /// [`Ty::Param`]s, const params → rigid [`ConstArgValue::Param`]s),
     /// applied by [`Self::lower_type_ref`] to every type annotation
@@ -2170,6 +2203,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::BreakOutsideLoop { .. }
                 | InferenceDiagnostic::ContinueOutsideLoop { .. }
                 | InferenceDiagnostic::ReturnOutsideFn { .. }
+                | InferenceDiagnostic::ReturnInConstBlock { .. }
                 | InferenceDiagnostic::PatBindingNeedsAnnotation { .. }
                 | InferenceDiagnostic::PatUnknownType { .. }
                 | InferenceDiagnostic::GenericArgCount { .. }
@@ -2952,10 +2986,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // bounds' dictionary (`const_block_depth`).
                 self.witness_sink = sink;
                 let saved_loops = std::mem::take(&mut self.loop_sinks);
-                // A body of its own, so it is also a `return` target: the
-                // block's own expectation is what a `return` inside it must
-                // produce (its tail's expectation, verbatim).
-                self.return_targets.push((expected.clone(), cause));
+                // A body of its own, so it shadows the enclosing `fn`'s
+                // return target — but as a RESERVED one: a `return` that
+                // lands here is refused, never checked against anything
+                // (see `ReturnTarget::ConstBlock`).
+                self.return_targets.push(ReturnTarget::ConstBlock);
                 self.const_block_depth += 1;
                 let ty = self.infer_expr_with(*inner, expected, cause);
                 self.const_block_depth -= 1;
@@ -3342,8 +3377,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // `ret`/`ret_cause` pair the tail below is checked against.
                 // Pushed (not swapped): an outer entry stays reachable only
                 // to the outer body, so a nested literal's `return` exits
-                // the nested literal.
-                self.return_targets.push((ret.clone(), ret_cause));
+                // the nested literal — including a literal nested inside a
+                // `const` block, whose own reserved entry it covers.
+                self.return_targets.push(ReturnTarget::Fn {
+                    ty: ret.clone(),
+                    cause: ret_cause,
+                });
                 let body_ty = self.infer_expr_with(*fn_body, &ret, ret_cause);
                 self.return_targets.pop();
                 self.loop_sinks = saved_loops;
@@ -3468,7 +3507,32 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
             },
             ExprData::Return { value } => match self.return_targets.last().cloned() {
-                Some((ret, ret_cause)) => {
+                // RESERVED: the nearest body is a `const` block.
+                // Conceptually this `return` bails from the OUTER fn body —
+                // which needs cross-body machinery that no v1 pass has — so
+                // it is refused outright rather than silently retargeted at
+                // the block. The operand is still inferred (freely: nothing
+                // here demands a type of it) so its contents get types and
+                // diagnostics, and the `return` still types `!`: it
+                // produces no value under any reading, and MIR traps on it.
+                Some(ReturnTarget::ConstBlock) => {
+                    if let Some(value) = value {
+                        let fresh = self.fresh_var();
+                        let ty = self.infer_expr(*value, &fresh);
+                        // The reservation is the whole story: nothing here
+                        // demanded a type of the operand, so a bare literal
+                        // in it must not add a no-defining-use sibling.
+                        poison_unresolved_number(self.table, &ty);
+                    }
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::ReturnInConstBlock { expr });
+                    Ty::Never
+                }
+                Some(ReturnTarget::Fn {
+                    ty: ret,
+                    cause: ret_cause,
+                }) => {
                     match value {
                         // THE seam: the operand is checked against the
                         // enclosing body's return type with that type's own
@@ -3490,15 +3554,24 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
                 None => {
                     // At an item initializer's top level: there is no
-                    // function to leave. The value is still inferred so its
-                    // contents get types and diagnostics.
+                    // function to leave. The value is still inferred (freely:
+                    // nothing here demands a type of it) so its contents get
+                    // types and diagnostics, and — matching the const-block
+                    // arm above — a bare literal in it must not add a
+                    // no-defining-use sibling to the refusal.
                     if let Some(value) = value {
                         let fresh = self.fresh_var();
-                        self.infer_expr(*value, &fresh);
+                        let ty = self.infer_expr(*value, &fresh);
+                        poison_unresolved_number(self.table, &ty);
                     }
                     self.result
                         .diagnostics
                         .push(InferenceDiagnostic::ReturnOutsideFn { expr });
+                    // Unlike the const-block arm's `Ty::Never`, this is
+                    // `Ty::Error`: the refusal marks a genuinely malformed
+                    // program (no body encloses the `return` at all), so its
+                    // type should not participate in further inference the
+                    // way a real `!` would.
                     Ty::Error
                 }
             },

@@ -1676,11 +1676,28 @@ static y: usize = clamped(3);
 }
 
 #[test]
-fn return_in_a_const_block_yields_the_blocks_value() {
+fn return_in_a_const_block_traps_at_the_return() {
+    // The reserve's runtime half: the block is still lowered and still
+    // evaluated — deferred errors, like every other refused construct —
+    // and the execution that REACHES the `return` traps there with the
+    // checker's own message. The old behavior (this block evaluating to
+    // `42`) must not survive anywhere.
     check_const_blocks(
         "static f = fn { let x: usize = const { if true { return 42; }; 0 }; };",
         expect![[r#"
-            f#0 = 42
+            f#0 = error[Trap]: `return` inside a `const` block is not supported yet: it would have to leave the enclosing `fn` body, and a `const` block is compiled as a body of its own
+        "#]],
+    );
+}
+
+#[test]
+fn return_in_a_fn_literal_inside_a_const_block_still_runs() {
+    // The other side of the boundary: the literal is its own body, so its
+    // `return` is an ordinary early exit and the block evaluates fine.
+    check_const_blocks(
+        "static f = fn { let x: usize = const { let inner = fn () -> usize { return 7; }; 9 }; };",
+        expect![[r#"
+            f#0 = 9
         "#]],
     );
 }

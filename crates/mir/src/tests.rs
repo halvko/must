@@ -1910,14 +1910,55 @@ fn return_outside_a_function_traps_with_the_diagnostic() {
             item x:
             fn b0() -> {error} {
               _0: {error}  // return
-              _1: {number}
-              _2: {error}
+              _1: {error}
               bb0:
-                _1 = trap "cannot infer the type of this number: it has no defining use — add a type annotation" -> bb1
+                _1 = trap "`return` outside of a function: there is no enclosing `fn` body to return from" -> bb1
               bb1:
-                _2 = trap "`return` outside of a function: there is no enclosing `fn` body to return from" -> bb2
+                _0 = _1
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn return_in_a_const_block_traps_instead_of_leaving_the_block() {
+    // The reserve's MIR half: the `const` block's own body still lowers
+    // whole, but the refused `return` plants a trap where it used to plant
+    // the block's exit edge — so nothing produces the block's value early
+    // any more.
+    check_mir(
+        "static x = fn () -> usize { const { if true { return 42; }; 0 } };",
+        expect![[r#"
+            item x:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: ()
+              _2: !
+              bb0:
+                if true -> [then: bb1, else: bb2]
+              bb1:
+                _2 = trap "`return` inside a `const` block is not supported yet: it would have to leave the enclosing `fn` body, and a `const` block is compiled as a body of its own" -> bb3
               bb2:
-                _0 = _2
+                _1 = ()
+                goto -> bb4
+              bb3:
+                _1 = ()
+                goto -> bb4
+              bb4:
+                _0 = 0
+                return
+            }
+            fn b1() -> usize {
+              _0: usize  // return
+              bb0:
+                _0 = const b0
+                return
+            }
+            fn b2() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b1
                 return
             }
         "#]],

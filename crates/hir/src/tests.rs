@@ -3732,16 +3732,55 @@ static x = clamped(42);
 }
 
 #[test]
-fn return_in_a_const_block_leaves_the_const_block() {
-    // A `const` block is a compile-time body of its own (MIR lowers it to
-    // a separate body), so — exactly like the `break` boundary — a
-    // `return` inside one produces THAT block's value and cannot exit the
-    // surrounding function. Its operand is checked against the block's own
-    // expectation, here the `usize` annotation on `x`.
+fn return_in_a_const_block_is_reserved() {
+    // REVERSING what the `return` arc first shipped (a `return` here used
+    // to yield the CONST BLOCK's value, like a `break` bound by it).
+    // Conceptually it bails from the OUTER fn body — which needs
+    // cross-body machinery no v1 pass has — so v1 refuses it outright
+    // rather than picking the reachable-but-wrong reading.
     check_diagnostics(
         r#"
 static f = fn () -> str {
     let x: usize = const { if true { return 42; }; 0 };
+    "ok"
+};
+"#,
+        expect![[r#"
+            64..73: `return` inside a `const` block is not supported yet: it would have to leave the enclosing `fn` body, and a `const` block is compiled as a body of its own
+        "#]],
+    );
+}
+
+#[test]
+fn return_in_a_const_block_reports_once() {
+    // The reservation is the whole story: the operand is inferred (so its
+    // contents still get types and diagnostics) but nothing demands a type
+    // of it, so neither the block's expectation nor a bare literal in it
+    // adds a sibling diagnostic.
+    check_diagnostics(
+        r#"
+static f = fn () -> str {
+    let x: usize = const { return "text"; };
+    "ok"
+};
+static g = const { return 1; };
+"#,
+        expect![[r#"
+            54..67: `return` inside a `const` block is not supported yet: it would have to leave the enclosing `fn` body, and a `const` block is compiled as a body of its own
+            103..111: `return` inside a `const` block is not supported yet: it would have to leave the enclosing `fn` body, and a `const` block is compiled as a body of its own
+        "#]],
+    );
+}
+
+#[test]
+fn return_in_a_fn_literal_nested_in_a_const_block_is_fine() {
+    // The reservation is about the `const` block being the NEAREST body.
+    // A `fn` literal inside one is its own body, so its `return` leaves
+    // the literal exactly as anywhere else — nothing to reserve.
+    check_diagnostics(
+        r#"
+static f = fn () -> str {
+    let x: usize = const { let inner = fn () -> usize { return 7; }; 0 };
     "ok"
 };
 "#,
@@ -3750,29 +3789,15 @@ static f = fn () -> str {
 }
 
 #[test]
-fn return_in_a_const_block_checks_against_the_block_not_the_fn() {
-    check_diagnostics(
-        r#"
-static f = fn () -> str {
-    let x: usize = const { return "text"; };
-    "ok"
-};
-"#,
-        expect![[r#"
-            61..67: type mismatch: expected `usize`, found `str` (expected `usize` because of this annotation at 38..43)
-        "#]],
-    );
-}
-
-#[test]
 fn return_outside_a_function_errors() {
     // An item initializer's own top level is a value expression, not a
-    // function body — there is nothing to leave.
+    // function body — there is nothing to leave. The refusal is the whole
+    // story: nothing here demanded a type of the operand, so the bare
+    // literal must not add a no-defining-use sibling.
     check_diagnostics(
         "static x = return 1;",
         expect![[r#"
             11..19: `return` outside of a function: there is no enclosing `fn` body to return from
-            18..19: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }

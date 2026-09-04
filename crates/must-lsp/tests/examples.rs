@@ -336,7 +336,13 @@ fn errors_checks_dirty_with_the_documented_count() {
             203 |     let p = &raw mut x;
                 |             ^
 
-            found 20 errors and 1 warning
+            error: `return` inside a `const` block is not supported yet: it would have to leave the enclosing `fn` body, and a `const` block is compiled as a body of its own
+              --> examples/errors.must:214:23
+                |
+            214 |     const { if true { return 1; }; 0 }
+                |                       ^^^^^^^^
+
+            found 21 errors and 1 warning
         "#]],
     );
 }
