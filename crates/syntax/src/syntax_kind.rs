@@ -64,6 +64,8 @@ pub enum SyntaxKind {
     PUB_KW,
     RAW_KW,
     UNSAFE_KW,
+    WITH_KW,
+    IMPL_KW,
     ERROR_TOKEN,
 
     // Nodes
@@ -127,6 +129,9 @@ pub enum SyntaxKind {
     ARRAY_EXPR,
     INDEX_EXPR,
     NEG_EXPR,
+    WITH_GROUP,
+    IMPL_ELEMENT,
+    MEMBER,
     ERROR,
 }
 
@@ -159,6 +164,8 @@ impl SyntaxKind {
             "pub" => PUB_KW,
             "raw" => RAW_KW,
             "unsafe" => UNSAFE_KW,
+            "with" => WITH_KW,
+            "impl" => IMPL_KW,
             _ => return None,
         };
         Some(kw)

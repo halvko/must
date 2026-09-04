@@ -6605,6 +6605,652 @@ static f = fn (n: i16) -> str {
     );
 }
 
+// ---- inherent members and dot-calls -------------------------------------
+
+#[test]
+fn dot_call_happy_path() {
+    check_infer(
+        r#"
+type Counter = struct { n: usize } with {
+    impl Self {
+        get = fn(c: Self) -> usize { c.n };
+        bump = fn(by: usize, c: Self) -> Self { Counter(struct { n = c.n + by }) };
+    }
+};
+static main = fn() -> usize {
+    let c = Counter(struct { n = 3 });
+    c.bump(2).get()
+};
+"#,
+        expect![[r#"
+            210..286 'fn() -> usize {  ...': fn() -> usize
+            224..286 '{     let c = Cou...': usize
+            234..235 'c': Counter
+            238..245 'Counter': fn(struct { n: usize }) -> Counter
+            238..263 'Counter(struct { ...': Counter
+            246..262 'struct { n = 3 }': struct { n: usize }
+            259..260 '3': usize
+            269..270 'c': Counter
+            269..275 'c.bump': fn(usize, Counter) -> Counter
+            269..278 'c.bump(2)': Counter
+            269..282 'c.bump(2).get': fn(Counter) -> usize
+            269..284 'c.bump(2).get()': usize
+            276..277 '2': usize
+        "#]],
+    );
+}
+
+#[test]
+fn dot_call_happy_path_no_diagnostics() {
+    check_diagnostics(
+        r#"
+type Counter = struct { n: usize } with {
+    impl Self {
+        get = fn(c: Self) -> usize { c.n };
+    }
+};
+static main = fn() -> usize { Counter(struct { n = 3 }).get() };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn dot_call_on_generic_type_member() {
+    check_infer(
+        r#"
+type Box2 = struct::<T> { v: T } with {
+    impl Self {
+        get = fn(b: Self) -> T { b.v };
+        put = fn(x: T, b: Self) -> Self { Box2::<T>(struct { v = x }) };
+    }
+};
+static main = fn() -> str {
+    Box2(struct { v = "hi" }).put("ho").get()
+};
+"#,
+        expect![[r#"
+            193..254 'fn() -> str {    ...': fn() -> str
+            205..254 '{     Box2(struct...': str
+            211..215 'Box2': fn(struct { v: str }) -> Box2::<str>
+            211..236 'Box2(struct { v =...': Box2::<str>
+            211..240 'Box2(struct { v =...': fn(str, Box2::<str>) -> Box2::<str>
+            211..246 'Box2(struct { v =...': Box2::<str>
+            211..250 'Box2(struct { v =...': fn(Box2::<str>) -> str
+            211..252 'Box2(struct { v =...': str
+            216..235 'struct { v = "hi" }': struct { v: str }
+            229..233 '"hi"': str
+            241..245 '"ho"': str
+        "#]],
+    );
+}
+
+#[test]
+fn member_self_resolves_in_signature_and_body() {
+    check_diagnostics(
+        r#"
+type Wrap = struct { v: usize } with {
+    impl Self {
+        dup = fn(w: Self) -> Self { Self(struct { v = w.v }) };
+    }
+};
+static main = fn() -> Wrap { Wrap(struct { v = 1 }).dup() };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn member_signature_must_be_fully_annotated() {
+    check_diagnostics(
+        r#"
+type A = struct { x: usize } with {
+    impl Self {
+        f = fn(a) { a.x };
+    }
+};
+"#,
+        expect![[r#"
+            61..62: member `f` must spell its full signature: every parameter and the return type
+            73..74: cannot determine the type of this expression; add a type annotation
+        "#]],
+    );
+}
+
+#[test]
+fn statics_are_never_dot_callable() {
+    check_diagnostics(
+        r#"
+type A = struct { x: usize } with {
+    impl Self {
+        get = fn(a: Self) -> usize { a.x };
+    }
+};
+static double = fn(a: A) -> usize { a.get() * 2 };
+static main = fn() -> usize {
+    let a = A(struct { x = 3 });
+    a.double()
+};
+"#,
+        expect![[r#"
+            224..234: no field or member `double` on `A` (a module-level `double` is defined here — statics are never dot-callable; call `double(...)` instead at 113..119)
+        "#]],
+    );
+}
+
+#[test]
+fn member_without_self_last_param_is_not_dot_callable() {
+    check_diagnostics(
+        r#"
+type A = struct { x: usize } with {
+    impl Self {
+        mk = fn(x: usize) -> usize { x };
+        rev = fn(a: Self, x: usize) -> usize { x };
+    }
+};
+static main = fn() -> usize {
+    let a = A(struct { x = 3 });
+    a.mk(1) + a.rev(2)
+};
+"#,
+        expect![[r#"
+            223..230: `mk` is not dot-callable: its last parameter is not `Self`-typed (dot-call resolution is structural) (`mk` is defined here at 61..63)
+            233..241: `rev` is not dot-callable: its last parameter is not `Self`-typed (dot-call resolution is structural) (`rev` is defined here at 103..106)
+        "#]],
+    );
+}
+
+#[test]
+fn member_reached_without_a_call() {
+    check_diagnostics(
+        r#"
+type A = struct { x: usize } with {
+    impl Self {
+        get = fn(a: Self) -> usize { a.x };
+    }
+};
+static main = fn() -> usize { A(struct { x = 3 }).get };
+"#,
+        expect![[r#"
+            136..159: `get` is a member fn, not a field; call it: `.get(...)`
+        "#]],
+    );
+}
+
+#[test]
+fn duplicate_member_reported() {
+    check_diagnostics(
+        r#"
+type A = struct { x: usize } with {
+    impl Self {
+        get = fn(a: Self) -> usize { a.x };
+        get = fn(a: Self) -> usize { 0 };
+    }
+};
+"#,
+        expect![[r#"
+            105..108: duplicate member `get` (first defined here at 61..64)
+        "#]],
+    );
+}
+
+#[test]
+fn member_may_share_a_field_name_getter_idiom() {
+    // SEPARATE NAMESPACES (G13): a member named like a field is
+    // legal. Call syntax selects the MEMBER (which may read the FIELD of
+    // the same name through bare access in its own body) — the getter
+    // idiom, clean end to end.
+    check_infer(
+        r#"
+type Vecish = struct { len: usize } with {
+    impl Self {
+        len = fn(v: Self) -> usize { v.len };
+    }
+};
+static main = fn() -> usize {
+    let v = Vecish(struct { len = 3 });
+    v.len() + v.len
+};
+"#,
+        expect![[r#"
+            129..206 'fn() -> usize {  ...': fn() -> usize
+            143..206 '{     let v = Vec...': usize
+            153..154 'v': Vecish
+            157..163 'Vecish': fn(struct { len: usize }) -> Vecish
+            157..183 'Vecish(struct { l...': Vecish
+            164..182 'struct { len = 3 }': struct { len: usize }
+            179..180 '3': usize
+            189..190 'v': Vecish
+            189..194 'v.len': fn(Vecish) -> usize
+            189..196 'v.len()': usize
+            189..204 'v.len() + v.len': usize
+            199..200 'v': Vecish
+            199..204 'v.len': usize
+        "#]],
+    );
+}
+
+#[test]
+fn parenthesized_field_access_is_a_value_call_not_a_dot_call() {
+    // `(recv.name)(...)` is an ordinary value call of the FIELD access —
+    // the parens opt out of member selection, so a member-only name gets
+    // the member-must-be-called diagnostic from the bare-access path.
+    check_diagnostics(
+        r#"
+type A = struct { x: usize } with {
+    impl Self {
+        get = fn(a: Self) -> usize { a.x };
+    }
+};
+static main = fn() -> usize { (A(struct { x = 1 }).get)() };
+"#,
+        expect![[r#"
+            137..160: `get` is a member fn, not a field; call it: `.get(...)`
+        "#]],
+    );
+}
+
+#[test]
+fn calling_a_plain_field_names_the_field_and_the_missing_member() {
+    check_diagnostics(
+        r#"
+type A = struct { x: usize };
+static main = fn() -> usize { A(struct { x = 1 }).x() };
+"#,
+        expect![[r#"
+            61..84: field `x` is not callable (its type is `usize`), and `A` has no member `x`
+        "#]],
+    );
+}
+
+#[test]
+fn qualified_member_reference_reserved() {
+    check_diagnostics(
+        r#"
+type A = struct { x: usize } with {
+    impl Self {
+        get = fn(a: Self) -> usize { a.x };
+    }
+};
+static main = fn() -> usize { A::get(A(struct { x = 1 })) };
+"#,
+        expect![[r#"
+            136..142: qualified member references are not supported yet; call `get` through its receiver: `value.get(...)`
+        "#]],
+    );
+}
+
+#[test]
+fn dot_call_is_field_first() {
+    // A fn-valued field keeps today's meaning on receivers without
+    // members: `a.f(5)` on a record receiver calls the FIELD's fn value —
+    // structural records cannot carry members, so the field is the only
+    // namespace in play. (On NAMED receivers, call syntax selects a
+    // member FIRST — see `member_may_share_a_field_name_getter_idiom`.)
+    check_infer(
+        r#"
+static main = fn() -> usize {
+    let a = struct { f = fn(n: usize) -> usize { n + n } };
+    a.f(5)
+};
+"#,
+        expect![[r#"
+            15..103 'fn() -> usize {  ...': fn() -> usize
+            29..103 '{     let a = str...': usize
+            39..40 'a': struct { f: fn(usize) -> usize }
+            43..89 'struct { f = fn(n...': struct { f: fn(usize) -> usize }
+            56..87 'fn(n: usize) -> u...': fn(usize) -> usize
+            59..60 'n': usize
+            78..87 '{ n + n }': usize
+            80..81 'n': usize
+            80..85 'n + n': usize
+            84..85 'n': usize
+            95..96 'a': struct { f: fn(usize) -> usize }
+            95..98 'a.f': fn(usize) -> usize
+            95..101 'a.f(5)': usize
+            99..100 '5': usize
+        "#]],
+    );
+}
+
+#[test]
+fn dot_call_arity_does_not_count_self() {
+    check_diagnostics(
+        r#"
+type A = struct { x: usize } with {
+    impl Self {
+        add = fn(y: usize, a: Self) -> usize { a.x + y };
+    }
+};
+static main = fn() -> usize { A(struct { x = 1 }).add() };
+"#,
+        expect![[r#"
+            150..175: expected 1 argument(s), found 0
+        "#]],
+    );
+}
+
+#[test]
+fn dot_call_argument_mismatch_blames_the_argument() {
+    check_diagnostics(
+        r#"
+type A = struct { x: usize } with {
+    impl Self {
+        add = fn(y: usize, a: Self) -> usize { a.x + y };
+    }
+};
+static main = fn() -> usize { A(struct { x = 1 }).add("no") };
+"#,
+        expect![[r#"
+            174..178: type mismatch: expected `usize`, found `str`
+        "#]],
+    );
+}
+
+#[test]
+fn member_bodies_are_checked() {
+    check_diagnostics(
+        r#"
+type A = struct { x: usize } with {
+    impl Self {
+        get = fn(a: Self) -> str { a.x };
+    }
+};
+"#,
+        expect![[r#"
+            88..91: type mismatch: expected `str`, found `usize` (expected `str` because of this return type at 79..85)
+        "#]],
+    );
+}
+
+#[test]
+fn members_call_members_through_the_dot() {
+    check_diagnostics(
+        r#"
+type A = struct { x: usize } with {
+    impl Self {
+        get = fn(a: Self) -> usize { a.x };
+        twice = fn(a: Self) -> usize { a.get() + a.get() };
+    }
+};
+static main = fn() -> usize { A(struct { x = 2 }).twice() };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn enum_types_can_carry_members() {
+    check_diagnostics(
+        r#"
+type Light = enum { Red, Green } with {
+    impl Self {
+        flip = fn(l: Self) -> Light {
+            match l {
+                ::Red => Light::Green,
+                ::Green => Light::Red,
+            }
+        };
+    }
+};
+static main = fn() -> Light { Light::Red.flip() };
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn dot_call_on_type_without_members() {
+    check_diagnostics(
+        r#"
+type A = struct { x: usize };
+static main = fn() -> usize { A(struct { x = 1 }).get() };
+"#,
+        expect![[r#"
+            61..86: no field or member `get` on `A`
+        "#]],
+    );
+}
+
+#[test]
+fn member_signature_pinned_to_concrete_args_is_not_self_typed() {
+    // On a generic type, `Self` means the type at its FULL binders — a
+    // member whose last param pins the args is not dot-callable.
+    check_diagnostics(
+        r#"
+type Box2 = struct::<T> { v: T } with {
+    impl Self {
+        get_pinned = fn(b: Box2::<usize>) -> usize { b.v };
+    }
+};
+static main = fn() -> usize { Box2(struct { v = 1 }).get_pinned() };
+"#,
+        expect![[r#"
+            156..191: `get_pinned` is not dot-callable: its last parameter is not `Self`-typed (dot-call resolution is structural) (`get_pinned` is defined here at 65..75)
+            174..175: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
+    );
+}
+
+/// The signature/body query split for MEMBERS: editing one member's
+/// BODY re-infers only that member — its sibling's signature and the
+/// dot-calling item both backdate (member signatures are annotation-
+/// derived through the range-free `type_members`, which a body edit
+/// leaves value-equal).
+#[test]
+fn firewall_member_body_edit_does_not_reinfer_siblings_or_callers() {
+    use salsa::Setter as _;
+    use std::sync::{Arc, Mutex};
+
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let log_handle = Arc::clone(&log);
+    let mut db = RootDatabase::with_event_callback(Box::new(move |event| {
+        if let salsa::EventKind::WillExecute { database_key } = event.kind {
+            log_handle.lock().unwrap().push(format!("{database_key:?}"));
+        }
+    }));
+
+    let text_v1 = "type A = struct { x: usize } with {\n\
+                       impl Self {\n\
+                           get = fn(a: Self) -> usize { a.x };\n\
+                           dbl = fn(a: Self) -> usize { a.x * 2 };\n\
+                       }\n\
+                   };\n\
+                   static use_it: fn(A) -> usize = fn (a: A) -> usize { a.get() };\n";
+    // Only `get`'s BODY changes; every signature stays identical.
+    let text_v2 = "type A = struct { x: usize } with {\n\
+                       impl Self {\n\
+                           get = fn(a: Self) -> usize { a.x + 0 };\n\
+                           dbl = fn(a: Self) -> usize { a.x * 2 };\n\
+                       }\n\
+                   };\n\
+                   static use_it: fn(A) -> usize = fn (a: A) -> usize { a.get() };\n";
+
+    let file = SourceFile::new(&db, "test.must".to_owned(), text_v1.to_owned());
+    for item in crate::all_checkable_items(&db, file) {
+        crate::infer::infer(&db, item);
+    }
+    let executed_infers = |log: &Mutex<Vec<String>>| {
+        log.lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.contains("infer"))
+            .count()
+    };
+    // The type item itself has no body to infer, but its query still runs
+    // once: 4 checkable units (A, get, dbl, use_it).
+    assert_eq!(executed_infers(&log), 4, "all units inferred initially");
+
+    log.lock().unwrap().clear();
+    file.set_text(&mut db).to(text_v2.to_owned());
+    for item in crate::all_checkable_items(&db, file) {
+        crate::infer::infer(&db, item);
+    }
+    let log = log.lock().unwrap();
+    assert_eq!(
+        log.iter().filter(|entry| entry.contains("infer")).count(),
+        1,
+        "only the edited member may re-infer; executed: {log:#?}"
+    );
+}
+
+#[test]
+fn no_auto_deref_through_raw_pointers() {
+    // NO auto-deref, ever (G14): a pointer to a type with members does not
+    // dot-call them — the receiver's type must BE the member's `Self`.
+    check_diagnostics(
+        r#"
+type A = struct { x: usize } with {
+    impl Self {
+        get = fn(a: Self) -> usize { a.x };
+    }
+};
+static main = fn() -> usize {
+    let mut a = A(struct { x = 1 });
+    let p = &raw mut a;
+    p.get()
+};
+"#,
+        expect![[r#"
+            203..206: no field `get` on `&raw mut A`
+        "#]],
+    );
+}
+
+#[test]
+fn generic_owner_member_annotations_are_clean() {
+    // The annotation mirror must treat the OWNER's binder (and `Self`) as
+    // bound inside member signatures and bodies — no spurious unknown-type
+    // diagnostics.
+    check_diagnostics(
+        r#"
+type Stack = struct::<T> { top: T, rest: usize } with {
+    impl Self {
+        peek = fn(s: Self) -> T { s.top };
+        with_top = fn(x: T, s: Self) -> Stack::<T> {
+            let keep: T = x;
+            Stack::<T>(struct { top = keep, rest = s.rest })
+        };
+    }
+};
+static main = fn() -> usize { Stack(struct { top = 4, rest = 0 }).with_top(9).peek() };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn const_generic_owner_member_annotations_are_clean() {
+    check_diagnostics(
+        r#"
+type Buf = struct::<const N: usize> { used: usize } with {
+    impl Self {
+        cap = fn(b: Self) -> usize { N };
+        pad = fn(b: Self) -> [usize; N] { [0; N] };
+    }
+};
+static main = fn() -> usize { Buf::<8>(struct { used = 3 }).cap() };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn expression_self_is_rigid() {
+    // Expression-position `Self` is the RIGID Self (one meaning of `Self`
+    // per body): on a generic owner it constructs at the member's own
+    // binders — so a literal payload where `T` is expected is a mismatch,
+    // and `let x: Self = Self(...)` round-trips clean.
+    check_diagnostics(
+        r#"
+type Box2 = struct::<T> { v: T } with {
+    impl Self {
+        keep = fn(b: Self) -> Self {
+            let x: Self = Self(struct { v = b.v });
+            x
+        };
+        bad = fn(b: Self) -> Self { Self(struct { v = 1 }) };
+    }
+};
+"#,
+        expect![[r#"
+            225..226: type mismatch: expected `T`, found `{number}` (expected `T` because of this field declaration at 27..31)
+        "#]],
+    );
+}
+
+/// Member bodies are NOT a second class of call site. A member is required
+/// to spell its full signature, which makes it a fully-typed item — and a
+/// fully-typed item is a firewall: its body's call sites contribute no
+/// reference edge, so a group-inferrable static called only from inside one
+/// stays unconstrained. The comparison arm proves that is the SAME rule an
+/// annotated static obeys, not a member-specific gap.
+#[test]
+fn a_member_body_firewalls_its_callees_like_an_annotated_static() {
+    let from_member = r#"
+static id = fn (x) { x };
+type A = struct { n: usize } with {
+    impl Self {
+        use_it = fn(a: Self) -> usize { id(a.n) };
+    }
+};
+"#;
+    let from_annotated_static = r#"
+static id = fn (x) { x };
+static use_it = fn (n: usize) -> usize { id(n) };
+"#;
+    check_diagnostics(
+        from_member,
+        expect![[r#"
+            119..121: cannot infer the type of `id` across items; add a type annotation to its definition (defined here at 8..10)
+        "#]],
+    );
+    check_diagnostics(
+        from_annotated_static,
+        expect![[r#"
+            68..70: cannot infer the type of `id` across items; add a type annotation to its definition (defined here at 8..10)
+        "#]],
+    );
+}
+
+#[test]
+fn dot_call_on_broken_declaration_with_members_stays_silent() {
+    // The `with`-chain parses independently of a broken RHS, so the member
+    // resolves even though the type does not. Errors are infectious and
+    // SILENT: the declaration carries its own diagnostic, and a dot-call
+    // must not additionally be told to call what it already called.
+    check_diagnostics(
+        r#"
+type A = 5 with {
+    impl Self {
+        get = fn(a: Self) -> usize { 0 };
+    }
+};
+static main = fn (a: A) -> usize { a.get() };
+"#,
+        expect![[r#"
+            10..11: only a `struct` or `enum` literal can declare a type
+        "#]],
+    );
+}
+
+#[test]
+fn dot_call_on_broken_declaration_stays_silent() {
+    // Errors are infectious and SILENT: a broken type declaration carries
+    // its own diagnostic; a dot-call on a value of that type must not
+    // cascade a "no field or member" on top (same posture as plain field
+    // access).
+    check_diagnostics(
+        r#"
+type A = 5;
+static main = fn (a: A) -> usize { a.get() };
+"#,
+        expect![[r#"
+            10..11: only a `struct` or `enum` literal can declare a type
+        "#]],
+    );
+}
+
 // ---- the record-literal equals-defines respell --------------------------
 
 #[test]

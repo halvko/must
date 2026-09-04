@@ -34,13 +34,15 @@ pub use scopes::{
 };
 pub use ty::{
     ConstArgValue, FnTy, GenericArg, IntKind, IntValue, NamedTy, Ty, VariantTy, enum_variants,
-    signature, substitute_args, type_underlying, type_underlying_for, variant_payloads_for,
-    widens_to,
+    member_is_dot_callable, member_self_ty, signature, substitute_args, type_underlying,
+    type_underlying_for, variant_payloads_for, widens_to,
 };
 pub use unsafe_check::UnsafeCheckDiagnostic;
 
-/// Stable identity of a top-level item: survives edits to other items,
-/// reordering of unrelated code, and any edit inside its own body.
+/// Stable identity of a top-level item — or of one MEMBER of a type
+/// item's attachment chain (`impl Self { ... }`), when [`Self::member`] is
+/// set: survives edits to other items, reordering of unrelated code, and
+/// any edit inside its own body.
 ///
 /// Used as a *query key*. Inside query *values* use [`ItemLoc`], which is
 /// lifetime-free (salsa values holding `'db` ids would need `salsa::Update`).
@@ -52,6 +54,11 @@ pub struct ItemId<'db> {
     /// Which occurrence of `name` in the file (0-based); keeps duplicates
     /// and unnamed (broken) items distinct.
     pub disambiguator: u32,
+    /// `Some((member name, member disambiguator))` for a member of the
+    /// item's `with`-chain (`impl Self { ... }`) — NAME-KEYED, never
+    /// positional, so editing a sibling member never changes this
+    /// identity. `None` for the item itself.
+    pub member: Option<(String, u32)>,
 }
 
 /// Lifetime-free reference to an item, carrying the same identity as
@@ -64,18 +71,55 @@ pub struct ItemLoc {
     pub file: SourceFile,
     pub name: std::sync::Arc<str>,
     pub disambiguator: u32,
+    /// The member half of a member identity (see [`ItemId::member`]);
+    /// `None` for top-level items.
+    pub member: Option<(std::sync::Arc<str>, u32)>,
 }
 
 impl ItemLoc {
+    /// A top-level (non-member) location.
+    pub fn top_level(file: SourceFile, name: std::sync::Arc<str>, disambiguator: u32) -> ItemLoc {
+        ItemLoc {
+            file,
+            name,
+            disambiguator,
+            member: None,
+        }
+    }
+
+    /// One inherent member of `owner`, name-keyed. The only way to build a
+    /// member location: the owner half is copied wholesale, so a caller can
+    /// never pair one owner's file with another's name.
+    pub fn member(owner: &ItemLoc, name: &str, disambiguator: u32) -> ItemLoc {
+        ItemLoc {
+            file: owner.file,
+            name: owner.name.clone(),
+            disambiguator: owner.disambiguator,
+            member: Some((std::sync::Arc::from(name), disambiguator)),
+        }
+    }
+
     /// Always succeeds (interning): an `ItemLoc` held across an edit that
     /// deleted the item yields an id whose queries all answer the empty/
     /// error case — total, never a panic.
     pub fn to_id<'db>(&self, db: &'db dyn Db) -> ItemId<'db> {
-        ItemId::new(db, self.file, self.name.to_string(), self.disambiguator)
+        ItemId::new(
+            db,
+            self.file,
+            self.name.to_string(),
+            self.disambiguator,
+            self.member
+                .as_ref()
+                .map(|(name, dis)| (name.to_string(), *dis)),
+        )
     }
 
-    /// The name for messages; unnamed (broken) items render as `?`.
+    /// The name for messages — a member's own name for member locations;
+    /// unnamed (broken) items render as `?`.
     pub fn display_name(&self) -> &str {
+        if let Some((member, _)) = &self.member {
+            return member;
+        }
         if self.name.is_empty() {
             "?"
         } else {
@@ -89,7 +133,56 @@ pub fn item_loc(db: &dyn Db, item: ItemId<'_>) -> ItemLoc {
         file: item.file(db),
         name: std::sync::Arc::from(item.name(db).as_str()),
         disambiguator: item.disambiguator(db),
+        member: item
+            .member(db)
+            .map(|(name, dis)| (std::sync::Arc::from(name.as_str()), dis)),
     }
+}
+
+/// The owning type item of a member id (`None` for top-level items).
+pub fn member_owner<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<ItemId<'db>> {
+    item.member(db)?;
+    Some(ItemId::new(
+        db,
+        item.file(db),
+        item.name(db).clone(),
+        item.disambiguator(db),
+        None,
+    ))
+}
+
+/// The checkable unit owning `node`: the enclosing top-level item — or the
+/// enclosing MEMBER id when `node` sits inside an `impl Self` member of a
+/// type item's `with`-chain (member bodies are checkable units of their
+/// own). The IDE layer's one way from syntax to the id whose
+/// body/inference queries know about the node.
+pub fn checkable_item_at<'db>(
+    db: &'db dyn Db,
+    file: SourceFile,
+    node: &syntax::SyntaxNode,
+) -> Option<ItemId<'db>> {
+    let item_node = node.ancestors().find(|n| ast::Item::can_cast(n.kind()))?;
+    let root = parse(db, file).syntax_node();
+    let index = root
+        .children()
+        .filter(|n| ast::Item::can_cast(n.kind()))
+        .position(|n| n == item_node)?;
+    let item = *file_item_ids(db, file).get(index)?;
+    if let Some(member_node) = node.ancestors().find_map(ast::Member::cast)
+        && let Some(ast::Item::TypeItem(decl)) = item_source(db, item)
+        && let Some((name, dis, _)) = item_tree::semantic_member_sources(&decl)
+            .into_iter()
+            .find(|(_, _, m)| m.syntax() == member_node.syntax())
+    {
+        return Some(ItemId::new(
+            db,
+            file,
+            item.name(db).clone(),
+            item.disambiguator(db),
+            Some((name, dis)),
+        ));
+    }
+    Some(item)
 }
 
 /// The item's position in its file (= its index in [`item_tree`]). `None`
@@ -117,6 +210,27 @@ pub fn is_alloc_result_decl(db: &dyn Db, item: ItemId<'_>) -> bool {
 /// unchanged value backdates everything downstream.
 #[salsa::tracked(returns(ref))]
 pub fn item_data<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<item_tree::ItemData> {
+    // A MEMBER of a type item's `with`-chain: name-level facts synthesized
+    // from the range-free [`item_tree::type_members`] — its signature is
+    // its fn literal's annotations (like a generic item's scheme), and the
+    // OWNER's binder is its binder (the type's params flow into member
+    // signatures and bodies).
+    if let Some((member_name, member_dis)) = item.member(db) {
+        let owner = member_owner(db, item)?;
+        let data = item_tree::type_members(db, owner)
+            .iter()
+            .find(|m| m.name == member_name && m.disambiguator == member_dis)?;
+        let generics = item_data(db, owner)
+            .as_ref()
+            .map(|owner_data| owner_data.generics.clone())
+            .unwrap_or_default();
+        return Some(item_tree::ItemData {
+            name: data.name.clone(),
+            kind: item_tree::ItemKind::Member,
+            type_ref: data.type_ref.clone(),
+            generics,
+        });
+    }
     if is_alloc_result_decl(db, item) {
         return Some(item_tree::ItemData {
             name: ALLOC_RESULT_NAME.to_owned(),
@@ -134,6 +248,38 @@ pub fn item_data<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<item_tree::I
         .cloned()
 }
 
+/// The member ids of a type item's `with`-chain, in source order — the
+/// checkable-units extension of [`file_item_ids`] (members are inference/
+/// MIR/eval units of their own, keyed like items). Empty for non-type
+/// items.
+pub fn member_item_ids<'db>(db: &'db dyn Db, owner: ItemId<'db>) -> Vec<ItemId<'db>> {
+    item_tree::type_members(db, owner)
+        .iter()
+        .map(|m| {
+            ItemId::new(
+                db,
+                owner.file(db),
+                owner.name(db).clone(),
+                owner.disambiguator(db),
+                Some((m.name.clone(), m.disambiguator)),
+            )
+        })
+        .collect()
+}
+
+/// Every unit of `file` that checks like an item: the top-level items plus
+/// every type item's inherent members. The diagnostics aggregator (and
+/// anything else that wants "all bodies") iterates this; positional
+/// consumers (groups, indexes) keep using [`file_item_ids`].
+pub fn all_checkable_items<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemId<'db>> {
+    let mut items = Vec::new();
+    for &item in file_item_ids(db, file) {
+        items.push(item);
+        items.extend(member_item_ids(db, item));
+    }
+    items
+}
+
 #[salsa::tracked(returns(ref))]
 pub fn file_item_ids<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemId<'db>> {
     let tree = item_tree::item_tree(db, file);
@@ -142,7 +288,7 @@ pub fn file_item_ids<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemId<'db>>
         .iter()
         .map(|item| {
             let disambiguator = seen.entry(item.name.as_str()).or_insert(0);
-            let id = ItemId::new(db, file, item.name.clone(), *disambiguator);
+            let id = ItemId::new(db, file, item.name.clone(), *disambiguator, None);
             *disambiguator += 1;
             id
         })
@@ -242,6 +388,13 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             continue;
         };
         let name = name_ref.text();
+        // Inside a `with`-chain, only the one semantically supported context
+        // (an `impl Self` member of a plain group) is judged — everything else
+        // is parse-and-reserve territory whose single reservation
+        // diagnostic already tells the story.
+        if in_reserved_with_region(path_type.syntax()) {
+            continue;
+        }
         // A PathType sitting in a CONST-argument position of an enclosing
         // turbofish (`Buf::<N>`'s `N` parses as a type arg) is judged by
         // the owner's argument checks — inference for expression-position
@@ -331,6 +484,9 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             // No length at all: the parse error covers it.
             continue;
         };
+        if in_reserved_with_region(array_type.syntax()) {
+            continue;
+        }
         let binder = enclosing_binder_info(array_type.syntax());
         if let Some(message) = array_len_annotation_error(db, file, &len, &binder) {
             diagnostics.push(Diagnostic {
@@ -507,8 +663,12 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
     }
 
+    // Inherent members: definition-site rules that live on the range-free
+    // member facts, with only the range attached here.
+    member_definition_diagnostics(db, file, &mut diagnostics);
+
     let syntax_root = parse(db, file).syntax_node();
-    for &item in file_item_ids(db, file) {
+    for item in all_checkable_items(db, file) {
         let (body, source_map) = body_with_source_map(db, item);
         let resolutions = resolutions(db, item);
         for (expr, data) in body.exprs.iter() {
@@ -979,6 +1139,39 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 // The message names the nominal type only; where its shape
                 // is declared is the hint (an enum has variants, not
                 // fields — say so instead of promising fields).
+                // G13's opt-out, made discoverable: a module-level static
+                // of the wanted name exists — say how to call it.
+                InferenceDiagnostic::NoSuchMember { name, .. } => {
+                    match file_scope(db, file).resolve(name) {
+                        Some(Resolution::Item(loc)) => item_name(&loc)
+                            .map(|n| {
+                                vec![RelatedInfo {
+                                    file: loc.file,
+                                    range: n.syntax().text_range(),
+                                    message: format!(
+                                        "a module-level `{name}` is defined here — statics are \
+                                         never dot-callable; call `{name}(...)` instead"
+                                    ),
+                                }]
+                            })
+                            .unwrap_or_default(),
+                        _ => Vec::new(),
+                    }
+                }
+                // The member's definition (its last parameter) is what
+                // makes it not dot-callable — one click away.
+                InferenceDiagnostic::NotDotCallable { member, .. } => {
+                    item_tree::member_source(db, member.to_id(db))
+                        .and_then(|m| m.name())
+                        .map(|n| {
+                            vec![RelatedInfo {
+                                file: member.file,
+                                range: n.syntax().text_range(),
+                                message: format!("`{}` is defined here", member.display_name()),
+                            }]
+                        })
+                        .unwrap_or_default()
+                }
                 InferenceDiagnostic::NoSuchField {
                     receiver_ty: Ty::Named(named),
                     ..
@@ -1130,7 +1323,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     // say so loudly instead of leaving hover-only weirdness. Warnings
     // (unreachable arms) don't justify an `{error}`, so they don't disarm it.
     if !diagnostics.iter().any(|d| d.severity == Severity::Error) {
-        'items: for &item in file_item_ids(db, file) {
+        'items: for item in all_checkable_items(db, file) {
             let (_, source_map) = body_with_source_map(db, item);
             for (expr, ty) in infer::infer(db, item).type_of_expr.iter() {
                 if !ty.contains_error() {
@@ -1180,6 +1373,73 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 
     diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
     diagnostics
+}
+
+/// Definition-site rules for inherent members, reported at the member's
+/// own syntax: the fully-annotated rule (member signatures are always
+/// annotation-derived — dot-call resolution reads heads without
+/// inference) and duplicate member names. Fields and members are SEPARATE
+/// namespaces (G13): a member named like a field is legal — call syntax
+/// selects the member, bare access the field — so no collision rule
+/// lives here.
+fn member_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut Vec<Diagnostic>) {
+    for &owner in file_item_ids(db, file) {
+        let members = item_tree::type_members(db, owner);
+        if members.is_empty() {
+            continue;
+        }
+        let Some(ast::Item::TypeItem(decl)) = item_source(db, owner) else {
+            continue;
+        };
+        let sources = item_tree::semantic_member_sources(&decl);
+        let member_name_range = |name: &str, dis: u32| {
+            sources
+                .iter()
+                .find(|(n, d, _)| n == name && *d == dis)
+                .map(|(_, _, member)| {
+                    member
+                        .name()
+                        .map(|n| n.syntax().text_range())
+                        .unwrap_or_else(|| member.syntax().text_range())
+                })
+        };
+        for member in members {
+            let Some(range) = member_name_range(&member.name, member.disambiguator) else {
+                continue;
+            };
+            if member.type_ref.is_none() {
+                diagnostics.push(Diagnostic {
+                    range,
+                    severity: Severity::Error,
+                    message: format!(
+                        "member `{}` must spell its full signature: \
+                         every parameter and the return type",
+                        member.name
+                    ),
+                    fix: None,
+                    related: Vec::new(),
+                });
+            }
+            if member.disambiguator > 0 {
+                let related = member_name_range(&member.name, 0)
+                    .map(|first| {
+                        vec![RelatedInfo {
+                            file,
+                            range: first,
+                            message: "first defined here".to_owned(),
+                        }]
+                    })
+                    .unwrap_or_default();
+                diagnostics.push(Diagnostic {
+                    range,
+                    severity: Severity::Error,
+                    message: format!("duplicate member `{}`", member.name),
+                    fix: None,
+                    related,
+                });
+            }
+        }
+    }
 }
 
 /// The error for `name` in *type* position, if any. Mirrors the resolution
@@ -1239,6 +1499,27 @@ fn const_context_reason(
     })
 }
 
+/// Whether `node` sits inside a `with`-chain but OUTSIDE the one
+/// semantically supported context (an `impl Self` member of a plain
+/// group) — reserved territory the annotation mirror stays quiet about.
+fn in_reserved_with_region(node: &syntax::SyntaxNode) -> bool {
+    node.ancestors().any(|n| ast::WithGroup::can_cast(n.kind()))
+        && !syntax::in_inherent_member_context(node)
+}
+
+/// The generic binder scoping a MEMBER context: the OWNER type
+/// declaration's binder list (on its RHS `struct`/`enum` literal), found by
+/// climbing from a `with`-group to its `type` item. `None` outside member
+/// contexts.
+fn member_owner_binder_list(group: &ast::WithGroup) -> Option<ast::GenericParamList> {
+    let item = group.syntax().parent().and_then(ast::TypeItem::cast)?;
+    match item.body()? {
+        ast::Expr::RecordExpr(record) => record.generic_param_list(),
+        ast::Expr::EnumExpr(en) => en.generic_param_list(),
+        _ => None,
+    }
+}
+
 /// How `name`, at the position of `path_type`, relates to the enclosing
 /// generic binders — the syntactic mirror of the param scope inference
 /// lowers annotations under.
@@ -1262,7 +1543,9 @@ fn type_param_binding(path_type: &ast::PathType, name: &str) -> TypeParamBinding
             passed_a_binder_list = true;
         }
         // A binder can sit on a fn literal or (for type declarations) on a
-        // `struct`/`enum` literal — all three are climbed the same way.
+        // `struct`/`enum` literal — all three are climbed the same way. A
+        // MEMBER context (climbing reaches a `with`-group) is scoped by
+        // the OWNER's binder, plus `Self`.
         let list = if let Some(fn_literal) = ast::FnLiteral::cast(ancestor.clone()) {
             fn_literal.generic_param_list()
         } else if let Some(record) = ast::RecordExpr::cast(ancestor.clone()) {
@@ -1274,6 +1557,14 @@ fn type_param_binding(path_type: &ast::PathType, name: &str) -> TypeParamBinding
             }
         } else if let Some(en) = ast::EnumExpr::cast(ancestor.clone()) {
             match en.generic_param_list() {
+                Some(list) => Some(list),
+                None => continue,
+            }
+        } else if let Some(group) = ast::WithGroup::cast(ancestor.clone()) {
+            if name == "Self" {
+                return TypeParamBinding::Bound;
+            }
+            match member_owner_binder_list(&group) {
                 Some(list) => Some(list),
                 None => continue,
             }
@@ -1354,7 +1645,19 @@ impl BinderInfo {
 /// body/declaration).
 fn enclosing_binder_info(node: &syntax::SyntaxNode) -> BinderInfo {
     for ancestor in node.ancestors() {
-        let list = if let Some(fn_literal) = ast::FnLiteral::cast(ancestor.clone()) {
+        // A MEMBER context: the OWNER's binder scopes member signatures
+        // and bodies, and `Self` is a bound type name of its own.
+        let member_context = ast::WithGroup::cast(ancestor.clone());
+        let list = if let Some(group) = &member_context {
+            match member_owner_binder_list(group) {
+                Some(list) => Some(list),
+                None => {
+                    let mut info = BinderInfo::default();
+                    info.type_params.push("Self".to_owned());
+                    return info;
+                }
+            }
+        } else if let Some(fn_literal) = ast::FnLiteral::cast(ancestor.clone()) {
             fn_literal.generic_param_list()
         } else if let Some(record) = ast::RecordExpr::cast(ancestor.clone()) {
             record.generic_param_list()
@@ -1367,6 +1670,9 @@ fn enclosing_binder_info(node: &syntax::SyntaxNode) -> BinderInfo {
             continue;
         };
         let mut info = BinderInfo::default();
+        if member_context.is_some() {
+            info.type_params.push("Self".to_owned());
+        }
         for param in list.params() {
             match param {
                 ast::GenericParam::TypeParam(it) => {

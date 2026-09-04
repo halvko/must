@@ -79,6 +79,14 @@ pub enum ExprData {
     Call {
         callee: ExprId,
         args: Vec<ExprId>,
+        /// Whether the call was WRITTEN as a dot-call — the callee is
+        /// DIRECTLY a field-access expression (`recv.name(args)`), with no
+        /// parens in between. Syntax-directed member selection (G13)
+        /// keys off this: `recv.name(...)` resolves the member
+        /// first, while `(recv.name)(...)` is an ordinary value call of
+        /// the field (parens lower transparently, so this bit is the only
+        /// trace of them).
+        dot_call: bool,
     },
     Bin {
         op: Option<BinOp>,
@@ -424,10 +432,19 @@ pub fn body_with_source_map<'db>(db: &'db dyn Db, item: ItemId<'db>) -> (Body, B
     let mut ctx = LowerCtx::default();
     // A `type` item's RHS is a *type declaration*, not a value: it is read
     // syntactically by `type_decl` and never lowered, inferred, const-checked
-    // or evaluated — so its body here is empty (`root: None`).
-    let root = match item_source(db, item) {
-        Some(syntax::ast::Item::StaticItem(it)) => it.body().map(|expr| ctx.lower_expr(expr)),
-        Some(syntax::ast::Item::TypeItem(_)) | None => None,
+    // or evaluated — so its body here is empty (`root: None`). A MEMBER id's
+    // body is its defining fn literal (the BODY side of the name-keyed
+    // signature/body split: editing it dirties only this member's own
+    // checks).
+    let root = if item.member(db).is_some() {
+        crate::item_tree::member_source(db, item)
+            .and_then(|member| member.value())
+            .map(|expr| ctx.lower_expr(expr))
+    } else {
+        match item_source(db, item) {
+            Some(syntax::ast::Item::StaticItem(it)) => it.body().map(|expr| ctx.lower_expr(expr)),
+            Some(syntax::ast::Item::TypeItem(_)) | None => None,
+        }
     };
     (
         Body {
@@ -553,12 +570,20 @@ impl LowerCtx {
                 self.alloc_expr(ExprData::NameRef(name_ref.text()), it.syntax())
             }
             ast::Expr::CallExpr(it) => {
+                let dot_call = matches!(it.callee(), Some(ast::Expr::FieldExpr(_)));
                 let callee = self.lower_opt_expr(it.callee());
                 let args = it
                     .arg_list()
                     .map(|args| args.args().map(|a| self.lower_expr(a)).collect())
                     .unwrap_or_default();
-                self.alloc_expr(ExprData::Call { callee, args }, it.syntax())
+                self.alloc_expr(
+                    ExprData::Call {
+                        callee,
+                        args,
+                        dot_call,
+                    },
+                    it.syntax(),
+                )
             }
             ast::Expr::BinExpr(it) => {
                 let lhs = self.lower_opt_expr(it.lhs());

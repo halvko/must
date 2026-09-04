@@ -70,6 +70,12 @@ pub enum ItemKind {
     /// runtime location (not `static`) and are not copied values (`const`
     /// is reserved for future type *aliases*).
     Type,
+    /// An inherent member of a type's `with`-chain. Not a `Value`: a member
+    /// carries no item-level `static`/`const` keyword to report (a member's
+    /// own `const fn` marker lives on its fn literal), and it is never a
+    /// file-scope name, so saying `Value(Static)` here would answer a
+    /// question the spelling never asked.
+    Member,
 }
 
 impl ItemKind {
@@ -77,7 +83,7 @@ impl ItemKind {
     pub fn constness(self) -> Option<Constness> {
         match self {
             ItemKind::Value(constness) => Some(constness),
-            ItemKind::Type => None,
+            ItemKind::Type | ItemKind::Member => None,
         }
     }
 }
@@ -585,7 +591,13 @@ fn type_ref_from_fn_literal(body: Option<ast::Expr>) -> Option<TypeRef> {
 /// The syntax node for `item`, looked up by (name, disambiguator). Range
 /// information enters here and only here; callers that want to stay in the
 /// firewall must not feed this back into range-free queries.
+///
+/// `None` for MEMBER ids — a member is not an [`ast::Item`]; its syntax is
+/// [`member_source`]'s business.
 pub fn item_source(db: &dyn Db, item: crate::ItemId<'_>) -> Option<ast::Item> {
+    if item.member(db).is_some() {
+        return None;
+    }
     let file = item.file(db);
     let tree = parse(db, file).tree();
     let name = item.name(db);
@@ -600,4 +612,98 @@ pub fn item_source(db: &dyn Db, item: crate::ItemId<'_>) -> Option<ast::Item> {
         }
     }
     None
+}
+
+// ---- inherent members ---------------------------------------------------
+
+/// One semantically-supported member of a type item's `with`-chain
+/// (`impl Self { name = fn(...) ... }`), range-free. Identity is
+/// `(name, disambiguator)` — NAME-KEYED, never positional: inserting a
+/// sibling member doesn't change any other member's identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MemberData {
+    pub name: String,
+    /// Which occurrence of `name` among the type's members (0-based) —
+    /// duplicates are diagnosed, the first wins lookups.
+    pub disambiguator: u32,
+    /// The member's signature, synthesized from its defining fn literal's
+    /// own annotations exactly like a generic item's scheme
+    /// ([`type_ref_from_fn_literal`]); `None` when the member isn't fully
+    /// annotated (the definition site carries the diagnostic — member
+    /// signatures are always annotation-derived, so dot-call resolution
+    /// never needs inference to read a head).
+    pub type_ref: Option<TypeRef>,
+}
+
+/// The SIGNATURE side of the member query split: range-free member
+/// facts, one query per owning type item — a member BODY edit leaves this
+/// value unchanged, so sibling signatures (and every dot-call resolution)
+/// backdate behind it. Empty for non-type items.
+#[salsa::tracked(returns(ref))]
+pub fn type_members<'db>(db: &'db dyn Db, item: crate::ItemId<'db>) -> Vec<MemberData> {
+    let Some(ast::Item::TypeItem(decl)) = item_source(db, item) else {
+        return Vec::new();
+    };
+    semantic_member_sources(&decl)
+        .into_iter()
+        .map(|(name, disambiguator, member)| MemberData {
+            name,
+            disambiguator,
+            type_ref: type_ref_from_fn_literal(member.value()),
+        })
+        .collect()
+}
+
+/// Every member the current semantics MINTS an item for, in source order,
+/// each with its name-keyed disambiguator: the `=`-defined `fn`-literal
+/// members of `impl Self { ... }` elements sitting DIRECTLY in plain
+/// `with { ... }` groups (no binders, no clauses, no `unsafe`/`for` heads
+/// — everything else is parse-and-reserve and mints nothing).
+///
+/// The ONE enumeration both [`type_members`] and [`member_source`] go
+/// through, so identity always agrees between the range-free and the
+/// syntax side.
+pub fn semantic_member_sources(decl: &ast::TypeItem) -> Vec<(String, u32, ast::Member)> {
+    let mut seen: rustc_hash::FxHashMap<String, u32> = rustc_hash::FxHashMap::default();
+    let mut out = Vec::new();
+    for group in decl.with_groups() {
+        for impl_element in group.elements() {
+            if !impl_element.is_self_head() {
+                continue;
+            }
+            for member in impl_element.members() {
+                // Colon-declares and non-fn values mint nothing — they are
+                // rejected at the definition site (validation), and a
+                // minted item for them would have nothing to check.
+                if !matches!(member.value(), Some(ast::Expr::FnLiteral(_))) {
+                    continue;
+                }
+                let Some(name) = member.name() else {
+                    continue;
+                };
+                let name = name.text();
+                if name.is_empty() {
+                    continue;
+                }
+                let disambiguator = seen.entry(name.clone()).or_insert(0);
+                out.push((name.clone(), *disambiguator, member));
+                *disambiguator += 1;
+            }
+        }
+    }
+    out
+}
+
+/// The syntax node of a MEMBER id — the member-side sibling of
+/// [`item_source`]. `None` for top-level ids and vanished members.
+pub fn member_source(db: &dyn Db, item: crate::ItemId<'_>) -> Option<ast::Member> {
+    let (member_name, member_dis) = item.member(db)?;
+    let owner = crate::member_owner(db, item)?;
+    let ast::Item::TypeItem(decl) = item_source(db, owner)? else {
+        return None;
+    };
+    semantic_member_sources(&decl)
+        .into_iter()
+        .find(|(name, dis, _)| *name == member_name && *dis == member_dis)
+        .map(|(_, _, member)| member)
 }

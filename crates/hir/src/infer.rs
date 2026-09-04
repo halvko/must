@@ -27,7 +27,7 @@ use crate::scopes::{Builtin, Resolution, resolutions, type_scope};
 use crate::ty::{
     ConstArgValue, GenericArg, IntKind, IntValue, NamedTy, ParamScope, Ty, TyVar, TyVarValue,
     VariantTy, builtin_type_by_name, enum_variants, generic_param_scope, lower_type_ref_in,
-    signature, signature_needs_annotation, substitute_args, type_underlying_for,
+    member_self_ty, signature, signature_needs_annotation, substitute_args, type_underlying_for,
 };
 use crate::{ItemId, ItemLoc, Severity, TypeRef, item_loc};
 
@@ -85,6 +85,14 @@ pub struct InferenceResult {
     /// only *type-checks* the values against their declared const-param
     /// types; evaluation and instance identity consume this later.
     pub const_args_of_expr: ArenaMap<ExprId, Vec<(u32, ExprId)>>,
+    /// Every dot-call (`recv.name(a, b)`) that resolved STRUCTURALLY to an
+    /// inherent member (TR01: `name` is a member fn of recv's type whose
+    /// LAST parameter is Self-typed), keyed by the CALL expression and
+    /// mapping to the member's location. MIR lowers these as ordinary
+    /// direct calls of the member with the receiver appended as the LAST
+    /// argument (so the written arguments evaluate BEFORE the receiver
+    /// binds).
+    pub member_of_expr: ArenaMap<ExprId, ItemLoc>,
     pub diagnostics: Vec<InferenceDiagnostic>,
 }
 
@@ -676,6 +684,53 @@ pub enum InferenceDiagnostic {
         /// The pointer's type.
         ty: Ty,
     },
+    /// A dot-call `recv.name(...)` where `name` is neither a field nor a
+    /// member of the receiver's type. Module-level statics are NEVER
+    /// dot-callable (G13's deliberate opt-out) — the diagnostics
+    /// aggregator adds the "call `name(...)` instead" hint when one
+    /// exists.
+    NoSuchMember {
+        /// The call expression (where MIR traps).
+        expr: ExprId,
+        name: String,
+        receiver_ty: Ty,
+    },
+    /// A dot-call of a member whose LAST parameter is not Self-typed —
+    /// TR01 makes dot-callability structural, and this member doesn't have
+    /// the shape.
+    NotDotCallable {
+        /// The call expression (where MIR traps).
+        expr: ExprId,
+        name: String,
+        /// The member (its definition is the related location).
+        member: ItemLoc,
+    },
+    /// A member fn reached through a bare dot (`v.len` without a call):
+    /// members are not field values.
+    MemberNotCalled {
+        /// The field-access expression.
+        expr: ExprId,
+        name: String,
+    },
+    /// `Type::member` — a qualified reference to an inherent member.
+    /// Parse-and-reserve: dot-call is the supported spelling.
+    QualifiedMemberReserved {
+        /// The path expression.
+        expr: ExprId,
+        name: String,
+    },
+    /// `recv.name(...)` where `name` is a plain (non-fn) FIELD and no
+    /// member exists: under the syntax-directed namespace rule the field
+    /// carries the call as a value, and this one is no fn.
+    FieldNotCallable {
+        /// The call expression (where MIR traps).
+        expr: ExprId,
+        name: String,
+        /// The field's (non-callable) type.
+        ty: Ty,
+        /// The receiver's type, for the no-such-member half of the story.
+        receiver_ty: Ty,
+    },
 }
 
 /// Why an arm can never run — one message per cause, so the fix is named.
@@ -730,6 +785,11 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::EmptyArrayNeedsAnnotation { expr }
             | InferenceDiagnostic::ArrayConstArg { expr }
             | InferenceDiagnostic::BuiltinNotFirstClass { expr, .. }
+            | InferenceDiagnostic::NoSuchMember { expr, .. }
+            | InferenceDiagnostic::NotDotCallable { expr, .. }
+            | InferenceDiagnostic::MemberNotCalled { expr, .. }
+            | InferenceDiagnostic::QualifiedMemberReserved { expr, .. }
+            | InferenceDiagnostic::FieldNotCallable { expr, .. }
             | InferenceDiagnostic::AddrOfNonPlace { expr } => *expr,
             InferenceDiagnostic::BuiltinExpectsRawPtr { arg, .. } => *arg,
             InferenceDiagnostic::AddrOfMutImmutable { root, .. }
@@ -837,6 +897,31 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::NotCallable { ty, .. } => {
                 format!("expression of type `{}` is not callable", ty.display())
             }
+            InferenceDiagnostic::NoSuchMember {
+                name, receiver_ty, ..
+            } => format!("no field or member `{name}` on `{}`", receiver_ty.display()),
+            InferenceDiagnostic::NotDotCallable { name, .. } => format!(
+                "`{name}` is not dot-callable: its last parameter is not `Self`-typed \
+                 (dot-call resolution is structural)"
+            ),
+            InferenceDiagnostic::MemberNotCalled { name, .. } => {
+                format!("`{name}` is a member fn, not a field; call it: `.{name}(...)`")
+            }
+            InferenceDiagnostic::QualifiedMemberReserved { name, .. } => format!(
+                "qualified member references are not supported yet; \
+                 call `{name}` through its receiver: `value.{name}(...)`"
+            ),
+            InferenceDiagnostic::FieldNotCallable {
+                name,
+                ty,
+                receiver_ty,
+                ..
+            } => format!(
+                "field `{name}` is not callable (its type is `{}`), and `{}` has no \
+                 member `{name}`",
+                ty.display(),
+                receiver_ty.display()
+            ),
             InferenceDiagnostic::ArgCountMismatch {
                 expected, found, ..
             } => format!("expected {expected} argument(s), found {found}"),
@@ -1180,7 +1265,9 @@ pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
         .as_ref()
         .map(|it| it.generics.as_slice())
         .unwrap_or(&[]);
-    let type_params = if generics.is_empty() {
+    // Members always take the scope (even with an empty binder, `Self` is
+    // in scope in every type position of the member's body).
+    let type_params = if generics.is_empty() && item.member(db).is_none() {
         ParamScope::default()
     } else {
         generic_param_scope(db, item, generics)
@@ -1511,7 +1598,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 InferenceDiagnostic::RecordLitExtraField { expected, .. } => {
                     *expected = resolve_finished(self.table, expected);
                 }
-                InferenceDiagnostic::NoSuchField { receiver_ty, .. } => {
+                InferenceDiagnostic::NoSuchField { receiver_ty, .. }
+                | InferenceDiagnostic::NoSuchMember { receiver_ty, .. } => {
+                    *receiver_ty = resolve_finished(self.table, receiver_ty);
+                }
+                InferenceDiagnostic::FieldNotCallable {
+                    ty, receiver_ty, ..
+                } => {
+                    *ty = resolve_finished(self.table, ty);
                     *receiver_ty = resolve_finished(self.table, receiver_ty);
                 }
                 InferenceDiagnostic::MatchWithoutCatchAll { scrutinee, .. }
@@ -1587,7 +1681,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::ArrayConstArg { .. }
                 | InferenceDiagnostic::CannotInferNumberType { .. }
                 | InferenceDiagnostic::IntLiteralOutOfRange { .. }
-                | InferenceDiagnostic::BuiltinNotFirstClass { .. } => {}
+                | InferenceDiagnostic::BuiltinNotFirstClass { .. }
+                | InferenceDiagnostic::NotDotCallable { .. }
+                | InferenceDiagnostic::MemberNotCalled { .. }
+                | InferenceDiagnostic::QualifiedMemberReserved { .. } => {}
             }
         }
         for (_, ty) in result.type_of_pat.iter_mut() {
@@ -1753,7 +1850,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 args,
             } => self.infer_variant_path(expr, *base, variant, args.as_deref()),
             ExprData::GenericApp { base, args } => self.infer_generic_app(expr, *base, args),
-            ExprData::Call { callee, args } => {
+            ExprData::Call {
+                callee,
+                args,
+                dot_call,
+            } => {
                 // A construction call: the type name used as a plain
                 // constructor function taking the underlying record —
                 // `Foo(struct { x = 1 })`, or `Pair::<usize>(...)` with the
@@ -1800,93 +1901,23 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         ty
                     };
                 }
+                // TR01 dot-call: `recv.name(a, b)` — but only the WRITTEN
+                // dot-call shape; `(recv.name)(...)` is an ordinary value
+                // call of the field (the parens are the field-selection
+                // spelling). Resolution is STRUCTURAL and syntax-directed
+                // (G13): under call syntax the MEMBER resolves
+                // first — a dot-callable member shadows a same-named field
+                // — then the field; the call desugars to the member with
+                // recv as the LAST argument (arguments evaluate BEFORE the
+                // receiver binds).
+                if *dot_call && let ExprData::Field { receiver, name } = &self.body.exprs[*callee] {
+                    let (callee, receiver, name) = (*callee, *receiver, name.clone());
+                    return self
+                        .infer_dot_call(expr, callee, receiver, &name, args, expected, cause);
+                }
                 let fresh = self.fresh_var();
                 let callee_ty = self.infer_expr(*callee, &fresh);
-                match self.resolve_shallow(&callee_ty) {
-                    // The callee's type is still being inferred (an
-                    // in-group signature, e.g. mutual recursion): calling
-                    // it commits it to a function of this shape. A
-                    // NUMBER-CLASS callee refuses the commitment — a
-                    // number is not callable.
-                    Ty::Infer(var) => {
-                        let params: Vec<Ty> = args.iter().map(|_| self.fresh_var()).collect();
-                        let ret = self.fresh_var();
-                        if self.unify(&Ty::Infer(var), &Ty::fn_type(params.clone(), ret.clone())) {
-                            for (i, &arg) in args.iter().enumerate() {
-                                self.infer_expr(arg, &params[i]);
-                            }
-                            ret
-                        } else {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::NotCallable {
-                                    expr: *callee,
-                                    ty: Ty::UnresolvedNumber,
-                                });
-                            // The commitment contradicts what the callee's
-                            // signature is already committed to: poison it
-                            // so the member reports via the needs-annotation
-                            // path instead of publishing a guess.
-                            self.table.union_value(var, TyVarValue::Known(Ty::Error));
-                            self.infer_args_broken(args);
-                            Ty::Error
-                        }
-                    }
-                    Ty::Fn(f) => {
-                        if f.params.len() != args.len() {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::ArgCountMismatch {
-                                    expr,
-                                    expected: f.params.len(),
-                                    found: args.len(),
-                                });
-                        }
-                        for (i, &arg) in args.iter().enumerate() {
-                            // The parameter type is an axiom: the cause is
-                            // recorded when it binds a variable (blaming a
-                            // branch through this call) and cited on direct
-                            // mismatches (where the renderer drops it as
-                            // self-evident: the call encloses the argument).
-                            let param = f.params.get(i).cloned().unwrap_or(Ty::Error);
-                            self.infer_expr_with(
-                                arg,
-                                &param,
-                                Some(Cause::CallSite { call: expr, arg }),
-                            );
-                        }
-                        f.ret.clone()
-                    }
-                    Ty::Error => {
-                        self.infer_args_broken(args);
-                        Ty::Error
-                    }
-                    // Evaluating the callee already diverges, so the call
-                    // diverges; `{error}` here would be an error type with
-                    // no diagnostic to explain it.
-                    Ty::Never => {
-                        for &arg in args {
-                            let arg_fresh = self.fresh_var();
-                            // TODO: If we cannot infer the type of something, but we can see it's
-                            // unreachable, it would be ok for it to be a warning rather than an
-                            // error (the no-defining-use error on an
-                            // unreachable literal argument stays one for the
-                            // same reason).
-                            self.infer_expr(arg, &arg_fresh);
-                        }
-                        Ty::Never
-                    }
-                    other => {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::NotCallable {
-                                expr: *callee,
-                                ty: other,
-                            });
-                        self.infer_args_broken(args);
-                        Ty::Error
-                    }
-                }
+                self.call_of_value(expr, *callee, args, callee_ty)
             }
             ExprData::Bin { op, lhs, rhs } => {
                 use crate::body::BinOp::*;
@@ -2331,94 +2362,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 Ty::record(field_tys)
             }
             ExprData::Field { receiver, name } => {
+                let receiver = *receiver;
+                let name = name.clone();
                 let fresh = self.fresh_var();
-                let receiver_ty = self.infer_expr(*receiver, &fresh);
+                let receiver_ty = self.infer_expr(receiver, &fresh);
                 if name.is_empty() {
                     // `a.` — the parse error covers it.
                     Ty::Error
                 } else {
-                    match self.resolve_shallow(&receiver_ty) {
-                        Ty::Record(rec) => match rec.field_ty(name) {
-                            Some(field_ty) => field_ty.clone(),
-                            None => {
-                                self.result
-                                    .diagnostics
-                                    .push(InferenceDiagnostic::NoSuchField {
-                                        expr,
-                                        name: name.clone(),
-                                        receiver_ty: Ty::Record(rec),
-                                    });
-                                Ty::Error
-                            }
-                        },
-                        // A named type projects through to its declared
-                        // shape — with the mention's generic args
-                        // substituted in: `p.a` on a `Pair::<usize>` is a
-                        // `usize`.
-                        Ty::Named(named) => {
-                            match type_underlying_for(self.db, &named) {
-                                Some(Ty::Record(rec)) => match rec.field_ty(name) {
-                                    Some(field_ty) => field_ty.clone(),
-                                    None => {
-                                        self.result.diagnostics.push(
-                                            InferenceDiagnostic::NoSuchField {
-                                                expr,
-                                                name: name.clone(),
-                                                receiver_ty: Ty::Named(named),
-                                            },
-                                        );
-                                        Ty::Error
-                                    }
-                                },
-                                _ => {
-                                    // An enum value has no fields at all
-                                    // (v1 payloads are positional and only
-                                    // reachable through `match`, later); a
-                                    // broken declaration's own diagnostic
-                                    // sits at the declaration site — stay
-                                    // silent for it.
-                                    if enum_variants(self.db, named.decl.to_id(self.db)).is_some() {
-                                        self.result.diagnostics.push(
-                                            InferenceDiagnostic::NoSuchField {
-                                                expr,
-                                                name: name.clone(),
-                                                receiver_ty: Ty::Named(named),
-                                            },
-                                        );
-                                    }
-                                    Ty::Error
-                                }
-                            }
-                        }
-                        // Evaluating the receiver already diverges (same
-                        // reasoning as a diverging callee).
-                        Ty::Never => Ty::Never,
-                        // Structural equality can't run backwards from a
-                        // field name, so an undetermined receiver stays
-                        // undetermined: ask for the annotation.
-                        Ty::Infer(_) => {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::FieldOnUnknownType {
-                                    expr,
-                                    receiver: *receiver,
-                                });
-                            Ty::Error
-                        }
-                        // Errors are infectious and silent — a broken
-                        // receiver must not cascade into field diagnostics.
-                        broken if broken.contains_error() => Ty::Error,
-                        other => {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::NoSuchField {
-                                    expr,
-                                    name: name.clone(),
-                                    receiver_ty: other,
-                                });
-                            Ty::Error
-                        }
-                    }
+                    let resolved = self.resolve_shallow(&receiver_ty);
+                    self.field_access_ty(expr, receiver, &name, resolved)
                 }
             }
             ExprData::ArrayLit { elements } => {
@@ -2816,6 +2769,499 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         ty
     }
 
+    /// The type of `receiver.name` given the receiver's SHALLOW-RESOLVED
+    /// type — the Field arm's judgement, factored out so the dot-call
+    /// path in the `Call` arm (which must decide field-vs-member before
+    /// choosing a callee) shares it verbatim.
+    fn field_access_ty(&mut self, expr: ExprId, receiver: ExprId, name: &str, resolved: Ty) -> Ty {
+        match resolved {
+            Ty::Record(rec) => match rec.field_ty(name) {
+                Some(field_ty) => field_ty.clone(),
+                None => {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::NoSuchField {
+                            expr,
+                            name: name.to_owned(),
+                            receiver_ty: Ty::Record(rec),
+                        });
+                    Ty::Error
+                }
+            },
+            // A named type projects through to its declared
+            // shape — with the mention's generic args
+            // substituted in: `p.a` on a `Pair::<usize>` is a
+            // `usize`.
+            Ty::Named(named) => {
+                match type_underlying_for(self.db, &named) {
+                    Some(Ty::Record(rec)) => match rec.field_ty(name) {
+                        Some(field_ty) => field_ty.clone(),
+                        None => {
+                            // A member fn is not a field value — a bare
+                            // dot reaching one gets the call-it hint
+                            // instead of "no such field".
+                            if self.member_of(&named.decl, name).is_some() {
+                                self.result.diagnostics.push(
+                                    InferenceDiagnostic::MemberNotCalled {
+                                        expr,
+                                        name: name.to_owned(),
+                                    },
+                                );
+                            } else {
+                                self.result
+                                    .diagnostics
+                                    .push(InferenceDiagnostic::NoSuchField {
+                                        expr,
+                                        name: name.to_owned(),
+                                        receiver_ty: Ty::Named(named),
+                                    });
+                            }
+                            Ty::Error
+                        }
+                    },
+                    _ => {
+                        // An enum value has no fields at all (v1 payloads
+                        // are positional and only reachable through
+                        // `match`) — but it can have members. A BROKEN
+                        // declaration is neither a record nor an enum, and
+                        // its own diagnostic sits at the declaration site:
+                        // stay silent, members included. A `with`-chain
+                        // parses independently of a broken RHS, so without
+                        // this guard a *call* on such a type falls through
+                        // to here and is told to call what it just called.
+                        if enum_variants(self.db, named.decl.to_id(self.db)).is_some() {
+                            if self.member_of(&named.decl, name).is_some() {
+                                self.result.diagnostics.push(
+                                    InferenceDiagnostic::MemberNotCalled {
+                                        expr,
+                                        name: name.to_owned(),
+                                    },
+                                );
+                            } else {
+                                self.result
+                                    .diagnostics
+                                    .push(InferenceDiagnostic::NoSuchField {
+                                        expr,
+                                        name: name.to_owned(),
+                                        receiver_ty: Ty::Named(named),
+                                    });
+                            }
+                        }
+                        Ty::Error
+                    }
+                }
+            }
+            // Evaluating the receiver already diverges (same
+            // reasoning as a diverging callee).
+            Ty::Never => Ty::Never,
+            // Structural equality can't run backwards from a
+            // field name, so an undetermined receiver stays
+            // undetermined: ask for the annotation.
+            Ty::Infer(_) => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::FieldOnUnknownType { expr, receiver });
+                Ty::Error
+            }
+            // Errors are infectious and silent — a broken
+            // receiver must not cascade into field diagnostics.
+            broken if broken.contains_error() => Ty::Error,
+            other => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::NoSuchField {
+                        expr,
+                        name: name.to_owned(),
+                        receiver_ty: other,
+                    });
+                Ty::Error
+            }
+        }
+    }
+
+    /// The member of `decl`'s `with`-chain named `name`, as a member
+    /// [`ItemLoc`] — first occurrence wins (duplicates carry their own
+    /// diagnostic at the definition).
+    fn member_of(&self, decl: &ItemLoc, name: &str) -> Option<ItemLoc> {
+        if decl.member.is_some() {
+            return None;
+        }
+        crate::item_tree::type_members(self.db, decl.to_id(self.db))
+            .iter()
+            .find(|m| m.name == name)
+            .map(|m| ItemLoc {
+                file: decl.file,
+                name: decl.name.clone(),
+                disambiguator: decl.disambiguator,
+                member: Some((std::sync::Arc::from(m.name.as_str()), m.disambiguator)),
+            })
+    }
+
+    /// Complete a call whose callee is an ordinary VALUE of type
+    /// `callee_ty` — the `Call` arm's judgement, factored out so the
+    /// dot-call path's field fallback shares it. Returns the call's type
+    /// (pre-`check`, like any match-arm value).
+    fn call_of_value(
+        &mut self,
+        expr: ExprId,
+        callee: ExprId,
+        args: &[ExprId],
+        callee_ty: Ty,
+    ) -> Ty {
+        match self.resolve_shallow(&callee_ty) {
+            // The callee's type is still being inferred (an
+            // in-group signature, e.g. mutual recursion): calling
+            // it commits it to a function of this shape. A
+            // NUMBER-CLASS callee refuses the commitment — a
+            // number is not callable.
+            Ty::Infer(var) => {
+                let params: Vec<Ty> = args.iter().map(|_| self.fresh_var()).collect();
+                let ret = self.fresh_var();
+                if self.unify(&Ty::Infer(var), &Ty::fn_type(params.clone(), ret.clone())) {
+                    for (i, &arg) in args.iter().enumerate() {
+                        self.infer_expr(arg, &params[i]);
+                    }
+                    ret
+                } else {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::NotCallable {
+                            expr: callee,
+                            ty: Ty::UnresolvedNumber,
+                        });
+                    // The commitment contradicts what the callee's
+                    // signature is already committed to: poison it
+                    // so the member reports via the needs-annotation
+                    // path instead of publishing a guess.
+                    self.table.union_value(var, TyVarValue::Known(Ty::Error));
+                    self.infer_args_broken(args);
+                    Ty::Error
+                }
+            }
+            Ty::Fn(f) => {
+                if f.params.len() != args.len() {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::ArgCountMismatch {
+                            expr,
+                            expected: f.params.len(),
+                            found: args.len(),
+                        });
+                }
+                for (i, &arg) in args.iter().enumerate() {
+                    // The parameter type is an axiom: the cause is
+                    // recorded when it binds a variable (blaming a
+                    // branch through this call) and cited on direct
+                    // mismatches (where the renderer drops it as
+                    // self-evident: the call encloses the argument).
+                    let param = f.params.get(i).cloned().unwrap_or(Ty::Error);
+                    self.infer_expr_with(arg, &param, Some(Cause::CallSite { call: expr, arg }));
+                }
+                f.ret.clone()
+            }
+            Ty::Error => {
+                self.infer_args_broken(args);
+                Ty::Error
+            }
+            // Evaluating the callee already diverges, so the call
+            // diverges; `{error}` here would be an error type with
+            // no diagnostic to explain it.
+            Ty::Never => {
+                for &arg in args {
+                    let arg_fresh = self.fresh_var();
+                    // TODO: If we cannot infer the type of something, but we can see it's
+                    // unreachable, it would be ok for it to be a warning rather than an
+                    // error (the no-defining-use error on an
+                    // unreachable literal argument stays one for the
+                    // same reason).
+                    self.infer_expr(arg, &arg_fresh);
+                }
+                Ty::Never
+            }
+            other => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::NotCallable {
+                        expr: callee,
+                        ty: other,
+                    });
+                self.infer_args_broken(args);
+                Ty::Error
+            }
+        }
+    }
+
+    /// A dot-call `recv.name(a, b)` (TR01's structural dot-call, with
+    /// G13's SYNTAX-DIRECTED namespace rule): under call syntax the
+    /// MEMBER resolves first — `name` as a member fn of recv's type
+    /// whose LAST parameter is Self-typed shadows a same-named field —
+    /// then the field carries the call as an ordinary value, then
+    /// `NoSuchMember`.
+    /// (Bare `recv.name` selects the FIELD; `(recv.name)(...)` is a value
+    /// call of the field — neither reaches this function.) The member
+    /// call desugars to the member with recv as the LAST argument.
+    /// Module-level statics never resolve here (G13's deliberate opt-out);
+    /// NO auto-deref, NO auto-ref.
+    #[allow(clippy::too_many_arguments)]
+    fn infer_dot_call(
+        &mut self,
+        expr: ExprId,
+        callee: ExprId,
+        receiver: ExprId,
+        name: &str,
+        args: &[ExprId],
+        expected: &Ty,
+        cause: Option<Cause>,
+    ) -> Ty {
+        // The callee (the field-access expression) is visited by hand, so
+        // record its expectation and (below) its type like any visited
+        // expression.
+        let callee_expectation = self.fresh_var();
+        self.result
+            .expectation_of_expr
+            .insert(callee, callee_expectation.clone());
+        let receiver_fresh = self.fresh_var();
+        let receiver_ty = self.infer_expr(receiver, &receiver_fresh);
+        let resolved = self.resolve_shallow(&receiver_ty);
+
+        // A named receiver (a variant-typed one reaches its ENUM's
+        // members: the receiver widens — variant → enum, the sanctioned
+        // conversion — into the Self argument, exactly as it would into
+        // any enum-typed parameter).
+        let named_recv = match &resolved {
+            Ty::Named(named) if !name.is_empty() => Some(named.clone()),
+            Ty::Variant(variant) if !name.is_empty() => Some(NamedTy {
+                decl: variant.decl.clone(),
+                args: variant.args.clone(),
+            }),
+            _ => None,
+        };
+        // Whether the receiver's type declares `name` as a FIELD — the
+        // call-syntax fallback, and (when the member wins) the shadowed
+        // half of the shared dot.
+        let mut named_has_field = false;
+
+        if let Some(named) = &named_recv {
+            let underlying = type_underlying_for(self.db, named);
+            named_has_field = matches!(
+                &underlying,
+                Some(Ty::Record(rec)) if rec.field_ty(name).is_some()
+            );
+            // A BROKEN declaration (neither a struct shape nor an enum):
+            // its own diagnostic sits at the declaration site — fall
+            // through to the field path, whose broken arm stays silent
+            // (errors are infectious and silent).
+            let decl_broken =
+                underlying.is_none() && enum_variants(self.db, named.decl.to_id(self.db)).is_none();
+            if !decl_broken {
+                match self.member_of(&named.decl, name) {
+                    Some(member_loc) => {
+                        let member_id = member_loc.to_id(self.db);
+                        let sig = signature(self.db, member_id);
+                        if sig.contains_error() {
+                            // A broken member definition (not fully
+                            // annotated): the definition site carries the
+                            // diagnostic.
+                            self.result.type_of_expr.insert(callee, Ty::Error);
+                            self.infer_args_broken(args);
+                            return self.finish_dot_call(expr, Ty::Error, expected, cause);
+                        }
+                        if crate::ty::member_is_dot_callable(self.db, member_id) {
+                            let ret = self.infer_member_call(
+                                expr,
+                                callee,
+                                receiver,
+                                &receiver_ty,
+                                named,
+                                member_loc,
+                                sig,
+                                &callee_expectation,
+                                args,
+                            );
+                            return self.finish_dot_call(expr, ret, expected, cause);
+                        }
+                        // A member without the dot-callable shape: only a
+                        // same-named field can still carry the call.
+                        if !named_has_field {
+                            self.result
+                                .diagnostics
+                                .push(InferenceDiagnostic::NotDotCallable {
+                                    expr,
+                                    name: name.to_owned(),
+                                    member: member_loc,
+                                });
+                            self.result.type_of_expr.insert(callee, Ty::Error);
+                            self.infer_args_broken(args);
+                            return self.finish_dot_call(expr, Ty::Error, expected, cause);
+                        }
+                    }
+                    // No member AND no field: the receiver's type just
+                    // doesn't have `name` — with statics deliberately
+                    // opted out, this is its own diagnostic (the
+                    // aggregator adds the "call `name(...)` instead" hint
+                    // when a module-level static exists).
+                    None if !named_has_field => {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::NoSuchMember {
+                                expr,
+                                name: name.to_owned(),
+                                receiver_ty: Ty::Named(named.clone()),
+                            });
+                        self.result.type_of_expr.insert(callee, Ty::Error);
+                        self.infer_args_broken(args);
+                        return self.finish_dot_call(expr, Ty::Error, expected, cause);
+                    }
+                    None => {}
+                }
+            }
+        }
+
+        // The field path: the callee is an ordinary field access, judged
+        // by the shared helper, and the call proceeds on its value.
+        let callee_ty = if name.is_empty() {
+            Ty::Error
+        } else {
+            self.field_access_ty(callee, receiver, name, resolved.clone())
+        };
+        let callee_ty = self.check(callee, callee_ty, &callee_expectation, None);
+        self.result.type_of_expr.insert(callee, callee_ty.clone());
+        // A named receiver's plain (non-fn) field under call syntax gets
+        // the precise story — the field exists but is no fn, and there is
+        // no member either — instead of the generic not-callable text.
+        if named_has_field {
+            let resolved_callee = self.resolve_shallow(&callee_ty);
+            let callable_shaped = matches!(
+                resolved_callee,
+                Ty::Fn(_) | Ty::Infer(_) | Ty::Never | Ty::Error
+            );
+            if !callable_shaped {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::FieldNotCallable {
+                        expr,
+                        name: name.to_owned(),
+                        ty: resolved_callee,
+                        receiver_ty: resolved.clone(),
+                    });
+                self.infer_args_broken(args);
+                return self.finish_dot_call(expr, Ty::Error, expected, cause);
+            }
+        }
+        let ty = self.call_of_value(expr, callee, args, callee_ty);
+        self.finish_dot_call(expr, ty, expected, cause)
+    }
+
+    /// The rigid `Self` of the enclosing MEMBER body, when `mention` is a
+    /// `Self`-based type mention (a bare `Self` constructor head, a
+    /// `Self::Variant` path's base, or a — rejected — `Self::<...>`
+    /// turbofish). `None` anywhere else.
+    fn rigid_self_mention(&self, mention: ExprId) -> Option<NamedTy> {
+        let base = match &self.body.exprs[mention] {
+            ExprData::NameRef(_) => mention,
+            ExprData::VariantPath { base, .. } | ExprData::GenericApp { base, .. } => *base,
+            _ => return None,
+        };
+        match &self.body.exprs[base] {
+            ExprData::NameRef(name) if name == "Self" => {}
+            _ => return None,
+        }
+        let own = self.own_item.as_ref()?;
+        own.member.as_ref()?;
+        match member_self_ty(self.db, own.to_id(self.db)) {
+            Some(Ty::Named(named)) => Some(named),
+            _ => None,
+        }
+    }
+
+    /// The common tail every dot-call outcome funnels through: check the
+    /// call's type against its expectation and persist it — exactly what
+    /// [`InferCtx::infer_expr_with`]'s own tail does for ordinary arms.
+    fn finish_dot_call(&mut self, expr: ExprId, ty: Ty, expected: &Ty, cause: Option<Cause>) -> Ty {
+        let ty = self.check(expr, ty, expected, cause);
+        self.result.type_of_expr.insert(expr, ty.clone());
+        ty
+    }
+
+    /// The resolved-member half of a dot-call: instantiate the member's
+    /// scheme at the RECEIVER's generic arguments (the receiver's type is
+    /// the turbofish a dot-call never spells), record the resolution for
+    /// MIR/IDE, and check the written arguments plus the receiver-as-last-
+    /// argument. Returns the call's (pre-`check`) type.
+    #[allow(clippy::too_many_arguments)]
+    fn infer_member_call(
+        &mut self,
+        expr: ExprId,
+        callee: ExprId,
+        receiver: ExprId,
+        receiver_ty: &Ty,
+        named: &NamedTy,
+        member_loc: ItemLoc,
+        sig: Ty,
+        callee_expectation: &Ty,
+        args: &[ExprId],
+    ) -> Ty {
+        // A member's binder IS the owner's (an inherent member declares no
+        // parameters of its own), so the receiver type's arguments map onto
+        // it position by position. A SHORT argument list — a mention that
+        // failed to resolve its own arguments — would leave the tail rigid
+        // and then blame a type parameter the user never wrote, so the
+        // member call is abandoned instead: the mention carries the error.
+        let arity = crate::item_data(self.db, member_loc.to_id(self.db))
+            .as_ref()
+            .map(|data| data.generics.len())
+            .unwrap_or_default();
+        if named.args.len() != arity {
+            self.result.type_of_expr.insert(callee, Ty::Error);
+            self.infer_args_broken(args);
+            return Ty::Error;
+        }
+        let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
+        let mut const_subst: FxHashMap<u32, ConstArgValue> = FxHashMap::default();
+        for (index, arg) in named.args.iter().enumerate() {
+            match arg {
+                GenericArg::Ty(ty) => {
+                    subst.insert(index as u32, ty.clone());
+                }
+                GenericArg::Const(value) => {
+                    const_subst.insert(index as u32, value.clone());
+                }
+            }
+        }
+        let inst = instantiate_scheme(&sig, &member_loc, &subst, &const_subst);
+        self.result.member_of_expr.insert(expr, member_loc);
+        let inst_ty = self.check(callee, inst.clone(), callee_expectation, None);
+        self.result.type_of_expr.insert(callee, inst_ty);
+        let Ty::Fn(f) = inst else {
+            unreachable!("member signatures are fn-typed by construction");
+        };
+        // Arity: the Self param is supplied by the receiver, so it
+        // doesn't count.
+        if f.params.len() != args.len() + 1 {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::ArgCountMismatch {
+                    expr,
+                    expected: f.params.len() - 1,
+                    found: args.len(),
+                });
+        }
+        for (i, &arg) in args.iter().enumerate() {
+            let param = f.params.get(i).cloned().unwrap_or(Ty::Error);
+            self.infer_expr_with(arg, &param, Some(Cause::CallSite { call: expr, arg }));
+        }
+        // The receiver IS the last argument: check it against the
+        // instantiated Self param — identical by construction for
+        // enum/struct-typed receivers (a plain unification that lets
+        // leftover inference variables flow), a WIDENING for
+        // variant-typed ones (the tag injection lands on the receiver
+        // expression like at any other check site).
+        if let Some(last) = f.params.last() {
+            self.check(receiver, receiver_ty.clone(), last, None);
+        }
+        f.ret.clone()
+    }
+
     /// Enforcement for a place-chain assignment target (`p.x = e;`,
     /// `p.a.b = e;`, `a[i] = e;`, `m[0][1].x = e;`): assignability is
     /// Rust's transitivity rule — legal exactly when the ROOT binding is
@@ -3089,6 +3535,19 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 let Some(variants) = enum_variants(self.db, item).as_ref() else {
                     // A struct type has no variants; a broken declaration
                     // carries its own diagnostics (infectious, silent).
+                    // `Type::member` naming an inherent member is the
+                    // reserved qualified spelling — its own honest "not
+                    // yet".
+                    if self.member_of(&loc, variant).is_some() {
+                        self.result.diagnostics.push(
+                            InferenceDiagnostic::QualifiedMemberReserved {
+                                expr,
+                                name: variant.to_owned(),
+                            },
+                        );
+                        self.infer_const_args_free(args.unwrap_or(&[]));
+                        return Ty::Error;
+                    }
                     if matches!(
                         crate::type_decl(self.db, item),
                         Some(TypeDeclData::Struct { .. })
@@ -3134,13 +3593,24 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         }
                     }
                     None => {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::NoSuchVariant {
-                                expr,
-                                item: loc.clone(),
-                                name: variant.to_owned(),
-                            });
+                        // An enum's `Type::member` qualified reference is
+                        // the same reserved spelling as a struct's.
+                        if self.member_of(&loc, variant).is_some() {
+                            self.result.diagnostics.push(
+                                InferenceDiagnostic::QualifiedMemberReserved {
+                                    expr,
+                                    name: variant.to_owned(),
+                                },
+                            );
+                        } else {
+                            self.result
+                                .diagnostics
+                                .push(InferenceDiagnostic::NoSuchVariant {
+                                    expr,
+                                    item: loc.clone(),
+                                    name: variant.to_owned(),
+                                });
+                        }
                         self.infer_const_args_free(args.unwrap_or(&[]));
                         Ty::Error
                     }
@@ -4469,6 +4939,18 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         loc: &ItemLoc,
         written: Option<&[GenericArgData]>,
     ) -> NamedTy {
+        // Expression-position `Self` is the RIGID Self (TR01): the
+        // owner type at the member's own binders, exactly as in type
+        // position — ONE meaning of `Self` per body, never a fresh
+        // instantiation. A turbofish on it is rejected like a turbofish on
+        // any non-generic name (`Self` already IS the type at its args).
+        if let Some(self_named) = self.rigid_self_mention(mention) {
+            if let Some(args) = written {
+                self.push_not_generic(mention, "Self");
+                self.infer_const_args_free(args);
+            }
+            return self_named;
+        }
         let generics = item_generics(self.db, loc.to_id(self.db));
         if generics.is_empty() {
             if let Some(args) = written {
@@ -4916,11 +5398,11 @@ fn builtin_generics(builtin: Builtin) -> Option<Vec<GenericParamData>> {
 /// [`InferCtx::instantiate_mention`] substitutes them with zero special
 /// cases.
 fn builtin_scheme(builtin: Builtin, file: SourceFile) -> (ItemLoc, Ty) {
-    let loc = ItemLoc {
+    let loc = ItemLoc::top_level(
         file,
-        name: std::sync::Arc::from(builtin.name()),
-        disambiguator: crate::BUILTIN_DISAMBIGUATOR,
-    };
+        std::sync::Arc::from(builtin.name()),
+        crate::BUILTIN_DISAMBIGUATOR,
+    );
     let t = Ty::Param(crate::ty::ParamTy {
         item: loc.clone(),
         index: 0,

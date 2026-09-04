@@ -2939,3 +2939,122 @@ fn hover_unpinned_number_renders_as_number() {
 fn hover_sized_integer_binding_shows_its_width() {
     check_hover("static f = fn { let n$0: u8 = 3; };", "```must\nn: u8\n```");
 }
+
+// ---- inherent members and dot-calls -------------------------------------
+
+const MEMBER_FIXTURE_HEAD: &str = r#"
+type Counter = struct { n: usize } with {
+    impl Self {
+        get = fn(c: Self) -> usize { c.n };
+        bump = fn(by: usize, c: Self) -> Self { Self(struct { n = c.n + by }) };
+    }
+};
+"#;
+
+#[test]
+fn hover_on_member_call_name_shows_the_member_signature() {
+    check_hover(
+        &format!(
+            "{MEMBER_FIXTURE_HEAD}static main = fn() -> usize {{ Counter(struct {{ n = 1 }}).get$0() }};"
+        ),
+        "```must\nget: fn(Counter) -> usize\n```",
+    );
+}
+
+#[test]
+fn hover_on_member_name_declaration_shows_its_signature() {
+    check_hover(
+        r#"
+type Counter = struct { n: usize } with {
+    impl Self {
+        get$0 = fn(c: Self) -> usize { c.n };
+    }
+};
+"#,
+        "```must\nget: fn(Counter) -> usize\n```",
+    );
+}
+
+#[test]
+fn hover_inside_member_body_resolves_locals() {
+    check_hover(
+        r#"
+type Counter = struct { n: usize } with {
+    impl Self {
+        get = fn(c: Self) -> usize { c$0.n };
+    }
+};
+"#,
+        "```must\nc: Counter\n```",
+    );
+}
+
+#[test]
+fn goto_definition_on_member_call_name_lands_on_the_member() {
+    check_goto(
+        &format!(
+            "{MEMBER_FIXTURE_HEAD}static main = fn() -> usize {{ Counter(struct {{ n = 1 }}).get$0() }};"
+        ),
+        "get",
+        0,
+    );
+}
+
+#[test]
+fn dot_completions_offer_members_next_to_fields() {
+    check_has_completion(
+        &format!(
+            "{MEMBER_FIXTURE_HEAD}static main = fn() -> usize {{ Counter(struct {{ n = 1 }}).$0 }};"
+        ),
+        "bump",
+    );
+    check_has_completion(
+        &format!(
+            "{MEMBER_FIXTURE_HEAD}static main = fn() -> usize {{ Counter(struct {{ n = 1 }}).$0 }};"
+        ),
+        "n",
+    );
+}
+
+#[test]
+fn member_bodies_highlight_as_code() {
+    check_highlights(
+        r#"
+type A = struct { x: usize } with {
+    impl Self {
+        get = fn(a: Self) -> usize { a.x };
+    }
+};
+static use_it = fn() -> usize { A(struct { x = 1 }).get() };
+"#,
+        expect_test::expect![[r#"
+            1..5 "type" Keyword
+            6..7 "A" Type.declaration
+            8..9 "=" Operator
+            10..16 "struct" Keyword
+            22..27 "usize" Type.defaultLibrary
+            30..34 "with" Keyword
+            41..45 "impl" Keyword
+            46..50 "Self" Type.defaultLibrary
+            61..64 "get" Function.declaration
+            65..66 "=" Operator
+            67..69 "fn" Keyword
+            70..71 "a" Parameter.declaration
+            73..77 "Self" Type.defaultLibrary
+            79..81 "->" Operator
+            82..87 "usize" Type.defaultLibrary
+            90..91 "a" Parameter
+            106..112 "static" Keyword
+            113..119 "use_it" Function.declaration.static
+            120..121 "=" Operator
+            122..124 "fn" Keyword
+            127..129 "->" Operator
+            130..135 "usize" Type.defaultLibrary
+            138..139 "A" Type
+            140..146 "struct" Keyword
+            151..152 "=" Operator
+            153..154 "1" Number
+            158..161 "get" Function
+        "#]],
+    );
+}

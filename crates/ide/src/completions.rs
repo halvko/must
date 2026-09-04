@@ -217,19 +217,21 @@ fn completion_item(
     }
 }
 
-/// The fn-call snippet for a `fn`-typed candidate (a file item or a
-/// builtin): `name($1)` when it takes parameters, `name()` when it's
-/// zero-arity — except when `tier` is 0, meaning the candidate's own type
-/// (not its return type) matched the expectation: the position wants the
-/// `fn` itself as a *value* (passed, not called), so the bare name inserts
-/// with no call syntax at all. The zero-arity and snippet-incapable-client
-/// cases share one plain spelling (`name()`), computed once here.
-fn fn_call_insert(name: &str, fn_ty: &hir::FnTy, tier: u8) -> InsertText {
+/// The fn-call snippet for a `fn`-typed candidate (a file item, a
+/// builtin, or an inherent member): `name($1)` when it takes parameters,
+/// `name()` when it's zero-arity — except when `tier` is 0, meaning the
+/// candidate's own type (not its return type) matched the expectation: the
+/// position wants the `fn` itself as a *value* (passed, not called), so the
+/// bare name inserts with no call syntax at all. The zero-arity and
+/// snippet-incapable-client cases share one plain spelling (`name()`),
+/// computed once here. `written_params` is the arity the user actually
+/// types, which for a member excludes the receiver.
+fn fn_call_insert(name: &str, written_params: usize, tier: u8) -> InsertText {
     if tier == 0 {
         return InsertText::Plain(name.to_owned());
     }
     let plain = format!("{name}()");
-    if fn_ty.params.is_empty() {
+    if written_params == 0 {
         InsertText::Plain(plain)
     } else {
         InsertText::Snippet {
@@ -756,7 +758,7 @@ fn builtin_fn_items(edit_range: TextRange, expected: Option<&hir::Ty>) -> Vec<Co
             edit_range,
         );
         if let hir::Ty::Fn(f) = &ty {
-            candidate.text_edit.insert = fn_call_insert(&candidate.label, f, tier);
+            candidate.text_edit.insert = fn_call_insert(&candidate.label, f.params.len(), tier);
         }
         candidate
     })
@@ -805,7 +807,8 @@ fn file_value_and_type_items(
                     edit_range,
                 );
                 if let hir::Ty::Fn(f) = &ty {
-                    candidate.text_edit.insert = fn_call_insert(&candidate.label, f, tier);
+                    candidate.text_edit.insert =
+                        fn_call_insert(&candidate.label, f.params.len(), tier);
                 }
                 Some(candidate)
             }
@@ -914,7 +917,7 @@ fn field_items(
     let Some(anchor) = real_anchor(real_root, receiver_range.start()) else {
         return Vec::new();
     };
-    let Some(item) = item_at(db, file, real_root, &anchor) else {
+    let Some(item) = hir::checkable_item_at(db, file, &anchor) else {
         return Vec::new();
     };
     let (_, source_map) = hir::body_with_source_map(db, item);
@@ -933,12 +936,9 @@ fn field_items(
         },
         _ => None,
     };
-    let Some(record) = record else {
-        return Vec::new();
-    };
-    record
-        .fields
+    let mut items: Vec<CompletionItem> = record
         .iter()
+        .flat_map(|record| record.fields.iter())
         .map(|(name, ty)| {
             completion_item(
                 name.clone(),
@@ -949,7 +949,43 @@ fn field_items(
                 edit_range,
             )
         })
-        .collect()
+        .collect();
+    // Dot-callable inherent members of a named (or variant-typed — it
+    // widens) receiver, offered next to the fields they share the dot
+    // with.
+    let decl = match ty {
+        hir::Ty::Named(named) => Some(&named.decl),
+        hir::Ty::Variant(variant) => Some(&variant.decl),
+        _ => None,
+    };
+    if let Some(decl) = decl {
+        for member_id in hir::member_item_ids(db, decl.to_id(db)) {
+            if !hir::member_is_dot_callable(db, member_id) {
+                continue;
+            }
+            let sig = hir::signature(db, member_id);
+            // The receiver does not count toward the written arity, so a
+            // nullary-through-the-dot member inserts `name()`.
+            let written_params = match &sig {
+                hir::Ty::Fn(f) => f.params.len().saturating_sub(1),
+                _ => 0,
+            };
+            let tier = type_tier(Some(&sig), expected);
+            let mut item = completion_item(
+                hir::item_loc(db, member_id).display_name().to_owned(),
+                CompletionItemKind::Function,
+                Provenance::Item,
+                // A member is fn-shaped, so it may satisfy the position
+                // when CALLED — the same ranking a top-level fn gets.
+                tier,
+                Some(sig.display()),
+                edit_range,
+            );
+            item.text_edit.insert = fn_call_insert(&item.label, written_params, tier);
+            items.push(item);
+        }
+    }
+    items
 }
 
 /// The second segment of a `::` path (`Shape::Circle`), in expression
@@ -1045,7 +1081,7 @@ fn match_arm_items(
     let Some(anchor) = real_anchor(real_root, scrutinee_range.start()) else {
         return Vec::new();
     };
-    let Some(item) = item_at(db, file, real_root, &anchor) else {
+    let Some(item) = hir::checkable_item_at(db, file, &anchor) else {
         return Vec::new();
     };
     let (_, source_map) = hir::body_with_source_map(db, item);
@@ -1345,7 +1381,7 @@ fn record_pattern_items(
         .map(|name| name.text())
         .collect();
 
-    let Some(item) = item_at(db, file, real_root, &anchor) else {
+    let Some(item) = hir::checkable_item_at(db, file, &anchor) else {
         return Vec::new();
     };
     let (_, source_map) = hir::body_with_source_map(db, item);
@@ -1418,7 +1454,7 @@ fn expected_type_at(
 ) -> Option<hir::Ty> {
     if !edit_range.is_empty() {
         let anchor = real_anchor(real_root, edit_range.start())?;
-        let item = item_at(db, file, real_root, &anchor)?;
+        let item = hir::checkable_item_at(db, file, &anchor)?;
         let (_, source_map) = hir::body_with_source_map(db, item);
         let inference = hir::infer::infer(db, item);
         let mut node = anchor;
@@ -1449,7 +1485,7 @@ fn expected_type_at(
         return None;
     }
     let pat = let_stmt.pat()?;
-    let item = item_at(db, file, real_root, let_stmt.syntax())?;
+    let item = hir::checkable_item_at(db, file, let_stmt.syntax())?;
     let (body, source_map) = hir::body_with_source_map(db, item);
     let pat_id = source_map.pat_for_node(SyntaxNodePtr::new(pat.syntax()))?;
     let inference = hir::infer::infer(db, item);
@@ -1506,22 +1542,6 @@ fn expr_for_range(
     }
 }
 
-/// The item whose body contains `node`, by position (mirrors
-/// `hover`/`goto_definition`'s identical helper).
-fn item_at<'db>(
-    db: &'db RootDatabase,
-    file: SourceFile,
-    real_root: &SyntaxNode,
-    node: &SyntaxNode,
-) -> Option<hir::ItemId<'db>> {
-    let item_node = node.ancestors().find(|n| ast::Item::can_cast(n.kind()))?;
-    let index = real_root
-        .children()
-        .filter(|n| ast::Item::can_cast(n.kind()))
-        .position(|n| n == item_node)?;
-    hir::file_item_ids(db, file).get(index).copied()
-}
-
 /// Visible locals at `offset`, each with whether it's `mut` and its
 /// inferred type (for the sort key's TYPE tier; `None` when inference has
 /// no entry) — the candidate source for expression/statement-start
@@ -1538,7 +1558,7 @@ fn locals_for(
     let Some(anchor) = real_anchor(real_root, offset) else {
         return Vec::new();
     };
-    let Some(item) = item_at(db, file, real_root, &anchor) else {
+    let Some(item) = hir::checkable_item_at(db, file, &anchor) else {
         return Vec::new();
     };
     let (body, source_map) = hir::body_with_source_map(db, item);

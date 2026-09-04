@@ -143,6 +143,12 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
                 Some(body) => require_block(&body, "`unsafe` blocks", &mut errors),
                 None => {}
             }
+        } else if let Some(group) = ast::WithGroup::cast(node.clone()) {
+            validate_with_group(&group, &mut errors);
+        } else if let Some(impl_element) = ast::ImplElement::cast(node.clone()) {
+            validate_impl_element(&impl_element, &mut errors);
+        } else if let Some(member) = ast::Member::cast(node.clone()) {
+            validate_member(&member, &mut errors);
         } else if let Some(ref_type) = ast::RefType::cast(node.clone()) {
             // `&T`/`&mut T` stay unclaimed for real references — parse-and-
             // reserve, the same pattern as `pub` fields. `&raw T` is a
@@ -155,6 +161,138 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
         }
     }
     errors
+}
+
+/// Whether `node` sits inside the one semantically supported element
+/// context: a `with { ... }` group directly on a `type` declaration,
+/// inside an `impl Self { ... }` element that is a DIRECT child of the
+/// group. Everything outside this context is covered by its own single
+/// "not supported yet" reservation, so member-level checks stay quiet
+/// there.
+pub fn in_inherent_member_context(node: &SyntaxNode) -> bool {
+    let Some(impl_element) = node
+        .ancestors()
+        .find_map(ast::ImplElement::cast)
+        .filter(ast::ImplElement::is_self_head)
+    else {
+        return false;
+    };
+    let Some(group) = impl_element
+        .syntax()
+        .parent()
+        .and_then(ast::WithGroup::cast)
+    else {
+        return false;
+    };
+    group
+        .syntax()
+        .parent()
+        .is_some_and(|p| ast::TypeItem::can_cast(p.kind()))
+}
+
+/// The reservation check for one attachment group: `with`-chains attach to
+/// `type` declarations only.
+fn validate_with_group(group: &ast::WithGroup, errors: &mut Vec<SyntaxError>) {
+    let anchor = group
+        .with_token()
+        .map(|t| t.text_range())
+        .unwrap_or_else(|| group.syntax().text_range());
+    if group
+        .syntax()
+        .parent()
+        .is_some_and(|p| ast::StaticItem::can_cast(p.kind()))
+    {
+        errors.push(SyntaxError {
+            message: "`with` attachment groups belong on `type` declarations only".to_owned(),
+            range: anchor,
+            fix: None,
+        });
+    }
+}
+
+/// The reservation checks for one `impl` element: only `impl Self { members }`
+/// is supported — anything with a non-`Self` head (a trait impl, a marker)
+/// is reserved, and `impl Self` requires a member body.
+fn validate_impl_element(impl_element: &ast::ImplElement, errors: &mut Vec<SyntaxError>) {
+    let anchor = impl_element
+        .head()
+        .map(|head| head.syntax().text_range())
+        .or_else(|| impl_element.impl_token().map(|t| t.text_range()))
+        .unwrap_or_else(|| impl_element.syntax().text_range());
+    if !impl_element.is_self_head() {
+        // One honest reservation per element; its members stay unjudged.
+        errors.push(SyntaxError {
+            message: "trait impls are not supported yet; \
+                      only `impl Self { ... }` (inherent members) is"
+                .to_owned(),
+            range: anchor,
+            fix: None,
+        });
+        return;
+    }
+    if impl_element.l_brace_token().is_none() {
+        // `impl Self;` — a body-elided inherent impl declares nothing.
+        errors.push(SyntaxError {
+            message: "`impl Self` requires a member body (`{ ... }`)".to_owned(),
+            range: anchor,
+            fix: None,
+        });
+    }
+}
+
+/// The member rules, applied only in the supported context (see
+/// [`in_inherent_member_context`]): members are `=`-defined `fn` literals;
+/// colon-declared members, type ascriptions and non-`fn` values are
+/// rejected (a declare-only inherent member is an unimplementable
+/// promise; the rest is reserved).
+fn validate_member(member: &ast::Member, errors: &mut Vec<SyntaxError>) {
+    if !in_inherent_member_context(member.syntax()) {
+        return;
+    }
+    let range = member.syntax().text_range();
+    match (member.colon_token(), member.eq_token()) {
+        (Some(_), None) => {
+            errors.push(SyntaxError {
+                message: "a declare-only inherent member is an unimplementable promise; \
+                          define it: `name = fn(...) -> ... { ... };`"
+                    .to_owned(),
+                range,
+                fix: None,
+            });
+            return;
+        }
+        (Some(colon), Some(_)) => {
+            let end = member
+                .ty()
+                .map(|ty| ty.syntax().text_range().end())
+                .unwrap_or_else(|| colon.text_range().end());
+            errors.push(SyntaxError {
+                message: "member type ascriptions are not supported yet; \
+                          the `fn` literal's own annotations are the signature"
+                    .to_owned(),
+                range: TextRange::new(colon.text_range().start(), end),
+                fix: None,
+            });
+            // The `=`-defined value is still judged below.
+        }
+        (None, Some(_)) | (None, None) => {}
+    }
+    match member.value() {
+        Some(ast::Expr::FnLiteral(_)) => {}
+        // `name = unsafe fn ...` — the existing `unsafe fn` reservation
+        // already fires on the wrapped literal; adding a second error here
+        // would be noise.
+        Some(ast::Expr::UnsafeBlockExpr(inner))
+            if matches!(inner.expr(), Some(ast::Expr::FnLiteral(_))) => {}
+        Some(value) => errors.push(SyntaxError {
+            message: "a member must be defined as an `fn` literal".to_owned(),
+            range: value.syntax().text_range(),
+            fix: None,
+        }),
+        // No `=` at all: the declare-only error above (or a parse error)
+        // covers it.
+        None => {}
+    }
 }
 
 /// Report every repeat of a field name after its first occurrence. Empty
@@ -409,6 +547,23 @@ fn reject_nested_generic_binder(fn_literal: &ast::FnLiteral, errors: &mut Vec<Sy
         .parent()
         .is_some_and(|p| ast::StaticItem::can_cast(p.kind()))
     {
+        return;
+    }
+    // A member's defining fn literal: the type's own binders already flow
+    // into the member, and member-own binders are reserved — a more
+    // precise message than the generic one below.
+    if fn_literal
+        .syntax()
+        .parent()
+        .is_some_and(|p| ast::Member::can_cast(p.kind()))
+    {
+        errors.push(SyntaxError {
+            message: "generic members are not supported yet \
+                      (the type's own binders are already in scope)"
+                .to_owned(),
+            range: generic_param_list.syntax().text_range(),
+            fix: None,
+        });
         return;
     }
     errors.push(SyntaxError {

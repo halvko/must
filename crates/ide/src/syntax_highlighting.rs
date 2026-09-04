@@ -78,7 +78,7 @@ fn classify(
         INT_NUMBER => HlTag::Number,
         FN_KW | STATIC_KW | CONST_KW | TYPE_KW | STRUCT_KW | ENUM_KW | LET_KW | MUT_KW | IF_KW
         | ELSE_KW | MATCH_KW | LOOP_KW | BREAK_KW | CONTINUE_KW | TRUE_KW | FALSE_KW | RAW_KW
-        | UNSAFE_KW => HlTag::Keyword,
+        | UNSAFE_KW | WITH_KW | IMPL_KW => HlTag::Keyword,
         PLUS | MINUS | STAR | SLASH | EQ | THIN_ARROW | FAT_ARROW | AMP | EQ2 | NEQ | L_ANGLE
         | R_ANGLE | LTEQ | GTEQ => HlTag::Operator,
         // `!` only exists as the never type today.
@@ -102,7 +102,7 @@ fn classify_ident(
     let owner = parent.parent()?;
     match (parent.kind(), owner.kind()) {
         (NAME, STATIC_ITEM) => {
-            let item = item_of(db, file, root, &owner)?;
+            let item = hir::checkable_item_at(db, file, &owner)?;
             let tag = if item_is_fn(db, item) {
                 HlTag::Function
             } else {
@@ -112,6 +112,9 @@ fn classify_ident(
         }
         // A `type` item's name declaration is a type, through and through.
         (NAME, TYPE_ITEM) => Some((HlTag::Type, HlMods(HlMods::DECLARATION))),
+        // A member's name declaration inside an `impl Self { ... }`
+        // element: a function, like a static fn's.
+        (NAME, MEMBER) => Some((HlTag::Function, HlMods(HlMods::DECLARATION))),
         // A variant declared inside an `enum` literal.
         (NAME, ENUM_VARIANT) => Some((HlTag::EnumMember, HlMods(HlMods::DECLARATION))),
         // A payload binding in a variant pattern declares a plain local.
@@ -128,7 +131,7 @@ fn classify_ident(
         // always a binding now (never reinterpreted as a variant), so it
         // always falls through to the binding/parameter coloring.
         (NAME, BIND_PAT) | (NAME, RECORD_PAT_FIELD) => {
-            let item = item_of(db, file, root, &owner)?;
+            let item = hir::checkable_item_at(db, file, &owner)?;
             let (body, source_map) = hir::body_with_source_map(db, item);
             let binding = source_map.binding_for_node(SyntaxNodePtr::new(&parent))?;
             let mut mods = HlMods::DECLARATION;
@@ -177,12 +180,15 @@ fn classify_ident(
                 return Some((HlTag::EnumMember, HlMods::NONE));
             }
             // Inside a `type` declaration's RHS every "expression" is
-            // really type syntax (`type Foo = struct { x: usize };`), so
-            // names there classify as type names, not values.
-            if owner.ancestors().any(|n| n.kind() == TYPE_ITEM) {
+            // really type syntax (`type Foo = struct { x: usize };`) — but
+            // a `with`-chain's member bodies are real expression code, so
+            // they are exempt.
+            if owner.ancestors().any(|n| n.kind() == TYPE_ITEM)
+                && !owner.ancestors().any(|n| n.kind() == WITH_GROUP)
+            {
                 return Some(classify_type_name(db, file, token.text()));
             }
-            let item = item_of(db, file, root, &owner)?;
+            let item = hir::checkable_item_at(db, file, &owner)?;
             let (body, source_map) = hir::body_with_source_map(db, item);
             // The base of a `::` path has its own expression on the
             // segment's node; a plain path sits on the whole path node.
@@ -224,6 +230,19 @@ fn classify_ident(
                 }
             }
         }
+        // The field name of a dot-call that resolved to an inherent
+        // member: a function. (Plain field accesses stay unstyled, as
+        // before.)
+        (NAME_REF, FIELD_EXPR) => {
+            let item = hir::checkable_item_at(db, file, &owner)?;
+            let (_, source_map) = hir::body_with_source_map(db, item);
+            let call = owner.parent().filter(|p| p.kind() == CALL_EXPR)?;
+            let call_expr = source_map.expr_for_node(SyntaxNodePtr::new(&call))?;
+            hir::infer::infer(db, item)
+                .member_of_expr
+                .get(call_expr)
+                .map(|_| (HlTag::Function, HlMods::NONE))
+        }
         // Unresolved or junk: leave it plain; diagnostics carry the news.
         _ => None,
     }
@@ -262,26 +281,6 @@ fn classify_type_name(db: &RootDatabase, file: SourceFile, name: &str) -> (HlTag
         Some(hir::Resolution::TypeItem(_)) => (HlTag::Type, HlMods::NONE),
         _ => (HlTag::Type, HlMods(HlMods::DEFAULT_LIBRARY)),
     }
-}
-
-fn item_of<'db>(
-    db: &'db RootDatabase,
-    file: SourceFile,
-    root: &SyntaxNode,
-    node: &SyntaxNode,
-) -> Option<hir::ItemId<'db>> {
-    let item_node = node.ancestors().find(is_item)?;
-    let index = root
-        .children()
-        .filter(is_item)
-        .position(|n| n == item_node)?;
-    hir::file_item_ids(db, file).get(index).copied()
-}
-
-/// Whether the node is a top-level item — the positional index over these
-/// must match `hir::file_item_ids`, which counts *all* item kinds.
-fn is_item(node: &SyntaxNode) -> bool {
-    matches!(node.kind(), SyntaxKind::STATIC_ITEM | SyntaxKind::TYPE_ITEM)
 }
 
 /// Push the token's range, split at line breaks: LSP clients aren't required

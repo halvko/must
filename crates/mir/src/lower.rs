@@ -28,6 +28,7 @@ pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
         .unwrap_or(&[]);
     let mut ctx = LowerCtx {
         db,
+        loc: hir::item_loc(db, item),
         body,
         infer,
         const_diagnostics,
@@ -62,6 +63,10 @@ pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
 
 struct LowerCtx<'db> {
     db: &'db dyn Db,
+    /// The lowered item's own identity — the `item` half a forwarded
+    /// const param (`ConstArgValue::Param`) must match to resolve against
+    /// the executing frame's instance.
+    loc: ItemLoc,
     body: &'db Body,
     infer: &'db InferenceResult,
     const_diagnostics: &'db [hir::ConstCheckDiagnostic],
@@ -305,6 +310,19 @@ impl LowerCtx<'_> {
                 InferenceDiagnostic::BuiltinNotFirstClass { expr, .. } => {
                     self.value_traps.insert(*expr, diag.message());
                 }
+                // A broken dot-call: the call operation itself cannot
+                // execute (arguments still evaluate for effects).
+                InferenceDiagnostic::NoSuchMember { expr, .. }
+                | InferenceDiagnostic::NotDotCallable { expr, .. }
+                | InferenceDiagnostic::FieldNotCallable { expr, .. } => {
+                    self.call_traps.insert(*expr, diag.message());
+                }
+                // A member reached without a call, and the reserved
+                // qualified spelling: the value cannot be produced.
+                InferenceDiagnostic::MemberNotCalled { expr, .. }
+                | InferenceDiagnostic::QualifiedMemberReserved { expr, .. } => {
+                    self.value_traps.insert(*expr, diag.message());
+                }
             }
         }
         for diag in self.unsafe_diagnostics {
@@ -529,7 +547,7 @@ impl LowerCtx<'_> {
                     _ => self.lower_name_ref(b, *base, &name),
                 }
             }
-            ExprData::Call { callee, args } => {
+            ExprData::Call { callee, args, .. } => {
                 // A construction call `Foo(arg)`. Erasure decision: nominal
                 // types exist only in the static type system — a `Foo` *is*
                 // its underlying record at runtime (`Value::Record`, no
@@ -600,9 +618,35 @@ impl LowerCtx<'_> {
                     );
                     return Operand::Copy(dest.into());
                 }
-                let callee_op = self.lower_expr(b, *callee);
-                let arg_ops: Vec<Operand> =
-                    args.iter().map(|&arg| self.lower_expr(b, arg)).collect();
+                // A dot-call resolved to an inherent member: the written
+                // arguments lower first and the RECEIVER is appended last,
+                // which is both the desugaring and the evaluation order.
+                // The callee field-access expression is never lowered as a
+                // value — it names a member, not a place.
+                let member =
+                    self.infer.member_of_expr.get(expr).cloned().and_then(|m| {
+                        match &body.exprs[*callee] {
+                            ExprData::Field { receiver, .. } => Some((m, *receiver)),
+                            _ => None,
+                        }
+                    });
+                let (callee_op, arg_ops) = match &member {
+                    Some((member, receiver)) => {
+                        let mut arg_ops: Vec<Operand> =
+                            args.iter().map(|&arg| self.lower_expr(b, arg)).collect();
+                        arg_ops.push(self.lower_expr(b, *receiver));
+                        (
+                            self.member_callee_operand(b, expr, *callee, member, *receiver),
+                            arg_ops,
+                        )
+                    }
+                    None => {
+                        let callee_op = self.lower_expr(b, *callee);
+                        let arg_ops: Vec<Operand> =
+                            args.iter().map(|&arg| self.lower_expr(b, arg)).collect();
+                        (callee_op, arg_ops)
+                    }
+                };
                 // A call const-check rejected. Inside a `const fn` body or
                 // a `const` block the code is a const context under every
                 // execution, so the call is replaced by an unconditional
@@ -2333,6 +2377,116 @@ impl LowerCtx<'_> {
             .take(binder_index as usize)
             .filter(|param| matches!(param.kind, hir::item_tree::GenericParamKind::Const(_)))
             .count() as u32
+    }
+
+    /// The callee operand of a resolved member call: the member item's
+    /// value — instantiated with the RECEIVER type's const-argument values
+    /// when the owner's binder declares const params (the receiver's type
+    /// is the turbofish a dot-call never spells; its values live in the
+    /// annotation-representable const domain, so they lower to plain
+    /// constants — or to a forwarded `ConstParam` read inside a generic
+    /// body). Type params need nothing (erasure).
+    ///
+    /// INVARIANT this rests on: a member's binder IS its owner's, verbatim
+    /// (`hir::item_data` clones the owner's generics for a member, and
+    /// inherent members declare none of their own — the grammar has no
+    /// member binder to declare). So the receiver type's argument list maps
+    /// onto the member's binder position by position, which is what makes
+    /// `receiver_args.get(index)` right. When member-own binders land, the
+    /// member's binder becomes owner ∪ own while the receiver still supplies
+    /// only the owner prefix, and this indexing has to be revisited.
+    fn member_callee_operand(
+        &mut self,
+        b: &mut BodyBuilder,
+        expr: ExprId,
+        callee: ExprId,
+        member: &ItemLoc,
+        receiver: ExprId,
+    ) -> Operand {
+        let member_id = member.to_id(self.db);
+        let generics = hir::item_data(self.db, member_id)
+            .as_ref()
+            .map(|data| data.generics.clone())
+            .unwrap_or_default();
+        let has_const_params = generics
+            .iter()
+            .any(|param| matches!(param.kind, hir::item_tree::GenericParamKind::Const(_)));
+        if !has_const_params {
+            return Operand::Const(Const::Item(member.clone()));
+        }
+        // The receiver's type carries the values — its enum's args for a
+        // (widened) variant-typed receiver.
+        let receiver_args = match self.ty(receiver) {
+            Ty::Named(named) => named.args,
+            Ty::Variant(variant) => variant.args,
+            _ => {
+                // Inference resolved the member off a Named receiver; a
+                // non-Named type here is broken code with its own
+                // diagnostics.
+                return self.trap(
+                    b,
+                    expr,
+                    "cannot call the member: the receiver's type is broken".to_owned(),
+                );
+            }
+        };
+        let mut const_args = Vec::new();
+        for (index, param) in generics.iter().enumerate() {
+            if !matches!(param.kind, hir::item_tree::GenericParamKind::Const(_)) {
+                continue;
+            }
+            let value = match receiver_args.get(index) {
+                Some(hir::GenericArg::Const(value)) => value.clone(),
+                _ => hir::ConstArgValue::Error,
+            };
+            let op = match value {
+                hir::ConstArgValue::Int(v) => {
+                    match hir::ty::const_param_declared_ty(self.db, member_id, index as u32) {
+                        Ty::Int(kind) => i128::try_from(v)
+                            .ok()
+                            .and_then(|v| hir::IntValue::new(kind, v))
+                            .map(|iv| Operand::Const(Const::Int(iv))),
+                        _ => None,
+                    }
+                }
+                hir::ConstArgValue::Str(s) => Some(Operand::Const(Const::Str(s.to_string()))),
+                hir::ConstArgValue::Bool(v) => Some(Operand::Const(Const::Bool(v))),
+                // The enclosing generic body forwards its own const param
+                // (a member calling a sibling member on `Self`).
+                hir::ConstArgValue::Param {
+                    item,
+                    index: binder_index,
+                    ..
+                } if item == self.loc => Some(Operand::Const(Const::ConstParam(
+                    self.const_param_index(binder_index),
+                ))),
+                _ => None,
+            };
+            match op {
+                Some(op) => const_args.push(op),
+                // Broken const arguments carry their diagnostics upstream
+                // (at the receiver's type); refuse the call here.
+                None => {
+                    return self.trap(
+                        b,
+                        expr,
+                        "cannot call the member: the receiver type's const arguments \
+                         are broken"
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        let dest = b.temp(self.ty(callee));
+        b.push_assign(
+            dest,
+            Rvalue::Instantiate {
+                item: member.clone(),
+                const_args,
+            },
+            expr,
+        );
+        Operand::Copy(dest.into())
     }
 }
 

@@ -21,6 +21,7 @@ fn at_expr_recovery(p: &Parser<'_>) -> bool {
             | TYPE_KW
             | LET_KW
             | ELSE_KW
+            | WITH_KW
     )
 }
 
@@ -52,6 +53,13 @@ fn item(p: &mut Parser<'_>) {
     }
     if p.eat(EQ) {
         expr(p);
+        // Attachment `with`-chains trail the RHS: `type X = struct { ... }
+        // with { elements } with { ... };` (TR01). Parsed on any item
+        // kind (superset — validation rejects them on `static`/`const`
+        // items).
+        while p.at(WITH_KW) {
+            with_group(p);
+        }
         // Brace rule: items whose value ends in `}` don't need a `;`.
         // A value "ending" in `;` only happens in broken nesting (e.g. an
         // unclosed block) — demanding another `;` there is pure noise.
@@ -65,6 +73,157 @@ fn item(p: &mut Parser<'_>) {
         p.eat(SEMICOLON);
     }
     m.complete(p, kind);
+}
+
+// ---- attachment `with`-chains (sealed trait-syntax grammar, TR01) ------
+//
+// Only `with { impl Self { members } }` (inherent members) is
+// semantically supported; the FULL element grammar parses cleanly —
+// element boundaries recognizable from tokens alone, heads readable while
+// member bodies stay ordinary expressions — with everything else
+// rejected by validation ("not supported yet", the house
+// parse-and-reserve pattern).
+
+/// `with { element* }` — one attachment group. There is exactly one
+/// element form, so the group is a bare brace block; the binder turbofish
+/// and the constrain/pin clause list are part of the sealed grammar and
+/// arrive with the rest of it.
+fn with_group(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.bump(WITH_KW);
+    if p.at(L_BRACE) {
+        element_block(p);
+    } else {
+        p.error("expected `{` followed by the group's elements");
+    }
+    m.complete(p, WITH_GROUP);
+}
+
+/// `{ element* }` — a group's element block.
+fn element_block(p: &mut Parser<'_>) {
+    p.bump(L_BRACE);
+    while !p.at(R_BRACE) && !p.at(EOF) {
+        if at_item_recovery(p) {
+            break;
+        }
+        let before = p.pos();
+        element(p);
+        if p.pos() == before {
+            p.err_and_bump("expected an element (`impl`)");
+        }
+    }
+    p.expect_after_prev(R_BRACE);
+}
+
+/// Whether the current token can only mean an enclosing item continues.
+/// The one item-keyword recovery set, asked wherever a nested construct
+/// has to give up (the element loop, an arm body's skip): nothing
+/// element-shaped and nothing expression-shaped starts with an item
+/// keyword, so a copy of this list is only a chance for two copies to
+/// disagree.
+fn at_item_recovery(p: &Parser<'_>) -> bool {
+    matches!(p.current(), STATIC_KW | TYPE_KW | LET_KW | CONST_KW)
+}
+
+/// One element of a `with` group. There is one form, the `impl`
+/// element; the modifier heads (`unsafe`, `for ⟨Type⟩`) are part of the
+/// sealed grammar and arrive with the rest of it.
+fn element(p: &mut Parser<'_>) {
+    if p.at(IMPL_KW) {
+        impl_element(p);
+    }
+}
+
+/// `impl ⟨head⟩ { member* }` (or the body-elided marker form
+/// `impl ⟨head⟩;`). The head is a type mention: `Self` (inherent — the one
+/// supported form), or, superset-parsed and rejected by validation, a trait
+/// name or marker.
+fn impl_element(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.bump(IMPL_KW);
+    if p.at(L_BRACE) || p.at(SEMICOLON) {
+        // A head is not optional: saying so here is what stops validation
+        // from reporting a *missing* head as an unsupported trait impl.
+        p.error("expected a name after `impl`");
+    } else {
+        type_(p);
+    }
+    if p.at(L_BRACE) {
+        p.bump(L_BRACE);
+        while !p.at(R_BRACE) && !p.at(EOF) {
+            if at_item_recovery(p) {
+                break;
+            }
+            let before = p.pos();
+            member(p);
+            if p.pos() == before {
+                p.err_and_bump("expected a member");
+            }
+        }
+        p.expect_after_prev(R_BRACE);
+    } else if !p.eat(SEMICOLON) {
+        p.error("expected `{` followed by the impl's members, or `;`");
+    }
+    m.complete(p, IMPL_ELEMENT);
+}
+
+/// A colon-declared member's fn signature: like a fn literal's head
+/// (named, annotated params; return type) with no body — wrapped in
+/// `FN_TYPE` so it sits in the tree as the annotation it is. The plain fn
+/// TYPE grammar takes bare types, so the sealed spelling
+/// (`alloc: fn(n: usize, v: Self) -> R;`) needs its own production; the
+/// form itself is rejected, but it has to parse whole first for the
+/// rejection to be the only error.
+fn member_decl_fn_signature(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.bump(FN_KW);
+    if p.at(L_PAREN) {
+        param_list(p);
+    } else {
+        p.error("expected `(`");
+    }
+    if p.at(THIN_ARROW) {
+        ret_type(p);
+    }
+    m.complete(p, FN_TYPE);
+}
+
+/// One member of an impl body, the sealed member grammar: equals-defines
+/// (`name = fn(...) -> R { ... };`). The colon-declare form `name: fn(...);`
+/// superset-parses so validation can call it the unimplementable promise
+/// it is.
+fn member(p: &mut Parser<'_>) {
+    match p.current() {
+        SEMICOLON => {
+            p.bump_any();
+            return;
+        }
+        IDENT => {}
+        _ => {
+            p.error("expected a member");
+            return;
+        }
+    }
+    let m = p.start();
+    pattern(p, "expected a member name");
+    if p.eat(COLON) {
+        if p.at(FN_KW) {
+            member_decl_fn_signature(p);
+        } else {
+            type_(p);
+        }
+    }
+    if p.eat(EQ) {
+        expr(p);
+    }
+    // The item brace rule, one level down: a member whose value ends in
+    // `}` doesn't need its `;` re-demanded on broken nesting.
+    if matches!(p.prev(), Some(R_BRACE | SEMICOLON)) {
+        p.eat(SEMICOLON);
+    } else {
+        p.expect_after_prev(SEMICOLON);
+    }
+    m.complete(p, MEMBER);
 }
 
 /// A pattern an assignment is destructured to
@@ -472,9 +631,15 @@ fn skip_arm_body(p: &mut Parser<'_>) {
             L_BRACE | L_PAREN | L_BRACKET => depth += 1,
             R_BRACE | R_PAREN | R_BRACKET if depth == 0 => return,
             R_BRACE | R_PAREN | R_BRACKET => depth -= 1,
-            // At depth 0 these end the arm (or the item that swallowed
-            // it); nested, they are the body's own.
-            COMMA | SEMICOLON | STATIC_KW | CONST_KW | TYPE_KW | LET_KW if depth == 0 => return,
+            // At depth 0 these end the arm; nested, they are the body's
+            // own.
+            COMMA | SEMICOLON if depth == 0 => return,
+            // An item keyword at depth 0 means the arm list's `}` is
+            // missing and an enclosing item resumed. Asking
+            // [`at_item_recovery`] rather than repeating its tokens is
+            // what keeps the skip from stopping at a smaller set than the
+            // arm loop itself recovers on.
+            _ if depth == 0 && at_item_recovery(p) => return,
             _ => {}
         }
         p.bump_any();

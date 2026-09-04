@@ -37,7 +37,7 @@ pub(crate) fn goto_definition(
             };
             return nav_to_item(db, &loc);
         }
-        let item = item_at(db, file, &root, variant_pat.syntax())?;
+        let item = hir::checkable_item_at(db, file, variant_pat.syntax())?;
         let (_, source_map) = hir::body_with_source_map(db, item);
         let pat = source_map.pat_for_node(SyntaxNodePtr::new(variant_pat.syntax()))?;
         let variant = hir::infer::infer(db, item).variant_of_pat.get(pat)?;
@@ -64,10 +64,24 @@ pub(crate) fn goto_definition(
         return nav_to_item(db, &loc);
     }
 
+    // The field name of a dot-call that resolved to an inherent member:
+    // jump to the member's definition inside the type's `with`-chain.
+    if let Some(field_expr) = name_ref.syntax().parent().and_then(ast::FieldExpr::cast) {
+        let item = hir::checkable_item_at(db, file, field_expr.syntax())?;
+        let (_, source_map) = hir::body_with_source_map(db, item);
+        let call = field_expr
+            .syntax()
+            .parent()
+            .filter(|p| ast::CallExpr::can_cast(p.kind()))?;
+        let call_expr = source_map.expr_for_node(SyntaxNodePtr::new(&call))?;
+        let member = hir::infer::infer(db, item).member_of_expr.get(call_expr)?;
+        return nav_to_member(db, member);
+    }
+
     let path_expr = name_ref.syntax().parent().and_then(ast::PathExpr::cast)?;
 
     // Which item are we inside?
-    let item = item_at(db, file, &root, path_expr.syntax())?;
+    let item = hir::checkable_item_at(db, file, path_expr.syntax())?;
 
     let (_, source_map) = hir::body_with_source_map(db, item);
 
@@ -110,13 +124,17 @@ pub(crate) fn goto_definition(
         // A const param: jump to its declaration in the enclosing
         // binder (`const N: usize` in `fn::<...>`).
         Resolution::ConstParam(index) => {
-            let fn_lit = hir::item_source(db, item)
+            // A member's const params live on the OWNER type's binder.
+            let source_item = hir::member_owner(db, item).unwrap_or(item);
+            let list = hir::item_source(db, source_item)
                 .and_then(|it| it.body())
                 .and_then(|body| match body {
-                    ast::Expr::FnLiteral(fn_lit) => Some(fn_lit),
+                    ast::Expr::FnLiteral(fn_lit) => fn_lit.generic_param_list(),
+                    ast::Expr::RecordExpr(record) => record.generic_param_list(),
+                    ast::Expr::EnumExpr(en) => en.generic_param_list(),
                     _ => None,
                 })?;
-            let param = fn_lit.generic_param_list()?.params().nth(*index as usize)?;
+            let param = list.params().nth(*index as usize)?;
             let ast::GenericParam::ConstParam(const_param) = param else {
                 return None;
             };
@@ -132,19 +150,20 @@ pub(crate) fn goto_definition(
     }
 }
 
-/// The item whose body contains `node`, by position.
-fn item_at<'db>(
-    db: &'db RootDatabase,
-    file: SourceFile,
-    root: &syntax::SyntaxNode,
-    node: &syntax::SyntaxNode,
-) -> Option<hir::ItemId<'db>> {
-    let item_node = node.ancestors().find(|n| ast::Item::can_cast(n.kind()))?;
-    let item_index = root
-        .children()
-        .filter(|n| ast::Item::can_cast(n.kind()))
-        .position(|n| n == item_node)?;
-    hir::file_item_ids(db, file).get(item_index).copied()
+/// Navigate to a member's definition inside its type's `with`-chain: the
+/// member node is the full range, its name the focus.
+fn nav_to_member(db: &RootDatabase, member: &hir::ItemLoc) -> Option<NavigationTarget> {
+    let src = hir::item_tree::member_source(db, member.to_id(db))?;
+    let full_range = src.syntax().text_range();
+    let focus_range = src
+        .name()
+        .map(|n| n.syntax().text_range())
+        .unwrap_or(full_range);
+    Some(NavigationTarget {
+        file: member.file,
+        full_range,
+        focus_range,
+    })
 }
 
 /// Navigate to a variant's declaration inside its enum's `type` item: the

@@ -27,6 +27,7 @@ use base_db::Db;
 use la_arena::ArenaMap;
 
 use crate::body::{Body, ExprData, ExprId, Stmt, body};
+use crate::infer::{InferenceResult, infer};
 use crate::scopes::{Builtin, Resolution, resolutions};
 use crate::{ItemId, ItemLoc, diag};
 
@@ -113,6 +114,9 @@ pub fn const_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<ConstCheckDia
         db,
         body,
         resolutions: resolutions(db, item),
+        // Dot-calls resolve type-directed, so their member target lives in
+        // the inference result, not in `resolutions`.
+        infer: infer(db, item),
         diagnostics: Vec::new(),
     };
     if let Some(root) = body.root {
@@ -125,6 +129,7 @@ struct CheckCtx<'db> {
     db: &'db dyn Db,
     body: &'db Body,
     resolutions: &'db ArenaMap<ExprId, Resolution>,
+    infer: &'db InferenceResult,
     diagnostics: Vec<ConstCheckDiagnostic>,
 }
 
@@ -146,9 +151,9 @@ impl CheckCtx<'_> {
                     }
                 }
             }
-            ExprData::Call { callee, args } => {
+            ExprData::Call { callee, args, .. } => {
                 if in_const {
-                    self.check_callee(*callee);
+                    self.check_callee(expr, *callee);
                 }
                 // Callee and arguments are evaluated by the call, so they
                 // sit in the same context as the call itself; a rejected
@@ -258,10 +263,29 @@ impl CheckCtx<'_> {
         }
     }
 
-    /// `callee` is being called in a const context; reject it unless it is
-    /// known to be const-callable.
-    fn check_callee(&mut self, callee: ExprId) {
+    /// `callee` (of the call expression `call`) is being called in a const
+    /// context; reject it unless it is known to be const-callable.
+    fn check_callee(&mut self, call: ExprId, callee: ExprId) {
         match &self.body.exprs[callee] {
+            // A dot-call: when inference resolved it to an inherent member,
+            // the member is a statically known fn item — judge its literal's
+            // marker exactly like a named callee's. A field-valued callee
+            // (no member resolution) stays the conservative value call.
+            ExprData::Field { .. } => match self.infer.member_of_expr.get(call) {
+                Some(member) => match root_fn_is_const(self.db, member.to_id(self.db)) {
+                    Some(true) => {}
+                    Some(false) => self.diagnostics.push(ConstCheckDiagnostic::NonConstFnCall {
+                        callee,
+                        item: member.clone(),
+                    }),
+                    None => self
+                        .diagnostics
+                        .push(ConstCheckDiagnostic::ValueCall { callee }),
+                },
+                None => self
+                    .diagnostics
+                    .push(ConstCheckDiagnostic::ValueCall { callee }),
+            },
             // Broken source; the parse error is already reported.
             ExprData::Missing => {}
             // A directly-called fn literal wears its const-ness on its

@@ -116,7 +116,7 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
             });
             compute_expr_scopes(body, scopes, *b, scope);
         }
-        ExprData::Call { callee, args } => {
+        ExprData::Call { callee, args, .. } => {
             compute_expr_scopes(body, scopes, *callee, scope);
             for &arg in args {
                 compute_expr_scopes(body, scopes, arg, scope);
@@ -354,11 +354,11 @@ pub const ALLOC_RESULT_NAME: &str = "AllocResult";
 
 /// The [`ItemLoc`] of `file`'s compiler-provided [`ALLOC_RESULT_NAME`] enum.
 pub fn alloc_result_loc(file: SourceFile) -> ItemLoc {
-    ItemLoc {
+    ItemLoc::top_level(
         file,
-        name: std::sync::Arc::from(ALLOC_RESULT_NAME),
-        disambiguator: BUILTIN_DISAMBIGUATOR,
-    }
+        std::sync::Arc::from(ALLOC_RESULT_NAME),
+        BUILTIN_DISAMBIGUATOR,
+    )
 }
 
 /// Top-level names of a file, *including* what's wrong with them: the scope
@@ -393,7 +393,7 @@ impl FileScope {
             Resolution::Ambiguous(entry.loc.clone())
         } else {
             match entry.kind {
-                ItemKind::Value(_) => Resolution::Item(entry.loc.clone()),
+                ItemKind::Value(_) | ItemKind::Member => Resolution::Item(entry.loc.clone()),
                 ItemKind::Type => Resolution::TypeItem(entry.loc.clone()),
             }
         })
@@ -410,7 +410,7 @@ impl FileScope {
                 return None;
             }
             let resolution = match entry.kind {
-                ItemKind::Value(_) => Resolution::Item(entry.loc.clone()),
+                ItemKind::Value(_) | ItemKind::Member => Resolution::Item(entry.loc.clone()),
                 ItemKind::Type => Resolution::TypeItem(entry.loc.clone()),
             };
             Some((name.as_str(), resolution))
@@ -479,11 +479,11 @@ pub fn type_scope(db: &dyn Db, file: SourceFile) -> TypeScope {
         if data.name.is_empty() || !matches!(data.kind, ItemKind::Type) {
             continue;
         }
-        let loc = ItemLoc {
+        let loc = ItemLoc::top_level(
             file,
-            name: std::sync::Arc::from(data.name.as_str()),
+            std::sync::Arc::from(data.name.as_str()),
             disambiguator,
-        };
+        );
         scope
             .entries
             .entry(data.name.clone())
@@ -527,11 +527,11 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
         if data.name.is_empty() {
             continue;
         }
-        let loc = ItemLoc {
+        let loc = ItemLoc::top_level(
             file,
-            name: std::sync::Arc::from(data.name.as_str()),
+            std::sync::Arc::from(data.name.as_str()),
             disambiguator,
-        };
+        );
         match scope.entries.entry(data.name.clone()) {
             std::collections::hash_map::Entry::Vacant(slot) => {
                 slot.insert(ScopeEntry {
@@ -594,6 +594,11 @@ pub fn resolutions<'db>(db: &'db dyn Db, item: ItemId<'db>) -> ArenaMap<ExprId, 
             })
             .map(|(index, _)| Resolution::ConstParam(index as u32))
     };
+    // Inside a MEMBER's body, `Self` in expression position names the
+    // owning type (so `Self(struct { ... })` constructs it) — a scope
+    // layer between the locals and the file, like the binder's const
+    // params.
+    let self_owner = crate::member_owner(db, item).map(|owner| crate::item_loc(db, owner));
     let mut map = ArenaMap::default();
     for (expr, data) in body.exprs.iter() {
         let ExprData::NameRef(name) = data else {
@@ -604,6 +609,11 @@ pub fn resolutions<'db>(db: &'db dyn Db, item: ItemId<'db>) -> ArenaMap<ExprId, 
             .and_then(|scope| scopes.resolve_in_scope(scope, name));
         let resolution = local.map(Resolution::Local).or_else(|| {
             const_param(name).or_else(|| {
+                if name == "Self"
+                    && let Some(owner) = &self_owner
+                {
+                    return Some(Resolution::TypeItem(owner.clone()));
+                }
                 file_scope
                     .resolve(name)
                     .or_else(|| Builtin::by_name(name).map(Resolution::Builtin))

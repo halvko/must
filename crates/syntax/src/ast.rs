@@ -271,6 +271,23 @@ ast_node!(
     /// `-x` — unary minus on a number.
     NegExpr: NEG_EXPR
 );
+ast_node!(
+    /// `with { element* }` — one attachment group trailing a `type`
+    /// declaration (sealed trait-syntax grammar, TR01).
+    WithGroup: WITH_GROUP
+);
+ast_node!(
+    /// `impl ⟨head⟩ { member* }` or the body-elided `impl ⟨head⟩;`. Only
+    /// `impl Self { ... }` (inherent members) is supported; everything
+    /// else is parse-and-reserve.
+    ImplElement: IMPL_ELEMENT
+);
+ast_node!(
+    /// One member of an impl body: `name = fn(...) -> R { ... };`
+    /// (equals-defines) or `name: fn(...);` (colon-declares — parses so
+    /// validation can reject it).
+    Member: MEMBER
+);
 
 ast_enum!(
     Expr: FnLiteral,
@@ -374,9 +391,69 @@ impl StaticItem {
     }
 }
 
+impl WithGroup {
+    pub fn with_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, WITH_KW)
+    }
+    pub fn elements(&self) -> impl Iterator<Item = ImplElement> + use<> {
+        children(&self.syntax)
+    }
+}
+
+impl ImplElement {
+    pub fn impl_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, IMPL_KW)
+    }
+    /// The head type: `Self`, a trait name, a marker, an implementer.
+    pub fn head(&self) -> Option<Type> {
+        child(&self.syntax)
+    }
+    /// Whether the head is the bare `Self` — the inherent form.
+    pub fn is_self_head(&self) -> bool {
+        matches!(
+            &self.head(),
+            Some(Type::PathType(path))
+                if path.generic_arg_list().is_none()
+                    && path.variant_name_ref().is_none()
+                    && path.name_ref().is_some_and(|n| n.text() == "Self")
+        )
+    }
+    pub fn members(&self) -> impl Iterator<Item = Member> + use<> {
+        children(&self.syntax)
+    }
+    pub fn l_brace_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, L_BRACE)
+    }
+}
+
+impl Member {
+    pub fn name(&self) -> Option<Name> {
+        child(&self.syntax)
+    }
+    /// The colon-declared type (`name: fn(...);`), when written.
+    pub fn colon_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, COLON)
+    }
+    pub fn ty(&self) -> Option<Type> {
+        child(&self.syntax)
+    }
+    pub fn eq_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, EQ)
+    }
+    /// The defining value (`name = fn(...) { ... };`), when written.
+    pub fn value(&self) -> Option<Expr> {
+        child(&self.syntax)
+    }
+}
+
 impl TypeItem {
     pub fn name(&self) -> Option<Name> {
         child(&self.syntax)
+    }
+    /// The attachment `with`-chain trailing the declaration, in source
+    /// order.
+    pub fn with_groups(&self) -> impl Iterator<Item = WithGroup> + use<> {
+        children(&self.syntax)
     }
     /// The declaration's RHS — restricted to a `struct` literal by hir, but
     /// any expression parses (resilience).
@@ -867,8 +944,18 @@ impl EnumVariant {
 }
 
 impl FnType {
+    /// The parameter types. A written fn TYPE spells them bare
+    /// (`fn(usize) -> R`) and they are direct children; the member
+    /// declaration spelling names them (`fn(n: usize) -> R`), which puts
+    /// them one level down under a `PARAM_LIST`. Reading through it keeps
+    /// this accessor honest for both shapes instead of silently answering
+    /// "no parameters" for the second.
     pub fn param_types(&self) -> impl Iterator<Item = Type> + use<> {
-        children(&self.syntax)
+        let params: Vec<Type> = match child::<ParamList>(&self.syntax) {
+            Some(list) => list.params().filter_map(|p| p.ty()).collect(),
+            None => children(&self.syntax).collect(),
+        };
+        params.into_iter()
     }
     pub fn ret_type(&self) -> Option<RetType> {
         child(&self.syntax)

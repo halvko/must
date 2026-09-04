@@ -27,13 +27,6 @@ pub(crate) fn hover(
         .find(|t| t.kind() == SyntaxKind::IDENT)?;
     let parent = token.parent()?;
 
-    let item_index = |node: &SyntaxNode| {
-        let item_node = node.ancestors().find(|n| ast::Item::can_cast(n.kind()))?;
-        root.children()
-            .filter(|n| ast::Item::can_cast(n.kind()))
-            .position(|n| n == item_node)
-    };
-
     // A type name in annotation position: show the declaration. The
     // variant segment of `p: Shape::Circle` shows the variant instead.
     if let Some(name_ref) = ast::NameRef::cast(parent.clone())
@@ -63,7 +56,7 @@ pub(crate) fn hover(
             };
             return type_item_hover(db, loc.to_id(db), name_ref.syntax().text_range());
         }
-        let item = *hir::file_item_ids(db, file).get(item_index(variant_pat.syntax())?)?;
+        let item = hir::checkable_item_at(db, file, variant_pat.syntax())?;
         let (_, source_map) = hir::body_with_source_map(db, item);
         let pat = source_map.pat_for_node(SyntaxNodePtr::new(variant_pat.syntax()))?;
         let variant = hir::infer::infer(db, item).variant_of_pat.get(pat)?;
@@ -80,7 +73,7 @@ pub(crate) fn hover(
     if let Some(name_ref) = ast::NameRef::cast(parent.clone())
         && let Some(field_expr) = name_ref.syntax().parent().and_then(ast::FieldExpr::cast)
     {
-        let item = *hir::file_item_ids(db, file).get(item_index(field_expr.syntax())?)?;
+        let item = hir::checkable_item_at(db, file, field_expr.syntax())?;
         let (_, source_map) = hir::body_with_source_map(db, item);
         let expr = source_map.expr_for_node(SyntaxNodePtr::new(field_expr.syntax()))?;
         let ty = hir::infer::infer(db, item).type_of_expr.get(expr)?.clone();
@@ -94,7 +87,7 @@ pub(crate) fn hover(
         if let Some(name_ref) = ast::NameRef::cast(parent.clone()) {
             // A use: the type of the expression.
             let path_expr = name_ref.syntax().parent().and_then(ast::PathExpr::cast)?;
-            let item = *hir::file_item_ids(db, file).get(item_index(path_expr.syntax())?)?;
+            let item = hir::checkable_item_at(db, file, path_expr.syntax())?;
             let (body, source_map) = hir::body_with_source_map(db, item);
             // The first segment of `Shape::Circle` has its own expression
             // on the segment's node; anything else is the whole path.
@@ -129,7 +122,7 @@ pub(crate) fn hover(
             )
         } else {
             let name = ast::Name::cast(parent)?;
-            let item = *hir::file_item_ids(db, file).get(item_index(name.syntax())?)?;
+            let item = hir::checkable_item_at(db, file, name.syntax())?;
             if name
                 .syntax()
                 .parent()
@@ -145,6 +138,15 @@ pub(crate) fn hover(
                 let ty = hir::signature(db, item);
                 let value = const_display(db, item);
                 (name.text(), ty, name.syntax().text_range(), value, false)
+            } else if name
+                .syntax()
+                .parent()
+                .is_some_and(|p| p.kind() == SyntaxKind::MEMBER)
+            {
+                // A member's name declaration: its signature, like a
+                // static fn's.
+                let ty = hir::signature(db, item);
+                (name.text(), ty, name.syntax().text_range(), None, false)
             } else {
                 // A local binding (let or parameter).
                 let (body, source_map) = hir::body_with_source_map(db, item);
@@ -243,15 +245,7 @@ fn const_block_hover(
         .token_at_offset(offset)
         .find(|t| t.kind() == SyntaxKind::CONST_KW)?;
     let block = ast::ConstBlockExpr::cast(token.parent()?)?;
-    let item_node = block
-        .syntax()
-        .ancestors()
-        .find(|n| ast::Item::can_cast(n.kind()))?;
-    let index = root
-        .children()
-        .filter(|n| ast::Item::can_cast(n.kind()))
-        .position(|n| n == item_node)?;
-    let item = *hir::file_item_ids(db, file).get(index)?;
+    let item = hir::checkable_item_at(db, file, block.syntax())?;
     let (_, source_map) = hir::body_with_source_map(db, item);
     let expr = source_map.expr_for_node(SyntaxNodePtr::new(block.syntax()))?;
     let ty = hir::infer::infer(db, item).type_of_expr.get(expr)?.clone();
@@ -281,15 +275,7 @@ fn loop_hover(
         .token_at_offset(offset)
         .find(|t| t.kind() == SyntaxKind::LOOP_KW)?;
     let loop_expr = ast::LoopExpr::cast(token.parent()?)?;
-    let item_node = loop_expr
-        .syntax()
-        .ancestors()
-        .find(|n| ast::Item::can_cast(n.kind()))?;
-    let index = root
-        .children()
-        .filter(|n| ast::Item::can_cast(n.kind()))
-        .position(|n| n == item_node)?;
-    let item = *hir::file_item_ids(db, file).get(index)?;
+    let item = hir::checkable_item_at(db, file, loop_expr.syntax())?;
     let (_, source_map) = hir::body_with_source_map(db, item);
     let expr = source_map.expr_for_node(SyntaxNodePtr::new(loop_expr.syntax()))?;
     let ty = hir::infer::infer(db, item).type_of_expr.get(expr)?.clone();

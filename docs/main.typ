@@ -40,54 +40,6 @@ tag) — anonymous and structural, matched by shape alone. Enums have no
 anonymous form: every enum lives behind a `type` item (see "Enums and
 variants" below).
 
-Tagged types can be created:
-
-```
-trait Eq {
-    type Lhs = Self;
-    type Rhs = Self;
-    eq: fn (lhs: Lhs, rhs: &Rhs) -> bool = {
-        fn<S: Struct>(lhs: S, rhs: S) => {
-            // ...
-        }
-        fn<E: Enum>(lhs: E, rhs: E) => {
-            // ...
-        }
-    }
-    /*
-    typematch (Lhs, Rhs) {
-        (s { ...lhsFields }, s { ...rhsFields }) => for field in lhsFields {
-            rhsFields[field] == lhsFields[field]
-        }
-    }
-    */
-} derive for Struct<...T> where T: Eq {
-
-} derive Enum {
-
-}
-
-type S {
-    a: string,
-} with self {
-    new = fn (a) => S { a }
-} with Eq {};
-
-type Nested {
-    a: { b: string }
-};
-
-type HasGeneric<T> { phantom: Phantom<T> } with Eq where T: Eq {};
-
-type ExampleEnum | A | B;
-
-static main = fn {
-    let s1 = S::new("example");
-    let s2 = S::new("example");
-    assert(s1 == s2);
-}
-```
-
 == Variable declarations
 
 `let` is the only variable-declaration form. Possible sugars — an
@@ -335,6 +287,86 @@ At runtime named types are fully erased: a `Point` value *is* its record
 value — same representation, structural equality under the hood. The type
 system alone keeps `Point` and bare records apart, so erased equality is
 only ever asked between two values of the same nominal type.
+
+== Inherent members and dot-calls
+
+A `type` declaration may carry operations of its own, in a trailing `with`
+chain. Inside it, `impl Self { ... }` holds *inherent members*: ordinary
+`fn` values, defined with `=` like every other item, that the type owns.
+
+```must
+type Counter = struct { n: usize } with {
+    impl Self {
+        get = fn (c: Self) -> usize { c.n };
+        bump = fn (by: usize, c: Self) -> Self {
+            Counter(struct { n = c.n + by })
+        };
+    }
+};
+
+static main = fn () -> usize {
+    let c = Counter(struct { n = 3 });
+    c.bump(2).get()
+};
+```
+
+There is no `self` keyword. Dot-callability is *structural*: a member is
+reachable through the dot exactly when its LAST parameter is `Self`-typed,
+and the receiver becomes that last argument. `c.bump(2)` means `bump(2, c)`
+— literally, including evaluation order, so the written arguments run
+*before* the receiver expression binds. That is the whole reason the
+receiver sits last rather than first.
+
+A member must spell its full signature: every parameter type and the return
+type. That is what lets a dot-call pick the member without first running
+inference over its body.
+
+Module-level functions are deliberately *not* dot-callable, even with the
+same shape — construction has no receiver, so `Counter::new`-style
+constructors stay ordinary calls:
+
+```must
+static counter_new = fn (n: usize) -> Counter { Counter(struct { n }) };
+// counter_new(3)      — fine
+// c.counter_new()     — error: no field or member `counter_new`
+```
+
+Fields and members are separate namespaces, and the syntax picks between
+them: call syntax reaches a dot-callable member first, a bare dot always
+reads the field, and parenthesising the access — `(v.len)()` — calls a
+fn-typed field even when a member shares its name. A member named after a
+field is therefore legal, which is what makes the getter idiom work:
+
+```must
+type Vecish = struct { len: usize } with {
+    impl Self {
+        len = fn (v: Self) -> usize { v.len };
+    }
+};
+// v.len()  — the member
+// v.len    — the field
+```
+
+There is no auto-deref and no auto-ref. A receiver's type must *be* the
+member's `Self`, so a raw pointer to a type with members does not dot-call
+them; write the deref yourself.
+
+The owner's generic binder is in scope in member signatures and bodies, and
+a dot-call never spells a turbofish — the receiver's type supplies the
+arguments:
+
+```must
+type Box2 = struct::<T> { v: T } with {
+    impl Self {
+        get = fn (b: Self) -> T { b.v };
+    }
+};
+
+static hi = fn () -> str { Box2(struct { v = "hi" }).get() };
+```
+
+Attaching an impl to anything but `Self` — a trait impl — parses but is not
+supported yet.
 
 == Enums and variants
 

@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 15 errors and 1 warning.
+// exactly: found 19 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -153,3 +153,43 @@ static too_big_for_u8: u8 = 300;
 //     reinterpretation.
 //     error: record fields are defined with `=` (`name = value`); `:` annotates a type
 static old_spelling: struct { x: usize } = struct { x: 1 };
+
+// 17. Trait impls in a `with`-chain are parse-and-reserve: the sealed
+//     grammar parses whole (element boundaries are token-recognizable),
+//     but only `impl Self { ... }` inherent members are supported.
+//     error: trait impls are not supported yet; only `impl Self { ... }` (inherent members) is
+type Reserved = struct { n: usize } with {
+    impl Display {
+        fmt = fn(r: Self) -> str { "reserved" };
+    }
+};
+
+// 18. A colon-declared member inside `impl Self` is an unimplementable
+//     promise: an inherent impl is the only impl site its type will ever
+//     have, so a declaration with no definition can never be satisfied.
+//     error: a declare-only inherent member is an unimplementable promise; define it: `name = fn(...) -> ... { ... };`
+type Promised = struct { n: usize } with {
+    impl Self {
+        len: fn(p: Self) -> usize;
+    }
+};
+
+// 19. Module-level statics are never dot-callable — G13's deliberate
+//     opt-out: identical signature, but only members resolve through the dot.
+//     The related note points at `plain_len` and says to call it directly.
+//     error: no field or member `plain_len` on `Opted`
+type Opted = struct { n: usize };
+static plain_len = fn (o: Opted) -> usize { o.n };
+static dotted_call = fn (o: Opted) -> usize { o.plain_len() };
+
+// 20. A member whose LAST parameter is not `Self`-typed is not dot-callable:
+//     dot-call resolution is structural — the receiver becomes the last
+//     argument, so only a Self-typed last parameter can receive it.
+//     error: `scaled` is not dot-callable: its last parameter is not `Self`-typed (dot-call resolution is structural)
+type Scaler = struct { n: usize } with {
+    impl Self {
+        scaled = fn(s: Self, by: usize) -> usize { s.n * by };
+    }
+};
+static wrong_self_position = fn (s: Scaler) -> usize { s.scaled(2) };
+

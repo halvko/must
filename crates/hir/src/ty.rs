@@ -995,6 +995,24 @@ pub(crate) fn lower_type_ref_in(
     }
 }
 
+/// The declared type of `item`'s const param `index` (`usize` for
+/// `const N: usize`), lowered eval-free — `{error}` when out of range or
+/// not a const param. MIR consults this to type the receiver-supplied
+/// const-argument values of a member call on a const-generic type.
+pub fn const_param_declared_ty(db: &dyn Db, item: ItemId<'_>, index: u32) -> Ty {
+    let declared = crate::item_data(db, item)
+        .as_ref()
+        .and_then(|data| data.generics.get(index as usize))
+        .and_then(|param| match &param.kind {
+            GenericParamKind::Const(type_ref) => Some(type_ref.clone()),
+            GenericParamKind::Type => None,
+        });
+    match declared {
+        Some(type_ref) => lower_const_decl_ty(db, item.file(db), &type_ref),
+        None => Ty::Error,
+    }
+}
+
 /// Lower a const param's *declared* type outside any inference context —
 /// scope-less (dependent `const N: T` is rejected, TR06) and hole-free (any
 /// minted variable erases to `{error}`; the declaration has nothing to
@@ -1006,7 +1024,57 @@ pub(crate) fn lower_const_decl_ty(db: &dyn Db, file: SourceFile, type_ref: &Type
     if ty.contains_infer() { Ty::Error } else { ty }
 }
 
-/// The [`ParamScope`] of `item`'s generic binder.
+/// The self-type of a MEMBER item: the OWNING type declaration at its full
+/// binders — each of the owner's params spelled as the member's own rigid
+/// [`Ty::Param`]/[`ConstArgValue::Param`] (member schemes are keyed by the
+/// member's [`ItemLoc`], exactly like any generic item's). `None` for
+/// non-member ids.
+pub fn member_self_ty(db: &dyn Db, item: ItemId<'_>) -> Option<Ty> {
+    let owner = crate::member_owner(db, item)?;
+    let owner_loc = crate::item_loc(db, owner);
+    let member_loc = crate::item_loc(db, item);
+    let generics = crate::item_data(db, owner)
+        .as_ref()
+        .map(|data| data.generics.clone())
+        .unwrap_or_default();
+    let args = generics
+        .iter()
+        .enumerate()
+        .map(|(index, param)| match param.kind {
+            GenericParamKind::Type => GenericArg::Ty(Ty::Param(ParamTy {
+                item: member_loc.clone(),
+                index: index as u32,
+                name: std::sync::Arc::from(param.name.as_str()),
+            })),
+            GenericParamKind::Const(_) => GenericArg::Const(ConstArgValue::Param {
+                item: member_loc.clone(),
+                index: index as u32,
+                name: std::sync::Arc::from(param.name.as_str()),
+            }),
+        })
+        .collect();
+    Some(Ty::Named(NamedTy {
+        decl: owner_loc,
+        args,
+    }))
+}
+
+/// Whether `item` — a member id — is reachable through the dot. Dot-call
+/// resolution is STRUCTURAL (there is no `self` token): the receiver
+/// becomes the LAST argument, so a member is dot-callable exactly when it
+/// is an fn whose last parameter is its own `Self` type. One definition,
+/// because inference and completions must never disagree about which
+/// members the dot offers.
+pub fn member_is_dot_callable(db: &dyn Db, item: ItemId<'_>) -> bool {
+    matches!(
+        (signature(db, item), member_self_ty(db, item)),
+        (Ty::Fn(f), Some(self_ty)) if f.params.last() == Some(&self_ty)
+    )
+}
+
+/// The [`ParamScope`] of `item`'s generic binder. For a MEMBER item the
+/// scope additionally binds `Self` to the owning type at its full binders
+/// — the one extra name member signatures and bodies resolve.
 pub(crate) fn generic_param_scope(
     db: &dyn Db,
     item: ItemId<'_>,
@@ -1014,6 +1082,9 @@ pub(crate) fn generic_param_scope(
 ) -> ParamScope {
     let loc = crate::item_loc(db, item);
     let mut scope = ParamScope::default();
+    if let Some(self_ty) = member_self_ty(db, item) {
+        scope.types.insert("Self".to_owned(), self_ty);
+    }
     for (index, param) in generics.iter().enumerate() {
         if param.name.is_empty() {
             continue;
@@ -1288,6 +1359,22 @@ pub fn variant_payloads_for(db: &dyn Db, variant: &VariantTy) -> Option<Vec<Ty>>
 /// consults [`crate::groups`] for them.
 #[salsa::tracked]
 pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
+    // A MEMBER's signature is always annotation-derived (dot-call
+    // resolution must read heads without inference) and always lowers
+    // under its param scope — even with an empty binder, `Self` is in
+    // scope. `Ty::Error` when the fully-annotated member rule is violated
+    // (the definition site carries the diagnostic).
+    if item.member(db).is_some() {
+        let Some(data) = crate::item_data(db, item).as_ref() else {
+            return Ty::Error;
+        };
+        let Some(type_ref) = data.type_ref.as_ref() else {
+            return Ty::Error;
+        };
+        let scope = generic_param_scope(db, item, &data.generics);
+        let mut table = InPlaceUnificationTable::new();
+        return lower_type_ref_in(db, item.file(db), type_ref, &mut table, &scope);
+    }
     if let Some(data) = crate::item_data(db, item).as_ref()
         && !data.generics.is_empty()
     {
@@ -1350,6 +1437,12 @@ pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
 /// exists, exported items go back to requiring annotations; today every
 /// item counts as private.
 pub fn signature_needs_annotation<'db>(db: &'db dyn Db, item: ItemId<'db>) -> bool {
+    // Members follow the generic-item rule: the definition site carries
+    // the unconditional fully-annotated diagnostic; repeating it at uses
+    // would be noise.
+    if item.member(db).is_some() {
+        return false;
+    }
     if let Some(data) = crate::item_data(db, item).as_ref() {
         // A generic item is never "needs annotation": its scheme either is
         // complete (fully-annotated rule) or the *definition* carries the

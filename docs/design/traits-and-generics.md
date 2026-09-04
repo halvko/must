@@ -2,6 +2,21 @@
 
 ## Conclusions
 
+- **TR01** Trait and impl syntax, sealed. `trait N = requires { ... };` declares; aliases are a
+  committed second constructor. Impls attach as `impl`-keyword elements inside a required
+  `with`-chain, at one of three homes: the trait's declaration, the self-type's head, or, via
+  a `for`-head covering `Self`, an anchor type in the self-type's arguments. Binder algebra:
+  `with::<U>` declares, `with T: Bound` constrains, `with T = usize` pins. Modifier heads
+  (`unsafe`, `for <Type>`) distribute over the next element or a brace group. Qualified
+  references use named `Self` (`From::<u8, Self = T>::from(x)`), with a short form when `Self`
+  is inferable. Clauses immediately precede the item's defining brace. There is no `self`
+  token: dot-call is structural, so a member whose last parameter is `Self`-typed is
+  dot-callable and the receiver becomes its LAST argument — which is why the written arguments
+  evaluate before the receiver binds. Expression-position `Self` is rigid: one meaning per
+  body, the owner type at the member's own binders. Implemented so far: the inherent home,
+  `impl Self { name = fn(...) -> R { ... }; }` on a `type` declaration. Trait declarations do
+  not parse yet, and a member must spell its full signature — that is what lets a dot-call
+  resolve without running inference.
 - **TR06** Generics are item-level only: no first-class generic values, no higher-rank types,
   schemes never enter the type. Instantiation identity is applicative: the key is
   `(ItemLoc, canonical args)`; for distinctness, wrap it in a `type` declaration. Bodies check
@@ -35,6 +50,14 @@
 
 ## Discarded
 
+- **Declaration spellings that lost**: `interface` (a permanent two-vocabulary cost);
+  `type N = trait` (kind-dishonest: a trait classifies types, not values); binder-on-the-name
+  (breaks the constructor-binder invariant); methods inside the struct body (the brace split
+  mirrors the runtime split: fields are data in the value's layout, impls are static fns no
+  value carries a pointer to); keywordless elements (context ambiguity, greppability, diff
+  anchoring). **TR01**
+- **Auto-ref to dodge the receiver wall** — a conversion policy with inference consequences,
+  not a spelling: the receiver's type must BE the member's `Self`. **TR01**
 - **First-class generic values / higher-rank types** — binders in an engine that is
   deliberately binder-free; a solver rewrite. **Generic items joining inference groups** — one
   shared signature variable pins them to a monotype. **Unannotated generic literals** — would
@@ -63,6 +86,9 @@
 
 ## Re-evaluate when
 
+- **Trait aliases are scheduled or rejected** — the `Name = constructor` declaration shape
+  depends on them: if no second constructor materializes, the shape degenerates and
+  keyword-declaration forms re-enter. **TR01**
 - **Closures are built** — that owns the access-marker spelling, capture modes and syntax, and
   the capture-free-literal fork: nominal like every closure and coerced to the structural fn
   type (uniform, one seam), or a structural fn value directly (no coercion machinery, but

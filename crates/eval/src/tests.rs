@@ -3797,3 +3797,171 @@ static main = fn () -> bool {
         "#]],
     );
 }
+
+// ---- inherent members and dot-calls -------------------------------------
+
+#[test]
+fn dot_call_runs_as_a_direct_call() {
+    check_run(
+        r#"
+type Counter = struct { n: usize } with {
+    impl Self {
+        get = fn(c: Self) -> usize { c.n };
+        bump = fn(by: usize, c: Self) -> Self { Counter(struct { n = c.n + by }) };
+    }
+};
+"#,
+        "Counter(struct { n = 3 }).bump(4).get()",
+        expect![[r#"
+            => 7
+        "#]],
+    );
+}
+
+// THE TR01 evaluation-order pin: `recv.name(a)` desugars to `name(a, recv)`,
+// and arguments evaluate left to right — so the ARGUMENT runs BEFORE the
+// receiver expression binds its value. `bump` mutates the cell through a
+// raw pointer while the receiver expression reads through the same
+// pointer: argument-first order sees the bumped value (99), receiver-first
+// would have seen 1. This order is WHY self is the last parameter.
+#[test]
+fn dot_call_arguments_evaluate_before_the_receiver_binds() {
+    check_run(
+        r#"
+type Cell = struct { v: usize } with {
+    impl Self {
+        plus = fn(extra: usize, c: Self) -> usize { c.v + extra };
+    }
+};
+static bump = fn(p: &raw mut Cell) -> usize {
+    unsafe { p.* = Cell(struct { v = 99 }); };
+    0
+};
+static main = fn() -> usize {
+    let mut c = Cell(struct { v = 1 });
+    let p = &raw mut c;
+    unsafe { p.* }.plus(bump(p))
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 99
+        "#]],
+    );
+}
+
+#[test]
+fn generic_member_dispatches_at_the_receiver_args() {
+    check_run(
+        r#"
+type Box2 = struct::<T> { v: T } with {
+    impl Self {
+        get = fn(b: Self) -> T { b.v };
+        put = fn(x: T, b: Self) -> Self { Box2::<T>(struct { v = x }) };
+    }
+};
+"#,
+        r#"Box2(struct { v = "hi" }).put("ho").get()"#,
+        expect![[r#"
+            => "ho"
+        "#]],
+    );
+}
+
+// A const-generic owner: the member reads the binder's `N`, supplied by
+// the RECEIVER's type (the turbofish a dot-call never spells) — and one
+// member forwards it to another through a dot-call on `Self`.
+#[test]
+fn const_generic_member_reads_the_receivers_const_arg() {
+    check_run(
+        r#"
+type Buf = struct::<const N: usize> { used: usize } with {
+    impl Self {
+        cap = fn(b: Self) -> usize { N };
+        free = fn(b: Self) -> usize { b.cap() - b.used };
+    }
+};
+"#,
+        "Buf::<8>(struct { used = 3 }).free()",
+        expect![[r#"
+            => 5
+        "#]],
+    );
+}
+
+#[test]
+fn variant_typed_receiver_widens_into_the_member() {
+    check_run(
+        r#"
+type Light = enum { Red, Green } with {
+    impl Self {
+        flip = fn(l: Self) -> Light {
+            match l {
+                ::Red => Light::Green,
+                ::Green => Light::Red,
+            }
+        };
+    }
+};
+"#,
+        "Light::Red.flip()",
+        expect![[r#"
+            => Light::Green
+        "#]],
+    );
+}
+
+// A `const fn` member is const-callable; a plain member is rejected in a
+// const context with the ordinary const-check story.
+#[test]
+fn const_fn_members_run_at_compile_time() {
+    check_const(
+        r#"
+type Sq = struct { n: usize } with {
+    impl Self {
+        area = const fn(s: Self) -> usize { s.n * s.n };
+    }
+};
+static a = const { Sq(struct { n = 5 }).area() };
+"#,
+        expect![[r#"
+            a = 25
+        "#]],
+    );
+}
+
+#[test]
+fn plain_member_call_rejected_in_const_context() {
+    check_const(
+        r#"
+type Sq = struct { n: usize } with {
+    impl Self {
+        area = fn(s: Self) -> usize { s.n * s.n };
+    }
+};
+static a = const { Sq(struct { n = 5 }).area() };
+"#,
+        expect![[r#"
+            a = error[Trap]: cannot call `area` in a const context; marking it `const fn` would allow this
+        "#]],
+    );
+}
+
+// SEPARATE NAMESPACES (G13): call syntax runs the MEMBER, bare
+// access reads the FIELD — the getter idiom end to end at runtime.
+#[test]
+fn member_shadowing_a_field_dispatches_by_syntax() {
+    check_run(
+        r#"
+type Vecish = struct { len: usize } with {
+    impl Self {
+        len = fn(v: Self) -> usize { v.len + 10 };
+    }
+};
+"#,
+        "Vecish(struct { len = 3 }).len() + Vecish(struct { len = 3 }).len",
+        expect![[r#"
+            => 16
+        "#]],
+    );
+}

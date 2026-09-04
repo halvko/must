@@ -100,7 +100,7 @@ impl CheckCtx<'_> {
                     }
                 }
             }
-            ExprData::Call { callee, args } => {
+            ExprData::Call { callee, args, .. } => {
                 // The unsafe builtins: freeing invalidates every pointer
                 // into the allocation, and `copy` writes through a raw
                 // pointer — misuse of either is UB, so the CALL needs the
