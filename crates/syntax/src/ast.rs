@@ -232,6 +232,22 @@ ast_enum!(
     GenericArg: TypeArg, ConstArg
 );
 
+ast_node!(
+    /// `[T; N]` — a fixed-size array type. The length is a [`ConstArg`],
+    /// the same node a turbofish's const argument uses.
+    ArrayType: ARRAY_TYPE
+);
+ast_node!(
+    /// `[e1, e2]` (length = element count) or `[e; N]` (the repeat form —
+    /// a `;` separates the element from the count).
+    ArrayExpr: ARRAY_EXPR
+);
+ast_node!(
+    /// `base[index]` — an index read (or, as an assignment target, an
+    /// element write). Chains like field access.
+    IndexExpr: INDEX_EXPR
+);
+
 ast_enum!(
     Expr: FnLiteral,
     CallExpr,
@@ -248,7 +264,9 @@ ast_enum!(
     MatchExpr,
     LoopExpr,
     BreakExpr,
-    ContinueExpr
+    ContinueExpr,
+    ArrayExpr,
+    IndexExpr
 );
 ast_enum!(
     /// A pattern: a match-arm pattern (`VariantPat`/`WildcardPat`/`RestPat`)
@@ -270,7 +288,8 @@ ast_enum!(
     PathType,
     RefType,
     HoleType,
-    RecordType
+    RecordType,
+    ArrayType
 );
 ast_enum!(Stmt: LetStmt, AssignStmt, ExprStmt);
 ast_enum!(
@@ -941,6 +960,53 @@ impl RecordExprField {
     /// supported yet; validation rejects it.
     pub fn pub_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, PUB_KW)
+    }
+}
+
+impl ArrayType {
+    /// The element type.
+    pub fn ty(&self) -> Option<Type> {
+        child(&self.syntax)
+    }
+    /// The length const argument.
+    pub fn len(&self) -> Option<ConstArg> {
+        child(&self.syntax)
+    }
+}
+
+impl ArrayExpr {
+    /// The `;` of the repeat form, if this is one.
+    pub fn semicolon_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, SEMICOLON)
+    }
+    pub fn is_repeat(&self) -> bool {
+        self.semicolon_token().is_some()
+    }
+    /// The list form's elements (all direct child expressions). For the
+    /// repeat form use [`Self::repeat_parts`] instead.
+    pub fn elements(&self) -> impl Iterator<Item = Expr> + use<> {
+        children(&self.syntax)
+    }
+    /// The repeat form's `(element, count)` — `None` when this is the list
+    /// form or the source is broken.
+    pub fn repeat_parts(&self) -> Option<(Expr, Option<Expr>)> {
+        if !self.is_repeat() {
+            return None;
+        }
+        let mut exprs = children::<Expr>(&self.syntax);
+        let element = exprs.next()?;
+        Some((element, exprs.next()))
+    }
+}
+
+impl IndexExpr {
+    /// The expression being indexed.
+    pub fn base(&self) -> Option<Expr> {
+        children(&self.syntax).next()
+    }
+    /// The index expression (between the brackets).
+    pub fn index(&self) -> Option<Expr> {
+        children(&self.syntax).nth(1)
     }
 }
 

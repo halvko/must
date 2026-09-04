@@ -202,6 +202,22 @@ impl CheckCtx<'_> {
             // A field access evaluates its receiver; the projection itself
             // has no effect.
             ExprData::Field { receiver, .. } => self.check_expr(*receiver, in_const),
+            // Array construction and indexing are pure data operations —
+            // const-legal, like record literals and field access; the
+            // bounds trap is the ordinary rejected-op story.
+            ExprData::ArrayLit { elements } => {
+                for &element in elements {
+                    self.check_expr(element, in_const);
+                }
+            }
+            ExprData::ArrayRepeat { element, count } => {
+                self.check_expr(*element, in_const);
+                self.check_expr(*count, in_const);
+            }
+            ExprData::Index { base, index } => {
+                self.check_expr(*base, in_const);
+                self.check_expr(*index, in_const);
+            }
             // `const { ... }` re-enters a const context wherever it appears.
             ExprData::ConstBlock { body } => self.check_expr(*body, true),
             // *Defining* a function in a const context is always fine; only

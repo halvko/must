@@ -76,6 +76,8 @@ fn next_token(rest: &str) -> (SyntaxKind, usize, Option<String>) {
         ')' => (R_PAREN, 1, None),
         '{' => (L_BRACE, 1, None),
         '}' => (R_BRACE, 1, None),
+        '[' => (L_BRACKET, 1, None),
+        ']' => (R_BRACKET, 1, None),
         ':' if rest.as_bytes().get(1) == Some(&b':') => (COLON2, 2, None),
         ':' => (COLON, 1, None),
         ';' => (SEMICOLON, 1, None),

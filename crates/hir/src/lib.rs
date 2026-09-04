@@ -291,6 +291,34 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
     }
 
+    // Array-type LENGTHS in annotation position: the diagnostic MIRROR of
+    // `ty`'s array lowering, which reads the length off the syntax
+    // (eval-free, like every const arg) and stays silent about anything it
+    // can't represent. Same judgement as a turbofish's const argument
+    // against a `usize`-declared param: literals type-check by literal
+    // kind, a bare name must be an in-scope `usize` const param, and a
+    // `const { ... }` block is outside the annotation domain entirely.
+    for array_type in parse(db, file)
+        .syntax_node()
+        .descendants()
+        .filter_map(ast::ArrayType::cast)
+    {
+        let Some(len) = array_type.len() else {
+            // No length at all: the parse error covers it.
+            continue;
+        };
+        let binder = enclosing_binder_info(array_type.syntax());
+        if let Some(message) = array_len_annotation_error(db, file, &len, &binder) {
+            diagnostics.push(Diagnostic {
+                range: len.syntax().text_range(),
+                severity: Severity::Error,
+                message,
+                fix: None,
+                related: Vec::new(),
+            });
+        }
+    }
+
     // One binder, one name per parameter. Type and const params share the
     // binder's namespace: a rigid `Ty::Param` is positional and a const
     // param's mention resolves to the LAST declaration of the name, so a
@@ -393,6 +421,19 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     range: ty.syntax().text_range(),
                     severity: Severity::Error,
                     message: diag::FN_CONST_ARG.to_owned(),
+                    fix: None,
+                    related: Vec::new(),
+                });
+                continue;
+            }
+            // Array values stay outside the const-arg domain too (the
+            // ruled domain is builtins + records + variants) — same
+            // declaration-site rejection, same belt at mentions.
+            if type_ref.mentions_array() {
+                diagnostics.push(Diagnostic {
+                    range: ty.syntax().text_range(),
+                    severity: Severity::Error,
+                    message: diag::ARRAY_CONST_ARG.to_owned(),
                     fix: None,
                     related: Vec::new(),
                 });
@@ -1522,6 +1563,67 @@ fn const_annotation_arg_error(
     }
 }
 
+/// Judge an array type's length in annotation position (`[T; N]`) — the
+/// array sibling of [`const_annotation_arg_error`], against the one
+/// declared type a length can have: `usize`. Mirrors the silent
+/// `ConstArgValue` cases of `ty`'s lowering case by case.
+fn array_len_annotation_error(
+    db: &dyn Db,
+    file: SourceFile,
+    len: &ast::ConstArg,
+    binder: &BinderInfo,
+) -> Option<String> {
+    array_len_expr_error(db, file, len.expr(), binder)
+}
+
+/// The expression-shaped core of [`array_len_annotation_error`] — shared
+/// with type declarations, where `[usize; N]` parses as an ARRAY_EXPR and
+/// the length is a plain child expression.
+fn array_len_expr_error(
+    db: &dyn Db,
+    file: SourceFile,
+    len: Option<ast::Expr>,
+    binder: &BinderInfo,
+) -> Option<String> {
+    match len {
+        Some(ast::Expr::Literal(lit)) => {
+            let found = match lit.kind()? {
+                ast::LiteralKind::Int(token) => {
+                    if token.text().replace('_', "").parse::<u128>().is_err() {
+                        return Some(diag::INT_LITERAL_TOO_LARGE.to_owned());
+                    }
+                    return None;
+                }
+                ast::LiteralKind::Str(_) => Ty::Str,
+                ast::LiteralKind::Bool(_) => Ty::Bool,
+            };
+            Some(format!(
+                "type mismatch: expected `usize`, found `{}`",
+                found.display()
+            ))
+        }
+        Some(ast::Expr::PathExpr(path)) => {
+            let name = path.name_ref()?.text();
+            if !binder.names_const_param(&name) {
+                return Some(diag::TYPE_CONST_ARG_NOT_LITERAL.to_owned());
+            }
+            let own_declared = TypeRef::from_ast(binder.const_param_ty(&name)?.clone());
+            let found = ty::lower_const_decl_ty(db, file, &own_declared);
+            if found.contains_error() || found == Ty::Int {
+                return None;
+            }
+            Some(format!(
+                "type mismatch: expected `usize`, found `{}`",
+                found.display()
+            ))
+        }
+        Some(ast::Expr::ConstBlockExpr(_)) => Some(diag::CONST_BLOCK_TYPE_ARG.to_owned()),
+        // Broken source: the parse errors cover it.
+        None => None,
+        Some(_) => Some(diag::TYPE_CONST_ARG_NOT_LITERAL.to_owned()),
+    }
+}
+
 /// `Buf::<N>` forwarding the enclosing binder's const param `N`: the two
 /// declared types must agree — there is no subtyping (or conversion) in
 /// the const-arg domain either.
@@ -1664,15 +1766,6 @@ fn type_decl_field_diagnostics(
     record: &ast::RecordExpr,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    fn simple_error(range: TextRange, message: String) -> Diagnostic {
-        Diagnostic {
-            range,
-            severity: Severity::Error,
-            message,
-            fix: None,
-            related: Vec::new(),
-        }
-    }
     for field in record.fields() {
         let Some(name_ref) = field.name_ref() else {
             // No field name: broken source, the parse error covers it.
@@ -1684,91 +1777,142 @@ fn type_decl_field_diagnostics(
                 field.syntax().text_range(),
                 format!("expected a type for field `{}`", name_ref.text()),
             )),
-            Some(ast::Expr::PathExpr(path)) => {
-                let Some(type_name) = path.name_ref() else {
-                    continue;
-                };
-                let name = type_name.text();
-                let binder = enclosing_binder_info(path.syntax());
-                if let Some(list) = path.generic_arg_list() {
-                    if path.variant_name_ref().is_some() {
-                        diagnostics.push(simple_error(
-                            path.syntax().text_range(),
-                            format!(
-                                "`{name}` is generic; a generic enum's variant types \
-                                 cannot be written in annotations yet"
-                            ),
-                        ));
-                        continue;
-                    }
-                    // A hole inside the args has nothing to infer from in a
-                    // declaration (same rule as enum payloads).
-                    if !item_tree::expr_as_type_ref(ast::Expr::PathExpr(path.clone()))
-                        .is_fully_typed()
-                    {
-                        diagnostics.push(simple_error(
-                            path.syntax().text_range(),
-                            "a field's type must be a fully written type; \
-                             a declaration has nothing to infer `_` from"
-                                .to_owned(),
-                        ));
-                    }
-                    apply_position_diagnostics(
-                        db,
-                        file,
-                        path.syntax(),
-                        &name,
-                        Some(&list),
-                        &binder,
-                        diagnostics,
-                    );
-                    continue;
-                }
-                // The enclosing binder's params are real type names here —
-                // except a const param, which is a value.
-                if binder.names_type_param(&name) {
-                    if path.variant_name_ref().is_some() {
-                        diagnostics.push(simple_error(
-                            path.syntax().text_range(),
-                            format!("`{name}` has no variants (it is a type parameter)"),
-                        ));
-                    }
-                    continue;
-                }
-                if binder.names_const_param(&name) {
+            Some(expr) => type_decl_value_diagnostics(
+                db,
+                file,
+                &expr,
+                &format!("for field `{}`", name_ref.text()),
+                diagnostics,
+            ),
+        }
+    }
+}
+
+fn simple_error(range: TextRange, message: String) -> Diagnostic {
+    Diagnostic {
+        range,
+        severity: Severity::Error,
+        message,
+        fix: None,
+        related: Vec::new(),
+    }
+}
+
+/// Check one type-declaration value expression (a field's type, or an
+/// array element's) — a name, a nested `struct` literal, or a `[T; N]`
+/// written as the repeat-form ARRAY_EXPR this expression position parses
+/// it as. Anything else is not a type; `what` words the message
+/// (`"for field `x`"` / `"for the array element"`).
+fn type_decl_value_diagnostics(
+    db: &dyn Db,
+    file: SourceFile,
+    value: &ast::Expr,
+    what: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    match value {
+        ast::Expr::PathExpr(path) => {
+            let Some(type_name) = path.name_ref() else {
+                return;
+            };
+            let name = type_name.text();
+            let binder = enclosing_binder_info(path.syntax());
+            if let Some(list) = path.generic_arg_list() {
+                if path.variant_name_ref().is_some() {
                     diagnostics.push(simple_error(
                         path.syntax().text_range(),
-                        format!("`{name}` is a const parameter, not a type"),
+                        format!(
+                            "`{name}` is generic; a generic enum's variant types \
+                             cannot be written in annotations yet"
+                        ),
                     ));
-                    continue;
+                    return;
                 }
-                let message = match path.variant_name_ref() {
-                    // `x: Shape::Circle` as a field's type: same checks as
-                    // annotation position.
-                    Some(variant) => variant_position_error(db, file, &name, &variant.text()),
-                    None => type_position_error(db, file, &name).or_else(|| {
-                        // A bare mention of a GENERIC type: the args must
-                        // be spelled (same rule as annotation position).
-                        match type_scope(db, file).resolve(&name) {
-                            Some(Resolution::TypeItem(loc)) => {
-                                let arity = decl_generics_len(db, &loc);
-                                (arity > 0).then(|| diag::generic_arg_count(&name, arity, 0))
-                            }
-                            _ => None,
+                // A hole inside the args has nothing to infer from in a
+                // declaration (same rule as enum payloads).
+                if !item_tree::expr_as_type_ref(ast::Expr::PathExpr(path.clone())).is_fully_typed()
+                {
+                    diagnostics.push(simple_error(
+                        path.syntax().text_range(),
+                        "a field's type must be a fully written type; \
+                         a declaration has nothing to infer `_` from"
+                            .to_owned(),
+                    ));
+                }
+                apply_position_diagnostics(
+                    db,
+                    file,
+                    path.syntax(),
+                    &name,
+                    Some(&list),
+                    &binder,
+                    diagnostics,
+                );
+                return;
+            }
+            // The enclosing binder's params are real type names here —
+            // except a const param, which is a value.
+            if binder.names_type_param(&name) {
+                if path.variant_name_ref().is_some() {
+                    diagnostics.push(simple_error(
+                        path.syntax().text_range(),
+                        format!("`{name}` has no variants (it is a type parameter)"),
+                    ));
+                }
+                return;
+            }
+            if binder.names_const_param(&name) {
+                diagnostics.push(simple_error(
+                    path.syntax().text_range(),
+                    format!("`{name}` is a const parameter, not a type"),
+                ));
+                return;
+            }
+            let message = match path.variant_name_ref() {
+                // `x: Shape::Circle` as a field's type: same checks as
+                // annotation position.
+                Some(variant) => variant_position_error(db, file, &name, &variant.text()),
+                None => type_position_error(db, file, &name).or_else(|| {
+                    // A bare mention of a GENERIC type: the args must
+                    // be spelled (same rule as annotation position).
+                    match type_scope(db, file).resolve(&name) {
+                        Some(Resolution::TypeItem(loc)) => {
+                            let arity = decl_generics_len(db, &loc);
+                            (arity > 0).then(|| diag::generic_arg_count(&name, arity, 0))
                         }
-                    }),
-                };
-                if let Some(message) = message {
-                    diagnostics.push(simple_error(path.syntax().text_range(), message));
-                }
+                        _ => None,
+                    }
+                }),
+            };
+            if let Some(message) = message {
+                diagnostics.push(simple_error(path.syntax().text_range(), message));
             }
-            Some(ast::Expr::RecordExpr(nested)) => {
-                type_decl_field_diagnostics(db, file, &nested, diagnostics);
-            }
-            Some(other) => diagnostics.push(simple_error(
-                other.syntax().text_range(),
-                format!("expected a type for field `{}`", name_ref.text()),
-            )),
         }
+        ast::Expr::RecordExpr(nested) => {
+            type_decl_field_diagnostics(db, file, nested, diagnostics);
+        }
+        // `[usize; 4]` as a field's type parses as the repeat-form
+        // ARRAY_EXPR in this expression position (see
+        // `item_tree::expr_as_type_ref`): the element recurses as a type
+        // value, the length gets the annotation-position judgement. The
+        // list form is not a type.
+        ast::Expr::ArrayExpr(array) if array.is_repeat() => {
+            let binder = enclosing_binder_info(array.syntax());
+            let Some((element, count)) = array.repeat_parts() else {
+                return;
+            };
+            type_decl_value_diagnostics(db, file, &element, "for the array element", diagnostics);
+            let count_range = count
+                .as_ref()
+                .map(|count| count.syntax().text_range())
+                .unwrap_or_else(|| array.syntax().text_range());
+            if let Some(message) = array_len_expr_error(db, file, count, &binder) {
+                diagnostics.push(simple_error(count_range, message));
+            }
+        }
+        other => diagnostics.push(simple_error(
+            other.syntax().text_range(),
+            format!("expected a type {what}"),
+        )),
     }
 }

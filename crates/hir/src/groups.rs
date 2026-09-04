@@ -310,6 +310,7 @@ fn erase_infer(ty: &Ty) -> Ty {
             f.params.iter().map(erase_infer).collect(),
             erase_infer(&f.ret),
         ),
+        Ty::Array { elem, len } => Ty::array(erase_infer(elem), len.clone()),
         Ty::Record(rec) => Ty::record(
             rec.fields
                 .iter()

@@ -238,6 +238,23 @@ impl LowerCtx<'_> {
                 InferenceDiagnostic::AssignToConstParam { target, .. } => {
                     self.assign_traps.insert(*target, diag.message());
                 }
+                // Indexing a non-array, or a compile-time-known index past
+                // a compile-time-known length: the element's value cannot
+                // be produced (the OOB trap carries exactly the text the
+                // runtime bounds check would have used).
+                InferenceDiagnostic::IndexNonArray { expr, .. }
+                | InferenceDiagnostic::IndexOutOfBounds { expr, .. } => {
+                    self.value_traps.insert(*expr, diag.message());
+                }
+                // An empty array with an unknowable element type:
+                // compile-time only, like `NeedsAnnotation` — the value
+                // itself runs fine (it has no elements to be wrong about).
+                InferenceDiagnostic::EmptyArrayNeedsAnnotation { .. } => {}
+                // An array value in a const-arg position: like `FnConstArg`
+                // above, the mention's value refuses.
+                InferenceDiagnostic::ArrayConstArg { expr } => {
+                    self.value_traps.insert(*expr, diag.message());
+                }
             }
         }
         // Const-check diagnostics are reported on the *callee* (the
@@ -741,6 +758,69 @@ impl LowerCtx<'_> {
                     // already trapped — either way this operand is never
                     // observed.
                     None => Operand::Const(Const::Unit),
+                }
+            }
+            // `[e1, e2, e3]`: elements evaluate in source order (their
+            // effects follow the written program), then assemble.
+            ExprData::ArrayLit { elements } => {
+                let ops: Vec<Operand> = elements
+                    .iter()
+                    .map(|&element| self.lower_expr(b, element))
+                    .collect();
+                let dest = b.temp(self.ty(expr));
+                b.push_assign(
+                    dest,
+                    Rvalue::Aggregate {
+                        kind: AggregateKind::Array,
+                        ops,
+                    },
+                    expr,
+                );
+                Operand::Copy(dest)
+            }
+            // `[e; N]`: the element evaluates once, the count operand is a
+            // compile-time value by checking (a broken count is a pending
+            // value trap on the count expression and fires during its
+            // lowering here).
+            ExprData::ArrayRepeat { element, count } => {
+                let elem = self.lower_expr(b, *element);
+                let count = self.lower_expr(b, *count);
+                let dest = b.temp(self.ty(expr));
+                b.push_assign(dest, Rvalue::Repeat { elem, count }, expr);
+                Operand::Copy(dest)
+            }
+            // `a[i]`: base and index evaluate, then the element is read
+            // with a runtime bounds check (an ordinary trap, not UB). A
+            // diagnosed base (not an array / unknown type) or a
+            // compile-time OOB is a pending value trap on this expression;
+            // the placeholder is never observed.
+            ExprData::Index { base, index } => {
+                let base_op = self.lower_expr(b, *base);
+                let index_op = self.lower_expr(b, *index);
+                // A diagnosed read (compile-time OOB, non-array base,
+                // unknown type): the wrapper's value trap is the whole
+                // story — the read itself must not execute, or a
+                // compile-time-known OOB would fire the machine's runtime
+                // bounds check (same text, but a *dynamic* error the
+                // const-eval diagnostics would report a second time)
+                // instead of the planted trap.
+                if self.value_traps.contains_key(&expr) {
+                    return Operand::Const(Const::Unit);
+                }
+                match self.ty(*base) {
+                    Ty::Array { .. } => {
+                        let dest = b.temp(self.ty(expr));
+                        b.push_assign(
+                            dest,
+                            Rvalue::Index {
+                                base: base_op,
+                                index: index_op,
+                            },
+                            expr,
+                        );
+                        Operand::Copy(dest)
+                    }
+                    _ => Operand::Const(Const::Unit),
                 }
             }
             // `Shape::Circle` as a value (not a direct call — those are
@@ -1409,7 +1489,7 @@ impl LowerCtx<'_> {
             self.trap(b, target, message);
             return;
         }
-        if let ExprData::Field { .. } = &self.body.exprs[target] {
+        if let ExprData::Field { .. } | ExprData::Index { .. } = &self.body.exprs[target] {
             self.lower_field_assign_target(b, target, value, value_op);
             return;
         }
@@ -1503,16 +1583,18 @@ impl LowerCtx<'_> {
         }
     }
 
-    /// Lower a field-chain assignment target (`p.x = e;`, `p.a.b = e;`):
-    /// the write goes through a [`Place`] projection — the root binding's
-    /// local plus the chain's field indices (resolved through the receiver
-    /// types exactly like [`Self::field_index`] read projections). The
+    /// Lower a place-chain assignment target (`p.x = e;`, `p.a.b = e;`,
+    /// `a[i] = e;`, `m[0][1].x = e;`): the write goes through a [`Place`]
+    /// projection — the root binding's local plus the chain's field
+    /// indices (resolved through the receiver types exactly like
+    /// [`Self::field_index`] read projections) and element indices (kept
+    /// as operands; the machine bounds-checks them at the write). The
     /// target is never lowered as a read, so the traps inference/validation
     /// reported on it are reconciled here, mirroring the plain-name path:
     /// the root's assignment enforcement first (immutable root — the
     /// headline diagnostic — item, builtin), then any broken link in the
-    /// chain (unknown field, non-record receiver, a root that isn't even a
-    /// value), then the root's own resolution failures.
+    /// chain (unknown field, non-record receiver, non-array base, a root
+    /// that isn't even a value), then the root's own resolution failures.
     fn lower_field_assign_target(
         &mut self,
         b: &mut BodyBuilder,
@@ -1520,13 +1602,22 @@ impl LowerCtx<'_> {
         value: ExprId,
         value_op: Operand,
     ) {
-        // The chain's field-access expressions, outermost first; `root` is
-        // the non-field expression at its base.
+        // The chain's field-access and index expressions, outermost first;
+        // `root` is the non-projection expression at its base.
         let mut chain = Vec::new();
         let mut root = target;
-        while let ExprData::Field { receiver, .. } = &self.body.exprs[root] {
-            chain.push(root);
-            root = *receiver;
+        loop {
+            match &self.body.exprs[root] {
+                ExprData::Field { receiver, .. } => {
+                    chain.push(root);
+                    root = *receiver;
+                }
+                ExprData::Index { base, .. } => {
+                    chain.push(root);
+                    root = *base;
+                }
+                _ => break,
+            }
         }
         // Inference rejected the root as an assignment target (immutable
         // binding, item, builtin): trap with the squiggle's exact text.
@@ -1563,21 +1654,37 @@ impl LowerCtx<'_> {
                 Some(&local) => {
                     // Innermost projection first: `p.a.b` writes through
                     // `a`'s index in `p`, then `b`'s index in `p.a`.
+                    // Element indices evaluate here, innermost first too —
+                    // after the RHS (which the caller lowered), a fixed,
+                    // deterministic order.
                     let mut projection = Vec::with_capacity(chain.len());
-                    for &field_expr in chain.iter().rev() {
-                        let ExprData::Field { receiver, name } = &self.body.exprs[field_expr]
-                        else {
-                            unreachable!("chain holds only field expressions");
-                        };
-                        match self.field_index(*receiver, name) {
-                            Some(index) => projection.push(index),
-                            // No index and no diagnosed trap above: the
-                            // receiver's type is `{error}` (infectious and
-                            // silent), so the value the root would hold is
-                            // already trapped upstream — skip the write,
-                            // like the read path's never-observed
-                            // placeholder, and keep lowering total.
-                            None => return,
+                    for &link in chain.iter().rev() {
+                        match &self.body.exprs[link] {
+                            ExprData::Field { receiver, name } => {
+                                match self.field_index(*receiver, name) {
+                                    Some(index) => projection.push(crate::ProjElem::Field(index)),
+                                    // No index and no diagnosed trap above:
+                                    // the receiver's type is `{error}`
+                                    // (infectious and silent), so the value
+                                    // the root would hold is already trapped
+                                    // upstream — skip the write, like the
+                                    // read path's never-observed
+                                    // placeholder, and keep lowering total.
+                                    None => return,
+                                }
+                            }
+                            ExprData::Index { base, index } => {
+                                // A non-array base was diagnosed (a pending
+                                // value trap on the link, handled above);
+                                // `{error}` bases skip the write silently,
+                                // like a missing field index.
+                                if !matches!(self.ty(*base), Ty::Array { .. }) {
+                                    return;
+                                }
+                                let index_op = self.lower_expr(b, *index);
+                                projection.push(crate::ProjElem::Index(index_op));
+                            }
+                            _ => unreachable!("chain holds only projection expressions"),
                         }
                     }
                     b.push_assign(Place { local, projection }, Rvalue::Use(value_op), value);

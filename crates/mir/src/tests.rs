@@ -1942,3 +1942,105 @@ fn generic_widening_injects_the_tag() {
         "#]],
     );
 }
+
+#[test]
+fn array_literal_index_and_element_assign_lower() {
+    check_mir(
+        r#"
+static f = fn {
+    let mut a = [1, 2, 3];
+    let x = a[1];
+    a[2] = x;
+};
+"#,
+        expect![[r#"
+            item f:
+            fn b0() -> () {
+              _0: ()  // return
+              _1: [usize; 3]
+              _2: [usize; 3]  // a
+              _3: usize
+              _4: usize  // x
+              bb0:
+                _1 = [1, 2, 3]
+                _2 = _1
+                _3 = _2[1]
+                _4 = _3
+                _2[2] = _4
+                _0 = ()
+                return
+            }
+            fn b1() -> fn() {
+              _0: fn()  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn array_repeat_and_nested_index_assign_lower() {
+    check_mir(
+        r#"
+static f = fn {
+    let mut m = [[0; 2]; 2];
+    m[0][1] = 5;
+};
+"#,
+        expect![[r#"
+            item f:
+            fn b0() -> () {
+              _0: ()  // return
+              _1: [usize; 2]
+              _2: [[usize; 2]; 2]
+              _3: [[usize; 2]; 2]  // m
+              bb0:
+                _1 = [0; 2]
+                _2 = [_1; 2]
+                _3 = _2
+                _3[0][1] = 5
+                _0 = ()
+                return
+            }
+            fn b1() -> fn() {
+              _0: fn()  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn compile_time_out_of_bounds_lowers_to_a_trap() {
+    check_mir(
+        "static f = fn { let a = [1, 2]; let x = a[2]; };",
+        expect![[r#"
+            item f:
+            fn b0() -> () {
+              _0: ()  // return
+              _1: [usize; 2]
+              _2: [usize; 2]  // a
+              _3: usize
+              _4: usize  // x
+              bb0:
+                _1 = [1, 2]
+                _2 = _1
+                _3 = trap "index out of bounds: the length is 2 but the index is 2" -> bb1
+              bb1:
+                _4 = _3
+                _0 = ()
+                return
+            }
+            fn b1() -> fn() {
+              _0: fn()  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}

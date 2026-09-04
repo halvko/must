@@ -117,6 +117,24 @@ pub enum ExprData {
         /// parse error covers it, inference stays silent.
         name: String,
     },
+    /// `[e1, e2, e3]`: an array literal — the length is the element count.
+    ArrayLit {
+        elements: Vec<ExprId>,
+    },
+    /// `[e; N]`: the repeat form. The count lowers as an ordinary
+    /// expression (scoped, resolved); inference restricts it to the
+    /// const-arg forms — an integer literal or a const-param read — so the
+    /// array's TYPE can carry the length on the eval-free path.
+    ArrayRepeat {
+        element: ExprId,
+        count: ExprId,
+    },
+    /// `base[index]`: an element read. As an assignment target
+    /// (`a[i] = e;`) the same node names the written-into place.
+    Index {
+        base: ExprId,
+        index: ExprId,
+    },
     FnLiteral {
         /// Whether the literal was written `const fn`. Orthogonal to the
         /// enclosing item's own `static`/`const`; read by the separate
@@ -562,6 +580,27 @@ impl LowerCtx {
                 let receiver = self.lower_opt_expr(it.receiver());
                 let name = it.name_ref().map(|n| n.text()).unwrap_or_default();
                 self.alloc_expr(ExprData::Field { receiver, name }, it.syntax())
+            }
+            ast::Expr::ArrayExpr(it) => {
+                if it.is_repeat() {
+                    let (element, count) = match it.repeat_parts() {
+                        Some((element, count)) => {
+                            (self.lower_expr(element), self.lower_opt_expr(count))
+                        }
+                        // `[; n]` and friends: broken source, the parse
+                        // error covers it.
+                        None => (self.missing_expr(), self.missing_expr()),
+                    };
+                    self.alloc_expr(ExprData::ArrayRepeat { element, count }, it.syntax())
+                } else {
+                    let elements = it.elements().map(|e| self.lower_expr(e)).collect();
+                    self.alloc_expr(ExprData::ArrayLit { elements }, it.syntax())
+                }
+            }
+            ast::Expr::IndexExpr(it) => {
+                let base = self.lower_opt_expr(it.base());
+                let index = self.lower_opt_expr(it.index());
+                self.alloc_expr(ExprData::Index { base, index }, it.syntax())
             }
             // An `enum` literal is type-declaration syntax; in a value body
             // it is broken source (validation rejects it), so there is

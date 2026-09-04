@@ -1,0 +1,77 @@
+// Fixed-size arrays `[T; N]`: literals (`[1, 2, 3]`), the repeat form
+// (`[e; N]`), indexing and index-assignment (`a[i]`, `a[i] = v;`), and a
+// length that is part of the type — `[usize; 2]` and `[usize; 3]` never
+// unify. Length lives in the type, so out-of-bounds known at compile time
+// is a squiggle, and only an index the checker can't pin down is left to
+// trap at runtime.
+//
+// Run: must-lsp run examples/arrays.must
+//
+// Arrays of numbers don't print, so this tour computes with them and prints
+// string labels for what it observed.
+
+// The flagship: build a lookup table imperatively in a `const { ... }`
+// block — a `mut` array stepped by index-assignment inside a loop — then
+// *freeze* the finished value into a static. All of this runs at compile
+// time; `TABLE` is a plain `[usize; 5]` constant by the time any code runs.
+// Hover it in the editor and it already reads `[usize; 5] = [0, 1, 4, 9, 16]`.
+static TABLE = const {
+    let mut t = [0; 5];
+    let mut i = 0;
+    loop {
+        if i == 5 { break t; };
+        t[i] = i * i;
+        i = i + 1;
+    }
+};
+
+// Nested arrays are just arrays whose element type is itself an array:
+// `[[usize; 2]; 2]`. Indexing chains left to right, `grid[1][0]`.
+static grid = [[1, 2], [3, 4]];
+
+// A generic type carrying a const-param length: `Buf::<2>` fixes `N = 2`,
+// so its `data` field is exactly a `[usize; 2]`. `Buf::<2>` and `Buf::<3>`
+// are different types — the length is checked, not merely documented.
+type Buf = struct::<const N: usize> { data: [usize; N], len: usize };
+
+static main = fn () -> () {
+    // The frozen table: squares 0, 1, 4, 9, 16.
+    if TABLE[2] + TABLE[4] == 20 {
+        print("table: TABLE[2] + TABLE[4] == 20 — built in a const loop, frozen into a static");
+    } else {
+        print("table: unexpected");
+    };
+
+    // Nested indexing.
+    if grid[0][1] + grid[1][0] == 5 {
+        print("nested: grid[0][1] + grid[1][0] == 5");
+    } else {
+        print("nested: unexpected");
+    };
+
+    // Index-assignment needs a `mut` root, exactly like field assignment;
+    // mutability is transitive through the index.
+    let mut a = [1, 2, 3];
+    a[0] = 10;
+    if a[0] + a[2] == 13 {
+        print("index-assign: a[0] = 10 through a mut binding");
+    } else {
+        print("index-assign: unexpected");
+    };
+
+    // Construct a `Buf::<2>` and read through its array field.
+    let b: Buf::<2> = Buf::<2>(struct { data: [40, 2], len: 2 });
+    if b.data[0] + b.data[1] == 42 {
+        print("generic buffer: Buf::<2> holds a [usize; 2] summing to 42");
+    } else {
+        print("generic buffer: unexpected");
+    };
+}
+
+// On out-of-bounds: an index the checker can compute is checked *then and
+// there*. `let a = [1, 2]; a[2]` is a compile-time squiggle reading exactly
+// `index out of bounds: the length is 2 but the index is 2`. That same text
+// is what a genuinely runtime-only index traps with — see `errors.must` for
+// the compile-time squiggle and the eval trap side by side.
+//
+// Not yet: a length accessor, and matching on arrays.

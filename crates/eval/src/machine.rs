@@ -9,8 +9,8 @@ use base_db::Db;
 use hir::{Builtin, ExprId, ItemLoc};
 use la_arena::ArenaMap;
 use mir::{
-    AggregateKind, BodyId, Const, LocalData, LocalId, MirBody, MirLowered, Operand, Rvalue,
-    StatementKind, TerminatorKind,
+    AggregateKind, BodyId, Const, LocalData, LocalId, MirBody, MirLowered, Operand, ProjElem,
+    Rvalue, StatementKind, TerminatorKind,
 };
 use rustc_hash::FxHashMap;
 
@@ -459,7 +459,10 @@ impl<'db, M: Mode> Machine<'db, M> {
         if let Some(stmt) = block.statements.get(statement) {
             let StatementKind::Assign { dest, rvalue } = &stmt.kind;
             let value = self.eval_rvalue(&loc, body, rvalue, stmt.origin)?;
-            self.write_place(&loc, body, dest, value, stmt.origin)?;
+            let body = &self.lowered(&loc).bodies[body_id];
+            let projection = self.resolve_projection(&loc, body, &dest.projection, stmt.origin)?;
+            let body = &self.lowered(&loc).bodies[body_id];
+            self.write_place(&loc, body, dest.local, &projection, value, stmt.origin)?;
             let frame = self.frames.last_mut().expect("frame still live");
             frame.statement += 1;
             return Ok(StepEvent::Progress);
@@ -639,27 +642,78 @@ impl<'db, M: Mode> Machine<'db, M> {
     /// is compile-checked to record chains; variant payloads aren't
     /// reachable as places), so anything else here is an invariant
     /// violation, loud like every other ill-typed value.
+    /// Evaluate a place projection's element-index operands, producing the
+    /// value-walkable form [`Machine::write_place`] consumes. Field steps
+    /// pass through; index steps evaluate to their `usize` value (bounds
+    /// are checked later, at the write, where the array's length is
+    /// known).
+    fn resolve_projection(
+        &mut self,
+        loc: &ItemLoc,
+        body: &MirBody,
+        projection: &[ProjElem],
+        origin: ExprId,
+    ) -> Result<Vec<ResolvedProj>, EvalError> {
+        projection
+            .iter()
+            .map(|elem| match elem {
+                ProjElem::Field(index) => Ok(ResolvedProj::Field(*index)),
+                ProjElem::Index(op) => {
+                    let value = self.eval_operand(loc, body, op, origin)?;
+                    let Value::Int(index) = value else {
+                        return Err(self.ill_typed("a `usize` index", &value, loc, origin));
+                    };
+                    Ok(ResolvedProj::Index(index))
+                }
+            })
+            .collect()
+    }
+
+    /// Store `value` into the place on the topmost frame: the whole local
+    /// for an empty projection, or the nested `Value::Record` field /
+    /// `Value::Array` element the resolved path names — mutated in place;
+    /// values are plain Rust data in `frame.locals`. Only records and
+    /// arrays are writable through (assignment targets are compile-checked
+    /// to field/element chains; variant payloads aren't reachable as
+    /// places), so any other shape here is an invariant violation, loud
+    /// like every other ill-typed value — while an out-of-bounds element
+    /// write is an ordinary runtime trap (the same message as an
+    /// out-of-bounds read), never UB and never corruption.
     fn write_place(
         &mut self,
         loc: &ItemLoc,
         body: &MirBody,
-        dest: &mir::Place,
+        local: LocalId,
+        projection: &[ResolvedProj],
         value: Value,
         origin: ExprId,
     ) -> Result<(), EvalError> {
+        let project_error = |this: &Self, error: ProjectError| match error {
+            ProjectError::OutOfBounds { len, index } => EvalError {
+                kind: EvalErrorKind::Runtime,
+                message: hir::diag::index_out_of_bounds(len, index),
+                origin: Some((loc.clone(), origin)),
+            },
+            ProjectError::Shape(detail) => this.internal_error(detail, Some((loc.clone(), origin))),
+        };
         let frame = self.frames.last_mut().expect("frame still live");
-        if dest.projection.is_empty() {
-            frame.locals.insert(dest.local, value);
+        if projection.is_empty() {
+            frame.locals.insert(local, value);
             return Ok(());
         }
-        let result = match frame.locals.get_mut(dest.local) {
-            None => Err(format!(
-                "write through uninitialized {}",
-                local_name(body, dest.local)
+        match frame.locals.get_mut(local) {
+            None => Err(self.internal_error(
+                format!("write through uninitialized {}", local_name(body, local)),
+                Some((loc.clone(), origin)),
             )),
-            Some(slot) => project_mut(slot, &dest.projection).map(|field| *field = value),
-        };
-        result.map_err(|detail| self.internal_error(detail, Some((loc.clone(), origin))))
+            Some(slot) => match project_mut(slot, projection) {
+                Ok(field) => {
+                    *field = value;
+                    Ok(())
+                }
+                Err(error) => Err(project_error(self, error)),
+            },
+        }
     }
 
     fn jump(&mut self, target: mir::BlockId) {
@@ -702,6 +756,57 @@ impl<'db, M: Mode> Machine<'db, M> {
                     .map(|op| self.eval_operand(loc, body, op, origin))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(Value::Tuple(values))
+            }
+            Rvalue::Aggregate {
+                kind: AggregateKind::Array,
+                ops,
+            } => {
+                let values = ops
+                    .iter()
+                    .map(|op| self.eval_operand(loc, body, op, origin))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(Value::Array(values))
+            }
+            // `[e; N]`: N copies of the element. Const contexts pay fuel
+            // per element — a compile-time `[0; 10_000_000_000]` must
+            // exhaust the budget, not the server's memory (run-mode code
+            // is the user's own process, unfueled as always).
+            Rvalue::Repeat { elem, count } => {
+                let elem = self.eval_operand(loc, body, elem, origin)?;
+                let count = self.eval_operand(loc, body, count, origin)?;
+                let Value::Int(count) = count else {
+                    return Err(self.ill_typed("a `usize` repeat count", &count, loc, origin));
+                };
+                if self.const_depth > 0 {
+                    self.spend_fuel_n(count.min(u64::MAX as u128) as u64, loc)?;
+                }
+                let count = usize::try_from(count).map_err(|_| EvalError {
+                    kind: EvalErrorKind::Runtime,
+                    message: format!("array length {count} is too large"),
+                    origin: Some((loc.clone(), origin)),
+                })?;
+                Ok(Value::Array(vec![elem; count]))
+            }
+            // `a[i]`: the runtime bounds check — an ordinary trap (the
+            // rejected-op story), deterministic, and worded exactly like
+            // the compile-time squiggle when both sides are known there.
+            Rvalue::Index { base, index } => {
+                let base = self.eval_operand(loc, body, base, origin)?;
+                let index = self.eval_operand(loc, body, index, origin)?;
+                let Value::Array(mut values) = base else {
+                    return Err(self.ill_typed("an array value", &base, loc, origin));
+                };
+                let Value::Int(index) = index else {
+                    return Err(self.ill_typed("a `usize` index", &index, loc, origin));
+                };
+                if index >= values.len() as u128 {
+                    return Err(EvalError {
+                        kind: EvalErrorKind::Runtime,
+                        message: hir::diag::index_out_of_bounds(values.len() as u128, index),
+                        origin: Some((loc.clone(), origin)),
+                    });
+                }
+                Ok(values.swap_remove(index as usize))
             }
             // The widening conversion: the one place a tag comes into
             // existence — the tag-free payload carrier becomes a tagged
@@ -948,10 +1053,17 @@ impl<'db, M: Mode> Machine<'db, M> {
     }
 
     fn spend_fuel(&mut self, loc: &ItemLoc) -> Result<(), EvalError> {
+        self.spend_fuel_n(1, loc)
+    }
+
+    /// Charge `amount` units of const fuel — bulk work (an array repeat's
+    /// elements) pays proportionally, so one statement can't dodge the
+    /// budget by doing its looping inside the machine.
+    fn spend_fuel_n(&mut self, amount: u64, loc: &ItemLoc) -> Result<(), EvalError> {
         if self.const_depth == 0 {
             return Ok(());
         }
-        self.const_fuel = self.const_fuel.saturating_sub(1);
+        self.const_fuel = self.const_fuel.saturating_sub(amount);
         if self.const_fuel == 0 {
             return Err(EvalError {
                 kind: EvalErrorKind::NotConst,
@@ -982,31 +1094,65 @@ impl<'db, M: Mode> Machine<'db, M> {
     }
 }
 
-/// Navigate a field-index path to the nested record field it names,
-/// mutably. Errors are the *detail* strings of internal errors (the caller
-/// attaches the origin): reaching a non-record or an out-of-range index
-/// means a value the checker should have refused was written through.
-fn project_mut<'v>(slot: &'v mut Value, projection: &[u32]) -> Result<&'v mut Value, String> {
+/// One resolved step of a place projection: index operands already
+/// evaluated, ready to walk a value.
+enum ResolvedProj {
+    /// A record field, by canonical sorted index.
+    Field(u32),
+    /// An array element. Kept as the raw `u128` the index evaluated to so
+    /// the bounds check compares honestly (a `usize` conversion would have
+    /// to invent a verdict for huge indices).
+    Index(u128),
+}
+
+/// Why a place projection failed. Out-of-bounds element writes are
+/// ordinary runtime traps (the program's fault, deterministically
+/// reported); everything else means a value the checker should have
+/// refused was written through — an internal error.
+enum ProjectError {
+    OutOfBounds { len: u128, index: u128 },
+    Shape(String),
+}
+
+/// Navigate a resolved projection to the nested record field or array
+/// element it names, mutably — the write side of places.
+fn project_mut<'v>(
+    slot: &'v mut Value,
+    projection: &[ResolvedProj],
+) -> Result<&'v mut Value, ProjectError> {
     let mut current = slot;
-    for &index in projection {
-        let index = index as usize;
-        match current {
-            Value::Record { fields } => {
+    for elem in projection {
+        match (elem, current) {
+            (ResolvedProj::Field(index), Value::Record { fields }) => {
+                let index = *index as usize;
                 let len = fields.len();
                 current = match fields.get_mut(index) {
                     Some((_, field)) => field,
                     None => {
-                        return Err(format!(
+                        return Err(ProjectError::Shape(format!(
                             "record field index {index} out of range ({len} elements)"
-                        ));
+                        )));
                     }
                 };
             }
-            other => {
-                return Err(format!(
+            (ResolvedProj::Index(index), Value::Array(values)) => {
+                let len = values.len() as u128;
+                if *index >= len {
+                    return Err(ProjectError::OutOfBounds { len, index: *index });
+                }
+                current = &mut values[*index as usize];
+            }
+            (ResolvedProj::Field(_), other) => {
+                return Err(ProjectError::Shape(format!(
                     "expected a record value to assign into, found `{}`",
                     other.display()
-                ));
+                )));
+            }
+            (ResolvedProj::Index(_), other) => {
+                return Err(ProjectError::Shape(format!(
+                    "expected an array value to assign into, found `{}`",
+                    other.display()
+                )));
             }
         }
     }
@@ -1032,6 +1178,20 @@ fn value_ty(value: &Value) -> hir::Ty {
                 .map(|(name, value)| (name.clone(), value_ty(value)))
                 .collect(),
         ),
+        // The element type comes from the first element; an empty array's
+        // is unrecoverable from the value alone — `{error}`, which only
+        // demotes it from console-eval parameters.
+        Value::Array(values) => match values.first() {
+            Some(first) => {
+                let elem = value_ty(first);
+                if elem.contains_error() {
+                    hir::Ty::Error
+                } else {
+                    hir::Ty::array(elem, hir::ConstArgValue::Int(values.len() as u128))
+                }
+            }
+            None => hir::Ty::Error,
+        },
         // Generic args are erased at runtime, so the recovered type is the
         // bare declaration (`Option`, args unknown) — enough for the
         // variables panel; console-eval parameters demote like the other

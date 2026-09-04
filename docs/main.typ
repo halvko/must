@@ -536,7 +536,7 @@ payloads:
 ```
 type Pair = struct::<T> { a: T, b: T };
 type Option = enum::<T> { Some(T), None };
-type Buf = struct::<const N: usize> { len: usize };
+type Buf = struct::<const N: usize> { data: [usize; N], len: usize };
 ```
 
 A generic type is instantiated with a turbofish in both annotation and
@@ -550,7 +550,8 @@ static inferred = Pair(struct { a: "x", b: "y" }); // T = str, from the payload
 ```
 
 Const params make instances *distinct types*: `Buf::<8>` and `Buf::<9>` do
-not unify (the const argument is checked, not decorative).
+not unify (the const argument is checked, not decorative), and the length
+flows into the field type — a `Buf::<8>` really does carry a `[usize; 8]`.
 Variants of a generic enum spell their arguments before the variant name:
 `Option::<usize>::Some(3)`, and mixed variants widen to the generic enum
 exactly as in the non-generic case.
@@ -568,3 +569,49 @@ Honest restrictions, all diagnosed:
 - A generic enum's *variant types* are not spellable in annotations yet
   (`fn (o: Option::Some)` is rejected with that reason); use the whole
   generic enum, or a monomorphic enum, until it lands.
+
+== Arrays
+
+Fixed-size arrays `[T; N]` — the length is part of the type. Literals
+(`[1, 2, 3]`), the repeat form (`[e; N]`), indexing (`a[i]`) and
+index-assignment (`a[i] = v;`, whose `mut` requirement is transitive from
+the root, like fields). Nested arrays are arrays of arrays; the element type
+may be a record, a variant, anything.
+
+```
+static main = fn () -> usize {
+    let mut a = [1, 2, 3];
+    a[0] = 10;
+    let m = [[1, 2], [3, 4]];
+    a[0] + a[2] + m[1][0]         // 16
+};
+```
+
+Length is typed exactly: `[usize; 2]` and `[usize; 3]` never unify — not
+across a call, not against an annotation — so a length mismatch is a
+check-time error naming both lengths. Because the length is known, an index
+the checker can *evaluate* is bounds-checked right then: `let a = [1, 2];
+a[2]` is a compile-time squiggle reading `index out of bounds: the length is
+2 but the index is 2`. The identical text is what a genuinely runtime-only
+index traps with — squiggle text and trap text are one render.
+
+Arrays are const-legal, which is the flagship pattern: build a table
+imperatively in a `const { ... }` block and *freeze* the finished value into
+a static.
+
+```
+static table = const {
+    let mut t = [0; 5];
+    let mut i = 0;
+    loop {
+        if i == 5 { break t; };
+        t[i] = i * i;
+        i = i + 1;
+    }
+};                                 // table: [usize; 5] = [0, 1, 4, 9, 16]
+```
+
+Const-param lengths connect arrays to generics: a generic function's `const
+N: usize` may be the length of a `[usize; N]` parameter, and a generic type
+may carry a `[usize; N]` field (`Buf::<2>` above). Not yet: a length
+accessor, and matching on arrays.

@@ -50,6 +50,17 @@ pub enum Ty {
     /// conversion preserves them); they are projected through
     /// [`variant_payloads_for`].
     Variant(VariantTy),
+    /// `[T; N]`: a fixed-size array — structural, like [`Ty::Record`]
+    /// (never a `Named` declaration). Unifies exactly: element pointwise,
+    /// length by plain equality with [`ConstArgValue::Error`] infectious
+    /// (mirroring generic const-arg unification) — `[T; 8]` and `[T; 9]`
+    /// never unify, and there is no variance and no implicit conversion.
+    /// The length lives in the annotation-representable const domain
+    /// (literal or rigid const param), never a computed value.
+    Array {
+        elem: Arc<Ty>,
+        len: ConstArgValue,
+    },
     /// A rigid type parameter of a generic item (`T` in `fn::<T>`).
     /// Identity is `(item, index)` — the declaring item plus the position
     /// in its binder — the same range-free scheme as [`Ty::Named`] /
@@ -233,6 +244,13 @@ impl Ty {
         Ty::Fn(Arc::new(FnTy { params, ret }))
     }
 
+    pub fn array(elem: Ty, len: ConstArgValue) -> Ty {
+        Ty::Array {
+            elem: Arc::new(elem),
+            len,
+        }
+    }
+
     /// A record type in canonical form: fields sorted by name. Duplicate
     /// names keep the FIRST occurrence (the stable sort preserves source
     /// order among equals) — validation already errors on the duplicate, so
@@ -252,6 +270,9 @@ impl Ty {
         match self {
             Ty::Infer(_) => true,
             Ty::Fn(f) => f.ret.contains_infer() || f.params.iter().any(Ty::contains_infer),
+            // The length is never an inference variable (const args are
+            // never inferred, TR06) — only the element can be undetermined.
+            Ty::Array { elem, .. } => elem.contains_infer(),
             Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| ty.contains_infer()),
             Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
                 args.iter().any(GenericArg::contains_infer)
@@ -269,6 +290,7 @@ impl Ty {
     pub fn mentions_fn(&self) -> bool {
         match self {
             Ty::Fn(_) => true,
+            Ty::Array { elem, .. } => elem.mentions_fn(),
             Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| ty.mentions_fn()),
             Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
                 args.iter().any(|arg| match arg {
@@ -280,10 +302,34 @@ impl Ty {
         }
     }
 
+    /// Whether an array type appears anywhere in the type — the mention-side
+    /// belt keeping array VALUES out of the const-arg domain (the ruled
+    /// domain is builtins + records + variants); the declaration-side twin
+    /// is [`crate::item_tree::TypeRef::mentions_array`]. Same traversal
+    /// shape (and the same nominal-opaque blind spot) as
+    /// [`Ty::mentions_fn`].
+    pub fn mentions_array(&self) -> bool {
+        match self {
+            Ty::Array { .. } => true,
+            Ty::Fn(f) => f.params.iter().any(Ty::mentions_array) || f.ret.mentions_array(),
+            Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| ty.mentions_array()),
+            Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
+                args.iter().any(|arg| match arg {
+                    GenericArg::Ty(ty) => ty.mentions_array(),
+                    GenericArg::Const(_) => false,
+                })
+            }
+            _ => false,
+        }
+    }
+
     pub fn contains_error(&self) -> bool {
         match self {
             Ty::Error => true,
             Ty::Fn(f) => f.ret.contains_error() || f.params.iter().any(Ty::contains_error),
+            // A broken length is this type's business, exactly like a
+            // broken generic const ARG on a `Named` mention.
+            Ty::Array { elem, len } => elem.contains_error() || matches!(len, ConstArgValue::Error),
             Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| ty.contains_error()),
             // The declared shape stays identity-only: a broken *declaration*
             // carries its own diagnostics at the declaration site; uses of
@@ -322,6 +368,9 @@ impl Ty {
                     Ty::Unit => format!("fn({params})"),
                     ret => format!("fn({params}) -> {}", ret.display()),
                 }
+            }
+            Ty::Array { elem, len } => {
+                format!("[{}; {}]", elem.display(), len.display())
             }
             Ty::Record(rec) => {
                 if rec.fields.is_empty() {
@@ -615,6 +664,10 @@ pub(crate) fn lower_type_ref_in(
             // TODO: once we introduce references this can't discard them any longer
             lower_type_ref_in(db, file, type_ref, table, scope)
         }
+        TypeRef::Array { elem, len } => Ty::array(
+            lower_type_ref_in(db, file, elem, table, scope),
+            lower_const_arg_ref(len, scope),
+        ),
         TypeRef::Path(path) => match scope.types.get(path) {
             Some(param) => param.clone(),
             None => lower_type_path(db, file, path),
@@ -782,6 +835,7 @@ fn erase_infer(ty: &Ty) -> Ty {
             f.params.iter().map(erase_infer).collect(),
             erase_infer(&f.ret),
         ),
+        Ty::Array { elem, len } => Ty::array(erase_infer(elem), len.clone()),
         Ty::Record(rec) => Ty::record(
             rec.fields
                 .iter()
@@ -831,6 +885,18 @@ pub fn substitute_args(ty: &Ty, decl: &ItemLoc, args: &[GenericArg]) -> Ty {
                 .collect(),
             substitute_args(&f.ret, decl, args),
         ),
+        Ty::Array { elem, len } => {
+            let len = match len {
+                ConstArgValue::Param { item, index, .. } if item == decl => {
+                    match args.get(*index as usize) {
+                        Some(GenericArg::Const(value)) => value.clone(),
+                        _ => ConstArgValue::Error,
+                    }
+                }
+                other => other.clone(),
+            };
+            Ty::array(substitute_args(elem, decl, args), len)
+        }
         Ty::Record(rec) => Ty::record(
             rec.fields
                 .iter()

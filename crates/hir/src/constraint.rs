@@ -246,6 +246,16 @@ impl Constraints {
                     params_ok && self.unify(table, &f1.ret, &f2.ret, cause)
                 }
             }
+            // Structural and exact: element pointwise, length by plain
+            // equality with `Error` infectious on either side — the same
+            // judgement generic const args get in `unify_args`. `[T; 8]`
+            // vs `[T; 9]` is simply FALSE: no variance, no conversion.
+            (Ty::Array { elem: e1, len: l1 }, Ty::Array { elem: e2, len: l2 }) => {
+                (matches!(l1, ConstArgValue::Error)
+                    || matches!(l2, ConstArgValue::Error)
+                    || l1 == l2)
+                    && self.unify(table, &e1, &e2, cause)
+            }
             // Nominal: same declaration AND pointwise-unifying args, or
             // nothing — the applicative identity, with NO variance of any
             // kind (Must has no subtyping; every argument position is
@@ -627,6 +637,7 @@ pub(crate) fn resolve_fully(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty)
             let ret = resolve_fully(table, &f.ret);
             Ty::fn_type(params, ret)
         }
+        Ty::Array { elem, len } => Ty::array(resolve_fully(table, elem), len.clone()),
         Ty::Record(rec) => Ty::record(
             rec.fields
                 .iter()
@@ -672,6 +683,7 @@ fn occurs(table: &mut InPlaceUnificationTable<TyVar>, var: TyVar, ty: &Ty) -> bo
             }
         }
         Ty::Fn(f) => f.params.iter().any(|p| occurs(table, var, p)) || occurs(table, var, &f.ret),
+        Ty::Array { elem, .. } => occurs(table, var, elem),
         Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| occurs(table, var, ty)),
         Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
             args.iter().any(|arg| match arg {

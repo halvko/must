@@ -122,6 +122,7 @@ impl<'t> Parser<'t> {
             R_PAREN => ")",
             R_BRACE => "}",
             R_ANGLE => ">",
+            R_BRACKET => "]",
             _ => unreachable!("{kind:?} is not a closer"),
         };
         self.events.push(Event::Error {

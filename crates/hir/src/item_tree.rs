@@ -122,6 +122,14 @@ pub enum TypeRef {
     /// name (field order is irrelevant to the type, so the canonical order
     /// makes equal types compare equal).
     Record(Vec<(String, TypeRef)>),
+    /// `[T; N]` — a fixed-size array type. The length is a const argument
+    /// in annotation position, so it stays in the eval-free
+    /// [`ConstArgRef`] domain (a `const { ... }` block keeps its
+    /// [`ConstArgRef::Block`] shape and is rejected by the mirror pass).
+    Array {
+        elem: Box<TypeRef>,
+        len: ConstArgRef,
+    },
     Error,
 }
 
@@ -208,6 +216,17 @@ impl TypeRef {
                 fields.dedup_by(|second, first| second.0 == first.0);
                 TypeRef::Record(fields)
             }
+            ast::Type::ArrayType(it) => {
+                let elem = it.ty().map(TypeRef::from_ast).unwrap_or(TypeRef::Error);
+                let len = it
+                    .len()
+                    .map(|arg| const_arg_ref_from_ast(&arg))
+                    .unwrap_or(ConstArgRef::Error);
+                TypeRef::Array {
+                    elem: Box::new(elem),
+                    len,
+                }
+            }
         }
     }
 
@@ -235,6 +254,9 @@ impl TypeRef {
                 GenericArgRef::Const(_) => true,
             }),
             TypeRef::Record(fields) => fields.iter().all(|(_, ty)| ty.is_fully_typed()),
+            // The length is a written const value, never inferred (same
+            // reasoning as `Apply`'s const args).
+            TypeRef::Array { elem, .. } => elem.is_fully_typed(),
         }
     }
 
@@ -252,8 +274,38 @@ impl TypeRef {
             TypeRef::Fn { .. } => true,
             TypeRef::Ref(inner) => inner.mentions_fn(),
             TypeRef::Record(fields) => fields.iter().any(|(_, ty)| ty.mentions_fn()),
+            TypeRef::Array { elem, .. } => elem.mentions_fn(),
             TypeRef::Apply { args, .. } => args.iter().any(|arg| match arg {
                 GenericArgRef::Type(ty) => ty.mentions_fn(),
+                GenericArgRef::Const(_) => false,
+            }),
+            TypeRef::Unit
+            | TypeRef::Never
+            | TypeRef::Path(_)
+            | TypeRef::Variant { .. }
+            | TypeRef::Hole
+            | TypeRef::Error => false,
+        }
+    }
+
+    /// Whether an array type is written anywhere inside this reference —
+    /// the array twin of [`TypeRef::mentions_fn`], with the same use: array
+    /// VALUES stay outside the const-arg domain for now (the ruled domain
+    /// is builtins + records + variants), so a const param whose declared
+    /// type mentions one is rejected at the declaration (and, as a belt, at
+    /// every mention — both render [`crate::diag::ARRAY_CONST_ARG`]). Same
+    /// nominal-opaque blind spot as `mentions_fn`.
+    pub fn mentions_array(&self) -> bool {
+        match self {
+            TypeRef::Array { .. } => true,
+            TypeRef::Ref(inner) => inner.mentions_array(),
+            TypeRef::Record(fields) => fields.iter().any(|(_, ty)| ty.mentions_array()),
+            TypeRef::Fn { params, ret } => {
+                params.iter().any(TypeRef::mentions_array)
+                    || ret.as_ref().is_some_and(|ret| ret.mentions_array())
+            }
+            TypeRef::Apply { args, .. } => args.iter().any(|arg| match arg {
+                GenericArgRef::Type(ty) => ty.mentions_array(),
                 GenericArgRef::Const(_) => false,
             }),
             TypeRef::Unit
@@ -456,6 +508,44 @@ pub(crate) fn expr_as_type_ref(expr: ast::Expr) -> TypeRef {
             },
         },
         ast::Expr::RecordExpr(it) => TypeRef::Record(record_expr_fields_as_types(&it)),
+        // `[usize; 4]` as a field's type parses as an ARRAY_EXPR in this
+        // expression position — the repeat form's `;` shape is exactly the
+        // array type's, so reinterpret element and count. The list form
+        // (`[a, b]`) is not a type.
+        ast::Expr::ArrayExpr(it) if it.is_repeat() => {
+            let (elem_expr, count) = match it.repeat_parts() {
+                Some(parts) => parts,
+                None => return TypeRef::Error,
+            };
+            let elem = expr_as_type_ref(elem_expr);
+            let len = match count {
+                Some(ast::Expr::Literal(lit)) => match lit.kind() {
+                    Some(ast::LiteralKind::Int(token)) => {
+                        match token.text().replace('_', "").parse() {
+                            Ok(value) => ConstArgRef::Int(value),
+                            Err(_) => ConstArgRef::Error,
+                        }
+                    }
+                    Some(ast::LiteralKind::Str(token)) => {
+                        ConstArgRef::Str(crate::body::unescape(token.text()))
+                    }
+                    Some(ast::LiteralKind::Bool(value)) => ConstArgRef::Bool(value),
+                    None => ConstArgRef::Error,
+                },
+                Some(ast::Expr::PathExpr(path)) => match path.name_ref() {
+                    Some(name) if path.variant_name_ref().is_none() => {
+                        ConstArgRef::Name(name.text())
+                    }
+                    _ => ConstArgRef::Error,
+                },
+                Some(ast::Expr::ConstBlockExpr(_)) => ConstArgRef::Block,
+                _ => ConstArgRef::Error,
+            };
+            TypeRef::Array {
+                elem: Box::new(elem),
+                len,
+            }
+        }
         _ => TypeRef::Error,
     }
 }

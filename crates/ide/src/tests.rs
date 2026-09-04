@@ -2782,3 +2782,59 @@ fn hover_shows_generic_variant_instance() {
         "```must\no: Option::<usize>::Some\n```",
     );
 }
+
+#[test]
+fn hover_array_local() {
+    check_hover(
+        r#"static main = fn { let a = [1, 2, 3]; let x = a$0[0]; };"#,
+        "```must\na: [usize; 3]\n```",
+    );
+}
+
+#[test]
+fn hover_array_binding_definition() {
+    check_hover(
+        r#"static main = fn { let m$0 = [[1, 2], [3, 4]]; let x = m[0][1]; };"#,
+        "```must\nm: [[usize; 2]; 2]\n```",
+    );
+}
+
+#[test]
+fn goto_through_index_chain() {
+    check_goto(
+        r#"
+static f = fn {
+    let buf = [1, 2];
+    let x = buf$0[0];
+}
+"#,
+        "buf",
+        0,
+    );
+}
+
+#[test]
+fn highlights_survive_array_syntax() {
+    check_highlights(
+        r#"static f = fn (i: usize) { let mut a = [1, 2]; a[i] = a[0]; };"#,
+        expect_test::expect![[r#"
+            0..6 "static" Keyword
+            7..8 "f" Function.declaration.static
+            9..10 "=" Operator
+            11..13 "fn" Keyword
+            15..16 "i" Parameter.declaration
+            18..23 "usize" Type.defaultLibrary
+            27..30 "let" Keyword
+            31..34 "mut" Keyword
+            35..36 "a" Variable.declaration.mutable
+            37..38 "=" Operator
+            40..41 "1" Number
+            43..44 "2" Number
+            47..48 "a" Variable.mutable
+            49..50 "i" Parameter
+            52..53 "=" Operator
+            54..55 "a" Variable.mutable
+            56..57 "0" Number
+        "#]],
+    );
+}

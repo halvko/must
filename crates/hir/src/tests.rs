@@ -4965,3 +4965,363 @@ fn generic_enum_payload_mentions_check_in_declarations() {
         expect![[""]],
     );
 }
+
+#[test]
+fn array_literal_and_index_infer() {
+    check_infer(
+        "static f = fn { let a = [1, 2, 3]; let x = a[0]; };",
+        expect![[r#"
+            11..50 'fn { let a = [1, ...': fn()
+            14..50 '{ let a = [1, 2, ...': ()
+            20..21 'a': [usize; 3]
+            24..33 '[1, 2, 3]': [usize; 3]
+            25..26 '1': usize
+            28..29 '2': usize
+            31..32 '3': usize
+            39..40 'x': usize
+            43..44 'a': [usize; 3]
+            43..47 'a[0]': usize
+            45..46 '0': usize
+        "#]],
+    );
+}
+
+#[test]
+fn arrays_in_records_and_records_in_arrays_infer() {
+    // `a` carries an annotation: like an `if`-joined record binding, a
+    // record-element type decided by a multi-witness join is not available
+    // to `.x` *during* traversal (joins solve after it) — the annotation is
+    // the same way out `field_access_on_unannotated_param` names.
+    check_infer(
+        r#"
+static f = fn {
+    let r = struct { data: [1, 2], len: 2 };
+    let a: [struct { x: usize }; 2] = [struct { x: 1 }, struct { x: 2 }];
+    let n = r.data[0] + a[1].x;
+};
+"#,
+        expect![[r#"
+            12..169 'fn {     let r = ...': fn()
+            15..169 '{     let r = str...': ()
+            25..26 'r': struct { data: [usize; 2], len: usize }
+            29..60 'struct { data: [1...': struct { data: [usize; 2], len: usize }
+            44..50 '[1, 2]': [usize; 2]
+            45..46 '1': usize
+            48..49 '2': usize
+            57..58 '2': usize
+            70..71 'a': [struct { x: usize }; 2]
+            100..134 '[struct { x: 1 },...': [struct { x: usize }; 2]
+            101..116 'struct { x: 1 }': struct { x: usize }
+            113..114 '1': usize
+            118..133 'struct { x: 2 }': struct { x: usize }
+            130..131 '2': usize
+            144..145 'n': usize
+            148..149 'r': struct { data: [usize; 2], len: usize }
+            148..154 'r.data': [usize; 2]
+            148..157 'r.data[0]': usize
+            148..166 'r.data[0] + a[1].x': usize
+            155..156 '0': usize
+            160..161 'a': [struct { x: usize }; 2]
+            160..164 'a[1]': struct { x: usize }
+            160..166 'a[1].x': usize
+            162..163 '1': usize
+        "#]],
+    );
+}
+
+#[test]
+fn array_length_mismatch_blames_the_literal() {
+    check_diagnostics(
+        "static f = fn { let a: [usize; 3] = [1, 2]; };",
+        expect![[r#"
+            36..42: type mismatch: expected `[usize; 3]`, found `[usize; 2]` (expected `[usize; 3]` because of this annotation at 23..33)
+        "#]],
+    );
+}
+
+#[test]
+fn array_lengths_never_unify_across_a_call() {
+    check_diagnostics(
+        r#"
+static g = fn (a: [usize; 2]) {};
+static f = fn { g([1, 2, 3]); };
+"#,
+        expect![[r#"
+            53..62: type mismatch: expected `[usize; 2]`, found `[usize; 3]`
+        "#]],
+    );
+}
+
+#[test]
+fn array_element_mismatch_blames_the_element() {
+    check_diagnostics(
+        r#"static f = fn { let a: [usize; 2] = [1, "two"]; };"#,
+        expect![[r#"
+            40..45: type mismatch: expected `usize`, found `str` (expected `usize` because of this annotation at 23..33)
+        "#]],
+    );
+}
+
+#[test]
+fn array_elements_vote_without_an_annotation() {
+    check_diagnostics(
+        r#"static f = fn { let a = [1, 2, "three"]; };"#,
+        expect![[r#"
+            31..38: type mismatch: expected `usize`, found `str` (this branch has type `usize` at 25..26) (this branch has type `usize` at 28..29)
+        "#]],
+    );
+}
+
+#[test]
+fn empty_array_needs_annotation() {
+    check_diagnostics(
+        r#"static f = fn { let a = []; };"#,
+        expect![[r#"
+            24..26: cannot infer the element type of an empty array; add a type annotation
+        "#]],
+    );
+}
+
+#[test]
+fn empty_array_with_annotation_is_fine() {
+    check_diagnostics(
+        "static f = fn { let a: [usize; 0] = []; };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn index_must_be_usize() {
+    check_diagnostics(
+        r#"static f = fn { let a = [1, 2]; let x = a["nope"]; };"#,
+        expect![[r#"
+            42..48: type mismatch: expected `usize`, found `str`
+        "#]],
+    );
+}
+
+#[test]
+fn compile_time_out_of_bounds_is_reported() {
+    check_diagnostics(
+        "static f = fn { let a = [1, 2]; let x = a[2]; };",
+        expect![[r#"
+            40..44: index out of bounds: the length is 2 but the index is 2
+        "#]],
+    );
+}
+
+#[test]
+fn index_on_non_array_is_reported() {
+    check_diagnostics(
+        "static f = fn { let x = 5; let y = x[0]; };",
+        expect![[r#"
+            35..39: type `usize` cannot be indexed
+        "#]],
+    );
+}
+
+#[test]
+fn index_assign_requires_mut_root() {
+    check_diagnostics(
+        "static f = fn { let a = [1, 2]; a[0] = 5; };",
+        expect![[r#"
+            32..33: cannot assign to `a[_]`: `a` is not declared `mut` (`a` is declared without `mut` here at 20..21)
+        "#]],
+    );
+}
+
+#[test]
+fn index_assign_to_mut_binding_is_fine() {
+    check_diagnostics(
+        "static f = fn { let mut a = [1, 2]; a[0] = 5; print(\"\"); };",
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn const_param_array_length_end_to_end() {
+    check_diagnostics(
+        r#"
+static sum2 = const fn::<const N: usize>(b: [usize; N]) -> usize { b[0] + b[1] };
+static r = sum2::<2>([1, 2]);
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn const_param_array_length_mismatch_at_instantiation() {
+    check_diagnostics(
+        r#"
+static sum2 = const fn::<const N: usize>(b: [usize; N]) -> usize { b[0] + b[1] };
+static r = sum2::<3>([1, 2]);
+"#,
+        expect![[r#"
+            104..110: type mismatch: expected `[usize; 3]`, found `[usize; 2]`
+        "#]],
+    );
+}
+
+#[test]
+fn generic_type_with_array_field_end_to_end() {
+    check_diagnostics(
+        r#"
+type Buf = struct::<const N: usize> { data: [usize; N], len: usize };
+static b = Buf::<2>(struct { data: [1, 2], len: 2 });
+static first = fn (buf: Buf::<2>) -> usize { buf.data[0] };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn const_block_array_length_rejected_in_type_position() {
+    check_diagnostics(
+        "static x: [usize; const { 3 }] = [1, 2, 3];",
+        expect![[r#"
+            18..29: a `const { ... }` block cannot parameterize a type; pass the value through a generic function's const parameter instead
+        "#]],
+    );
+}
+
+#[test]
+fn non_const_array_length_name_rejected_in_type_position() {
+    check_diagnostics(
+        "static x: [usize; huh] = [1];",
+        expect![[r#"
+            18..21: a type's const argument must be a literal or a const parameter name
+        "#]],
+    );
+}
+
+#[test]
+fn str_array_length_rejected_in_type_position() {
+    check_diagnostics(
+        r#"static x: [usize; "two"] = [1, 2];"#,
+        expect![[r#"
+            18..23: type mismatch: expected `usize`, found `str`
+            27..33: type mismatch: expected `[usize; "two"]`, found `[usize; 2]` (expected `[usize; "two"]` because of this annotation at 10..24)
+        "#]],
+    );
+}
+
+#[test]
+fn array_repeat_infers_and_repeat_count_forms() {
+    check_infer(
+        "static f = fn { let a = [0; 4]; };",
+        expect![[r#"
+            11..33 'fn { let a = [0; ...': fn()
+            14..33 '{ let a = [0; 4]; }': ()
+            20..21 'a': [usize; 4]
+            24..30 '[0; 4]': [usize; 4]
+            25..26 '0': usize
+            28..29 '4': usize
+        "#]],
+    );
+}
+
+#[test]
+fn array_repeat_with_variable_count_rejected() {
+    check_diagnostics(
+        "static f = fn (n: usize) { let a = [0; n]; };",
+        expect![[r#"
+            39..40: a type's const argument must be a literal or a const parameter name
+        "#]],
+    );
+}
+
+#[test]
+fn array_repeat_with_const_block_count_rejected() {
+    check_diagnostics(
+        "static f = fn { let a = [0; const { 2 }]; };",
+        expect![[r#"
+            28..39: a `const { ... }` block cannot parameterize a type; pass the value through a generic function's const parameter instead
+        "#]],
+    );
+}
+
+#[test]
+fn array_repeat_with_const_param_count() {
+    check_diagnostics(
+        r#"
+static rep = const fn::<const N: usize>(v: usize) -> [usize; N] { [v; N] };
+static r = rep::<3>(7);
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn array_valued_const_param_rejected_at_declaration() {
+    check_diagnostics(
+        "static f = fn::<const N: [usize; 2]>() -> usize { 0 };",
+        expect![[r#"
+            25..35: an array value cannot be a const argument (yet)
+        "#]],
+    );
+}
+
+#[test]
+fn type_declaration_with_array_field() {
+    check_diagnostics(
+        r#"
+type Buf = struct { data: [usize; 2] };
+static b = Buf(struct { data: [1, 2] });
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn type_declaration_array_field_bad_lengths() {
+    check_diagnostics(
+        r#"
+type A = struct { data: [usize; const { 2 }] };
+type B = struct { data: [usize; nope] };
+"#,
+        expect![[r#"
+            33..44: a `const { ... }` block cannot parameterize a type; pass the value through a generic function's const parameter instead
+            81..85: a type's const argument must be a literal or a const parameter name
+        "#]],
+    );
+}
+
+#[test]
+fn mixed_variant_array_elements_widen_to_the_enum() {
+    check_infer(
+        r#"
+type Shape = enum { Point, Circle(usize) };
+static f = fn {
+    let shapes = [Shape::Circle(1), Shape::Point];
+};
+"#,
+        expect![[r#"
+            56..113 'fn {     let shap...': fn()
+            59..113 '{     let shapes ...': ()
+            69..75 'shapes': [Shape; 2]
+            78..110 '[Shape::Circle(1)...': [Shape; 2]
+            79..92 'Shape::Circle': fn(usize) -> Shape::Circle
+            79..95 'Shape::Circle(1)': Shape::Circle
+            93..94 '1': usize
+            97..109 'Shape::Point': Shape::Point
+        "#]],
+    );
+}
+
+#[test]
+fn match_on_array_scrutinee_rejects_variant_patterns() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Point };
+static f = fn (a: [usize; 2]) -> usize {
+    match a {
+        ::Point => 1,
+        _ => 2,
+    }
+};
+"#,
+        expect![[r#"
+            93..100: only `_` or a binding can match a `[usize; 2]` (for now)
+        "#]],
+    );
+}

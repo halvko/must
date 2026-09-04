@@ -147,6 +147,19 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
         ExprData::Field { receiver, .. } => {
             compute_expr_scopes(body, scopes, *receiver, scope);
         }
+        ExprData::ArrayLit { elements } => {
+            for &element in elements {
+                compute_expr_scopes(body, scopes, element, scope);
+            }
+        }
+        ExprData::ArrayRepeat { element, count } => {
+            compute_expr_scopes(body, scopes, *element, scope);
+            compute_expr_scopes(body, scopes, *count, scope);
+        }
+        ExprData::Index { base, index } => {
+            compute_expr_scopes(body, scopes, *base, scope);
+            compute_expr_scopes(body, scopes, *index, scope);
+        }
         // The variant name is resolved against the enum during inference,
         // not lexically; only the base is a scoped reference — plus any
         // turbofish const-arg values, which are ordinary scoped

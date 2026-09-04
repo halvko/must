@@ -195,6 +195,12 @@ fn require_variable_target(expr: &ast::Expr, errors: &mut Vec<SyntaxError>) {
                 // parse error covers it.
                 None => return,
             },
+            // An index is a place segment (`a[i] = v;`, `m[0][1] = v;`,
+            // `p.buf[i].x = v;`) — root mutability is inference's call.
+            ast::Expr::IndexExpr(index) => match index.base() {
+                Some(base) => place = base,
+                None => return,
+            },
             _ => break,
         }
     }

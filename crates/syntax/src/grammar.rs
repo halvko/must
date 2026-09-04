@@ -13,6 +13,7 @@ fn at_expr_recovery(p: &Parser<'_>) -> bool {
         p.current(),
         EOF | R_BRACE
             | R_PAREN
+            | R_BRACKET
             | SEMICOLON
             | COMMA
             | STATIC_KW
@@ -176,6 +177,18 @@ fn expr_bp(p: &mut Parser<'_>, min_bp: u8) -> Option<CompletedMarker> {
             lhs = m.complete(p, CALL_EXPR);
             continue;
         }
+        // Indexing sits in the call/field tier too, so `a[0][1]`, `m[i].x`
+        // and `f()[0]` all chain naturally. A `[` after an expression is
+        // always an index — array *literals* only start expressions
+        // (`primary_expr`), so there is no ambiguity to disambiguate.
+        if p.at(L_BRACKET) {
+            let m = lhs.precede(p);
+            p.bump(L_BRACKET);
+            expr(p);
+            p.expect_after_prev(R_BRACKET);
+            lhs = m.complete(p, INDEX_EXPR);
+            continue;
+        }
         // Field access sits in the same tier as calls, so `a.b.c`, `f().x`
         // and `a.b()` all fall out of this loop naturally.
         if p.at(DOT) {
@@ -284,6 +297,7 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         // A bare `{` is always a block. Record literals are introduced by the
         // `struct` keyword (handled above), so no lookahead is needed here.
         L_BRACE => block_expr(p),
+        L_BRACKET => array_expr(p),
         FN_KW => fn_literal(p),
         IF_KW => if_expr(p),
         MATCH_KW => match_expr(p),
@@ -422,9 +436,9 @@ fn skip_arm_body(p: &mut Parser<'_>) {
     loop {
         match p.current() {
             EOF => return,
-            L_BRACE | L_PAREN => depth += 1,
-            R_BRACE | R_PAREN if depth == 0 => return,
-            R_BRACE | R_PAREN => depth -= 1,
+            L_BRACE | L_PAREN | L_BRACKET => depth += 1,
+            R_BRACE | R_PAREN | R_BRACKET if depth == 0 => return,
+            R_BRACE | R_PAREN | R_BRACKET => depth -= 1,
             // At depth 0 these end the arm (or the item that swallowed
             // it); nested, they are the body's own.
             COMMA | SEMICOLON | STATIC_KW | CONST_KW | TYPE_KW | LET_KW if depth == 0 => return,
@@ -574,13 +588,46 @@ fn continue_expr(p: &mut Parser<'_>) -> CompletedMarker {
     m.complete(p, CONTINUE_EXPR)
 }
 
+/// `[e1, e2, e3]` — an array literal — or `[e; N]` — the repeat form. One
+/// node kind for both: the `;` decides (see `ast::ArrayExpr`). Elements are
+/// ordinary expressions; the repeat count parses as an expression too and
+/// is restricted semantically (a const argument: a literal or a const
+/// parameter — inference rejects the rest).
+fn array_expr(p: &mut Parser<'_>) -> CompletedMarker {
+    let m = p.start();
+    p.bump(L_BRACKET);
+    if p.eat(R_BRACKET) {
+        // `[]` — the empty array literal.
+        return m.complete(p, ARRAY_EXPR);
+    }
+    expr(p);
+    if p.eat(SEMICOLON) {
+        // The repeat form: `[e; N]`.
+        expr(p);
+    } else {
+        while p.at(COMMA) {
+            p.bump(COMMA);
+            if p.at(R_BRACKET) {
+                break; // trailing comma
+            }
+            let before = p.pos();
+            expr(p);
+            if p.pos() == before {
+                break;
+            }
+        }
+    }
+    p.expect_after_prev(R_BRACKET);
+    m.complete(p, ARRAY_EXPR)
+}
+
 /// Whether the current token can start an expression — the dispatch set of
 /// `primary_expr`, including its one-token-lookahead `const`/`struct`/`enum`
 /// cases. Used where an expression is *optional* (a `break` value).
 fn at_expr_start(p: &Parser<'_>) -> bool {
     match p.current() {
-        INT_NUMBER | STRING | TRUE_KW | FALSE_KW | IDENT | L_PAREN | L_BRACE | FN_KW | IF_KW
-        | MATCH_KW | LOOP_KW | BREAK_KW | CONTINUE_KW => true,
+        INT_NUMBER | STRING | TRUE_KW | FALSE_KW | IDENT | L_PAREN | L_BRACE | L_BRACKET
+        | FN_KW | IF_KW | MATCH_KW | LOOP_KW | BREAK_KW | CONTINUE_KW => true,
         CONST_KW => matches!(p.nth(1), FN_KW | L_BRACE),
         STRUCT_KW | ENUM_KW => at_type_literal_body(p),
         _ => false,
@@ -1066,7 +1113,78 @@ fn type_(p: &mut Parser<'_>) {
         }
         // Record types are introduced by `struct`; a bare `{` is not a type.
         STRUCT_KW => record_type(p),
+        L_BRACKET => array_type(p),
         _ => p.error("expected a type"),
+    }
+}
+
+/// `[T; N]` — a fixed-size array type. The length is a const argument in
+/// annotation position, so it follows the ruled const-arg forms: a bare
+/// literal, a bare (const-param) name, or the `const`-prefixed spellings —
+/// including `const { ... }`, which parses here (resilience) but is always
+/// rejected semantically (type identity lives on the eval-free path; see
+/// `hir`'s annotation mirror).
+fn array_type(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.bump(L_BRACKET);
+    type_(p);
+    if p.expect(SEMICOLON, "`;` (array types are written `[T; N]`)") {
+        array_len_arg(p);
+    }
+    p.expect_after_prev(R_BRACKET);
+    m.complete(p, ARRAY_TYPE);
+}
+
+/// The length of an [`array_type`]: a `CONST_ARG` node, same shapes as a
+/// turbofish's const argument ([`generic_arg`]'s const arms) plus the bare
+/// name — the position is unambiguously a value, so no `const` sigil is
+/// needed to force the reading.
+fn array_len_arg(p: &mut Parser<'_>) {
+    match p.current() {
+        INT_NUMBER | STRING | TRUE_KW | FALSE_KW => {
+            let m = p.start();
+            let lit = p.start();
+            p.bump_any();
+            lit.complete(p, LITERAL);
+            m.complete(p, CONST_ARG);
+        }
+        // A bare name: a const parameter (`[T; N]`).
+        IDENT => {
+            let m = p.start();
+            let path = p.start();
+            name_ref(p);
+            path.complete(p, PATH_EXPR);
+            m.complete(p, CONST_ARG);
+        }
+        // `const { ... }` / `const N` / `const 42` — accepted by the
+        // grammar so the tree keeps the user's intent; the block spelling
+        // is rejected semantically (see `array_type`'s doc).
+        CONST_KW if p.nth(1) == L_BRACE => {
+            let m = p.start();
+            const_block_expr(p);
+            m.complete(p, CONST_ARG);
+        }
+        CONST_KW => {
+            let m = p.start();
+            p.bump(CONST_KW);
+            match p.current() {
+                INT_NUMBER | STRING | TRUE_KW | FALSE_KW => {
+                    let lit = p.start();
+                    p.bump_any();
+                    lit.complete(p, LITERAL);
+                }
+                IDENT => {
+                    let path = p.start();
+                    name_ref(p);
+                    path.complete(p, PATH_EXPR);
+                }
+                _ => {
+                    p.error("expected a name, literal, or `{ ... }` block after `const`");
+                }
+            }
+            m.complete(p, CONST_ARG);
+        }
+        _ => p.error("expected an array length (a literal or a const parameter name)"),
     }
 }
 

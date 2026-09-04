@@ -4,8 +4,8 @@
 use std::fmt::Write as _;
 
 use crate::{
-    AggregateKind, BlockId, BodyId, Const, LocalId, MirBody, MirLowered, Operand, Place, Rvalue,
-    StatementKind, TerminatorKind,
+    AggregateKind, BlockId, BodyId, Const, LocalId, MirBody, MirLowered, Operand, Place, ProjElem,
+    Rvalue, StatementKind, TerminatorKind,
 };
 
 pub fn render(lowered: &MirLowered) -> String {
@@ -81,7 +81,16 @@ fn render_rvalue(rvalue: &Rvalue) -> String {
             let parts = ops.iter().map(operand).collect::<Vec<_>>().join(", ");
             format!("payload({parts})")
         }
+        Rvalue::Aggregate {
+            kind: AggregateKind::Array,
+            ops,
+        } => {
+            let parts = ops.iter().map(operand).collect::<Vec<_>>().join(", ");
+            format!("[{parts}]")
+        }
         Rvalue::Field { base, index } => format!("{}.{index}", operand(base)),
+        Rvalue::Index { base, index } => format!("{}[{}]", operand(base), operand(index)),
+        Rvalue::Repeat { elem, count } => format!("[{}; {}]", operand(elem), operand(count)),
         Rvalue::Instantiate { item, const_args } => {
             let args = const_args
                 .iter()
@@ -186,12 +195,20 @@ fn local(id: LocalId) -> String {
     format!("_{}", u32::from(id.into_raw()))
 }
 
-/// `_1` for a whole local, `_1.0.2` through a field-index projection —
-/// the same dotted spelling `Rvalue::Field` reads render with.
+/// `_1` for a whole local, `_1.0.2` through a field-index projection (the
+/// same dotted spelling `Rvalue::Field` reads render with), `_1[_2]`
+/// through an element projection.
 fn place(p: &Place) -> String {
     let mut out = local(p.local);
-    for index in &p.projection {
-        let _ = write!(out, ".{index}");
+    for elem in &p.projection {
+        match elem {
+            ProjElem::Field(index) => {
+                let _ = write!(out, ".{index}");
+            }
+            ProjElem::Index(op) => {
+                let _ = write!(out, "[{}]", operand(op));
+            }
+        }
     }
     out
 }

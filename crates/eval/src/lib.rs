@@ -41,6 +41,12 @@ pub enum Value {
     Record {
         fields: Vec<(String, Value)>,
     },
+    /// A fixed-size array value: the elements in order. The homogeneous
+    /// carrier `[T; N]` values run on — plain data (copyable, no heap),
+    /// so it composes freely with records, const evaluation and freezing
+    /// into statics. Derived `PartialEq` is elementwise structural
+    /// equality, like `Record`'s.
+    Array(Vec<Value>),
     /// A *variant-typed* value: the bare payload tuple, in declaration
     /// order. This is the uniform carrier for every payload arity —
     /// `Shape::Point` is `Tuple([])`, `Shape::Circle(3)` is
@@ -137,6 +143,10 @@ impl std::hash::Hash for Value {
             Value::Fn(_) => {}
             Value::Builtin(b) => b.hash(state),
             Value::Record { fields } => fields.hash(state),
+            // Lawful but never an identity: array values are excluded from
+            // the const-arg domain (see `hir::diag::ARRAY_CONST_ARG`), so
+            // this hash can never key an instance.
+            Value::Array(values) => values.hash(state),
             Value::Tuple(values) => values.hash(state),
             Value::Variant {
                 decl,
@@ -172,6 +182,16 @@ impl Value {
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("{{ {parts} }}")
+            }
+            // Rendered whole, like records — no truncation precedent
+            // exists in the value renderers, so none is invented here.
+            Value::Array(values) => {
+                let parts = values
+                    .iter()
+                    .map(Value::display)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("[{parts}]")
             }
             // A payload-less variant-typed value renders like unit — all
             // the runtime has (its *type* names the variant; the debugger

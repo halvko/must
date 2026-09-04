@@ -530,6 +530,42 @@ pub enum InferenceDiagnostic {
         /// non-literal value.
         is_block: bool,
     },
+    /// `a[i]` where `a` is not an array.
+    IndexNonArray {
+        /// The index expression.
+        expr: ExprId,
+        /// The base's (non-array) type.
+        ty: Ty,
+    },
+    /// `a[3]` on an `[T; 3]` — both the length and the index are
+    /// compile-time known and the index is out of bounds. The message is
+    /// EXACTLY the runtime bounds trap's ([`crate::diag::index_out_of_bounds`],
+    /// the single-render discipline): the squiggle and the crash say the
+    /// same thing.
+    IndexOutOfBounds {
+        /// The index expression (carries the squiggle and the trap).
+        expr: ExprId,
+        len: u128,
+        index: u128,
+    },
+    /// `[]` with nothing pinning the element type — the array sibling of
+    /// [`Self::NeedsAnnotation`]: compile-time only (an empty array runs
+    /// fine whatever its element type would have been), so no trap.
+    EmptyArrayNeedsAnnotation {
+        /// The empty array literal.
+        expr: ExprId,
+    },
+    /// A const argument in a position whose declared type mentions an
+    /// array: array VALUES stay outside the const-arg domain for now (the
+    /// ruled domain is builtins + records + variants). The mention-side
+    /// belt of the declaration-site rejection in
+    /// [`crate::file_diagnostics`]; both render
+    /// [`crate::diag::ARRAY_CONST_ARG`] — the array twin of
+    /// [`Self::FnConstArg`].
+    ArrayConstArg {
+        /// The turbofish mention expression.
+        expr: ExprId,
+    },
 }
 
 /// Why an arm can never run — one message per cause, so the fix is named.
@@ -575,7 +611,11 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::MissingConstArgs { expr, .. }
             | InferenceDiagnostic::CannotInferGenericParam { expr, .. }
             | InferenceDiagnostic::FnConstArg { expr }
-            | InferenceDiagnostic::TypeConstArgUnsupported { expr, .. } => *expr,
+            | InferenceDiagnostic::TypeConstArgUnsupported { expr, .. }
+            | InferenceDiagnostic::IndexNonArray { expr, .. }
+            | InferenceDiagnostic::IndexOutOfBounds { expr, .. }
+            | InferenceDiagnostic::EmptyArrayNeedsAnnotation { expr }
+            | InferenceDiagnostic::ArrayConstArg { expr } => *expr,
             InferenceDiagnostic::UnreachableArm { match_expr, .. }
             | InferenceDiagnostic::NonEnumScrutineeVariantPat { match_expr, .. }
             | InferenceDiagnostic::PatNoSuchVariant { match_expr, .. }
@@ -927,6 +967,16 @@ impl InferenceDiagnostic {
                     crate::diag::TYPE_CONST_ARG_NOT_LITERAL.to_owned()
                 }
             }
+            InferenceDiagnostic::IndexNonArray { ty, .. } => {
+                format!("type `{}` cannot be indexed", ty.display())
+            }
+            InferenceDiagnostic::IndexOutOfBounds { len, index, .. } => {
+                crate::diag::index_out_of_bounds(*len, *index)
+            }
+            InferenceDiagnostic::EmptyArrayNeedsAnnotation { .. } => {
+                "cannot infer the element type of an empty array; add a type annotation".to_owned()
+            }
+            InferenceDiagnostic::ArrayConstArg { .. } => crate::diag::ARRAY_CONST_ARG.to_owned(),
         }
     }
 }
@@ -1036,6 +1086,11 @@ pub(crate) struct InferCtx<'a, 'db> {
     /// [`Self::finish`] can report type params the whole traversal never
     /// pinned (the mention-site sibling of `NeedsAnnotation`).
     pending_instantiations: Vec<PendingInstantiation>,
+    /// Every empty array literal (`[]`) whose element type started as a
+    /// fresh variable: if the whole traversal (joins included) never pins
+    /// it, [`Self::finish`] reports
+    /// [`InferenceDiagnostic::EmptyArrayNeedsAnnotation`].
+    pending_empty_arrays: Vec<(ExprId, Ty)>,
 }
 
 /// One instantiation of a generic item's scheme at a mention: which fresh
@@ -1086,6 +1141,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             own_generics: &[],
             own_item: None,
             pending_instantiations: Vec::new(),
+            pending_empty_arrays: Vec::new(),
         }
     }
 
@@ -1129,6 +1185,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             param,
                         });
                 }
+            }
+        }
+        // Empty array literals whose element type nothing ever pinned —
+        // the array sibling of the loop above.
+        let pending = std::mem::take(&mut self.pending_empty_arrays);
+        for (expr, elem) in pending {
+            if resolve_fully(self.table, &elem).contains_infer() {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::EmptyArrayNeedsAnnotation { expr });
             }
         }
         let mut result = std::mem::take(&mut self.result);
@@ -1199,7 +1265,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         *ty = resolve_fully(self.table, ty);
                     }
                 }
-                InferenceDiagnostic::PatNotRecord { ty, .. } => {
+                InferenceDiagnostic::PatNotRecord { ty, .. }
+                | InferenceDiagnostic::IndexNonArray { ty, .. } => {
                     *ty = resolve_fully(self.table, ty);
                 }
                 InferenceDiagnostic::PatNamedTypeMismatch {
@@ -1239,7 +1306,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::CannotInferGenericParam { .. }
                 | InferenceDiagnostic::AssignToConstParam { .. }
                 | InferenceDiagnostic::FnConstArg { .. }
-                | InferenceDiagnostic::TypeConstArgUnsupported { .. } => {}
+                | InferenceDiagnostic::TypeConstArgUnsupported { .. }
+                | InferenceDiagnostic::IndexOutOfBounds { .. }
+                | InferenceDiagnostic::EmptyArrayNeedsAnnotation { .. }
+                | InferenceDiagnostic::ArrayConstArg { .. } => {}
             }
         }
         for (_, ty) in result.type_of_pat.iter_mut() {
@@ -1685,7 +1755,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             // non-record receivers on the way).
                             let fresh = self.fresh_var();
                             let target_ty = self.infer_expr(*target, &fresh);
-                            if let ExprData::Field { .. } = &self.body.exprs[*target] {
+                            if let ExprData::Field { .. } | ExprData::Index { .. } =
+                                &self.body.exprs[*target]
+                            {
                                 let cause = self.check_field_assign_target(*target);
                                 self.infer_expr_with(*value, &target_ty, cause);
                                 continue;
@@ -1959,6 +2031,169 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     }
                 }
             }
+            ExprData::ArrayLit { elements } => {
+                let elements = elements.clone();
+                // Bidirectional: an array expectation flows its element
+                // type into every element (with the same cause), exactly
+                // like record literals — a wrong element blames the
+                // element and cites the annotation/call that demanded it.
+                if let Ty::Array { elem, .. } = self.resolve_shallow(expected) {
+                    let elem = (*elem).clone();
+                    for &element in &elements {
+                        self.infer_expr_with(element, &elem, cause);
+                    }
+                    // The literal's length is its element count; a length
+                    // disagreement with the expectation is an ordinary
+                    // mismatch on the whole literal (the final `check`).
+                    Ty::array(elem, ConstArgValue::Int(elements.len() as u128))
+                } else {
+                    // No array expectation: the elements are witnesses of
+                    // ONE join — the same family-aware machinery `if`
+                    // branches and match arms use, so identical elements
+                    // keep their type, mixed variants of one enum LUB to
+                    // the enum (with the conversion planted per element),
+                    // and blame speaks about elements.
+                    let result = self.fresh_var();
+                    self.join_sinks.push(JoinSink {
+                        result: result.clone(),
+                        witnesses: Vec::new(),
+                    });
+                    let sink_index = self.join_sinks.len() - 1;
+                    for &element in &elements {
+                        let fresh = self.fresh_var();
+                        self.witness_sink = Some(sink_index);
+                        let element_ty = self.infer_expr(element, &fresh);
+                        self.contribute_witness(sink_index, element, &element_ty);
+                    }
+                    let JoinSink { result, witnesses } =
+                        self.join_sinks.pop().expect("sink pushed above");
+                    match witnesses.len() {
+                        // `[]` (or every element diverges): the element
+                        // type is the context's to decide; a genuinely
+                        // unpinned `[]` is reported in `finish`.
+                        0 => {
+                            if elements.is_empty() {
+                                self.pending_empty_arrays.push((expr, result.clone()));
+                            }
+                        }
+                        1 => {
+                            let ty = witnesses.into_iter().next().unwrap().ty;
+                            self.unify(&result, &ty);
+                        }
+                        _ => {
+                            // Deferral exists so axioms arriving later can
+                            // pick the winner before witnesses are played
+                            // against each other — when every element
+                            // already resolves to ONE concrete type there
+                            // is nothing left to decide, and resolving
+                            // eagerly keeps the element type usable
+                            // *during* traversal (indexing is the array's
+                            // primary operation: `m[1][0]` / `pts[1].x`
+                            // on a nested literal must project right
+                            // away, which a deferred join can't offer).
+                            let resolved: Vec<Ty> = witnesses
+                                .iter()
+                                .map(|witness| resolve_fully(self.table, &witness.ty))
+                                .collect();
+                            let unanimous = !resolved[0].contains_infer()
+                                && !resolved[0].contains_error()
+                                && resolved.iter().all(|ty| *ty == resolved[0]);
+                            if unanimous {
+                                self.unify(&result, &resolved[0]);
+                            } else {
+                                self.constraints.push_join(Join {
+                                    expr,
+                                    depth: self.scope_depth,
+                                    result: result.clone(),
+                                    witnesses,
+                                });
+                            }
+                        }
+                    }
+                    Ty::array(result, ConstArgValue::Int(elements.len() as u128))
+                }
+            }
+            ExprData::ArrayRepeat { element, count } => {
+                let element = *element;
+                let count = *count;
+                let elem_expected = match self.resolve_shallow(expected) {
+                    Ty::Array { elem, .. } => (*elem).clone(),
+                    _ => self.fresh_var(),
+                };
+                let elem_ty = self.infer_expr_with(element, &elem_expected, cause);
+                // The count is a `usize`...
+                self.infer_expr_with(count, &Ty::Int, None);
+                // ...and it parameterizes the array's TYPE, so it is
+                // restricted to the annotation-representable const domain
+                // (a literal or a const-param read) — a computed count
+                // (any expression, `const { ... }` blocks included) gets
+                // the same diagnostic a type's const argument does.
+                let len = match self.try_type_const_arg_value(count) {
+                    Ok(value) => value,
+                    Err(is_block) => {
+                        self.result.diagnostics.push(
+                            InferenceDiagnostic::TypeConstArgUnsupported {
+                                expr: count,
+                                is_block,
+                            },
+                        );
+                        ConstArgValue::Error
+                    }
+                };
+                Ty::array(elem_ty, len)
+            }
+            ExprData::Index { base, index } => {
+                let base = *base;
+                let index = *index;
+                let base_fresh = self.fresh_var();
+                let base_ty = self.infer_expr(base, &base_fresh);
+                self.infer_expr_with(index, &Ty::Int, None);
+                match self.resolve_shallow(&base_ty) {
+                    Ty::Array { elem, len } => {
+                        // Both the length and the index compile-time known
+                        // and out of bounds: squiggle here, trap at this
+                        // expression — with exactly the text the runtime
+                        // bounds check uses.
+                        if let ConstArgValue::Int(len_value) = len
+                            && let ExprData::Literal(LiteralData::Int(Some(index_value))) =
+                                &self.body.exprs[index]
+                            && *index_value >= len_value
+                        {
+                            let index_value = *index_value;
+                            self.result
+                                .diagnostics
+                                .push(InferenceDiagnostic::IndexOutOfBounds {
+                                    expr,
+                                    len: len_value,
+                                    index: index_value,
+                                });
+                        }
+                        (*elem).clone()
+                    }
+                    // Evaluating the base already diverges.
+                    Ty::Never => Ty::Never,
+                    // An undetermined base: like a field access, the
+                    // element type can't be run backwards — ask for an
+                    // annotation.
+                    Ty::Infer(_) => {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::FieldOnUnknownType {
+                                expr,
+                                receiver: base,
+                            });
+                        Ty::Error
+                    }
+                    // Errors are infectious and silent.
+                    broken if broken.contains_error() => Ty::Error,
+                    other => {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::IndexNonArray { expr, ty: other });
+                        Ty::Error
+                    }
+                }
+            }
             ExprData::FnLiteral {
                 params,
                 ret_type,
@@ -2137,24 +2372,36 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         ty
     }
 
-    /// Enforcement for a field-chain assignment target (`p.x = e;`,
-    /// `p.a.b = e;`): assignability is Rust's transitivity rule — legal
-    /// exactly when the ROOT binding is `mut`; outer immutability implies
-    /// inner immutability and vice versa, with no per-field `mut`. The
-    /// chain was already inferred as an ordinary read (unknown fields and
-    /// non-record receivers got their `NoSuchField`-family squiggles
-    /// there), so only the root is ruled on here. Returns the cause the
-    /// RHS check should cite: the root binding's annotation when it has
-    /// one — its record type spells the field's type out, the same axiom
+    /// Enforcement for a place-chain assignment target (`p.x = e;`,
+    /// `p.a.b = e;`, `a[i] = e;`, `m[0][1].x = e;`): assignability is
+    /// Rust's transitivity rule — legal exactly when the ROOT binding is
+    /// `mut`; outer immutability implies inner immutability and vice
+    /// versa, with no per-field (or per-element) `mut`. The chain was
+    /// already inferred as an ordinary read (unknown fields, non-record
+    /// receivers and non-array bases got their squiggles there), so only
+    /// the root is ruled on here. Returns the cause the RHS check should
+    /// cite: the root binding's annotation when it has one — its type
+    /// spells the field's/element's type out, the same axiom
     /// record-literal field checking flows down — and nothing otherwise
     /// (the inferred-from-initializer fallback hint would claim the
-    /// *binding* has the field's type).
+    /// *binding* has the projected type).
     fn check_field_assign_target(&mut self, target: ExprId) -> Option<Cause> {
         let mut segments: Vec<String> = Vec::new();
         let mut root = target;
-        while let ExprData::Field { receiver, name } = &self.body.exprs[root] {
-            segments.push(name.clone());
-            root = *receiver;
+        loop {
+            match &self.body.exprs[root] {
+                ExprData::Field { receiver, name } => {
+                    segments.push(format!(".{name}"));
+                    root = *receiver;
+                }
+                // The index expression has no stable rendering here
+                // (message texts are range-free); `[_]` says "an element".
+                ExprData::Index { base, .. } => {
+                    segments.push("[_]".to_owned());
+                    root = *base;
+                }
+                _ => break,
+            }
         }
         let ExprData::NameRef(root_name) = &self.body.exprs[root] else {
             // A chain rooted in a non-variable: validation already
@@ -2165,7 +2412,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         };
         segments.push(root_name.clone());
         segments.reverse();
-        let place = segments.join(".");
+        let place = segments.concat();
         // The same target taxonomy as a plain-name assignment, judged at
         // the root; the silent arms match its reasoning too (the root read
         // already carries `TypeNotValue` / unresolved-name / duplicate
@@ -2475,12 +2722,20 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         // (see `file_diagnostics`); repeating it here is
                         // the belt at the mention — and the argument is
                         // NOT recorded, so no fn value can ever reach
-                        // instance identity or evaluation.
+                        // instance identity or evaluation. Array values
+                        // are excluded the same way (the ruled domain is
+                        // builtins + records + variants).
                         let fn_valued = declared.mentions_fn();
                         if fn_valued {
                             self.result
                                 .diagnostics
                                 .push(InferenceDiagnostic::FnConstArg { expr });
+                        }
+                        let array_valued = declared.mentions_array();
+                        if array_valued {
+                            self.result
+                                .diagnostics
+                                .push(InferenceDiagnostic::ArrayConstArg { expr });
                         }
                         self.infer_expr_with(
                             value,
@@ -2490,7 +2745,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 index: index as u32,
                             }),
                         );
-                        if !fn_valued {
+                        if !fn_valued && !array_valued {
                             const_args.push((index as u32, value));
                             // The scheme's TYPES may mention this const
                             // param (`fn::<const N: usize>(b: Buf::<N>)`) —
@@ -3581,12 +3836,19 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             let declared = self.lower_const_param_ty(declared);
                             // Fn values are outside the const-arg domain
                             // (TR06: concrete data types only) — same belt
-                            // as fn mentions.
+                            // as fn mentions. Array values are excluded
+                            // the same way.
                             let fn_valued = declared.mentions_fn();
                             if fn_valued {
                                 self.result
                                     .diagnostics
                                     .push(InferenceDiagnostic::FnConstArg { expr: mention });
+                            }
+                            let array_valued = declared.mentions_array();
+                            if array_valued {
+                                self.result
+                                    .diagnostics
+                                    .push(InferenceDiagnostic::ArrayConstArg { expr: mention });
                             }
                             self.infer_expr_with(
                                 value,
@@ -3596,7 +3858,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     index: index as u32,
                                 }),
                             );
-                            if fn_valued {
+                            if fn_valued || array_valued {
                                 ConstArgValue::Error
                             } else {
                                 self.type_const_arg_value(mention, value)
@@ -3919,6 +4181,24 @@ fn instantiate_scheme(
                 .collect(),
             instantiate_scheme(&f.ret, item, subst, const_subst),
         ),
+        // The scheme may embed a const param as an array LENGTH
+        // (`fn::<const N: usize>(b: [usize; N])`): substitute the written
+        // argument's type-level value, exactly like a generic-type
+        // mention's const args below.
+        Ty::Array { elem, len } => {
+            let len = match len {
+                ConstArgValue::Param {
+                    item: param_item,
+                    index,
+                    ..
+                } if param_item == item => const_subst
+                    .get(index)
+                    .cloned()
+                    .unwrap_or(ConstArgValue::Error),
+                other => other.clone(),
+            };
+            Ty::array(instantiate_scheme(elem, item, subst, const_subst), len)
+        }
         Ty::Record(rec) => Ty::record(
             rec.fields
                 .iter()
@@ -3992,6 +4272,17 @@ fn ty_mentions_const_param(ty: &Ty, item: &ItemLoc, index: u32) -> bool {
             .fields
             .iter()
             .any(|(_, ty)| ty_mentions_const_param(ty, item, index)),
+        Ty::Array { elem, len } => {
+            ty_mentions_const_param(elem, item, index)
+                || matches!(
+                    len,
+                    ConstArgValue::Param {
+                        item: param_item,
+                        index: param_index,
+                        ..
+                    } if param_item == item && *param_index == index
+                )
+        }
         Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => in_args(args),
         _ => false,
     }

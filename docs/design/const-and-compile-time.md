@@ -9,7 +9,8 @@
   a runaway item costs its own budget once; run mode is unfueled. Const blocks and const
   arguments inside uncalled functions are forced at check time, so their fuel-outs and
   traps are editor diagnostics rather than latent runtime crashes; dead code can emit
-  const-eval errors.
+  const-eval errors. A compile-time-known out-of-bounds index becomes a value trap at
+  lowering, so it is not reported twice.
 - **C05** Const arguments in type mentions are restricted to literals and const-parameter
   names. The obstacle is not ordering (the query engine is demand-driven) but a cycle: type
   identity → inference → const eval → MIR lowering → inference. Two relaxations, separately

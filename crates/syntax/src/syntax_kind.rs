@@ -20,6 +20,8 @@ pub enum SyntaxKind {
     R_PAREN,
     L_BRACE,
     R_BRACE,
+    L_BRACKET,
+    R_BRACKET,
     COLON,
     COLON2,
     SEMICOLON,
@@ -115,6 +117,9 @@ pub enum SyntaxKind {
     GENERIC_ARG_LIST,
     TYPE_ARG,
     CONST_ARG,
+    ARRAY_TYPE,
+    ARRAY_EXPR,
+    INDEX_EXPR,
     ERROR,
 }
 

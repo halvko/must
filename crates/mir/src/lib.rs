@@ -109,17 +109,30 @@ pub struct Statement {
 }
 
 /// A writable location: a local, optionally projected into by a chain of
-/// field indices. Indices use the same canonical sorted field order as
-/// [`Ty::Record`] and [`AggregateKind::Record`] — the write-side twin of
-/// [`Rvalue::Field`] (reads stay operand-based; only writes need to name a
-/// nested destination). Field *names* are resolved to indices at lowering,
-/// like every other projection.
+/// field indices and computed element indices. Field steps use the same
+/// canonical sorted field order as [`Ty::Record`] and
+/// [`AggregateKind::Record`] — the write-side twin of [`Rvalue::Field`]
+/// (reads stay operand-based; only writes need to name a nested
+/// destination). Field *names* are resolved to indices at lowering, like
+/// every other projection; element indices stay operands, evaluated at the
+/// write (and bounds-checked there — an out-of-range write is an ordinary
+/// trap, never silent corruption).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Place {
     pub local: LocalId,
-    /// Field-index path into the local's (possibly nested) record value;
-    /// empty means the whole local.
-    pub projection: Vec<u32>,
+    /// Projection path into the local's (possibly nested) value; empty
+    /// means the whole local.
+    pub projection: Vec<ProjElem>,
+}
+
+/// One step of a [`Place`] projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjElem {
+    /// A record field, by canonical sorted-field index.
+    Field(u32),
+    /// An array element, by a computed `usize` index — bounds-checked when
+    /// the write executes (the read side is [`Rvalue::Index`]).
+    Index(Operand),
 }
 
 impl From<LocalId> for Place {
@@ -158,6 +171,22 @@ pub enum Rvalue {
     Field {
         base: Operand,
         index: u32,
+    },
+    /// `a[i]` — reads one element out of an array value by computed index,
+    /// bounds-checked at execution: an out-of-range index is an ordinary
+    /// runtime trap (the deferred-error story, NOT undefined behavior),
+    /// with the same message the compile-time squiggle uses when both
+    /// sides are known.
+    Index {
+        base: Operand,
+        index: Operand,
+    },
+    /// `[e; N]` — builds an array of `count` copies of `elem`. `count` is
+    /// a compile-time value by checking (a literal or a const-param read);
+    /// it arrives as an ordinary operand.
+    Repeat {
+        elem: Operand,
+        count: Operand,
     },
     /// Constructs the fn value of a generic instantiation (`rep::<3>`):
     /// the mentioned item's own fn value with the *evaluated* const
@@ -207,6 +236,9 @@ pub enum AggregateKind {
     /// variant-typed value is fully erased at runtime (the state-machine
     /// story); the tag exists only after [`Rvalue::WidenToEnum`].
     VariantPayload,
+    /// `[e1, e2, e3]` — an array value; `ops` are the elements in source
+    /// order (which IS the canonical order: elements are positional).
+    Array,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

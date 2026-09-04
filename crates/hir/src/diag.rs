@@ -89,6 +89,21 @@ pub fn const_param_needs_value(param: &str) -> String {
     format!("`{param}` is a const parameter; write a value (a literal, or `const <expr>`)")
 }
 
+/// An array index past the end. Rendered here because it appears in THREE
+/// coats that must all say the same thing: the compile-time squiggle (both
+/// sides known), the trap MIR plants for it, and the runtime bounds check
+/// the interpreter performs when either side is only known dynamically.
+pub fn index_out_of_bounds(len: u128, index: u128) -> String {
+    format!("index out of bounds: the length is {len} but the index is {index}")
+}
+
+/// The const-arg domain exclusion for arrays: the ruled const-arg value
+/// domain is builtins + records + variants — array VALUES stay outside it
+/// for now. Rejected at the *declaration* (a const param whose declared
+/// type mentions an array type) and, as a belt, at every mention — both
+/// render this exact text, the array twin of [`FN_CONST_ARG`].
+pub const ARRAY_CONST_ARG: &str = "an array value cannot be a const argument (yet)";
+
 /// The const-arg domain exclusion (TR06: concrete data types only): fn
 /// values carry a `BodyId` arena index that renumbers under body edits, so
 /// admitting them as const arguments would make instance identity (and,
