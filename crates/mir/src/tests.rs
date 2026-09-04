@@ -1901,6 +1901,9 @@ static f = fn () -> usize {
 
 #[test]
 fn return_outside_a_function_traps_with_the_diagnostic() {
+    // The trap has to sit on the path that REACHES the `return`: emitting
+    // the exit edge first buries it in the unreachable block after the
+    // `return`, and the execution leaves normally instead of trapping.
     check_mir(
         "static x = return 1;",
         expect![[r#"
@@ -1912,11 +1915,8 @@ fn return_outside_a_function_traps_with_the_diagnostic() {
               bb0:
                 _1 = trap "cannot infer the type of this number: it has no defining use — add a type annotation" -> bb1
               bb1:
-                _0 = _1
-                return
+                _2 = trap "`return` outside of a function: there is no enclosing `fn` body to return from" -> bb2
               bb2:
-                _2 = trap "`return` outside of a function: there is no enclosing `fn` body to return from" -> bb3
-              bb3:
                 _0 = _2
                 return
             }

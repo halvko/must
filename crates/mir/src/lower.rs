@@ -219,9 +219,13 @@ impl LowerCtx<'_> {
                 | InferenceDiagnostic::VariantPatUnknownScrutinee { match_expr, .. } => {
                     self.value_traps.insert(*match_expr, diag.message());
                 }
-                // A `break`/`continue` with no loop to go to: there is no
-                // edge to emit, so the expression itself is the operation
-                // that cannot execute — a value trap right there.
+                // A `break`/`continue` with no loop to go to, or a
+                // `return` with no body to leave: there is no edge to emit,
+                // so the expression itself is the operation that cannot
+                // execute — a value trap right there. `lower_expr_inner`'s
+                // `Return` arm checks for the trap BEFORE terminating, so
+                // it lands in the block that reaches the `return` instead
+                // of the dead block after it.
                 InferenceDiagnostic::BreakOutsideLoop { expr }
                 | InferenceDiagnostic::ContinueOutsideLoop { expr }
                 | InferenceDiagnostic::ReturnOutsideFn { expr } => {
@@ -1364,6 +1368,16 @@ impl LowerCtx<'_> {
                     // A bare `return;` returns `()`.
                     None => Operand::Const(Const::Unit),
                 };
+                // Refused (`return` outside any fn): the exit edge must
+                // NOT be emitted — terminating here would push the
+                // `lower_expr` wrapper's trap into the unreachable block
+                // after it, so the execution that reaches this `return`
+                // would leave normally instead of trapping. Fall through
+                // with the operand evaluated (effects survive) and let the
+                // wrapper plant the trap right here.
+                if self.value_traps.contains_key(&expr) {
+                    return Operand::Const(Const::Unit);
+                }
                 let ret = b.ret;
                 b.push_assign(ret, Rvalue::Use(op), expr);
                 b.terminate(TerminatorKind::Return, expr);
