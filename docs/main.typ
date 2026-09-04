@@ -7,6 +7,10 @@ static main: fn() -> () = fn() -> () {
     (fn (s: str) -> () { print(s) })(s);
 };
 ```
+The `print(s)` above writes exactly what it is given — a `str`, verbatim,
+with no newline appended — so a line break comes from the string, never
+from the call.
+
 or with less annotation (an unannotated parameter's type is still inferred,
 from the single call site right here):
 ```must

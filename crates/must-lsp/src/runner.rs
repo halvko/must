@@ -34,6 +34,12 @@ pub fn run(path: &str, expr: &str) -> i32 {
         }
         Ok(None) => 0,
         Err(rendered) => {
+            // Program output is still sitting in stdout's line buffer:
+            // `print` writes exactly its argument, so a program that
+            // crashed mid-line never wrote the newline that would have
+            // flushed it. stderr is unbuffered, so without this the crash
+            // report overtakes the output that led up to it.
+            let _ = std::io::stdout().flush();
             eprintln!("{rendered}");
             1
         }
@@ -231,7 +237,7 @@ mod tests {
     fn runs_main_and_prints() {
         check(
             r#"
-static greeting = "hello world";
+static greeting = "hello world\n";
 static main = fn {
     print(greeting);
 };
@@ -263,9 +269,9 @@ static fib = fn (n: usize) -> usize {
         check(
             r#"
 static main = fn {
-    print("before");
+    print("before\n");
     let v: usize = "s";
-    print("after");
+    print("after\n");
 };
 "#,
             "main()",
@@ -523,8 +529,8 @@ static arena_deinit = fn::<T>(a: Arena::<T>) -> () {
 static main = fn () -> () {
     let a = arena_new::<usize>(2);
     match arena_alloc(a, 3) {
-        AllocResult::Ok(p) => print("unexpected fit"),
-        AllocResult::Err => print("exhausted, by value"),
+        AllocResult::Ok(p) => print("unexpected fit\n"),
+        AllocResult::Err => print("exhausted, by value\n"),
     };
     arena_deinit(a);
 }

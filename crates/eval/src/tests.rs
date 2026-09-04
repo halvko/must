@@ -39,7 +39,17 @@ fn check_run(text: &str, entry: &str, expect: Expect) {
         .expect("entrypoint item exists");
     let mut machine = Machine::new(&db, RunMode { out: Vec::new() });
     let result = machine.eval_root(&hir::item_loc(&db, entry_item));
-    let mut rendered = String::from_utf8(machine.mode.out).unwrap();
+    let printed = String::from_utf8(machine.mode.out).unwrap();
+    // Printed output is shown *escaped*, as one `output:` line. `print`
+    // writes exactly its argument and appends nothing, so line breaks are
+    // part of the program's output rather than a property of `print` —
+    // rendering the raw bytes would run consecutive prints together
+    // (`431` for three separate digits) and would hide a newline creeping
+    // back into `RunMode`. `{:?}` makes every byte visible.
+    let mut rendered = String::new();
+    if !printed.is_empty() {
+        rendered.push_str(&format!("output: {printed:?}\n"));
+    }
     rendered.push_str(&match result {
         Ok(value) => format!("=> {}\n", value.display()),
         Err(err) => {
@@ -231,7 +241,35 @@ fn run_hello() {
         r#"static main = fn { print("hello"); };"#,
         "main()",
         expect![[r#"
-            hello
+            output: "hello"
+            => ()
+        "#]],
+    );
+}
+
+#[test]
+fn print_appends_no_newline() {
+    // P03, pinned at the only place it is observable: two `print`s land
+    // on one line, because `print` writes its argument and nothing else.
+    check_run(
+        r#"static main = fn { print("a"); print("b"); };"#,
+        "main()",
+        expect![[r#"
+            output: "ab"
+            => ()
+        "#]],
+    );
+}
+
+#[test]
+fn a_program_writes_its_own_line_breaks() {
+    // With no auto-newline, `\n` is the only way to end a line — which is
+    // exactly why the escape set exists.
+    check_run(
+        r#"static main = fn { print("a\n"); print("b\n"); };"#,
+        "main()",
+        expect![[r#"
+            output: "a\nb\n"
             => ()
         "#]],
     );
@@ -280,8 +318,7 @@ fn escapes_work_inside_a_const_block() {
         r#"static main = fn { print(const { "x\ty\n" }); };"#,
         "main()",
         expect![[r#"
-            x	y
-
+            output: "x\ty\n"
             => ()
         "#]],
     );
@@ -295,9 +332,7 @@ fn escapes_inside_a_multiline_string() {
         "static main = fn { print(\"one\\ttwo\nthree\\n\"); };",
         "main()",
         expect![[r#"
-            one	two
-            three
-
+            output: "one\ttwo\nthree\n"
             => ()
         "#]],
     );
@@ -346,7 +381,7 @@ static main = fn {
 "#,
         "main()",
         expect![[r#"
-            before
+            output: "before"
             error[Trap]: type mismatch: expected `usize`, found `str`
         "#]],
     );
@@ -394,7 +429,7 @@ static main = fn {
 "#,
         "main()",
         expect![[r#"
-            side effect
+            output: "side effect"
             => ()
         "#]],
     );
@@ -676,7 +711,7 @@ static main = fn {
 "#,
         "main()",
         expect![[r#"
-            before
+            output: "before"
             error[Trap]: cannot call a value in a const context; whether it is a `const fn` is not known from its type
         "#]],
     );
@@ -1091,7 +1126,7 @@ static main = fn -> Shape::Pair {
 "#,
         "main()",
         expect![[r#"
-            round-tripped intact
+            output: "round-tripped intact"
             => (1, "a")
         "#]],
     );
@@ -1197,9 +1232,7 @@ static main = fn {
 "#,
         "main()",
         expect![[r#"
-            circle
-            pair
-            point
+            output: "circlepairpoint"
             => ()
         "#]],
     );
@@ -1243,7 +1276,7 @@ static main = fn {
 "#,
         "main()",
         expect![[r#"
-            covered arm runs
+            output: "covered arm runs"
             error[Trap]: this `match` does not cover `Shape::Point`
         "#]],
     );
@@ -1534,7 +1567,7 @@ static f = fn (c: bool) -> usize {
 "#,
         "f(true)",
         expect![[r#"
-            before 
+            output: "before "
             => 1
         "#]],
     );
@@ -1555,8 +1588,7 @@ static f = fn (c: bool) -> usize {
 "#,
         "f(false)",
         expect![[r#"
-            before 
-            after 
+            output: "before after "
             => 2
         "#]],
     );
@@ -1618,7 +1650,7 @@ static f = fn () -> usize {
 "#,
         "f()",
         expect![[r#"
-            outer still running 
+            output: "outer still running "
             => 101
         "#]],
     );
@@ -3311,8 +3343,7 @@ static main = fn () -> usize {
 "#,
         "main()",
         expect![[r#"
-            copy of a half-written buffer did not trap
-            the initialized element arrived
+            output: "copy of a half-written buffer did not trapthe initialized element arrived"
             error[UndefinedBehavior]: read of uninitialized memory — this element was never written
         "#]],
     );
@@ -3651,9 +3682,7 @@ static main = fn () -> () {
 "#,
         "main()",
         expect![[r#"
-            carved 3 of 4
-            exhausted: Err, by value
-            the last element still fits
+            output: "carved 3 of 4exhausted: Err, by valuethe last element still fits"
             => ()
         "#]],
     );
@@ -4221,11 +4250,7 @@ static main = fn() -> usize {
 "#,
         "main()",
         expect![[r#"
-            hi
-            num
-            num
-            ,
-            num
+            output: "hinumnum,num"
             => 5
         "#]],
     );
@@ -4268,9 +4293,7 @@ static main = fn() -> usize {
 "#,
         "main()",
         expect![[r#"
-            4
-            3
-            1
+            output: "431"
             => 3
         "#]],
     );
@@ -4293,9 +4316,7 @@ static main = fn() -> () {
 "#,
         "main()",
         expect![[r#"
-            int
-            qq
-            int
+            output: "intqqint"
             => ()
         "#]],
     );
@@ -4322,10 +4343,7 @@ static main = fn() -> () {
 "#,
         "main()",
         expect![[r#"
-            inherent
-            trait
-            trait
-            field
+            output: "inherenttraittraitfield"
             => ()
         "#]],
     );
@@ -4396,9 +4414,7 @@ static main = fn() -> () {
 "#,
         "main()",
         expect![[r#"
-            s
-            int
-            rigid
+            output: "sintrigid"
             => ()
         "#]],
     );
@@ -4444,8 +4460,7 @@ static main = fn() -> () {
 "#,
         "main()",
         expect![[r#"
-            dot ok
-            qualified ok
+            output: "dot okqualified ok"
             => ()
         "#]],
     );
@@ -4472,7 +4487,7 @@ static main = fn() -> () {
 "#,
         "main()",
         expect![[r#"
-            point — correct
+            output: "point — correct"
             => ()
         "#]],
     );

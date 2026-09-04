@@ -20,6 +20,12 @@
   the number.
 - **P11** The debugger runs in-process on the const-eval interpreter (X08): same MIR, same
   machine, same UB findings.
+- **P03** `print` emits exactly what it is given: `str` only, no newline, no formatting, no
+  interpolation. The CLI runner writes to `stdout.lock()` — Rust's own line buffering, no
+  per-call flush — and flushes it explicitly only before a crash report, so a program's
+  output still precedes the report it led to; the DAP console forwards each write to the
+  client as its own event, since waiting for a newline that may never come would withhold
+  output indefinitely.
 - **P10** Semantic tokens are served full-file from the server and bound to the parser: one
   keyword table generates the set, the highlighter enumerates no kinds, and a drift guard
   walks the whole syntax-kind enum. The legend grows by appending, so existing indices never

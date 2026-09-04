@@ -3,14 +3,19 @@
 // enclosing function. `fn { print }` works around that: it is a function
 // *returning* the builtin `print`, which we then call with `s`.
 //
+// `print` writes exactly the string it is given and nothing more — no
+// newline is appended. Line breaks are the program's to write, either as a
+// literal newline inside a string (strings are multiline) or with the `\n`
+// escape. Both appear below.
+//
 // Run: must-lsp run examples/hello.must
 
 static banner = "+----------------+
 |  Hello, Must!  |
-+----------------+";
++----------------+\n";
 
 static greeting = fn {
-    let s = "hello";
+    let s = "hello\n";
     fn { print }()(s);
 }
 

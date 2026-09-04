@@ -215,13 +215,13 @@ static main = fn () -> () {
                 p2.* = 30;
             };
             if unsafe { add(p, 2).* } == 30 {
-                print("roundtrip: wrote 3 elements through add, read them back");
+                print("roundtrip: wrote 3 elements through add, read them back\n");
             } else {
-                print("roundtrip: unexpected");
+                print("roundtrip: unexpected\n");
             };
             unsafe { dealloc_array(p, 3); };
         }
-        AllocResult::Err => print("roundtrip: out of memory"),
+        AllocResult::Err => print("roundtrip: out of memory\n"),
     };
 
     // HeapVec: pushes past the initial capacity force a growth (fresh
@@ -235,9 +235,9 @@ static main = fn () -> () {
         i = i + 1;
     };
     if v.get(5) == 25 {
-        print("heapvec: pushed 6 squares across a growth, get(5) == 25");
+        print("heapvec: pushed 6 squares across a growth, get(5) == 25\n");
     } else {
-        print("heapvec: unexpected");
+        print("heapvec: unexpected\n");
     };
     v.deinit();
 
@@ -248,13 +248,13 @@ static main = fn () -> () {
         AllocResult::Ok(p) => {
             let last = unsafe { add(p, 2) };
             unsafe { last.* = 7; };
-            print("arena: carved 3 of 4 elements");
+            print("arena: carved 3 of 4 elements\n");
         }
-        AllocResult::Err => print("arena: unexpected exhaustion"),
+        AllocResult::Err => print("arena: unexpected exhaustion\n"),
     };
     match a.alloc(2) {
-        AllocResult::Ok(p) => print("arena: unexpected fit"),
-        AllocResult::Err => print("arena: a further 2 don't fit — Err, by value"),
+        AllocResult::Ok(p) => print("arena: unexpected fit\n"),
+        AllocResult::Err => print("arena: a further 2 don't fit — Err, by value\n"),
     };
     a.deinit();
 }

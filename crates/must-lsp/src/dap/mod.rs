@@ -400,7 +400,6 @@ impl<W: Write> Session<W> {
         ConsoleWriter {
             out: Rc::clone(&self.out),
             seq: Rc::clone(&self.seq),
-            buffer: Vec::new(),
         }
     }
 
@@ -434,12 +433,17 @@ impl<W: Write> Session<W> {
     }
 }
 
-/// An `io::Write` that turns each completed line of program output into a
-/// DAP `output` event — `print` streams to the debug console as it runs.
+/// An `io::Write` that turns each chunk of program output into a DAP
+/// `output` event — `print` streams to the debug console as it runs.
+///
+/// Deliberately not line-buffered: `print` writes exactly its argument and
+/// appends no newline, so waiting for one would withhold a program's output
+/// indefinitely. DAP `output` events are concatenated by the client, not
+/// treated as lines, so emitting per write keeps the console text identical
+/// while making partial lines appear immediately.
 pub(crate) struct ConsoleWriter<W: Write> {
     out: Rc<RefCell<W>>,
     seq: Rc<Cell<i64>>,
-    buffer: Vec<u8>,
 }
 
 impl<W: Write> Clone for ConsoleWriter<W> {
@@ -447,7 +451,6 @@ impl<W: Write> Clone for ConsoleWriter<W> {
         ConsoleWriter {
             out: Rc::clone(&self.out),
             seq: Rc::clone(&self.seq),
-            buffer: Vec::new(),
         }
     }
 }
@@ -466,24 +469,13 @@ impl<W: Write> ConsoleWriter<W> {
 
 impl<W: Write> Write for ConsoleWriter<W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.buffer.extend_from_slice(buf);
-        while let Some(newline) = self.buffer.iter().position(|&b| b == b'\n') {
-            let line: Vec<u8> = self.buffer.drain(..=newline).collect();
-            self.emit(&String::from_utf8_lossy(&line));
+        if !buf.is_empty() {
+            self.emit(&String::from_utf8_lossy(buf));
         }
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
-    }
-}
-
-impl<W: Write> Drop for ConsoleWriter<W> {
-    fn drop(&mut self) {
-        if !self.buffer.is_empty() {
-            let rest = String::from_utf8_lossy(&std::mem::take(&mut self.buffer)).into_owned();
-            self.emit(&rest);
-        }
     }
 }

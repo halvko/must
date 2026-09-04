@@ -39,16 +39,16 @@ type Buf = struct::<const N: usize> { data: [usize; N], len: usize };
 static main = fn () -> () {
     // The frozen table: squares 0, 1, 4, 9, 16.
     if TABLE[2] + TABLE[4] == 20 {
-        print("table: TABLE[2] + TABLE[4] == 20 — built in a const loop, frozen into a static");
+        print("table: TABLE[2] + TABLE[4] == 20 — built in a const loop, frozen into a static\n");
     } else {
-        print("table: unexpected");
+        print("table: unexpected\n");
     };
 
     // Nested indexing.
     if grid[0][1] + grid[1][0] == 5 {
-        print("nested: grid[0][1] + grid[1][0] == 5");
+        print("nested: grid[0][1] + grid[1][0] == 5\n");
     } else {
-        print("nested: unexpected");
+        print("nested: unexpected\n");
     };
 
     // Index-assignment needs a `mut` root, exactly like field assignment;
@@ -56,17 +56,17 @@ static main = fn () -> () {
     let mut a: [u8; 3] = [1, 2, 3];
     a[0] = 10;
     if a[0] + a[2] == 13 {
-        print("index-assign: a[0] = 10 through a mut binding");
+        print("index-assign: a[0] = 10 through a mut binding\n");
     } else {
-        print("index-assign: unexpected");
+        print("index-assign: unexpected\n");
     };
 
     // Construct a `Buf::<2>` and read through its array field.
     let b: Buf::<2> = Buf::<2>(struct { data = [40, 2], len = 2 });
     if b.data[0] + b.data[1] == 42 {
-        print("generic buffer: Buf::<2> holds a [usize; 2] summing to 42");
+        print("generic buffer: Buf::<2> holds a [usize; 2] summing to 42\n");
     } else {
-        print("generic buffer: unexpected");
+        print("generic buffer: unexpected\n");
     };
 }
 

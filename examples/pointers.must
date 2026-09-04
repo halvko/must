@@ -32,14 +32,14 @@ static main = fn () -> () {
     // temporary, but a compiler is free to merge or split immutable copies —
     // never compare const-derived addresses and expect a particular answer.
     if S.&raw == S.&raw {
-        print("static: S.&raw == S.&raw is true — one place, one address");
+        print("static: S.&raw == S.&raw is true — one place, one address\n");
     } else {
-        print("static: unexpected");
+        print("static: unexpected\n");
     };
     if C.&raw == C.&raw {
-        print("const: unexpected");
+        print("const: unexpected\n");
     } else {
-        print("const: C.&raw == C.&raw is false — each mention is its own copy");
+        print("const: C.&raw == C.&raw is false — each mention is its own copy\n");
     };
 
     // --- writing through a pointer, step by step ---
@@ -50,9 +50,9 @@ static main = fn () -> () {
     let p = x.&raw mut;
     unsafe { p.* = 42; };
     if x == 42 {
-        print("write-through: p.* = 42 updated the local x to 42");
+        print("write-through: p.* = 42 updated the local x to 42\n");
     } else {
-        print("write-through: unexpected");
+        print("write-through: unexpected\n");
     };
 
     // --- pointer copies alias the same place ---
@@ -61,9 +61,9 @@ static main = fn () -> () {
     let q = p;
     unsafe { q.* = 9; };
     if unsafe { p.* } == 9 {
-        print("aliasing: writing through the copy q is seen through p");
+        print("aliasing: writing through the copy q is seen through p\n");
     } else {
-        print("aliasing: unexpected");
+        print("aliasing: unexpected\n");
     };
 
     // --- a pointer to a field addresses just that element ---
@@ -71,9 +71,9 @@ static main = fn () -> () {
     let pa = r.a.&raw mut;
     unsafe { pa.* = 10; };
     if r.a + r.b == 12 {
-        print("field pointer: r.a.&raw mut wrote only r.a");
+        print("field pointer: r.a.&raw mut wrote only r.a\n");
     } else {
-        print("field pointer: unexpected");
+        print("field pointer: unexpected\n");
     };
 }
 

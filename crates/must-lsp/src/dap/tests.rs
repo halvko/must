@@ -69,7 +69,10 @@ fn events<'a>(messages: &'a [Value], name: &str) -> Vec<&'a Value> {
 
 #[test]
 fn launch_session_runs_the_program() {
-    let program = fixture("hello", r#"static main = fn { print("hello from dap"); };"#);
+    let program = fixture(
+        "hello",
+        r#"static main = fn { print("hello from dap\n"); };"#,
+    );
     let messages = run_session(&[
         ("initialize", json!({ "adapterID": "must" })),
         (
@@ -129,7 +132,7 @@ fn launch_session_runs_the_program() {
 fn deferred_errors_stop_at_the_crash_site_then_terminate_on_resume() {
     let program = fixture(
         "broken",
-        "static main = fn {\n    print(\"before\");\n    let v: usize = \"s\";\n};\n",
+        "static main = fn {\n    print(\"before\\n\");\n    let v: usize = \"s\";\n};\n",
     );
     let messages = run_session(&[
         ("initialize", json!({})),
@@ -183,7 +186,7 @@ fn deferred_errors_stop_at_the_crash_site_then_terminate_on_resume() {
 fn breakpoint_hit_inspect_and_resume() {
     let program = fixture(
         "bp",
-        "static double = fn (n: usize) -> usize {\n    let twice = n * 2;\n    twice\n}\nstatic main = fn {\n    print(\"start\");\n    double(21);\n    print(\"end\");\n};\n",
+        "static double = fn (n: usize) -> usize {\n    let twice = n * 2;\n    twice\n}\nstatic main = fn {\n    print(\"start\\n\");\n    double(21);\n    print(\"end\\n\");\n};\n",
     );
     let messages = run_session(&[
         ("initialize", json!({})),
@@ -471,13 +474,15 @@ fn breakpoint_columns_are_utf16_code_units() {
     assert_eq!(stack[0]["line"], 3);
     assert_eq!(stack[0]["column"], 30);
 
-    // The multibyte string round-trips through the console.
+    // The multibyte string round-trips through the console. `print`
+    // appends nothing, so the fixture's own bytes are the whole of it —
+    // no trailing newline to account for.
     let stdout: String = events(&messages, "output")
         .iter()
         .filter(|e| e["body"]["category"] == "stdout")
         .map(|e| e["body"]["output"].as_str().unwrap())
         .collect();
-    assert_eq!(stdout, "λ😀\n");
+    assert_eq!(stdout, "λ😀");
     assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
 
     let _ = std::fs::remove_file(program);

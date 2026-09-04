@@ -49,9 +49,16 @@ static fmt_usize = fn::<W: Write>(w: W, n: usize) -> W {
     }
 };
 
-// A writer over the print hook: each pushed fragment prints on its own
-// line, and the sink counts what it wrote (value-threading: `push` gives
-// the advanced writer back).
+// A writer over the print hook, and the clearest illustration of what a
+// `Write` implementation is FOR. `print` writes exactly the string handed
+// to it and appends nothing, so FRAMING is the sink's decision, never the
+// builtin's. This sink simply concatenates: an impl that pushes "4" and
+// then "2" comes out as `42`, which is what formatting an integer is
+// supposed to look like. A sink that wrapped, indented, or buffered each
+// fragment instead would need no change whatsoever to any `fmt` impl
+// below — that separation is the whole point of the `Write` bound. The
+// sink also counts what it wrote (value-threading: `push` gives the
+// advanced writer back).
 type Sink = struct { pushes: usize } with {
     impl Write {
         push = fn(s: str, w: Self) -> Self {
@@ -62,7 +69,8 @@ type Sink = struct { pushes: usize } with {
 };
 
 // The type-side impl home: a user type's own `with`-chain implements the
-// trait. `Point` renders as `x`, `,`, `y` — via the qualified short form
+// trait. `Point` pushes `x`, then `,`, then `y` — three writes that the
+// sink above runs together into one `1,23` — via the qualified short form
 // `Display::fmt(...)`, whose `Self` is inferred from the argument
 // (`p.x: usize` picks the usize impl).
 type Point = struct { x: usize, y: usize } with {
@@ -85,19 +93,42 @@ static show = fn::<T: Display>(x: T) -> usize {
 
 static main = fn() -> () {
     // One generic fn, three implementers — usize and str through the
-    // trait-side impls, Point through its type-side one.
+    // trait-side impls, Point through its type-side one. Each `show`
+    // writes nothing but its own fragments; the label before it and the
+    // newline after it are written HERE, by the code that knows where the
+    // line starts and ends. Three writers, one line — which is only
+    // possible because `print` appends nothing of its own.
+    print("show::<usize>(42)   -> ");
     let a = show::<usize>(42);
+    print("\n");
+
+    print("show::<str>(hello)  -> ");
     let b = show::<str>("hello");
+    print("\n");
+
+    print("show::<Point>(1,23) -> ");
     let c = show::<Point>(Point(struct { x = 1, y = 23 }));
+    print("\n");
+
     // Impl-directed dot-calls on concrete receivers work too (a builtin
     // receiver reaches the trait-side impl)...
     let seven: usize = 7;
+    print("7.fmt(sink)         -> ");
     let d = seven.fmt(Sink(struct { pushes = 0 }));
+    print("\n");
+
     // ...as does the qualified short form outside any impl.
+    print("Display::fmt(bye)   -> ");
     let e = Display::fmt(Sink(struct { pushes = 0 }), "bye");
-    if a == 2 { print("show(42): two digits") } else { print("unexpected") };
-    if b == 1 { print("show(\"hello\"): one fragment") } else { print("unexpected") };
-    if c == 4 { print("show(Point): x, comma, y") } else { print("unexpected") };
-    if d.pushes == 1 { print("7.fmt: one digit") } else { print("unexpected") };
-    if e.pushes == 1 { print("Display::fmt: one fragment") } else { print("unexpected") };
+    print("\n");
+
+    // `show` hands back the sink's push count — one `push` per fragment
+    // the `fmt` impls wrote, which is a different number from the width
+    // of the rendered text: `42` is two pushes, `hello` is one, and a
+    // `Point` is four (`1`, `,`, and both digits of `23`).
+    if a == 2 { print("show(42): two digits pushed\n") } else { print("unexpected\n") };
+    if b == 1 { print("show(\"hello\"): one fragment pushed\n") } else { print("unexpected\n") };
+    if c == 4 { print("show(Point): x, comma, both digits of y\n") } else { print("unexpected\n") };
+    if d.pushes == 1 { print("7.fmt: one digit pushed\n") } else { print("unexpected\n") };
+    if e.pushes == 1 { print("Display::fmt: one fragment pushed\n") } else { print("unexpected\n") };
 };

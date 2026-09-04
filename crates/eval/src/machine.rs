@@ -22,7 +22,9 @@ use crate::{
 /// What the machine does at its impure edges. [`ConstMode`] refuses;
 /// the runner's mode performs the I/O.
 pub trait Mode {
-    /// `print(text)` outside any const context.
+    /// `print(text)` outside any const context. Implementations write
+    /// `text` verbatim — adding a separator here would make `print` a
+    /// line-writer, which it deliberately is not.
     fn print(&mut self, text: &str) -> Result<(), EvalError>;
 }
 
@@ -43,14 +45,17 @@ impl Mode for ConstMode {
     }
 }
 
-/// Run mode for the CLI and the debug adapter: `print` writes a line.
+/// Run mode for the CLI and the debug adapter: `print` writes its argument
+/// and nothing else — no newline is appended (ruled). `print` is a write,
+/// not a line; a program that wants a line break emits one itself with the
+/// `\n` escape.
 pub struct RunMode<W: std::io::Write> {
     pub out: W,
 }
 
 impl<W: std::io::Write> Mode for RunMode<W> {
     fn print(&mut self, text: &str) -> Result<(), EvalError> {
-        writeln!(self.out, "{text}").map_err(|err| EvalError {
+        write!(self.out, "{text}").map_err(|err| EvalError {
             kind: EvalErrorKind::Runtime,
             message: format!("I/O error in `print`: {err}"),
             origin: None,
