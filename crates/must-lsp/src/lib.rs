@@ -10,6 +10,7 @@
 //! stay stale until that document changes again.
 
 pub mod check;
+pub mod cli;
 pub mod dap;
 mod from_proto;
 mod pool;
