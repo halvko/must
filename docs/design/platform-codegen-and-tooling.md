@@ -30,6 +30,9 @@
   keyword table generates the set, the highlighter enumerates no kinds, and a drift guard
   walks the whole syntax-kind enum. The legend grows by appending, so existing indices never
   move.
+- **P13** The examples smoke target checks and runs every example against recorded snapshots
+  under a timeout, so a hang fails naming the file, and a coverage guard fails if an example
+  ships untested.
 - **P14** Roadmap: AoC puzzles, then a small embedded OS, then self-hosting. The embedded stage
   makes bare-asm entrypoints, layer-0 purity, linker placement and volatile access scheduled
   requirements.
