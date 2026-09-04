@@ -237,13 +237,17 @@ fn classify_ident(
             }
             Some(classify_type_position(db, file, &parent))
         }
+        // A named generic argument's name (`Self` in
+        // `Display::<Self = Foo>::fmt`): it names the trait's `Self`
+        // parameter, so it reads like the type name it stands for.
+        (NAME_REF, NAMED_ARG) => Some(classify_type_name(db, file, token.text())),
         (NAME_REF, PATH_EXPR) => {
             if is_variant_segment(&parent) {
-                // A qualified trait member call (`Display::fmt`, the
-                // qualified short form) wears the same two-segment shape as
-                // an enum's `Shape::Circle` but names a FUNCTION. What
-                // tells the two shapes apart is the resolution, not the
-                // spelling.
+                // A qualified MEMBER path wears the same two-segment shape
+                // as an enum's `Shape::Circle` but names a FUNCTION: the
+                // type's own member (`Point::len`) or a trait's
+                // (`Display::fmt`, in either form). What tells the two
+                // shapes apart is the resolution, not the spelling.
                 if qualified_member_segment(db, file, &owner) {
                     return Some((HlTag::Function, HlMods::NONE));
                 }
@@ -335,17 +339,25 @@ fn classify_ident(
     }
 }
 
-/// Whether a two-segment path expression names a trait MEMBER in the
-/// qualified short form (`Display::fmt`) — rather than an enum variant.
-/// Both shapes are `Name::name`, so only the resolution tells them apart:
-/// a directly-called qualified form resolves on the enclosing CALL,
-/// dispatched to an impl member or through the enclosing dictionary.
+/// Whether a two-segment path expression names a MEMBER — the type's own
+/// (`Point::len`) or a trait's (`Display::fmt`, in either form: the
+/// qualified short form and the named-`Self` spelling
+/// `Display::<Self = Foo>::fmt`) — rather than an enum variant. Both shapes
+/// are `Name::name`, so only the resolution tells them apart.
 fn qualified_member_segment(db: &RootDatabase, file: SourceFile, path: &SyntaxNode) -> bool {
     let Some(item) = hir::checkable_item_at(db, file, path) else {
         return false;
     };
     let (_, source_map) = hir::body_with_source_map(db, item);
+    let Some(expr) = source_map.expr_for_node(SyntaxNodePtr::new(path)) else {
+        return false;
+    };
     let infer = hir::infer::infer(db, item);
+    if infer.member_value_of_expr.get(expr).is_some() {
+        return true;
+    }
+    // A directly-called qualified form resolves on the CALL — dispatched
+    // to an impl member, or through the enclosing dictionary.
     path.parent()
         .filter(|p| p.kind() == SyntaxKind::CALL_EXPR)
         .and_then(|call| source_map.expr_for_node(SyntaxNodePtr::new(&call)))

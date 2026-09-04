@@ -222,14 +222,21 @@ ast_node!(
     /// `"x"`, `true`, `false`) or a `const`-prefixed expression.
     ConstArg: CONST_ARG
 );
+ast_node!(
+    /// A NAMED argument in a [`GenericArgList`] — `Self = Type` (TR01's one
+    /// nameable argument). The grammar accepts any name; which names are
+    /// nameable is a semantic question.
+    NamedArg: NAMED_ARG
+);
 
 ast_enum!(
     /// One generic parameter: a bare type name or a `const` value binder.
     GenericParam: TypeParam, ConstParam
 );
 ast_enum!(
-    /// One turbofish argument: a type (including `_`) or a const value.
-    GenericArg: TypeArg, ConstArg
+    /// One turbofish argument: a type (including `_`), a const value, or a
+    /// named argument (`Self = Type`).
+    GenericArg: TypeArg, ConstArg, NamedArg
 );
 
 ast_node!(
@@ -1193,6 +1200,20 @@ impl GenericArgList {
 }
 
 impl TypeArg {
+    pub fn ty(&self) -> Option<Type> {
+        child(&self.syntax)
+    }
+}
+
+impl NamedArg {
+    /// The argument's written name (`Self`).
+    pub fn name_ref(&self) -> Option<NameRef> {
+        child(&self.syntax)
+    }
+    pub fn eq_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, EQ)
+    }
+    /// The named argument's value — a type (`Self = Point`).
     pub fn ty(&self) -> Option<Type> {
         child(&self.syntax)
     }

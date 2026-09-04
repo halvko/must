@@ -4100,6 +4100,109 @@ static main = fn() -> () {
 }
 
 #[test]
+fn collision_escapes_each_run_to_their_own_member() {
+    // G13: every escape the ambiguity error names must actually reach the
+    // thing it names — inherent, trait impl, fn-typed field.
+    check_run(
+        r#"
+trait D = requires { m: fn(x: Self) -> str; };
+type P = struct { m: fn() -> str } with {
+    impl Self { m = fn(x: Self) -> str { "inherent" }; }
+    impl D { m = fn(x: Self) -> str { "trait" }; }
+};
+static main = fn() -> () {
+    let p = P(struct { m = fn() -> str { "field" } });
+    print(P::m(p));
+    print(D::m(p));
+    print(D::<Self = P>::m(p));
+    print((p.m)());
+};
+"#,
+        "main()",
+        expect![[r#"
+            inherent
+            trait
+            trait
+            field
+            => ()
+        "#]],
+    );
+}
+
+#[test]
+fn collision_call_traps_with_the_ambiguity_message() {
+    // Deferred-error mode: the refused call carries the squiggle's text.
+    check_run(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; };
+type P = struct { v: usize } with {
+    impl Self { m = fn(x: Self) -> usize { 1 }; }
+    impl D { m = fn(x: Self) -> usize { 2 }; }
+};
+static main = fn() -> usize { P(struct { v = 0 }).m() };
+"#,
+        "main()",
+        expect![[r#"
+            error[Trap]: `m` is ambiguous on `P`: it could be the inherent member (`P::m(value)`) or `D`'s member (`D::m(value)`) — spell the one you mean
+        "#]],
+    );
+}
+
+#[test]
+fn qualified_inherent_member_runs_as_a_plain_fn_value() {
+    // `Type::member` is an ordinary fn value: callable directly, bindable,
+    // and instantiated at the TYPE's arguments when the owner is generic.
+    check_run(
+        r#"
+type Pair = struct::<T> { a: T, b: T } with {
+    impl Self { first = fn(p: Self) -> T { p.a }; }
+};
+type P = struct { v: usize } with {
+    impl Self { len = fn(p: Self) -> usize { p.v }; }
+};
+static main = fn() -> usize {
+    let p = P(struct { v = 7 });
+    let f = P::len;
+    let q = Pair::<usize>(struct { a = 5, b = 6 });
+    f(p) + P::len(p) + Pair::<usize>::first(q)
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 19
+        "#]],
+    );
+}
+
+#[test]
+fn named_self_call_and_value_dispatch() {
+    // The full named-Self form states `Self` where nothing infers it, and
+    // its member VALUE is one impl's fn.
+    check_run(
+        r#"
+trait D = requires { n: fn(k: usize) -> Self; m: fn(x: Self) -> str; } with {
+    impl usize { n = fn(k: usize) -> usize { k + 1 }; m = fn(x: usize) -> str { "int" }; }
+    impl str { n = fn(k: usize) -> str { "s" }; m = fn(x: str) -> str { x }; }
+};
+static generic = fn::<T: D>(x: T) -> str { D::<Self = T>::m(x) };
+static main = fn() -> () {
+    print(D::<Self = str>::n(1));
+    let f = D::<Self = usize>::m;
+    print(f(D::<Self = usize>::n(1)));
+    print(generic("rigid"));
+};
+"#,
+        "main()",
+        expect![[r#"
+            s
+            int
+            rigid
+            => ()
+        "#]],
+    );
+}
+
+#[test]
 fn unsatisfied_bound_traps_at_runtime() {
     // Deferred-error mode: the broken call traps with the squiggle's text
     // when it actually runs.

@@ -223,6 +223,12 @@ pub enum GenericArgData {
     /// for instance identity — inference records these in
     /// [`crate::infer::InferenceResult::const_args_of_expr`].
     Const(ExprId),
+    /// A NAMED argument — `Self = Point` (TR01). Position-irrelevant: the
+    /// name selects the argument, so a named `Self` composes with a generic
+    /// trait's positional arguments in any order. Only `Self` is nameable in
+    /// v1 (general named args are gated on the binder-names-as-API ruling);
+    /// anything else is diagnosed at the mention.
+    Named { name: String, ty: TypeRef },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -539,6 +545,10 @@ impl LowerCtx {
                             ast::GenericArg::ConstArg(const_arg) => {
                                 GenericArgData::Const(self.lower_opt_expr(const_arg.expr()))
                             }
+                            ast::GenericArg::NamedArg(named) => GenericArgData::Named {
+                                name: named.name_ref().map(|n| n.text()).unwrap_or_default(),
+                                ty: named.ty().map(TypeRef::from_ast).unwrap_or(TypeRef::Error),
+                            },
                         })
                         .collect();
                     if let Some(variant) = it.variant_name_ref() {

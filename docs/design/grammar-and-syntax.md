@@ -31,12 +31,17 @@
   reinterpretation.
 - **G13** Fields and members are separate namespaces, and the SYNTAX decides which one a name
   reaches: a bare dot always reads the field, and call syntax resolves to a dot-callable
-  member — inherent or trait-impl alike. A name reached by BOTH a dot-callable member and a
-  same-named fn-typed field is a call-site ambiguity error naming the field escape,
-  `(v.name)(...)`, and, when a trait member is the other candidate, the qualified escape
-  `Trait::name(...)` — an inherent member's own qualified spelling is itself still reserved,
-  so it names no second escape today. There is no collision error at declaration — the getter
-  idiom is legal.
+  member — inherent or trait-impl alike. A name carried by MORE THAN ONE carrier (an inherent
+  member, each trait-impl member, an fn-typed field, in any combination) is one call-site
+  ambiguity error naming every candidate's exact spelling, with a related location per
+  candidate — no fall-through: a trait impl may live in the trait's own chain, nowhere near
+  the type, so silent shadowing either way would be action at a distance. Three escapes exist:
+  the field's `(v.name)(...)`; the full named-Self form `Trait::<Self = Type>::member(...)`
+  for a trait member (short forms stay available when unambiguous); `Type::member(value)` for
+  an inherent member. `Type::m` where `m` names a member a trait provides for `Type` (not
+  `Type`'s own) is its own `QualifiedTraitMemberOnType` diagnostic, naming the trait spelling
+  it should have used instead. There is no collision error at declaration — the getter idiom
+  is legal.
 - **G16** Full keywords: `raw unsafe with impl for trait requires` (`const`, `struct`, `enum`
   are contextual expression-starters). One `keywords!` table generates the set — `from_keyword`,
   `is_keyword`, and the table itself — so the highlighter (P10) and completions classify a

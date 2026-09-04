@@ -1059,10 +1059,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                                 let Some(param_name) = param_name else {
                                     return Vec::new();
                                 };
-                                let range = match &arg {
-                                    ast::GenericArg::TypeArg(it) => it.syntax().text_range(),
-                                    ast::GenericArg::ConstArg(it) => it.syntax().text_range(),
-                                };
+                                let range = arg.syntax().text_range();
                                 vec![RelatedInfo {
                                     file,
                                     range,
@@ -1185,6 +1182,32 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                         _ => Vec::new(),
                     }
                 }
+                // Every colliding candidate, one click away: the whole
+                // point of the G13 error is that the competitors may be
+                // nowhere near the call (a trait impl lives in the TRAIT's
+                // chain just as legally as in the type's).
+                InferenceDiagnostic::MemberCallAmbiguity {
+                    name, candidates, ..
+                } => candidates
+                    .iter()
+                    .filter_map(|candidate| {
+                        let (def, message) = candidate.related(name)?;
+                        // A member candidate points at its own definition;
+                        // a bound-directed one at the requirement.
+                        if def.member.is_none() {
+                            return requirement_related(db, def, name).into_iter().next();
+                        }
+                        let range = item_tree::member_source(db, def.to_id(db))?
+                            .name()?
+                            .syntax()
+                            .text_range();
+                        Some(RelatedInfo {
+                            file: def.file,
+                            range,
+                            message,
+                        })
+                    })
+                    .collect(),
                 // The member's definition (its last parameter) is what
                 // makes it not dot-callable — one click away.
                 InferenceDiagnostic::NotDotCallable { member, .. } => {
@@ -2161,7 +2184,7 @@ fn in_const_arg_position(db: &dyn Db, file: SourceFile, path_type: &ast::PathTyp
     };
     let Some(index) = list.args().position(|arg| match &arg {
         ast::GenericArg::TypeArg(it) => it.syntax() == type_arg.syntax(),
-        ast::GenericArg::ConstArg(_) => false,
+        ast::GenericArg::ConstArg(_) | ast::GenericArg::NamedArg(_) => false,
     }) else {
         return false;
     };
@@ -2267,11 +2290,14 @@ fn apply_position_diagnostics(
         return;
     }
     for (param, arg) in generics.iter().zip(&written) {
-        let arg_range = match arg {
-            ast::GenericArg::TypeArg(it) => it.syntax().text_range(),
-            ast::GenericArg::ConstArg(it) => it.syntax().text_range(),
-        };
+        let arg_range = arg.syntax().text_range();
         match (&param.kind, arg) {
+            // TR01's named arguments name a TRAIT's `Self`; nothing in an
+            // annotation position takes one.
+            (_, ast::GenericArg::NamedArg(named)) => {
+                let arg_name = named.name_ref().map(|n| n.text()).unwrap_or_default();
+                diagnostics.push(simple(arg_range, diag::named_arg_not_a_trait(&arg_name)));
+            }
             // Inner type args are PathTypes of their own — the pass visits
             // them independently; nothing to add here.
             (item_tree::GenericParamKind::Type, ast::GenericArg::TypeArg(_)) => {}

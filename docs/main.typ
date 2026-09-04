@@ -455,17 +455,24 @@ Dispatch is static only: every call above resolves to one impl at compile
 time, passed along as a dictionary of fn values under the hood. There is
 no `dyn` and no vtable.
 
+A dot-call whose name is ambiguous on the receiver's type — a field and a
+member of the same name, or same-named members from more than one trait —
+is refused at the call; the spellings that pick one are `Type::member(value)`
+for an inherent member, `Trait::member(value)` for a trait's,
+`Trait::<Self = Type>::member(value)` when the trait's short form itself
+needs the implementing type spelled out, and `(value.field)(...)` to call
+a fn-typed field.
+
 A trait declaration is non-generic today, and so is every implementing
 type — reserved for later: trait aliases (`trait Ord = Eq + PartialOrd`),
 generic traits and generic-type impls, supertrait clauses, default
 members, associated types and consts, `unsafe` traits and trait members,
-and marker impls (`impl Name;`). Also reserved: the named-Self qualified
-form `Trait::<Self = Type>::member(...)` (use the short form instead);
-using a bounded generic `fn` as a value; and using a bound from inside a
-`fn` literal or a `const { ... }` block nested in the bounded body (the
-dictionary lives in the enclosing body, out of a nested one's reach).
-Bounds on a `type` declaration's own binder are reserved too — only a
-member's own binder, or a generic `fn`'s, can carry them today.
+and marker impls (`impl Name;`). Also reserved: using a bounded generic
+`fn` as a value; and using a bound from inside a `fn` literal or a
+`const { ... }` block nested in the bounded body (the dictionary lives in
+the enclosing body, out of a nested one's reach). Bounds on a `type`
+declaration's own binder are reserved too — only a member's own binder,
+or a generic `fn`'s, can carry them today.
 
 == Enums and variants
 

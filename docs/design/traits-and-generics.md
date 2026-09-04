@@ -6,22 +6,22 @@
   requires { ... };` declares a set of named, fully-signatured requirements; aliases are a
   committed second constructor, still reserved. Impls attach as `impl`-keyword elements inside
   a required `with`-chain, at one of three homes: the trait's declaration, the self-type's
-  head, or, via a `for`-head covering `Self`, an anchor type in the self-type's arguments — the
-  third, anchor home stays reserved. A trait-side impl's `Self` is the head's implementing
+  head, or, via a `for`-head covering `Self`, an anchor type in the self-type's arguments —
+  the third, anchor home stays reserved. A trait-side impl's `Self` is the head's implementing
   type (a builtin scalar or a non-generic `type` item — builtins have no declaration of their
   own to host the other home); a type-side impl's `Self` is the owner. Binder algebra:
   `with::<U>` declares, `with T: Bound` constrains, `with T = usize` pins. Modifier heads
   (`unsafe`, `for <Type>`) distribute over the next element or a brace group. Qualified
   references use the SHORT form, `Trait::member(args)`, with `Self` inferred from the
-  arguments; the named-Self form (`Trait::<Self = T>::member`) is reserved (`NamedSelfReserved`:
-  "not supported yet; use the short form"). Clauses immediately precede the item's defining
-  brace. There is no `self` token: dot-call is structural, so a member whose last parameter is
-  `Self`-typed is dot-callable and the receiver becomes its LAST argument — which is why the
-  written arguments evaluate before the receiver binds. Expression-position `Self` is rigid:
-  one meaning per body, the owner type at the member's own binders. Reserved for later: trait
-  aliases, generic traits and generic-type impls, supertrait clauses, default members,
-  associated types/consts, `unsafe` traits and trait members, and marker impls — the house
-  parse-and-reserve pattern throughout.
+  arguments; the named-Self form, `Trait::<Self = Type>::member(args)`, spells `Self` out and
+  is the escape when the short form itself is ambiguous (G13). Clauses immediately precede the
+  item's defining brace. There is no `self` token: dot-call is structural, so a member whose
+  last parameter is `Self`-typed is dot-callable and the receiver becomes its LAST argument —
+  which is why the written arguments evaluate before the receiver binds. Expression-position
+  `Self` is rigid: one meaning per body, the owner type at the member's own binders. Reserved
+  for later: trait aliases, generic traits and generic-type impls, supertrait clauses, default
+  members, associated types/consts, `unsafe` traits and trait members, and marker impls — the
+  house parse-and-reserve pattern throughout.
 - **TR02** Dispatch is static only, flattened dictionary-lowered. No `dyn` in v1. Every bounded
   type param contributes one dictionary SLOT per `(param, resolved bound trait)` pair
   (`hir::bound_slots`, canonical order: params in binder order, bounds in written order,

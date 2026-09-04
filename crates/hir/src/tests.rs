@@ -6885,7 +6885,9 @@ static main = fn() -> usize { A(struct { x = 1 }).x() };
 }
 
 #[test]
-fn qualified_member_reference_reserved() {
+fn qualified_inherent_member_reference_is_live() {
+    // G13: `Type::member(value)` names the type's OWN member — the
+    // escape a collision's diagnostic points at, and legal on its own.
     check_diagnostics(
         r#"
 type A = struct { x: usize } with {
@@ -6895,9 +6897,7 @@ type A = struct { x: usize } with {
 };
 static main = fn() -> usize { A::get(A(struct { x = 1 })) };
 "#,
-        expect![[r#"
-            136..142: qualified member references are not supported yet; call `get` through its receiver: `value.get(...)`
-        "#]],
+        expect![[r#""#]],
     );
 }
 
@@ -7648,7 +7648,7 @@ static main = fn() -> () {
 };
 "#,
         expect![[r#"
-            274..279: `m` is ambiguous: `A` and `B` both provide it; write `Trait::m(...)` to pick one
+            274..279: `m` is ambiguous on `usize`: it could be `A`'s member (`A::m(value)`) or `B`'s member (`B::m(value)`) — spell the one you mean (`A::m` for `usize` is defined here at 69..70) (`B::m` for `usize` is defined here at 175..176)
         "#]],
     );
 }
@@ -7694,7 +7694,10 @@ static y = fn(p: D) -> usize { 1 };
 }
 
 #[test]
-fn qualified_member_value_and_named_self_reserved() {
+fn bare_trait_member_value_needs_the_implementer() {
+    // A member VALUE is impl-specific, so a bare `D::m` names no one
+    // function — the fix is the named-Self form. A trait's own POSITIONAL
+    // arguments are reserved (generic traits): a non-generic trait takes none.
     check_diagnostics(
         r#"
 trait D = requires { m: fn(x: Self) -> usize; } with {
@@ -7704,8 +7707,8 @@ static a = fn() -> usize { let f = D::m; 1 };
 static b = fn() -> usize { let n: usize = 1; D::<usize>::m(n) };
 "#,
         expect![[r#"
-            146..150: an impl-specific member value needs the named-Self form (`D::<Self = ...>::m`), which is not supported yet; call `D::m(...)` directly
-            202..215: the named-Self qualified form (`Trait::<Self = ...>::member`) is not supported yet; use the short form `Trait::member(...)`
+            146..150: a member value is impl-specific, so it must name the implementer: `D::<Self = Type>::m`
+            202..215: `D` takes no generic arguments
         "#]],
     );
 }
@@ -7713,8 +7716,8 @@ static b = fn() -> usize { let n: usize = 1; D::<usize>::m(n) };
 #[test]
 fn qualified_call_self_resolution_errors() {
     // A rigid Self without the bound is an unsatisfied bound; a Self no
-    // argument determines cannot be inferred (the named-Self form that
-    // could spell it is reserved).
+    // argument determines cannot be inferred by the SHORT form (the
+    // named-Self form spells it — see `named_self_call_pins_self`).
     check_diagnostics(
         r#"
 trait D = requires { m: fn(x: Self) -> usize; n: fn(k: usize) -> Self; } with {
@@ -7904,12 +7907,12 @@ static g = fn(x: X) -> usize { Gen::get(x) };
 
 #[test]
 fn trait_member_vs_fn_field_call_is_ambiguous() {
-    // A dot-callable member beside an fn-typed field is an ambiguity
-    // ERROR under call syntax — silent shadowing would let a distant
-    // impl reroute existing field calls.
-    // The escapes both work: `(b.get)()` reaches the field, the
-    // qualified form reaches the trait member. Bare access stays the
-    // field; a NON-fn field keeps the sealed member-shadows-field rule.
+    // G13: a dot-callable member beside an fn-typed field is an
+    // ambiguity ERROR under call syntax — silent shadowing would let a
+    // distant impl reroute existing field calls. Both escapes work:
+    // `(b.get)()` reaches the field, `Get::get(b)` the trait member. Bare
+    // access stays the field; a NON-fn field keeps the sealed
+    // member-shadows-field rule.
     check_diagnostics(
         r#"
 trait Get = requires { get: fn(x: Self) -> usize; };
@@ -7929,7 +7932,7 @@ static escapes = fn(b: B, c: C) -> usize {
 };
 "#,
         expect![[r#"
-            279..286: `get` is both a member and an fn-typed field of `B`; write `(value.get)(...)` to call the field, or `Get::get(...)` for the trait member
+            279..286: `get` is ambiguous on `B`: it could be `Get`'s member (`Get::get(value)`) or the fn-typed field (`(value.get)(...)`) — spell the one you mean (`Get::get` for `B` is defined here at 115..118)
         "#]],
     );
 }
@@ -7944,7 +7947,309 @@ type B = struct { get: fn() -> usize } with {
 static f = fn(b: B) -> usize { b.get() };
 "#,
         expect![[r#"
-            135..142: `get` is both a member and an fn-typed field of `B`; write `(value.get)(...)` to call the field
+            135..142: `get` is ambiguous on `B`: it could be the inherent member (`B::get(value)`) or the fn-typed field (`(value.get)(...)`) — spell the one you mean (`B::get` is defined here at 63..66)
+        "#]],
+    );
+}
+
+// ---- G13: member collisions and their escapes ----
+
+#[test]
+fn inherent_member_vs_trait_member_call_is_ambiguous() {
+    // G13: an inherent member no longer silently shadows a trait
+    // member — the impl may be added in the TRAIT's chain, nowhere near
+    // the type, so either winner would be action at a distance. Both
+    // escapes are named, and both work.
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; };
+type P = struct { v: usize } with {
+    impl Self { m = fn(x: Self) -> usize { 1 }; }
+    impl D { m = fn(x: Self) -> usize { 2 }; }
+};
+static collides = fn(p: P) -> usize { p.m() };
+static escapes = fn(p: P) -> usize { P::m(p) + D::m(p) };
+"#,
+        expect![[r#"
+            224..229: `m` is ambiguous on `P`: it could be the inherent member (`P::m(value)`) or `D`'s member (`D::m(value)`) — spell the one you mean (`P::m` is defined here at 102..103) (`D::m` for `P` is defined here at 149..150)
+        "#]],
+    );
+}
+
+#[test]
+fn inherent_trait_and_field_call_is_ambiguous() {
+    // All three namespaces at once: the message lists one escape per
+    // candidate, in resolution order (inherent, traits, field).
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; };
+type P = struct { m: fn() -> usize } with {
+    impl Self { m = fn(x: Self) -> usize { 1 }; }
+    impl D { m = fn(x: Self) -> usize { 2 }; }
+};
+static collides = fn(p: P) -> usize { p.m() };
+static escapes = fn(p: P) -> usize { P::m(p) + D::m(p) + (p.m)() };
+"#,
+        expect![[r#"
+            232..237: `m` is ambiguous on `P`: it could be the inherent member (`P::m(value)`), `D`'s member (`D::m(value)`), or the fn-typed field (`(value.m)(...)`) — spell the one you mean (`P::m` is defined here at 110..111) (`D::m` for `P` is defined here at 157..158)
+        "#]],
+    );
+}
+
+#[test]
+fn collision_leaves_bare_access_alone() {
+    // Bare `p.m` is the FIELD, collision or not — only call syntax has
+    // more than one candidate to choose between.
+    check_infer(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; };
+type P = struct { m: fn() -> usize } with {
+    impl Self { m = fn(x: Self) -> usize { 1 }; }
+    impl D { m = fn(x: Self) -> usize { 2 }; }
+};
+static bare = fn(p: P) -> fn() -> usize { p.m };
+"#,
+        expect![[r#"
+            208..241 'fn(p: P) -> fn() ...': fn(P) -> fn() -> usize
+            211..212 'p': P
+            234..241 '{ p.m }': fn() -> usize
+            236..237 'p': P
+            236..239 'p.m': fn() -> usize
+        "#]],
+    );
+}
+
+#[test]
+fn bound_directed_collision_is_ambiguous() {
+    // Two bounds providing the same name on a RIGID receiver: the same
+    // ambiguity, with the escapes naming the param.
+    check_diagnostics(
+        r#"
+trait A = requires { m: fn(x: Self) -> usize; };
+trait B = requires { m: fn(x: Self) -> usize; };
+static collides = fn::<T: A + B>(x: T) -> usize { x.m() };
+static escapes = fn::<T: A + B>(x: T) -> usize { A::m(x) + B::<Self = T>::m(x) };
+"#,
+        expect![[r#"
+            149..154: `m` is ambiguous on `T`: it could be `A`'s member (`A::m(value)`) or `B`'s member (`B::m(value)`) — spell the one you mean (required by the trait here at 22..23) (required by the trait here at 71..72)
+        "#]],
+    );
+}
+
+#[test]
+fn qualified_inherent_member_is_a_value() {
+    // An inherent member is an ordinary fn (its `Self` is just the last
+    // parameter), so the qualified reference is its plain fn VALUE — no
+    // dictionary is involved anywhere.
+    check_infer(
+        r#"
+type P = struct { v: usize } with {
+    impl Self { len = fn(p: Self) -> usize { p.v }; }
+};
+static main = fn(p: P) -> usize { let f = P::len; f(p) };
+"#,
+        expect![[r#"
+            108..150 'fn(p: P) -> usize...': fn(P) -> usize
+            111..112 'p': P
+            126..150 '{ let f = P::len;...': usize
+            132..133 'f': fn(P) -> usize
+            136..142 'P::len': fn(P) -> usize
+            144..145 'f': fn(P) -> usize
+            144..148 'f(p)': usize
+            146..147 'p': P
+        "#]],
+    );
+}
+
+#[test]
+fn qualified_member_path_reaches_inherent_members_only() {
+    // Each spelling names exactly one thing: `Type::m` is the type's OWN
+    // member, and a trait member is spelled through its trait.
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; };
+type P = struct { v: usize } with {
+    impl D { m = fn(x: Self) -> usize { 2 }; }
+};
+static main = fn(p: P) -> usize { P::m(p) };
+"#,
+        expect![[r#"
+            170..174: `m` is not a member of `P` itself: `D` provides it — write `D::m(value)` (a trait member is spelled through its trait)
+        "#]],
+    );
+}
+
+#[test]
+fn self_qualified_member_inside_a_member_body() {
+    // Expression-`Self` is RIGID (TR01), and the qualified
+    // path reads it like any type name: `Self::one(p)` is the enclosing
+    // type's own member at the body's own instantiation.
+    check_diagnostics(
+        r#"
+type P = struct { v: usize } with {
+    impl Self {
+        one = fn(p: Self) -> usize { 1 };
+        two = fn(p: Self) -> usize { Self::one(p) + 1 };
+    }
+};
+static main = fn(p: P) -> usize { P::two(p) };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn qualified_member_path_on_an_enum_keeps_variants_first() {
+    // An enum's second segment is its VARIANT's home; a member of the same
+    // name would be shadowed there, and any other name reaches the members.
+    // The qualified path also ignores dot-callability — it passes `Self`
+    // like any other argument, so a member the dot cannot reach is still
+    // callable here.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle, Point } with {
+    impl Self {
+        area = fn(s: Self) -> usize { 1 };
+        scaled = fn(s: Self, by: usize) -> usize { by };
+    }
+};
+static main = fn() -> usize {
+    let c = Shape::Circle;
+    Shape::area(c) + Shape::scaled(c, 2)
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn qualified_member_on_a_generic_type_takes_the_type_args() {
+    // An inherent member's binder IS the owner's, so the turbofish sits on
+    // the TYPE — exactly the arguments a dot-call reads off the receiver.
+    check_infer(
+        r#"
+type Pair = struct::<T> { a: T, b: T } with {
+    impl Self { first = fn(p: Self) -> T { p.a }; }
+};
+static main = fn() -> usize {
+    let p = Pair::<usize>(struct { a = 1, b = 2 });
+    Pair::<usize>::first(p)
+};
+"#,
+        expect![[r#"
+            116..213 'fn() -> usize {  ...': fn() -> usize
+            130..213 '{     let p = Pai...': usize
+            140..141 'p': Pair::<usize>
+            144..157 'Pair::<usize>': fn(struct { a: usize, b: usize }) -> Pair::<usize>
+            144..182 'Pair::<usize>(str...': Pair::<usize>
+            158..181 'struct { a = 1, b...': struct { a: usize, b: usize }
+            171..172 '1': usize
+            178..179 '2': usize
+            188..208 'Pair::<usize>::first': fn(Pair::<usize>) -> usize
+            188..211 'Pair::<usize>::fi...': usize
+            209..210 'p': Pair::<usize>
+        "#]],
+    );
+}
+
+#[test]
+fn named_self_call_pins_an_uninferable_self() {
+    // The short form cannot infer `Self` when no argument mentions it;
+    // the named-Self form states it — much of its point.
+    check_diagnostics(
+        r#"
+trait D = requires { n: fn(k: usize) -> Self; } with {
+    impl usize { n = fn(k: usize) -> usize { k }; }
+};
+static main = fn() -> usize { D::<Self = usize>::n(3) };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn named_self_call_on_a_rigid_self_dispatches_through_the_dictionary() {
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; } with {
+    impl usize { m = fn(x: usize) -> usize { x }; }
+};
+static f = fn::<T: D>(x: T) -> usize { D::<Self = T>::m(x) };
+static main = fn() -> usize { f::<usize>(7) };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn named_self_member_value_is_impl_specific() {
+    // TR01's impl-specific fn value: one impl's member, usable as a value.
+    // A RIGID `Self` would read the enclosing dictionary — the same
+    // capture wall as `BoundFnValue`.
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; } with {
+    impl usize { m = fn(x: usize) -> usize { x }; }
+};
+static ok = fn() -> usize { let f = D::<Self = usize>::m; f(4) };
+static reserved = fn::<T: D>(x: T) -> usize { let f = D::<Self = T>::m; f(x) };
+"#,
+        expect![[r#"
+            231..247: `D::m` on a rigid `Self` comes from the enclosing dictionary, so it cannot be used as a value yet; call it directly
+        "#]],
+    );
+}
+
+#[test]
+fn named_self_argument_list_rules() {
+    // Only `Self` is nameable (TR01), it may be given once, and a
+    // non-generic trait takes no positional arguments of its own.
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; } with {
+    impl usize { m = fn(x: usize) -> usize { x }; }
+};
+static a = fn() -> usize { D::<Self = usize, Self = usize>::m(1) };
+static b = fn() -> usize { D::<W = usize, Self = usize>::m(1) };
+static c = fn() -> usize { D::<usize, Self = usize>::m(1) };
+static d = fn(x: usize) -> usize { id::<Self = usize>(x) };
+static id = fn::<T>(x: T) -> T { x };
+type Pair = struct::<T> { a: T, b: T };
+static e = fn(p: Pair::<Self = usize>) -> usize { 1 };
+"#,
+        expect![[r#"
+            138..172: `Self` is given more than once
+            206..237: `W` cannot be supplied by name: `Self` is the only nameable generic argument (`Trait::<Self = Type>::member`)
+            271..298: `D` takes no generic arguments
+            340..358: only a trait has a `Self` argument to name
+            467..479: only a trait has a `Self` argument to name
+        "#]],
+    );
+}
+
+#[test]
+fn named_self_reservations_survive() {
+    // Associated types (reserved), generic traits (reserved) and the
+    // bounded-value capture wall are untouched by the named-Self form.
+    check_diagnostics(
+        r#"
+trait Gen = requires::<T> { g: fn(x: Self) -> T; };
+trait D = requires {
+    type Item;
+    m: fn::<W: D>(w: W, x: Self) -> usize;
+} with {
+    impl usize { m = fn::<W: D>(w: W, x: usize) -> usize { x }; }
+};
+static a = fn(x: usize) -> usize { D::<Self = usize>::Item };
+static b = fn(x: usize) -> usize { Gen::<Self = usize>::g(x) };
+static c = fn(x: usize) -> usize { let f = D::<Self = usize>::m; 1 };
+"#,
+        expect![[r#"
+            21..26: generic traits are not supported yet
+            78..82: associated types are not supported yet
+            245..268: `D::Item` is an associated type; associated types are not supported yet
+            307..329: `Gen` is a reserved generic trait (generic traits are not supported yet) and cannot be used
+            379..399: `D::m` has bounds on its type parameters, so it cannot be used as a value yet; call it directly
         "#]],
     );
 }

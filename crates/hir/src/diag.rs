@@ -106,6 +106,25 @@ pub fn takes_no_generic_args(name: &str) -> String {
     format!("`{name}` takes no generic arguments")
 }
 
+/// A named generic argument outside a trait's argument list (TR01 gives v1
+/// exactly one nameable argument, a trait's `Self`) — shared between
+/// inference and the annotation-position pass.
+pub fn named_arg_not_a_trait(name: &str) -> String {
+    if name == "Self" {
+        return "only a trait has a `Self` argument to name".to_owned();
+    }
+    named_arg_not_self(name)
+}
+
+/// A named generic argument whose name isn't `Self` — shared like
+/// [`named_arg_not_a_trait`].
+pub fn named_arg_not_self(name: &str) -> String {
+    format!(
+        "`{name}` cannot be supplied by name: `Self` is the only nameable generic \
+         argument (`Trait::<Self = Type>::member`)"
+    )
+}
+
 /// A value written where a binder declares a type parameter — shared like
 /// [`generic_arg_count`].
 pub fn type_param_needs_type(param: &str) -> String {

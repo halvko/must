@@ -324,18 +324,21 @@ impl LowerCtx<'_> {
                 | InferenceDiagnostic::FieldNotCallable { expr, .. } => {
                     self.call_traps.insert(*expr, diag.message());
                 }
-                // A member reached without a call, and the reserved
-                // qualified spelling: the value cannot be produced.
-                InferenceDiagnostic::MemberNotCalled { expr, .. }
-                | InferenceDiagnostic::QualifiedMemberReserved { expr, .. } => {
+                // A member reached without a call: the value cannot be
+                // produced.
+                InferenceDiagnostic::MemberNotCalled { expr, .. } => {
                     self.value_traps.insert(*expr, diag.message());
                 }
-                // A bare trait name (or a reserved trait-member value/
-                // named-Self form, or a bounded generic used as a value):
-                // the value cannot be produced.
+                // A bare trait name (or a member value with no implementer
+                // named, one that would capture a dictionary, an associated
+                // type, a bounded generic used as a value, a named generic
+                // argument): the value cannot be produced.
                 InferenceDiagnostic::TraitNotValue { expr, .. }
                 | InferenceDiagnostic::QualifiedTraitMemberValue { expr, .. }
-                | InferenceDiagnostic::NamedSelfReserved { expr }
+                | InferenceDiagnostic::BoundMemberValue { expr, .. }
+                | InferenceDiagnostic::AssocTypeReserved { expr, .. }
+                | InferenceDiagnostic::NamedGenericArg { expr, .. }
+                | InferenceDiagnostic::QualifiedTraitMemberOnType { expr, .. }
                 | InferenceDiagnostic::TraitHasNoMember { expr, .. }
                 | InferenceDiagnostic::BoundFnValue { expr, .. } => {
                     self.value_traps.insert(*expr, diag.message());
@@ -349,8 +352,7 @@ impl LowerCtx<'_> {
                 // value refuses before the call).
                 InferenceDiagnostic::UnsatisfiedBound { expr, .. }
                 | InferenceDiagnostic::NoTraitImpl { expr, .. }
-                | InferenceDiagnostic::AmbiguousTraitMember { expr, .. }
-                | InferenceDiagnostic::MemberFieldCallAmbiguity { expr, .. }
+                | InferenceDiagnostic::MemberCallAmbiguity { expr, .. }
                 | InferenceDiagnostic::NestedBoundUse { expr }
                 | InferenceDiagnostic::GenericTraitReserved { expr, .. }
                 | InferenceDiagnostic::CannotInferSelf { expr, .. } => {
@@ -1141,6 +1143,18 @@ impl LowerCtx<'_> {
             // body (params → payload aggregate) so calling it through a
             // variable runs like any function value.
             ExprData::VariantPath { base, .. } => {
+                // A qualified MEMBER reference (`Point::len`,
+                // `Display::<Self = Foo>::fmt`): the member item's fn value.
+                // A direct call of one is then an ordinary call — nothing
+                // here is receiver-shaped.
+                if let Some(value) = self.infer.member_value_of_expr.get(expr).cloned() {
+                    if self.value_traps.contains_key(&expr) {
+                        // A broken mention (arity, kinds, an unusable const
+                        // argument): the wrapper's trap carries the message.
+                        return Operand::Const(Const::Unit);
+                    }
+                    return self.member_value_operand(b, expr, expr, &value.member, &value.args);
+                }
                 match self.infer.variant_of_expr.get(expr).cloned() {
                     Some(variant) => {
                         // Substituted with the mention's enum args, so a
@@ -2711,19 +2725,13 @@ impl LowerCtx<'_> {
         member: &ItemLoc,
         receiver: ExprId,
     ) -> Operand {
-        let member_id = member.to_id(self.db);
-        let generics = hir::item_data(self.db, member_id)
-            .as_ref()
-            .map(|data| data.generics.clone())
-            .unwrap_or_default();
-        let has_const_params = generics
-            .iter()
-            .any(|param| matches!(param.kind, hir::item_tree::GenericParamKind::Const(_)));
-        if !has_const_params {
+        // Type params need nothing at runtime (erasure), so only an owner
+        // binder with CONST params has to read the receiver's arguments.
+        if !self.member_owner_has_const_params(member) {
             return Operand::Const(Const::Item(member.clone()));
         }
-        // The receiver's type carries the values — its enum's args for a
-        // (widened) variant-typed receiver.
+        // The receiver's type carries the owner's arguments — its enum's
+        // for a (widened) variant-typed receiver.
         let receiver_args = match self.ty(receiver) {
             Ty::Named(named) => named.args,
             Ty::Variant(variant) => variant.args,
@@ -2738,6 +2746,43 @@ impl LowerCtx<'_> {
                 );
             }
         };
+        self.member_value_operand(b, expr, callee, member, &receiver_args)
+    }
+
+    /// Whether a member's OWNER binder declares const params — the only
+    /// reason a member's fn value needs an instance.
+    fn member_owner_has_const_params(&self, member: &ItemLoc) -> bool {
+        hir::item_data(self.db, member.to_id(self.db))
+            .as_ref()
+            .is_some_and(|data| {
+                data.generics
+                    .iter()
+                    .any(|param| matches!(param.kind, hir::item_tree::GenericParamKind::Const(_)))
+            })
+    }
+
+    /// A member item's fn VALUE at the owner's generic arguments — shared
+    /// by dot-calls (whose arguments come from the receiver's type) and
+    /// qualified member references (which write them). Const params of the
+    /// owner's binder materialize per instance ([`Rvalue::Instantiate`]);
+    /// type params need nothing (erasure).
+    fn member_value_operand(
+        &mut self,
+        b: &mut BodyBuilder,
+        expr: ExprId,
+        callee: ExprId,
+        member: &ItemLoc,
+        owner_args: &[hir::GenericArg],
+    ) -> Operand {
+        if !self.member_owner_has_const_params(member) {
+            return Operand::Const(Const::Item(member.clone()));
+        }
+        let member_id = member.to_id(self.db);
+        let generics = hir::item_data(self.db, member_id)
+            .as_ref()
+            .map(|data| data.generics.clone())
+            .unwrap_or_default();
+        let receiver_args = owner_args;
         let mut const_args = Vec::new();
         for (index, param) in generics.iter().enumerate() {
             if !matches!(param.kind, hir::item_tree::GenericParamKind::Const(_)) {

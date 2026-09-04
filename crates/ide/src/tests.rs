@@ -3005,6 +3005,19 @@ fn goto_definition_on_member_call_name_lands_on_the_member() {
 }
 
 #[test]
+fn goto_definition_on_a_qualified_member_path_lands_on_the_member() {
+    // The G13 escape `Type::member` names exactly one member — one click
+    // away, like the dot-call's name.
+    check_goto(
+        &format!(
+            "{MEMBER_FIXTURE_HEAD}static main = fn() -> usize {{ Counter::get$0(Counter(struct {{ n = 1 }})) }};"
+        ),
+        "get",
+        0,
+    );
+}
+
+#[test]
 fn dot_completions_offer_members_next_to_fields() {
     check_has_completion(
         &format!(
@@ -3438,6 +3451,85 @@ type Box = struct::<T> { v: T } with {
             82..84 "->" Operator
             85..86 "T" TypeParameter
             89..90 "b" Parameter
+        "#]],
+    );
+}
+
+#[test]
+fn qualified_member_paths_highlight_as_functions() {
+    // A qualified member path shares the `Name::name` shape with a variant
+    // path but names a FUNCTION — after a TYPE (`P::len`) as well as after
+    // a TRAIT, here in the named-`Self` form, whose named argument reads
+    // like the type it stands for. (The trait short form `D::m` is pinned
+    // by `highlights_trait_names_at_every_occurrence`.)
+    check_highlights(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; } with {
+    impl usize { m = fn(x: usize) -> usize { x }; }
+};
+type P = struct { v: usize } with {
+    impl Self { len = fn(p: Self) -> usize { p.v }; }
+};
+static a = fn(p: P) -> usize { D::<Self = usize>::m(1) + P::len(p) };
+"#,
+        expect_test::expect![[r#"
+            1..6 "trait" Keyword
+            7..8 "D" Trait.declaration
+            9..10 "=" Operator
+            11..19 "requires" Keyword
+            22..23 "m" Function.declaration
+            25..27 "fn" Keyword
+            28..29 "x" Parameter.declaration
+            31..35 "Self" Type
+            37..39 "->" Operator
+            40..45 "usize" Type.defaultLibrary
+            49..53 "with" Keyword
+            60..64 "impl" Keyword
+            65..70 "usize" Type.defaultLibrary
+            73..74 "m" Function.declaration
+            75..76 "=" Operator
+            77..79 "fn" Keyword
+            80..81 "x" Parameter.declaration
+            83..88 "usize" Type.defaultLibrary
+            90..92 "->" Operator
+            93..98 "usize" Type.defaultLibrary
+            101..102 "x" Parameter
+            111..115 "type" Keyword
+            116..117 "P" Type.declaration
+            118..119 "=" Operator
+            120..126 "struct" Keyword
+            132..137 "usize" Type.defaultLibrary
+            140..144 "with" Keyword
+            151..155 "impl" Keyword
+            156..160 "Self" Type
+            163..166 "len" Function.declaration
+            167..168 "=" Operator
+            169..171 "fn" Keyword
+            172..173 "p" Parameter.declaration
+            175..179 "Self" Type
+            181..183 "->" Operator
+            184..189 "usize" Type.defaultLibrary
+            192..193 "p" Parameter
+            204..210 "static" Keyword
+            211..212 "a" Function.declaration.static
+            213..214 "=" Operator
+            215..217 "fn" Keyword
+            218..219 "p" Parameter.declaration
+            221..222 "P" Type
+            224..226 "->" Operator
+            227..232 "usize" Type.defaultLibrary
+            235..236 "D" Trait
+            238..239 "<" Operator
+            239..243 "Self" Type
+            244..245 "=" Operator
+            246..251 "usize" Type.defaultLibrary
+            251..252 ">" Operator
+            254..255 "m" Function
+            256..257 "1" Number
+            259..260 "+" Operator
+            261..262 "P" Type
+            264..267 "len" Function
+            268..269 "p" Parameter
         "#]],
     );
 }

@@ -133,9 +133,10 @@ type HeapVec = struct::<T> { ptr: T.&raw mut, len: usize, cap: usize } with {
     }
 };
 
-// Construction has no receiver, so `new` is an ordinary module-level fn —
-// and deliberately NOT dot-callable (G13; the qualified `HeapVec::new`
-// spelling is reserved).
+// Construction has no receiver, so `new` could not be dot-called even as
+// an `impl Self` member; kept as an ordinary module-level fn instead of a
+// receiver-less member reached through `HeapVec::<T>::new(...)` — either
+// spelling works, this one just reads plainly at the call site.
 static heapvec_new = fn::<T>() -> HeapVec::<T> {
     // Zero capacity, no allocation: `dangling` is the no-buffer-yet
     // pointer. Nothing ever dereferences it — every access is guarded by

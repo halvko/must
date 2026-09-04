@@ -362,6 +362,11 @@ pub(crate) fn generic_args_from_ast(list: &ast::GenericArgList) -> Vec<GenericAr
             ast::GenericArg::ConstArg(const_arg) => {
                 GenericArgRef::Const(const_arg_ref_from_ast(&const_arg))
             }
+            // TR01's named arguments name a TRAIT's `Self`; no annotation
+            // position takes one (the diagnostics pass says so). Range-free
+            // lowering keeps the arity, so the argument counts as an
+            // unusable type.
+            ast::GenericArg::NamedArg(_) => GenericArgRef::Type(TypeRef::Error),
         })
         .collect()
 }
@@ -905,6 +910,28 @@ pub fn trait_requirements<'db>(db: &'db dyn Db, item: crate::ItemId<'db>) -> Vec
         });
     }
     out
+}
+
+/// The RESERVED associated-type names a trait declares (`type Item;` in
+/// its `requires` block), in source order. Associated types are reserved —
+/// nothing lowers them — but a qualified path naming one must say so
+/// (`Trait::<Self = T>::Item`) instead of claiming the trait has no such
+/// requirement.
+#[salsa::tracked(returns(ref))]
+pub fn trait_assoc_types<'db>(db: &'db dyn Db, item: crate::ItemId<'db>) -> Vec<String> {
+    let Some(ast::Item::TraitItem(decl)) = item_source(db, item) else {
+        return Vec::new();
+    };
+    let Some(requires) = decl.requires_def() else {
+        return Vec::new();
+    };
+    requires
+        .members()
+        .filter(|member| member.type_token().is_some())
+        .filter_map(|member| member.name())
+        .map(|name| name.text())
+        .filter(|name| !name.is_empty())
+        .collect()
 }
 
 /// Synthesize a [`TypeRef::Fn`] from a colon-declared member signature

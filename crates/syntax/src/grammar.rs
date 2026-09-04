@@ -1216,6 +1216,12 @@ fn generic_arg_list(p: &mut Parser<'_>) {
 ///   parser so its const-context checking, staging, evaluation and blame all
 ///   come from the existing `const { ... }` machinery unchanged.
 ///
+/// A NAMED argument (`Self = Type`) is recognized by form too — a bare name
+/// followed by `=`. TR01 gives v1 exactly one nameable argument (`Self`,
+/// position irrelevant); the grammar accepts any name and leaves "only
+/// `Self` is nameable" to semantics, so the tree stays stable and the
+/// diagnostic can be precise.
+///
 /// Everything else — any type, including the `_` hole — parses as `TYPE_ARG`.
 /// Whether a given position actually accepts a const or a type is a semantic
 /// question, deferred.
@@ -1231,6 +1237,17 @@ fn generic_arg_list(p: &mut Parser<'_>) {
 /// `>` is its own token), so no ambiguity forces restricting this. Nothing
 /// downstream acts on nested generic args yet.
 fn generic_arg(p: &mut Parser<'_>) {
+    // `Self = Type` — a named argument, recognized by the two-token
+    // `IDENT EQ` lookahead (nothing else follows a bare name with `=` in
+    // an argument list).
+    if p.at(IDENT) && p.nth(1) == EQ {
+        let m = p.start();
+        name_ref(p);
+        p.bump(EQ);
+        type_(p);
+        m.complete(p, NAMED_ARG);
+        return;
+    }
     match p.current() {
         // Const by form: a bare literal.
         INT_NUMBER | STRING | TRUE_KW | FALSE_KW => {

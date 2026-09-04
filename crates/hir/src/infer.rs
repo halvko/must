@@ -27,7 +27,8 @@ use crate::scopes::{Builtin, Resolution, resolutions, type_scope};
 use crate::ty::{
     ConstArgValue, GenericArg, IntKind, IntValue, NamedTy, ParamScope, Ty, TyVar, TyVarValue,
     VariantTy, builtin_type_by_name, enum_variants, generic_param_scope, lower_type_ref_in,
-    member_self_ty, signature, signature_needs_annotation, substitute_args, type_underlying_for,
+    member_is_dot_callable, member_self_ty, signature, signature_needs_annotation, substitute_args,
+    type_underlying_for,
 };
 use crate::{ItemId, ItemLoc, Severity, TypeRef, item_loc};
 
@@ -100,6 +101,12 @@ pub struct InferenceResult {
     /// arguments are passed exactly as written (Self is an ordinary
     /// parameter here — no receiver is appended).
     pub qualified_member_of_expr: ArenaMap<ExprId, ItemLoc>,
+    /// Qualified member PATHS that name one member's fn value, keyed by the
+    /// PATH expression: `Point::len` (an inherent member — an ordinary fn,
+    /// no dictionary) and `Display::<Self = Foo>::fmt` (a named-Self impl
+    /// member, TR01). MIR lowers these to the member item's value; a direct
+    /// call of one is then an ordinary call.
+    pub member_value_of_expr: ArenaMap<ExprId, QualifiedMemberValue>,
     /// Bound-directed member calls — `x.fmt(w)` on a rigid `T: Display`
     /// receiver, or a qualified call whose `Self` resolved to a bounded
     /// rigid param — keyed by the CALL expression. MIR lowers these as
@@ -113,6 +120,18 @@ pub struct InferenceResult {
     /// per trait requirement.
     pub bound_dicts_of_expr: ArenaMap<ExprId, Vec<DictEntry>>,
     pub diagnostics: Vec<InferenceDiagnostic>,
+}
+
+/// One qualified member reference used as a VALUE — see
+/// [`InferenceResult::member_value_of_expr`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualifiedMemberValue {
+    pub member: ItemLoc,
+    /// The OWNER's generic arguments the reference instantiates the member
+    /// at — a dot-call reads these off the receiver's type; a qualified
+    /// reference writes them (`Buf::<3>::len`). Empty for trait-impl
+    /// members (their owner is non-generic by the non-generic-trait rules).
+    pub args: Vec<GenericArg>,
 }
 
 /// One bound-directed member call — see
@@ -761,12 +780,14 @@ pub enum InferenceDiagnostic {
         expr: ExprId,
         name: String,
     },
-    /// `Type::member` — a qualified reference to an inherent member.
-    /// Parse-and-reserve: dot-call is the supported spelling.
-    QualifiedMemberReserved {
-        /// The path expression.
+    /// A named generic argument that isn't the one nameable argument of
+    /// TR01, or is named where nothing takes named arguments.
+    NamedGenericArg {
+        /// The mention (carries the squiggle).
         expr: ExprId,
+        /// The written name.
         name: String,
+        reason: NamedArgReason,
     },
     /// `recv.name(...)` where `name` is a plain (non-fn) FIELD and no
     /// member exists: under the syntax-directed namespace rule the field
@@ -808,14 +829,26 @@ pub enum InferenceDiagnostic {
         trait_: ItemLoc,
         ty: Ty,
     },
-    /// Two (or more) traits both provide `name` for the receiver — spell
-    /// the trait: `Trait::name(...)`.
-    AmbiguousTraitMember {
-        /// The call expression (where MIR traps).
+    /// `Type::member` naming a member the type gets from a TRAIT. Each
+    /// spelling names exactly one thing (G13), so a type's own qualified
+    /// path reaches its INHERENT members only — the trait's own spellings
+    /// reach the impl's.
+    QualifiedTraitMemberOnType {
+        /// The path expression (carries the squiggle).
         expr: ExprId,
-        name: String,
-        /// The display names of the competing traits, in file order.
+        type_name: String,
+        member: String,
+        /// The traits providing it for this type, in file order.
         traits: Vec<String>,
+    },
+    /// `Trait::<Self = T>::Item` — an associated-type path. Associated
+    /// types are reserved; the trait declares the name, so this
+    /// is not a "no such requirement".
+    AssocTypeReserved {
+        /// The path expression (carries the squiggle).
+        expr: ExprId,
+        trait_: ItemLoc,
+        name: String,
     },
     /// A qualified short-form call whose `Self` no argument determined.
     CannotInferSelf {
@@ -825,20 +858,23 @@ pub enum InferenceDiagnostic {
         trait_name: String,
         member: String,
     },
-    /// `Trait::member` used as a VALUE (not called directly): the
-    /// impl-specific fn value needs the named-Self form (TR01), which is
-    /// reserved.
+    /// `Trait::member` used as a VALUE (not called directly): a member
+    /// value is impl-specific, so the implementer must be named — the
+    /// named-Self form (TR01), which nothing infers here.
     QualifiedTraitMemberValue {
         /// The path expression (carries the squiggle).
         expr: ExprId,
         trait_name: String,
         member: String,
     },
-    /// `Trait::<...>::member` — the named-Self qualified form (TR01),
-    /// reserved.
-    NamedSelfReserved {
-        /// The path expression.
+    /// `Trait::<Self = T>::member` as a VALUE with a RIGID `Self`: the
+    /// value would be a read of the enclosing body's dictionary — the same
+    /// capture wall as [`InferenceDiagnostic::BoundFnValue`].
+    BoundMemberValue {
+        /// The path expression (carries the squiggle).
         expr: ExprId,
+        trait_name: String,
+        member: String,
     },
     /// `Trait::name` where the trait declares no such requirement.
     TraitHasNoMember {
@@ -863,20 +899,20 @@ pub enum InferenceDiagnostic {
         /// The trait's display name.
         name: String,
     },
-    /// Call syntax where the name is BOTH a dot-callable member and an
-    /// fn-typed field of the receiver's type: an ambiguity error at the
-    /// call site — silent shadowing
-    /// at a distance would let a new impl reroute existing field calls.
-    /// Strict-first: relaxable to member-wins-plus-lint later.
-    MemberFieldCallAmbiguity {
+    /// Call syntax where MORE THAN ONE thing on the receiver could carry
+    /// the call — an inherent member, a trait member, an fn-typed field, in
+    /// any combination (G13: no fall-through). Silent shadowing would
+    /// be action at a distance: a trait impl may be added in the TRAIT's
+    /// own chain, nowhere near the type, and reroute existing calls. The
+    /// message names EVERY candidate with the spelling that selects it.
+    MemberCallAmbiguity {
         /// The call expression (where MIR traps).
         expr: ExprId,
         name: String,
         receiver_ty: Ty,
-        /// The trait providing the member — `None` for an inherent member
-        /// (whose qualified spelling is still reserved, so only the field
-        /// escape can be suggested).
-        trait_: Option<ItemLoc>,
+        /// Every candidate, in resolution order (inherent, traits in file
+        /// order, field).
+        candidates: Vec<MemberCandidate>,
     },
     /// A bound-directed use (a bound member call, or a call forwarding
     /// the enclosing bounds) inside a fn literal NESTED in the bounded
@@ -886,6 +922,97 @@ pub enum InferenceDiagnostic {
         /// The call expression (where MIR traps).
         expr: ExprId,
     },
+}
+
+/// Why a named generic argument is refused — see
+/// [`InferenceDiagnostic::NamedGenericArg`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NamedArgReason {
+    /// A name other than `Self`: general named arguments are gated on the
+    /// binder-names-as-API ruling (TR01).
+    NotSelf,
+    /// `Self = ...` on something that is not a trait — only a trait has a
+    /// `Self` argument.
+    NotATrait,
+    /// `Self` supplied twice in one argument list.
+    Duplicate,
+}
+
+/// One thing a call-syntax name could resolve to, with the spelling that
+/// selects it — see [`InferenceDiagnostic::MemberCallAmbiguity`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberCandidate {
+    /// An inherent (`impl Self`) member: `Type::name(value)`.
+    Inherent {
+        /// The receiver type as written in the escape.
+        type_name: String,
+        /// The member's definition, for the related location.
+        def: ItemLoc,
+    },
+    /// A trait member, spelled short (`Trait::name(value)`) or with the
+    /// named `Self` (`Trait::<Self = Type>::name(value)`).
+    Trait {
+        trait_name: String,
+        /// The implementer, for the named-Self spelling.
+        type_name: String,
+        /// Whether the SHORT form suffices — it does whenever an argument
+        /// determines `Self`, which every collision site today guarantees
+        /// (the collisions are dot-calls, whose receiver IS the `Self`
+        /// argument). The named-Self rendering is what a collision site
+        /// that cannot determine `Self` will need.
+        short: bool,
+        /// The impl member's definition (the trait's declaration for a
+        /// bound-directed candidate), for the related location.
+        def: Option<ItemLoc>,
+    },
+    /// An fn-typed field: `(value.name)(...)`.
+    Field,
+}
+
+impl MemberCandidate {
+    /// The spelling that selects this candidate, plus what it selects.
+    fn escape(&self, name: &str) -> String {
+        match self {
+            MemberCandidate::Inherent { type_name, .. } => {
+                format!("the inherent member (`{type_name}::{name}(value)`)")
+            }
+            MemberCandidate::Trait {
+                trait_name,
+                type_name,
+                short,
+                ..
+            } => {
+                let spelling = if *short {
+                    format!("{trait_name}::{name}(value)")
+                } else {
+                    format!("{trait_name}::<Self = {type_name}>::{name}(value)")
+                };
+                format!("`{trait_name}`'s member (`{spelling}`)")
+            }
+            MemberCandidate::Field => format!("the fn-typed field (`(value.{name})(...)`)"),
+        }
+    }
+
+    /// The definition to point at and what to say about it, when there is
+    /// one. A field's declaration is the receiver type's own body — the
+    /// reader is already there, so it gets no hint.
+    pub fn related(&self, name: &str) -> Option<(&ItemLoc, String)> {
+        match self {
+            MemberCandidate::Inherent { type_name, def } => {
+                Some((def, format!("`{type_name}::{name}` is defined here")))
+            }
+            MemberCandidate::Trait {
+                trait_name,
+                type_name,
+                def,
+                ..
+            } => Some((
+                def.as_ref()?,
+                format!("`{trait_name}::{name}` for `{type_name}` is defined here"),
+            )),
+            MemberCandidate::Field => None,
+        }
+    }
 }
 
 /// Why an arm can never run — one message per cause, so the fix is named.
@@ -943,19 +1070,20 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::NoSuchMember { expr, .. }
             | InferenceDiagnostic::NotDotCallable { expr, .. }
             | InferenceDiagnostic::MemberNotCalled { expr, .. }
-            | InferenceDiagnostic::QualifiedMemberReserved { expr, .. }
+            | InferenceDiagnostic::NamedGenericArg { expr, .. }
+            | InferenceDiagnostic::QualifiedTraitMemberOnType { expr, .. }
             | InferenceDiagnostic::FieldNotCallable { expr, .. }
             | InferenceDiagnostic::TraitNotValue { expr, .. }
             | InferenceDiagnostic::UnsatisfiedBound { expr, .. }
             | InferenceDiagnostic::NoTraitImpl { expr, .. }
-            | InferenceDiagnostic::AmbiguousTraitMember { expr, .. }
+            | InferenceDiagnostic::AssocTypeReserved { expr, .. }
             | InferenceDiagnostic::CannotInferSelf { expr, .. }
             | InferenceDiagnostic::QualifiedTraitMemberValue { expr, .. }
-            | InferenceDiagnostic::NamedSelfReserved { expr }
+            | InferenceDiagnostic::BoundMemberValue { expr, .. }
             | InferenceDiagnostic::TraitHasNoMember { expr, .. }
             | InferenceDiagnostic::BoundFnValue { expr, .. }
             | InferenceDiagnostic::GenericTraitReserved { expr, .. }
-            | InferenceDiagnostic::MemberFieldCallAmbiguity { expr, .. }
+            | InferenceDiagnostic::MemberCallAmbiguity { expr, .. }
             | InferenceDiagnostic::NestedBoundUse { expr }
             | InferenceDiagnostic::AddrOfNonPlace { expr } => *expr,
             InferenceDiagnostic::BuiltinExpectsRawPtr { arg, .. } => *arg,
@@ -1074,10 +1202,11 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::MemberNotCalled { name, .. } => {
                 format!("`{name}` is a member fn, not a field; call it: `.{name}(...)`")
             }
-            InferenceDiagnostic::QualifiedMemberReserved { name, .. } => format!(
-                "qualified member references are not supported yet; \
-                 call `{name}` through its receiver: `value.{name}(...)`"
-            ),
+            InferenceDiagnostic::NamedGenericArg { name, reason, .. } => match reason {
+                NamedArgReason::NotSelf => crate::diag::named_arg_not_self(name),
+                NamedArgReason::NotATrait => crate::diag::named_arg_not_a_trait("Self"),
+                NamedArgReason::Duplicate => "`Self` is given more than once".to_owned(),
+            },
             InferenceDiagnostic::FieldNotCallable {
                 name,
                 ty,
@@ -1428,17 +1557,37 @@ impl InferenceDiagnostic {
                 ty.display(),
                 trait_.display_name()
             ),
-            InferenceDiagnostic::AmbiguousTraitMember { name, traits, .. } => {
-                let list = traits
+            InferenceDiagnostic::QualifiedTraitMemberOnType {
+                type_name,
+                member,
+                traits,
+                ..
+            } => {
+                let providers = match traits.split_last() {
+                    Some((last, [])) => format!("`{last}` provides it"),
+                    Some((last, rest)) => format!(
+                        "{} and `{last}` provide it",
+                        rest.iter()
+                            .map(|t| format!("`{t}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    None => String::new(),
+                };
+                let spellings = traits
                     .iter()
-                    .map(|t| format!("`{t}`"))
+                    .map(|t| format!("`{t}::{member}(value)`"))
                     .collect::<Vec<_>>()
-                    .join(" and ");
+                    .join(" or ");
                 format!(
-                    "`{name}` is ambiguous: {list} both provide it; \
-                     write `Trait::{name}(...)` to pick one"
+                    "`{member}` is not a member of `{type_name}` itself: {providers} — \
+                     write {spellings} (a trait member is spelled through its trait)"
                 )
             }
+            InferenceDiagnostic::AssocTypeReserved { trait_, name, .. } => format!(
+                "`{}::{name}` is an associated type; associated types are not supported yet",
+                trait_.display_name()
+            ),
             InferenceDiagnostic::CannotInferSelf {
                 trait_name, member, ..
             } => format!(
@@ -1448,15 +1597,15 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::QualifiedTraitMemberValue {
                 trait_name, member, ..
             } => format!(
-                "an impl-specific member value needs the named-Self form \
-                 (`{trait_name}::<Self = ...>::{member}`), which is not supported yet; \
-                 call `{trait_name}::{member}(...)` directly"
+                "a member value is impl-specific, so it must name the implementer: \
+                 `{trait_name}::<Self = Type>::{member}`"
             ),
-            InferenceDiagnostic::NamedSelfReserved { .. } => {
-                "the named-Self qualified form (`Trait::<Self = ...>::member`) is not \
-                 supported yet; use the short form `Trait::member(...)`"
-                    .to_owned()
-            }
+            InferenceDiagnostic::BoundMemberValue {
+                trait_name, member, ..
+            } => format!(
+                "`{trait_name}::{member}` on a rigid `Self` comes from the enclosing \
+                 dictionary, so it cannot be used as a value yet; call it directly"
+            ),
             InferenceDiagnostic::TraitHasNoMember { trait_, name, .. } => {
                 format!("`{}` has no requirement `{name}`", trait_.display_name())
             }
@@ -1468,22 +1617,25 @@ impl InferenceDiagnostic {
                 "`{name}` is a reserved generic trait (generic traits are not supported \
                  yet) and cannot be used"
             ),
-            InferenceDiagnostic::MemberFieldCallAmbiguity {
+            InferenceDiagnostic::MemberCallAmbiguity {
                 name,
                 receiver_ty,
-                trait_,
+                candidates,
                 ..
             } => {
-                let member_escape = match trait_ {
-                    Some(trait_) => format!(
-                        ", or `{trait}::{name}(...)` for the trait member",
-                        trait = trait_.display_name()
-                    ),
+                let escapes: Vec<String> = candidates
+                    .iter()
+                    .map(|candidate| candidate.escape(name))
+                    .collect();
+                let list = match escapes.split_last() {
+                    Some((last, [])) => last.clone(),
+                    Some((last, [first])) => format!("{first} or {last}"),
+                    Some((last, rest)) => format!("{}, or {last}", rest.join(", ")),
                     None => String::new(),
                 };
                 format!(
-                    "`{name}` is both a member and an fn-typed field of `{recv}`; \
-                     write `(value.{name})(...)` to call the field{member_escape}",
+                    "`{name}` is ambiguous on `{recv}`: it could be {list} — \
+                     spell the one you mean",
                     recv = receiver_ty.display()
                 )
             }
@@ -1632,6 +1784,20 @@ pub(crate) struct InferCtx<'a, 'db> {
     /// bound-carrying generic mention must be in (its VALUE would need a
     /// captured dictionary, which is reserved).
     direct_callees: rustc_hash::FxHashSet<ExprId>,
+}
+
+/// One trait that could carry a concrete-receiver dot-call — see
+/// [`InferCtx::trait_call_candidates`].
+struct TraitCallCandidate {
+    trait_: ItemLoc,
+    /// The impl's member for the requirement; `None` when the impl doesn't
+    /// provide it (the impl's definition site carries that diagnostic).
+    member: Option<ItemLoc>,
+    /// Whether the impl member can take the call (TR01's structural shape).
+    dot_callable: bool,
+    /// Whether the impl member's signature is broken (its definition site
+    /// carries the diagnostic; the call refuses silently).
+    broken: bool,
 }
 
 /// One `T: Trait` obligation at an instantiation edge, awaiting its
@@ -1906,7 +2072,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
                 InferenceDiagnostic::NoSuchField { receiver_ty, .. }
                 | InferenceDiagnostic::NoSuchMember { receiver_ty, .. }
-                | InferenceDiagnostic::MemberFieldCallAmbiguity { receiver_ty, .. } => {
+                | InferenceDiagnostic::MemberCallAmbiguity { receiver_ty, .. } => {
                     *receiver_ty = resolve_finished(self.table, receiver_ty);
                 }
                 InferenceDiagnostic::FieldNotCallable {
@@ -1995,12 +2161,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::BuiltinNotFirstClass { .. }
                 | InferenceDiagnostic::NotDotCallable { .. }
                 | InferenceDiagnostic::MemberNotCalled { .. }
-                | InferenceDiagnostic::QualifiedMemberReserved { .. }
+                | InferenceDiagnostic::NamedGenericArg { .. }
+                | InferenceDiagnostic::QualifiedTraitMemberOnType { .. }
                 | InferenceDiagnostic::TraitNotValue { .. }
-                | InferenceDiagnostic::AmbiguousTraitMember { .. }
+                | InferenceDiagnostic::AssocTypeReserved { .. }
                 | InferenceDiagnostic::CannotInferSelf { .. }
                 | InferenceDiagnostic::QualifiedTraitMemberValue { .. }
-                | InferenceDiagnostic::NamedSelfReserved { .. }
+                | InferenceDiagnostic::BoundMemberValue { .. }
                 | InferenceDiagnostic::TraitHasNoMember { .. }
                 | InferenceDiagnostic::BoundFnValue { .. }
                 | InferenceDiagnostic::GenericTraitReserved { .. }
@@ -3465,12 +3632,17 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         }
     }
 
-    /// A dot-call `recv.name(a, b)` (TR01's structural dot-call, with
-    /// G13's SYNTAX-DIRECTED namespace rule): under call syntax the
-    /// MEMBER resolves first — `name` as a member fn of recv's type
-    /// whose LAST parameter is Self-typed shadows a same-named field —
-    /// then the field carries the call as an ordinary value, then
+    /// A dot-call `recv.name(a, b)`, TR01's structural dot-call with
+    /// G13's SYNTAX-DIRECTED namespace rule: everything that could carry
+    /// the call — an inherent member of recv's type, a trait-impl member
+    /// for it, an fn-typed field — is collected FIRST. Exactly one
+    /// candidate resolves the call; MORE THAN ONE is an ambiguity error
+    /// naming every escape (no fall-through: a trait impl may live in
+    /// the trait's own chain, nowhere near the type, so silent shadowing
+    /// either way would be action at a distance). Zero candidates keep
+    /// the old story: a non-dot-callable member, a plain field, or
     /// `NoSuchMember`.
+    ///
     /// (Bare `recv.name` selects the FIELD; `(recv.name)(...)` is a value
     /// call of the field — neither reaches this function.) The member
     /// call desugars to the member with recv as the LAST argument.
@@ -3531,157 +3703,194 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             _ => None,
         };
         // Whether the receiver's type declares `name` as a FIELD — the
-        // call-syntax fallback, and (when the member wins) the shadowed
-        // half of the shared dot. An FN-TYPED field could carry the call
-        // itself, so a dot-callable member beside one is an AMBIGUITY
-        // error — see `MemberFieldCallAmbiguity`.
+        // call-syntax fallback, and (when a member wins) the shadowed half
+        // of the shared dot. An FN-TYPED field can carry the call itself,
+        // so it is a CANDIDATE beside the members; a plain field is not
+        // (nothing about it could take a call).
         let mut named_has_field = false;
-
-        if let Some(named) = &named_recv {
-            let underlying = type_underlying_for(self.db, named);
+        // A BUILTIN-typed receiver (`5.fmt(w)`, `"x".fmt(w)`) has no fields
+        // and no inherent members, but trait impls reach it (`impl usize`
+        // in a trait's chain) — the same candidate collection, minus the
+        // two halves a builtin cannot have.
+        let builtin_recv = named_recv.is_none()
+            && !name.is_empty()
+            && matches!(resolved, Ty::Int(_) | Ty::Str | Ty::Bool);
+        if named_recv.is_some() || builtin_recv {
+            let underlying = named_recv
+                .as_ref()
+                .and_then(|named| type_underlying_for(self.db, named));
             let field_ty = match &underlying {
                 Some(Ty::Record(rec)) => rec.field_ty(name).cloned(),
                 _ => None,
             };
             named_has_field = field_ty.is_some();
-            let named_fn_field = matches!(&field_ty, Some(Ty::Fn(_)));
+            let fn_field = matches!(&field_ty, Some(Ty::Fn(_)));
             // A BROKEN declaration (neither a struct shape nor an enum):
             // its own diagnostic sits at the declaration site — fall
             // through to the field path, whose broken arm stays silent
             // (errors are infectious and silent).
-            let decl_broken =
-                underlying.is_none() && enum_variants(self.db, named.decl.to_id(self.db)).is_none();
+            let decl_broken = underlying.is_none()
+                && named_recv.as_ref().is_some_and(|named| {
+                    enum_variants(self.db, named.decl.to_id(self.db)).is_none()
+                });
             if !decl_broken {
-                match self.member_of(&named.decl, name) {
-                    Some(member_loc) => {
-                        let member_id = member_loc.to_id(self.db);
-                        let sig = signature(self.db, member_id);
-                        if sig.contains_error() {
-                            // A broken member definition (not fully
-                            // annotated): the definition site carries the
-                            // diagnostic.
-                            self.result.type_of_expr.insert(callee, Ty::Error);
-                            self.infer_args_broken(args);
-                            return self.finish_dot_call(expr, Ty::Error, expected, cause);
-                        }
-                        if crate::ty::member_is_dot_callable(self.db, member_id) {
-                            // A dot-callable member NEXT TO an fn-typed
-                            // field: refuse the call as ambiguous rather
-                            // than silently preferring either.
-                            if named_fn_field {
-                                self.result.diagnostics.push(
-                                    InferenceDiagnostic::MemberFieldCallAmbiguity {
-                                        expr,
-                                        name: name.to_owned(),
-                                        receiver_ty: Ty::Named(named.clone()),
-                                        trait_: None,
-                                    },
-                                );
-                                self.result.type_of_expr.insert(callee, Ty::Error);
-                                self.infer_args_broken(args);
-                                return self.finish_dot_call(expr, Ty::Error, expected, cause);
-                            }
-                            let ret = self.infer_member_call(
-                                expr,
-                                callee,
-                                receiver,
-                                &receiver_ty,
-                                named,
-                                member_loc,
-                                sig,
-                                &callee_expectation,
-                                args,
-                            );
-                            return self.finish_dot_call(expr, ret, expected, cause);
-                        }
-                        // A member without the dot-callable shape: only a
-                        // same-named field can still carry the call.
-                        if !named_has_field {
+                // The receiver's type as the escapes spell it — the ENUM
+                // for a variant-typed receiver (impls live on the enum, and
+                // the receiver widens into the Self argument, the ordinary
+                // sanctioned conversion).
+                let recv_ty = match &named_recv {
+                    Some(named) => Ty::Named(named.clone()),
+                    None => resolved.clone(),
+                };
+                let inherent = named_recv
+                    .as_ref()
+                    .and_then(|named| self.member_of(&named.decl, name));
+                if inherent
+                    .as_ref()
+                    .is_some_and(|loc| signature(self.db, loc.to_id(self.db)).contains_error())
+                {
+                    // A broken member definition (not fully annotated): the
+                    // definition site carries the diagnostic.
+                    self.result.type_of_expr.insert(callee, Ty::Error);
+                    self.infer_args_broken(args);
+                    return self.finish_dot_call(expr, Ty::Error, expected, cause);
+                }
+                let inherent_carrier = inherent
+                    .as_ref()
+                    .filter(|loc| member_is_dot_callable(self.db, loc.to_id(self.db)))
+                    .cloned();
+                let traits = self.trait_call_candidates(&recv_ty, name);
+                // A broken IMPL member is the definition site's problem
+                // too — it carries no call and makes nothing ambiguous.
+                if traits.iter().any(|candidate| candidate.broken) {
+                    self.result.type_of_expr.insert(callee, Ty::Error);
+                    self.infer_args_broken(args);
+                    return self.finish_dot_call(expr, Ty::Error, expected, cause);
+                }
+                let trait_carriers: Vec<&TraitCallCandidate> = traits
+                    .iter()
+                    .filter(|candidate| candidate.dot_callable)
+                    .collect();
+                let carriers = usize::from(inherent_carrier.is_some())
+                    + trait_carriers.len()
+                    + usize::from(fn_field);
+                // MORE THAN ONE candidate: refuse, naming every escape.
+                if carriers > 1 {
+                    let mut candidates: Vec<MemberCandidate> = Vec::new();
+                    if let Some(def) = &inherent_carrier {
+                        candidates.push(MemberCandidate::Inherent {
+                            type_name: recv_ty.display(),
+                            def: def.clone(),
+                        });
+                    }
+                    for candidate in &trait_carriers {
+                        candidates.push(MemberCandidate::Trait {
+                            trait_name: candidate.trait_.display_name().to_owned(),
+                            type_name: recv_ty.display(),
+                            // A dot-call's receiver sits at the
+                            // requirement's `Self` parameter, so the short
+                            // form determines `Self` by itself.
+                            short: true,
+                            def: candidate.member.clone(),
+                        });
+                    }
+                    if fn_field {
+                        candidates.push(MemberCandidate::Field);
+                    }
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::MemberCallAmbiguity {
+                            expr,
+                            name: name.to_owned(),
+                            receiver_ty: recv_ty,
+                            candidates,
+                        });
+                    self.result.type_of_expr.insert(callee, Ty::Error);
+                    self.infer_args_broken(args);
+                    return self.finish_dot_call(expr, Ty::Error, expected, cause);
+                }
+                // Exactly one candidate takes the call (a lone fn-typed
+                // field falls through to the field path below).
+                if let Some(member_loc) = inherent_carrier {
+                    let named = named_recv
+                        .clone()
+                        .expect("an inherent member needs a named receiver");
+                    let sig = signature(self.db, member_loc.to_id(self.db));
+                    let ret = self.infer_member_call(
+                        expr,
+                        callee,
+                        receiver,
+                        &receiver_ty,
+                        &named,
+                        member_loc,
+                        sig,
+                        &callee_expectation,
+                        args,
+                    );
+                    return self.finish_dot_call(expr, ret, expected, cause);
+                }
+                if let [candidate] = trait_carriers.as_slice() {
+                    let member_loc = candidate
+                        .member
+                        .clone()
+                        .expect("a carrying candidate has its impl member");
+                    let ty = self.infer_impl_member_call(
+                        expr,
+                        callee,
+                        receiver,
+                        &receiver_ty,
+                        member_loc,
+                        name,
+                        args,
+                        &callee_expectation,
+                    );
+                    return self.finish_dot_call(expr, ty, expected, cause);
+                }
+                // Nothing carries the call: an impl missing the
+                // requirement, a member without the dot-callable shape
+                // (TR01 is structural), or an unknown name. A field — even a
+                // plain one — still gets its own (better) story below.
+                let impl_gap = traits.iter().find(|candidate| candidate.member.is_none());
+                if let Some(candidate) = impl_gap {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::NoTraitImpl {
+                            expr,
+                            trait_: candidate.trait_.clone(),
+                            ty: recv_ty,
+                        });
+                    self.result.type_of_expr.insert(callee, Ty::Error);
+                    self.infer_args_broken(args);
+                    return self.finish_dot_call(expr, Ty::Error, expected, cause);
+                }
+                if !named_has_field {
+                    let not_dot_callable =
+                        inherent.or_else(|| traits.first().and_then(|c| c.member.clone()));
+                    match not_dot_callable {
+                        Some(member) => {
                             self.result
                                 .diagnostics
                                 .push(InferenceDiagnostic::NotDotCallable {
                                     expr,
                                     name: name.to_owned(),
-                                    member: member_loc,
+                                    member,
                                 });
-                            self.result.type_of_expr.insert(callee, Ty::Error);
-                            self.infer_args_broken(args);
-                            return self.finish_dot_call(expr, Ty::Error, expected, cause);
                         }
-                    }
-                    // No inherent member: a TRAIT-impl member on the
-                    // concrete receiver resolves next (impl-directed TR01 —
-                    // members shadow fields under call syntax, trait
-                    // members included), then the field carries the call,
-                    // then `NoSuchMember`.
-                    None => {
-                        // The search runs on the ENUM for a variant-typed
-                        // receiver (`named_recv` already widened the decl);
-                        // the receiver-as-last-argument check then records
-                        // the ordinary variant→enum conversion.
-                        if let Some(ty) = self.infer_trait_member_dot_call(
-                            expr,
-                            callee,
-                            receiver,
-                            &receiver_ty,
-                            &Ty::Named(named.clone()),
-                            name,
-                            args,
-                            &callee_expectation,
-                            named_has_field,
-                            named_fn_field,
-                        ) {
-                            return self.finish_dot_call(expr, ty, expected, cause);
-                        }
-                        if !named_has_field {
+                        None => {
                             self.result
                                 .diagnostics
                                 .push(InferenceDiagnostic::NoSuchMember {
                                     expr,
                                     name: name.to_owned(),
-                                    receiver_ty: Ty::Named(named.clone()),
+                                    receiver_ty: recv_ty,
                                 });
-                            self.result.type_of_expr.insert(callee, Ty::Error);
-                            self.infer_args_broken(args);
-                            return self.finish_dot_call(expr, Ty::Error, expected, cause);
                         }
                     }
+                    self.result.type_of_expr.insert(callee, Ty::Error);
+                    self.infer_args_broken(args);
+                    return self.finish_dot_call(expr, Ty::Error, expected, cause);
                 }
             }
-        }
-
-        // A BUILTIN-typed receiver (`5.fmt(w)`, `"x".fmt(w)`): builtins
-        // have no fields and no inherent members, but trait impls reach
-        // them (`impl usize` in a trait's chain) — impl-directed
-        // resolution, then `NoSuchMember`.
-        if named_recv.is_none()
-            && !name.is_empty()
-            && matches!(resolved, Ty::Int(_) | Ty::Str | Ty::Bool)
-        {
-            if let Some(ty) = self.infer_trait_member_dot_call(
-                expr,
-                callee,
-                receiver,
-                &receiver_ty,
-                &resolved,
-                name,
-                args,
-                &callee_expectation,
-                false,
-                false,
-            ) {
-                return self.finish_dot_call(expr, ty, expected, cause);
-            }
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::NoSuchMember {
-                    expr,
-                    name: name.to_owned(),
-                    receiver_ty: resolved.clone(),
-                });
-            self.result.type_of_expr.insert(callee, Ty::Error);
-            self.infer_args_broken(args);
-            return self.finish_dot_call(expr, Ty::Error, expected, cause);
         }
 
         // The field path: the callee is an ordinary field access, judged
@@ -3864,111 +4073,37 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         f.ret.clone()
     }
 
-    /// The trait half of concrete-receiver dot-call resolution
-    /// (impl-directed, TR01 extended): find the unique trait providing
-    /// `name` for the receiver AND implemented for it, and call its impl
-    /// member. `None` when NO candidate exists — or when the member is
-    /// not dot-callable and a field can carry the call instead (the
-    /// caller falls through to fields / `NoSuchMember`); `Some` when the
-    /// call was handled — including its error outcomes (ambiguity with
-    /// another trait or with an fn-typed field, broken impls).
-    #[allow(clippy::too_many_arguments)]
-    fn infer_trait_member_dot_call(
-        &mut self,
-        expr: ExprId,
-        callee: ExprId,
-        receiver: ExprId,
-        receiver_ty: &Ty,
-        resolved: &Ty,
-        name: &str,
-        args: &[ExprId],
-        callee_expectation: &Ty,
-        has_field: bool,
-        fn_field: bool,
-    ) -> Option<Ty> {
-        let self_key = crate::traits::SelfKey::for_ty(resolved)?;
-        let candidates =
-            crate::traits::traits_providing_member(self.db, self.file, &self_key, name);
-        match candidates.len() {
-            0 => None,
-            1 => {
-                let (trait_loc, member_index) = candidates.into_iter().next().expect("len is 1");
-                let impls = crate::traits::trait_impls(self.db, self.file);
-                let site = impls
+    /// Every trait that could answer `recv.name(...)` on a CONCRETE
+    /// receiver (impl-directed, TR01 extended): the trait declares `name`
+    /// AND is implemented for the receiver. In file order; whether each
+    /// one can actually take the call is on the candidate.
+    fn trait_call_candidates(&self, resolved: &Ty, name: &str) -> Vec<TraitCallCandidate> {
+        let Some(self_key) = crate::traits::SelfKey::for_ty(resolved) else {
+            return Vec::new();
+        };
+        let impls = crate::traits::trait_impls(self.db, self.file);
+        crate::traits::traits_providing_member(self.db, self.file, &self_key, name)
+            .into_iter()
+            .map(|(trait_loc, member_index)| {
+                let member = impls
                     .impl_for(&trait_loc, &self_key)
-                    .expect("candidates are filtered to implemented traits")
-                    .clone();
-                let member_loc = crate::traits::impl_dict_members(self.db, &trait_loc, &site)
+                    .and_then(|site| crate::traits::impl_dict_members(self.db, &trait_loc, site))
                     .and_then(|members| members.get(member_index as usize).cloned());
-                let Some(member_loc) = member_loc else {
-                    // The impl is missing this member: the definition site
-                    // carries the diagnostic; the call refuses.
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::NoTraitImpl {
-                            expr,
-                            trait_: trait_loc,
-                            ty: resolved.clone(),
-                        });
-                    self.result.type_of_expr.insert(callee, Ty::Error);
-                    self.infer_args_broken(args);
-                    return Some(Ty::Error);
-                };
-                // Judge dot-callability BEFORE committing, so the field
-                // interaction mirrors the inherent rules: a dot-callable
-                // member beside an fn-typed field is an ambiguity error
-                // (see `MemberFieldCallAmbiguity`), a non-dot-callable member beside
-                // any field lets the field carry the call.
-                let member_id = member_loc.to_id(self.db);
-                let sig = signature(self.db, member_id);
-                let self_ty = member_self_ty(self.db, member_id);
-                let dot_callable = matches!(
-                    (&sig, self_ty.as_ref()),
-                    (Ty::Fn(f), Some(self_ty)) if f.params.last() == Some(self_ty)
-                );
-                if dot_callable && fn_field {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::MemberFieldCallAmbiguity {
-                            expr,
-                            name: name.to_owned(),
-                            receiver_ty: resolved.clone(),
-                            trait_: Some(trait_loc),
-                        });
-                    self.result.type_of_expr.insert(callee, Ty::Error);
-                    self.infer_args_broken(args);
-                    return Some(Ty::Error);
+                let broken = member
+                    .as_ref()
+                    .is_some_and(|loc| signature(self.db, loc.to_id(self.db)).contains_error());
+                let dot_callable = !broken
+                    && member
+                        .as_ref()
+                        .is_some_and(|loc| member_is_dot_callable(self.db, loc.to_id(self.db)));
+                TraitCallCandidate {
+                    trait_: trait_loc,
+                    member,
+                    dot_callable,
+                    broken,
                 }
-                if !dot_callable && has_field && !sig.contains_error() {
-                    return None;
-                }
-                Some(self.infer_impl_member_call(
-                    expr,
-                    callee,
-                    receiver,
-                    receiver_ty,
-                    member_loc,
-                    name,
-                    args,
-                    callee_expectation,
-                ))
-            }
-            _ => {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::AmbiguousTraitMember {
-                        expr,
-                        name: name.to_owned(),
-                        traits: candidates
-                            .iter()
-                            .map(|(t, _)| t.display_name().to_owned())
-                            .collect(),
-                    });
-                self.result.type_of_expr.insert(callee, Ty::Error);
-                self.infer_args_broken(args);
-                Some(Ty::Error)
-            }
-        }
+            })
+            .collect()
     }
 
     /// Call a TRAIT-IMPL member on a concrete receiver: like
@@ -4104,16 +4239,27 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 self.infer_args_broken(args);
                 return Ty::Error;
             }
+            // Two bounds providing the same name: the same G13 ambiguity as
+            // on a concrete receiver — with `Self` rigid, the escapes name
+            // the param.
             _ => {
+                let receiver_ty = Ty::Param(param.clone());
+                let candidates = candidates
+                    .iter()
+                    .map(|(trait_, _)| MemberCandidate::Trait {
+                        trait_name: trait_.display_name().to_owned(),
+                        type_name: receiver_ty.display(),
+                        short: true,
+                        def: Some(trait_.clone()),
+                    })
+                    .collect();
                 self.result
                     .diagnostics
-                    .push(InferenceDiagnostic::AmbiguousTraitMember {
+                    .push(InferenceDiagnostic::MemberCallAmbiguity {
                         expr,
                         name: name.to_owned(),
-                        traits: candidates
-                            .iter()
-                            .map(|(t, _)| t.display_name().to_owned())
-                            .collect(),
+                        receiver_ty,
+                        candidates,
                     });
                 self.result.type_of_expr.insert(callee, Ty::Error);
                 self.infer_args_broken(args);
@@ -4230,10 +4376,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         (inst, var_of)
     }
 
-    /// The qualified short form `Trait::member(args...)` (TR01): the
-    /// requirement's signature is the contract, `Self` is inferred from
-    /// the arguments, and resolution is impl-directed (concrete Self) or
-    /// bound-directed (rigid Self).
+    /// A qualified trait call (TR01), in either form: the requirement's
+    /// signature is the contract, and resolution is impl-directed (concrete
+    /// `Self`) or bound-directed (rigid `Self`). The short form
+    /// `Trait::member(args...)` infers `Self` from the arguments; the full
+    /// named-Self form `Trait::<Self = Type>::member(args...)` states it —
+    /// which is what disambiguates a collision, and the only spelling where
+    /// no argument determines `Self` at all.
     #[allow(clippy::too_many_arguments)]
     fn infer_qualified_trait_call(
         &mut self,
@@ -4266,26 +4415,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             self.infer_args_broken(args);
             return self.finish_dot_call(expr, Ty::Error, expected, cause);
         }
-        if let Some(vp_args) = vp_args {
-            // `Trait::<...>::member(...)` — the named-Self form, reserved.
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::NamedSelfReserved { expr: callee });
-            self.result.type_of_expr.insert(callee, Ty::Error);
-            self.infer_const_args_free(vp_args);
-            self.infer_args_broken(args);
-            return self.finish_dot_call(expr, Ty::Error, expected, cause);
-        }
+        // `Trait::<Self = Type>::member(...)` — the written implementer.
+        let named_self = self.trait_path_self_arg(callee, &trait_loc, vp_args);
         let requirements = crate::item_tree::trait_requirements(self.db, trait_loc.to_id(self.db));
         let Some(member_index) = requirements.iter().position(|req| req.name == member) else {
             if !member.is_empty() {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::TraitHasNoMember {
-                        expr: callee,
-                        trait_: trait_loc,
-                        name: member.to_owned(),
-                    });
+                self.no_such_trait_member(callee, &trait_loc, member);
             }
             self.result.type_of_expr.insert(callee, Ty::Error);
             self.infer_args_broken(args);
@@ -4299,7 +4434,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             self.infer_args_broken(args);
             return self.finish_dot_call(expr, Ty::Error, expected, cause);
         };
-        let self_var = self.fresh_var();
+        // The named form PINS `Self`; the short form leaves a variable the
+        // receiver-like argument pass determines below.
+        let self_var = match named_self {
+            Some(self_ty) => self_ty,
+            None => self.fresh_var(),
+        };
         let (inst, var_of) =
             self.instantiate_requirement_sig(expr, &trait_loc, &req, &sig_ref, self_var.clone());
         self.push_bound_obligations(expr, &req.generics, &var_of);
@@ -4732,16 +4872,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 let Some(variants) = enum_variants(self.db, item).as_ref() else {
                     // A struct type has no variants; a broken declaration
                     // carries its own diagnostics (infectious, silent).
-                    // `Type::member` naming an inherent member is the
-                    // reserved qualified spelling — its own honest "not
-                    // yet".
-                    if self.member_of(&loc, variant).is_some() {
-                        self.result.diagnostics.push(
-                            InferenceDiagnostic::QualifiedMemberReserved {
-                                expr,
-                                name: variant.to_owned(),
-                            },
-                        );
+                    // `Type::member` naming an inherent member is the G13
+                    // escape — the type's own member, as a plain fn value.
+                    if let Some(member) = self.member_of(&loc, variant) {
+                        return self.infer_qualified_member_value(expr, &loc, member, args);
+                    }
+                    if self.push_trait_member_on_type(expr, &loc, variant) {
                         self.infer_const_args_free(args.unwrap_or(&[]));
                         return Ty::Error;
                     }
@@ -4790,16 +4926,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         }
                     }
                     None => {
-                        // An enum's `Type::member` qualified reference is
-                        // the same reserved spelling as a struct's.
-                        if self.member_of(&loc, variant).is_some() {
-                            self.result.diagnostics.push(
-                                InferenceDiagnostic::QualifiedMemberReserved {
-                                    expr,
-                                    name: variant.to_owned(),
-                                },
-                            );
-                        } else {
+                        // An enum's `Type::member` reference is the same
+                        // qualified member spelling as a struct's (variants
+                        // win the name — they are the enum's own second
+                        // segment).
+                        if let Some(member) = self.member_of(&loc, variant) {
+                            return self.infer_qualified_member_value(expr, &loc, member, args);
+                        }
+                        if !self.push_trait_member_on_type(expr, &loc, variant) {
                             self.result
                                 .diagnostics
                                 .push(InferenceDiagnostic::NoSuchVariant {
@@ -4813,10 +4947,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     }
                 }
             }
-            // `Trait::member` as a bare VALUE (a called short form is
-            // intercepted in the `Call` arm and never reaches this):
-            // impl-specific member values are the named-Self form's
-            // territory — reserved.
+            // `Trait::member` as a VALUE — a called short form is
+            // intercepted in the `Call` arm and never reaches this. A
+            // member value is IMPL-SPECIFIC, so it needs the named-Self
+            // form (TR01): `Display::<Self = Foo>::fmt` is one impl's fn,
+            // while a bare `Display::fmt` names no one function.
             Some(Resolution::TraitItem(loc)) => {
                 let loc = loc.clone();
                 if crate::traits::trait_is_generic(self.db, &loc) {
@@ -4827,34 +4962,36 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             expr,
                             name: loc.display_name().to_owned(),
                         });
-                } else if args.is_some() {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::NamedSelfReserved { expr });
-                } else if variant.is_empty() {
-                    // `Trait::` — the parse error covers it.
-                } else if crate::item_tree::trait_requirements(self.db, loc.to_id(self.db))
-                    .iter()
-                    .any(|req| req.name == variant)
-                {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::QualifiedTraitMemberValue {
-                            expr,
-                            trait_name: loc.display_name().to_owned(),
-                            member: variant.to_owned(),
-                        });
-                } else {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::TraitHasNoMember {
-                            expr,
-                            trait_: loc,
-                            name: variant.to_owned(),
-                        });
+                    self.infer_const_args_free(args.unwrap_or(&[]));
+                    return Ty::Error;
                 }
-                self.infer_const_args_free(args.unwrap_or(&[]));
-                Ty::Error
+                if variant.is_empty() {
+                    // `Trait::` — the parse error covers it.
+                    self.infer_const_args_free(args.unwrap_or(&[]));
+                    return Ty::Error;
+                }
+                let named_self = self.trait_path_self_arg(expr, &loc, args);
+                let requirements =
+                    crate::item_tree::trait_requirements(self.db, loc.to_id(self.db));
+                if !requirements.iter().any(|req| req.name == variant) {
+                    self.no_such_trait_member(expr, &loc, variant);
+                    return Ty::Error;
+                }
+                match named_self {
+                    Some(self_ty) => {
+                        self.infer_named_self_member_value(expr, &loc, variant, self_ty)
+                    }
+                    None => {
+                        self.result.diagnostics.push(
+                            InferenceDiagnostic::QualifiedTraitMemberValue {
+                                expr,
+                                trait_name: loc.display_name().to_owned(),
+                                member: variant.to_owned(),
+                            },
+                        );
+                        Ty::Error
+                    }
+                }
             }
             Some(
                 Resolution::Local(_)
@@ -4880,6 +5017,249 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 Ty::Error
             }
         }
+    }
+
+    /// `Point::len` — a qualified reference to an INHERENT member (the G13
+    /// escape naming the type's own member). An inherent member is an
+    /// ordinary fn whose `Self` is simply its last parameter, so the
+    /// reference IS its fn value: `Point::len(p)` is an ordinary call, and
+    /// `let f = Point::len;` is legal (no dictionary is involved anywhere).
+    /// Written type arguments belong to the TYPE (`Pair::<usize>::first`) —
+    /// an inherent member's binder is the owner's — so the mention
+    /// instantiates the member exactly as a dot-call instantiates it at the
+    /// receiver's arguments.
+    ///
+    /// TRAIT-impl members are deliberately unreachable here: their
+    /// spellings are `Trait::member` and `Trait::<Self = Type>::member`, so
+    /// every spelling names exactly one thing. (Member items are keyed by
+    /// the qualified `head::member` name, so this lookup cannot even see
+    /// them.)
+    fn infer_qualified_member_value(
+        &mut self,
+        expr: ExprId,
+        owner: &ItemLoc,
+        member: ItemLoc,
+        args: Option<&[GenericArgData]>,
+    ) -> Ty {
+        let sig = signature(self.db, member.to_id(self.db));
+        if sig.contains_error() {
+            // The definition site carries the fully-annotated member rule's
+            // diagnostic; errors are infectious and silent.
+            self.infer_const_args_free(args.unwrap_or(&[]));
+            return Ty::Error;
+        }
+        // The OWNER's binder, judged exactly like any type mention (arity,
+        // kinds, const args, `_` holes), then substituted into the member's
+        // scheme — member schemes are keyed by the MEMBER's `ItemLoc` at the
+        // owner's binder indices.
+        let named = self.instantiate_type_mention(expr, owner, args);
+        let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
+        let mut const_subst: FxHashMap<u32, ConstArgValue> = FxHashMap::default();
+        for (index, arg) in named.args.iter().enumerate() {
+            match arg {
+                GenericArg::Ty(ty) => {
+                    subst.insert(index as u32, ty.clone());
+                }
+                GenericArg::Const(value) => {
+                    const_subst.insert(index as u32, value.clone());
+                }
+            }
+        }
+        let inst = instantiate_scheme(&sig, &member, &subst, &const_subst);
+        self.result.member_value_of_expr.insert(
+            expr,
+            QualifiedMemberValue {
+                member,
+                args: named.args,
+            },
+        );
+        inst
+    }
+
+    /// `Type::member` where the TYPE has no such member but a trait
+    /// provides one for it: say which trait, and how its spelling goes.
+    /// Returns whether the diagnostic was pushed.
+    fn push_trait_member_on_type(&mut self, expr: ExprId, loc: &ItemLoc, member: &str) -> bool {
+        if member.is_empty() {
+            return false;
+        }
+        let self_key = crate::traits::SelfKey::Decl(loc.clone());
+        let traits: Vec<String> =
+            crate::traits::traits_providing_member(self.db, self.file, &self_key, member)
+                .into_iter()
+                .map(|(trait_, _)| trait_.display_name().to_owned())
+                .collect();
+        if traits.is_empty() {
+            return false;
+        }
+        self.result
+            .diagnostics
+            .push(InferenceDiagnostic::QualifiedTraitMemberOnType {
+                expr,
+                type_name: loc.display_name().to_owned(),
+                member: member.to_owned(),
+                traits,
+            });
+        true
+    }
+
+    /// The `Self = Type` argument of a qualified trait path (TR01: named,
+    /// position-irrelevant), lowered. The rest of the list is judged here
+    /// too: only `Self` is nameable, `Self` may be given once, and a
+    /// non-generic trait takes no positional arguments of its own.
+    fn trait_path_self_arg(
+        &mut self,
+        expr: ExprId,
+        trait_loc: &ItemLoc,
+        args: Option<&[GenericArgData]>,
+    ) -> Option<Ty> {
+        let args = args?;
+        let mut self_ref: Option<TypeRef> = None;
+        let mut positional = 0usize;
+        for arg in args {
+            match arg {
+                GenericArgData::Named { name, ty } if name == "Self" => {
+                    if self_ref.is_some() {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::NamedGenericArg {
+                                expr,
+                                name: name.clone(),
+                                reason: NamedArgReason::Duplicate,
+                            });
+                        continue;
+                    }
+                    self_ref = Some(ty.clone());
+                }
+                GenericArgData::Named { name, .. } => {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::NamedGenericArg {
+                            expr,
+                            name: name.clone(),
+                            reason: NamedArgReason::NotSelf,
+                        });
+                }
+                // A trait's OWN arguments belong to generic traits
+                // (reserved), and their reservation is reported before
+                // this runs, so a positional argument here belongs to a
+                // trait that takes none.
+                GenericArgData::Type(_) => positional += 1,
+                GenericArgData::Const(value) => {
+                    positional += 1;
+                    let fresh = self.fresh_var();
+                    self.infer_expr(*value, &fresh);
+                }
+            }
+        }
+        if positional > 0 {
+            self.push_not_generic(expr, trait_loc.display_name());
+        }
+        let self_ref = self_ref?;
+        Some(self.lower_type_ref(&self_ref))
+    }
+
+    /// A trait path's last segment naming no requirement: an associated
+    /// type (reserved) or nothing at all.
+    fn no_such_trait_member(&mut self, expr: ExprId, trait_loc: &ItemLoc, name: &str) {
+        let assoc = crate::item_tree::trait_assoc_types(self.db, trait_loc.to_id(self.db))
+            .iter()
+            .any(|assoc| assoc == name);
+        if assoc {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::AssocTypeReserved {
+                    expr,
+                    trait_: trait_loc.clone(),
+                    name: name.to_owned(),
+                });
+            return;
+        }
+        self.result
+            .diagnostics
+            .push(InferenceDiagnostic::TraitHasNoMember {
+                expr,
+                trait_: trait_loc.clone(),
+                name: name.to_owned(),
+            });
+    }
+
+    /// `Display::<Self = Foo>::fmt` as a VALUE — TR01's impl-specific fn
+    /// value: the named implementer's own member. A RIGID `Self` names a
+    /// dictionary slot instead, which a value would have to capture
+    /// (reserved, the same wall as [`InferenceDiagnostic::BoundFnValue`]).
+    fn infer_named_self_member_value(
+        &mut self,
+        expr: ExprId,
+        trait_loc: &ItemLoc,
+        member: &str,
+        self_ty: Ty,
+    ) -> Ty {
+        let resolved = self.resolve_shallow(&self_ty);
+        if resolved.contains_error() {
+            return Ty::Error;
+        }
+        if matches!(resolved, Ty::Param(_)) {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::BoundMemberValue {
+                    expr,
+                    trait_name: trait_loc.display_name().to_owned(),
+                    member: member.to_owned(),
+                });
+            return Ty::Error;
+        }
+        let requirements = crate::item_tree::trait_requirements(self.db, trait_loc.to_id(self.db));
+        let Some(member_index) = requirements.iter().position(|req| req.name == member) else {
+            return Ty::Error;
+        };
+        let member_loc = crate::traits::SelfKey::for_ty(&resolved).and_then(|key| {
+            let impls = crate::traits::trait_impls(self.db, self.file);
+            impls
+                .impl_for(trait_loc, &key)
+                .cloned()
+                .and_then(|site| crate::traits::impl_dict_members(self.db, trait_loc, &site))
+                .and_then(|members| members.get(member_index).cloned())
+        });
+        let Some(member_loc) = member_loc else {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::NoTraitImpl {
+                    expr,
+                    trait_: trait_loc.clone(),
+                    ty: resolved,
+                });
+            return Ty::Error;
+        };
+        let sig = signature(self.db, member_loc.to_id(self.db));
+        if sig.contains_error() {
+            // The impl member's definition site carries the diagnostic.
+            return Ty::Error;
+        }
+        // The member's OWN binder (a requirement may be a generic fn):
+        // instantiated fresh where the value is directly called; its bounds
+        // would need a captured dictionary anywhere else — reserved.
+        let generics = item_generics(self.db, member_loc.to_id(self.db)).to_vec();
+        if !crate::traits::bound_slots(self.db, self.file, &generics).is_empty()
+            && !self.direct_callees.contains(&expr)
+        {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::BoundFnValue {
+                    expr,
+                    name: format!("{}::{member}", trait_loc.display_name()),
+                });
+            return Ty::Error;
+        }
+        let inst = self.instantiate_member_own_binder(expr, &member_loc, sig, &generics);
+        self.result.member_value_of_expr.insert(
+            expr,
+            QualifiedMemberValue {
+                member: member_loc,
+                args: Vec::new(),
+            },
+        );
+        inst
     }
 
     /// The value type of the enclosing binder's const param `index`
@@ -4931,6 +5311,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         generics: &[GenericParamData],
         args: Option<&[GenericArgData]>,
     ) -> Ty {
+        self.reject_named_args(expr, args);
         let matched_args = match args {
             Some(args) if args.len() != generics.len() => {
                 self.result
@@ -5004,7 +5385,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             let fresh = self.fresh_var();
                             self.infer_expr(value, &fresh);
                         }
-                        None => {}
+                        // Refused at the list (`reject_named_args`): only a
+                        // trait has a nameable argument.
+                        Some(GenericArgData::Named { .. }) | None => {}
                     }
                     pending.push((param.name.clone(), var.clone()));
                     subst.insert(index as u32, var);
@@ -5085,9 +5468,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 param_is_const: true,
                             });
                     }
-                    // Already reported: `MissingConstArgs` (bare mention)
-                    // or `GenericArgCount` (unmatchable list).
-                    None => {}
+                    // Already reported: `MissingConstArgs` (bare mention),
+                    // `GenericArgCount` (unmatchable list) or
+                    // `NamedGenericArg` (a named argument here).
+                    Some(GenericArgData::Named { .. }) | None => {}
                 },
             }
         }
@@ -5194,9 +5578,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 self.infer_const_args_free(args);
                 Ty::Error
             }
-            // `Display::<...>` — a turbofish on a trait is the named-Self
-            // form's position (TR01), reserved. A RESERVED generic trait's
-            // own reservation wins.
+            // `Display::<Self = Foo>` with no member segment: the argument
+            // list is the named-Self form's position (TR01), but a trait is
+            // still not a value — only `Trait::<...>::member` names one. A
+            // RESERVED generic trait's own reservation wins.
             Some(Resolution::TraitItem(loc)) => {
                 if crate::traits::trait_is_generic(self.db, loc) {
                     self.result
@@ -5208,7 +5593,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 } else {
                     self.result
                         .diagnostics
-                        .push(InferenceDiagnostic::NamedSelfReserved { expr });
+                        .push(InferenceDiagnostic::TraitNotValue {
+                            expr,
+                            name: base_name.clone(),
+                        });
                 }
                 self.infer_const_args_free(args);
                 Ty::Error
@@ -5219,6 +5607,30 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 self.infer_const_args_free(args);
                 Ty::Error
             }
+        }
+    }
+
+    /// Named generic arguments belong to a TRAIT's argument list and name
+    /// nothing but `Self` (TR01). Everywhere else — a fn mention, a type
+    /// mention, a construction head — every named argument is refused here;
+    /// the positional matching then treats it as an unusable argument.
+    fn reject_named_args(&mut self, expr: ExprId, args: Option<&[GenericArgData]>) {
+        for arg in args.unwrap_or(&[]) {
+            let GenericArgData::Named { name, .. } = arg else {
+                continue;
+            };
+            let reason = if name == "Self" {
+                NamedArgReason::NotATrait
+            } else {
+                NamedArgReason::NotSelf
+            };
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::NamedGenericArg {
+                    expr,
+                    name: name.clone(),
+                    reason,
+                });
         }
     }
 
@@ -6230,6 +6642,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             }
             return self_named;
         }
+        self.reject_named_args(mention, written);
         let generics = item_generics(self.db, loc.to_id(self.db));
         if generics.is_empty() {
             if let Some(args) = written {
@@ -6300,7 +6713,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             let fresh = self.fresh_var();
                             self.infer_expr(value, &fresh);
                         }
-                        None => {}
+                        // Refused at the list (`reject_named_args`).
+                        Some(GenericArgData::Named { .. }) | None => {}
                     }
                     pending.push((param.name.clone(), var.clone()));
                     out.push(GenericArg::Ty(var));
@@ -6393,8 +6807,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             ConstArgValue::Error
                         }
                         // Already reported: `MissingConstArgs` (bare
-                        // mention) or `GenericArgCount` (unmatchable list).
-                        None => ConstArgValue::Error,
+                        // mention), `GenericArgCount` (unmatchable list) or
+                        // `NamedGenericArg` (a named argument here).
+                        Some(GenericArgData::Named { .. }) | None => ConstArgValue::Error,
                     };
                     out.push(GenericArg::Const(value));
                 }

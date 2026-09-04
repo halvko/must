@@ -107,6 +107,11 @@ pub(crate) fn goto_definition(
         if let Some(variant) = infer.variant_of_expr.get(path) {
             return nav_to_variant(db, variant);
         }
+        // A qualified MEMBER reference (`Point::len`, or the named-Self
+        // `Display::<Self = Foo>::fmt`) names exactly one member.
+        if let Some(value) = infer.member_value_of_expr.get(path) {
+            return nav_to_member(db, &value.member);
+        }
         let base_name = path_expr.name_ref()?;
         if let Some(Resolution::TraitItem(trait_loc)) =
             hir::file_scope(db, file).resolve(&base_name.text())

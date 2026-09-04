@@ -6087,6 +6087,149 @@ fn turbofish_const_paren_escape_no_longer_parses() {
 }
 
 #[test]
+fn named_self_qualified_member_path() {
+    // TR01's named-Self form: `Self = Type` is one argument of the trait's
+    // list (recognized by the `IDENT EQ` form, so the tree is stable under
+    // declaration edits), and the member segment follows it.
+    check(
+        "static x = D::<Self = usize>::m(n);",
+        expect![[r#"
+            SOURCE_FILE@0..35
+              STATIC_ITEM@0..35
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                CALL_EXPR@11..34
+                  PATH_EXPR@11..31
+                    NAME_REF@11..12
+                      IDENT@11..12 "D"
+                    COLON2@12..14 "::"
+                    GENERIC_ARG_LIST@14..28
+                      L_ANGLE@14..15 "<"
+                      NAMED_ARG@15..27
+                        NAME_REF@15..19
+                          IDENT@15..19 "Self"
+                        WHITESPACE@19..20 " "
+                        EQ@20..21 "="
+                        WHITESPACE@21..22 " "
+                        PATH_TYPE@22..27
+                          NAME_REF@22..27
+                            IDENT@22..27 "usize"
+                      R_ANGLE@27..28 ">"
+                    COLON2@28..30 "::"
+                    NAME_REF@30..31
+                      IDENT@30..31 "m"
+                  ARG_LIST@31..34
+                    L_PAREN@31..32 "("
+                    PATH_EXPR@32..33
+                      NAME_REF@32..33
+                        IDENT@32..33 "n"
+                    R_PAREN@33..34 ")"
+                SEMICOLON@34..35 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn named_arg_composes_with_positional_args() {
+    // Position-irrelevant (TR01): `From::<u8, Self = T>::from(x)` is the
+    // reserved generic-trait shape, and the grammar already carries it.
+    check(
+        "static x = From::<u8, Self = T>::from(v);",
+        expect![[r#"
+            SOURCE_FILE@0..41
+              STATIC_ITEM@0..41
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                CALL_EXPR@11..40
+                  PATH_EXPR@11..37
+                    NAME_REF@11..15
+                      IDENT@11..15 "From"
+                    COLON2@15..17 "::"
+                    GENERIC_ARG_LIST@17..31
+                      L_ANGLE@17..18 "<"
+                      TYPE_ARG@18..20
+                        PATH_TYPE@18..20
+                          NAME_REF@18..20
+                            IDENT@18..20 "u8"
+                      COMMA@20..21 ","
+                      WHITESPACE@21..22 " "
+                      NAMED_ARG@22..30
+                        NAME_REF@22..26
+                          IDENT@22..26 "Self"
+                        WHITESPACE@26..27 " "
+                        EQ@27..28 "="
+                        WHITESPACE@28..29 " "
+                        PATH_TYPE@29..30
+                          NAME_REF@29..30
+                            IDENT@29..30 "T"
+                      R_ANGLE@30..31 ">"
+                    COLON2@31..33 "::"
+                    NAME_REF@33..37
+                      IDENT@33..37 "from"
+                  ARG_LIST@37..40
+                    L_PAREN@37..38 "("
+                    PATH_EXPR@38..39
+                      NAME_REF@38..39
+                        IDENT@38..39 "v"
+                    R_PAREN@39..40 ")"
+                SEMICOLON@40..41 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn qualified_member_path_with_type_args() {
+    // The G13 inherent escape, turbofished: the arguments belong to the
+    // TYPE, the last segment names its member.
+    check(
+        "static x = Pair::<usize>::first(p);",
+        expect![[r#"
+            SOURCE_FILE@0..35
+              STATIC_ITEM@0..35
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                CALL_EXPR@11..34
+                  PATH_EXPR@11..31
+                    NAME_REF@11..15
+                      IDENT@11..15 "Pair"
+                    COLON2@15..17 "::"
+                    GENERIC_ARG_LIST@17..24
+                      L_ANGLE@17..18 "<"
+                      TYPE_ARG@18..23
+                        PATH_TYPE@18..23
+                          NAME_REF@18..23
+                            IDENT@18..23 "usize"
+                      R_ANGLE@23..24 ">"
+                    COLON2@24..26 "::"
+                    NAME_REF@26..31
+                      IDENT@26..31 "first"
+                  ARG_LIST@31..34
+                    L_PAREN@31..32 "("
+                    PATH_EXPR@32..33
+                      NAME_REF@32..33
+                        IDENT@32..33 "p"
+                    R_PAREN@33..34 ")"
+                SEMICOLON@34..35 ";"
+        "#]],
+    );
+}
+
+#[test]
 fn turbofish_in_type_position() {
     check(
         "static x: Pair::<usize> = y;",
