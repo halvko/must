@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 14 errors and 1 warning.
+// exactly: found 15 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -49,7 +49,7 @@ static reassign_immutable = fn () -> usize {
 // 5. Missing record field: the annotation demands `y`, the literal never
 //    supplies it.
 //    error: record literal is missing field `y: str`
-static missing_field: struct { x: usize, y: str } = struct { x: 1 };
+static missing_field: struct { x: usize, y: str } = struct { x = 1 };
 
 // 6. Variant demanded, enum given: `wants_circle` is typed to require the
 //    precise `Shape::Circle` variant; a `Shape::Point` doesn't widen the
@@ -119,7 +119,7 @@ static addr_of_non_mut = fn () {
 //     value does not satisfy a `Buf::<8>` annotation.
 //     error: type mismatch: expected `Buf::<8>`, found `Buf::<9>`
 type Buf = struct::<const N: usize> { len: usize };
-static wrong_const_len: Buf::<8> = Buf::<9>(struct { len: 1 });
+static wrong_const_len: Buf::<8> = Buf::<9>(struct { len = 1 });
 
 // 13. A pointer escaping compile-time evaluation: pointers hold no stable
 //     identity beyond the frame that owns their pointee, so one can never be
@@ -146,3 +146,10 @@ static ambiguous_number = fn () -> () {
 //     range-checked right there — `300` needs more than 8 bits.
 //     error: `300` does not fit in `u8`
 static too_big_for_u8: u8 = 300;
+
+// 16. The retired construction spelling: record fields are DEFINED with
+//     `=` (`name = value`); after a `:` comes a type, uniformly — the old
+//     `name: value` form is a targeted parse error, never a silent
+//     reinterpretation.
+//     error: record fields are defined with `=` (`name = value`); `:` annotates a type
+static old_spelling: struct { x: usize } = struct { x: 1 };

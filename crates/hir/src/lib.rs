@@ -492,7 +492,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         };
         match rhs {
             ast::Expr::RecordExpr(record) => {
-                type_decl_field_diagnostics(db, file, &record, &mut diagnostics);
+                type_decl_field_diagnostics(&record, &mut diagnostics);
             }
             ast::Expr::EnumExpr(en) => {
                 enum_decl_payload_diagnostics(&en, &mut diagnostics);
@@ -1827,33 +1827,52 @@ fn enum_decl_payload_diagnostics(en: &ast::EnumExpr, diagnostics: &mut Vec<Diagn
     }
 }
 
-/// Check the fields of a `struct` literal used as a type declaration: each
-/// field value must itself denote a type — a type name or a nested `struct`
-/// literal (mirroring `item_tree::expr_as_type_ref`).
-fn type_decl_field_diagnostics(
-    db: &dyn Db,
-    file: SourceFile,
-    record: &ast::RecordExpr,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
+/// Check the fields of a `struct` literal used as a type declaration:
+/// each field must declare a fully written type (`name: Type`) and no
+/// value — the field types are real type syntax now (equals-defines
+/// respell), so name resolution, arity and turbofish problems inside them
+/// are the ordinary annotation mirror's business; only the field-shape
+/// rules live here.
+fn type_decl_field_diagnostics(record: &ast::RecordExpr, diagnostics: &mut Vec<Diagnostic>) {
     for field in record.fields() {
         let Some(name_ref) = field.name_ref() else {
             // No field name: broken source, the parse error covers it.
             continue;
         };
-        match field.expr() {
-            // Shorthand (`x` without `: type`): there is no type to read.
-            None => diagnostics.push(simple_error(
-                field.syntax().text_range(),
-                format!("expected a type for field `{}`", name_ref.text()),
-            )),
-            Some(expr) => type_decl_value_diagnostics(
-                db,
-                file,
-                &expr,
-                &format!("for field `{}`", name_ref.text()),
-                diagnostics,
-            ),
+        if let Some(eq) = field.eq_token() {
+            let end = field
+                .expr()
+                .map(|value| value.syntax().text_range().end())
+                .unwrap_or_else(|| eq.text_range().end());
+            diagnostics.push(simple_error(
+                TextRange::new(eq.text_range().start(), end),
+                "a `type` declaration's field declares a type, not a value".to_owned(),
+            ));
+        }
+        match field.ty() {
+            // Shorthand, or the retired `name: value` spelling (its parse
+            // error already told the respell story — don't pile on).
+            None => {
+                if field.colon_token().is_none() {
+                    diagnostics.push(simple_error(
+                        field.syntax().text_range(),
+                        format!(
+                            "expected a type for field `{}`: `name: Type`",
+                            name_ref.text()
+                        ),
+                    ));
+                }
+            }
+            Some(ty) => {
+                if !TypeRef::from_ast(ty.clone()).is_fully_typed() {
+                    diagnostics.push(simple_error(
+                        ty.syntax().text_range(),
+                        "a field's type must be a fully written type; \
+                         a declaration has nothing to infer `_` from"
+                            .to_owned(),
+                    ));
+                }
+            }
         }
     }
 }
@@ -1865,132 +1884,5 @@ fn simple_error(range: TextRange, message: String) -> Diagnostic {
         message,
         fix: None,
         related: Vec::new(),
-    }
-}
-
-/// Check one type-declaration value expression (a field's type, or an
-/// array element's) — a name, a nested `struct` literal, or a `[T; N]`
-/// written as the repeat-form ARRAY_EXPR this expression position parses
-/// it as. Anything else is not a type; `what` words the message
-/// (`"for field `x`"` / `"for the array element"`).
-fn type_decl_value_diagnostics(
-    db: &dyn Db,
-    file: SourceFile,
-    value: &ast::Expr,
-    what: &str,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    match value {
-        ast::Expr::PathExpr(path) => {
-            let Some(type_name) = path.name_ref() else {
-                return;
-            };
-            let name = type_name.text();
-            let binder = enclosing_binder_info(path.syntax());
-            if let Some(list) = path.generic_arg_list() {
-                if path.variant_name_ref().is_some() {
-                    diagnostics.push(simple_error(
-                        path.syntax().text_range(),
-                        format!(
-                            "`{name}` is generic; a generic enum's variant types \
-                             cannot be written in annotations yet"
-                        ),
-                    ));
-                    return;
-                }
-                // A hole inside the args has nothing to infer from in a
-                // declaration (same rule as enum payloads).
-                if !item_tree::expr_as_type_ref(ast::Expr::PathExpr(path.clone())).is_fully_typed()
-                {
-                    diagnostics.push(simple_error(
-                        path.syntax().text_range(),
-                        "a field's type must be a fully written type; \
-                         a declaration has nothing to infer `_` from"
-                            .to_owned(),
-                    ));
-                }
-                apply_position_diagnostics(
-                    db,
-                    file,
-                    path.syntax(),
-                    &name,
-                    Some(&list),
-                    &binder,
-                    diagnostics,
-                );
-                return;
-            }
-            // The enclosing binder's params are real type names here —
-            // except a const param, which is a value.
-            if binder.names_type_param(&name) {
-                if path.variant_name_ref().is_some() {
-                    diagnostics.push(simple_error(
-                        path.syntax().text_range(),
-                        format!("`{name}` has no variants (it is a type parameter)"),
-                    ));
-                }
-                return;
-            }
-            if binder.names_const_param(&name) {
-                diagnostics.push(simple_error(
-                    path.syntax().text_range(),
-                    format!("`{name}` is a const parameter, not a type"),
-                ));
-                return;
-            }
-            let message = match path.variant_name_ref() {
-                // `x: Shape::Circle` as a field's type: same checks as
-                // annotation position.
-                Some(variant) => variant_position_error(db, file, &name, &variant.text()),
-                None => type_position_error(db, file, &name).or_else(|| {
-                    // A bare mention of a GENERIC type: the args must
-                    // be spelled (same rule as annotation position).
-                    match type_scope(db, file).resolve(&name) {
-                        Some(Resolution::TypeItem(loc)) => {
-                            let arity = decl_generics_len(db, &loc);
-                            (arity > 0).then(|| diag::generic_arg_count(&name, arity, 0))
-                        }
-                        _ => None,
-                    }
-                }),
-            };
-            if let Some(message) = message {
-                diagnostics.push(simple_error(path.syntax().text_range(), message));
-            }
-        }
-        ast::Expr::RecordExpr(nested) => {
-            type_decl_field_diagnostics(db, file, nested, diagnostics);
-        }
-        // `&raw mut T` as a field's type (see `item_tree::expr_as_type_ref`):
-        // the pointee recurses as a type value. A plain `&x` falls through
-        // to the not-a-type arm below (references are reserved).
-        ast::Expr::AddrOfExpr(ptr) if ptr.raw_token().is_some() => {
-            if let Some(inner) = ptr.expr() {
-                type_decl_value_diagnostics(db, file, &inner, "for the pointee", diagnostics);
-            }
-        }
-        // `[usize; 4]` as a field's type parses as the repeat-form
-        // ARRAY_EXPR in this expression position (see
-        // `item_tree::expr_as_type_ref`): the element recurses as a type
-        // value, the length gets the annotation-position judgement. The
-        // list form is not a type.
-        ast::Expr::ArrayExpr(array) if array.is_repeat() => {
-            let binder = enclosing_binder_info(array.syntax());
-            let Some((element, count)) = array.repeat_parts() else {
-                return;
-            };
-            type_decl_value_diagnostics(db, file, &element, "for the array element", diagnostics);
-            let count_range = count
-                .as_ref()
-                .map(|count| count.syntax().text_range())
-                .unwrap_or_else(|| array.syntax().text_range());
-            if let Some(message) = array_len_expr_error(db, file, count, &binder) {
-                diagnostics.push(simple_error(count_range, message));
-            }
-        }
-        other => diagnostics.push(simple_error(
-            other.syntax().text_range(),
-            format!("expected a type {what}"),
-        )),
     }
 }

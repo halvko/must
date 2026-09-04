@@ -769,7 +769,7 @@ fn illegal_assignment_in_an_unevaluated_branch_does_not_crash() {
 fn field_assignment_mutates_the_record() {
     check_run(
         "",
-        "(fn { let mut p: struct { x: usize, y: usize } = struct { x: 1, y: 2 }; p.x = 10; p.x + p.y })()",
+        "(fn { let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 }; p.x = 10; p.x + p.y })()",
         expect![[r#"
             => 12
         "#]],
@@ -782,12 +782,7 @@ fn nested_field_assignment_writes_through_both_levels() {
     // field and the outer record's other field are untouched.
     check_run(
         "",
-        "(fn {
-            let mut p: struct { inner: struct { a: usize, b: usize }, c: usize } =
-                struct { inner: struct { a: 1, b: 2 }, c: 3 };
-            p.inner.b = 20;
-            p.inner.a + p.inner.b + p.c
-        })()",
+        "(fn {\n            let mut p: struct { inner: struct { a: usize, b: usize }, c: usize } =\n                struct { inner = struct { a = 1, b = 2 }, c = 3 };\n            p.inner.b = 20;\n            p.inner.a + p.inner.b + p.c\n        })()",
         expect![[r#"
             => 24
         "#]],
@@ -802,7 +797,7 @@ fn field_assignment_through_a_named_type() {
         r#"
 type Point = struct { x: usize, y: usize };
 static main = fn () -> usize {
-    let mut p = Point(struct { x: 1, y: 2 });
+    let mut p = Point(struct { x = 1, y = 2 });
     p.x = 40;
     p.x + p.y
 };
@@ -824,7 +819,7 @@ static bump = const fn (mut p: struct { n: usize }) -> usize {
     p.n = p.n + 1;
     p.n
 };
-static x = bump(struct { n: 41 });
+static x = bump(struct { n = 41 });
 "#,
         expect![[r#"
             bump = fn
@@ -839,7 +834,7 @@ fn field_assignment_to_an_immutable_root_traps_at_runtime() {
     // binding, exactly as the editor shows it.
     check_run(
         "",
-        "(fn { let p: struct { x: usize } = struct { x: 1 }; p.x = 2; p.x })()",
+        "(fn { let p: struct { x: usize } = struct { x = 1 }; p.x = 2; p.x })()",
         expect![[r#"
             error[Trap]: cannot assign to `p.x`: `p` is not declared `mut`
         "#]],
@@ -853,10 +848,7 @@ fn illegal_field_assign_in_an_unevaluated_branch_does_not_crash() {
     // decides the run.
     check_run(
         "",
-        "(fn () -> usize {
-            let mut p = struct { x: 1 };
-            if true { p.x } else { p.bogus = 2; p.x }
-        })()",
+        "(fn () -> usize {\n            let mut p = struct { x = 1 };\n            if true { p.x } else { p.bogus = 2; p.x }\n        })()",
         expect![[r#"
             => 1
         "#]],
@@ -887,7 +879,7 @@ static x = double(21);
 fn record_construction_and_field_access() {
     check_run(
         "",
-        "(fn { let p: struct { x: usize, y: usize } = struct { x: 1, y: 2 }; p.x + p.y })()",
+        "(fn { let p: struct { x: usize, y: usize } = struct { x = 1, y = 2 }; p.x + p.y })()",
         expect![[r#"
             => 3
         "#]],
@@ -898,7 +890,7 @@ fn record_construction_and_field_access() {
 fn nested_records_construct_and_project() {
     check_run(
         "",
-        r#"(fn { let a: struct { b: struct { c: usize } } = struct { b: struct { c: 5 } }; a.b.c })()"#,
+        r#"(fn { let a: struct { b: struct { c: usize } } = struct { b = struct { c = 5 } }; a.b.c })()"#,
         expect![[r#"
             => 5
         "#]],
@@ -909,11 +901,11 @@ fn nested_records_construct_and_project() {
 fn records_const_evaluate() {
     check_const(
         r#"
-static p: struct { x: usize, y: usize } = struct { x: 1, y: 2 };
+static p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };
 static sum = p.x + p.y;
 "#,
         expect![[r#"
-            p = { x: 1, y: 2 }
+            p = { x = 1, y = 2 }
             sum = 3
         "#]],
     );
@@ -934,21 +926,21 @@ fn shorthand_fields_evaluate() {
 fn record_equality_is_structural_both_ways() {
     check_run(
         "",
-        r#"(fn { let one: usize = 1; struct { x: one } == struct { x: one } })()"#,
+        r#"(fn { let one: usize = 1; struct { x = one } == struct { x = one } })()"#,
         expect![[r#"
             => true
         "#]],
     );
     check_run(
         "",
-        r#"(fn { let one: usize = 1; let two: usize = 2; struct { x: one } == struct { x: two } })()"#,
+        r#"(fn { let one: usize = 1; let two: usize = 2; struct { x = one } == struct { x = two } })()"#,
         expect![[r#"
             => false
         "#]],
     );
     check_run(
         "",
-        r#"(fn { let one: usize = 1; let two: usize = 2; struct { x: one } != struct { x: two } })()"#,
+        r#"(fn { let one: usize = 1; let two: usize = 2; struct { x = one } != struct { x = two } })()"#,
         expect![[r#"
             => true
         "#]],
@@ -962,7 +954,7 @@ fn field_access_on_a_nonexistent_field_still_traps_at_runtime() {
     // (the earlier message, unchanged).
     check_run(
         "",
-        r#"(fn { let p: struct { x: usize } = struct { x: 1 }; p.y })()"#,
+        r#"(fn { let p: struct { x: usize } = struct { x = 1 }; p.y })()"#,
         expect![[r#"
             error[Trap]: no field `y` on `struct { x: usize }`
         "#]],
@@ -980,11 +972,11 @@ fn named_type_construction_erases_to_its_record() {
     check_const(
         r#"
 type Foo = struct { x: usize, y: str };
-static p = Foo(struct { x: 1, y: "s" });
+static p = Foo(struct { x = 1, y = "s" });
 static x = p.x;
 "#,
         expect![[r#"
-            p = { x: 1, y: "s" }
+            p = { x = 1, y = "s" }
             x = 1
         "#]],
     );
@@ -996,7 +988,7 @@ fn named_type_equality_is_structural_under_the_hood() {
     // `Foo`s, equality is the underlying records' structural equality.
     check_run(
         "type Foo = struct { x: usize };",
-        r#"(Foo(struct { x: 1 }) == Foo(struct { x: 1 }))"#,
+        r#"(Foo(struct { x = 1 }) == Foo(struct { x = 1 }))"#,
         expect![[r#"
             => true
         "#]],
@@ -1007,7 +999,7 @@ fn named_type_equality_is_structural_under_the_hood() {
 fn named_type_inequality_observes_field_values() {
     check_run(
         "type Foo = struct { x: usize };",
-        r#"(Foo(struct { x: 1 }) == Foo(struct { x: 2 }))"#,
+        r#"(Foo(struct { x = 1 }) == Foo(struct { x = 2 }))"#,
         expect![[r#"
             => false
         "#]],
@@ -1465,7 +1457,7 @@ fn infinite_loop_in_a_const_block_runs_out_of_fuel() {
 fn let_record_destructure_evaluates() {
     check_run(
         "",
-        r#"(fn { let struct { x, y }: struct { x: usize, y: usize } = struct { x: 1, y: 2 }; x + y })()"#,
+        r#"(fn { let struct { x, y }: struct { x: usize, y: usize } = struct { x = 1, y = 2 }; x + y })()"#,
         expect![[r#"
             => 3
         "#]],
@@ -1476,7 +1468,7 @@ fn let_record_destructure_evaluates() {
 fn let_record_destructure_rename_evaluates() {
     check_run(
         "",
-        r#"(fn { let struct { x as a, y as b }: struct { x: usize, y: usize } = struct { x: 1, y: 2 }; a + b })()"#,
+        r#"(fn { let struct { x as a, y as b }: struct { x: usize, y: usize } = struct { x = 1, y = 2 }; a + b })()"#,
         expect![[r#"
             => 3
         "#]],
@@ -1487,7 +1479,7 @@ fn let_record_destructure_rename_evaluates() {
 fn let_record_destructure_rest_evaluates() {
     check_run(
         "",
-        r#"(fn { let struct { x, .. }: struct { x: usize, y: usize, z: usize } = struct { x: 1, y: 2, z: 3 }; x })()"#,
+        r#"(fn { let struct { x, .. }: struct { x: usize, y: usize, z: usize } = struct { x = 1, y = 2, z = 3 }; x })()"#,
         expect![[r#"
             => 1
         "#]],
@@ -1498,7 +1490,7 @@ fn let_record_destructure_rest_evaluates() {
 fn param_record_destructure_evaluates() {
     check_run(
         "static add = fn (struct { x, y }: struct { x: usize, y: usize }) -> usize { x + y };",
-        "add(struct { x: 4, y: 5 })",
+        "add(struct { x = 4, y = 5 })",
         expect![[r#"
             => 9
         "#]],
@@ -1512,7 +1504,7 @@ fn newtype_destructure_evaluates() {
 type Point = struct { x: usize, y: usize };
 static add = fn (Point(struct { x, y })) -> usize { x + y };
 "#,
-        "add(Point(struct { x: 4, y: 5 }))",
+        "add(Point(struct { x = 4, y = 5 }))",
         expect![[r#"
             => 9
         "#]],
@@ -1523,14 +1515,14 @@ static add = fn (Point(struct { x, y })) -> usize { x + y };
 fn record_destructure_in_const_context_evaluates() {
     check_const(
         r#"
-static p: struct { x: usize, y: usize } = struct { x: 3, y: 4 };
+static p: struct { x: usize, y: usize } = struct { x = 3, y = 4 };
 static sum = const fn () -> usize {
     let struct { x, y } = p;
     x + y
 }();
 "#,
         expect![[r#"
-            p = { x: 3, y: 4 }
+            p = { x = 3, y = 4 }
             sum = 7
         "#]],
     );
@@ -1540,7 +1532,7 @@ static sum = const fn () -> usize {
 fn per_binding_mut_record_destructure_evaluates() {
     check_run(
         "",
-        r#"(fn { let struct { mut x, y }: struct { x: usize, y: usize } = struct { x: 1, y: 2 }; x = x + y; x })()"#,
+        r#"(fn { let struct { mut x, y }: struct { x: usize, y: usize } = struct { x = 1, y = 2 }; x = x + y; x })()"#,
         expect![[r#"
             => 3
         "#]],
@@ -1765,8 +1757,7 @@ fn generic_frame_shows_const_params_as_named_locals() {
 #[test]
 fn generic_record_constructs_and_projects() {
     check_run(
-        "type Pair = struct::<T> { a: T, b: T };\n\
-         static main = fn () -> usize { let p = Pair::<usize>(struct { a: 1, b: 2 }); p.a + p.b };",
+        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static main = fn () -> usize { let p = Pair::<usize>(struct { a = 1, b = 2 }); p.a + p.b };",
         "main()",
         expect![[r#"
             => 3
@@ -1809,8 +1800,7 @@ fn generic_variant_value_renders() {
 #[test]
 fn const_param_type_constructs_and_evaluates() {
     check_run(
-        "type Buf = struct::<const N: usize> { len: usize };\n\
-         static main = fn () -> usize { let b: Buf::<8> = Buf::<8>(struct { len: 3 }); b.len };",
+        "type Buf = struct::<const N: usize> { len: usize };\n\\\n         static main = fn () -> usize { let b: Buf::<8> = Buf::<8>(struct { len = 3 }); b.len };",
         "main()",
         expect![[r#"
             => 3
@@ -1841,7 +1831,7 @@ fn pointer_to_a_field_reads_and_writes_that_element() {
     check_run(
         r#"
 static main = fn() -> usize {
-    let mut r: struct { a: usize, b: usize } = struct { a: 1, b: 2 };
+    let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
     let pa = &raw mut r.a;
     unsafe { pa.* = 10; }
     r.a + r.b
@@ -1862,9 +1852,9 @@ fn interior_pointer_survives_whole_value_overwrite() {
     check_run(
         r#"
 static main = fn() -> usize {
-    let mut r: struct { a: usize, b: usize } = struct { a: 1, b: 2 };
+    let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
     let pa = &raw mut r.a;
-    r = struct { a: 3, b: 4 };
+    r = struct { a = 3, b = 4 };
     unsafe { pa.* }
 };
 "#,
@@ -1880,7 +1870,7 @@ fn pointee_field_reads_chain() {
     check_run(
         r#"
 static main = fn() -> usize {
-    let mut r: struct { a: usize, b: usize } = struct { a: 1, b: 2 };
+    let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
     let p = &raw mut r;
     unsafe { p.*.a + p.*.b }
 };
@@ -1932,7 +1922,7 @@ static main = fn() -> bool {
 fn deref_of_a_static_pointer_reads_the_static() {
     check_run(
         r#"
-static s: struct { a: usize, b: usize } = struct { a: 40, b: 2 };
+static s: struct { a: usize, b: usize } = struct { a = 40, b = 2 };
 static main = fn() -> usize {
     let pa = &raw s.a;
     let pb = &raw s.b;
@@ -2070,7 +2060,7 @@ fn a_pointer_inside_a_record_cannot_leave_const_evaluation_either() {
         r#"
 static p = {
     let mut x: usize = 1;
-    struct { ptr: &raw mut x }
+    struct { ptr = &raw mut x }
 };
 "#,
         expect![[r#"
@@ -2120,7 +2110,7 @@ fn through_pointer_field_write_is_visible_afterward() {
     check_run(
         r#"
 static main = fn() -> usize {
-    let mut r: struct { a: usize, b: usize } = struct { a: 1, b: 2 };
+    let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
     let p = &raw mut r;
     unsafe { p.*.a = 40; }
     r.a + r.b
@@ -2138,7 +2128,7 @@ fn through_pointer_field_chain_writes_the_nested_field() {
     check_run(
         r#"
 static main = fn() -> usize {
-    let mut r = struct { inner: struct { v: 1 }, other: 2 };
+    let mut r = struct { inner = struct { v = 1 }, other = 2 };
     let p = &raw mut r;
     unsafe { p.*.inner.v = 40; }
     r.inner.v + r.other
@@ -2218,8 +2208,8 @@ fn deref_in_the_middle_of_a_write_chain_composes() {
     check_run(
         r#"
 static main = fn() -> usize {
-    let mut inner = struct { v: 1 };
-    let mut outer = struct { q: &raw mut inner };
+    let mut inner = struct { v = 1 };
+    let mut outer = struct { q = &raw mut inner };
     let p = &raw mut outer;
     unsafe { p.*.q.*.v = 5; }
     inner.v
@@ -2237,7 +2227,7 @@ fn through_pointer_mixed_chain_with_elements_and_fields() {
     check_run(
         r#"
 static main = fn() -> usize {
-    let mut r: struct { buf: [struct { v: usize }; 2] } = struct { buf: [struct { v: 1 }, struct { v: 2 }] };
+    let mut r: struct { buf: [struct { v: usize }; 2] } = struct { buf = [struct { v = 1 }, struct { v = 2 }] };
     let p = &raw mut r;
     unsafe { p.*.buf[1].v = 9; }
     unsafe { p.*.buf[0].v + p.*.buf[1].v }
@@ -2332,7 +2322,7 @@ fn addr_of_through_a_deref_is_double_indirection_free() {
     check_run(
         r#"
 static main = fn() -> bool {
-    let mut r: struct { a: usize, b: usize } = struct { a: 1, b: 2 };
+    let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
     let p = &raw mut r;
     unsafe { &raw mut p.*.a == &raw mut r.a }
 };
@@ -2349,7 +2339,7 @@ fn addr_of_through_a_deref_writes_the_original_place() {
     check_run(
         r#"
 static main = fn() -> usize {
-    let mut r: struct { a: usize, b: usize } = struct { a: 1, b: 2 };
+    let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
     let p = &raw mut r;
     let q = unsafe { &raw mut p.*.a };
     unsafe { q.* = 40; }
@@ -2390,7 +2380,7 @@ fn dangling_pointer_from_addr_of_through_deref_is_detected_ub() {
     check_run(
         r#"
 static make = fn() -> &raw mut usize {
-    let mut r: struct { a: usize } = struct { a: 1 };
+    let mut r: struct { a: usize } = struct { a = 1 };
     let p = &raw mut r;
     unsafe { &raw mut p.*.a }
 };
@@ -2415,10 +2405,10 @@ fn interior_pointer_survives_through_pointer_whole_value_overwrite() {
     check_run(
         r#"
 static main = fn() -> usize {
-    let mut r: struct { a: usize, b: usize } = struct { a: 1, b: 2 };
+    let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
     let pa = &raw mut r.a;
     let p = &raw mut r;
-    unsafe { p.* = struct { a: 3, b: 4 }; }
+    unsafe { p.* = struct { a = 3, b = 4 }; }
     unsafe { pa.* }
 };
 "#,
@@ -2436,7 +2426,7 @@ fn through_pointer_write_into_a_static_is_rejected_at_the_flavor() {
     // paths do not open a route around the read-only allocation.
     check_run(
         r#"
-static s: struct { a: usize } = struct { a: 1 };
+static s: struct { a: usize } = struct { a = 1 };
 static main = fn() {
     let p = &raw s;
     unsafe { p.*.a = 2; }
@@ -2454,7 +2444,7 @@ fn through_pointer_field_write_outside_unsafe_traps() {
     check_run(
         r#"
 static main = fn() {
-    let mut r: struct { a: usize } = struct { a: 1 };
+    let mut r: struct { a: usize } = struct { a = 1 };
     let p = &raw mut r;
     p.*.a = 2;
 };
@@ -2492,7 +2482,7 @@ fn through_pointer_writes_work_inside_const_evaluation() {
     check_const(
         r#"
 static v = {
-    let mut r: struct { a: usize, b: usize } = struct { a: 1, b: 2 };
+    let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
     let p = &raw mut r;
     unsafe { p.*.a = 40; }
     r.a + r.b
@@ -2535,13 +2525,13 @@ static table = const {
     t[3] = t[0] + t[1];
     t
 };
-static row: struct { name: str, cells: [usize; 3] } = struct { name: "row", cells: [1, 2, 3] };
-static grid: [struct { x: usize }; 2] = [struct { x: 1 }, struct { x: 2 }];
+static row: struct { name: str, cells: [usize; 3] } = struct { name = "row", cells = [1, 2, 3] };
+static grid: [struct { x: usize }; 2] = [struct { x = 1 }, struct { x = 2 }];
 "#,
         expect![[r#"
             table = [1, 2, 0, 3]
-            row = { cells: [1, 2, 3], name: "row" }
-            grid = [{ x: 1 }, { x: 2 }]
+            row = { cells = [1, 2, 3], name = "row" }
+            grid = [{ x = 1 }, { x = 2 }]
         "#]],
     );
 }
@@ -2618,7 +2608,7 @@ fn generic_buffer_type_with_const_length_runs() {
         r#"
 type Buf = struct::<const N: usize> { data: [usize; N], len: usize };
 static first = fn (b: Buf::<2>) -> usize { b.data[0] + b.len };
-static main = fn () -> usize { first(Buf::<2>(struct { data: [40, 1], len: 2 })) };
+static main = fn () -> usize { first(Buf::<2>(struct { data = [40, 1], len = 2 })) };
 "#,
         "main()",
         expect![[r#"
@@ -2655,7 +2645,7 @@ fn arrays_of_records_mutate_in_place() {
     check_run(
         r#"
 static main = fn () -> usize {
-    let mut pts: [struct { x: usize, y: usize }; 2] = [struct { x: 1, y: 2 }, struct { x: 3, y: 4 }];
+    let mut pts: [struct { x: usize, y: usize }; 2] = [struct { x = 1, y = 2 }, struct { x = 3, y = 4 }];
     pts[1].x = 30;
     pts[1].x + pts[0].y
 };
@@ -3277,7 +3267,7 @@ fn heapvec_push_growth_get_and_deinit_roundtrip() {
         r#"
 type HeapVec = struct::<T> { ptr: &raw mut T, len: usize, cap: usize };
 static heapvec_new = fn::<T>() -> HeapVec::<T> {
-    HeapVec::<T>(struct { ptr: dangling::<T>(), len: 0, cap: 0 })
+    HeapVec::<T>(struct { ptr = dangling::<T>(), len = 0, cap = 0 })
 };
 static heapvec_push = fn::<T>(mut v: HeapVec::<T>, x: T) -> HeapVec::<T> {
     if v.len == v.cap {
@@ -3353,7 +3343,7 @@ static main = fn () -> usize {
         AllocResult::Err => panic("oom"),
     };
     unsafe { p.* = 1; };
-    let v = HeapVec::<usize>(struct { ptr: p, len: 1, cap: 4 });
+    let v = HeapVec::<usize>(struct { ptr = p, len = 1, cap = 4 });
     heapvec_get(v, 3)
 };
 "#,
@@ -3382,7 +3372,7 @@ static main = fn () -> () {
         AllocResult::Ok(p) => p,
         AllocResult::Err => panic("oom"),
     };
-    let v = HeapVec::<usize>(struct { ptr: p, len: 0, cap: 4 });
+    let v = HeapVec::<usize>(struct { ptr = p, len = 0, cap = 4 });
     let w = v;
     heapvec_deinit(v);
     heapvec_deinit(w);
@@ -3414,8 +3404,8 @@ static arena_new = fn::<T>(cap: usize) -> Arena::<T> {
         AllocResult::Ok(p) => p,
         AllocResult::Err => panic("arena_new: out of memory"),
     };
-    unsafe { state.* = ArenaState::<T>(struct { base: base, cap: cap, cursor: 0 }); };
-    Arena::<T>(struct { state: state })
+    unsafe { state.* = ArenaState::<T>(struct { base = base, cap = cap, cursor = 0 }); };
+    Arena::<T>(struct { state = state })
 };
 static arena_alloc = fn::<T>(a: Arena::<T>, n: usize) -> AllocResult::<T> {
     let cap = unsafe { a.state.*.cap };
@@ -3504,7 +3494,7 @@ static main = fn () -> usize {
         AllocResult::Ok(p) => p,
         AllocResult::Err => panic("oom"),
     };
-    unsafe { p.* = Point(struct { x: 1, y: 2 }); };
+    unsafe { p.* = Point(struct { x = 1, y = 2 }); };
     unsafe { p.*.y = 40; };
     let got = unsafe { p.*.x + p.*.y };
     unsafe { dealloc_array(p, 1) };

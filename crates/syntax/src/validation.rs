@@ -62,8 +62,29 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
                 record_expr.syntax(),
                 &mut errors,
             );
+            // A CONSTRUCTION literal (any record expr that is not a `type`
+            // declaration's RHS) must define every field: an annotation
+            // with no value has nothing to construct from. Type-decl RHS
+            // fields are the opposite (annotation-only) — hir judges those.
+            let is_type_decl_rhs = record_expr
+                .syntax()
+                .parent()
+                .is_some_and(|p| ast::TypeItem::can_cast(p.kind()));
             for field in record_expr.fields() {
                 reject_pub_field(field.pub_token(), &mut errors);
+                if !is_type_decl_rhs
+                    && field.colon_token().is_some()
+                    && field.eq_token().is_none()
+                    && field.expr().is_none()
+                {
+                    errors.push(SyntaxError {
+                        message: "this field has a type but no value; \
+                                  write `name: Type = value` (or `name = value`)"
+                            .to_owned(),
+                        range: field.syntax().text_range(),
+                        fix: None,
+                    });
+                }
             }
         } else if let Some(type_item) = ast::TypeItem::cast(node.clone()) {
             reject_type_item_annotation(&type_item, &mut errors);

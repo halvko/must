@@ -15,8 +15,11 @@
 - **G08** Deref is postfix: `p.*`, chaining with `.field` and call parens without
   parentheses, which removes the wrong spelling: `p.*.hp = 0` is the only way to write it.
   Address-of is `&raw x` / `&raw mut x`, with the type twins `&raw T` / `&raw mut T`.
-- **G12** Record literals construct with `=`: `struct { x = 1 }`. Colon means has-type,
-  everywhere. Shorthand `struct { x }` is `struct { x = x }`.
+- **G12** Record literals construct with `=`: `struct { x = 1 }`, spelled out
+  `struct { a: usize = 10 }`. Colon means has-type, everywhere, so a field's annotation is a
+  real type and fn, pointer and array field types are first class. Shorthand `struct { x }` is
+  `struct { x = x }`. The retired `name: value` spelling is a targeted error, never a silent
+  reinterpretation.
 - **G25** A bare pattern name never reinterprets as a variant: it binds fresh with a
   shadowing warning, and `::Circle` is the variant spelling in a pattern. In expression
   position the qualified `Shape::Circle` is the spelling.

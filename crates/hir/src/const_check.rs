@@ -216,8 +216,8 @@ impl CheckCtx<'_> {
             // Record construction is not a call — nothing to reject; the
             // field initializers sit in the same context as the literal.
             ExprData::RecordLit { fields } => {
-                for (_, field) in fields {
-                    self.check_expr(*field, in_const);
+                for field in fields {
+                    self.check_expr(field.value, in_const);
                 }
             }
             // A field access evaluates its receiver; the projection itself

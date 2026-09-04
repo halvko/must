@@ -62,7 +62,7 @@ static heapvec_new = fn::<T>() -> HeapVec::<T> {
     // Zero capacity, no allocation: `dangling` is the no-buffer-yet
     // pointer. Nothing ever dereferences it — every access is guarded by
     // `len`, and growth replaces it before the first write.
-    HeapVec::<T>(struct { ptr: dangling::<T>(), len: 0, cap: 0 })
+    HeapVec::<T>(struct { ptr = dangling::<T>(), len = 0, cap = 0 })
 };
 
 // Growth is not a primitive: it is alloc + copy + dealloc, composed here.
@@ -138,8 +138,8 @@ static arena_new = fn::<T>(cap: usize) -> Arena::<T> {
         AllocResult::Ok(p) => p,
         AllocResult::Err => panic("arena_new: out of memory"),
     };
-    unsafe { state.* = ArenaState::<T>(struct { base: base, cap: cap, cursor: 0 }); };
-    Arena::<T>(struct { state: state })
+    unsafe { state.* = ArenaState::<T>(struct { base, cap, cursor = 0 }); };
+    Arena::<T>(struct { state })
 };
 
 // The arena allocates in the SAME result shape as the builtin — and unlike

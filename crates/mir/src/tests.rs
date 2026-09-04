@@ -843,7 +843,7 @@ fn record_literal_evaluates_fields_in_source_order_then_aggregates_in_sorted_ord
         r#"
 static f = fn () -> usize { 1 }
 static g = fn () -> usize { 2 }
-static r = fn { struct { y: g(), x: f() } };
+static r = fn { struct { y = g(), x = f() } };
 "#,
         expect![[r#"
             item f:
@@ -900,7 +900,7 @@ static r = fn { struct { y: g(), x: f() } };
 #[test]
 fn record_field_access_lowers_to_a_positional_projection() {
     check_mir(
-        r#"static f = fn { let p: struct { x: usize, y: usize } = struct { x: 1, y: 2 }; p.y };"#,
+        r#"static f = fn { let p: struct { x: usize, y: usize } = struct { x = 1, y = 2 }; p.y };"#,
         expect![[r#"
             item f:
             fn b0() -> usize {
@@ -931,7 +931,7 @@ fn field_access_on_a_nonexistent_field_still_traps() {
     // exactly as trapped as before — the diagnostic just isn't
     // `UnsupportedRecord` anymore.
     check_mir(
-        r#"static f = fn { let p = struct { x: "s" }; p.y };"#,
+        r#"static f = fn { let p = struct { x = "s" }; p.y };"#,
         expect![[r#"
             item f:
             fn b0() -> {error} {
@@ -964,7 +964,7 @@ fn nested_field_assign_lowers_to_a_place_projection() {
     // in `p.a`), rendered `_1.0.0`. The RHS is evaluated before the write,
     // like every assignment.
     check_mir(
-        "static f = fn () -> usize { let mut p = struct { a: struct { b: 1 } }; p.a.b = 2; p.a.b };",
+        "static f = fn () -> usize { let mut p = struct { a = struct { b = 1 } }; p.a.b = 2; p.a.b };",
         expect![[r#"
             item f:
             fn b0() -> usize {
@@ -999,7 +999,7 @@ fn field_assign_on_an_immutable_root_traps() {
     // Inference rejected the root; the write is replaced by a trap with
     // the squiggle's exact text (squiggle-equals-crash).
     check_mir(
-        "static f = fn () -> usize { let p = struct { x: 1 }; p.x = 2; p.x };",
+        "static f = fn () -> usize { let p = struct { x = 1 }; p.x = 2; p.x };",
         expect![[r#"
             item f:
             fn b0() -> usize {
@@ -1059,13 +1059,13 @@ fn assignment_to_a_non_variable_traps_with_the_validation_message() {
 
 #[test]
 fn named_type_constructor_erases_in_mir() {
-    // `Foo(struct { x: 1 })` lowers to the record aggregate alone — no
+    // `Foo(struct { x = 1 })` lowers to the record aggregate alone — no
     // call, no tag: nominal types exist only in the static type system.
     // The `type` item itself lowers to nothing (no root body).
     check_mir(
         r#"
 type Foo = struct { x: usize };
-static p = Foo(struct { x: 1 });
+static p = Foo(struct { x = 1 });
 "#,
         expect![[r#"
             item Foo:
@@ -2042,7 +2042,7 @@ fn through_pointer_writes_lower_to_deref_projected_places() {
     check_mir(
         r#"
 static main = fn() {
-    let mut r: struct { x: usize, buf: [usize; 2] } = struct { x: 1, buf: [1, 2] };
+    let mut r: struct { x: usize, buf: [usize; 2] } = struct { x = 1, buf = [1, 2] };
     let p = &raw mut r;
     let i = 1;
     unsafe {
@@ -2132,7 +2132,7 @@ fn addr_of_array_element_and_through_deref_lower_without_promotion_of_the_pointe
 static main = fn() -> usize {
     let mut a: [usize; 2] = [1, 2];
     let e = &raw mut a[0];
-    let mut r = struct { x: 1 };
+    let mut r = struct { x = 1 };
     let p = &raw mut r;
     unsafe {
         let q = &raw mut p.*.x;

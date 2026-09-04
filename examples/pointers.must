@@ -66,7 +66,7 @@ static main = fn () -> () {
     };
 
     // --- a pointer to a field addresses just that element ---
-    let mut r: struct { a: usize, b: usize } = struct { a: 1, b: 2 };
+    let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
     let pa = &raw mut r.a;
     unsafe { pa.* = 10; };
     if r.a + r.b == 12 {

@@ -817,10 +817,10 @@ impl LowerCtx<'_> {
             // so the aggregate itself is never observed.
             ExprData::RecordLit { fields } => {
                 let mut by_name: Vec<(String, Operand)> = Vec::new();
-                for (name, field_expr) in fields {
-                    let op = self.lower_expr(b, *field_expr);
-                    if !by_name.iter().any(|(n, _)| n == name) {
-                        by_name.push((name.clone(), op));
+                for field in fields {
+                    let op = self.lower_expr(b, field.value);
+                    if !by_name.iter().any(|(n, _)| n == &field.name) {
+                        by_name.push((field.name.clone(), op));
                     }
                 }
                 let field_names: Vec<String> = match self.ty(expr) {

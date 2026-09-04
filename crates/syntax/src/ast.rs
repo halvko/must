@@ -1032,12 +1032,23 @@ impl RecordExprField {
     pub fn colon_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, COLON)
     }
+    /// The `: Type` annotation, when written — a TYPE, uniformly (the
+    /// equals-defines respell): the declared type in a `type` item's RHS,
+    /// an ascription on a construction field.
+    pub fn ty(&self) -> Option<Type> {
+        child(&self.syntax)
+    }
+    pub fn eq_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, EQ)
+    }
+    /// The defining value (`name = expr`), when written.
     pub fn expr(&self) -> Option<Expr> {
         child(&self.syntax)
     }
-    /// Shorthand fields (`x` meaning `x: x`) have no colon.
+    /// Shorthand fields (`x` meaning `x = x`) have neither a colon nor an
+    /// equals.
     pub fn is_shorthand(&self) -> bool {
-        self.colon_token().is_none()
+        self.colon_token().is_none() && self.eq_token().is_none()
     }
     /// The reserved `pub` marker, if written — field visibility is not
     /// supported yet; validation rejects it.

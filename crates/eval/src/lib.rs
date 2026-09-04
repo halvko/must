@@ -240,7 +240,7 @@ impl Value {
                 }
                 let parts = fields
                     .iter()
-                    .map(|(name, value)| format!("{name}: {}", value.display()))
+                    .map(|(name, value)| format!("{name} = {}", value.display()))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("{{ {parts} }}")

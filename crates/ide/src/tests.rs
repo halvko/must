@@ -368,13 +368,14 @@ fn highlights_const_fn_and_const_block_keywords() {
 #[test]
 fn highlights_struct_keyword() {
     check_highlights(
-        "static p = struct { x: 1 };",
+        "static p = struct { x = 1 };",
         expect_test::expect![[r#"
             0..6 "static" Keyword
             7..8 "p" Variable.declaration.static
             9..10 "=" Operator
             11..17 "struct" Keyword
-            23..24 "1" Number
+            22..23 "=" Operator
+            24..25 "1" Number
         "#]],
     );
 }
@@ -529,7 +530,7 @@ fn field_assign_to_immutable_root_offers_the_make_mut_fix() {
     // Same machinery as the plain-assignment case: the squiggle sits on
     // the ROOT name inside the place, the message carries the field path,
     // and the fix inserts `mut ` at the binding's declaration.
-    let src = "static f = fn { let p: struct { x: usize } = struct { x: 1 }; p.x = 2; };";
+    let src = "static f = fn { let p: struct { x: usize } = struct { x = 1 }; p.x = 2; };";
     let (analysis, file, _pos) = fixture(&format!("{src}$0"));
     let diagnostics = analysis.diagnostics(file);
     let errors: Vec<_> = diagnostics
@@ -541,9 +542,9 @@ fn field_assign_to_immutable_root_offers_the_make_mut_fix() {
         errors[0].message,
         "cannot assign to `p.x`: `p` is not declared `mut`"
     );
-    // The root `p` inside the place (offset 62), not the whole `p.x`.
+    // The root `p` inside the place (offset 63), not the whole `p.x`.
     assert_eq!(&src[errors[0].range], "p");
-    assert_eq!(u32::from(errors[0].range.start()), 62);
+    assert_eq!(u32::from(errors[0].range.start()), 63);
     let fix = errors[0].fix.as_ref().expect("diagnostic has a fix");
     assert_eq!(fix.label, "Make `p` mutable");
     assert_eq!(fix.edits.len(), 1);
@@ -637,8 +638,8 @@ fn hover_item_shows_record_const_value() {
     // Records const-evaluate: `Value::Record` displays like the type
     // does, field by field, in the same canonical (sorted) order.
     check_hover(
-        "static po$0int: struct { x: usize, y: usize } = struct { y: 2, x: 1 };",
-        "```must\npoint: struct { x: usize, y: usize } = { x: 1, y: 2 }\n```",
+        "static po$0int: struct { x: usize, y: usize } = struct { y = 2, x = 1 };",
+        "```must\npoint: struct { x: usize, y: usize } = { x = 1, y = 2 }\n```",
     );
 }
 
@@ -876,7 +877,7 @@ static f = fn (n: usize) -> () {
 fn hover_record_typed_binding() {
     // The record type renders canonically (sorted fields) on the binding.
     check_hover(
-        r#"static f = fn { let p$0 = struct { y: "s", x: { let n: usize = 1; n } }; };"#,
+        r#"static f = fn { let p$0 = struct { y = "s", x = { let n: usize = 1; n } }; };"#,
         "```must\np: struct { x: usize, y: str }\n```",
     );
 }
@@ -884,7 +885,7 @@ fn hover_record_typed_binding() {
 #[test]
 fn hover_field_access_shows_the_field_type() {
     check_hover(
-        r#"static f = fn { let p: struct { x: usize } = struct { x: 1 }; let y = p.x$0; };"#,
+        r#"static f = fn { let p: struct { x: usize } = struct { x = 1 }; let y = p.x$0; };"#,
         "```must\nx: usize\n```",
     );
 }
@@ -893,7 +894,7 @@ fn hover_field_access_shows_the_field_type() {
 fn hover_chained_field_access_intermediate_step() {
     // Hovering `b` in `a.b.c` shows the intermediate record's type.
     check_hover(
-        r#"static f = fn { let a = struct { b: struct { c: "deep" } }; a.b$0.c; };"#,
+        r#"static f = fn { let a = struct { b = struct { c = "deep" } }; a.b$0.c; };"#,
         "```must\nb: struct { c: str }\n```",
     );
 }
@@ -903,7 +904,7 @@ fn record_expression_evaluates_cleanly() {
     // Records are typed structurally and have a MIR/eval story
     // (aggregates and field projections) — the "not yet" diagnostic is
     // gone, and a record initializer is exactly as clean as any other.
-    let (analysis, file, _pos) = fixture("static p = struct { x: { let n: usize = 1; n } };$0");
+    let (analysis, file, _pos) = fixture("static p = struct { x = { let n: usize = 1; n } };$0");
     let diagnostics = analysis.diagnostics(file);
     assert_eq!(diagnostics, Vec::new(), "diagnostics: {diagnostics:?}");
 }
@@ -927,7 +928,7 @@ fn goto_type_item_from_construction_call() {
     check_goto(
         r#"
 type Foo = struct { x: usize };
-static p = Foo$0(struct { x: 1 });
+static p = Foo$0(struct { x = 1 });
 "#,
         "Foo",
         0,
@@ -963,7 +964,7 @@ fn hover_type_name_in_construction_call() {
     check_hover(
         r#"
 type Foo = struct { x: usize };
-static p = Foo$0(struct { x: 1 });
+static p = Foo$0(struct { x = 1 });
 "#,
         "```must\ntype Foo = struct { x: usize }\n```",
     );
@@ -974,7 +975,7 @@ fn hover_named_typed_binding_shows_the_name() {
     check_hover(
         r#"
 type Foo = struct { x: usize };
-static f = fn { let p$0 = Foo(struct { x: 1 }); p.x };
+static f = fn { let p$0 = Foo(struct { x = 1 }); p.x };
 "#,
         "```must\np: Foo\n```",
     );
@@ -987,7 +988,7 @@ fn highlights_named_types() {
     // the library modifier, user types don't.
     check_highlights(
         r#"type Foo = struct { x: usize };
-static f = fn (p: Foo) { Foo(struct { x: p.x }) };"#,
+static f = fn (p: Foo) { Foo(struct { x = p.x }) };"#,
         expect_test::expect![[r#"
             0..4 "type" Keyword
             5..8 "Foo" Type.declaration
@@ -1002,7 +1003,8 @@ static f = fn (p: Foo) { Foo(struct { x: p.x }) };"#,
             50..53 "Foo" Type
             57..60 "Foo" Type
             61..67 "struct" Keyword
-            73..74 "p" Parameter
+            72..73 "=" Operator
+            74..75 "p" Parameter
         "#]],
     );
 }
@@ -1012,7 +1014,7 @@ fn type_item_file_evaluates_cleanly() {
     // Type items have no value; the eager check-eval loop must not invent
     // a diagnostic for them.
     let (analysis, file, _pos) =
-        fixture("type Foo = struct { x: usize };\nstatic p = Foo(struct { x: 1 });$0");
+        fixture("type Foo = struct { x: usize };\nstatic p = Foo(struct { x = 1 });$0");
     let diagnostics = analysis.diagnostics(file);
     assert_eq!(diagnostics, Vec::new(), "diagnostics: {diagnostics:?}");
 }
@@ -1392,7 +1394,7 @@ fn hover_on_break_keyword_is_none() {
 #[test]
 fn hover_record_destructured_binding_definition() {
     check_hover(
-        r#"static f = fn { let struct { x$0, y }: struct { x: usize, y: str } = struct { x: 1, y: "s" }; };"#,
+        r#"static f = fn { let struct { x$0, y }: struct { x: usize, y: str } = struct { x = 1, y = "s" }; };"#,
         "```must\nx: usize\n```",
     );
 }
@@ -1400,7 +1402,7 @@ fn hover_record_destructured_binding_definition() {
 #[test]
 fn hover_record_destructured_binding_use() {
     check_hover(
-        r#"static f = fn { let struct { x, y } = struct { x: 1, y: "s" }; print(y$0); };"#,
+        r#"static f = fn { let struct { x, y } = struct { x = 1, y = "s" }; print(y$0); };"#,
         "```must\ny: str\n```",
     );
 }
@@ -1408,7 +1410,7 @@ fn hover_record_destructured_binding_use() {
 #[test]
 fn hover_record_destructure_rename_shows_the_new_name() {
     check_hover(
-        r#"static f = fn { let struct { x as alpha }: struct { x: usize } = struct { x: 1 }; let b = alpha$0; };"#,
+        r#"static f = fn { let struct { x as alpha }: struct { x: usize } = struct { x = 1 }; let b = alpha$0; };"#,
         "```must\nalpha: usize\n```",
     );
 }
@@ -1416,7 +1418,7 @@ fn hover_record_destructure_rename_shows_the_new_name() {
 #[test]
 fn hover_mut_field_binding_shows_mut() {
     check_hover(
-        r#"static f = fn { let struct { mut x$0 }: struct { x: usize } = struct { x: 1 }; x = 2; };"#,
+        r#"static f = fn { let struct { mut x$0 }: struct { x: usize } = struct { x = 1 }; x = 2; };"#,
         "```must\nmut x: usize\n```",
     );
 }
@@ -1445,7 +1447,7 @@ fn goto_record_destructured_binding_use() {
     check_goto(
         r#"
 static f = fn {
-    let struct { x, y } = struct { x: 1, y: 2 };
+    let struct { x, y } = struct { x = 1, y = 2 };
     print(x$0);
 }
 "#,
@@ -1462,7 +1464,7 @@ fn goto_record_destructure_rename_use_lands_on_the_rename() {
     check_goto(
         r#"
 static f = fn {
-    let struct { x as alpha } = struct { x: 1 };
+    let struct { x as alpha } = struct { x = 1 };
     print(alpha$0);
 }
 "#,
@@ -1816,7 +1818,7 @@ fn completions_dot_field_access_on_record_local() {
     check_completions(
         r#"
 static f = fn {
-    let p: struct { x: usize, y: usize } = struct { x: 1, y: 2 };
+    let p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };
     p.$0
 };
 "#,
@@ -2068,7 +2070,7 @@ fn completions_record_literal_missing_fields_excludes_already_written() {
         r#"
 type Point = struct { x: usize, y: usize };
 static f = fn {
-    Point(struct { x: 1, $0 })
+    Point(struct { x = 1, $0 })
 };
 "#,
         expect_test::expect![[r#"
@@ -2084,7 +2086,7 @@ fn completions_record_literal_matching_local_ranked_first() {
 type Point = struct { x: usize, y: usize };
 static f = fn {
     let y = 5;
-    Point(struct { x: 1, $0 })
+    Point(struct { x = 1, $0 })
 };
 "#,
         expect_test::expect![[r#"
@@ -2576,14 +2578,14 @@ fn completions_snippet_record_literal_missing_field_inserts_a_snippet() {
             r#"
 type Point = struct { x: usize, y: usize };
 static f = fn {
-    Point(struct { x: 1, $0 })
+    Point(struct { x = 1, $0 })
 };
 "#,
             "y",
         ),
         crate::InsertText::Snippet {
-            snippet: "y: $1".to_owned(),
-            plain: "y: ".to_owned(),
+            snippet: "y = $1".to_owned(),
+            plain: "y = ".to_owned(),
         }
     );
 }
@@ -2598,7 +2600,7 @@ fn completions_snippet_record_literal_gold_local_stays_a_plain_bare_name() {
 type Point = struct { x: usize, y: usize };
 static f = fn {
     let y = 5;
-    Point(struct { x: 1, $0 })
+    Point(struct { x = 1, $0 })
 };
 "#,
             "y",
@@ -2615,7 +2617,7 @@ fn completions_record_pattern_let_destructure_field_names() {
     // A `let struct { … }` destructure completes the field names of the
     // initializer's record type, with the field's own type as detail.
     check_completions(
-        r#"static f = fn { let struct { $0 }: struct { x: usize, y: str } = struct { x: 1, y: "s" }; };"#,
+        r#"static f = fn { let struct { $0 }: struct { x: usize, y: str } = struct { x = 1, y = "s" }; };"#,
         expect_test::expect![[r#"
             x Field (usize)
             y Field (str)
@@ -2659,7 +2661,7 @@ fn completions_record_pattern_excludes_already_bound_fields() {
     // A field named earlier in the same pattern is dropped; only the
     // still-unbound fields are offered.
     check_completions(
-        r#"static f = fn { let struct { x, $0 }: struct { x: usize, y: usize, z: usize } = struct { x: 1, y: 2, z: 3 }; };"#,
+        r#"static f = fn { let struct { x, $0 }: struct { x: usize, y: usize, z: usize } = struct { x = 1, y = 2, z = 3 }; };"#,
         expect_test::expect![[r#"
             y Field (usize)
             z Field (usize)
@@ -2674,7 +2676,7 @@ fn completions_record_pattern_partial_prefix_classifies_and_edit_covers_the_pref
     // cursor sits in does not exclude itself, and the edit replaces exactly
     // the typed prefix.
     let (analysis, _file, pos) =
-        fixture(r#"static f = fn { let struct { na$0 } = struct { name: 1, note: 2 }; };"#);
+        fixture(r#"static f = fn { let struct { na$0 } = struct { name = 1, note = 2 }; };"#);
     let items = analysis.completions(pos);
     let field = items
         .iter()
@@ -2714,7 +2716,7 @@ fn completions_record_pattern_rename_slot_offers_nothing() {
     // The `as`-rename target (`x as <cursor>`) is a brand-new binding name,
     // not a field selector — nothing to complete there.
     check_no_completion(
-        r#"static f = fn { let struct { x as $0 } = struct { x: 1 }; };"#,
+        r#"static f = fn { let struct { x as $0 } = struct { x = 1 }; };"#,
         "x",
     );
 }
@@ -2836,7 +2838,7 @@ fn goto_definition_on_a_const_param_jumps_to_the_binder() {
 #[test]
 fn hover_shows_generic_type_instance() {
     check_hover(
-        "type Pair = struct::<T> { a: T, b: T };\nstatic main = fn { let p$0 = Pair::<usize>(struct { a: 1, b: 2 }); };",
+        "type Pair = struct::<T> { a: T, b: T };\nstatic main = fn { let p$0 = Pair::<usize>(struct { a = 1, b = 2 }); };",
         "```must\np: Pair::<usize>\n```",
     );
 }

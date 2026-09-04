@@ -174,8 +174,8 @@ impl CheckCtx<'_> {
                 }
             }
             ExprData::RecordLit { fields } => {
-                for (_, field) in fields {
-                    self.check_expr(*field, in_unsafe);
+                for field in fields {
+                    self.check_expr(field.value, in_unsafe);
                 }
             }
             ExprData::Field { receiver, .. } => self.check_expr(*receiver, in_unsafe),

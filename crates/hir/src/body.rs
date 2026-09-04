@@ -108,13 +108,16 @@ pub enum ExprData {
     ConstBlock {
         body: ExprId,
     },
-    /// `{ x: e, y }`: a record literal. Fields keep source order (squiggles
-    /// and evaluation order follow the source); the *type* canonicalizes to
-    /// name order in inference. A shorthand field `x` lowers as the name
-    /// plus a [`ExprData::NameRef`] for `x`, so the reference resolves
-    /// through scopes like any other.
+    /// `struct { x = e, y }`: a record literal (equals-defines). Fields
+    /// keep source order (squiggles and evaluation order follow the
+    /// source); the *type* canonicalizes to name order in inference. A
+    /// shorthand field `x` lowers as the name plus a
+    /// [`ExprData::NameRef`] for `x`, so the reference resolves through
+    /// scopes like any other. A field may additionally carry its `: Type`
+    /// ascription (`x: usize = 10`) — checked against the value AND the
+    /// position's expectation during inference.
     RecordLit {
-        fields: Vec<(String, ExprId)>,
+        fields: Vec<RecordLitField>,
     },
     /// `receiver.field`. The field name is not an expression of its own —
     /// it names a projection, not a value in scope.
@@ -217,6 +220,18 @@ pub enum GenericArgData {
 pub struct MatchArm {
     pub pat: PatId,
     pub body: ExprId,
+}
+
+/// One field of a [`ExprData::RecordLit`]: `name[: Type][= value]` — the
+/// value is the shorthand's own [`ExprData::NameRef`] when neither `:` nor
+/// `=` was written, and a [`ExprData::Missing`] for a value-less annotated
+/// field (validation carries that error).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordLitField {
+    pub name: String,
+    pub value: ExprId,
+    /// The written `: Type` ascription, when present.
+    pub type_ref: Option<TypeRef>,
 }
 
 /// One parameter of a `fn` literal: a pattern (construction's mirror image)
@@ -593,15 +608,25 @@ impl LowerCtx {
                         let name_ref = field.name_ref()?;
                         let name = name_ref.text();
                         let value = if field.is_shorthand() {
-                            // `x` is sugar for `x: x`: the value is a normal
+                            // `x` is sugar for `x = x`: the value is a normal
                             // `NameRef` allocated on the name's own node, so
                             // resolution, hover and the source map treat it
                             // like any other reference to `x`.
                             self.alloc_expr(ExprData::NameRef(name.clone()), name_ref.syntax())
                         } else {
+                            // `= value` — or the retired `: value`
+                            // spelling's superset-parsed expression (its
+                            // parse error carries the story; keeping the
+                            // value keeps inference and hover working).
+                            // An annotated field with NO value lowers
+                            // `Missing` (validation carries that error).
                             self.lower_opt_expr(field.expr())
                         };
-                        Some((name, value))
+                        Some(RecordLitField {
+                            name,
+                            value,
+                            type_ref: field.ty().map(TypeRef::from_ast),
+                        })
                     })
                     .collect();
                 self.alloc_expr(ExprData::RecordLit { fields }, it.syntax())

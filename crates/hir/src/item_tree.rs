@@ -492,8 +492,12 @@ pub fn type_decl<'db>(db: &'db dyn Db, item: crate::ItemId<'db>) -> Option<TypeD
     }
 }
 
-/// The fields of a `struct` literal used as a type declaration, each value
-/// expression reinterpreted as a type. Sorted + deduplicated like
+/// The fields of a `struct` literal used as a type declaration: each
+/// field's `: Type` annotation, read as the real type syntax it now is
+/// (the equals-defines respell — the colon annotates a TYPE everywhere).
+/// A field without an annotation (shorthand, or the retired `name: value`
+/// spelling's error recovery) keeps a [`TypeRef::Error`]; the diagnostics
+/// pass carries the story. Sorted + deduplicated like
 /// [`TypeRef::from_ast`] does for record *types*.
 fn record_expr_fields_as_types(record: &ast::RecordExpr) -> Vec<(String, TypeRef)> {
     let mut fields: Vec<(String, TypeRef)> = record
@@ -502,101 +506,13 @@ fn record_expr_fields_as_types(record: &ast::RecordExpr) -> Vec<(String, TypeRef
             // A field without a name is broken source (the parse error
             // covers it); nothing meaningful to keep.
             let name = field.name_ref()?.text();
-            let ty = field
-                .expr()
-                .map(expr_as_type_ref)
-                // Shorthand (`x` without `: type`): no type to read.
-                .unwrap_or(TypeRef::Error);
+            let ty = field.ty().map(TypeRef::from_ast).unwrap_or(TypeRef::Error);
             Some((name, ty))
         })
         .collect();
     fields.sort_by(|(a, _), (b, _)| a.cmp(b));
     fields.dedup_by(|second, first| second.0 == first.0);
     fields
-}
-
-/// A type-declaration field's value expression, read as a type: a name is a
-/// type name, a nested `struct` literal is a nested record. Anything else
-/// (a computed expression) is not a type — [`TypeRef::Error`];
-/// [`crate::file_diagnostics`] reports it.
-pub(crate) fn expr_as_type_ref(expr: ast::Expr) -> TypeRef {
-    match expr {
-        ast::Expr::PathExpr(it) => match it.generic_arg_list() {
-            Some(list) => match (it.name_ref(), it.variant_name_ref()) {
-                // `List::<T>` as a field's type — a generic type mention.
-                (Some(name), None) => TypeRef::Apply {
-                    name: name.text(),
-                    args: generic_args_from_ast(&list),
-                },
-                // `Option::<T>::Some` — variant types of generic enums have
-                // no annotation spelling yet.
-                _ => TypeRef::Error,
-            },
-            None => match (it.name_ref(), it.variant_name_ref()) {
-                (Some(enum_name), Some(variant)) => TypeRef::Variant {
-                    enum_name: enum_name.text(),
-                    variant: variant.text(),
-                },
-                (Some(name), None) => TypeRef::Path(name.text()),
-                (None, _) => TypeRef::Error,
-            },
-        },
-        ast::Expr::RecordExpr(it) => TypeRef::Record(record_expr_fields_as_types(&it)),
-        // `&raw mut T` / `&raw T` as a field's type parses as an
-        // ADDR_OF_EXPR in this expression position — the address-of
-        // spelling IS the pointer-type spelling, so reinterpret the
-        // operand as the pointee type. A plain `&x` (no `raw`) stays a
-        // non-type (references are reserved).
-        ast::Expr::AddrOfExpr(it) if it.raw_token().is_some() => {
-            let inner = match it.expr() {
-                Some(expr) => expr_as_type_ref(expr),
-                None => TypeRef::Error,
-            };
-            TypeRef::RawPtr {
-                mutable: it.is_mut(),
-                inner: Box::new(inner),
-            }
-        }
-        // `[usize; 4]` as a field's type parses as an ARRAY_EXPR in this
-        // expression position — the repeat form's `;` shape is exactly the
-        // array type's, so reinterpret element and count. The list form
-        // (`[a, b]`) is not a type.
-        ast::Expr::ArrayExpr(it) if it.is_repeat() => {
-            let (elem_expr, count) = match it.repeat_parts() {
-                Some(parts) => parts,
-                None => return TypeRef::Error,
-            };
-            let elem = expr_as_type_ref(elem_expr);
-            let len = match count {
-                Some(ast::Expr::Literal(lit)) => match lit.kind() {
-                    Some(ast::LiteralKind::Int(token)) => {
-                        match token.text().replace('_', "").parse() {
-                            Ok(value) => ConstArgRef::Int(value),
-                            Err(_) => ConstArgRef::Error,
-                        }
-                    }
-                    Some(ast::LiteralKind::Str(token)) => {
-                        ConstArgRef::Str(crate::body::unescape(token.text()))
-                    }
-                    Some(ast::LiteralKind::Bool(value)) => ConstArgRef::Bool(value),
-                    None => ConstArgRef::Error,
-                },
-                Some(ast::Expr::PathExpr(path)) => match path.name_ref() {
-                    Some(name) if path.variant_name_ref().is_none() => {
-                        ConstArgRef::Name(name.text())
-                    }
-                    _ => ConstArgRef::Error,
-                },
-                Some(ast::Expr::ConstBlockExpr(_)) => ConstArgRef::Block,
-                _ => ConstArgRef::Error,
-            };
-            TypeRef::Array {
-                elem: Box::new(elem),
-                len,
-            }
-        }
-        _ => TypeRef::Error,
-    }
 }
 
 /// The generic binder of `body` when it is a fn literal with one

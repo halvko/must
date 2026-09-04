@@ -181,7 +181,7 @@ per-field `mut`:
 
 ```must
 static shift = fn () -> usize {
-    let mut p = struct { x: 1, y: 2 };
+    let mut p = struct { x = 1, y = 2 };
     p.x = 10;       // fine: `p` is `mut`, so its fields are writable
     p.x + p.y
 };
@@ -299,7 +299,7 @@ runtime location) nor `const` (reserved for future type aliases). A `type`
 item's value is a `struct` literal or an `enum` literal (see the next
 section).
 
-```
+```must
 type Point = struct { x: usize, y: usize };
 ```
 
@@ -312,12 +312,18 @@ Construction is a plain function call: the type name applied to the
 underlying record value. Constructors are functions — no special brace
 syntax on the type name.
 
+Inside a record, `:` and `=` never mean the same thing: `:` annotates a
+type and `=` defines a value. So `struct { x: usize }` is a shape,
+`struct { x = 1 }` builds one, and `struct { x: usize = 1 }` spells both
+halves at once. A field written bare is shorthand for defining it from a
+binding of the same name — `struct { x }` means `struct { x = x }`.
+
 ```
-static origin = Point(struct { x: 0, y: 0 });
+static origin = Point(struct { x = 0, y = 0 });
 
 static translate = fn (p: Point, dx: usize) -> Point {
     // Field access projects through to the declared shape.
-    Point(struct { x: p.x + dx, y: p.y })
+    Point(struct { x = p.x + dx, y = p.y })
 };
 ```
 
@@ -545,8 +551,8 @@ construction position. Construction is the same plain call as any named type
 inferred from the payload, or escaped with `_`:
 
 ```
-static labeled = Pair::<str>(struct { a: "left", b: "right" });
-static inferred = Pair(struct { a: "x", b: "y" }); // T = str, from the payload
+static labeled = Pair::<str>(struct { a = "left", b = "right" });
+static inferred = Pair(struct { a = "x", b = "y" }); // T = str, from the payload
 ```
 
 Const params make instances *distinct types*: `Buf::<8>` and `Buf::<9>` do

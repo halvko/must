@@ -1756,7 +1756,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             ExprData::Call { callee, args } => {
                 // A construction call: the type name used as a plain
                 // constructor function taking the underlying record —
-                // `Foo(struct { x: 1 })`, or `Pair::<usize>(...)` with the
+                // `Foo(struct { x = 1 })`, or `Pair::<usize>(...)` with the
                 // type's generic arguments spelled. Intercepted before the
                 // callee is inferred (a bare type name in expression
                 // position is an error; as a construction head it is the
@@ -2245,8 +2245,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // (with the same cause, so a wrong field blames the field's
                 // expression and cites the annotation/call that demanded the
                 // type — same shape as call arguments and annotated lets).
+                // A field's own `: Type` ascription is an extra local
+                // axiom: the value checks against it first, and IT must
+                // then agree with the expected field type.
                 if let Ty::Record(expected_rec) = self.resolve_shallow(expected) {
-                    let has = |name: &str| fields.iter().any(|(n, _)| n.as_str() == name);
+                    let has = |name: &str| fields.iter().any(|f| f.name == name);
                     let missing: Vec<(String, Ty)> = expected_rec
                         .fields
                         .iter()
@@ -2261,31 +2264,41 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 fields: missing,
                             });
                     }
-                    let mut seen: Vec<&str> = Vec::new();
-                    for (name, field_expr) in fields {
-                        match expected_rec.field_ty(name) {
-                            Some(field_ty) => {
-                                self.infer_expr_with(*field_expr, &field_ty.clone(), cause);
-                            }
+                    let mut seen: Vec<String> = Vec::new();
+                    for field in fields {
+                        let ascription = field
+                            .type_ref
+                            .clone()
+                            .map(|type_ref| self.lower_type_ref(&type_ref));
+                        match expected_rec.field_ty(&field.name) {
+                            Some(field_ty) => match &ascription {
+                                Some(ascribed) => {
+                                    self.infer_expr_with(field.value, ascribed, None);
+                                    self.check(field.value, ascribed.clone(), field_ty, cause);
+                                }
+                                None => {
+                                    self.infer_expr_with(field.value, &field_ty.clone(), cause);
+                                }
+                            },
                             None => {
                                 // An extra field (exact field-set equality:
                                 // nothing is dropped silently). Duplicates of
                                 // one extra name get a single diagnostic —
                                 // validation already flags the duplication.
-                                if !seen.contains(&name.as_str()) {
+                                if !seen.contains(&field.name) {
                                     self.result.diagnostics.push(
                                         InferenceDiagnostic::RecordLitExtraField {
-                                            expr: *field_expr,
-                                            name: name.clone(),
+                                            expr: field.value,
+                                            name: field.name.clone(),
                                             expected: Ty::Record(expected_rec.clone()),
                                         },
                                     );
                                 }
-                                let fresh = self.fresh_var();
-                                self.infer_expr(*field_expr, &fresh);
+                                let expected_field = ascription.unwrap_or_else(|| self.fresh_var());
+                                self.infer_expr(field.value, &expected_field);
                             }
                         }
-                        seen.push(name.as_str());
+                        seen.push(field.name.clone());
                     }
                     // Field mismatches were reported above (or the sets
                     // match); either way the literal recovers with the
@@ -2294,15 +2307,25 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     self.result.type_of_expr.insert(expr, ty.clone());
                     return ty;
                 }
-                // No record expectation: infer every field and conclude a
-                // record type, then let the ordinary check judge it (binding
-                // a free variable, or reporting a plain mismatch against a
+                // No record expectation: infer every field — against its
+                // own ascription when it wrote one — and conclude a record
+                // type, then let the ordinary check judge it (binding a
+                // free variable, or reporting a plain mismatch against a
                 // non-record expectation).
                 let field_tys = fields
                     .iter()
-                    .map(|(name, field_expr)| {
-                        let fresh = self.fresh_var();
-                        (name.clone(), self.infer_expr(*field_expr, &fresh))
+                    .map(|field| {
+                        let expected_field = match &field.type_ref {
+                            Some(type_ref) => {
+                                let type_ref = type_ref.clone();
+                                self.lower_type_ref(&type_ref)
+                            }
+                            None => self.fresh_var(),
+                        };
+                        (
+                            field.name.clone(),
+                            self.infer_expr(field.value, &expected_field),
+                        )
                     })
                     .collect();
                 Ty::record(field_tys)

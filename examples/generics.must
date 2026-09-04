@@ -52,12 +52,12 @@ static braced_val = square::<const { 3 + 4 }>();
 // item may bind its own type and const params, reused across its fields.
 // `Pair::<str>` is the turbofish instantiation; construction is the same
 // plain call as any named type, applied to the underlying record. `T` can
-// also be inferred from the payload (`Pair(struct { a: "x", b: "y" })`
+// also be inferred from the payload (`Pair(struct { a = "x", b = "y" })`
 // works with no turbofish), and `_` escapes a single argument to inference.
 // A *bare* `Pair` in type position is an arity error — a generic type's
 // arguments are never optional in an annotation.
 type Pair = struct::<T> { a: T, b: T };
-static labeled = Pair::<str>(struct { a: "left", b: "right" });
+static labeled = Pair::<str>(struct { a = "left", b = "right" });
 static pair_first = labeled.a;
 
 // Const params make instances distinct: `Buf::<8>` and `Buf::<9>` are

@@ -2351,10 +2351,10 @@ fn record_type_annotation() {
 #[test]
 fn record_expr_mixed_explicit_and_shorthand_trailing_comma() {
     check(
-        "static p = struct { x: 1, y, };",
+        "static p = struct { x = 1, y, };",
         expect![[r#"
-            SOURCE_FILE@0..31
-              STATIC_ITEM@0..31
+            SOURCE_FILE@0..32
+              STATIC_ITEM@0..32
                 STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
@@ -2362,27 +2362,28 @@ fn record_expr_mixed_explicit_and_shorthand_trailing_comma() {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                RECORD_EXPR@11..30
+                RECORD_EXPR@11..31
                   STRUCT_KW@11..17 "struct"
                   WHITESPACE@17..18 " "
                   L_BRACE@18..19 "{"
                   WHITESPACE@19..20 " "
-                  RECORD_EXPR_FIELD@20..24
+                  RECORD_EXPR_FIELD@20..25
                     NAME_REF@20..21
                       IDENT@20..21 "x"
-                    COLON@21..22 ":"
-                    WHITESPACE@22..23 " "
-                    LITERAL@23..24
-                      INT_NUMBER@23..24 "1"
-                  COMMA@24..25 ","
-                  WHITESPACE@25..26 " "
-                  RECORD_EXPR_FIELD@26..27
-                    NAME_REF@26..27
-                      IDENT@26..27 "y"
-                  COMMA@27..28 ","
-                  WHITESPACE@28..29 " "
-                  R_BRACE@29..30 "}"
-                SEMICOLON@30..31 ";"
+                    WHITESPACE@21..22 " "
+                    EQ@22..23 "="
+                    WHITESPACE@23..24 " "
+                    LITERAL@24..25
+                      INT_NUMBER@24..25 "1"
+                  COMMA@25..26 ","
+                  WHITESPACE@26..27 " "
+                  RECORD_EXPR_FIELD@27..28
+                    NAME_REF@27..28
+                      IDENT@27..28 "y"
+                  COMMA@28..29 ","
+                  WHITESPACE@29..30 " "
+                  R_BRACE@30..31 "}"
+                SEMICOLON@31..32 ";"
         "#]],
     );
 }
@@ -2390,10 +2391,10 @@ fn record_expr_mixed_explicit_and_shorthand_trailing_comma() {
 #[test]
 fn nested_record_literal() {
     check(
-        "static p = struct { outer: struct { x: 1 } };",
+        "static p = struct { outer = struct { x = 1 } };",
         expect![[r#"
-            SOURCE_FILE@0..45
-              STATIC_ITEM@0..45
+            SOURCE_FILE@0..47
+              STATIC_ITEM@0..47
                 STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
@@ -2401,33 +2402,35 @@ fn nested_record_literal() {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                RECORD_EXPR@11..44
+                RECORD_EXPR@11..46
                   STRUCT_KW@11..17 "struct"
                   WHITESPACE@17..18 " "
                   L_BRACE@18..19 "{"
                   WHITESPACE@19..20 " "
-                  RECORD_EXPR_FIELD@20..42
+                  RECORD_EXPR_FIELD@20..44
                     NAME_REF@20..25
                       IDENT@20..25 "outer"
-                    COLON@25..26 ":"
-                    WHITESPACE@26..27 " "
-                    RECORD_EXPR@27..42
-                      STRUCT_KW@27..33 "struct"
-                      WHITESPACE@33..34 " "
-                      L_BRACE@34..35 "{"
-                      WHITESPACE@35..36 " "
-                      RECORD_EXPR_FIELD@36..40
-                        NAME_REF@36..37
-                          IDENT@36..37 "x"
-                        COLON@37..38 ":"
+                    WHITESPACE@25..26 " "
+                    EQ@26..27 "="
+                    WHITESPACE@27..28 " "
+                    RECORD_EXPR@28..44
+                      STRUCT_KW@28..34 "struct"
+                      WHITESPACE@34..35 " "
+                      L_BRACE@35..36 "{"
+                      WHITESPACE@36..37 " "
+                      RECORD_EXPR_FIELD@37..42
+                        NAME_REF@37..38
+                          IDENT@37..38 "x"
                         WHITESPACE@38..39 " "
-                        LITERAL@39..40
-                          INT_NUMBER@39..40 "1"
-                      WHITESPACE@40..41 " "
-                      R_BRACE@41..42 "}"
-                  WHITESPACE@42..43 " "
-                  R_BRACE@43..44 "}"
-                SEMICOLON@44..45 ";"
+                        EQ@39..40 "="
+                        WHITESPACE@40..41 " "
+                        LITERAL@41..42
+                          INT_NUMBER@41..42 "1"
+                      WHITESPACE@42..43 " "
+                      R_BRACE@43..44 "}"
+                  WHITESPACE@44..45 " "
+                  R_BRACE@45..46 "}"
+                SEMICOLON@46..47 ";"
         "#]],
     );
 }
@@ -2617,10 +2620,10 @@ fn field_access_on_call_result() {
 #[test]
 fn record_literal_as_call_argument() {
     check(
-        "static p = f(struct { x: 1 });",
+        "static p = f(struct { x = 1 });",
         expect![[r#"
-            SOURCE_FILE@0..30
-              STATIC_ITEM@0..30
+            SOURCE_FILE@0..31
+              STATIC_ITEM@0..31
                 STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
@@ -2628,28 +2631,29 @@ fn record_literal_as_call_argument() {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                CALL_EXPR@11..29
+                CALL_EXPR@11..30
                   PATH_EXPR@11..12
                     NAME_REF@11..12
                       IDENT@11..12 "f"
-                  ARG_LIST@12..29
+                  ARG_LIST@12..30
                     L_PAREN@12..13 "("
-                    RECORD_EXPR@13..28
+                    RECORD_EXPR@13..29
                       STRUCT_KW@13..19 "struct"
                       WHITESPACE@19..20 " "
                       L_BRACE@20..21 "{"
                       WHITESPACE@21..22 " "
-                      RECORD_EXPR_FIELD@22..26
+                      RECORD_EXPR_FIELD@22..27
                         NAME_REF@22..23
                           IDENT@22..23 "x"
-                        COLON@23..24 ":"
-                        WHITESPACE@24..25 " "
-                        LITERAL@25..26
-                          INT_NUMBER@25..26 "1"
-                      WHITESPACE@26..27 " "
-                      R_BRACE@27..28 "}"
-                    R_PAREN@28..29 ")"
-                SEMICOLON@29..30 ";"
+                        WHITESPACE@23..24 " "
+                        EQ@24..25 "="
+                        WHITESPACE@25..26 " "
+                        LITERAL@26..27
+                          INT_NUMBER@26..27 "1"
+                      WHITESPACE@27..28 " "
+                      R_BRACE@28..29 "}"
+                    R_PAREN@29..30 ")"
+                SEMICOLON@30..31 ";"
         "#]],
     );
 }
@@ -2706,10 +2710,10 @@ fn duplicate_field_in_record_type() {
 #[test]
 fn duplicate_field_in_record_literal() {
     check(
-        "static p = struct { x: 1, x: 2 };",
+        "static p = struct { x = 1, x = 2 };",
         expect![[r#"
-            SOURCE_FILE@0..33
-              STATIC_ITEM@0..33
+            SOURCE_FILE@0..35
+              STATIC_ITEM@0..35
                 STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
@@ -2717,31 +2721,33 @@ fn duplicate_field_in_record_literal() {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                RECORD_EXPR@11..32
+                RECORD_EXPR@11..34
                   STRUCT_KW@11..17 "struct"
                   WHITESPACE@17..18 " "
                   L_BRACE@18..19 "{"
                   WHITESPACE@19..20 " "
-                  RECORD_EXPR_FIELD@20..24
+                  RECORD_EXPR_FIELD@20..25
                     NAME_REF@20..21
                       IDENT@20..21 "x"
-                    COLON@21..22 ":"
-                    WHITESPACE@22..23 " "
-                    LITERAL@23..24
-                      INT_NUMBER@23..24 "1"
-                  COMMA@24..25 ","
-                  WHITESPACE@25..26 " "
-                  RECORD_EXPR_FIELD@26..30
-                    NAME_REF@26..27
-                      IDENT@26..27 "x"
-                    COLON@27..28 ":"
+                    WHITESPACE@21..22 " "
+                    EQ@22..23 "="
+                    WHITESPACE@23..24 " "
+                    LITERAL@24..25
+                      INT_NUMBER@24..25 "1"
+                  COMMA@25..26 ","
+                  WHITESPACE@26..27 " "
+                  RECORD_EXPR_FIELD@27..32
+                    NAME_REF@27..28
+                      IDENT@27..28 "x"
                     WHITESPACE@28..29 " "
-                    LITERAL@29..30
-                      INT_NUMBER@29..30 "2"
-                  WHITESPACE@30..31 " "
-                  R_BRACE@31..32 "}"
-                SEMICOLON@32..33 ";"
-            error 26..27: duplicate field `x`
+                    EQ@29..30 "="
+                    WHITESPACE@30..31 " "
+                    LITERAL@31..32
+                      INT_NUMBER@31..32 "2"
+                  WHITESPACE@32..33 " "
+                  R_BRACE@33..34 "}"
+                SEMICOLON@34..35 ";"
+            error 27..28: duplicate field `x`
         "#]],
     );
 }
@@ -2791,10 +2797,10 @@ fn open_record_type_is_rejected() {
 #[test]
 fn open_record_literal_is_rejected() {
     check(
-        "static p = struct { x: 1, ... };",
+        "static p = struct { x = 1, ... };",
         expect![[r#"
-            SOURCE_FILE@0..32
-              STATIC_ITEM@0..32
+            SOURCE_FILE@0..33
+              STATIC_ITEM@0..33
                 STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
@@ -2802,25 +2808,26 @@ fn open_record_literal_is_rejected() {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                RECORD_EXPR@11..31
+                RECORD_EXPR@11..32
                   STRUCT_KW@11..17 "struct"
                   WHITESPACE@17..18 " "
                   L_BRACE@18..19 "{"
                   WHITESPACE@19..20 " "
-                  RECORD_EXPR_FIELD@20..24
+                  RECORD_EXPR_FIELD@20..25
                     NAME_REF@20..21
                       IDENT@20..21 "x"
-                    COLON@21..22 ":"
-                    WHITESPACE@22..23 " "
-                    LITERAL@23..24
-                      INT_NUMBER@23..24 "1"
-                  COMMA@24..25 ","
-                  WHITESPACE@25..26 " "
-                  DOT3@26..29 "..."
-                  WHITESPACE@29..30 " "
-                  R_BRACE@30..31 "}"
-                SEMICOLON@31..32 ";"
-            error 26..29: open record types are not supported yet
+                    WHITESPACE@21..22 " "
+                    EQ@22..23 "="
+                    WHITESPACE@23..24 " "
+                    LITERAL@24..25
+                      INT_NUMBER@24..25 "1"
+                  COMMA@25..26 ","
+                  WHITESPACE@26..27 " "
+                  DOT3@27..30 "..."
+                  WHITESPACE@30..31 " "
+                  R_BRACE@31..32 "}"
+                SEMICOLON@32..33 ";"
+            error 27..30: open record types are not supported yet
         "#]],
     );
 }
@@ -2977,10 +2984,10 @@ fn struct_without_brace_errors_gracefully() {
 #[test]
 fn struct_literal_as_statement() {
     check(
-        "static f = fn { struct { x: 1 }; };",
+        "static f = fn { struct { x = 1 }; };",
         expect![[r#"
-            SOURCE_FILE@0..35
-              STATIC_ITEM@0..35
+            SOURCE_FILE@0..36
+              STATIC_ITEM@0..36
                 STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
@@ -2988,31 +2995,32 @@ fn struct_literal_as_statement() {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                FN_LITERAL@11..34
+                FN_LITERAL@11..35
                   FN_KW@11..13 "fn"
                   WHITESPACE@13..14 " "
-                  BLOCK_EXPR@14..34
+                  BLOCK_EXPR@14..35
                     L_BRACE@14..15 "{"
                     WHITESPACE@15..16 " "
-                    EXPR_STMT@16..32
-                      RECORD_EXPR@16..31
+                    EXPR_STMT@16..33
+                      RECORD_EXPR@16..32
                         STRUCT_KW@16..22 "struct"
                         WHITESPACE@22..23 " "
                         L_BRACE@23..24 "{"
                         WHITESPACE@24..25 " "
-                        RECORD_EXPR_FIELD@25..29
+                        RECORD_EXPR_FIELD@25..30
                           NAME_REF@25..26
                             IDENT@25..26 "x"
-                          COLON@26..27 ":"
-                          WHITESPACE@27..28 " "
-                          LITERAL@28..29
-                            INT_NUMBER@28..29 "1"
-                        WHITESPACE@29..30 " "
-                        R_BRACE@30..31 "}"
-                      SEMICOLON@31..32 ";"
-                    WHITESPACE@32..33 " "
-                    R_BRACE@33..34 "}"
-                SEMICOLON@34..35 ";"
+                          WHITESPACE@26..27 " "
+                          EQ@27..28 "="
+                          WHITESPACE@28..29 " "
+                          LITERAL@29..30
+                            INT_NUMBER@29..30 "1"
+                        WHITESPACE@30..31 " "
+                        R_BRACE@31..32 "}"
+                      SEMICOLON@32..33 ";"
+                    WHITESPACE@33..34 " "
+                    R_BRACE@34..35 "}"
+                SEMICOLON@35..36 ";"
         "#]],
     );
 }
@@ -3024,10 +3032,10 @@ fn struct_literal_as_statement() {
 #[test]
 fn if_condition_with_struct_literal_before_branch() {
     check(
-        "static c = if p == struct { x: 1 } {};",
+        "static c = if p == struct { x = 1 } {};",
         expect![[r#"
-            SOURCE_FILE@0..38
-              STATIC_ITEM@0..38
+            SOURCE_FILE@0..39
+              STATIC_ITEM@0..39
                 STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
@@ -3035,35 +3043,36 @@ fn if_condition_with_struct_literal_before_branch() {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                IF_EXPR@11..37
+                IF_EXPR@11..38
                   IF_KW@11..13 "if"
                   WHITESPACE@13..14 " "
-                  BIN_EXPR@14..34
+                  BIN_EXPR@14..35
                     PATH_EXPR@14..15
                       NAME_REF@14..15
                         IDENT@14..15 "p"
                     WHITESPACE@15..16 " "
                     EQ2@16..18 "=="
                     WHITESPACE@18..19 " "
-                    RECORD_EXPR@19..34
+                    RECORD_EXPR@19..35
                       STRUCT_KW@19..25 "struct"
                       WHITESPACE@25..26 " "
                       L_BRACE@26..27 "{"
                       WHITESPACE@27..28 " "
-                      RECORD_EXPR_FIELD@28..32
+                      RECORD_EXPR_FIELD@28..33
                         NAME_REF@28..29
                           IDENT@28..29 "x"
-                        COLON@29..30 ":"
-                        WHITESPACE@30..31 " "
-                        LITERAL@31..32
-                          INT_NUMBER@31..32 "1"
-                      WHITESPACE@32..33 " "
-                      R_BRACE@33..34 "}"
-                  WHITESPACE@34..35 " "
-                  BLOCK_EXPR@35..37
-                    L_BRACE@35..36 "{"
-                    R_BRACE@36..37 "}"
-                SEMICOLON@37..38 ";"
+                        WHITESPACE@29..30 " "
+                        EQ@30..31 "="
+                        WHITESPACE@31..32 " "
+                        LITERAL@32..33
+                          INT_NUMBER@32..33 "1"
+                      WHITESPACE@33..34 " "
+                      R_BRACE@34..35 "}"
+                  WHITESPACE@35..36 " "
+                  BLOCK_EXPR@36..38
+                    L_BRACE@36..37 "{"
+                    R_BRACE@37..38 "}"
+                SEMICOLON@38..39 ";"
         "#]],
     );
 }
@@ -3092,7 +3101,7 @@ fn type_item() {
                       IDENT@20..21 "x"
                     COLON@21..22 ":"
                     WHITESPACE@22..23 " "
-                    PATH_EXPR@23..28
+                    PATH_TYPE@23..28
                       NAME_REF@23..28
                         IDENT@23..28 "usize"
                   WHITESPACE@28..29 " "
@@ -3165,7 +3174,7 @@ fn type_item_inside_block_recovers() {
                       IDENT@36..37 "x"
                     COLON@37..38 ":"
                     WHITESPACE@38..39 " "
-                    PATH_EXPR@39..44
+                    PATH_TYPE@39..44
                       NAME_REF@39..44
                         IDENT@39..44 "usize"
                   WHITESPACE@44..45 " "
@@ -3207,7 +3216,7 @@ fn type_item_annotation_rejected() {
                       IDENT@27..28 "x"
                     COLON@28..29 ":"
                     WHITESPACE@29..30 " "
-                    PATH_EXPR@30..35
+                    PATH_TYPE@30..35
                       NAME_REF@30..35
                         IDENT@30..35 "usize"
                   WHITESPACE@35..36 " "
@@ -5062,7 +5071,7 @@ fn pub_reserved_on_type_decl_field() {
                       IDENT@24..27 "bar"
                     COLON@27..28 ":"
                     WHITESPACE@28..29 " "
-                    PATH_EXPR@29..34
+                    PATH_TYPE@29..34
                       NAME_REF@29..34
                         IDENT@29..34 "usize"
                   WHITESPACE@34..35 " "
@@ -5076,10 +5085,10 @@ fn pub_reserved_on_type_decl_field() {
 #[test]
 fn pub_rejected_on_record_literal_field() {
     check(
-        "static f = struct { pub x: 1 };",
+        "static f = struct { pub x = 1 };",
         expect![[r#"
-            SOURCE_FILE@0..31
-              STATIC_ITEM@0..31
+            SOURCE_FILE@0..32
+              STATIC_ITEM@0..32
                 STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
@@ -5087,23 +5096,24 @@ fn pub_rejected_on_record_literal_field() {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                RECORD_EXPR@11..30
+                RECORD_EXPR@11..31
                   STRUCT_KW@11..17 "struct"
                   WHITESPACE@17..18 " "
                   L_BRACE@18..19 "{"
                   WHITESPACE@19..20 " "
-                  RECORD_EXPR_FIELD@20..28
+                  RECORD_EXPR_FIELD@20..29
                     PUB_KW@20..23 "pub"
                     WHITESPACE@23..24 " "
                     NAME_REF@24..25
                       IDENT@24..25 "x"
-                    COLON@25..26 ":"
-                    WHITESPACE@26..27 " "
-                    LITERAL@27..28
-                      INT_NUMBER@27..28 "1"
-                  WHITESPACE@28..29 " "
-                  R_BRACE@29..30 "}"
-                SEMICOLON@30..31 ";"
+                    WHITESPACE@25..26 " "
+                    EQ@26..27 "="
+                    WHITESPACE@27..28 " "
+                    LITERAL@28..29
+                      INT_NUMBER@28..29 "1"
+                  WHITESPACE@29..30 " "
+                  R_BRACE@30..31 "}"
+                SEMICOLON@31..32 ";"
             error 20..23: field visibility is not supported yet
         "#]],
     );
@@ -6139,7 +6149,7 @@ fn generic_binder_on_struct_literal() {
                       IDENT@26..27 "a"
                     COLON@27..28 ":"
                     WHITESPACE@28..29 " "
-                    PATH_EXPR@29..30
+                    PATH_TYPE@29..30
                       NAME_REF@29..30
                         IDENT@29..30 "T"
                   COMMA@30..31 ","
@@ -6149,7 +6159,7 @@ fn generic_binder_on_struct_literal() {
                       IDENT@32..33 "b"
                     COLON@33..34 ":"
                     WHITESPACE@34..35 " "
-                    PATH_EXPR@35..36
+                    PATH_TYPE@35..36
                       NAME_REF@35..36
                         IDENT@35..36 "T"
                   WHITESPACE@36..37 " "
@@ -6248,7 +6258,7 @@ fn generic_binder_with_const_param_on_struct_literal() {
                       IDENT@41..42 "x"
                     COLON@42..43 ":"
                     WHITESPACE@43..44 " "
-                    PATH_EXPR@44..45
+                    PATH_TYPE@44..45
                       NAME_REF@44..45
                         IDENT@44..45 "T"
                   WHITESPACE@45..46 " "
@@ -6300,10 +6310,10 @@ fn generic_enum_variant_path_expr() {
 #[test]
 fn construction_turbofish_expr() {
     check(
-        "static p = Pair::<usize>(struct { a: 1, b: 2 });",
+        "static p = Pair::<usize>(struct { a = 1, b = 2 });",
         expect![[r#"
-            SOURCE_FILE@0..48
-              STATIC_ITEM@0..48
+            SOURCE_FILE@0..50
+              STATIC_ITEM@0..50
                 STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
@@ -6311,7 +6321,7 @@ fn construction_turbofish_expr() {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                CALL_EXPR@11..47
+                CALL_EXPR@11..49
                   PATH_EXPR@11..24
                     NAME_REF@11..15
                       IDENT@11..15 "Pair"
@@ -6323,33 +6333,35 @@ fn construction_turbofish_expr() {
                           NAME_REF@18..23
                             IDENT@18..23 "usize"
                       R_ANGLE@23..24 ">"
-                  ARG_LIST@24..47
+                  ARG_LIST@24..49
                     L_PAREN@24..25 "("
-                    RECORD_EXPR@25..46
+                    RECORD_EXPR@25..48
                       STRUCT_KW@25..31 "struct"
                       WHITESPACE@31..32 " "
                       L_BRACE@32..33 "{"
                       WHITESPACE@33..34 " "
-                      RECORD_EXPR_FIELD@34..38
+                      RECORD_EXPR_FIELD@34..39
                         NAME_REF@34..35
                           IDENT@34..35 "a"
-                        COLON@35..36 ":"
-                        WHITESPACE@36..37 " "
-                        LITERAL@37..38
-                          INT_NUMBER@37..38 "1"
-                      COMMA@38..39 ","
-                      WHITESPACE@39..40 " "
-                      RECORD_EXPR_FIELD@40..44
-                        NAME_REF@40..41
-                          IDENT@40..41 "b"
-                        COLON@41..42 ":"
+                        WHITESPACE@35..36 " "
+                        EQ@36..37 "="
+                        WHITESPACE@37..38 " "
+                        LITERAL@38..39
+                          INT_NUMBER@38..39 "1"
+                      COMMA@39..40 ","
+                      WHITESPACE@40..41 " "
+                      RECORD_EXPR_FIELD@41..46
+                        NAME_REF@41..42
+                          IDENT@41..42 "b"
                         WHITESPACE@42..43 " "
-                        LITERAL@43..44
-                          INT_NUMBER@43..44 "2"
-                      WHITESPACE@44..45 " "
-                      R_BRACE@45..46 "}"
-                    R_PAREN@46..47 ")"
-                SEMICOLON@47..48 ";"
+                        EQ@43..44 "="
+                        WHITESPACE@44..45 " "
+                        LITERAL@45..46
+                          INT_NUMBER@45..46 "2"
+                      WHITESPACE@46..47 " "
+                      R_BRACE@47..48 "}"
+                    R_PAREN@48..49 ")"
+                SEMICOLON@49..50 ";"
         "#]],
     );
 }
@@ -7426,6 +7438,96 @@ fn unary_minus_can_carry_a_break_value() {
                     WHITESPACE@32..33 " "
                     R_BRACE@33..34 "}"
                 SEMICOLON@34..35 ";"
+        "#]],
+    );
+}
+
+// ---- the record-literal equals-defines respell --------------------------
+
+#[test]
+fn record_field_equals_defines() {
+    check(
+        "static p = struct { x = 1, y: usize = 2, z };",
+        expect![[r#"
+            SOURCE_FILE@0..45
+              STATIC_ITEM@0..45
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "p"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                RECORD_EXPR@11..44
+                  STRUCT_KW@11..17 "struct"
+                  WHITESPACE@17..18 " "
+                  L_BRACE@18..19 "{"
+                  WHITESPACE@19..20 " "
+                  RECORD_EXPR_FIELD@20..25
+                    NAME_REF@20..21
+                      IDENT@20..21 "x"
+                    WHITESPACE@21..22 " "
+                    EQ@22..23 "="
+                    WHITESPACE@23..24 " "
+                    LITERAL@24..25
+                      INT_NUMBER@24..25 "1"
+                  COMMA@25..26 ","
+                  WHITESPACE@26..27 " "
+                  RECORD_EXPR_FIELD@27..39
+                    NAME_REF@27..28
+                      IDENT@27..28 "y"
+                    COLON@28..29 ":"
+                    WHITESPACE@29..30 " "
+                    PATH_TYPE@30..35
+                      NAME_REF@30..35
+                        IDENT@30..35 "usize"
+                    WHITESPACE@35..36 " "
+                    EQ@36..37 "="
+                    WHITESPACE@37..38 " "
+                    LITERAL@38..39
+                      INT_NUMBER@38..39 "2"
+                  COMMA@39..40 ","
+                  WHITESPACE@40..41 " "
+                  RECORD_EXPR_FIELD@41..42
+                    NAME_REF@41..42
+                      IDENT@41..42 "z"
+                  WHITESPACE@42..43 " "
+                  R_BRACE@43..44 "}"
+                SEMICOLON@44..45 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn record_field_old_colon_value_is_a_targeted_parse_error() {
+    check(
+        "static p = struct { x: 1 };",
+        expect![[r#"
+            SOURCE_FILE@0..27
+              STATIC_ITEM@0..27
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "p"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                RECORD_EXPR@11..26
+                  STRUCT_KW@11..17 "struct"
+                  WHITESPACE@17..18 " "
+                  L_BRACE@18..19 "{"
+                  WHITESPACE@19..20 " "
+                  RECORD_EXPR_FIELD@20..24
+                    NAME_REF@20..21
+                      IDENT@20..21 "x"
+                    COLON@21..22 ":"
+                    WHITESPACE@22..23 " "
+                    LITERAL@23..24
+                      INT_NUMBER@23..24 "1"
+                  WHITESPACE@24..25 " "
+                  R_BRACE@25..26 "}"
+                SEMICOLON@26..27 ";"
+            error 23..24: record fields are defined with `=` (`name = value`); `:` annotates a type
         "#]],
     );
 }

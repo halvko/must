@@ -976,7 +976,7 @@ fn dot_triggered_completion_over_protocol_returns_field_items() {
 
     client.open(
         &file,
-        "type Point = struct { x: usize, y: usize };\nstatic main = fn {\n    let p = Point(struct { x: 1, y: 2 });\n    p.\n}\n",
+        "type Point = struct { x: usize, y: usize };\nstatic main = fn {\n    let p = Point(struct { x = 1, y = 2 });\n    p.\n}\n",
     );
     client.next_diagnostics();
 

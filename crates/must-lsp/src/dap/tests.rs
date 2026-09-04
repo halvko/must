@@ -269,7 +269,7 @@ fn breakpoint_hit_inspect_and_resume() {
 fn record_local_expands_into_fields() {
     let program = fixture(
         "rec",
-        "static main = fn {\n    let p: struct { x: usize, y: usize } = struct { x: 1, y: 2 };\n    print(\"done\");\n};\n",
+        "static main = fn {\n    let p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };\n    print(\"done\");\n};\n",
     );
     let messages = run_session(&[
         ("initialize", json!({})),
@@ -300,7 +300,7 @@ fn record_local_expands_into_fields() {
     let vars = &responses_for(&messages, "variables")[0]["body"]["variables"];
     assert_eq!(vars.as_array().unwrap().len(), 1);
     assert_eq!(vars[0]["name"], "p");
-    assert_eq!(vars[0]["value"], "{ x: 1, y: 2 }");
+    assert_eq!(vars[0]["value"], "{ x = 1, y = 2 }");
     assert_eq!(vars[0]["variablesReference"], 100_000);
 
     // Expanding it: one child per field, in the record's canonical (sorted)
@@ -325,7 +325,7 @@ fn record_local_expands_into_fields() {
     // Console evaluation sees the same structured value and can compute
     // over its fields.
     let evals = responses_for(&messages, "evaluate");
-    assert_eq!(evals[0]["body"]["result"], "{ x: 1, y: 2 }");
+    assert_eq!(evals[0]["body"]["result"], "{ x = 1, y = 2 }");
     assert_eq!(evals[1]["body"]["result"], "3");
 
     assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
@@ -340,7 +340,7 @@ fn mutated_field_shows_its_new_value_in_locals() {
     // expansion machinery as an untouched one.
     let program = fixture(
         "mutrec",
-        "static main = fn {\n    let mut p: struct { x: usize, y: usize } = struct { x: 1, y: 2 };\n    p.x = 10;\n    print(\"done\");\n};\n",
+        "static main = fn {\n    let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };\n    p.x = 10;\n    print(\"done\");\n};\n",
     );
     let messages = run_session(&[
         ("initialize", json!({})),
@@ -357,7 +357,7 @@ fn mutated_field_shows_its_new_value_in_locals() {
 
     let vars = &responses_for(&messages, "variables")[0]["body"]["variables"];
     assert_eq!(vars[0]["name"], "p");
-    assert_eq!(vars[0]["value"], "{ x: 10, y: 2 }");
+    assert_eq!(vars[0]["value"], "{ x = 10, y = 2 }");
 
     let fields = &responses_for(&messages, "variables")[1]["body"]["variables"];
     assert_eq!(fields[0]["name"], "x");
@@ -899,7 +899,7 @@ fn named_typed_local_displays_its_record_value() {
     // the variables panel — same display, same expansion as a bare record.
     let program = fixture(
         "named",
-        "type Foo = struct { x: usize };\nstatic main = fn {\n    let p = Foo(struct { x: 1 });\n    print(\"done\");\n};\n",
+        "type Foo = struct { x: usize };\nstatic main = fn {\n    let p = Foo(struct { x = 1 });\n    print(\"done\");\n};\n",
     );
     let messages = run_session(&[
         ("initialize", json!({})),
@@ -917,7 +917,7 @@ fn named_typed_local_displays_its_record_value() {
     let vars = &responses_for(&messages, "variables")[0]["body"]["variables"];
     assert_eq!(vars.as_array().unwrap().len(), 1);
     assert_eq!(vars[0]["name"], "p");
-    assert_eq!(vars[0]["value"], "{ x: 1 }");
+    assert_eq!(vars[0]["value"], "{ x = 1 }");
     assert_eq!(vars[0]["variablesReference"], 100_000);
 
     let fields = &responses_for(&messages, "variables")[1]["body"]["variables"];

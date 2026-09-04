@@ -105,6 +105,11 @@ fn binding_pattern(p: &mut Parser<'_>, msg: &str) {
 
 /// `struct { x, y as z, mut w, .. }` — a record-destructuring pattern. The
 /// caller has already confirmed `p.at(STRUCT_KW) && p.nth(1) == L_BRACE`.
+///
+/// Future note (pre-ruled with the equals-defines respell): when the
+/// patterns round enriches field patterns, the sub-pattern spelling is
+/// `field = pattern` — construction's mirror image under the global
+/// colon-annotates/equals-defines split (`as`-renames may then retire).
 fn record_pat(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.bump(STRUCT_KW);
@@ -1008,10 +1013,17 @@ fn enum_variant(p: &mut Parser<'_>) {
     m.complete(p, ENUM_VARIANT);
 }
 
-/// A record-literal field: `name` (shorthand for `name: name`) or `name: expr`.
-/// `pub` superset-parses here too (a `type` declaration's shape is written
-/// as a `struct` literal — see [`enum_variant`]'s sibling in `item_tree`);
-/// validation rejects it everywhere fields appear.
+/// A record-literal field, the full member production `name[: Type][= value]`
+/// (the equals-defines respell, G12): `name = expr` defines,
+/// `name: Type` annotates a TYPE — everywhere, uniformly — `name: Type =
+/// expr` does both, and bare `name` is shorthand for `name = name`. The
+/// retired construction spelling `name: value` gets a targeted parse error
+/// on literal-shaped values (never a silent reinterpretation — the shape
+/// may return later as a value-type annotation); an identifier after the
+/// colon reads as the type it now is, and the value-less-field check
+/// carries the story from there. `pub` superset-parses here too (a `type`
+/// declaration's shape is written as a `struct` literal); validation
+/// rejects it everywhere fields appear.
 fn record_expr_field(p: &mut Parser<'_>) {
     let m = p.start();
     p.eat(PUB_KW);
@@ -1023,6 +1035,24 @@ fn record_expr_field(p: &mut Parser<'_>) {
         p.error("expected a field name");
     }
     if p.eat(COLON) {
+        if matches!(
+            p.current(),
+            INT_NUMBER | STRING | TRUE_KW | FALSE_KW | MINUS
+        ) {
+            // The retired `name: value` construction spelling, recognized
+            // on a literal-shaped value before anything is consumed. A
+            // composite value (`x: foo()`, `x: fn () -> R { .. }`) is
+            // type-shaped at its first token and is left to the ordinary
+            // type grammar: by the time it gives itself away the field is
+            // already unrecoverable, so naming the retired spelling there
+            // buries the message in a cascade instead of replacing one.
+            p.error("record fields are defined with `=` (`name = value`); `:` annotates a type");
+            expr(p);
+        } else {
+            type_(p);
+        }
+    }
+    if p.eat(EQ) {
         expr(p);
     }
     m.complete(p, RECORD_EXPR_FIELD);

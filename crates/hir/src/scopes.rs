@@ -141,8 +141,8 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
             }
         }
         ExprData::RecordLit { fields } => {
-            for (_, field) in fields {
-                compute_expr_scopes(body, scopes, *field, scope);
+            for field in fields {
+                compute_expr_scopes(body, scopes, field.value, scope);
             }
         }
         // The field name is a projection, not a scoped reference; only the

@@ -403,7 +403,7 @@ static main = fn { print(
             r#"
 type HeapVec = struct::<T> { ptr: &raw mut T, len: usize, cap: usize };
 static heapvec_new = fn::<T>() -> HeapVec::<T> {
-    HeapVec::<T>(struct { ptr: dangling::<T>(), len: 0, cap: 0 })
+    HeapVec::<T>(struct { ptr = dangling::<T>(), len = 0, cap = 0 })
 };
 static heapvec_push = fn::<T>(mut v: HeapVec::<T>, x: T) -> HeapVec::<T> {
     if v.len == v.cap {
@@ -498,8 +498,8 @@ static arena_new = fn::<T>(cap: usize) -> Arena::<T> {
         AllocResult::Ok(p) => p,
         AllocResult::Err => panic("arena_new: out of memory"),
     };
-    unsafe { state.* = ArenaState::<T>(struct { base: base, cap: cap, cursor: 0 }); };
-    Arena::<T>(struct { state: state })
+    unsafe { state.* = ArenaState::<T>(struct { base = base, cap = cap, cursor = 0 }); };
+    Arena::<T>(struct { state = state })
 };
 static arena_alloc = fn::<T>(a: Arena::<T>, n: usize) -> AllocResult::<T> {
     let cap = unsafe { a.state.*.cap };

@@ -62,7 +62,7 @@ static main = fn () -> () {
     };
 
     // Construct a `Buf::<2>` and read through its array field.
-    let b: Buf::<2> = Buf::<2>(struct { data: [40, 2], len: 2 });
+    let b: Buf::<2> = Buf::<2>(struct { data = [40, 2], len = 2 });
     if b.data[0] + b.data[1] == 42 {
         print("generic buffer: Buf::<2> holds a [usize; 2] summing to 42");
     } else {

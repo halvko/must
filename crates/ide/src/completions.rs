@@ -57,7 +57,7 @@
 //! never called — then it's the bare name), a `type X = …` RHS
 //! (`struct { $1 }` / `enum { $1 }`), a payload-carrying variant pattern in
 //! a match arm (`::Circle($1)` / `Circle($1)`), and a missing record-literal
-//! field (`x: $1`). Every snippet carries its own plain fallback for a
+//! field (`x = $1`). Every snippet carries its own plain fallback for a
 //! client without `snippetSupport` — `must-lsp::to_proto` picks between the
 //! two per client capability; `ide` itself has no notion of "the client",
 //! only the two spellings.
@@ -315,7 +315,7 @@ enum Context {
         scrutinee_range: TextRange,
         bare: bool,
     },
-    /// A shorthand field name (`x` meaning `x: x`) inside a record
+    /// A shorthand field name (`x` meaning `x = x`) inside a record
     /// literal. Carries the literal's own start offset — its opening
     /// token sits before the cursor, so (unlike its not-yet-closed end)
     /// that start back-maps directly to the real tree.
@@ -1215,7 +1215,7 @@ fn record_literal_items(
         .into_iter()
         .filter_map(|(name, mutable, ty)| {
             // The gold local's own expectation is the field it would fill
-            // (shorthand: `x` means `x: x`): matching the field's *type*
+            // (shorthand: `x` means `x = x`): matching the field's *type*
             // too ranks it tier 0.
             let (_, field_ty) = missing.iter().find(|(field, _)| **field == name)?;
             Some(completion_item(
@@ -1239,12 +1239,14 @@ fn record_literal_items(
             Some(ty.display()),
             edit_range,
         );
-        // `x: $1` snippets past the field name, tab-stop ready for the
-        // value; a snippet-incapable client gets just `x: ` (the shorthand
-        // gold-local match above stays a plain bare name — unchanged).
+        // `x = $1` snippets past the field name, tab-stop ready for the
+        // value; a snippet-incapable client gets just `x = ` (the shorthand
+        // gold-local match above stays a plain bare name — unchanged). Both
+        // spellings define with `=`: a plain fallback of `x: ` would hand
+        // that client the retired spelling, which is now a parse error.
         item.text_edit.insert = InsertText::Snippet {
-            snippet: format!("{name}: $1"),
-            plain: format!("{name}: "),
+            snippet: format!("{name} = $1"),
+            plain: format!("{name} = "),
         };
         item
     }));

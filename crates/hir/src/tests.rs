@@ -1813,14 +1813,14 @@ fn assignment_to_an_unresolved_name_does_not_panic() {
 #[test]
 fn record_literal_infers_structurally() {
     check_infer(
-        r#"static f = fn { let p = struct { x: 1, y: "s" }; };"#,
+        r#"static f = fn { let p = struct { x = 1, y = "s" }; };"#,
         expect![[r#"
-            11..50 'fn { let p = stru...': fn()
-            14..50 '{ let p = struct ...': ()
+            11..52 'fn { let p = stru...': fn()
+            14..52 '{ let p = struct ...': ()
             20..21 'p': struct { x: {number}, y: str }
-            24..47 'struct { x: 1, y:...': struct { x: {number}, y: str }
-            36..37 '1': {number}
-            42..45 '"s"': str
+            24..49 'struct { x = 1, y...': struct { x: {number}, y: str }
+            37..38 '1': {number}
+            44..47 '"s"': str
         "#]],
     );
 }
@@ -1831,7 +1831,7 @@ fn record_type_canonicalizes_field_order() {
     // other: field order is irrelevant to the type, so both are the same
     // record and nothing is reported.
     check_diagnostics(
-        r#"static f = fn { let p: struct { y: str, x: usize } = struct { x: 1, y: "s" }; };"#,
+        r#"static f = fn { let p: struct { y: str, x: usize } = struct { x = 1, y = "s" }; };"#,
         expect![[r#""#]],
     );
 }
@@ -1839,7 +1839,7 @@ fn record_type_canonicalizes_field_order() {
 #[test]
 fn annotated_let_with_matching_record_is_ok() {
     check_diagnostics(
-        r#"static f = fn { let p: struct { x: usize, y: str } = struct { x: 1, y: "s" }; };"#,
+        r#"static f = fn { let p: struct { x: usize, y: str } = struct { x = 1, y = "s" }; };"#,
         expect![[r#""#]],
     );
 }
@@ -1850,9 +1850,9 @@ fn record_field_mismatch_blames_the_field_and_cites_the_annotation() {
     // initializers, so the squiggle lands on `"s"` (not the whole literal)
     // and cites the annotation as the cause.
     check_diagnostics(
-        r#"static f = fn { let p: struct { x: usize } = struct { x: "s" }; };"#,
+        r#"static f = fn { let p: struct { x: usize } = struct { x = "s" }; };"#,
         expect![[r#"
-            57..60: type mismatch: expected `usize`, found `str` (expected `usize` because of this annotation at 23..42)
+            58..61: type mismatch: expected `usize`, found `str` (expected `usize` because of this annotation at 23..42)
         "#]],
     );
 }
@@ -1860,9 +1860,9 @@ fn record_field_mismatch_blames_the_field_and_cites_the_annotation() {
 #[test]
 fn record_literal_missing_field() {
     check_diagnostics(
-        r#"static f = fn { let p: struct { x: usize, y: str } = struct { x: 1 }; };"#,
+        r#"static f = fn { let p: struct { x: usize, y: str } = struct { x = 1 }; };"#,
         expect![[r#"
-            53..68: record literal is missing field `y: str`
+            53..69: record literal is missing field `y: str`
         "#]],
     );
 }
@@ -1870,9 +1870,9 @@ fn record_literal_missing_field() {
 #[test]
 fn record_literal_missing_several_fields() {
     check_diagnostics(
-        r#"static f = fn { let p: struct { x: usize, y: str, z: bool } = struct { y: "s" }; };"#,
+        r#"static f = fn { let p: struct { x: usize, y: str, z: bool } = struct { y = "s" }; };"#,
         expect![[r#"
-            62..79: record literal is missing fields `x: usize`, `z: bool`
+            62..80: record literal is missing fields `x: usize`, `z: bool`
         "#]],
     );
 }
@@ -1882,10 +1882,10 @@ fn record_literal_extra_field() {
     // Exact field-set equality: the extra field is an error (squiggle on
     // its name), never silently dropped.
     check_diagnostics(
-        r#"static f = fn { let p: struct { x: usize } = struct { x: 1, z: 2 }; };"#,
+        r#"static f = fn { let p: struct { x: usize } = struct { x = 1, z = 2 }; };"#,
         expect![[r#"
-            60..61: no field `z` in expected type `struct { x: usize }`
-            63..64: cannot infer the type of this number: it has no defining use — add a type annotation
+            61..62: no field `z` in expected type `struct { x: usize }`
+            65..66: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -1893,9 +1893,9 @@ fn record_literal_extra_field() {
 #[test]
 fn record_literal_against_non_record_expectation() {
     check_diagnostics(
-        r#"static f = fn { let n: usize = struct { x: 1 }; };"#,
+        r#"static f = fn { let n: usize = struct { x = 1 }; };"#,
         expect![[r#"
-            31..46: type mismatch: expected `usize`, found `struct { x: {error} }` (expected `usize` because of this annotation at 23..28)
+            31..47: type mismatch: expected `usize`, found `struct { x: {error} }` (expected `usize` because of this annotation at 23..28)
         "#]],
     );
 }
@@ -1903,16 +1903,16 @@ fn record_literal_against_non_record_expectation() {
 #[test]
 fn field_access_infers_the_field_type() {
     check_infer(
-        r#"static f = fn { let p = struct { x: 1 }; let y = p.x; };"#,
+        r#"static f = fn { let p = struct { x = 1 }; let y = p.x; };"#,
         expect![[r#"
-            11..55 'fn { let p = stru...': fn()
-            14..55 '{ let p = struct ...': ()
+            11..56 'fn { let p = stru...': fn()
+            14..56 '{ let p = struct ...': ()
             20..21 'p': struct { x: {number} }
-            24..39 'struct { x: 1 }': struct { x: {number} }
-            36..37 '1': {number}
-            45..46 'y': {number}
-            49..50 'p': struct { x: {number} }
-            49..52 'p.x': {number}
+            24..40 'struct { x = 1 }': struct { x: {number} }
+            37..38 '1': {number}
+            46..47 'y': {number}
+            50..51 'p': struct { x: {number} }
+            50..53 'p.x': {number}
         "#]],
     );
 }
@@ -1920,10 +1920,10 @@ fn field_access_infers_the_field_type() {
 #[test]
 fn field_access_unknown_field() {
     check_diagnostics(
-        r#"static f = fn { let p = struct { x: 1 }; p.z; };"#,
+        r#"static f = fn { let p = struct { x = 1 }; p.z; };"#,
         expect![[r#"
-            36..37: cannot infer the type of this number: it has no defining use — add a type annotation
-            43..44: no field `z` on `struct { x: {number} }`
+            37..38: cannot infer the type of this number: it has no defining use — add a type annotation
+            44..45: no field `z` on `struct { x: {number} }`
         "#]],
     );
 }
@@ -1942,17 +1942,17 @@ fn field_access_on_non_record() {
 #[test]
 fn chained_field_access_through_nested_records() {
     check_infer(
-        r#"static f = fn { let a = struct { b: struct { c: "deep" } }; a.b.c };"#,
+        r#"static f = fn { let a = struct { b = struct { c = "deep" } }; a.b.c };"#,
         expect![[r#"
-            11..67 'fn { let a = stru...': fn() -> str
-            14..67 '{ let a = struct ...': str
+            11..69 'fn { let a = stru...': fn() -> str
+            14..69 '{ let a = struct ...': str
             20..21 'a': struct { b: struct { c: str } }
-            24..58 'struct { b: struc...': struct { b: struct { c: str } }
-            36..56 'struct { c: "deep" }': struct { c: str }
-            48..54 '"deep"': str
-            60..61 'a': struct { b: struct { c: str } }
-            60..63 'a.b': struct { c: str }
-            60..65 'a.b.c': str
+            24..60 'struct { b = stru...': struct { b: struct { c: str } }
+            37..58 'struct { c = "dee...': struct { c: str }
+            50..56 '"deep"': str
+            62..63 'a': struct { b: struct { c: str } }
+            62..65 'a.b': struct { c: str }
+            62..67 'a.b.c': str
         "#]],
     );
 }
@@ -2006,9 +2006,9 @@ fn if_branches_with_mismatched_records_report_branch_mismatch() {
     // unchanged, so two branches disagreeing on a record type produce the
     // ordinary branch-mismatch diagnostic, verbatim.
     check_diagnostics(
-        r#"static f = fn (c: bool) { if c { struct { x: 1 } } else { struct { x: "s" } } };"#,
+        r#"static f = fn (c: bool) { if c { struct { x = 1 } } else { struct { x = "s" } } };"#,
         expect![[r#"
-            33..48: type mismatch: expected `struct { x: str }`, found `struct { x: {number} }` (this branch has type `struct { x: str }` at 58..75)
+            33..49: type mismatch: expected `struct { x: str }`, found `struct { x: {number} }` (this branch has type `struct { x: str }` at 59..77)
         "#]],
     );
 }
@@ -2018,7 +2018,7 @@ fn record_literal_in_initializer_is_const_clean() {
     // Record construction is not a call: const-checking has nothing to say
     // about a pure record literal in an item initializer.
     check_diagnostics(
-        r#"static p = struct { x: { let n: usize = 1; n }, y: "s" };"#,
+        r#"static p = struct { x = { let n: usize = 1; n }, y = "s" };"#,
         expect![[r#""#]],
     );
 }
@@ -2027,7 +2027,7 @@ fn record_literal_in_initializer_is_const_clean() {
 fn record_signature_flows_across_items() {
     check_diagnostics(
         r#"
-static origin: struct { x: usize, y: usize } = struct { x: 0, y: 0 };
+static origin: struct { x: usize, y: usize } = struct { x = 0, y = 0 };
 static f = fn { let x = origin.x; };
 "#,
         expect![[r#""#]],
@@ -2068,11 +2068,11 @@ static main = fn { s; };
         }
     }));
 
-    let text_v1 = "static a: struct { x: usize } = struct { x: 1 };\n\
+    let text_v1 = "static a: struct { x: usize } = struct { x = 1 };\n\
                    static b = fn { a.x; };\n";
     // Only `a`'s body changes; the annotation (the whole contract) is
     // identical, so dependents must backdate.
-    let text_v2 = "static a: struct { x: usize } = struct { x: 2 };\n\
+    let text_v2 = "static a: struct { x: usize } = struct { x = 2 };\n\
                    static b = fn { a.x; };\n";
 
     let file = SourceFile::new(&db, "test.must".to_owned(), text_v1.to_owned());
@@ -2146,8 +2146,9 @@ fn type_rhs_must_be_a_struct_literal() {
 
 #[test]
 fn type_decl_fields_must_be_types() {
-    // A computed expression and a shorthand field are both "not a type";
-    // an unknown or value name in a field gets the type-position errors.
+    // The retired `a: 5` spelling gets the targeted respell parse error, a
+    // shorthand field has no type to read, and an unknown or value name in
+    // a field gets the type-position errors.
     check_diagnostics(
         r#"
 static five = 5;
@@ -2155,8 +2156,8 @@ type Foo = struct { a: 5, b, c: missing, d: five };
 "#,
         expect![[r#"
             15..16: cannot infer the type of this number: it has no defining use — add a type annotation
-            41..42: expected a type for field `a`
-            44..45: expected a type for field `b`
+            41..42: record fields are defined with `=` (`name = value`); `:` annotates a type
+            44..45: expected a type for field `b`: `name: Type`
             50..57: unknown type `missing`
             62..66: `five` is not a type
         "#]],
@@ -2211,13 +2212,13 @@ fn construction_call_produces_the_named_type() {
     check_infer(
         r#"
 type Foo = struct { x: usize };
-static p = Foo(struct { x: 1 });
+static p = Foo(struct { x = 1 });
 "#,
         expect![[r#"
             44..47 'Foo': fn(struct { x: usize }) -> Foo
-            44..64 'Foo(struct { x: 1 })': Foo
-            48..63 'struct { x: 1 }': struct { x: usize }
-            60..61 '1': usize
+            44..65 'Foo(struct { x = ...': Foo
+            48..64 'struct { x = 1 }': struct { x: usize }
+            61..62 '1': usize
         "#]],
     );
 }
@@ -2229,10 +2230,10 @@ fn construction_field_mismatch_cites_the_field_declaration() {
     check_diagnostics(
         r#"
 type Foo = struct { x: usize };
-static p = Foo(struct { x: "s" });
+static p = Foo(struct { x = "s" });
 "#,
         expect![[r#"
-            60..63: type mismatch: expected `usize`, found `str` (expected `usize` because of this field declaration at 21..29)
+            61..64: type mismatch: expected `usize`, found `str` (expected `usize` because of this field declaration at 21..29)
         "#]],
     );
 }
@@ -2255,13 +2256,13 @@ fn construction_takes_exactly_one_argument() {
     check_diagnostics(
         r#"
 type Foo = struct { x: usize };
-static p = Foo(struct { x: 1 }, 2);
+static p = Foo(struct { x = 1 }, 2);
 static q = Foo();
 "#,
         expect![[r#"
-            44..67: `Foo` takes exactly one argument (its underlying `struct` value), found 2 (`Foo` is defined here at 6..9)
-            65..66: cannot infer the type of this number: it has no defining use — add a type annotation
-            80..85: `Foo` takes exactly one argument (its underlying `struct` value), found 0 (`Foo` is defined here at 6..9)
+            44..68: `Foo` takes exactly one argument (its underlying `struct` value), found 2 (`Foo` is defined here at 6..9)
+            66..67: cannot infer the type of this number: it has no defining use — add a type annotation
+            81..86: `Foo` takes exactly one argument (its underlying `struct` value), found 0 (`Foo` is defined here at 6..9)
         "#]],
     );
 }
@@ -2273,12 +2274,12 @@ fn named_type_is_distinct_from_its_underlying_record() {
     check_diagnostics(
         r#"
 type Foo = struct { x: usize };
-static a: Foo = struct { x: 1 };
-static b: struct { x: usize } = Foo(struct { x: 1 });
+static a: Foo = struct { x = 1 };
+static b: struct { x: usize } = Foo(struct { x = 1 });
 "#,
         expect![[r#"
-            49..64: type mismatch: expected `Foo`, found `struct { x: {error} }`; `Foo` is a distinct type — construct it with `Foo(...)` (expected `Foo` because of this annotation at 43..46)
-            98..118: type mismatch: expected `struct { x: usize }`, found `Foo` (expected `struct { x: usize }` because of this annotation at 76..95)
+            49..65: type mismatch: expected `Foo`, found `struct { x: {error} }`; `Foo` is a distinct type — construct it with `Foo(...)` (expected `Foo` because of this annotation at 43..46)
+            99..120: type mismatch: expected `struct { x: usize }`, found `Foo` (expected `struct { x: usize }` because of this annotation at 77..96)
         "#]],
     );
 }
@@ -2290,10 +2291,10 @@ fn named_types_unify_by_declaration_not_shape() {
         r#"
 type Meters = struct { value: usize };
 type Feet = struct { value: usize };
-static len: Meters = Feet(struct { value: 3 });
+static len: Meters = Feet(struct { value = 3 });
 "#,
         expect![[r#"
-            98..123: type mismatch: expected `Meters`, found `Feet` (expected `Meters` because of this annotation at 89..95)
+            98..124: type mismatch: expected `Meters`, found `Feet` (expected `Meters` because of this annotation at 89..95)
         "#]],
     );
 }
@@ -2318,10 +2319,10 @@ fn equality_between_named_and_bare_record_is_a_type_error() {
     check_diagnostics(
         r#"
 type Foo = struct { x: usize };
-static eq = Foo(struct { x: 1 }) == struct { x: 1 };
+static eq = Foo(struct { x = 1 }) == struct { x = 1 };
 "#,
         expect![[r#"
-            69..84: type mismatch: expected `Foo`, found `struct { x: {error} }`; `Foo` is a distinct type — construct it with `Foo(...)` (this operand has type `Foo` at 45..65)
+            70..86: type mismatch: expected `Foo`, found `struct { x: {error} }`; `Foo` is a distinct type — construct it with `Foo(...)` (this operand has type `Foo` at 45..66)
         "#]],
     );
 }
@@ -2333,8 +2334,8 @@ fn construction_is_legal_in_const_contexts() {
     check_diagnostics(
         r#"
 type Foo = struct { x: usize };
-static a = Foo(struct { x: 1 });
-const b = const { Foo(struct { x: 2 }) };
+static a = Foo(struct { x = 1 });
+const b = const { Foo(struct { x = 2 }) };
 "#,
         expect![[r#""#]],
     );
@@ -2371,18 +2372,18 @@ fn hole_typed_binding_can_hold_a_named_type() {
     check_infer(
         r#"
 type Foo = struct { x: usize };
-static f = fn { let p = Foo(struct { x: 1 }); p.x };
+static f = fn { let p = Foo(struct { x = 1 }); p.x };
 "#,
         expect![[r#"
-            44..84 'fn { let p = Foo(...': fn() -> usize
-            47..84 '{ let p = Foo(str...': usize
+            44..85 'fn { let p = Foo(...': fn() -> usize
+            47..85 '{ let p = Foo(str...': usize
             53..54 'p': Foo
             57..60 'Foo': fn(struct { x: usize }) -> Foo
-            57..77 'Foo(struct { x: 1 })': Foo
-            61..76 'struct { x: 1 }': struct { x: usize }
-            73..74 '1': usize
-            79..80 'p': Foo
-            79..82 'p.x': usize
+            57..78 'Foo(struct { x = ...': Foo
+            61..77 'struct { x = 1 }': struct { x: usize }
+            74..75 '1': usize
+            80..81 'p': Foo
+            80..83 'p.x': usize
         "#]],
     );
 }
@@ -3494,15 +3495,15 @@ static x = sum();
 #[test]
 fn let_record_destructure_binds_correct_types() {
     check_infer(
-        r#"static f = fn { let struct { x, y } = struct { x: 1, y: "s" }; };"#,
+        r#"static f = fn { let struct { x, y } = struct { x = 1, y = "s" }; };"#,
         expect![[r#"
-            11..64 'fn { let struct {...': fn()
-            14..64 '{ let struct { x,...': ()
+            11..66 'fn { let struct {...': fn()
+            14..66 '{ let struct { x,...': ()
             29..30 'x': {number}
             32..33 'y': str
-            38..61 'struct { x: 1, y:...': struct { x: {number}, y: str }
-            50..51 '1': {number}
-            56..59 '"s"': str
+            38..63 'struct { x = 1, y...': struct { x: {number}, y: str }
+            51..52 '1': {number}
+            58..61 '"s"': str
         "#]],
     );
 }
@@ -3511,10 +3512,10 @@ fn let_record_destructure_binds_correct_types() {
 fn let_record_destructure_rename_binds_only_the_new_name() {
     // `x` is not bound under its own name; only the rename `a` is.
     check_diagnostics(
-        r#"static f = fn { let struct { x as a } = struct { x: 1 }; let b = a; let c = x; };"#,
+        r#"static f = fn { let struct { x as a } = struct { x = 1 }; let b = a; let c = x; };"#,
         expect![[r#"
-            52..53: cannot infer the type of this number: it has no defining use — add a type annotation
-            76..77: unresolved name `x`
+            53..54: cannot infer the type of this number: it has no defining use — add a type annotation
+            77..78: unresolved name `x`
         "#]],
     );
 }
@@ -3522,11 +3523,11 @@ fn let_record_destructure_rename_binds_only_the_new_name() {
 #[test]
 fn let_record_destructure_missing_field_without_rest_errors() {
     check_diagnostics(
-        r#"static f = fn { let struct { x } = struct { x: 1, y: 2 }; };"#,
+        r#"static f = fn { let struct { x } = struct { x = 1, y = 2 }; };"#,
         expect![[r#"
             20..32: pattern does not mention field `y`; add `..` to ignore it
-            47..48: cannot infer the type of this number: it has no defining use — add a type annotation
-            53..54: cannot infer the type of this number: it has no defining use — add a type annotation
+            48..49: cannot infer the type of this number: it has no defining use — add a type annotation
+            55..56: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -3534,12 +3535,12 @@ fn let_record_destructure_missing_field_without_rest_errors() {
 #[test]
 fn let_record_destructure_missing_several_fields_without_rest_errors() {
     check_diagnostics(
-        r#"static f = fn { let struct { x } = struct { x: 1, y: 2, z: 3 }; };"#,
+        r#"static f = fn { let struct { x } = struct { x = 1, y = 2, z = 3 }; };"#,
         expect![[r#"
             20..32: pattern does not mention fields `y`, `z`; add `..` to ignore them
-            47..48: cannot infer the type of this number: it has no defining use — add a type annotation
-            53..54: cannot infer the type of this number: it has no defining use — add a type annotation
-            59..60: cannot infer the type of this number: it has no defining use — add a type annotation
+            48..49: cannot infer the type of this number: it has no defining use — add a type annotation
+            55..56: cannot infer the type of this number: it has no defining use — add a type annotation
+            62..63: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -3547,10 +3548,10 @@ fn let_record_destructure_missing_several_fields_without_rest_errors() {
 #[test]
 fn let_record_destructure_with_rest_ignores_missing_fields() {
     check_diagnostics(
-        r#"static f = fn { let struct { x, .. } = struct { x: 1, y: 2 }; };"#,
+        r#"static f = fn { let struct { x, .. } = struct { x = 1, y = 2 }; };"#,
         expect![[r#"
-            51..52: cannot infer the type of this number: it has no defining use — add a type annotation
-            57..58: cannot infer the type of this number: it has no defining use — add a type annotation
+            52..53: cannot infer the type of this number: it has no defining use — add a type annotation
+            59..60: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -3558,12 +3559,12 @@ fn let_record_destructure_with_rest_ignores_missing_fields() {
 #[test]
 fn let_record_destructure_unknown_field_errors() {
     check_diagnostics(
-        r#"static f = fn { let struct { x, z } = struct { x: 1, y: 2 }; };"#,
+        r#"static f = fn { let struct { x, z } = struct { x = 1, y = 2 }; };"#,
         expect![[r#"
             20..35: no field `z` on `struct { x: {number}, y: {number} }`
             20..35: pattern does not mention field `y`; add `..` to ignore it
-            50..51: cannot infer the type of this number: it has no defining use — add a type annotation
-            56..57: cannot infer the type of this number: it has no defining use — add a type annotation
+            51..52: cannot infer the type of this number: it has no defining use — add a type annotation
+            58..59: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -3678,10 +3679,10 @@ fn record_destructure_unknown_field_still_types_it_as_error_not_cascading() {
     // The unknown field's binding recovers as `{error}` (infectious and
     // silent) rather than blocking the rest of the pattern from checking.
     check_diagnostics(
-        r#"static f = fn { let struct { x, z, .. } = struct { x: 1 }; let n: usize = z; };"#,
+        r#"static f = fn { let struct { x, z, .. } = struct { x = 1 }; let n: usize = z; };"#,
         expect![[r#"
             20..39: no field `z` on `struct { x: {number} }`
-            54..55: cannot infer the type of this number: it has no defining use — add a type annotation
+            55..56: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -3689,10 +3690,10 @@ fn record_destructure_unknown_field_still_types_it_as_error_not_cascading() {
 #[test]
 fn per_binding_mut_in_record_pattern_allows_assignment() {
     check_diagnostics(
-        r#"static f = fn { let struct { mut x, y } = struct { x: 1, y: 2 }; x = 3; };"#,
+        r#"static f = fn { let struct { mut x, y } = struct { x = 1, y = 2 }; x = 3; };"#,
         expect![[r#"
-            54..55: cannot infer the type of this number: it has no defining use — add a type annotation
-            60..61: cannot infer the type of this number: it has no defining use — add a type annotation
+            55..56: cannot infer the type of this number: it has no defining use — add a type annotation
+            62..63: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -3700,11 +3701,11 @@ fn per_binding_mut_in_record_pattern_allows_assignment() {
 #[test]
 fn record_pattern_binding_without_mut_is_immutable() {
     check_diagnostics(
-        r#"static f = fn { let struct { x, y } = struct { x: 1, y: 2 }; x = 3; };"#,
+        r#"static f = fn { let struct { x, y } = struct { x = 1, y = 2 }; x = 3; };"#,
         expect![[r#"
-            50..51: cannot infer the type of this number: it has no defining use — add a type annotation
-            56..57: cannot infer the type of this number: it has no defining use — add a type annotation
-            61..62: cannot assign to `x`: it is not declared `mut` (`x` is declared without `mut` here at 29..30)
+            51..52: cannot infer the type of this number: it has no defining use — add a type annotation
+            58..59: cannot infer the type of this number: it has no defining use — add a type annotation
+            63..64: cannot assign to `x`: it is not declared `mut` (`x` is declared without `mut` here at 29..30)
         "#]],
     );
 }
@@ -3712,10 +3713,10 @@ fn record_pattern_binding_without_mut_is_immutable() {
 #[test]
 fn let_mut_on_a_destructuring_pattern_is_a_syntax_error() {
     check_diagnostics(
-        r#"static f = fn { let mut struct { x } = struct { x: 1 }; };"#,
+        r#"static f = fn { let mut struct { x } = struct { x = 1 }; };"#,
         expect![[r#"
             20..36: `mut` applies to individual bindings in a destructuring pattern
-            51..52: cannot infer the type of this number: it has no defining use — add a type annotation
+            52..53: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -3733,9 +3734,9 @@ fn field_assign_on_a_mut_root_is_clean() {
 #[test]
 fn nested_field_assign_on_a_mut_root_is_clean() {
     check_diagnostics(
-        r#"static f = fn { let mut p = struct { a: struct { b: 1 } }; p.a.b = 2; };"#,
+        r#"static f = fn { let mut p = struct { a = struct { b = 1 } }; p.a.b = 2; };"#,
         expect![[r#"
-            52..53: cannot infer the type of this number: it has no defining use — add a type annotation
+            54..55: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -3757,7 +3758,7 @@ fn field_assign_on_an_immutable_root_blames_the_root() {
 fn field_assign_to_immutable_root_offers_the_make_mut_fix() {
     // Same machinery as a plain assignment to an immutable binding: the
     // insert-`mut` fix anchors at the binding's declaration.
-    let text = "static f = fn { let p: struct { x: usize } = struct { x: 1 }; p.x = 2; };";
+    let text = "static f = fn { let p: struct { x: usize } = struct { x = 1 }; p.x = 2; };";
     let db = RootDatabase::default();
     let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
     let diagnostics = crate::file_diagnostics(&db, file);
@@ -3793,10 +3794,10 @@ fn unknown_field_in_an_assign_target_reports_no_such_field() {
     // existing `NoSuchField` fires at the target position — no
     // assignment-specific wording needed.
     check_diagnostics(
-        r#"static f = fn { let mut p = struct { x: 1 }; p.y = 2; };"#,
+        r#"static f = fn { let mut p = struct { x = 1 }; p.y = 2; };"#,
         expect![[r#"
-            40..41: cannot infer the type of this number: it has no defining use — add a type annotation
-            47..48: no field `y` on `struct { x: {number} }`
+            41..42: cannot infer the type of this number: it has no defining use — add a type annotation
+            48..49: no field `y` on `struct { x: {number} }`
         "#]],
     );
 }
@@ -3832,7 +3833,7 @@ fn field_assign_in_a_const_fn_is_clean() {
     check_diagnostics(
         r#"
 static bump = const fn (mut p: struct { x: usize }) -> usize { p.x = p.x + 1; p.x };
-static two: usize = bump(struct { x: 1 });
+static two: usize = bump(struct { x = 1 });
 "#,
         expect![[r#""#]],
     );
@@ -3953,14 +3954,14 @@ fn expectation_recorded_for_record_literal_field() {
     check_expectations(
         r#"
 type Foo = struct { x: usize };
-static main = fn { Foo(struct { x: 1 }); };
+static main = fn { Foo(struct { x = 1 }); };
 "#,
         expect![[r#"
-            47..75 'fn { Foo(struct {...': fn()
-            50..75 '{ Foo(struct { x:...': ()
-            52..72 'Foo(struct { x: 1 })': Foo
-            56..71 'struct { x: 1 }': struct { x: usize }
-            68..69 '1': usize
+            47..76 'fn { Foo(struct {...': fn()
+            50..76 '{ Foo(struct { x ...': ()
+            52..73 'Foo(struct { x = ...': Foo
+            56..72 'struct { x = 1 }': struct { x: usize }
+            69..70 '1': usize
         "#]],
     );
 }
@@ -4211,7 +4212,7 @@ fn rigid_param_passes_stores_returns_and_compares() {
     // `T` annotation resolving to the rigid param), store in a record
     // field, compare with `==`, return through a join.
     check_diagnostics(
-        "static f = fn::<T>(x: T) -> T { let y: T = x; let r = struct { v: y }; if x == y { r.v } else { x } };",
+        "static f = fn::<T>(x: T) -> T { let y: T = x; let r = struct { v = y }; if x == y { r.v } else { x } };",
         expect![[r#""#]],
     );
 }
@@ -4445,7 +4446,7 @@ fn unresolved_type_param_at_a_mention_is_reported() {
 #[test]
 fn turbofish_in_type_position_takes_no_generic_arguments() {
     check_diagnostics(
-        "type Foo = struct { x: usize };\nstatic f: Foo::<usize> = Foo(struct { x: 1 });",
+        "type Foo = struct { x: usize };\nstatic f: Foo::<usize> = Foo(struct { x = 1 });",
         expect![[r#"
             42..54: `Foo` takes no generic arguments (declared here at 5..8)
         "#]],
@@ -4647,22 +4648,21 @@ fn const_param_forwards_as_a_const_arg() {
 #[test]
 fn generic_record_construction_with_explicit_args() {
     check_infer(
-        "type Pair = struct::<T> { a: T, b: T };\n\
-         static main = fn () -> usize { let p = Pair::<usize>(struct { a: 1, b: 2 }); p.a + p.b };",
+        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static main = fn () -> usize { let p = Pair::<usize>(struct { a = 1, b = 2 }); p.a + p.b };",
         expect![[r#"
-            54..128 'fn () -> usize { ...': fn() -> usize
-            69..128 '{ let p = Pair::<...': usize
-            75..76 'p': Pair::<usize>
-            79..92 'Pair::<usize>': fn(struct { a: usize, b: usize }) -> Pair::<usize>
-            79..115 'Pair::<usize>(str...': Pair::<usize>
-            93..114 'struct { a: 1, b:...': struct { a: usize, b: usize }
-            105..106 '1': usize
-            111..112 '2': usize
-            117..118 'p': Pair::<usize>
-            117..120 'p.a': usize
-            117..126 'p.a + p.b': usize
-            123..124 'p': Pair::<usize>
-            123..126 'p.b': usize
+            65..141 'fn () -> usize { ...': fn() -> usize
+            80..141 '{ let p = Pair::<...': usize
+            86..87 'p': Pair::<usize>
+            90..103 'Pair::<usize>': fn(struct { a: usize, b: usize }) -> Pair::<usize>
+            90..128 'Pair::<usize>(str...': Pair::<usize>
+            104..127 'struct { a = 1, b...': struct { a: usize, b: usize }
+            117..118 '1': usize
+            124..125 '2': usize
+            130..131 'p': Pair::<usize>
+            130..133 'p.a': usize
+            130..139 'p.a + p.b': usize
+            136..137 'p': Pair::<usize>
+            136..139 'p.b': usize
         "#]],
     );
 }
@@ -4670,19 +4670,18 @@ fn generic_record_construction_with_explicit_args() {
 #[test]
 fn generic_record_construction_infers_args_from_payload() {
     check_infer(
-        "type Pair = struct::<T> { a: T, b: T };\n\
-         static main = fn () -> usize { let p = Pair(struct { a: 1, b: 2 }); p.b };",
+        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static main = fn () -> usize { let p = Pair(struct { a = 1, b = 2 }); p.b };",
         expect![[r#"
-            54..113 'fn () -> usize { ...': fn() -> usize
-            69..113 '{ let p = Pair(st...': usize
-            75..76 'p': Pair::<usize>
-            79..83 'Pair': fn(struct { a: usize, b: usize }) -> Pair::<usize>
-            79..106 'Pair(struct { a: ...': Pair::<usize>
-            84..105 'struct { a: 1, b:...': struct { a: usize, b: usize }
-            96..97 '1': usize
-            102..103 '2': usize
-            108..109 'p': Pair::<usize>
-            108..111 'p.b': usize
+            65..126 'fn () -> usize { ...': fn() -> usize
+            80..126 '{ let p = Pair(st...': usize
+            86..87 'p': Pair::<usize>
+            90..94 'Pair': fn(struct { a: usize, b: usize }) -> Pair::<usize>
+            90..119 'Pair(struct { a =...': Pair::<usize>
+            95..118 'struct { a = 1, b...': struct { a: usize, b: usize }
+            108..109 '1': usize
+            115..116 '2': usize
+            121..122 'p': Pair::<usize>
+            121..124 'p.b': usize
         "#]],
     );
 }
@@ -4690,11 +4689,11 @@ fn generic_record_construction_infers_args_from_payload() {
 #[test]
 fn generic_type_arity_mismatch_blames_the_use_site() {
     check_diagnostics(
-        "type Pair = struct::<T> { a: T, b: T };\n\
-         static main = fn () { let p = Pair::<usize, str>(struct { a: 1, b: 2 }); };",
+        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static main = fn () { let p = Pair::<usize, str>(struct { a = 1, b = 2 }); };",
         expect![[r#"
-            70..88: `Pair` takes 1 generic argument, found 2 (declared here at 5..9)
-            101..102: cannot infer the type of this number: it has no defining use — add a type annotation
+            40..41: unexpected character `\`
+            81..99: `Pair` takes 1 generic argument, found 2 (declared here at 5..9)
+            113..114: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -4702,10 +4701,10 @@ fn generic_type_arity_mismatch_blames_the_use_site() {
 #[test]
 fn generic_type_arity_mismatch_in_annotation_blames_the_use_site() {
     check_diagnostics(
-        "type Pair = struct::<T> { a: T, b: T };\n\
-         static main = fn () { let p: Pair::<usize, str> = Pair::<usize>(struct { a: 1, b: 2 }); };",
+        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static main = fn () { let p: Pair::<usize, str> = Pair::<usize>(struct { a = 1, b = 2 }); };",
         expect![[r#"
-            69..87: `Pair` takes 1 generic argument, found 2 (declared here at 5..9)
+            40..41: unexpected character `\`
+            80..98: `Pair` takes 1 generic argument, found 2 (declared here at 5..9)
         "#]],
     );
 }
@@ -4713,10 +4712,10 @@ fn generic_type_arity_mismatch_in_annotation_blames_the_use_site() {
 #[test]
 fn bare_generic_type_in_annotation_requires_the_turbofish() {
     check_diagnostics(
-        "type Pair = struct::<T> { a: T, b: T };\n\
-         static main = fn () { let p: Pair = Pair::<usize>(struct { a: 1, b: 2 }); };",
+        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static main = fn () { let p: Pair = Pair::<usize>(struct { a = 1, b = 2 }); };",
         expect![[r#"
-            69..73: `Pair` takes 1 generic argument, found 0 (declared here at 5..9)
+            40..41: unexpected character `\`
+            80..84: `Pair` takes 1 generic argument, found 0 (declared here at 5..9)
         "#]],
     );
 }
@@ -4724,17 +4723,16 @@ fn bare_generic_type_in_annotation_requires_the_turbofish() {
 #[test]
 fn annotation_hole_arg_is_pinned_by_the_initializer() {
     check_infer(
-        "type Pair = struct::<T> { a: T, b: T };\n\
-         static main = fn () { let p: Pair::<_> = Pair(struct { a: 1, b: 2 }); };",
+        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static main = fn () { let p: Pair::<_> = Pair(struct { a = 1, b = 2 }); };",
         expect![[r#"
-            54..111 'fn () { let p: Pa...': fn()
-            60..111 '{ let p: Pair::<_...': ()
-            66..67 'p': Pair::<{number}>
-            81..85 'Pair': fn(struct { a: {number}, b: {number} }) -> Pair::<{number}>
-            81..108 'Pair(struct { a: ...': Pair::<{number}>
-            86..107 'struct { a: 1, b:...': struct { a: {number}, b: {number} }
-            98..99 '1': {number}
-            104..105 '2': {number}
+            65..124 'fn () { let p: Pa...': fn()
+            71..124 '{ let p: Pair::<_...': ()
+            77..78 'p': Pair::<{number}>
+            92..96 'Pair': fn(struct { a: {number}, b: {number} }) -> Pair::<{number}>
+            92..121 'Pair(struct { a =...': Pair::<{number}>
+            97..120 'struct { a = 1, b...': struct { a: {number}, b: {number} }
+            110..111 '1': {number}
+            117..118 '2': {number}
         "#]],
     );
 }
@@ -4742,10 +4740,10 @@ fn annotation_hole_arg_is_pinned_by_the_initializer() {
 #[test]
 fn different_type_args_do_not_unify() {
     check_diagnostics(
-        "type Pair = struct::<T> { a: T, b: T };\n\
-         static main = fn () { let p: Pair::<str> = Pair::<usize>(struct { a: 1, b: 2 }); };",
+        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static main = fn () { let p: Pair::<str> = Pair::<usize>(struct { a = 1, b = 2 }); };",
         expect![[r#"
-            83..119: type mismatch: expected `Pair::<str>`, found `Pair::<usize>` (expected `Pair::<str>` because of this annotation at 69..80)
+            40..41: unexpected character `\`
+            94..132: type mismatch: expected `Pair::<str>`, found `Pair::<usize>` (expected `Pair::<str>` because of this annotation at 80..91)
         "#]],
     );
 }
@@ -4753,11 +4751,12 @@ fn different_type_args_do_not_unify() {
 #[test]
 fn same_args_unify_across_bodies() {
     check_diagnostics(
-        "type Pair = struct::<T> { a: T, b: T };\n\
-         static mk = fn () -> Pair::<usize> { Pair::<usize>(struct { a: 1, b: 2 }) };\n\
-         static use_it = fn (p: Pair::<usize>) -> usize { p.a };\n\
-         static main = fn () -> usize { use_it(mk()) };",
-        expect![[""]],
+        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static mk = fn () -> Pair::<usize> { Pair::<usize>(struct { a = 1, b = 2 }) };\n\\\n         static use_it = fn (p: Pair::<usize>) -> usize { p.a };\n\\\n         static main = fn () -> usize { use_it(mk()) };",
+        expect![[r#"
+            40..41: unexpected character `\`
+            130..131: unexpected character `\`
+            197..198: unexpected character `\`
+        "#]],
     );
 }
 
@@ -4848,10 +4847,10 @@ fn non_exhaustive_match_over_a_generic_enum_is_reported() {
 #[test]
 fn const_params_on_types_distinguish_instances() {
     check_diagnostics(
-        "type Buf = struct::<const N: usize> { len: usize };\n\
-         static main = fn () { let b: Buf::<8> = Buf::<9>(struct { len: 1 }); };",
+        "type Buf = struct::<const N: usize> { len: usize };\n\\\n         static main = fn () { let b: Buf::<8> = Buf::<9>(struct { len = 1 }); };",
         expect![[r#"
-            92..119: type mismatch: expected `Buf::<8>`, found `Buf::<9>` (expected `Buf::<8>` because of this annotation at 81..89)
+            52..53: unexpected character `\`
+            103..131: type mismatch: expected `Buf::<8>`, found `Buf::<9>` (expected `Buf::<8>` because of this annotation at 92..100)
         "#]],
     );
 }
@@ -4859,19 +4858,18 @@ fn const_params_on_types_distinguish_instances() {
 #[test]
 fn const_param_type_annotation_and_construction_agree() {
     check_infer(
-        "type Buf = struct::<const N: usize> { len: usize };\n\
-         static main = fn () -> usize { let b: Buf::<8> = Buf::<8>(struct { len: 3 }); b.len };",
+        "type Buf = struct::<const N: usize> { len: usize };\n\\\n         static main = fn () -> usize { let b: Buf::<8> = Buf::<8>(struct { len = 3 }); b.len };",
         expect![[r#"
-            66..137 'fn () -> usize { ...': fn() -> usize
-            81..137 '{ let b: Buf::<8>...': usize
-            87..88 'b': Buf::<8>
-            101..109 'Buf::<8>': fn(struct { len: usize }) -> Buf::<8>
-            101..128 'Buf::<8>(struct {...': Buf::<8>
-            107..108 '8': usize
-            110..127 'struct { len: 3 }': struct { len: usize }
-            124..125 '3': usize
-            130..131 'b': Buf::<8>
-            130..135 'b.len': usize
+            77..149 'fn () -> usize { ...': fn() -> usize
+            92..149 '{ let b: Buf::<8>...': usize
+            98..99 'b': Buf::<8>
+            112..120 'Buf::<8>': fn(struct { len: usize }) -> Buf::<8>
+            112..140 'Buf::<8>(struct {...': Buf::<8>
+            118..119 '8': usize
+            121..139 'struct { len = 3 }': struct { len: usize }
+            136..137 '3': usize
+            142..143 'b': Buf::<8>
+            142..147 'b.len': usize
         "#]],
     );
 }
@@ -4879,10 +4877,10 @@ fn const_param_type_annotation_and_construction_agree() {
 #[test]
 fn const_block_in_annotation_position_is_rejected() {
     check_diagnostics(
-        "type Buf = struct::<const N: usize> { len: usize };\n\
-         static main = fn () { let b: Buf::<const { 4 + 4 }> = Buf::<8>(struct { len: 1 }); };",
+        "type Buf = struct::<const N: usize> { len: usize };\n\\\n         static main = fn () { let b: Buf::<const { 4 + 4 }> = Buf::<8>(struct { len = 1 }); };",
         expect![[r#"
-            87..102: a `const { ... }` block cannot parameterize a type; pass the value through a generic function's const parameter instead
+            52..53: unexpected character `\`
+            98..113: a `const { ... }` block cannot parameterize a type; pass the value through a generic function's const parameter instead
         "#]],
     );
 }
@@ -4890,10 +4888,10 @@ fn const_block_in_annotation_position_is_rejected() {
 #[test]
 fn const_block_in_type_construction_turbofish_is_rejected() {
     check_diagnostics(
-        "type Buf = struct::<const N: usize> { len: usize };\n\
-         static main = fn () { let b = Buf::<const { 4 + 4 }>(struct { len: 1 }); };",
+        "type Buf = struct::<const N: usize> { len: usize };\n\\\n         static main = fn () { let b = Buf::<const { 4 + 4 }>(struct { len = 1 }); };",
         expect![[r#"
-            82..104: a `const { ... }` block cannot parameterize a type; pass the value through a generic function's const parameter instead
+            52..53: unexpected character `\`
+            93..115: a `const { ... }` block cannot parameterize a type; pass the value through a generic function's const parameter instead
         "#]],
     );
 }
@@ -4940,10 +4938,10 @@ fn unpinned_generic_type_param_is_reported_at_the_mention() {
 #[test]
 fn generic_type_display_in_diagnostics() {
     check_diagnostics(
-        "type Pair = struct::<T> { a: T, b: T };\n\
-         static main = fn () -> usize { Pair::<usize>(struct { a: 1, b: 2 }) };",
+        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static main = fn () -> usize { Pair::<usize>(struct { a = 1, b = 2 }) };",
         expect![[r#"
-            71..107: type mismatch: expected `usize`, found `Pair::<usize>` (expected `usize` because of this return type at 60..68)
+            40..41: unexpected character `\`
+            82..120: type mismatch: expected `usize`, found `Pair::<usize>` (expected `usize` because of this return type at 71..79)
         "#]],
     );
 }
@@ -4962,14 +4960,14 @@ fn generic_type_name_is_not_a_value() {
 #[test]
 fn kind_mismatches_on_a_generic_type_mention() {
     check_diagnostics(
-        "type Buf = struct::<T, const N: usize> { x: T };\n\
-         static main = fn () { let b: Buf::<8, usize> = Buf::<8, usize>(struct { x: 1 }); };",
+        "type Buf = struct::<T, const N: usize> { x: T };\n\\\n         static main = fn () { let b: Buf::<8, usize> = Buf::<8, usize>(struct { x = 1 }); };",
         expect![[r#"
-            84..85: `T` is a type parameter; write a type
-            87..92: `N` is a const parameter; write a value (a literal, or `const <expr>`)
-            96..111: `T` is a type parameter; write a type
-            96..111: `N` is a const parameter; write a value (a literal, or `const <expr>`)
-            102..103: cannot infer the type of this number: it has no defining use — add a type annotation
+            49..50: unexpected character `\`
+            95..96: `T` is a type parameter; write a type
+            98..103: `N` is a const parameter; write a value (a literal, or `const <expr>`)
+            107..122: `T` is a type parameter; write a type
+            107..122: `N` is a const parameter; write a value (a literal, or `const <expr>`)
+            113..114: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -4989,7 +4987,7 @@ fn generic_mention_in_a_declaration_field_mirrors_lowering() {
         "type Pair = struct::<T> { a: T, b: T };\n\
          type Holder = struct { p: Pair };",
         expect![[r#"
-            66..70: `Pair` takes 1 generic argument, found 0
+            66..70: `Pair` takes 1 generic argument, found 0 (declared here at 5..9)
         "#]],
     );
     // A hole arg has nothing to infer from in a declaration.
@@ -5068,10 +5066,10 @@ fn addr_of_mut_requires_a_mut_root() {
 #[test]
 fn addr_of_mut_of_a_field_blames_the_root() {
     check_diagnostics(
-        "static main = fn { let r = struct { a: 1 }; let p = &raw mut r.a; };",
+        "static main = fn { let r = struct { a = 1 }; let p = &raw mut r.a; };",
         expect![[r#"
-            39..40: cannot infer the type of this number: it has no defining use — add a type annotation
-            61..62: cannot take `&raw mut` of `r.a`: `r` is not declared `mut` (`r` is declared without `mut` here at 23..24)
+            40..41: cannot infer the type of this number: it has no defining use — add a type annotation
+            62..63: cannot take `&raw mut` of `r.a`: `r` is not declared `mut` (`r` is declared without `mut` here at 23..24)
         "#]],
     );
 }
@@ -5150,14 +5148,14 @@ fn addr_of_mut_through_a_shared_pointer_errors() {
     check_diagnostics(
         r#"
 static main = fn {
-    let mut r = struct { a: 1 };
+    let mut r = struct { a = 1 };
     let p = &raw r;
     let q = unsafe { &raw mut p.*.a };
 };
 "#,
         expect![[r#"
-            48..49: cannot infer the type of this number: it has no defining use — add a type annotation
-            94..108: cannot take `&raw mut` through `&raw struct { a: {number} }`: minting a mutating address needs a `&raw mut` pointer
+            49..50: cannot infer the type of this number: it has no defining use — add a type annotation
+            95..109: cannot take `&raw mut` through `&raw struct { a: {number} }`: minting a mutating address needs a `&raw mut` pointer
         "#]],
     );
 }
@@ -5167,13 +5165,13 @@ fn addr_of_shared_through_any_pointer_is_fine() {
     check_diagnostics(
         r#"
 static main = fn {
-    let mut r = struct { a: 1 };
+    let mut r = struct { a = 1 };
     let p = &raw r;
     let q = unsafe { &raw p.*.a };
 };
 "#,
         expect![[r#"
-            48..49: cannot infer the type of this number: it has no defining use — add a type annotation
+            49..50: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -5183,28 +5181,28 @@ fn addr_of_through_a_deref_types_as_the_projected_pointee() {
     check_infer(
         r#"
 static main = fn {
-    let mut r = struct { a: 1, b: 2 };
+    let mut r = struct { a = 1, b = 2 };
     let p = &raw mut r;
     let q = unsafe { &raw mut p.*.a };
 };
 "#,
         expect![[r#"
-            15..123 'fn {     let mut ...': fn()
-            18..123 '{     let mut r =...': ()
+            15..125 'fn {     let mut ...': fn()
+            18..125 '{     let mut r =...': ()
             32..33 'r': struct { a: {number}, b: {number} }
-            36..57 'struct { a: 1, b:...': struct { a: {number}, b: {number} }
-            48..49 '1': {number}
-            54..55 '2': {number}
-            67..68 'p': &raw mut struct { a: {number}, b: {number} }
-            71..81 '&raw mut r': &raw mut struct { a: {number}, b: {number} }
-            80..81 'r': struct { a: {number}, b: {number} }
-            91..92 'q': &raw mut {number}
-            95..120 'unsafe { &raw mut...': &raw mut {number}
-            102..120 '{ &raw mut p.*.a }': &raw mut {number}
-            104..118 '&raw mut p.*.a': &raw mut {number}
-            113..114 'p': &raw mut struct { a: {number}, b: {number} }
-            113..116 'p.*': struct { a: {number}, b: {number} }
-            113..118 'p.*.a': {number}
+            36..59 'struct { a = 1, b...': struct { a: {number}, b: {number} }
+            49..50 '1': {number}
+            56..57 '2': {number}
+            69..70 'p': &raw mut struct { a: {number}, b: {number} }
+            73..83 '&raw mut r': &raw mut struct { a: {number}, b: {number} }
+            82..83 'r': struct { a: {number}, b: {number} }
+            93..94 'q': &raw mut {number}
+            97..122 'unsafe { &raw mut...': &raw mut {number}
+            104..122 '{ &raw mut p.*.a }': &raw mut {number}
+            106..120 '&raw mut p.*.a': &raw mut {number}
+            115..116 'p': &raw mut struct { a: {number}, b: {number} }
+            115..118 'p.*': struct { a: {number}, b: {number} }
+            115..120 'p.*.a': {number}
         "#]],
     );
 }
@@ -5252,9 +5250,9 @@ fn deref_write_through_a_shared_pointer_errors() {
 #[test]
 fn deref_write_into_a_pointee_field_works() {
     check_diagnostics(
-        "static main = fn { let mut r = struct { a: 1 }; let p = &raw mut r; unsafe { p.*.a = 2; } };",
+        "static main = fn { let mut r = struct { a = 1 }; let p = &raw mut r; unsafe { p.*.a = 2; } };",
         expect![[r#"
-            43..44: cannot infer the type of this number: it has no defining use — add a type annotation
+            44..45: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -5264,10 +5262,10 @@ fn deref_write_into_a_pointee_field_through_a_shared_pointer_errors() {
     // The chain's outermost deref governs: `p` is shared, so the write is
     // refused at the pointer's flavor — same message as `p.* = v;`.
     check_diagnostics(
-        "static main = fn { let mut r = struct { a: 1 }; let p = &raw r; unsafe { p.*.a = 2; } };",
+        "static main = fn { let mut r = struct { a = 1 }; let p = &raw r; unsafe { p.*.a = 2; } };",
         expect![[r#"
-            43..44: cannot infer the type of this number: it has no defining use — add a type annotation
-            73..76: cannot assign through `&raw struct { a: {number} }`: writing needs a `&raw mut` pointer
+            44..45: cannot infer the type of this number: it has no defining use — add a type annotation
+            74..77: cannot assign through `&raw struct { a: {number} }`: writing needs a `&raw mut` pointer
         "#]],
     );
 }
@@ -5275,10 +5273,10 @@ fn deref_write_into_a_pointee_field_through_a_shared_pointer_errors() {
 #[test]
 fn deref_write_into_a_pointee_field_still_requires_unsafe() {
     check_diagnostics(
-        "static main = fn { let mut r = struct { a: 1 }; let p = &raw mut r; p.*.a = 2; };",
+        "static main = fn { let mut r = struct { a = 1 }; let p = &raw mut r; p.*.a = 2; };",
         expect![[r#"
-            43..44: cannot infer the type of this number: it has no defining use — add a type annotation
-            68..71: dereferencing a raw pointer requires an `unsafe { ... }` block
+            44..45: cannot infer the type of this number: it has no defining use — add a type annotation
+            69..72: dereferencing a raw pointer requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -5288,9 +5286,9 @@ fn deref_write_needs_no_mut_binding_on_the_pointer() {
     // `p` itself is not `mut` — writing through it does not reassign it,
     // for projected targets exactly like for `p.* = v;`.
     check_diagnostics(
-        "static main = fn { let mut r = struct { a: 1 }; let p = &raw mut r; unsafe { p.*.a = 2; }; let x = p; };",
+        "static main = fn { let mut r = struct { a = 1 }; let p = &raw mut r; unsafe { p.*.a = 2; }; let x = p; };",
         expect![[r#"
-            43..44: cannot infer the type of this number: it has no defining use — add a type annotation
+            44..45: cannot infer the type of this number: it has no defining use — add a type annotation
         "#]],
     );
 }
@@ -5298,7 +5296,7 @@ fn deref_write_needs_no_mut_binding_on_the_pointer() {
 #[test]
 fn pointee_field_reads_work() {
     check_diagnostics(
-        "static main = fn() -> usize { let mut r = struct { a: 1, b: 2 }; let p = &raw mut r; unsafe { p.*.a + p.*.b } };",
+        "static main = fn() -> usize { let mut r = struct { a = 1, b = 2 }; let p = &raw mut r; unsafe { p.*.a + p.*.b } };",
         expect![[r#""#]],
     );
 }
@@ -5395,36 +5393,36 @@ fn arrays_in_records_and_records_in_arrays_infer() {
     check_infer(
         r#"
 static f = fn {
-    let r = struct { data: [1, 2], len: 2 };
-    let a: [struct { x: usize }; 2] = [struct { x: 1 }, struct { x: 2 }];
+    let r = struct { data = [1, 2], len = 2 };
+    let a: [struct { x: usize }; 2] = [struct { x = 1 }, struct { x = 2 }];
     let n = r.data[0] + a[1].x;
 };
 "#,
         expect![[r#"
-            12..169 'fn {     let r = ...': fn()
-            15..169 '{     let r = str...': ()
+            12..173 'fn {     let r = ...': fn()
+            15..173 '{     let r = str...': ()
             25..26 'r': struct { data: [usize; 2], len: {number} }
-            29..60 'struct { data: [1...': struct { data: [usize; 2], len: {number} }
-            44..50 '[1, 2]': [usize; 2]
-            45..46 '1': usize
-            48..49 '2': usize
-            57..58 '2': {number}
-            70..71 'a': [struct { x: usize }; 2]
-            100..134 '[struct { x: 1 },...': [struct { x: usize }; 2]
-            101..116 'struct { x: 1 }': struct { x: usize }
-            113..114 '1': usize
-            118..133 'struct { x: 2 }': struct { x: usize }
-            130..131 '2': usize
-            144..145 'n': usize
-            148..149 'r': struct { data: [usize; 2], len: {number} }
-            148..154 'r.data': [usize; 2]
-            148..157 'r.data[0]': usize
-            148..166 'r.data[0] + a[1].x': usize
-            155..156 '0': usize
-            160..161 'a': [struct { x: usize }; 2]
-            160..164 'a[1]': struct { x: usize }
-            160..166 'a[1].x': usize
-            162..163 '1': usize
+            29..62 'struct { data = [...': struct { data: [usize; 2], len: {number} }
+            45..51 '[1, 2]': [usize; 2]
+            46..47 '1': usize
+            49..50 '2': usize
+            59..60 '2': {number}
+            72..73 'a': [struct { x: usize }; 2]
+            102..138 '[struct { x = 1 }...': [struct { x: usize }; 2]
+            103..119 'struct { x = 1 }': struct { x: usize }
+            116..117 '1': usize
+            121..137 'struct { x = 2 }': struct { x: usize }
+            134..135 '2': usize
+            148..149 'n': usize
+            152..153 'r': struct { data: [usize; 2], len: {number} }
+            152..158 'r.data': [usize; 2]
+            152..161 'r.data[0]': usize
+            152..170 'r.data[0] + a[1].x': usize
+            159..160 '0': usize
+            164..165 'a': [struct { x: usize }; 2]
+            164..168 'a[1]': struct { x: usize }
+            164..170 'a[1].x': usize
+            166..167 '1': usize
         "#]],
     );
 }
@@ -5574,7 +5572,7 @@ fn generic_type_with_array_field_end_to_end() {
     check_diagnostics(
         r#"
 type Buf = struct::<const N: usize> { data: [usize; N], len: usize };
-static b = Buf::<2>(struct { data: [1, 2], len: 2 });
+static b = Buf::<2>(struct { data = [1, 2], len = 2 });
 static first = fn (buf: Buf::<2>) -> usize { buf.data[0] };
 "#,
         expect![[r#""#]],
@@ -5745,7 +5743,7 @@ fn type_declaration_with_array_field() {
     check_diagnostics(
         r#"
 type Buf = struct { data: [usize; 2] };
-static b = Buf(struct { data: [1, 2] });
+static b = Buf(struct { data = [1, 2] });
 "#,
         expect![[r#""#]],
     );
@@ -6113,10 +6111,8 @@ type Bad = struct { r: &x };
 "#,
         expect![[r#"
             12..13: cannot infer the type of this number: it has no defining use — add a type annotation
-            35..39: expected a type for field `r`
-            38..39: expected an expression
-            39..40: expected `,`
-            39..40: expected a type for field `x`
+            38..40: references are not supported yet
+            39..40: `x` is not a type
         "#]],
     );
 }
@@ -6148,16 +6144,16 @@ fn user_declarations_shadow_the_builtin_alloc_result() {
         r#"
 type AllocResult = struct { tag: usize };
 static f = fn () -> AllocResult {
-    AllocResult(struct { tag: 1 })
+    AllocResult(struct { tag = 1 })
 };
 "#,
         expect![[r#"
-            54..113 'fn () -> AllocRes...': fn() -> AllocResult
-            75..113 '{     AllocResult...': AllocResult
+            54..114 'fn () -> AllocRes...': fn() -> AllocResult
+            75..114 '{     AllocResult...': AllocResult
             81..92 'AllocResult': fn(struct { tag: usize }) -> AllocResult
-            81..111 'AllocResult(struc...': AllocResult
-            93..110 'struct { tag: 1 }': struct { tag: usize }
-            107..108 '1': usize
+            81..112 'AllocResult(struc...': AllocResult
+            93..111 'struct { tag = 1 }': struct { tag: usize }
+            108..109 '1': usize
         "#]],
     );
 }
@@ -6573,7 +6569,7 @@ fn const_param_declared_with_a_sized_type_checks_literal_range() {
     check_diagnostics(
         r#"
 type Buf = struct::<const N: u8> { len: usize };
-static b: Buf::<300> = Buf::<300>(struct { len: 1 });
+static b: Buf::<300> = Buf::<300>(struct { len = 1 });
 "#,
         expect![[r#"
             66..69: `300` does not fit in `u8`
@@ -6605,6 +6601,86 @@ static f = fn (n: i16) -> str {
 "#,
         expect![[r#"
             37..42: this `match` does not cover every possible `i16`; add a `_` arm
+        "#]],
+    );
+}
+
+// ---- the record-literal equals-defines respell --------------------------
+
+#[test]
+fn record_field_ascription_checks_the_value() {
+    // The spelled-out member production `name: Type = value`: the colon
+    // half is a real annotation — it pins the value's type (a defining use
+    // for the literal) and must itself agree with the field's expected
+    // type.
+    check_infer(
+        r#"
+static a = struct { n: u8 = 10 };
+"#,
+        expect![[r#"
+            12..33 'struct { n: u8 = ...': struct { n: u8 }
+            29..31 '10': u8
+        "#]],
+    );
+}
+
+#[test]
+fn record_field_ascription_mismatch_is_reported() {
+    check_diagnostics(
+        r#"
+static a = struct { n: u8 = "no" };
+"#,
+        expect![[r#"
+            29..33: type mismatch: expected `u8`, found `str`
+        "#]],
+    );
+}
+
+#[test]
+fn record_field_ascription_must_agree_with_the_expected_field() {
+    check_diagnostics(
+        r#"
+type P = struct { n: usize };
+static a = P(struct { n: u8 = 10 });
+"#,
+        expect![[r#"
+            61..63: type mismatch: expected `usize`, found `u8` (expected `usize` because of this field declaration at 19..27)
+        "#]],
+    );
+}
+
+#[test]
+fn construction_field_without_a_value_is_rejected() {
+    check_diagnostics(
+        r#"
+static a: struct { n: usize } = struct { n: usize };
+"#,
+        expect![[r#"
+            42..50: this field has a type but no value; write `name: Type = value` (or `name = value`)
+        "#]],
+    );
+}
+
+#[test]
+fn type_decl_field_with_a_value_is_rejected() {
+    check_diagnostics(
+        r#"
+type P = struct { n: usize = 5 };
+"#,
+        expect![[r#"
+            28..31: a `type` declaration's field declares a type, not a value
+        "#]],
+    );
+}
+
+#[test]
+fn old_colon_construction_spelling_gets_the_targeted_error() {
+    check_diagnostics(
+        r#"
+static a: struct { n: usize } = struct { n: 1 };
+"#,
+        expect![[r#"
+            45..46: record fields are defined with `=` (`name = value`); `:` annotates a type
         "#]],
     );
 }
