@@ -3387,21 +3387,29 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 self.return_targets.pop();
                 self.loop_sinks = saved_loops;
                 self.scope_depth -= 1;
+                // The literal's own signature is checked against its
+                // context HERE — before any diverging-body default, and
+                // returning early exactly as the `Match` arm does — so a
+                // written slot (`let f: fn() -> usize = fn { panic("x") };`)
+                // gets first say: the structural unify below binds a still-
+                // free `ret` to the slot's return type when there is one.
+                let fn_ty = Ty::fn_type(param_tys, ret.clone());
+                let fn_ty = self.check(expr, fn_ty, expected, cause);
+                self.result.type_of_expr.insert(expr, fn_ty.clone());
                 // `check`'s `!`-coerces-to-anything shortcut leaves a still-
-                // free `expected` unbound rather than pinning it to `!`
+                // free expectation unbound rather than pinning it to `!`
                 // (right, in general: a witness that happens to diverge must
-                // not force a join's other branches to `!` too) — but an
-                // UNANNOTATED `ret` has exactly one determiner, this body, so
-                // leaving it unbound here resolves to `{error}`
-                // (needs-annotation) even though the body's divergence is a
-                // perfectly good answer. Pin it explicitly, only when `ret`
-                // is still free: an annotated `ret` is a concrete type by
-                // construction (`lower_type_ref` mints no variables) and
-                // stays exactly that even when the body diverges.
+                // not force a join's other branches to `!` too), and the
+                // slot check just above may already have bound `ret` to
+                // whatever the context demanded. Only when NEITHER
+                // determined it — `ret` is still genuinely free — does the
+                // body's own divergence become the answer: a body that
+                // never completes says nothing about what the function
+                // produces, so `!` is the honest one.
                 if matches!(self.resolve_shallow(&ret), Ty::Infer(_)) {
                     self.unify(&ret, &body_ty);
                 }
-                Ty::fn_type(param_tys, ret)
+                return fn_ty;
             }
             ExprData::Match { scrutinee, arms } => {
                 return self.infer_match(expr, *scrutinee, arms, sink, expected, cause);

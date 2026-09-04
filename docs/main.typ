@@ -666,6 +666,19 @@ being inferred, `return e` pins it exactly as a tail expression would, so
 an un-annotated `fn (c: bool) { if c { return "yes"; }; "no" }` is
 `fn(bool) -> str`.
 
+A body that never completes at all pins nothing, so an un-annotated one
+gets `!`: `fn { panic("boom") }` and `fn { loop { } }` are both
+`fn() -> !`, callable from anywhere with no annotation to write and
+usable wherever `!` widens. This is a default: a written slot the literal
+is checked against (an annotation, an outer `let`/`static` type) gets
+first say, so `let f: fn() -> usize = fn { panic(..) }` is
+`fn() -> usize`, with the body's `!` coercing at the tail — only when
+nothing pins it does the body's own divergence become the answer. An item
+with no such slot of its own still concludes `!`, and that conclusion is
+exactly as fixed as any other return type: `fn() -> T` is invariant (no
+subtyping anywhere), so nothing widens it later on someone else's
+say-so.
+
 `return` targets the *nearest enclosing function literal*, and function
 literals bound it the way they bound everything else: a `return` inside a
 `fn` nested in another function returns from the inner literal, leaving

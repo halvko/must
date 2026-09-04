@@ -48,6 +48,12 @@
   types: unresolved branches abstain, all-free ties tie together, a family tie recovers with
   the first witness.
 - **T13** All generic positions are invariant; no subtyping anywhere.
+- **T14** An unannotated fn body that diverges concludes `!` — the body's own conclusion, the
+  same way `let x = panic(..)` makes `x: !`. A written slot the literal is checked against
+  wins: `let f: fn() -> usize = fn { panic(..) }` is `fn() -> usize`, the body's `!` coercing
+  at the tail. `Never` coerces to anything on the actual side, but an item's own so-concluded
+  signature is as fixed as any other (T13: `fn() -> T` is invariant, so `!` in return position
+  never widens to something else on a later use's say-so).
 - **T15** `str` is a primitive; `Vec`, `String` and `Slice` are library types, and slices
   are not primitive. Interpolation is a library feature.
 

@@ -880,6 +880,118 @@ static f = fn {
     );
 }
 
+// ---- T14: an unannotated diverging fn body concludes `!` -------------
+
+#[test]
+fn a_diverging_body_is_callable_across_items_without_an_annotation() {
+    // Before this default, `boom`'s return type stayed an unpinned
+    // variable, group inference erased it to `{error}`, and every
+    // cross-item use demanded an annotation the author had nothing useful
+    // to write in. `!` is what the body actually means.
+    check_diagnostics(
+        r#"
+static boom = fn () { panic("boom") };
+static use_it = fn () -> usize { boom() };
+static main = fn () { boom(); };
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn a_diverging_bodys_value_is_usable_wherever_never_coerces() {
+    // The default is `!`, not a fresh opaque type: the call's value flows
+    // into a `usize` position (and any other) by the ordinary `!` coercion.
+    check_infer(
+        r#"
+static forever = fn () { loop { } };
+static n: usize = 1;
+static pick = fn (c: bool) -> usize { if c { 1 } else { forever() } };
+"#,
+        expect![[r#"
+            18..36 'fn () { loop { } }': fn() -> !
+            24..36 '{ loop { } }': !
+            26..34 'loop { }': !
+            31..34 '{ }': ()
+            56..57 '1': usize
+            73..128 'fn (c: bool) -> u...': fn(bool) -> usize
+            77..78 'c': bool
+            95..128 '{ if c { 1 } else...': usize
+            97..126 'if c { 1 } else {...': usize
+            100..101 'c': bool
+            102..107 '{ 1 }': usize
+            104..105 '1': usize
+            113..126 '{ forever() }': !
+            115..122 'forever': fn() -> !
+            115..124 'forever()': !
+        "#]],
+    );
+}
+
+#[test]
+fn a_diverging_body_pinned_by_its_own_return_keeps_that_type() {
+    // A `return e` inside the body IS a real constraint, so the default
+    // yields to it even though the body diverges — and the number
+    // discipline is untouched: the literal still needs a defining use.
+    check_diagnostics(
+        r#"
+static f = fn (c: bool) { if c { return 1; }; panic("x") };
+"#,
+        expect![[r#"
+            41..42: cannot infer the type of this number: it has no defining use — add a type annotation
+        "#]],
+    );
+}
+
+#[test]
+fn an_annotated_slot_around_a_diverging_body_is_not_pinned_to_never() {
+    // The default fires only where `ret` ends GENUINELY free: an item-level
+    // annotated slot is checked against the literal before any diverging-
+    // body default is considered, so the body's own `!` coerces at the
+    // tail instead of being forced onto the signature. Without checking
+    // the slot first, this used to report
+    // "expected `fn() -> usize`, found `fn() -> !`".
+    check_diagnostics(
+        r#"
+static f: fn() -> usize = fn () { panic("x") };
+static use_it = fn () { let n: usize = f(); };
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn an_annotated_let_binding_around_a_diverging_literal_is_not_pinned_to_never() {
+    // Same guard, `let`-annotated rather than item-annotated.
+    check_diagnostics(
+        r#"
+static use_it = fn () {
+    let f: fn() -> usize = fn () { panic("x") };
+    let n: usize = f();
+};
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn a_diverging_items_own_signature_beats_a_later_annotated_use() {
+    // T13: `fn() -> T` is invariant in `T`, so a `!` in return position
+    // does not widen to `usize` just because a later use wants it there.
+    // `diverges` has no annotation of its own, so ITS signature defaults
+    // to `fn() -> !`; `pin_it`'s annotation disagrees with that, honestly
+    // — the same mismatch a hand-written `fn() -> !` would draw.
+    check_diagnostics(
+        r#"
+static diverges = fn () { panic("x") };
+static pin_it = fn () { let f: fn() -> usize = diverges; f() };
+"#,
+        expect![[r#"
+            88..96: type mismatch: expected `fn() -> usize`, found `fn() -> !` (expected `fn() -> usize` because of this annotation at 72..85)
+        "#]],
+    );
+}
+
 #[test]
 fn if_is_an_expression_and_branches_must_agree() {
     check_infer(
@@ -3290,6 +3402,9 @@ static sum = fn () -> usize {
 
 #[test]
 fn breakless_loop_types_never() {
+    // …and so does the fn around it: the body diverges and nothing ever
+    // said what `f` produces, so the return type defaults to `!` instead
+    // of staying an unpinned `_`.
     check_infer(
         "static f = fn { loop { } };",
         expect![[r#"
