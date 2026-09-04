@@ -9,6 +9,7 @@
 //! document it edited — diagnostics cancelled by another document's edit
 //! stay stale until that document changes again.
 
+pub mod check;
 pub mod dap;
 mod from_proto;
 mod pool;

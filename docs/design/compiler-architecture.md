@@ -25,8 +25,8 @@
 - **X09** The interpreter is an oracle, not a spec. A detected-UB stop is a property of the
   interpreter, never a guarantee of the language; compiled Must may do anything with the same
   program.
-- **X16** Diagnostics have no stable codes. A severity word, free text and a caret are the
-  whole contract.
+- **X16** Diagnostics have no stable codes. A severity word, free text and a caret are the whole
+  contract. Warnings never affect exit status.
 
 ## Discarded
 

@@ -2,10 +2,14 @@ use tracing_subscriber::EnvFilter;
 
 fn main() -> must_lsp::ServerResult<()> {
     // `must-lsp run file.must [-e EXPR]` evaluates instead of serving;
+    // `must-lsp check file.must ...` prints diagnostics as text;
     // `must-lsp dap` speaks the Debug Adapter Protocol over stdio.
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("run") {
         std::process::exit(run_command(&args[1..]));
+    }
+    if args.first().map(String::as_str) == Some("check") {
+        std::process::exit(must_lsp::check::check(&args[1..]));
     }
     if args.first().map(String::as_str) == Some("dap") {
         let stdin = std::io::stdin();
