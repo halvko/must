@@ -22,7 +22,7 @@
 //! that match it say who voted for it.
 
 use ena::unify::InPlaceUnificationTable;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use crate::body::{BindingId, ExprId};
 use crate::infer::InferenceDiagnostic;
@@ -93,6 +93,15 @@ pub(crate) struct Join {
     /// The joining construct as a whole (the `if` expression). Blamed when
     /// the witnesses agree with each other but contradict an axiom.
     pub expr: ExprId,
+    /// The function literal this join sits in (`None` for joins directly in
+    /// the item's initializer). A function is a unit: it must be internally
+    /// consistent on its own, so flattened voting and delegation stop at
+    /// this boundary — from outside, the whole function is one witness.
+    pub scope: Option<ExprId>,
+    /// Function-literal nesting depth of `scope`. Inner functions solve
+    /// before their enclosing scope, so a function's type is settled
+    /// internally before any outer join consumes it.
+    pub depth: usize,
     /// A fresh variable standing for the join's type. Axioms reaching it
     /// during traversal decide the expected type before the witnesses are
     /// judged against each other.
@@ -182,29 +191,28 @@ impl Constraints {
 
     /// Solve all deferred joins, emitting blame-attributed diagnostics.
     ///
-    /// Joins are processed outermost-first (reverse push order: a nested
-    /// `if` is pushed while its parent's branch is being inferred). When an
-    /// outer join decides its type and a disagreeing witness is itself an
-    /// unsolved join, the expectation — and the causes explaining it — is
-    /// delegated inward, so blame lands on the innermost disagreeing
-    /// expression.
+    /// Inner functions solve before their enclosing scope: a function must
+    /// be internally consistent on its own, so its joins settle among
+    /// themselves before any outer join consumes the function's type — an
+    /// internal inconsistency is never resolved by how the function is
+    /// used. Within one scope, joins are processed outermost-first (reverse
+    /// push order: a nested `if` is pushed while its parent's branch is
+    /// being inferred); when an outer join decides its type and a
+    /// disagreeing witness is itself an unsolved join, the expectation —
+    /// and the causes explaining it — is delegated inward, so blame lands
+    /// on the innermost disagreeing expression.
     pub(crate) fn solve(
         &mut self,
         table: &mut InPlaceUnificationTable<TyVar>,
     ) -> Vec<InferenceDiagnostic> {
         let joins = std::mem::take(&mut self.joins);
-        // Result vars of unsolved joins: a disagreeing witness with such a
-        // type is delegated to, not blamed.
-        let join_results: FxHashSet<TyVar> = joins
-            .iter()
-            .filter_map(|join| match &join.result {
-                Ty::Infer(var) => Some(table.find(*var)),
-                _ => None,
-            })
-            .collect();
+        let mut order: Vec<usize> = (0..joins.len()).collect();
+        order.sort_by_key(|&i| (std::cmp::Reverse(joins[i].depth), std::cmp::Reverse(i)));
+        let mut solved = vec![false; joins.len()];
         let mut diagnostics = Vec::new();
-        for join in joins.iter().rev() {
-            self.solve_join(join, &join_results, table, &mut diagnostics);
+        for i in order {
+            solved[i] = true;
+            self.solve_join(&joins[i], &joins, &solved, table, &mut diagnostics);
         }
         diagnostics
     }
@@ -212,7 +220,8 @@ impl Constraints {
     fn solve_join(
         &mut self,
         join: &Join,
-        join_results: &FxHashSet<TyVar>,
+        joins: &[Join],
+        solved: &[bool],
         table: &mut InPlaceUnificationTable<TyVar>,
         diagnostics: &mut Vec<InferenceDiagnostic>,
     ) {
@@ -225,25 +234,25 @@ impl Constraints {
                 }
                 return;
             }
-            // No axiom constrained the result: the witnesses vote. Votes are
-            // per-join — a nested join delegates rather than flattening its
-            // witnesses into the parent's vote, so a deep plurality can lose
-            // to a shallow one; acceptable until a construct with more than
-            // two branches exists.
+            // No axiom constrained the result: the branches vote. The vote
+            // is flattened — every leaf branch of nested joins in the same
+            // function counts individually, so a plurality of leaves wins
+            // regardless of the nesting shape they arrive in.
             Ty::Infer(_) => {
+                let mut leaves = Vec::new();
+                flatten_leaves(join, joins, solved, table, &mut leaves);
                 let mut tally: Vec<(Ty, usize)> = Vec::new();
-                for witness in &join.witnesses {
-                    let ty = resolve_fully(table, &witness.ty);
+                for (_, ty) in &leaves {
                     if matches!(ty, Ty::Infer(_) | Ty::Error) {
                         continue;
                     }
-                    match tally.iter_mut().find(|(t, _)| *t == ty) {
+                    match tally.iter_mut().find(|(t, _)| t == ty) {
                         Some((_, n)) => *n += 1,
-                        None => tally.push((ty, 1)),
+                        None => tally.push((ty.clone(), 1)),
                     }
                 }
                 let Some(max) = tally.iter().map(|&(_, n)| n).max() else {
-                    // Every witness is still free: tie them together and let
+                    // Every leaf is still free: tie them together and let
                     // downstream axioms (or a caller) decide.
                     for witness in &join.witnesses {
                         self.unify(table, &join.result, &witness.ty, None);
@@ -254,12 +263,19 @@ impl Constraints {
                     // A tie between honest conclusions: neither side is
                     // wrong, so report the disagreement itself and recover
                     // with the first witness so downstream code still checks.
-                    self.push_tie_mismatch(join, table, diagnostics);
+                    push_tie_mismatch(&leaves, diagnostics);
                     self.unify(table, &join.result, &join.witnesses[0].ty, None);
                     return;
                 }
                 let winner = tally.iter().find(|&&(_, n)| n == max).unwrap().0.clone();
-                (winner, Vec::new())
+                // The winning leaves are the causes: "this branch has type
+                // …" hints, wherever in the nesting those leaves sit.
+                let voters = leaves
+                    .iter()
+                    .filter(|(_, ty)| *ty == winner)
+                    .map(|&(blame, _)| Cause::Branch(blame))
+                    .collect();
+                (winner, voters)
             }
             concrete => {
                 let causes = match &join.result {
@@ -284,9 +300,8 @@ impl Constraints {
             match resolve_shallow(table, &witness.ty) {
                 Ty::Error => {}
                 Ty::Infer(var) => {
-                    let root = table.find(var);
-                    if join_results.contains(&root) {
-                        delegated.push(root);
+                    if unsolved_nested(join, joins, solved, table, var).is_some() {
+                        delegated.push(table.find(var));
                     }
                     self.unify(table, &witness.ty, &expected, None);
                 }
@@ -340,29 +355,69 @@ impl Constraints {
         }
         self.unify(table, &join.result, &expected, None);
     }
+}
 
-    /// The tie diagnostic: the first witness against the first one that
-    /// concretely disagrees with it (for an `if` that is then vs. else).
-    fn push_tie_mismatch(
-        &mut self,
-        join: &Join,
-        table: &mut InPlaceUnificationTable<TyVar>,
-        diagnostics: &mut Vec<InferenceDiagnostic>,
-    ) {
-        let first = &join.witnesses[0];
-        let first_ty = resolve_fully(table, &first.ty);
-        let conflicting = join.witnesses[1..].iter().find(|witness| {
-            let ty = resolve_fully(table, &witness.ty);
-            !matches!(ty, Ty::Infer(_) | Ty::Error) && ty != first_ty
-        });
-        if let Some(other) = conflicting {
-            diagnostics.push(InferenceDiagnostic::IfBranchMismatch {
-                else_expr: other.blame,
-                then_expr: first.blame,
-                then_ty: first_ty,
-                else_ty: resolve_fully(table, &other.ty),
-            });
+/// The witnesses of `join` with unsolved same-scope nested joins expanded
+/// into their own witnesses, recursively: the individual leaf branches that
+/// vote. Types come out fully resolved. Function boundaries are opaque —
+/// a nested join in another scope was already solved (or is deliberately
+/// left free), so it resolves like any other witness.
+fn flatten_leaves(
+    join: &Join,
+    joins: &[Join],
+    solved: &[bool],
+    table: &mut InPlaceUnificationTable<TyVar>,
+    leaves: &mut Vec<(ExprId, Ty)>,
+) {
+    for witness in &join.witnesses {
+        let ty = resolve_fully(table, &witness.ty);
+        if let Ty::Infer(var) = ty
+            && let Some(nested) = unsolved_nested(join, joins, solved, table, var)
+        {
+            flatten_leaves(nested, joins, solved, table, leaves);
+            continue;
         }
+        leaves.push((witness.blame, ty));
+    }
+}
+
+/// The unsolved join in the same scope as `join` whose result is `var`, if
+/// any: a witness of that type is a nested join to flatten into the vote or
+/// delegate the expectation to, not a leaf to judge.
+fn unsolved_nested<'j>(
+    join: &Join,
+    joins: &'j [Join],
+    solved: &[bool],
+    table: &mut InPlaceUnificationTable<TyVar>,
+    var: TyVar,
+) -> Option<&'j Join> {
+    let root = table.find(var);
+    joins.iter().enumerate().find_map(|(i, other)| {
+        if solved[i] || other.scope != join.scope {
+            return None;
+        }
+        match &other.result {
+            Ty::Infer(v) if table.find(*v) == root => Some(other),
+            _ => None,
+        }
+    })
+}
+
+/// The tie diagnostic: the first leaf against the first one that concretely
+/// disagrees with it (for a plain `if` that is then vs. else).
+fn push_tie_mismatch(leaves: &[(ExprId, Ty)], diagnostics: &mut Vec<InferenceDiagnostic>) {
+    let concrete = |ty: &Ty| !matches!(ty, Ty::Infer(_) | Ty::Error);
+    let Some((first, first_ty)) = leaves.iter().find(|(_, ty)| concrete(ty)) else {
+        return;
+    };
+    let conflicting = leaves.iter().find(|(_, ty)| concrete(ty) && ty != first_ty);
+    if let Some((other, other_ty)) = conflicting {
+        diagnostics.push(InferenceDiagnostic::IfBranchMismatch {
+            else_expr: *other,
+            then_expr: *first,
+            then_ty: first_ty.clone(),
+            else_ty: other_ty.clone(),
+        });
     }
 }
 
@@ -370,13 +425,19 @@ impl Constraints {
 /// expected type it is the whole story: siblings that agree with it are
 /// coincidence, not causes — they would be rejected too if they disagreed.
 /// Only when the witnesses themselves decided (a vote, or a delegating
-/// outer vote) are the agreeing siblings the explanation.
+/// outer vote) are the agreeing siblings the explanation. Deduplicated:
+/// a witness can be both a direct sibling and a voting leaf.
 fn compose_reasons(expected_causes: &[Cause], siblings: &[Cause]) -> Vec<Cause> {
     if expected_causes.iter().any(|cause| cause.is_axiom()) {
-        expected_causes.to_vec()
-    } else {
-        siblings.iter().chain(expected_causes).copied().collect()
+        return expected_causes.to_vec();
     }
+    let mut reasons: Vec<Cause> = Vec::new();
+    for &cause in siblings.iter().chain(expected_causes) {
+        if !reasons.contains(&cause) {
+            reasons.push(cause);
+        }
+    }
+    reasons
 }
 
 pub(crate) fn resolve_shallow(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty) -> Ty {

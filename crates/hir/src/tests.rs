@@ -827,7 +827,7 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            69..74: `if` branches have incompatible types: `usize` vs `str` (this branch has type `usize` at 58..59)
+            69..74: `if` branches have incompatible types: `usize` vs `str`; add a type annotation to decide between them (this branch has type `usize` at 58..59)
         "#]],
     );
 }
@@ -959,6 +959,63 @@ static f = fn (n: usize) -> () {
 "#,
         expect![[r#"
             82..83: type mismatch: expected `str`, found `usize` (this branch has type `str` at 93..95) (this branch has type `str` at 58..60)
+        "#]],
+    );
+}
+
+#[test]
+fn nested_branches_vote_individually() {
+    // The vote flattens across nested `if`s in the same function: the two
+    // `0` leaves outvote the single `""` two to one, even though the `""`
+    // sits shallower. The odd one out gets the squiggle; every winning
+    // leaf is a hint.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> () {
+    let x = if n == 0 { if n == 0 { 0 } else { 0 } } else { "" };
+    print("done");
+}
+"#,
+        expect![[r#"
+            94..96: type mismatch: expected `usize`, found `str` (this branch has type `usize` at 70..71) (this branch has type `usize` at 81..82)
+        "#]],
+    );
+}
+
+#[test]
+fn fn_literal_votes_once_as_a_unit() {
+    // Wrapping the nested `if` in a function changes the vote: the
+    // function settles its type internally (`usize`, unanimously) and
+    // contributes exactly one vote outside — a genuine tie with `""`.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> () {
+    let x = if n == 0 { fn { if true { 0 } else { 0 } }() } else { "" };
+    print("done");
+}
+"#,
+        expect![[r#"
+            101..103: `if` branches have incompatible types: `usize` vs `str`; add a type annotation to decide between them (this branch has type `usize` at 58..91)
+        "#]],
+    );
+}
+
+#[test]
+fn fn_internal_inconsistency_not_resolved_by_use() {
+    // The function's branches disagree with each other; the annotation on
+    // `x` must not settle that argument from outside — a function has to
+    // be internally consistent on its own. The tie is reported inside the
+    // function, and the conflicting use at the call, as a unit.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> () {
+    let x: str = if n == 0 { fn { if true { 0 } else { "" } }() } else { "s" };
+    print(x);
+}
+"#,
+        expect![[r#"
+            63..97: type mismatch: expected `str`, found `usize` (expected `str` because of this annotation at 45..48)
+            89..91: `if` branches have incompatible types: `usize` vs `str`; add a type annotation to decide between them (this branch has type `usize` at 78..79)
         "#]],
     );
 }

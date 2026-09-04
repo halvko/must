@@ -121,7 +121,8 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::IfBranchMismatch {
                 then_ty, else_ty, ..
             } => format!(
-                "`if` branches have incompatible types: `{}` vs `{}`",
+                "`if` branches have incompatible types: `{}` vs `{}`; \
+                 add a type annotation to decide between them",
                 then_ty.display(),
                 else_ty.display()
             ),
@@ -181,6 +182,11 @@ pub(crate) struct InferCtx<'a, 'db> {
     in_group: &'a FxHashMap<ItemLoc, Ty>,
     /// Deferred joins and cause provenance, solved by [`InferCtx::solve`].
     constraints: Constraints,
+    /// The function literal currently being traversed (`None` at the item
+    /// initializer's top level) and its nesting depth: joins are tagged
+    /// with these so the solver treats each function as a unit.
+    scope: Option<ExprId>,
+    scope_depth: usize,
 }
 
 impl<'a, 'db> InferCtx<'a, 'db> {
@@ -199,6 +205,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             result: InferenceResult::default(),
             in_group,
             constraints: Constraints::default(),
+            scope: None,
+            scope_depth: 0,
         }
     }
 
@@ -458,6 +466,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     let result_ty = self.fresh_var();
                     self.constraints.push_join(Join {
                         expr,
+                        scope: self.scope,
+                        depth: self.scope_depth,
                         result: result_ty.clone(),
                         witnesses: vec![
                             Witness {
@@ -525,7 +535,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     None => self.fresh_var(),
                 };
                 let ret_cause = ret_type.is_some().then_some(Cause::ReturnAnnotation(expr));
+                // The body's joins belong to this function's scope: the
+                // function is a unit that must be internally consistent, so
+                // they solve before — and never flatten into — any join
+                // outside it.
+                let outer = self.scope.replace(expr);
+                self.scope_depth += 1;
                 self.infer_expr_with(*fn_body, &ret, ret_cause);
+                self.scope_depth -= 1;
+                self.scope = outer;
                 Ty::fn_type(param_tys, ret)
             }
         };
