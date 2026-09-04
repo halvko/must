@@ -1031,7 +1031,7 @@ static f = fn (n: usize) -> () {
 fn plurality_of_branches_decides_without_any_axiom() {
     // No annotation and no use constrains `x`: the branches vote, the
     // `str` plurality wins, and the odd one out gets the squiggle with
-    // every winning branch as a hint.
+    // every winning leaf as a hint, in source order.
     check_diagnostics(
         r#"
 static f = fn (n: usize) -> () {
@@ -1040,7 +1040,7 @@ static f = fn (n: usize) -> () {
 }
 "#,
         expect![[r#"
-            82..83: type mismatch: expected `str`, found `usize` (this branch has type `str` at 93..95) (this branch has type `str` at 58..60)
+            82..83: type mismatch: expected `str`, found `usize` (this branch has type `str` at 58..60) (this branch has type `str` at 93..95)
         "#]],
     );
 }
@@ -1060,6 +1060,196 @@ static f = fn (n: usize) -> () {
 "#,
         expect![[r#"
             94..96: type mismatch: expected `usize`, found `str` (this branch has type `usize` at 70..71) (this branch has type `usize` at 81..82)
+        "#]],
+    );
+}
+
+#[test]
+fn nested_join_resolves_once_at_the_annotation() {
+    // A nest of `if`s is ONE join with witnesses {leaf, leaf, leaf},
+    // resolved at the `let`'s annotation (the axiom): exactly one
+    // diagnostic, on the offending leaf, citing the annotation — never an
+    // intermediate "the inner if has type …" step. Variants: the culprit in
+    // the inner-then, inner-else, and outer-else slots.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> () {
+    let x: str = if n == 0 { if n == 1 { 0 } else { "a" } } else { "b" };
+    print(x);
+}
+"#,
+        expect![[r#"
+            75..76: type mismatch: expected `str`, found `usize` (expected `str` because of this annotation at 45..48)
+        "#]],
+    );
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> () {
+    let x: str = if n == 0 { if n == 1 { "a" } else { 0 } } else { "b" };
+    print(x);
+}
+"#,
+        expect![[r#"
+            88..89: type mismatch: expected `str`, found `usize` (expected `str` because of this annotation at 45..48)
+        "#]],
+    );
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> () {
+    let x: str = if n == 0 { if n == 1 { "a" } else { "b" } } else { 0 };
+    print(x);
+}
+"#,
+        expect![[r#"
+            103..104: type mismatch: expected `str`, found `usize` (expected `str` because of this annotation at 45..48)
+        "#]],
+    );
+}
+
+#[test]
+fn inner_branches_blamed_individually_never_the_inner_if() {
+    // Both leaves of the *inner* if disagree with the annotation while the
+    // outer-else leaf agrees: each wrong leaf gets its own squiggle citing
+    // the annotation. The inner `if` is not a blame target — there is no
+    // "every branch of the inner if" verdict, because the nest is one join.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> () {
+    let x: usize = if n == 0 { if n == 1 { "a" } else { "b" } } else { 1 };
+    print("done");
+}
+"#,
+        expect![[r#"
+            77..80: type mismatch: expected `usize`, found `str` (expected `usize` because of this annotation at 45..50)
+            90..93: type mismatch: expected `usize`, found `str` (expected `usize` because of this annotation at 45..50)
+        "#]],
+    );
+}
+
+#[test]
+fn nested_leaves_unanimous_against_annotation_blame_the_whole_nest() {
+    // Every leaf across both nesting levels produces `str`: one diagnostic
+    // on the whole (outermost) construct, not per leaf and not on the
+    // inner if.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> () {
+    let x: usize = if n == 0 { if n == 1 { "a" } else { "b" } } else { "c" };
+    print("done");
+}
+"#,
+        expect![[r#"
+            53..110: every branch produces `str`, but `usize` is needed (expected `usize` because of this annotation at 45..50)
+        "#]],
+    );
+}
+
+#[test]
+fn statement_position_if_inside_a_branch_is_its_own_join() {
+    // The inner `if` sits in a branch's *statements* (a `let`), not its
+    // tail: it is statement position, so it resolves as its own join (an
+    // unresolvable tie here) and does not leak its leaves into the outer
+    // join — which is internally consistent and stays clean.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> () {
+    let x = if n == 0 { let y = if n == 1 { 1 } else { "s" }; 2 } else { 3 };
+    print("done");
+}
+"#,
+        expect![[r#"
+            89..92: `if` branches have incompatible types: `usize` vs `str`; add a type annotation to decide between them (this branch has type `usize` at 78..79)
+        "#]],
+    );
+}
+
+#[test]
+fn let_bound_join_resolves_at_its_let_not_inside_a_later_join() {
+    // `x`'s join meets a non-join consumer (the `let`), so it resolves
+    // there — unanimously `usize` — before the second `if` consumes the
+    // binding. The second join then sees {usize, str}: an honest tie, not
+    // a plurality vote over `x`'s leaves.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> () {
+    let x = if n == 0 { 1 } else { 2 };
+    let z = if n == 1 { x } else { "s" };
+    print("done");
+}
+"#,
+        expect![[r#"
+            109..112: `if` branches have incompatible types: `usize` vs `str`; add a type annotation to decide between them (this branch has type `usize` at 98..99)
+        "#]],
+    );
+}
+
+#[test]
+fn call_argument_join_resolves_against_the_parameter_type() {
+    // A call argument is not statement position, but the call boundary
+    // makes the parameter type an axiom: the join resolves against it
+    // right there, blaming the disagreeing leaf and citing the call.
+    check_diagnostics(
+        r#"static f = fn (n: usize) -> () { print(if n == 0 { "s" } else { 1 }); };"#,
+        expect![[r#"
+            64..65: type mismatch: expected `str`, found `usize`
+        "#]],
+    );
+}
+
+#[test]
+fn never_leaf_in_a_nested_if_neither_votes_nor_blocks_flattening() {
+    // A diverging leaf inside the inner if widens (it contributes no
+    // witness) — the flat join judges the surviving leaves {0, "s"}
+    // against the annotation, blaming exactly the `0`, once.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> () {
+    let x: str = if n == 0 { if n == 1 { panic("boom") } else { 0 } } else { "s" };
+    print(x);
+}
+"#,
+        expect![[r#"
+            98..99: type mismatch: expected `str`, found `usize` (expected `str` because of this annotation at 45..48)
+        "#]],
+    );
+    // And when the surviving leaves all agree, the nest is clean.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> () {
+    let x: str = if n == 0 { if n == 1 { panic("boom") } else { "a" } } else { "b" };
+    print(x);
+}
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn hover_on_a_nested_if_shows_the_flat_joins_type() {
+    // Decision: an `if` in witness position types as the enclosing join's
+    // result, so hovering the inner `if` shows the whole nest's resolved
+    // type (`usize`), not a partial verdict of its own.
+    check_infer(
+        r#"static f = fn (n: usize) -> usize { if n == 0 { if n == 1 { 1 } else { 2 } } else { 3 } };"#,
+        expect![[r#"
+            11..89 'fn (n: usize) -> ...': fn(usize) -> usize
+            15..16 'n': usize
+            34..89 '{ if n == 0 { if ...': usize
+            36..87 'if n == 0 { if n ...': usize
+            39..40 'n': usize
+            39..45 'n == 0': bool
+            44..45 '0': usize
+            46..76 '{ if n == 1 { 1 }...': usize
+            48..74 'if n == 1 { 1 } e...': usize
+            51..52 'n': usize
+            51..57 'n == 1': bool
+            56..57 '1': usize
+            58..63 '{ 1 }': usize
+            60..61 '1': usize
+            69..74 '{ 2 }': usize
+            71..72 '2': usize
+            82..87 '{ 3 }': usize
+            84..85 '3': usize
         "#]],
     );
 }

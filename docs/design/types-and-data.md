@@ -12,6 +12,8 @@
 - **T07** Mutability. `let mut` declares a mutable binding; assignment is a statement;
   local mutation inside a const context is fine; `mut` parameters are local copies; an
   assignment the checker rejects traps rather than proceeding.
+- **T10** Joins resolve at statement boundaries, function return included; nested joins
+  flatten to one, and blame treats the nest as one statement.
 - **T11** Inference groups use bidirected edges, not pure SCCs, because higher-order
   functions need their call sites in the same group to constrain type variables.
   Fully-typed items are firewall items, checked once against their own contract and never

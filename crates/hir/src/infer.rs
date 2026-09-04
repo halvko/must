@@ -353,11 +353,33 @@ pub(crate) struct InferCtx<'a, 'db> {
     in_group: &'a FxHashMap<ItemLoc, Ty>,
     /// Deferred joins and cause provenance, solved by [`InferCtx::solve`].
     constraints: Constraints,
-    /// The function literal currently being traversed (`None` at the item
-    /// initializer's top level) and its nesting depth: joins are tagged
-    /// with these so the solver treats each function as a unit.
-    scope: Option<ExprId>,
+    /// Function-literal nesting depth (0 at the item initializer's top
+    /// level): joins are tagged with it so the solver settles each function
+    /// internally before anything outside consumes its type.
     scope_depth: usize,
+    /// Joins being assembled during traversal (LIFO — an inner
+    /// statement-position `if` completes before the construct enclosing
+    /// it). See [`JoinSink`].
+    join_sinks: Vec<JoinSink>,
+    /// The sink the expression currently being inferred contributes to if
+    /// it is a joining construct: `Some` exactly in *witness position* — a
+    /// branch tail of an enclosing `if`, reached through transparent
+    /// wrappers (block tails, `const` blocks). Everywhere else (`let`
+    /// initializers, call arguments, statements, conditions, …) it is
+    /// `None` and an `if` there resolves as its own join.
+    witness_sink: Option<usize>,
+}
+
+/// A join under construction. The root `if` of a nest opens one; every
+/// `if`/`else` reached in witness position below it contributes its leaf
+/// witnesses here instead of forming a join of its own, so the whole nest
+/// resolves as ONE flat join where its value meets a non-join consumer.
+/// Future joining constructs contribute witnesses through the same
+/// mechanism ([`InferCtx::contribute_witness`]).
+struct JoinSink {
+    /// Fresh variable standing for the whole nest's type.
+    result: Ty,
+    witnesses: Vec<Witness>,
 }
 
 impl<'a, 'db> InferCtx<'a, 'db> {
@@ -378,8 +400,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             result: InferenceResult::default(),
             in_group,
             constraints: Constraints::default(),
-            scope: None,
             scope_depth: 0,
+            join_sinks: Vec::new(),
+            witness_sink: None,
         }
     }
 
@@ -459,6 +482,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// expected — recorded when the expectation binds a type variable, and
     /// cited when the check fails outright.
     fn infer_expr_with(&mut self, expr: ExprId, expected: &Ty, cause: Option<Cause>) -> Ty {
+        // A join sink propagates only through transparent wrappers (block
+        // tails, `const` blocks) into an `if`'s witness position. Any other
+        // expression is a leaf of the enclosing join, and its
+        // subexpressions are ordinary non-witness positions — an `if`
+        // inside a call argument or a statement resolves as its own join.
+        let sink = self.witness_sink.take();
         let ty = match &self.body.exprs[expr] {
             ExprData::Missing => Ty::Error,
             ExprData::Literal(LiteralData::Int(_)) => Ty::Int,
@@ -657,41 +686,80 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     self.result.type_of_expr.insert(expr, ty.clone());
                     return ty;
                 };
+                // Statement vs. witness position, decided by `sink`.
+                // Reached through a transparent tail chain from an
+                // enclosing `if`'s branch, this `if` is a witness: its
+                // leaves join the enclosing sink and the whole nest
+                // resolves as one flat join where the outermost `if`'s
+                // value meets a non-join consumer. Anywhere else the join
+                // resolves here: open a fresh sink.
+                let (sink_index, is_root) = match sink {
+                    Some(index) => (index, false),
+                    None => {
+                        let result = self.fresh_var();
+                        self.join_sinks.push(JoinSink {
+                            result,
+                            witnesses: Vec::new(),
+                        });
+                        (self.join_sinks.len() - 1, true)
+                    }
+                };
                 // Each branch gets an independent fresh variable so outer
                 // expectation pressure never leaks in: the branches' honest
                 // types are what the join judges.
                 let then_fresh = self.fresh_var();
+                self.witness_sink = Some(sink_index);
                 let then_ty = self.infer_expr(*then_branch, &then_fresh);
+                self.contribute_witness(sink_index, *then_branch, &then_ty);
                 let else_fresh = self.fresh_var();
+                self.witness_sink = Some(sink_index);
                 let else_ty = self.infer_expr(*else_branch, &else_fresh);
-                // A diverging branch takes the other branch's type.
-                if matches!(self.resolve_shallow(&then_ty), Ty::Never) {
-                    else_ty
-                } else if matches!(self.resolve_shallow(&else_ty), Ty::Never) {
-                    then_ty
+                self.contribute_witness(sink_index, *else_branch, &else_ty);
+                let diverges = matches!(self.resolve_shallow(&then_ty), Ty::Never)
+                    && matches!(self.resolve_shallow(&else_ty), Ty::Never);
+                if !is_root {
+                    // A nested `if` types as the enclosing join's result:
+                    // hover on it shows the whole nest's resolved type —
+                    // there is no intermediate "the inner if has type …"
+                    // verdict of its own.
+                    if diverges {
+                        Ty::Never
+                    } else {
+                        self.join_sinks[sink_index].result.clone()
+                    }
                 } else {
-                    // Branch agreement is a join: deferred so axioms arriving
-                    // later in the traversal (an annotation above, the call
-                    // this feeds into below) pick the winner before the
-                    // branches are played against each other.
-                    let result_ty = self.fresh_var();
-                    self.constraints.push_join(Join {
-                        expr,
-                        scope: self.scope,
-                        depth: self.scope_depth,
-                        result: result_ty.clone(),
-                        witnesses: vec![
-                            Witness {
-                                blame: peel_blocks(self.body, *then_branch),
-                                ty: then_ty,
-                            },
-                            Witness {
-                                blame: peel_blocks(self.body, *else_branch),
-                                ty: else_ty,
-                            },
-                        ],
-                    });
-                    result_ty
+                    let JoinSink { result, witnesses } =
+                        self.join_sinks.pop().expect("sink pushed above");
+                    match witnesses.len() {
+                        // Every leaf diverges: so does the `if`.
+                        0 => {
+                            self.unify(&result, &Ty::Never);
+                            Ty::Never
+                        }
+                        // One surviving leaf (the rest diverged): its type
+                        // is the `if`'s type outright, no agreement left to
+                        // defer. Unified into `result` so nested `if`s that
+                        // routed the leaf here still resolve.
+                        1 => {
+                            let ty = witnesses.into_iter().next().unwrap().ty;
+                            self.unify(&result, &ty);
+                            ty
+                        }
+                        // Leaf agreement is a join: deferred so axioms
+                        // arriving later in the traversal (an annotation
+                        // above, the call this feeds into below) pick the
+                        // winner before the leaves are played against each
+                        // other.
+                        _ => {
+                            self.constraints.push_join(Join {
+                                expr,
+                                depth: self.scope_depth,
+                                result: result.clone(),
+                                witnesses,
+                            });
+                            result
+                        }
+                    }
                 }
             }
             ExprData::Block { stmts, tail } => {
@@ -781,6 +849,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     // Propagate the expectation so mismatches point at the
                     // tail expression, then skip re-checking at block level.
                     Some(tail) => {
+                        // The join sink survives only along the tail chain
+                        // (witness position); the statements above were
+                        // ordinary non-witness positions.
+                        self.witness_sink = sink;
                         let ty = self.infer_expr_with(*tail, expected, cause);
                         self.result.type_of_expr.insert(expr, ty.clone());
                         return ty;
@@ -795,6 +867,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             // early return below), so hover on the `const { ... }` itself
             // shows the right type.
             ExprData::ConstBlock { body: inner } => {
+                // Transparent for the join sink too, matching
+                // `peel_blocks`: an `if` at a `const` block's core is still
+                // in witness position.
+                self.witness_sink = sink;
                 let ty = self.infer_expr_with(*inner, expected, cause);
                 self.result.type_of_expr.insert(expr, ty.clone());
                 return ty;
@@ -968,15 +1044,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     None => self.fresh_var(),
                 };
                 let ret_cause = ret_type.is_some().then_some(Cause::ReturnAnnotation(expr));
-                // The body's joins belong to this function's scope: the
-                // function is a unit that must be internally consistent, so
-                // they solve before — and never flatten into — any join
-                // outside it.
-                let outer = self.scope.replace(expr);
+                // The function is a unit that must be internally
+                // consistent: its joins solve (by depth) before any outer
+                // join consumes its type, and they never flatten into one —
+                // the sink was not restored for the body, so a function
+                // literal in witness position is one opaque leaf and its
+                // body-tail `if` is a root join of its own (the return type
+                // is the boundary the join resolves against).
                 self.scope_depth += 1;
                 self.infer_expr_with(*fn_body, &ret, ret_cause);
                 self.scope_depth -= 1;
-                self.scope = outer;
                 Ty::fn_type(param_tys, ret)
             }
         };
@@ -1031,6 +1108,35 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let ty = self.check(expr, Ty::Named(loc.clone()), expected, cause);
         self.result.type_of_expr.insert(expr, ty.clone());
         ty
+    }
+
+    /// Register the value of a branch as a witness of the join being
+    /// assembled in `sink` — the witness-contribution seam every joining
+    /// construct plugs into.
+    ///
+    /// Two kinds of branch contribute nothing: a diverging branch (it
+    /// doesn't vote, it widens — the join is decided by the surviving
+    /// leaves alone), and a branch whose tail is itself an `if`/`else` (it
+    /// was inferred with this sink as its witness position, so its leaves
+    /// are already in; that's the flattening).
+    fn contribute_witness(&mut self, sink: usize, branch: ExprId, ty: &Ty) {
+        if matches!(self.resolve_shallow(ty), Ty::Never) {
+            return;
+        }
+        let blame = peel_blocks(self.body, branch);
+        if matches!(
+            self.body.exprs[blame],
+            ExprData::If {
+                else_branch: Some(_),
+                ..
+            }
+        ) {
+            return;
+        }
+        self.join_sinks[sink].witnesses.push(Witness {
+            blame,
+            ty: ty.clone(),
+        });
     }
 
     /// Check `actual` against `expected`; on mismatch, report on `expr` and
