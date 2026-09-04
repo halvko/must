@@ -31,6 +31,13 @@ pub(crate) fn text_edit(line_index: &LineIndex, edit: &ide::TextEdit) -> lsp_typ
 /// The legend advertised in the server capabilities. Token-type order must
 /// match [`token_type_index`]; modifier order must match the bit positions
 /// in `ide::HlMods`.
+///
+/// Only STANDARD LSP token types appear here, and new ones are APPENDED —
+/// never inserted, never reordered: a client caches the legend by index, and
+/// standard names are the ones clients know how to fall back on (Zed styles
+/// `interface` as `type.interface`/`interface`/`type` and `typeParameter` as
+/// `type.parameter`/`type`, so an unstyled theme still gets the type color
+/// rather than nothing).
 pub(crate) fn semantic_tokens_legend() -> lsp_types::SemanticTokensLegend {
     use lsp_types::{SemanticTokenModifier, SemanticTokenType};
     lsp_types::SemanticTokensLegend {
@@ -45,6 +52,8 @@ pub(crate) fn semantic_tokens_legend() -> lsp_types::SemanticTokensLegend {
             SemanticTokenType::PARAMETER,
             SemanticTokenType::TYPE,
             SemanticTokenType::ENUM_MEMBER,
+            SemanticTokenType::INTERFACE,
+            SemanticTokenType::TYPE_PARAMETER,
         ],
         token_modifiers: vec![
             SemanticTokenModifier::DECLARATION,
@@ -67,6 +76,8 @@ fn token_type_index(tag: ide::HlTag) -> u32 {
         ide::HlTag::Parameter => 7,
         ide::HlTag::Type => 8,
         ide::HlTag::EnumMember => 9,
+        ide::HlTag::Trait => 10,
+        ide::HlTag::TypeParameter => 11,
     }
 }
 

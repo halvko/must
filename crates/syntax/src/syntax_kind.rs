@@ -153,38 +153,74 @@ impl SyntaxKind {
     pub fn is_trivia(self) -> bool {
         matches!(self, WHITESPACE | COMMENT)
     }
+}
 
-    pub fn from_keyword(ident: &str) -> Option<SyntaxKind> {
-        let kw = match ident {
-            "fn" => FN_KW,
-            "static" => STATIC_KW,
-            "const" => CONST_KW,
-            "type" => TYPE_KW,
-            "struct" => STRUCT_KW,
-            "enum" => ENUM_KW,
-            "let" => LET_KW,
-            "mut" => MUT_KW,
-            "if" => IF_KW,
-            "else" => ELSE_KW,
-            "match" => MATCH_KW,
-            "loop" => LOOP_KW,
-            "break" => BREAK_KW,
-            "continue" => CONTINUE_KW,
-            "true" => TRUE_KW,
-            "false" => FALSE_KW,
-            "as" => AS_KW,
-            "pub" => PUB_KW,
-            "raw" => RAW_KW,
-            "unsafe" => UNSAFE_KW,
-            "with" => WITH_KW,
-            "impl" => IMPL_KW,
-            "for" => FOR_KW,
-            "trait" => TRAIT_KW,
-            "requires" => REQUIRES_KW,
-            _ => return None,
-        };
-        Some(kw)
-    }
+/// Declares the language's keywords ONCE, and derives everything that has to
+/// agree about them from that one list: [`KEYWORDS`] (the table itself),
+/// [`SyntaxKind::from_keyword`] (what the lexer promotes an identifier to)
+/// and [`SyntaxKind::is_keyword`] (what every consumer asks instead of
+/// re-listing the kinds).
+///
+/// The point is that adding a keyword is a ONE-LINE change: the lexer starts
+/// producing it, `is_keyword` starts answering `true` for it, and the ide
+/// layer's highlighter — which classifies keywords by asking `is_keyword`,
+/// never by enumerating kinds — colors it with no edit of its own. The
+/// drift-guard tests in `crate::tests` pin exactly that: every `*_KW` kind
+/// must appear here, every entry must round-trip, and the ide crate has a
+/// matching test asserting the highlighter tags each of them as a keyword.
+macro_rules! keywords {
+    ($($text:literal => $kind:ident),* $(,)?) => {
+        /// Every keyword of the language, paired with the token kind the
+        /// lexer produces for it — the single source of truth (see the
+        /// `keywords!` macro that generates this).
+        pub const KEYWORDS: &[(&str, SyntaxKind)] = &[$(($text, $kind)),*];
+
+        impl SyntaxKind {
+            /// The keyword kind `ident` spells, if it spells one.
+            pub fn from_keyword(ident: &str) -> Option<SyntaxKind> {
+                match ident {
+                    $($text => Some($kind),)*
+                    _ => None,
+                }
+            }
+
+            /// Whether this kind is one of the language's keyword tokens.
+            /// Consumers (highlighting, completions, editor affordances) ask
+            /// this rather than matching a list of their own, so a new
+            /// keyword can never be silently forgotten by one of them.
+            pub fn is_keyword(self) -> bool {
+                matches!(self, $($kind)|*)
+            }
+        }
+    };
+}
+
+keywords! {
+    "fn" => FN_KW,
+    "static" => STATIC_KW,
+    "const" => CONST_KW,
+    "type" => TYPE_KW,
+    "struct" => STRUCT_KW,
+    "enum" => ENUM_KW,
+    "let" => LET_KW,
+    "mut" => MUT_KW,
+    "if" => IF_KW,
+    "else" => ELSE_KW,
+    "match" => MATCH_KW,
+    "loop" => LOOP_KW,
+    "break" => BREAK_KW,
+    "continue" => CONTINUE_KW,
+    "true" => TRUE_KW,
+    "false" => FALSE_KW,
+    "as" => AS_KW,
+    "pub" => PUB_KW,
+    "raw" => RAW_KW,
+    "unsafe" => UNSAFE_KW,
+    "with" => WITH_KW,
+    "impl" => IMPL_KW,
+    "for" => FOR_KW,
+    "trait" => TRAIT_KW,
+    "requires" => REQUIRES_KW,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {

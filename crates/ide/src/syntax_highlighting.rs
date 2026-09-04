@@ -31,6 +31,17 @@ pub enum HlTag {
     /// An enum variant: its declaration inside an `enum` literal, and the
     /// second segment of a `Shape::Circle` path.
     EnumMember,
+    /// A trait name, wherever one can be written: the `trait N = ...`
+    /// declaration, a bound (`T: Display`), an impl head in either home
+    /// (`impl Display` in a type's chain, `impl Write`'s own chain) and the
+    /// base of a qualified member call (`Display::fmt`). Renders through the
+    /// LSP `interface` token type — traits ARE the interface concept, and
+    /// clients that don't style `interface` fall back to `type`.
+    Trait,
+    /// A generic parameter — a type param or a const param — at its binder
+    /// declaration (`fn::<T: Display>`, `struct::<T>`, `fn::<const N: usize>`)
+    /// and at every use. LSP `typeParameter`.
+    TypeParameter,
 }
 
 /// Modifier bitset. Bit positions are public API: the LSP legend lists its
@@ -71,23 +82,37 @@ fn classify(
     root: &SyntaxNode,
     token: &SyntaxToken,
 ) -> Option<(HlTag, HlMods)> {
+    if token.kind() == SyntaxKind::IDENT {
+        return classify_ident(db, file, root, token);
+    }
+    Some((lexical_tag(token.kind())?, HlMods::NONE))
+}
+
+/// The purely lexical classes — everything a token's KIND alone decides.
+///
+/// Keyword-ness is asked of [`SyntaxKind::is_keyword`], which the syntax
+/// crate generates from its one canonical keyword table, so a keyword added
+/// to the language highlights here with no edit to this file. Enumerating
+/// keyword kinds by hand is what left `trait`/`requires` (and before them
+/// any other new keyword) silently unstyled; `crate::tests`' drift guard
+/// pins that this stays table-driven.
+pub(crate) fn lexical_tag(kind: SyntaxKind) -> Option<HlTag> {
     use SyntaxKind::*;
-    let tag = match token.kind() {
+    if kind.is_keyword() {
+        return Some(HlTag::Keyword);
+    }
+    Some(match kind {
         COMMENT => HlTag::Comment,
         STRING => HlTag::String,
         INT_NUMBER => HlTag::Number,
-        FN_KW | STATIC_KW | CONST_KW | TYPE_KW | STRUCT_KW | ENUM_KW | LET_KW | MUT_KW | IF_KW
-        | ELSE_KW | MATCH_KW | LOOP_KW | BREAK_KW | CONTINUE_KW | TRUE_KW | FALSE_KW | RAW_KW
-        | UNSAFE_KW | WITH_KW | IMPL_KW | FOR_KW => HlTag::Keyword,
         PLUS | MINUS | STAR | SLASH | EQ | THIN_ARROW | FAT_ARROW | AMP | EQ2 | NEQ | L_ANGLE
         | R_ANGLE | LTEQ | GTEQ => HlTag::Operator,
         // `!` only exists as the never type today.
         BANG => HlTag::Type,
-        IDENT => return classify_ident(db, file, root, token),
-        // Punctuation (braces, parens, `;`, `,`, `:`) stays unstyled.
+        // Punctuation (braces, parens, `;`, `,`, `:`) stays unstyled, and
+        // identifiers are classified through hir, not by kind.
         _ => return None,
-    };
-    Some((tag, HlMods::NONE))
+    })
 }
 
 fn classify_ident(
@@ -112,9 +137,22 @@ fn classify_ident(
         }
         // A `type` item's name declaration is a type, through and through.
         (NAME, TYPE_ITEM) => Some((HlTag::Type, HlMods(HlMods::DECLARATION))),
-        // A member's name declaration inside an `impl Self { ... }`
-        // element: a function, like a static fn's.
+        // A `trait` item's name declaration — the one place a trait is
+        // BORN; every other trait mention (bounds, impl heads, qualified
+        // call bases) resolves back to it and renders the same class.
+        (NAME, TRAIT_ITEM) => Some((HlTag::Trait, HlMods(HlMods::DECLARATION))),
+        // A member's name declaration. All three homes are the same thing
+        // and render alike: an inherent member (`impl Self { ... }`), a
+        // trait requirement (`requires { fmt: fn(...); }`) and an impl's
+        // definition of one (`impl Display { fmt = fn... }`).
         (NAME, MEMBER) => Some((HlTag::Function, HlMods(HlMods::DECLARATION))),
+        // A generic parameter's binder declaration — a type param (`T`,
+        // bounds and all) or a const param (`const N: usize`). Both are
+        // binder-supplied names fixed per instantiation, not runtime
+        // values, so both take the generic-parameter class.
+        (NAME, TYPE_PARAM) | (NAME, CONST_PARAM) => {
+            Some((HlTag::TypeParameter, HlMods(HlMods::DECLARATION)))
+        }
         // A variant declared inside an `enum` literal.
         (NAME, ENUM_VARIANT) => Some((HlTag::EnumMember, HlMods(HlMods::DECLARATION))),
         // A payload binding in a variant pattern declares a plain local.
@@ -131,14 +169,28 @@ fn classify_ident(
         // always a binding now (never reinterpreted as a variant), so it
         // always falls through to the binding/parameter coloring.
         (NAME, BIND_PAT) | (NAME, RECORD_PAT_FIELD) => {
-            let item = hir::checkable_item_at(db, file, &owner)?;
-            let (body, source_map) = hir::body_with_source_map(db, item);
-            let binding = source_map.binding_for_node(SyntaxNodePtr::new(&parent))?;
+            let is_param = parent.ancestors().any(|n| n.kind() == PARAM);
+            let binding = hir::checkable_item_at(db, file, &owner).and_then(|item| {
+                let (_, source_map) = hir::body_with_source_map(db, item);
+                Some((
+                    item,
+                    source_map.binding_for_node(SyntaxNodePtr::new(&parent))?,
+                ))
+            });
+            let Some((item, binding)) = binding else {
+                // No binding behind it: a requirement signature's parameter
+                // names (`push: fn(s: str, w: Self);`) are a signature's
+                // spelling, not a body's bindings — but they are parameter
+                // names all the same, and reading them unstyled next to
+                // every other `fn`'s parameters is just a hole.
+                return is_param.then_some((HlTag::Parameter, HlMods(HlMods::DECLARATION)));
+            };
+            let (body, _) = hir::body_with_source_map(db, item);
             let mut mods = HlMods::DECLARATION;
             if body.bindings[binding].mutable {
                 mods |= HlMods::MUTABLE;
             }
-            let tag = if parent.ancestors().any(|n| n.kind() == PARAM) {
+            let tag = if is_param {
                 HlTag::Parameter
             } else {
                 HlTag::Variable
@@ -147,7 +199,7 @@ fn classify_ident(
         }
         // `Foo` in a newtype-unwrapping pattern (`let Foo(x) = ...`):
         // exactly the type name a construction call's callee is.
-        (NAME_REF, NEWTYPE_PAT) => Some(classify_type_name(db, file, token.text())),
+        (NAME_REF, NEWTYPE_PAT) => Some(classify_type_position(db, file, &parent)),
         // A variant pattern's path: the variant segment is an enum member
         // (the position says so, resolved or not); the qualified spelling's
         // enum segment is a type name. Decided via the `ast::VariantPat`
@@ -162,21 +214,39 @@ fn classify_ident(
             {
                 return Some((HlTag::EnumMember, HlMods::NONE));
             }
-            Some(classify_type_name(db, file, token.text()))
+            Some(classify_type_position(db, file, &parent))
+        }
+        // The constrained name of a `with`/`requires` clause (`T: Bound`,
+        // `Self: Iterator` — both reserved): a type mention like any other,
+        // so the same classifier answers it. The clause's BOUNDS are
+        // `PATH_TYPE`s and land in the arm below.
+        (NAME_REF, WITH_CLAUSE) | (NAME_REF, REQUIRES_CLAUSE) => {
+            Some(classify_type_position(db, file, &parent))
         }
         // Type position: user-declared types render as plain types, the
-        // builtins (`usize`, `str`, ...) keep their library modifier. The
-        // variant segment of `Shape::Circle` is an enum member — the
-        // position alone says so, resolved or not (diagnostics carry the
-        // news, same stance as unknown type names).
+        // builtins (`usize`, `str`, ...) keep their library modifier, an
+        // in-scope binder name is a generic parameter and a trait name is a
+        // trait — which is what a bound (`T: Display`), an impl head
+        // (`impl Display`) and a trait-alias RHS all are. The variant
+        // segment of `Shape::Circle` is an enum member — the position alone
+        // says so, resolved or not (diagnostics carry the news, same stance
+        // as unknown type names).
         (NAME_REF, PATH_TYPE) => {
             if is_variant_segment(&parent) {
                 return Some((HlTag::EnumMember, HlMods::NONE));
             }
-            Some(classify_type_name(db, file, token.text()))
+            Some(classify_type_position(db, file, &parent))
         }
         (NAME_REF, PATH_EXPR) => {
             if is_variant_segment(&parent) {
+                // A qualified trait member call (`Display::fmt`, the
+                // qualified short form) wears the same two-segment shape as
+                // an enum's `Shape::Circle` but names a FUNCTION. What
+                // tells the two shapes apart is the resolution, not the
+                // spelling.
+                if qualified_member_segment(db, file, &owner) {
+                    return Some((HlTag::Function, HlMods::NONE));
+                }
                 return Some((HlTag::EnumMember, HlMods::NONE));
             }
             // Inside a `type` declaration's RHS every "expression" is
@@ -186,7 +256,7 @@ fn classify_ident(
             if owner.ancestors().any(|n| n.kind() == TYPE_ITEM)
                 && !owner.ancestors().any(|n| n.kind() == WITH_GROUP)
             {
-                return Some(classify_type_name(db, file, token.text()));
+                return Some(classify_type_position(db, file, &parent));
             }
             let item = hir::checkable_item_at(db, file, &owner)?;
             let (body, source_map) = hir::body_with_source_map(db, item);
@@ -211,44 +281,146 @@ fn classify_ident(
                     };
                     Some((tag, HlMods(mods)))
                 }
-                hir::Resolution::Item(_) | hir::Resolution::Ambiguous(_) => {
+                hir::Resolution::Item(ref loc) | hir::Resolution::Ambiguous(ref loc) => {
                     let infer = hir::infer::infer(db, item);
-                    let tag = match infer.type_of_expr.get(expr) {
-                        Some(hir::Ty::Fn(_)) => HlTag::Function,
-                        _ => HlTag::Variable,
+                    // A GENERIC item's mention is the base of an
+                    // application (`show::<usize>(42)`), and inference
+                    // types that base with the uninstantiated scheme rather
+                    // than a `Ty::Fn` — so the item's own signature is what
+                    // says "function" for it.
+                    let is_fn = matches!(infer.type_of_expr.get(expr), Some(hir::Ty::Fn(_)))
+                        || matches!(hir::signature(db, loc.to_id(db)), hir::Ty::Fn(_));
+                    let tag = if is_fn {
+                        HlTag::Function
+                    } else {
+                        HlTag::Variable
                     };
                     Some((tag, HlMods(HlMods::STATIC)))
                 }
                 // A construction head (`Foo(...)`) — or a stray value use,
                 // which the diagnostics call out; either way the name *is*
-                // a type. A trait name (a qualified call's base) renders
-                // the same way.
-                hir::Resolution::TypeItem(_) | hir::Resolution::TraitItem(_) => {
-                    Some((HlTag::Type, HlMods::NONE))
-                }
-                // A const param reads like an immutable parameter.
-                hir::Resolution::ConstParam(_) => Some((HlTag::Parameter, HlMods::NONE)),
+                // a type.
+                hir::Resolution::TypeItem(_) => Some((HlTag::Type, HlMods::NONE)),
+                // A qualified call's base (`Display::fmt(w, x)`) — the one
+                // expression position a trait name may appear in.
+                hir::Resolution::TraitItem(_) => Some((HlTag::Trait, HlMods::NONE)),
+                // A const param: a binder-supplied name, fixed per
+                // instantiation — the same generic-parameter class its
+                // binder declaration wears, not a runtime parameter.
+                hir::Resolution::ConstParam(_) => Some((HlTag::TypeParameter, HlMods::NONE)),
                 hir::Resolution::Builtin(_) => {
                     Some((HlTag::Function, HlMods(HlMods::DEFAULT_LIBRARY)))
                 }
             }
         }
-        // The field name of a dot-call that resolved to an inherent
-        // member: a function. (Plain field accesses stay unstyled, as
-        // before.)
+        // The field name of a dot-call that resolved to a member: a
+        // function. Both dispatch shapes count — the STRUCTURAL one (an
+        // inherent member, or a trait impl's member on a concrete receiver)
+        // and the BOUND-DIRECTED one (`x.fmt(w)` on a rigid `T: Display`,
+        // which goes through the body's hidden dictionary). A reader
+        // shouldn't have to know which machinery answered. (Plain field
+        // accesses stay unstyled, as before.)
         (NAME_REF, FIELD_EXPR) => {
             let item = hir::checkable_item_at(db, file, &owner)?;
             let (_, source_map) = hir::body_with_source_map(db, item);
             let call = owner.parent().filter(|p| p.kind() == CALL_EXPR)?;
             let call_expr = source_map.expr_for_node(SyntaxNodePtr::new(&call))?;
-            hir::infer::infer(db, item)
-                .member_of_expr
-                .get(call_expr)
-                .map(|_| (HlTag::Function, HlMods::NONE))
+            let infer = hir::infer::infer(db, item);
+            let resolved = infer.member_of_expr.get(call_expr).is_some()
+                || infer.bound_member_of_expr.get(call_expr).is_some();
+            resolved.then_some((HlTag::Function, HlMods::NONE))
         }
         // Unresolved or junk: leave it plain; diagnostics carry the news.
         _ => None,
     }
+}
+
+/// Whether a two-segment path expression names a trait MEMBER in the
+/// qualified short form (`Display::fmt`) — rather than an enum variant.
+/// Both shapes are `Name::name`, so only the resolution tells them apart:
+/// a directly-called qualified form resolves on the enclosing CALL,
+/// dispatched to an impl member or through the enclosing dictionary.
+fn qualified_member_segment(db: &RootDatabase, file: SourceFile, path: &SyntaxNode) -> bool {
+    let Some(item) = hir::checkable_item_at(db, file, path) else {
+        return false;
+    };
+    let (_, source_map) = hir::body_with_source_map(db, item);
+    let infer = hir::infer::infer(db, item);
+    path.parent()
+        .filter(|p| p.kind() == SyntaxKind::CALL_EXPR)
+        .and_then(|call| source_map.expr_for_node(SyntaxNodePtr::new(&call)))
+        .is_some_and(|call| {
+            infer.qualified_member_of_expr.get(call).is_some()
+                || infer.bound_member_of_expr.get(call).is_some()
+        })
+}
+
+/// The identifier a `NAME`/`NAME_REF` node wraps (`None` for the `_` hole).
+fn ident_text(node: &SyntaxNode) -> Option<String> {
+    node.children_with_tokens()
+        .filter_map(|it| it.into_token())
+        .find(|it| it.kind() == SyntaxKind::IDENT)
+        .map(|it| it.text().to_owned())
+}
+
+/// Whether a generic binder in scope declares `name`. Walks the ancestors
+/// and inspects each one's own `GENERIC_PARAM_LIST` child, which is how
+/// EVERY binder home spells itself — fn literals, member fn signatures,
+/// `struct::<T>`/`enum::<T>` type literals, `requires ::<...>`,
+/// `with ::<...>` — so this file names none of them and a future binder
+/// home is covered the day it parses.
+///
+/// This re-derives, syntactically, a scoping rule hir already owns
+/// (`ParamScope`/`own_generics`) — until hir maps type refs back to a
+/// source node, there is no query to ask instead, so the highlighter
+/// walks the tree itself. Move this to a hir query the day one exists.
+fn binder_declares(node: &SyntaxNode, name: &str) -> bool {
+    use SyntaxKind::*;
+    node.ancestors().any(|ancestor| {
+        let mut lists: Vec<SyntaxNode> = ancestor
+            .children()
+            .filter(|c| c.kind() == GENERIC_PARAM_LIST)
+            .collect();
+        // A `type`/`trait` declaration writes its OWN binder on its RHS
+        // literal (`type Pair = struct::<T> { ... }`), one level down — and
+        // that binder stays in scope across the whole declaration, the
+        // trailing `with`-chain's members included, even though they are
+        // siblings of the literal rather than children of it. A `with`
+        // group's own binder is scoped to that group, which is an ancestor
+        // in its own right whenever we are inside it, so it is skipped here
+        // instead of leaking to its siblings.
+        if matches!(ancestor.kind(), TYPE_ITEM | TRAIT_ITEM) {
+            lists.extend(
+                ancestor
+                    .children()
+                    .filter(|c| c.kind() != WITH_GROUP)
+                    .flat_map(|c| c.children())
+                    .filter(|c| c.kind() == GENERIC_PARAM_LIST),
+            );
+        }
+        lists
+            .iter()
+            .flat_map(|list| list.children())
+            .filter(|p| matches!(p.kind(), TYPE_PARAM | CONST_PARAM))
+            .filter_map(|p| p.children().find(|c| c.kind() == NAME))
+            .any(|n| ident_text(&n).as_deref() == Some(name))
+    })
+}
+
+/// A name written in type position: a generic parameter when a binder in
+/// scope declares it, otherwise the name of a type or trait.
+fn classify_type_position(
+    db: &RootDatabase,
+    file: SourceFile,
+    name_ref: &SyntaxNode,
+) -> (HlTag, HlMods) {
+    let Some(text) = ident_text(name_ref) else {
+        return (HlTag::Type, HlMods(HlMods::DEFAULT_LIBRARY));
+    };
+    if binder_declares(name_ref, &text) {
+        return (HlTag::TypeParameter, HlMods::NONE);
+    }
+    classify_type_name(db, file, &text)
 }
 
 /// Whether `name_ref` is the *second* segment of a two-segment `::` path
@@ -276,12 +448,22 @@ fn item_is_fn(db: &RootDatabase, item: hir::ItemId<'_>) -> bool {
     )
 }
 
-/// A name used as a type: a `type` item reference, or a builtin type name
-/// with the library modifier. Unknown names still color as types — that's
-/// what the position says they were meant to be; diagnostics carry the news.
+/// A name used as a type: a `type` item reference, a trait name (bounds,
+/// impl heads, alias RHSs), or a builtin type name with the library
+/// modifier. Unknown names still color as types — that's what the position
+/// says they were meant to be; diagnostics carry the news.
 fn classify_type_name(db: &RootDatabase, file: SourceFile, name: &str) -> (HlTag, HlMods) {
+    // `Self` NAMES the enclosing type (TR01), so it reads
+    // as that type: a plain type, not a keyword and not a builtin. It has
+    // no file-scope entry of its own, which is why it needs saying here —
+    // otherwise it would fall through to the `defaultLibrary` case and
+    // render like `usize`.
+    if name == "Self" {
+        return (HlTag::Type, HlMods::NONE);
+    }
     match hir::file_scope(db, file).resolve(name) {
         Some(hir::Resolution::TypeItem(_)) => (HlTag::Type, HlMods::NONE),
+        Some(hir::Resolution::TraitItem(_)) => (HlTag::Trait, HlMods::NONE),
         _ => (HlTag::Type, HlMods(HlMods::DEFAULT_LIBRARY)),
     }
 }

@@ -37,6 +37,10 @@
   `Trait::name(...)` — an inherent member's own qualified spelling is itself still reserved,
   so it names no second escape today. There is no collision error at declaration — the getter
   idiom is legal.
+- **G16** Full keywords: `raw unsafe with impl for trait requires` (`const`, `struct`, `enum`
+  are contextual expression-starters). One `keywords!` table generates the set — `from_keyword`,
+  `is_keyword`, and the table itself — so the highlighter (P10) and completions classify a
+  keyword by asking, never by enumerating kinds.
 - **G14** No auto-deref, ever, and no auto-ref. Resolution never reaches through a deref, so
   an outer name disappearing can never silently re-resolve; a pointer to a type with members
   does not dot-call them, because the receiver's type must BE the member's `Self`.
@@ -72,7 +76,7 @@
 - **`with`, `impl`, `for`, `trait` and `requires` as contextual keywords** — the attachment
   and trait-declaration grammars need them at positions where an identifier is also legal, so
   they are full keywords like `raw` and `unsafe`; an identifier with one of those names now
-  dies in a parse cascade with no reserved-word hint. **G13**
+  dies in a parse cascade with no reserved-word hint. **G16**
 - **Silent reinterpretation of a bare pattern name as a variant** — footgun. **G25**
 - **A null literal** — abstract memory has no address zero to spell. **Pointer ordering** —
   meaningless there. **G08**

@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 pub use lexer::{Token, tokenize};
 pub use rowan::{TextRange, TextSize};
-pub use syntax_kind::SyntaxKind;
+pub use syntax_kind::{KEYWORDS, SyntaxKind};
 pub use validation::{
     CAN_ONLY_ASSIGN_TO_A_VARIABLE, MemberContext, impl_element_bare_head, semantic_member_context,
 };

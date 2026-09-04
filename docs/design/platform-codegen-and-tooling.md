@@ -20,6 +20,10 @@
   the number.
 - **P11** The debugger runs in-process on the const-eval interpreter (X08): same MIR, same
   machine, same UB findings.
+- **P10** Semantic tokens are served full-file from the server and bound to the parser: one
+  keyword table generates the set, the highlighter enumerates no kinds, and a drift guard
+  walks the whole syntax-kind enum. The legend grows by appending, so existing indices never
+  move.
 - **P14** Roadmap: AoC puzzles, then a small embedded OS, then self-hosting. The embedded stage
   makes bare-asm entrypoints, layer-0 purity, linker placement and volatile access scheduled
   requirements.

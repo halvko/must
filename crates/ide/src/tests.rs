@@ -1729,12 +1729,15 @@ static main = fn {
 }
 
 #[test]
-fn completions_top_level_offers_exactly_static_const_type() {
+fn completions_top_level_offers_exactly_the_item_keywords() {
+    // Exactly the grammar's item heads — `completions::tests` guards this
+    // set against the parser in both directions.
     check_completions(
         "$0",
         expect_test::expect![[r#"
             const Keyword
             static Keyword
+            trait Keyword
             type Keyword
         "#]],
     );
@@ -1749,6 +1752,7 @@ fn completions_empty_file_top_level() {
         expect_test::expect![[r#"
             const Keyword
             static Keyword
+            trait Keyword
             type Keyword
         "#]],
     );
@@ -3035,12 +3039,12 @@ static use_it = fn() -> usize { A(struct { x = 1 }).get() };
             22..27 "usize" Type.defaultLibrary
             30..34 "with" Keyword
             41..45 "impl" Keyword
-            46..50 "Self" Type.defaultLibrary
+            46..50 "Self" Type
             61..64 "get" Function.declaration
             65..66 "=" Operator
             67..69 "fn" Keyword
             70..71 "a" Parameter.declaration
-            73..77 "Self" Type.defaultLibrary
+            73..77 "Self" Type
             79..81 "->" Operator
             82..87 "usize" Type.defaultLibrary
             90..91 "a" Parameter
@@ -3211,5 +3215,229 @@ static f = fn(n: usize) -> str { D$0::m(n) };
 "#,
         "D",
         0,
+    );
+}
+
+// ---- keyword drift guard ----------------------------------------------
+
+#[test]
+fn every_canonical_keyword_classifies_as_a_keyword_highlight() {
+    // The architectural guard: keyword-ness reaches the highlighter from
+    // the syntax crate's ONE canonical table (`syntax::KEYWORDS`, which
+    // also generates `from_keyword`/`is_keyword`), never from a list kept
+    // here. A keyword added to the language must therefore highlight with
+    // no edit to `syntax_highlighting` — and if anyone reintroduces a
+    // hand-written match arm that forgets one, this fails.
+    for &(text, kind) in syntax::KEYWORDS {
+        assert_eq!(
+            syntax::SyntaxKind::from_keyword(text),
+            Some(kind),
+            "`{text}` does not round-trip through the keyword table"
+        );
+        assert_eq!(
+            crate::syntax_highlighting::lexical_tag(kind),
+            Some(crate::HlTag::Keyword),
+            "`{text}` ({kind:?}) is a keyword but does not classify as one"
+        );
+    }
+    // Identifiers are classified through hir, not by kind — the keyword
+    // branch must not swallow them.
+    assert_eq!(
+        crate::syntax_highlighting::lexical_tag(syntax::SyntaxKind::IDENT),
+        None
+    );
+}
+
+// ---- trait-aware classification ---------------------------------------
+
+#[test]
+fn highlights_trait_declaration_and_requirements() {
+    check_highlights(
+        r#"
+trait Show = requires {
+    show: fn(x: Self) -> str;
+};
+"#,
+        expect_test::expect![[r#"
+            1..6 "trait" Keyword
+            7..11 "Show" Trait.declaration
+            12..13 "=" Operator
+            14..22 "requires" Keyword
+            29..33 "show" Function.declaration
+            35..37 "fn" Keyword
+            38..39 "x" Parameter.declaration
+            41..45 "Self" Type
+            47..49 "->" Operator
+            50..53 "str" Type.defaultLibrary
+        "#]],
+    );
+}
+
+#[test]
+fn highlights_trait_names_at_every_occurrence() {
+    // One trait, every position it can be written in: the declaration, an
+    // impl head in the trait's OWN chain (the trait-side home), an impl
+    // head in a type's chain (the type-side home), a bound on a binder,
+    // and the base of a qualified member call.
+    check_highlights(
+        r#"
+trait Show = requires {
+    show: fn(x: Self) -> str;
+} with {
+    impl usize {
+        show = fn(x: usize) -> str { "n" };
+    }
+};
+type Tag = struct { t: usize } with {
+    impl Show {
+        show = fn(x: Self) -> str { Show::show(x.t) };
+    }
+};
+static render = fn::<T: Show>(v: T) -> str { v.show() };
+"#,
+        expect_test::expect![[r#"
+            1..6 "trait" Keyword
+            7..11 "Show" Trait.declaration
+            12..13 "=" Operator
+            14..22 "requires" Keyword
+            29..33 "show" Function.declaration
+            35..37 "fn" Keyword
+            38..39 "x" Parameter.declaration
+            41..45 "Self" Type
+            47..49 "->" Operator
+            50..53 "str" Type.defaultLibrary
+            57..61 "with" Keyword
+            68..72 "impl" Keyword
+            73..78 "usize" Type.defaultLibrary
+            89..93 "show" Function.declaration
+            94..95 "=" Operator
+            96..98 "fn" Keyword
+            99..100 "x" Parameter.declaration
+            102..107 "usize" Type.defaultLibrary
+            109..111 "->" Operator
+            112..115 "str" Type.defaultLibrary
+            118..121 "\"n\"" String
+            134..138 "type" Keyword
+            139..142 "Tag" Type.declaration
+            143..144 "=" Operator
+            145..151 "struct" Keyword
+            157..162 "usize" Type.defaultLibrary
+            165..169 "with" Keyword
+            176..180 "impl" Keyword
+            181..185 "Show" Trait
+            196..200 "show" Function.declaration
+            201..202 "=" Operator
+            203..205 "fn" Keyword
+            206..207 "x" Parameter.declaration
+            209..213 "Self" Type
+            215..217 "->" Operator
+            218..221 "str" Type.defaultLibrary
+            224..228 "Show" Trait
+            230..234 "show" Function
+            235..236 "x" Parameter
+            252..258 "static" Keyword
+            259..265 "render" Function.declaration.static
+            266..267 "=" Operator
+            268..270 "fn" Keyword
+            272..273 "<" Operator
+            273..274 "T" TypeParameter.declaration
+            276..280 "Show" Trait
+            280..281 ">" Operator
+            282..283 "v" Parameter.declaration
+            285..286 "T" TypeParameter
+            288..290 "->" Operator
+            291..294 "str" Type.defaultLibrary
+            297..298 "v" Parameter
+            299..303 "show" Function
+        "#]],
+    );
+}
+
+#[test]
+fn highlights_generic_binders_and_their_uses() {
+    // Type params and const params, at the binder and at every use — in
+    // signatures, in bodies, and in a `type` declaration's fields (whose
+    // binder sits on the RHS literal, in scope for the whole declaration).
+    check_highlights(
+        r#"
+static id = fn::<T>(x: T) -> T { x };
+static rep = const fn::<const N: usize>() -> usize { N + N };
+type Pair = struct::<T> { a: T, b: T };
+"#,
+        expect_test::expect![[r#"
+            1..7 "static" Keyword
+            8..10 "id" Function.declaration.static
+            11..12 "=" Operator
+            13..15 "fn" Keyword
+            17..18 "<" Operator
+            18..19 "T" TypeParameter.declaration
+            19..20 ">" Operator
+            21..22 "x" Parameter.declaration
+            24..25 "T" TypeParameter
+            27..29 "->" Operator
+            30..31 "T" TypeParameter
+            34..35 "x" Parameter
+            39..45 "static" Keyword
+            46..49 "rep" Function.declaration.static
+            50..51 "=" Operator
+            52..57 "const" Keyword
+            58..60 "fn" Keyword
+            62..63 "<" Operator
+            63..68 "const" Keyword
+            69..70 "N" TypeParameter.declaration
+            72..77 "usize" Type.defaultLibrary
+            77..78 ">" Operator
+            81..83 "->" Operator
+            84..89 "usize" Type.defaultLibrary
+            92..93 "N" TypeParameter
+            94..95 "+" Operator
+            96..97 "N" TypeParameter
+            101..105 "type" Keyword
+            106..110 "Pair" Type.declaration
+            111..112 "=" Operator
+            113..119 "struct" Keyword
+            121..122 "<" Operator
+            122..123 "T" TypeParameter.declaration
+            123..124 ">" Operator
+            130..131 "T" TypeParameter
+            136..137 "T" TypeParameter
+        "#]],
+    );
+}
+
+#[test]
+fn highlights_type_binder_reaches_its_with_chain_members() {
+    // The declaration's binder is in scope inside its `with`-chain, which
+    // is a SIBLING of the literal carrying the binder — the one place a
+    // naive ancestor walk would lose `T`.
+    check_highlights(
+        r#"
+type Box = struct::<T> { v: T } with {
+    impl Self {
+        get = fn(b: Self) -> T { b.v };
+    }
+};
+"#,
+        expect_test::expect![[r#"
+            1..5 "type" Keyword
+            6..9 "Box" Type.declaration
+            10..11 "=" Operator
+            12..18 "struct" Keyword
+            20..21 "<" Operator
+            21..22 "T" TypeParameter.declaration
+            22..23 ">" Operator
+            29..30 "T" TypeParameter
+            33..37 "with" Keyword
+            44..48 "impl" Keyword
+            49..53 "Self" Type
+            64..67 "get" Function.declaration
+            68..69 "=" Operator
+            70..72 "fn" Keyword
+            73..74 "b" Parameter.declaration
+            76..80 "Self" Type
+            82..84 "->" Operator
+            85..86 "T" TypeParameter
+            89..90 "b" Parameter
+        "#]],
     );
 }

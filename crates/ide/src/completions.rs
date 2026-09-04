@@ -383,7 +383,7 @@ pub(crate) fn completions(
     let expected_ty = expected_ty.as_ref();
 
     let mut items = match classify(&parent) {
-        Some(Context::ItemKeyword) => keyword_items(&["static", "const", "type"], edit_range),
+        Some(Context::ItemKeyword) => keyword_items(ITEM_KEYWORDS, edit_range),
         Some(Context::TypePosition) => {
             let mut items = type_scope_items(db, file, edit_range);
             items.extend(builtin_type_items(edit_range));
@@ -612,6 +612,22 @@ fn prefix_range(text: &str, offset: TextSize) -> TextRange {
     }
     TextRange::new(TextSize::new(start as u32), offset)
 }
+
+/// The keywords that can open a file-scope item.
+///
+/// These lists are hand-curated ON PURPOSE, and that is the difference
+/// between completion and highlighting: the highlighter asks
+/// [`syntax::SyntaxKind::is_keyword`] and so can never drift, because every
+/// keyword is a keyword everywhere. Completion is context-sensitive —
+/// offering `break` at file scope or `trait` inside an expression would be
+/// noise — so each position gets the subset the grammar actually accepts
+/// there, which no single predicate can derive.
+///
+/// This one list *is* mechanically checkable against the grammar, and
+/// `tests::item_keywords_match_the_grammar` checks it in both directions.
+/// The type- and expression-position lists below have no equivalent single
+/// grammar rule to check against and stay a judgement call.
+const ITEM_KEYWORDS: &[&str] = &["static", "const", "type", "trait"];
 
 /// The keywords that spell a TYPE where a type is expected: an `fn` type
 /// and a structural record. `enum` is deliberately absent — an enum literal
@@ -1634,4 +1650,43 @@ fn locals_in_block(
         }
     }
     current
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ITEM_KEYWORDS;
+
+    /// Ask the PARSER whether `keyword` can open an item, instead of
+    /// restating the grammar's item-head set here: at file scope, anything
+    /// the grammar will not accept as an item head is rejected at offset 0
+    /// with `expected an item`. A future item keyword therefore starts
+    /// answering `true` on its own, with no edit to this test.
+    fn opens_an_item(keyword: &str) -> bool {
+        !syntax::parse(keyword)
+            .errors()
+            .iter()
+            .any(|err| err.range.start() == 0.into() && err.message.starts_with("expected an item"))
+    }
+
+    #[test]
+    fn item_keywords_match_the_grammar() {
+        // Both directions: nothing the grammar accepts may be missing (the
+        // drift that lost `trait`), and nothing we offer may be a keyword
+        // the parser would reject on the spot.
+        for (text, _) in syntax::KEYWORDS {
+            assert_eq!(
+                opens_an_item(text),
+                ITEM_KEYWORDS.contains(text),
+                "`{text}`: the grammar and the item-position completion list disagree"
+            );
+        }
+    }
+
+    #[test]
+    fn the_guard_can_actually_fail() {
+        // Proof the discriminator discriminates — otherwise the test above
+        // would pass just as happily against an empty grammar.
+        assert!(opens_an_item("trait"), "`trait` opens an item");
+        assert!(!opens_an_item("break"), "`break` does not open an item");
+    }
 }

@@ -11612,3 +11612,69 @@ trait Gen = requires::<T> { get: fn(x: Self) -> usize; } with {
         "#]],
     );
 }
+
+// ---- keyword-table drift guards ---------------------------------------
+//
+// One canonical table (`syntax_kind::KEYWORDS`) generates `from_keyword`
+// and `is_keyword`; these tests pin that nothing can drift away from it —
+// including a `*_KW` kind added to the enum but forgotten in the table,
+// which is exactly how `trait`/`requires` ended up unhighlighted.
+
+#[test]
+fn every_keyword_in_the_table_lexes_and_answers_is_keyword() {
+    for &(text, kind) in crate::KEYWORDS {
+        assert_eq!(
+            crate::SyntaxKind::from_keyword(text),
+            Some(kind),
+            "`{text}` does not round-trip through `from_keyword`"
+        );
+        assert!(kind.is_keyword(), "{kind:?} is not `is_keyword`");
+        // The lexer must actually produce the kind for that spelling.
+        let (tokens, _) = crate::tokenize(text);
+        assert_eq!(
+            tokens.iter().map(|t| t.kind).collect::<Vec<_>>(),
+            vec![kind],
+            "lexing `{text}` did not yield {kind:?}"
+        );
+        assert!(
+            format!("{kind:?}").ends_with("_KW"),
+            "{kind:?} is in the keyword table but is not a `*_KW` kind"
+        );
+    }
+}
+
+#[test]
+fn every_kw_kind_is_in_the_canonical_keyword_table() {
+    // Walks the whole `SyntaxKind` enum by discriminant: any variant whose
+    // name ends in `_KW` must be reachable from the table, so adding a
+    // keyword kind without a table entry fails here rather than silently
+    // losing its highlighting.
+    for raw in 0..=(crate::SyntaxKind::ERROR as u16) {
+        let kind = crate::SyntaxKind::from(rowan::SyntaxKind(raw));
+        if !format!("{kind:?}").ends_with("_KW") {
+            continue;
+        }
+        assert!(
+            crate::KEYWORDS.iter().any(|&(_, k)| k == kind),
+            "{kind:?} is missing from the canonical keyword table \
+             (`syntax_kind::keywords!`) — add its spelling there"
+        );
+        assert!(kind.is_keyword(), "{kind:?} is not `is_keyword`");
+    }
+}
+
+#[test]
+fn non_keyword_kinds_are_not_keywords() {
+    for kind in [
+        crate::SyntaxKind::IDENT,
+        crate::SyntaxKind::COMMENT,
+        crate::SyntaxKind::INT_NUMBER,
+        crate::SyntaxKind::L_BRACE,
+        crate::SyntaxKind::TRAIT_ITEM,
+        crate::SyntaxKind::ERROR,
+    ] {
+        assert!(!kind.is_keyword(), "{kind:?} must not be `is_keyword`");
+    }
+    assert_eq!(crate::SyntaxKind::from_keyword("nonsense"), None);
+    assert_eq!(crate::SyntaxKind::from_keyword("Self"), None);
+}
