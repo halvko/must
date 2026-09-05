@@ -7024,6 +7024,66 @@ fn generic_enum_variant_path_expr() {
 }
 
 #[test]
+fn member_own_turbofish_is_one_error_and_recovers() {
+    // `P::len::<usize>` used to end the statement at the second `::` and
+    // then produce a parse error per leftover token — five of them,
+    // including a bogus "unresolved name `usize`" from the argument being
+    // read as an expression. Now it parses cleanly into its own
+    // `GENERIC_ARG_LIST` (parse-and-reserve, the house pattern) and
+    // validation reports the reservation once, from
+    // `PathExpr::member_generic_arg_list()` — kept distinct from
+    // `generic_arg_list()`, which must keep reading the OWNER's list alone.
+    check(
+        "static s = fn { let g = P::len::<usize>; };",
+        expect![[r#"
+            SOURCE_FILE@0..43
+              STATIC_ITEM@0..43
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "s"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..42
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..42
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..40
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      BIND_PAT@20..21
+                        NAME@20..21
+                          IDENT@20..21 "g"
+                      WHITESPACE@21..22 " "
+                      EQ@22..23 "="
+                      WHITESPACE@23..24 " "
+                      PATH_EXPR@24..39
+                        NAME_REF@24..25
+                          IDENT@24..25 "P"
+                        COLON2@25..27 "::"
+                        NAME_REF@27..30
+                          IDENT@27..30 "len"
+                        COLON2@30..32 "::"
+                        GENERIC_ARG_LIST@32..39
+                          L_ANGLE@32..33 "<"
+                          TYPE_ARG@33..38
+                            PATH_TYPE@33..38
+                              NAME_REF@33..38
+                                IDENT@33..38 "usize"
+                          R_ANGLE@38..39 ">"
+                      SEMICOLON@39..40 ";"
+                    WHITESPACE@40..41 " "
+                    R_BRACE@41..42 "}"
+                SEMICOLON@42..43 ";"
+            error 32..39: generic arguments belong to the owner, not the second segment: write `Owner::<...>::name` (a member's own generic arguments are not supported yet)
+        "#]],
+    );
+}
+
+#[test]
 fn construction_turbofish_expr() {
     check(
         "static p = Pair::<usize>(struct { a = 1, b = 2 });",

@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 21 errors and 1 warning.
+// exactly: found 22 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -213,3 +213,15 @@ static retired_prefix_raw = fn () -> () {
 static return_in_const_block = fn () -> usize {
     const { if true { return 1; }; 0 }
 };
+
+// 23. A turbofish on a qualified member's OWN name: generic arguments
+//     belong to the owner (`Pair::<usize>::first`), and a member's own
+//     binder is not reachable from here yet. Reserved with ONE diagnostic
+//     — the list is consumed, so the rest of the expression still parses.
+//     error: generic arguments belong to the owner, not the second segment: write `Owner::<...>::name` (a member's own generic arguments are not supported yet)
+type Measured = struct { n: usize } with {
+    impl Self {
+        size = fn (m: Self) -> usize { m.n };
+    }
+};
+static member_own_turbofish = fn () -> () { let f = Measured::size::<usize>; };

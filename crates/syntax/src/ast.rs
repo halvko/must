@@ -968,8 +968,27 @@ impl PathExpr {
     }
     /// The turbofish argument list (`f::<usize, 42>`), when present; hir
     /// lowers it and reports arity and position errors.
+    ///
+    /// Grammar-wise a `PathExpr` carries at most one `GENERIC_ARG_LIST`
+    /// child — the owner's turbofish OR a member's own (never both: the
+    /// member-own form is only reachable when the owner's is absent, see
+    /// `member_generic_arg_list`) — so this reads it only when it precedes
+    /// the second segment, or there is no second segment at all.
     pub fn generic_arg_list(&self) -> Option<GenericArgList> {
-        child(&self.syntax)
+        let list = child::<GenericArgList>(&self.syntax)?;
+        let is_member_own = self.variant_name_ref().is_some_and(|variant| {
+            list.syntax().text_range().start() > variant.syntax().text_range().start()
+        });
+        (!is_member_own).then_some(list)
+    }
+    /// A turbofish on the SECOND segment (`P::len::<usize>`), when present
+    /// — parse-and-reserve: generic arguments belong to the owner
+    /// (`generic_arg_list` above), not a member's own name, so
+    /// `syntax::validation` rejects this one outright.
+    pub fn member_generic_arg_list(&self) -> Option<GenericArgList> {
+        let variant = self.variant_name_ref()?;
+        let list = child::<GenericArgList>(&self.syntax)?;
+        (list.syntax().text_range().start() > variant.syntax().text_range().start()).then_some(list)
     }
 }
 

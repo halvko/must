@@ -200,6 +200,21 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
                 range: borrow_type.syntax().text_range(),
                 fix: None,
             });
+        } else if let Some(path_expr) = ast::PathExpr::cast(node.clone()) {
+            // `P::len::<usize>` — a turbofish on a member's own name.
+            // Parse-and-reserve: generic arguments belong to the OWNER
+            // (`Pair::<usize>::first`, `Shape::<usize>::A`), a member's own
+            // binder is not applicable from here.
+            if let Some(list) = path_expr.member_generic_arg_list() {
+                errors.push(SyntaxError {
+                    message: "generic arguments belong to the owner, not the second \
+                              segment: write `Owner::<...>::name` (a member's own \
+                              generic arguments are not supported yet)"
+                        .to_owned(),
+                    range: list.syntax().text_range(),
+                    fix: None,
+                });
+            }
         }
     }
     errors

@@ -342,7 +342,13 @@ fn errors_checks_dirty_with_the_documented_count() {
             214 |     const { if true { return 1; }; 0 }
                 |                       ^^^^^^^^
 
-            found 21 errors and 1 warning
+            error: generic arguments belong to the owner, not the second segment: write `Owner::<...>::name` (a member's own generic arguments are not supported yet)
+              --> examples/errors.must:227:69
+                |
+            227 | static member_own_turbofish = fn () -> () { let f = Measured::size::<usize>; };
+                |                                                                     ^^^^^^^
+
+            found 22 errors and 1 warning
         "#]],
     );
 }

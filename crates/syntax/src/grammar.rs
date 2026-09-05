@@ -648,8 +648,10 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
             let m = p.start();
             name_ref(p);
             // `Shape::Circle` — a two-segment variant path. Exactly two
-            // segments for now: a further `::` is left for the caller to
-            // stumble over (there is nothing deeper to name yet).
+            // segments for now: a further plain `::` is left for the
+            // caller to stumble over (there is nothing deeper to name
+            // yet) — a turbofish immediately following the second segment
+            // is its own case below.
             // `f::<usize, 42>` — a turbofish argument list, gated on the
             // same unambiguous `COLON2 L_ANGLE` lookahead as a generic
             // binder: nothing else follows `::` with `<`.
@@ -670,6 +672,18 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
                     }
                 } else if p.at(IDENT) {
                     name_ref(p);
+                    // `P::len::<usize>` — a turbofish on the SECOND
+                    // segment. Parsed cleanly into its own
+                    // `GENERIC_ARG_LIST` (parse-and-reserve, the house
+                    // pattern: validation rejects it, see
+                    // `PathExpr::member_generic_arg_list()`) rather than
+                    // refused here — generic arguments belong to the OWNER
+                    // (`Pair::<usize>::first`, `Shape::<usize>::A`), a
+                    // member's own binder is not applicable from here.
+                    if p.at(COLON2) && p.nth(1) == L_ANGLE {
+                        p.bump(COLON2);
+                        generic_arg_list(p);
+                    }
                 } else {
                     p.error("expected a variant name after `::`");
                 }
