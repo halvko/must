@@ -348,7 +348,14 @@ fn errors_checks_dirty_with_the_documented_count() {
             227 | static member_own_turbofish = fn () -> () { let f = Measured::size::<usize>; };
                 |                                                                     ^^^^^^^
 
-            found 22 errors and 1 warning
+            error: `len` is a field of `Sized`, not a member — fields are reached through a value: `value.len`
+              --> examples/errors.must:235:55
+                |
+            235 | static field_through_the_type = fn () -> () { let n = Sized::len; };
+                |                                                       ^^^^^^^^^^
+               = note: `Sized` is defined here (examples/errors.must:234:6)
+
+            found 23 errors and 1 warning
         "#]],
     );
 }

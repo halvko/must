@@ -2733,13 +2733,18 @@ static s = Shape::Missing;
 
 #[test]
 fn variant_path_on_a_struct_type_item() {
+    // `x` IS declared — as a field, one namespace over — so the answer
+    // names the namespace and the escape rather than the generic
+    // no-variants line. See
+    // `qualified_path_naming_a_field_says_so_and_names_the_escape` for the
+    // names that genuinely aren't there, which keep it.
     check_diagnostics(
         r#"
 type Point = struct { x: usize };
 static p = Point::x;
 "#,
         expect![[r#"
-            46..54: `Point` has no variants (it is a `struct` type) (`Point` is defined here at 6..11)
+            46..54: `x` is a field of `Point`, not a member — fields are reached through a value: `value.x` (`Point` is defined here at 6..11)
         "#]],
     );
 }
@@ -8511,6 +8516,33 @@ static main = fn(p: P) -> usize { let f = P::len; f(p) };
             144..145 'f': fn(P) -> usize
             144..148 'f(p)': usize
             146..147 'p': P
+        "#]],
+    );
+}
+
+#[test]
+fn qualified_path_naming_a_field_says_so_and_names_the_escape() {
+    // The field/member namespace split puts fields on VALUES: `P::len` is
+    // looking in the type's namespace, where only variants and members
+    // live. The old answer ("`P` has no variants") was true and useless —
+    // the name IS declared, one namespace over. Genuinely-unknown names
+    // keep that answer, and an enum is untouched (it has no fields to
+    // confuse anything with).
+    check_diagnostics(
+        r#"
+type P = struct { len: usize } with {
+    impl Self { size = fn(p: Self) -> usize { p.len }; }
+};
+type Shape = enum { Circle, Point };
+static a = fn() -> () { let i = P::len; };
+static b = fn() -> () { let j = P::nosuch; };
+static c = fn(p: P) -> usize { P::size(p) };
+static d = fn() -> () { let m = Shape::Nope; };
+"#,
+        expect![[r#"
+            168..174: `len` is a field of `P`, not a member — fields are reached through a value: `value.len` (`P` is defined here at 6..7)
+            211..220: `P` has no variants (it is a `struct` type) (`P` is defined here at 6..7)
+            309..313: `Shape` has no variant `Nope` (`Shape` is defined here at 104..109)
         "#]],
     );
 }

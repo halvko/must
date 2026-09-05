@@ -1148,6 +1148,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 // exist — one click away.
                 InferenceDiagnostic::NoSuchVariant { item: target, .. }
                 | InferenceDiagnostic::NoVariantsOnStruct { item: target, .. }
+                | InferenceDiagnostic::QualifiedPathIsField { item: target, .. }
                 | InferenceDiagnostic::EnumCtorIsVariant { item: target, .. }
                 | InferenceDiagnostic::PatNoSuchVariant { item: target, .. }
                 | InferenceDiagnostic::PatWrongEnum { item: target, .. }

@@ -185,10 +185,12 @@ impl LowerCtx<'_> {
                 InferenceDiagnostic::TypeCtorArgCount { expr, .. } => {
                     self.call_traps.insert(*expr, diag.message());
                 }
-                // A `::` path that names no variant (or no enum at all):
-                // the path itself is the value that cannot be produced.
+                // A `::` path that names no variant (or no enum at all, or
+                // a FIELD — the wrong namespace): the path itself is the
+                // value that cannot be produced.
                 InferenceDiagnostic::NoSuchVariant { expr, .. }
                 | InferenceDiagnostic::NoVariantsOnStruct { expr, .. }
+                | InferenceDiagnostic::QualifiedPathIsField { expr, .. }
                 | InferenceDiagnostic::VariantPathOnValue { expr, .. } => {
                     self.value_traps.insert(*expr, diag.message());
                 }

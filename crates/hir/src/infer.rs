@@ -328,13 +328,27 @@ pub enum InferenceDiagnostic {
         name: String,
     },
     /// A `::` path on a `type` item that declares a struct shape
-    /// (`Point::x` where `Point = struct { ... }`): only enums have
-    /// variants.
+    /// (`Point::nope` where `Point = struct { ... }`): only enums have
+    /// variants. When the second segment names a FIELD it is
+    /// [`Self::QualifiedPathIsField`] instead — that one has an escape to
+    /// offer.
     NoVariantsOnStruct {
         /// The variant-path expression.
         expr: ExprId,
         /// The struct `type` item.
         item: ItemLoc,
+    },
+    /// A `::` path whose second segment names a FIELD of the type
+    /// (`Point::x`). The qualified path reaches the type's NAMESPACE —
+    /// variants and members — and a field is not in it: a field belongs to
+    /// a value, so it is reached through one.
+    QualifiedPathIsField {
+        /// The variant-path expression.
+        expr: ExprId,
+        /// The `type` item declaring the field.
+        item: ItemLoc,
+        /// The field's name.
+        name: String,
     },
     /// A `::` path whose base names a value (a local, a `static`/`const`
     /// item, or a builtin) instead of a type.
@@ -1064,6 +1078,7 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::TypeCtorArgCount { expr, .. }
             | InferenceDiagnostic::NoSuchVariant { expr, .. }
             | InferenceDiagnostic::NoVariantsOnStruct { expr, .. }
+            | InferenceDiagnostic::QualifiedPathIsField { expr, .. }
             | InferenceDiagnostic::VariantPathOnValue { expr, .. }
             | InferenceDiagnostic::EnumCtorIsVariant { expr, .. }
             | InferenceDiagnostic::NonExhaustiveMatch { expr, .. }
@@ -1324,6 +1339,11 @@ impl InferenceDiagnostic {
                     item.display_name()
                 )
             }
+            InferenceDiagnostic::QualifiedPathIsField { item, name, .. } => format!(
+                "`{name}` is a field of `{}`, not a member — fields are reached through \
+                 a value: `value.{name}`",
+                item.display_name()
+            ),
             InferenceDiagnostic::VariantPathOnValue { name, .. } => {
                 format!("`{name}` is not a type; only an `enum` type has `::` variants")
             }
@@ -2191,6 +2211,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::TypeCtorArgCount { .. }
                 | InferenceDiagnostic::NoSuchVariant { .. }
                 | InferenceDiagnostic::NoVariantsOnStruct { .. }
+                | InferenceDiagnostic::QualifiedPathIsField { .. }
                 | InferenceDiagnostic::VariantPathOnValue { .. }
                 | InferenceDiagnostic::EnumCtorIsVariant { .. }
                 | InferenceDiagnostic::NonExhaustiveMatch { .. }
@@ -3710,6 +3731,17 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         }
     }
 
+    /// Whether the `type` item declares a FIELD by this name — the
+    /// namespace a qualified `::` path is NOT looking in (fields belong to
+    /// values, members to the type). Used to turn "no variants" into the
+    /// message that names the escape.
+    fn decl_has_field(&self, item: ItemId<'db>, name: &str) -> bool {
+        matches!(
+            crate::type_decl(self.db, item),
+            Some(TypeDeclData::Struct { fields }) if fields.iter().any(|(f, _)| f == name)
+        )
+    }
+
     /// The member of `decl`'s `with`-chain named `name`, as a member
     /// [`ItemLoc`] — first occurrence wins (duplicates carry their own
     /// diagnostic at the definition).
@@ -5068,6 +5100,24 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         return self.infer_qualified_member_value(expr, &loc, member, args);
                     }
                     if self.push_trait_member_on_type(expr, &loc, variant) {
+                        self.infer_const_args_free(args.unwrap_or(&[]));
+                        return Ty::Error;
+                    }
+                    // The name IS declared — as a FIELD. The field/member
+                    // namespace split puts fields on VALUES and members on
+                    // the type, so `P::f` is looking in the wrong namespace
+                    // rather than at nothing at all: say which one, and
+                    // name the spelling that works. The generic "no
+                    // variants" answer below is for names that genuinely
+                    // aren't there.
+                    if self.decl_has_field(item, variant) {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::QualifiedPathIsField {
+                                expr,
+                                item: loc.clone(),
+                                name: variant.to_owned(),
+                            });
                         self.infer_const_args_free(args.unwrap_or(&[]));
                         return Ty::Error;
                     }

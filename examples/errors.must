@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 22 errors and 1 warning.
+// exactly: found 23 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -225,3 +225,11 @@ type Measured = struct { n: usize } with {
     }
 };
 static member_own_turbofish = fn () -> () { let f = Measured::size::<usize>; };
+
+// 24. A qualified path naming a FIELD: the field/member namespace split
+//     puts fields on VALUES and members on the type, so `Sized::len` is
+//     looking in the wrong namespace — not at nothing. The message says
+//     which namespace the name IS in, and how to reach it.
+//     error: `len` is a field of `Sized`, not a member — fields are reached through a value: `value.len`
+type Sized = struct { len: usize };
+static field_through_the_type = fn () -> () { let n = Sized::len; };
