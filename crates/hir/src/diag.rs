@@ -125,6 +125,17 @@ pub fn named_arg_not_self(name: &str) -> String {
     )
 }
 
+/// `Trait::<Self = _>::member` — the `Self` argument written as a HOLE.
+/// `Self` names the implementer, which is the whole point of the named
+/// form: the member it denotes is impl-specific, so a hole there declines
+/// to answer the only question the spelling asks. Refused structurally at
+/// lowering in BOTH positions — in call position a hole would be
+/// inferable, but it adds nothing the short form `Trait::member(...)`
+/// does not already say, and one rule beats two.
+pub const NAMED_ARG_SELF_HOLE: &str = "`Self` names the implementer, so it cannot be `_`: \
+     write the type (`Trait::<Self = Type>::member`), or use the short form \
+     `Trait::member(...)` where an argument determines `Self`";
+
 /// A value written where a binder declares a type parameter — shared like
 /// [`generic_arg_count`].
 pub fn type_param_needs_type(param: &str) -> String {

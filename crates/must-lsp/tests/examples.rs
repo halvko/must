@@ -355,7 +355,13 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |                                                       ^^^^^^^^^^
                = note: `Sized` is defined here (examples/errors.must:234:6)
 
-            found 23 errors and 1 warning
+            error: `Self` names the implementer, so it cannot be `_`: write the type (`Trait::<Self = Type>::member`), or use the short form `Trait::member(...)` where an argument determines `Self`
+              --> examples/errors.must:248:45
+                |
+            248 | static self_hole = fn (n: usize) -> usize { Countable::<Self = _>::count(n) };
+                |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+            found 24 errors and 1 warning
         "#]],
     );
 }

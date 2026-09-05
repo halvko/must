@@ -8714,6 +8714,38 @@ static e = fn(p: Pair::<Self = usize>) -> usize { 1 };
 }
 
 #[test]
+fn named_self_argument_may_not_be_a_hole() {
+    // `Self` NAMES the implementer — it is what decides which impl the
+    // path denotes — so a `_` there declines to answer the only question
+    // the spelling asks. Refused structurally at lowering, in BOTH
+    // positions and at ANY depth, so no inference variable ever reaches
+    // trait resolution (the old shape rendered `_ does not implement D`
+    // and `Pair::<_> does not implement E`).
+    //
+    // Uniform on purpose: in call position a top-level hole IS inferable
+    // from the arguments, but it adds nothing over the short form
+    // `D::m(v)` — and both short and full spellings still work below.
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; } with {
+    impl usize { m = fn(x: usize) -> usize { x }; }
+};
+type Pair = struct::<T> { a: T, b: T };
+trait E = requires { n: fn(x: Self) -> usize; };
+static a = fn(v: usize) -> usize { D::<Self = _>::m(v) };
+static b = fn() -> () { let f = D::<Self = _>::m; };
+static c = fn() -> () { let f = E::<Self = Pair::<_>>::n; };
+static ok = fn(v: usize) -> usize { D::<Self = usize>::m(v) + D::m(v) };
+"#,
+        expect![[r#"
+            235..251: `Self` names the implementer, so it cannot be `_`: write the type (`Trait::<Self = Type>::member`), or use the short form `Trait::member(...)` where an argument determines `Self`
+            290..306: `Self` names the implementer, so it cannot be `_`: write the type (`Trait::<Self = Type>::member`), or use the short form `Trait::member(...)` where an argument determines `Self`
+            343..367: `Self` names the implementer, so it cannot be `_`: write the type (`Trait::<Self = Type>::member`), or use the short form `Trait::member(...)` where an argument determines `Self`
+        "#]],
+    );
+}
+
+#[test]
 fn named_self_reservations_survive() {
     // Associated types (reserved), generic traits (reserved) and the
     // bounded-value capture wall are untouched by the named-Self form.

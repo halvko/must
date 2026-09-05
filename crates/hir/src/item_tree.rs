@@ -262,6 +262,37 @@ impl TypeRef {
     pub fn from_opt_ast(ty: Option<ast::Type>) -> Option<TypeRef> {
         ty.map(TypeRef::from_ast)
     }
+
+    /// Whether a `_` is written anywhere inside this reference. Narrower
+    /// than `!is_fully_typed()`, which also counts a return-type-less `fn`
+    /// type — this asks only about holes the user actually wrote, for
+    /// positions that must name a type OUTRIGHT (a named `Self` argument:
+    /// it selects the impl, and v1's impls are all ground).
+    pub fn contains_hole(&self) -> bool {
+        match self {
+            TypeRef::Hole => true,
+            TypeRef::Unit
+            | TypeRef::Never
+            | TypeRef::Path(_)
+            | TypeRef::Variant { .. }
+            | TypeRef::Error => false,
+            TypeRef::Fn { params, ret } => {
+                params.iter().any(TypeRef::contains_hole)
+                    || ret.as_ref().is_some_and(|r| r.contains_hole())
+            }
+            TypeRef::Ref(inner) => inner.contains_hole(),
+            TypeRef::RawPtr { inner, .. } => inner.contains_hole(),
+            TypeRef::Apply { args, .. } => args.iter().any(|arg| match arg {
+                GenericArgRef::Type(ty) => ty.contains_hole(),
+                // Const args are never inferred (TR06); `_` is not even
+                // representable in one.
+                GenericArgRef::Const(_) => false,
+            }),
+            TypeRef::Record(fields) => fields.iter().any(|(_, ty)| ty.contains_hole()),
+            TypeRef::Array { elem, .. } => elem.contains_hole(),
+        }
+    }
+
     pub fn is_fully_typed(&self) -> bool {
         match self {
             TypeRef::Hole => false,

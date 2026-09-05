@@ -969,6 +969,12 @@ pub enum NamedArgReason {
     NotATrait,
     /// `Self` supplied twice in one argument list.
     Duplicate,
+    /// `Self = _` — the argument is a HOLE. `Self` names the implementer,
+    /// which is the one thing the named form exists to state, so a hole
+    /// there is the absence of an answer, not an under-specified type.
+    /// Refused structurally at lowering (both call and value position), so
+    /// no inference variable can reach trait resolution — nor a message.
+    Hole,
 }
 
 /// One thing a call-syntax name could resolve to, with the spelling that
@@ -1242,6 +1248,7 @@ impl InferenceDiagnostic {
                 NamedArgReason::NotSelf => crate::diag::named_arg_not_self(name),
                 NamedArgReason::NotATrait => crate::diag::named_arg_not_a_trait("Self"),
                 NamedArgReason::Duplicate => "`Self` is given more than once".to_owned(),
+                NamedArgReason::Hole => crate::diag::NAMED_ARG_SELF_HOLE.to_owned(),
             },
             InferenceDiagnostic::FieldNotCallable {
                 name,
@@ -5396,6 +5403,43 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             self.push_not_generic(expr, trait_loc.display_name());
         }
         let self_ref = self_ref?;
+        // A `_` ANYWHERE in the named `Self` argument — refused
+        // STRUCTURALLY, right here, before anything downstream mints a
+        // variable for it. The `Self` argument names the implementer: it is
+        // the one thing that decides WHICH impl the path denotes, so a hole
+        // is not an under-specified type, it is the absence of the answer
+        // the form exists to give. Letting one through hands trait
+        // resolution an inference variable and renders it into the failure
+        // message (`_ does not implement D`, `Pair::<_> does not implement
+        // E`) — an inference variable in user-facing text.
+        //
+        // Every position, deliberately, and strict-first:
+        //
+        // - In CALL position a top-level hole IS inferable from the
+        //   arguments, but it says nothing the short form `D::m(v)` does
+        //   not already say, so one rule beats two (the named form exists
+        //   to state `Self`, not to decline to).
+        // - A NESTED hole (`Self = Pair::<_>`) could in principle name the
+        //   implementer and leave its arguments open — but v1's impls are
+        //   all ground (coherence buckets are keyed by decl; generic-type
+        //   impls are reserved), so today it can only ever
+        //   reach the failure path. Allowing it is a purely additive
+        //   relaxation whenever generic impls land.
+        if self_ref.contains_hole() {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::NamedGenericArg {
+                    expr,
+                    name: "Self".to_owned(),
+                    reason: NamedArgReason::Hole,
+                });
+            // `{error}` rather than `None`: `None` means "no `Self` was
+            // written", which would draw the value form's own
+            // must-name-the-implementer diagnostic on top of this one.
+            // Errors are infectious and silent, so every consumer below
+            // goes quiet — which is the whole story here.
+            return Some(Ty::Error);
+        }
         Some(self.lower_type_ref(&self_ref))
     }
 

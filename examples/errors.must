@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 23 errors and 1 warning.
+// exactly: found 24 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -233,3 +233,16 @@ static member_own_turbofish = fn () -> () { let f = Measured::size::<usize>; };
 //     error: `len` is a field of `Sized`, not a member — fields are reached through a value: `value.len`
 type Sized = struct { len: usize };
 static field_through_the_type = fn () -> () { let n = Sized::len; };
+
+// 25. `Self = _` on a qualified trait path: `Self` NAMES the implementer —
+//     it is what decides which impl the path denotes — so a hole there
+//     declines to answer the only question the spelling asks. Refused
+//     structurally, so no inference variable ever reaches trait resolution
+//     (or a message).
+//     error: `Self` names the implementer, so it cannot be `_`: write the type (`Trait::<Self = Type>::member`), or use the short form `Trait::member(...)` where an argument determines `Self`
+trait Countable = requires {
+    count: fn (c: Self) -> usize;
+} with {
+    impl usize { count = fn (c: usize) -> usize { c }; }
+};
+static self_hole = fn (n: usize) -> usize { Countable::<Self = _>::count(n) };
