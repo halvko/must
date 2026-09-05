@@ -62,6 +62,24 @@ must-lsp run examples/hello.must                    # evaluates main()
 must-lsp run examples/functions.must -e 'fib(20)'   # any expression in file scope
 ```
 
+It also *compiles* Must code, to a self-contained WebAssembly module with
+no runtime of any kind — no allocator, no collector, no unwinder, no
+support library:
+
+```sh
+must-lsp compile examples/display.must -o display.wasm
+```
+
+The module imports exactly one thing, the platform effect `must.print`,
+and exports `main` plus its memory and its reporting globals (`trap_code`
+saying which trap fired, and the panic message's offset/length). What it
+does not compile yet — raw pointers, the heap builtins — it refuses by
+name, with a source location, rather than miscompiling. The backend lives
+in `crates/codegen-wasm`; its differential test harness runs every
+supported example under both the interpreter and a real engine and
+requires byte-identical behavior. Design notes:
+`docs/design/platform-codegen-and-tooling.md`.
+
 `examples/` has a short tour beyond `hello.must` — records and named types
 (`records.must`), the tag-free variant-parameter state-machine pattern
 (`state_machine.must`), loops and mutability (`loops.must`), functions,
@@ -125,7 +143,7 @@ crates/
   eval/         the MIR interpreter: const eval (salsa query)
   ide/          editor-agnostic analysis API (diagnostics, hover, goto-def)
   codegen-wasm/ the WebAssembly backend: monomorphization + code emission
-  must-lsp/     the LSP binary: transport + main loop, plus the `run` command and its runner
+  must-lsp/     the LSP binary: transport + main loop, plus `run`, `compile` and the runner
 editors/zed/ Zed extension (separate workspace; compiled to wasm by Zed)
 ```
 

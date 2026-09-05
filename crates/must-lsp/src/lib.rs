@@ -11,6 +11,7 @@
 
 pub mod check;
 pub mod cli;
+pub mod compile;
 pub mod dap;
 mod from_proto;
 mod pool;

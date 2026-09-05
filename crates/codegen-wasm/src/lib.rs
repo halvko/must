@@ -176,8 +176,9 @@ pub const IMPORT_MODULE: &str = "must";
 /// `MAX_ANALYSIS_DEPTH` in `mono.rs`) are only honest if the stack they run
 /// on is known. They are calibrated to fit this budget with at least a 2x
 /// margin (see `MAX_PATH_DEPTH`), and every caller runs [`compile`] on a
-/// thread at least this large — this crate's tests do. `must-lsp`'s `pool.rs`
-/// is the precedent — the same 8 MiB for the same kind of reason, a recursive
+/// thread at least this large — this crate's tests do, and so does
+/// the CLI's `compile` subcommand. `must-lsp`'s `pool.rs` is the
+/// precedent — the same 8 MiB for the same kind of reason, a recursive
 /// walk whose cap assumes a stack.
 ///
 /// [`compile`] cannot provide the thread itself: `salsa::Database` is

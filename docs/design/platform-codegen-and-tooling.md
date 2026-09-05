@@ -43,9 +43,11 @@
   compatible with everything sealed. What this layer may assume waits on the aliasing model,
   once ruled — X12.
 - **P09** The command surface. `run` exits 0, 1 for a trap/panic/runtime error/UB, or 2
-  for a usage or file-IO failure; `check` likewise. Warnings never affect the exit code.
-  Failure kinds have fixed prefix words. The frame limit is 10,000, and the message quotes
-  the number.
+  for a usage or file-IO failure; `check` likewise. `compile` exits 0 once a module is
+  written, 1 on a refusal (an unsupported construct, named and located), 2 on a usage or
+  file-IO failure, and `check`'s own exit code when the file does not check clean (nothing
+  is written in that case). Warnings never affect the exit code. Failure kinds have fixed
+  prefix words. The frame limit is 10,000, and the message quotes the number.
 - **P11** The debugger runs in-process on the const-eval interpreter (X08): same MIR, same
   machine, same UB findings.
 - **P03** `print` emits exactly what it is given: `str` only, no newline, no formatting, no

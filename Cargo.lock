@@ -423,6 +423,7 @@ name = "must-lsp"
 version = "0.1.0"
 dependencies = [
  "base-db",
+ "codegen-wasm",
  "crossbeam-channel",
  "eval",
  "expect-test",
@@ -437,6 +438,7 @@ dependencies = [
  "syntax",
  "tracing",
  "tracing-subscriber",
+ "wasmi",
 ]
 
 [[package]]

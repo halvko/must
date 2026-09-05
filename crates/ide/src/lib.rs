@@ -126,6 +126,15 @@ pub struct Analysis {
 }
 
 impl Analysis {
+    /// Wraps a database that has no [`AnalysisHost`] of its own — a batch
+    /// tool that built its `RootDatabase` and files directly (`must-lsp
+    /// compile`, checking a file it parsed itself, is the current example)
+    /// still gets the full diagnostic pipeline (hir, mir, const-eval)
+    /// rather than a hand-rolled subset of it.
+    pub fn new(db: RootDatabase) -> Analysis {
+        Analysis { db }
+    }
+
     pub fn diagnostics(&self, file: SourceFile) -> Vec<Diagnostic> {
         let mut diagnostics: Vec<Diagnostic> = hir::file_diagnostics(&self.db, file)
             .into_iter()

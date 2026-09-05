@@ -10,6 +10,7 @@ fn main() -> must_lsp::ServerResult<()> {
     match must_lsp::cli::parse(&args) {
         must_lsp::cli::Command::Run(rest) => std::process::exit(run_command(rest)),
         must_lsp::cli::Command::Check(rest) => std::process::exit(must_lsp::check::check(rest)),
+        must_lsp::cli::Command::Compile(rest) => std::process::exit(compile_command(rest)),
         must_lsp::cli::Command::Dap => {
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
@@ -68,4 +69,40 @@ fn run_command(args: &[String]) -> i32 {
         return 2;
     };
     must_lsp::runner::run(&file, expr.as_deref().unwrap_or("main()"))
+}
+
+fn compile_command(args: &[String]) -> i32 {
+    let mut file = None;
+    let mut output = None;
+    let mut expr = None;
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-e" | "--entry" => match args.next() {
+                Some(e) => expr = Some(e.clone()),
+                None => {
+                    eprintln!("error: {arg} needs an expression");
+                    return 2;
+                }
+            },
+            "-o" | "--output" => match args.next() {
+                Some(o) => output = Some(o.clone()),
+                None => {
+                    eprintln!("error: {arg} needs a file name");
+                    return 2;
+                }
+            },
+            _ if file.is_none() => file = Some(arg.clone()),
+            _ => {
+                eprintln!("error: unexpected argument `{arg}`");
+                eprintln!("try `must-lsp --help`");
+                return 2;
+            }
+        }
+    }
+    let (Some(file), Some(output)) = (file, output) else {
+        eprintln!("usage: must-lsp compile <file.must> -o <out.wasm> [-e <expression>]");
+        return 2;
+    };
+    must_lsp::compile::compile(&file, &output, expr.as_deref().unwrap_or("main()"))
 }

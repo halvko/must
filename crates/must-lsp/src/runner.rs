@@ -53,9 +53,50 @@ pub struct Prepared {
     pub original_len: usize,
 }
 
+/// Why `prepare` failed to produce something to run. `run` and the
+/// debugger treat both alike — print the message and stop — but `compile`
+/// maps them to different exit codes: a syntax error in the user's own
+/// file is the same class `check` reports (its own exit code, since the
+/// file doesn't check clean), while a bad `-e` expression is a usage
+/// problem (exit 2) — the file itself may be perfectly fine.
+pub enum PrepareError {
+    /// The file itself has a syntax error that reaches (or swallows) the
+    /// injection point — the entry expression was never at fault.
+    FileSyntax(String),
+    /// The entry expression is missing, unparsable, or otherwise malformed.
+    Entry(String),
+}
+
+impl PrepareError {
+    pub fn message(&self) -> &str {
+        match self {
+            PrepareError::FileSyntax(m) | PrepareError::Entry(m) => m,
+        }
+    }
+}
+
+impl std::fmt::Display for PrepareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message())
+    }
+}
+
+/// `run` and the debugger only ever print the message, so a bare `String`
+/// error still works at every existing call site.
+impl From<PrepareError> for String {
+    fn from(err: PrepareError) -> String {
+        err.message().to_owned()
+    }
+}
+
 /// Inject `expr` as the entry item of `text` and validate the injection.
 /// Errors come back fully rendered for the user.
-pub fn prepare(db: &RootDatabase, text: &str, path: &str, expr: &str) -> Result<Prepared, String> {
+pub fn prepare(
+    db: &RootDatabase,
+    text: &str,
+    path: &str,
+    expr: &str,
+) -> Result<Prepared, PrepareError> {
     let original_len = text.len();
     let entry_prefix = format!("static {ENTRY_NAME} = (");
     let entry_item = format!("{entry_prefix}{expr});");
@@ -94,16 +135,18 @@ pub fn prepare(db: &RootDatabase, text: &str, path: &str, expr: &str) -> Result<
             .find(|err| usize::from(err.range.start()) <= original_len)
         {
             let line_col = LineIndex::new(file.text(db)).line_col(err.range.start());
-            return Err(format!(
+            return Err(PrepareError::FileSyntax(format!(
                 "error: cannot evaluate the entry expression: \
                  the file has a syntax error that swallows the end of the file\n  \
                  --> {path}:{}:{}: {}",
                 line_col.line + 1,
                 line_col.col + 1,
                 err.message
-            ));
+            )));
         }
-        return Err("error: invalid entry expression".to_owned());
+        return Err(PrepareError::Entry(
+            "error: invalid entry expression".to_owned(),
+        ));
     };
 
     // The program may be arbitrarily broken — that's the point — but the
@@ -111,7 +154,10 @@ pub fn prepare(db: &RootDatabase, text: &str, path: &str, expr: &str) -> Result<
     if let Some(err) = base_db::parse(db, file).errors().iter().find(|err| {
         usize::from(err.range.start()) >= expr_start && usize::from(err.range.end()) <= entry_end
     }) {
-        return Err(format!("error: invalid entry expression: {}", err.message));
+        return Err(PrepareError::Entry(format!(
+            "error: invalid entry expression: {}",
+            err.message
+        )));
     }
 
     Ok(Prepared {

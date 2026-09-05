@@ -14,6 +14,8 @@ pub enum Command<'a> {
     Run(&'a [String]),
     /// `check` and the files to check.
     Check(&'a [String]),
+    /// `compile` and its own arguments (the file, `-o`, `-e`).
+    Compile(&'a [String]),
     /// `dap`: speak the Debug Adapter Protocol over stdio.
     Dap,
     /// Print `text` and exit with `code` — `--help`/`--version` (0, stdout)
@@ -28,6 +30,8 @@ USAGE:
     must-lsp                              Serve LSP over stdio (the default)
     must-lsp run <file.must> [-e <expr>]  Evaluate an expression in a file's scope
     must-lsp check <file.must>...         Check files, printing diagnostics as text
+    must-lsp compile <file.must> -o <out.wasm>
+                                          Compile to a self-contained WebAssembly module
     must-lsp dap                          Speak the Debug Adapter Protocol over stdio
 
 OPTIONS:
@@ -38,6 +42,20 @@ RUN OPTIONS:
     -e, --entry <expr>                    Expression to evaluate; defaults to `main()`.
                                           It is evaluated in the file's item scope, so it
                                           can name any static in the file.
+
+COMPILE OPTIONS:
+    -o, --output <file.wasm>              Where to write the module (required)
+    -e, --entry <expr>                    Entry expression; defaults to `main()`. It
+                                          becomes the module's exported `main`.
+
+                                          The module imports `must.print` (offset, length
+                                          into its exported memory) and exports `main`,
+                                          `memory` and its reporting globals: `trap_code`
+                                          (the index of the reason a trap fired) and
+                                          `panic_message_offset`/`panic_message_len` (a
+                                          panic's message, into the same memory). Nothing
+                                          else is needed to run it: there is no runtime
+                                          library.
 
 ENVIRONMENT:
     MUST_LSP_LOG                          Log filter for the server's stderr log; unset
@@ -58,6 +76,7 @@ pub fn parse(args: &[String]) -> Command<'_> {
     match first {
         "run" => Command::Run(&args[1..]),
         "check" => Command::Check(&args[1..]),
+        "compile" => Command::Compile(&args[1..]),
         "dap" => Command::Dap,
         "-h" | "--help" | "help" => Command::Message {
             text: HELP.to_owned(),
@@ -113,9 +132,11 @@ mod tests {
         for expected in [
             "must-lsp run <file.must>",
             "must-lsp check <file.must>...",
+            "must-lsp compile <file.must> -o <out.wasm>",
             "must-lsp dap",
             "MUST_LSP_LOG",
             "-e, --entry",
+            "-o, --output",
         ] {
             assert!(
                 text.contains(expected),
@@ -169,5 +190,9 @@ mod tests {
             Command::Check(rest) if rest.len() == 2
         ));
         assert_eq!(parse_owned(&["dap"]), Command::Dap);
+        assert!(matches!(
+            parse_owned(&["compile", "a.must", "-o", "a.wasm"]),
+            Command::Compile(rest) if rest.len() == 3
+        ));
     }
 }
