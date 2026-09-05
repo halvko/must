@@ -124,41 +124,50 @@ pub enum PathElem {
 
 /// A function value: which item's lowered MIR holds its code, and which of
 /// that item's bodies it is.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Hash` is derived (including the `BodyId` arena index) for a whole-
+/// program, non-salsa consumer only — `codegen_wasm::mono::InstanceKey` —
+/// which re-runs from scratch on every compile and so has no stale-index
+/// hazard. Do NOT let this derive tempt [`Value`]'s own hand-written
+/// `Hash` impl into hashing `Value::Fn(_)` by its `FnValue`: that impl
+/// keys the salsa-backed [`Instance`] memo, which persists across edits,
+/// and a churning arena index there would be a correctness bug, not a
+/// style choice — see that impl's doc comment.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FnValue {
     pub item: ItemLoc,
     pub body: BodyId,
     /// The instance's evaluated const arguments, dense over the item's
     /// *const* params in binder order (`mir::Const::ConstParam`'s index
     /// space) — empty for non-generic functions. Type arguments never
-    /// appear: they don't affect lowering (TR06), so the runtime identity of
-    /// an instance is `(item, const_args)` alone. Frames executing this
+    /// appear: they don't affect lowering (TR06), so the runtime identity
+    /// of an instance is `(item, const_args)` alone. Frames executing this
     /// value resolve `ConstParam` operands here; fn literals *nested* in a
     /// generic body inherit the enclosing frame's values at construction,
     /// so const params behave like auto-captured constants.
     pub const_args: Vec<Value>,
 }
 
-/// Identity of one instantiation of a generic item — TR06's applicative key:
-/// same item + same (canonical) args = the same instance everywhere, with
-/// no call-site component (arena-indexed `ExprId`s churn under edits;
+/// Identity of one instantiation of a generic item — TR06's applicative
+/// key: same item + same (canonical) args = the same instance everywhere,
+/// with no call-site component (arena-indexed `ExprId`s churn under edits;
 /// range-free identity is the firewall invariant). Today this keys the
 /// machine's per-instance memo for compile-time bodies (`const` blocks and
-/// const arguments evaluated under a generic frame); later it is the key
-/// of `mono_mir(db, Instance)` and FFI symbol mangling.
+/// const arguments evaluated under a generic frame).
 ///
-/// Deliberately CONST-ARGS-ONLY (TR06): type params never affect lowering —
-/// MIR consults types only for structure the body projects, and a rigid
-/// param is opaque — so the runtime key omits them. The FULL key with type
-/// arguments exists at the *type* level only, for when generic type
-/// declarations and a monomorphizing backend need it; nothing the interpreter
-/// does ever distinguishes `id::<usize>` from `id::<str>`.
+/// Deliberately CONST-ARGS-ONLY (TR06): type params never affect lowering
+/// — MIR consults types only for structure the body projects, and a rigid
+/// param is opaque — so the runtime key omits them; nothing the
+/// interpreter does ever distinguishes `id::<usize>` from `id::<str>`. A
+/// consumer that lays values out (a backend, say) DOES need the widths
+/// those omitted type arguments carry and so cannot key on `Instance`
+/// alone; see `codegen-wasm`'s own instance key for how one such consumer
+/// copes.
 ///
 /// Lives in `eval` because [`GenericArgValue`] wraps [`Value`] — mir sits
 /// below eval in the crate graph, and hoisting `Value` out of the
-/// interpreter for a key nothing below eval consumes yet would invert the
-/// layering for no benefit. When `mono_mir` lands, the key can move (or be
-/// re-exported) with it.
+/// interpreter for a key nothing below eval consumes would invert the
+/// layering for no benefit.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Instance {
     pub item: ItemLoc,

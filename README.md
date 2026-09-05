@@ -118,13 +118,14 @@ the in-process protocol tests in `crates/must-lsp/tests/server.rs`.
 
 ```
 crates/
-  syntax/    lexer + resilient parser + lossless rowan CST + typed AST
-  base-db/   salsa database, source inputs, parse query
-  hir/       item tree, body lowering, name resolution, type inference
-  mir/       control-flow-graph IR, lowered totally (errors become traps)
-  eval/      the MIR interpreter: const eval (salsa query)
-  ide/       editor-agnostic analysis API (diagnostics, hover, goto-def)
-  must-lsp/  the LSP binary: transport + main loop, plus the `run` command and its runner
+  syntax/       lexer + resilient parser + lossless rowan CST + typed AST
+  base-db/      salsa database, source inputs, parse query
+  hir/          item tree, body lowering, name resolution, type inference
+  mir/          control-flow-graph IR, lowered totally (errors become traps)
+  eval/         the MIR interpreter: const eval (salsa query)
+  ide/          editor-agnostic analysis API (diagnostics, hover, goto-def)
+  codegen-wasm/ the WebAssembly backend: monomorphization + code emission
+  must-lsp/     the LSP binary: transport + main loop, plus the `run` command and its runner
 editors/zed/ Zed extension (separate workspace; compiled to wasm by Zed)
 ```
 

@@ -30,6 +30,14 @@
 - **X09** The interpreter is an oracle, not a spec. A detected-UB stop is a property of the
   interpreter, never a guarantee of the language; compiled Must may do anything with the same
   program.
+- **X10** Record, don't re-derive. Carry a fact forward rather than reconstructing it from a
+  later, lossier IR. The wasm backend lives this daily: MIR carries no type arguments at all,
+  so a monomorphizing backend re-derives them by unifying declared parameter types against
+  concrete ones at each call site — inference done twice, and incomplete in principle. The
+  same discipline decides two shapes directly rather than guessing them: a tagged-enum
+  payload read is sized from the read's own destination type, never from variant order, and a
+  `fn` literal's type at a call site is its real substituted signature, never a placeholder —
+  both are facts the backend already has, carried forward instead of re-derived wrong.
 - **X11** The specialization-soundness law, both halves together: selection and codegen are
   lifetime-erased, and every impl is always-applicable modulo lifetimes. Lifetimes reject
   programs, never choose behaviours. This licenses monomorphization at codegen, makes the
@@ -67,8 +75,9 @@
 
 ## Re-evaluate when
 
-- **An LIR is built** — rule the aliasing model first: removing UB later invalidates
-  optimizations already shipped. **X06 X12**
+- **An LIR is built** — that is where re-derived type arguments get fixed and guaranteed
+  optimizations live. Rule the aliasing model first: removing UB later invalidates
+  optimizations already shipped. **X06 X10 X12**
 - **Layout, tuples or FFI make field order observable** — MIR's order is name-sorted and
   definition order does not exist at that boundary. Fix it then. **X14**
 - **Diagnostic codes get a customer** — a way to suppress a lint, or a way to reword without

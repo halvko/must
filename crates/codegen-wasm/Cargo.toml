@@ -1,0 +1,20 @@
+[package]
+name = "codegen-wasm"
+version.workspace = true
+edition.workspace = true
+
+# No wasm-encoding library: the WebAssembly binary format is small, stable
+# and fully specified, so the encoder is hand-rolled in `wasm.rs`, and
+# every dependency below is one the workspace already carries elsewhere.
+# The engine used to *execute* what we emit is a dev-dependency of the
+# differential harness only.
+[dependencies]
+base-db.workspace = true
+hir.workspace = true
+mir.workspace = true
+eval.workspace = true
+la-arena.workspace = true
+rustc-hash.workspace = true
+
+[dev-dependencies]
+wasmi.workspace = true

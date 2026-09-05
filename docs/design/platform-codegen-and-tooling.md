@@ -14,6 +14,34 @@
   errors cross a registered boundary and never unwind host frames; no raw pointers cross the
   boundary; no ambient authority. Items 1 and 3 rule out tracing GC and pervasive refcounting;
   item 4 is why traps map to a panic hook.
+- **P06** The wasm backend. A compiled module's entire host dependency is one import: no
+  allocator, no GC, no unwinder, no scheduler, no support library, no start function, no
+  runtime initialization; statics are const-evaluated at compile time and baked in. The
+  encoder is hand-rolled with no runtime dependencies. Monomorphization happens at codegen,
+  licensed by X11, and a differential harness makes the law executable: every supported
+  example and targeted programs run under the interpreter and a real engine, asserting
+  identical output, termination kind, trap reason and decoded value. Dictionaries resolve
+  away completely; overflow checks are emitted at every width; records and enums get an
+  internal, unspecified layout. Unsupported constructs refuse by name, pointing at the
+  source; the backend must never miscompile silently. Monomorphization's own limits are
+  refusals too: a body that recurs at an ever-new instantiation of itself is named after a
+  fixed number of re-entries counted across the whole cycle (polymorphic recursion), and a
+  call chain too deep to walk safely — even one with nothing recursive in it — is refused by
+  depth alone. Both are refused by name before the walk can exhaust the stack budget
+  `compile` documents (8 MiB), which its callers are contracted to provide.
+- Findings from the wasm backend that bind later work. MIR's erasure forces the backend to
+  re-derive type arguments by unification, which is inference done twice and incomplete in
+  principle (X10); the pre-mono LIR is where the fix belongs. MIR field order is name-sorted
+  (X14). Function values being compile-time constants is the only reason dictionaries fully
+  resolve; closures will force a table, indirect calls and a real calling convention. `str`
+  decided a platform ABI by accident: an offset/length pair plus one generated support
+  function, the first exception to "no runtime". Static identity (C01) is not implementable
+  in a register-only model.
+- **P08** Codegen direction: an SSA-based LIR below MIR, still pre-monomorphization, where
+  inlining and optimization happen before the backend, so backends receive less garbage and
+  specific optimizations can be guaranteed rather than hoped for. Direction, not commitment;
+  compatible with everything sealed. What this layer may assume waits on the aliasing model,
+  once ruled — X12.
 - **P09** The command surface. `run` exits 0, 1 for a trap/panic/runtime error/UB, or 2
   for a usage or file-IO failure; `check` likewise. Warnings never affect the exit code.
   Failure kinds have fixed prefix words. The frame limit is 10,000, and the message quotes
@@ -56,6 +84,15 @@
 
 ## Re-evaluate when
 
+- **P07** The module is wasm32 while `usize` stays 64-bit. Sound only while the compiled
+  subset has no pointers. Rule it when pointers reach wasm: target-parameterized `usize`, or
+  fixed 64 with a separate address width.
+- **Closures land** — the backend needs a table, indirect calls and a real calling
+  convention, and "dictionaries resolve away completely" ends. **P06**
+- **An LIR is built** — the wasm backend's re-derived type arguments get fixed there, and
+  guaranteed optimizations live there instead of being hoped for. **P08**
+- **The `str` platform ABI gets a second customer** — decide it on purpose before anything
+  else depends on it. **P06**
 - **Two open debug-adapter bugs**, not decisions: with loops and unfueled run mode an infinite
   loop hangs the session with no interrupt path; and breakpoint arrivals are deduped by
   frame/line/column, so a breakpoint in a loop body fires once per frame. **P11**

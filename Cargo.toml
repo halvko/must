@@ -16,6 +16,7 @@ hir = { path = "crates/hir" }
 mir = { path = "crates/mir" }
 eval = { path = "crates/eval" }
 ide = { path = "crates/ide" }
+codegen-wasm = { path = "crates/codegen-wasm" }
 
 # external — salsa pinned: its macro API has churned repeatedly, upgrade deliberately
 salsa = "=0.27.0"
@@ -32,3 +33,7 @@ crossbeam-channel = "0.5.15"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 expect-test = "1.5"
+# TEST-ONLY: the WebAssembly engine the differential harness executes
+# compiled modules on (`wasmi` — a lightweight, dependency-light
+# interpreter). Never a dependency of the compiler itself.
+wasmi = "1.1"
