@@ -1398,7 +1398,14 @@ impl<'db, M: Mode> Machine<'db, M> {
             // bounds-checked here (validity is judged at the deref): an
             // out-of-range address mints silently, and every later deref
             // of it is detected UB.
-            Rvalue::AddrOf { place, .. } => {
+            // `place.&` / `place.&mut` — a SAFE borrow. Structurally
+            // `Rvalue::AddrOf`'s twin (see its own doc comment), and at
+            // this stage the identical runtime value too: no static or
+            // dynamic exclusivity check exists yet, so the two share this
+            // one arm. A later stage that adds a dynamic aliasing check
+            // gives this its own arm, minting tracking state here and
+            // only here.
+            Rvalue::AddrOf { place, .. } | Rvalue::Borrow { place, .. } => {
                 let projection = self.resolve_projection(loc, body, &place.projection, origin)?;
                 let (alloc, path) = self.resolve_place_alloc(
                     loc,

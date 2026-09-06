@@ -245,14 +245,30 @@ ast_node!(
     MemberGenericArgs: MEMBER_GENERIC_ARGS
 );
 
+ast_node!(
+    /// `@a` (with optional outlives bounds `@b: @a + @c`) in a binder list —
+    /// the THIRD generic parameter kind. Regions ride the same binder slot
+    /// as types and consts but are a DISTINGUISHED kind downstream: erased,
+    /// never reaching instance keys or MIR identity.
+    RegionParam: REGION_PARAM
+);
+ast_node!(
+    /// `@a`, the wildcard `@_`, or the join `@a + @b` in a turbofish — one
+    /// region argument. A join names several regions at once and reads as
+    /// conjunction ("outlived by all of them"), exactly as `+` does in bound
+    /// composition.
+    RegionArg: REGION_ARG
+);
+
 ast_enum!(
-    /// One generic parameter: a bare type name or a `const` value binder.
-    GenericParam: TypeParam, ConstParam
+    /// One generic parameter: a region, a bare type name, or a `const`
+    /// value binder.
+    GenericParam: RegionParam, TypeParam, ConstParam
 );
 ast_enum!(
-    /// One turbofish argument: a type (including `_`), a const value, or a
-    /// named argument (`Self = Type`).
-    GenericArg: TypeArg, ConstArg, NamedArg
+    /// One turbofish argument: a region, a type (including `_`), a const
+    /// value, or a named argument (`Self = Type`).
+    GenericArg: RegionArg, TypeArg, ConstArg, NamedArg
 );
 
 ast_node!(
@@ -269,13 +285,11 @@ ast_node!(
     DerefExpr: DEREF_EXPR
 );
 ast_node!(
-    /// `x.&` / `x.&mut` — a postfix safe borrow, the dual of `.*`. Reserved
-    /// for the borrow round; validation rejects it (parse-and-reserve).
+    /// `x.&` / `x.&mut` — a postfix safe borrow, the dual of `.*`.
     BorrowExpr: BORROW_EXPR
 );
 ast_node!(
-    /// `T.&` / `T.&mut` — a postfix safe reference type. Reserved for the
-    /// borrow round; validation rejects it (parse-and-reserve).
+    /// `T.&` / `T.&mut` — a postfix safe reference type.
     BorrowType: BORROW_TYPE
 );
 ast_node!(
@@ -520,6 +534,11 @@ impl WithClause {
     /// The pin's `=` token (`T = usize`); a constrain clause has none.
     pub fn eq_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, EQ)
+    }
+    /// The region head's sigil (`@a` in `@a: @b + @c`); a type-headed
+    /// clause (`T: ...` / `T = ...`) has none.
+    pub fn region_ident_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, REGION_IDENT)
     }
 }
 
@@ -1250,6 +1269,40 @@ impl TypeArg {
     }
 }
 
+/// Every `REGION_IDENT` token directly under `node`, in written order — the
+/// one place region tokens are read off a tree. A [`RegionParam`]'s first is
+/// the declared name and the rest are its outlives bounds; a [`RegionArg`]'s
+/// are the members of its join.
+fn region_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> + use<> {
+    node.children_with_tokens()
+        .filter_map(|it| it.into_token())
+        .filter(|it| it.kind() == REGION_IDENT)
+}
+
+impl RegionParam {
+    /// The declared region's token (`@a`).
+    pub fn region_token(&self) -> Option<SyntaxToken> {
+        region_tokens(&self.syntax).next()
+    }
+    /// The declared region's name INCLUDING its sigil (`@a`) — the spelling
+    /// users see in diagnostics and hovers.
+    pub fn name(&self) -> Option<String> {
+        self.region_token().map(|it| it.text().to_owned())
+    }
+    /// The regions this one must outlive (`@b: @a + @c` yields `@a`, `@c`).
+    pub fn bounds(&self) -> impl Iterator<Item = SyntaxToken> + use<> {
+        region_tokens(&self.syntax).skip(1)
+    }
+}
+
+impl RegionArg {
+    /// The regions this argument names — one token for `@a`/`@_`, several
+    /// for the join `@a + @b`.
+    pub fn regions(&self) -> impl Iterator<Item = SyntaxToken> + use<> {
+        region_tokens(&self.syntax)
+    }
+}
+
 impl NamedArg {
     /// The argument's written name (`Self`).
     pub fn name_ref(&self) -> Option<NameRef> {
@@ -1338,6 +1391,12 @@ impl BorrowExpr {
     pub fn is_mut(&self) -> bool {
         self.mut_token().is_some()
     }
+    /// The borrow operator's OWN turbofish (`x.&mut::<@a>`), when written.
+    /// A borrow node has no other generic-argument child, so this direct
+    /// lookup is unambiguous.
+    pub fn generic_arg_list(&self) -> Option<GenericArgList> {
+        child(&self.syntax)
+    }
 }
 
 impl BorrowType {
@@ -1350,6 +1409,16 @@ impl BorrowType {
     }
     pub fn is_mut(&self) -> bool {
         self.mut_token().is_some()
+    }
+    /// The region turbofish (`T.&::<@a>`) — REQUIRED in signatures (no
+    /// elision at launch); body-local annotations may write `@_`.
+    pub fn generic_arg_list(&self) -> Option<GenericArgList> {
+        child(&self.syntax)
+    }
+    /// The `.&` operator's `&` token — the anchor for "this borrow needs a
+    /// region" diagnostics.
+    pub fn amp_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, AMP)
     }
 }
 

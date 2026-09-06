@@ -170,8 +170,25 @@ pub enum ExprData {
         mutable: bool,
         place: ExprId,
     },
-    /// `receiver.*`: reads through a raw pointer. As an assignment target
-    /// (`p.* = v;`) the same node names the written-through pointer.
+    /// `place.&` / `place.&mut` (optionally `place.&mut::<@a>`): a SAFE
+    /// borrow of a place. The operand lowers as an ordinary expression, so
+    /// its reads resolve and hover works; inference restricts it to places,
+    /// exactly as [`Self::AddrOf`] does.
+    ///
+    /// The region is optional here and REQUIRED in a type annotation, and
+    /// that asymmetry is the no-elision rule read correctly: a signature's
+    /// regions are parameters and must be named, a body's are existentials
+    /// and are inferred. An omitted turbofish means the same thing `@_`
+    /// does.
+    Borrow {
+        mutable: bool,
+        place: ExprId,
+        region: Option<crate::item_tree::RegionRef>,
+    },
+    /// `receiver.*`: reads through a raw pointer OR a safe borrow. Which
+    /// one decides whether an `unsafe` block is needed (flavor determines
+    /// safety) — a question only inference can answer, so lowering keeps
+    /// one node and `unsafe_check` consults types.
     Deref {
         receiver: ExprId,
     },
@@ -232,6 +249,9 @@ pub enum ExprData {
 /// or a const is checked against the declaration during inference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GenericArgData {
+    /// A REGION argument (`@a`, `@_`, `@a + @b`). Carries no expression and
+    /// no value: regions are erased, so nothing here survives to MIR.
+    Region(crate::item_tree::RegionRef),
     /// A type argument, including the `_` hole (which is an *error* in a
     /// const position — const args are never inferred, TR06).
     Type(TypeRef),
@@ -538,6 +558,9 @@ impl LowerCtx {
     fn lower_generic_args(&mut self, list: ast::GenericArgList) -> Vec<GenericArgData> {
         list.args()
             .map(|arg| match arg {
+                ast::GenericArg::RegionArg(region) => {
+                    GenericArgData::Region(crate::item_tree::RegionRef::from_ast(&region))
+                }
                 ast::GenericArg::TypeArg(ty_arg) => GenericArgData::Type(
                     ty_arg.ty().map(TypeRef::from_ast).unwrap_or(TypeRef::Error),
                 ),
@@ -755,9 +778,26 @@ impl LowerCtx {
                 let receiver = self.lower_opt_expr(it.receiver());
                 self.alloc_expr(ExprData::Deref { receiver }, it.syntax())
             }
-            // `x.&` / `x.&mut` — reserved safe borrows (validation rejects
-            // them); nothing to lower.
-            ast::Expr::BorrowExpr(_) => self.missing_expr(),
+            ast::Expr::BorrowExpr(it) => {
+                let place = self.lower_opt_expr(it.receiver());
+                let region = it
+                    .generic_arg_list()
+                    .and_then(|list| list.args().next())
+                    .map(|arg| match arg {
+                        ast::GenericArg::RegionArg(region) => {
+                            crate::item_tree::RegionRef::from_ast(&region)
+                        }
+                        _ => crate::item_tree::RegionRef::Error,
+                    });
+                self.alloc_expr(
+                    ExprData::Borrow {
+                        mutable: it.is_mut(),
+                        place,
+                        region,
+                    },
+                    it.syntax(),
+                )
+            }
             ast::Expr::UnsafeBlockExpr(it) => {
                 let body = self.lower_opt_expr(it.expr());
                 self.alloc_expr(ExprData::Unsafe { body }, it.syntax())

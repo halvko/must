@@ -256,6 +256,28 @@ pub enum Rvalue {
         mutable: bool,
         place: Place,
     },
+    /// `place.&` / `place.&mut` — a SAFE borrow of a place. Structurally
+    /// [`Rvalue::AddrOf`]'s twin, and at runtime the identical value: a
+    /// borrow and a raw pointer to the same place are the same machine
+    /// word, and the region that told them apart is already erased by the
+    /// time MIR exists.
+    ///
+    /// It is a variant of its own anyway, for two reasons. A future
+    /// dynamic aliasing check has exactly one place to mint tracking state
+    /// — here, and only here, never at `AddrOf` — so keeping the variants
+    /// distinct now is what keeps that check a local change later rather
+    /// than a re-plumbing. And every exhaustive consumer is forced to
+    /// decide what a safe borrow means for it rather than inheriting the
+    /// raw answer by accident (the wasm backend refuses it BY NAME).
+    ///
+    /// A borrow whose root is a `static` lowers through
+    /// [`Rvalue::AddrOfStatic`] instead: a static's allocation is
+    /// read-only and shared for the whole run, so there is no exclusivity
+    /// to track (`.&mut` of a `static` is rejected upstream).
+    Borrow {
+        mutable: bool,
+        place: Place,
+    },
     /// `S[.field | [index]]....&raw` of a `static` item: the item's ONE
     /// place — minted once per machine run in the static-allocation table,
     /// so every `S.&raw` is the same address (static=identity,

@@ -257,6 +257,7 @@ impl LowerCtx<'_> {
                 InferenceDiagnostic::GenericArgCount { expr, .. }
                 | InferenceDiagnostic::NotGeneric { expr, .. }
                 | InferenceDiagnostic::ConstArgHole { expr }
+                | InferenceDiagnostic::UnexpectedRegionArg { expr, .. }
                 | InferenceDiagnostic::GenericArgKindMismatch { expr, .. }
                 | InferenceDiagnostic::MissingConstArgs { expr, .. }
                 | InferenceDiagnostic::CannotInferGenericParam { expr, .. }
@@ -305,14 +306,28 @@ impl LowerCtx<'_> {
                 }
                 InferenceDiagnostic::AddrOfMutImmutable { addr_of, .. }
                 | InferenceDiagnostic::AddrOfMutItem { addr_of, .. }
-                | InferenceDiagnostic::AddrOfMutThroughImmutablePointer { addr_of, .. } => {
+                | InferenceDiagnostic::AddrOfMutThroughShared { addr_of, .. } => {
                     self.value_traps.insert(*addr_of, diag.message());
+                }
+                // The safe-borrow twins, keyed the same way: the value that
+                // cannot be produced is the borrow.
+                InferenceDiagnostic::DotThroughBorrow { expr, .. }
+                | InferenceDiagnostic::BorrowNonPlace { expr }
+                | InferenceDiagnostic::MoveOutOfBorrow { expr, .. }
+                | InferenceDiagnostic::RegionArg { expr, .. } => {
+                    self.value_traps.insert(*expr, diag.message());
+                }
+                InferenceDiagnostic::BorrowMutImmutable { borrow, .. }
+                | InferenceDiagnostic::BorrowMutItem { borrow, .. }
+                | InferenceDiagnostic::BorrowMutThroughShared { borrow, .. }
+                | InferenceDiagnostic::BorrowThroughRawPointer { borrow, .. } => {
+                    self.value_traps.insert(*borrow, diag.message());
                 }
                 // Writes through pointers the checker rejected: keyed on
                 // the governing deref (the target itself for `p.* = v;`,
                 // the chain's outermost deref for `p.*.x = v;`), like the
                 // other assign traps.
-                InferenceDiagnostic::AssignThroughImmutablePointer { target, .. } => {
+                InferenceDiagnostic::AssignThroughShared { target, .. } => {
                     self.assign_traps.insert(*target, diag.message());
                 }
                 // A flavor-polymorphic builtin (`add`/`copy`) applied
@@ -420,11 +435,21 @@ impl LowerCtx<'_> {
         })
     }
 
+    /// The type MIR sees for an expression — REGION-ERASED.
+    ///
+    /// This is the region boundary of the whole compiler, and it is one
+    /// function on purpose. Below it nothing can observe a region: MIR
+    /// snapshots, `Instance` keys, the backend's mono keys and every
+    /// `hir::Ty` hashed into them are all downstream of this call, so a
+    /// borrow of `@a` and a borrow of `@b` are the same type to all of
+    /// them. That is what makes borrow check a DECL-level query — one
+    /// check per body, never one per instantiation — and what keeps the
+    /// specialization law true by construction rather than by review.
     fn ty(&self, expr: ExprId) -> Ty {
         self.infer
             .type_of_expr
             .get(expr)
-            .cloned()
+            .map(Ty::erase_regions)
             .unwrap_or(Ty::Error)
     }
 
@@ -521,7 +546,66 @@ impl LowerCtx<'_> {
         })
     }
 
+    /// Lower an expression, MATERIALIZING any reborrow the checker
+    /// inserted at it.
+    ///
+    /// An implicit reborrow that produces no MIR operation would be
+    /// invisible to a future dynamic aliasing check: the child node would
+    /// never exist, so there would be no parent/child relation for a write
+    /// through the parent while the child is live to violate. M07 says
+    /// degradation is not spelled `v.*.&` "because the explicit form
+    /// produces exactly the same child node" — which is a statement about
+    /// the IR, and it has to be made true rather than assumed, before
+    /// anything reads the IR to check it.
+    ///
+    /// Only a PLACE-shaped source is reborrowed. A freshly-formed borrow
+    /// (`x.&mut` passed straight into a call) is already its own node;
+    /// wrapping it again would mint a redundant child and change what the
+    /// tree reports. What needs the reborrow is a NAMED holder — `m` in
+    /// `bump(m)` — which is exactly the case the affinity correction is
+    /// about.
     fn lower_expr(&mut self, b: &mut BodyBuilder, expr: ExprId) -> Operand {
+        let op = self.lower_expr_traps(b, expr);
+        let Some(&mutable) = self.infer.reborrows.get(expr) else {
+            return op;
+        };
+        if !self.is_place_expr(expr) {
+            return op;
+        }
+        // G14's auto-ref exception, materialized: a safe borrow of `x.*`,
+        // never of `x` itself, and never raw.
+        let local = self.operand_root_local(b, op, expr);
+        let dest = b.temp(self.ty(expr));
+        b.push_assign(
+            dest,
+            Rvalue::Borrow {
+                mutable,
+                place: Place {
+                    local,
+                    projection: vec![crate::ProjElem::Deref],
+                },
+            },
+            expr,
+        );
+        Operand::Copy(dest.into())
+    }
+
+    /// Whether this expression names a PLACE that holds a borrow — a
+    /// variable, a field or element of one, or a deref chain. A call
+    /// result, a literal or a freshly-formed borrow is not one.
+    fn is_place_expr(&self, expr: ExprId) -> bool {
+        match &self.body.exprs[expr] {
+            ExprData::NameRef(_) => {
+                matches!(self.resolutions.get(expr), Some(Resolution::Local(_)))
+            }
+            ExprData::Field { receiver, .. } => self.is_place_expr(*receiver),
+            ExprData::Index { base, .. } => self.is_place_expr(*base),
+            ExprData::Deref { .. } => true,
+            _ => false,
+        }
+    }
+
+    fn lower_expr_traps(&mut self, b: &mut BodyBuilder, expr: ExprId) -> Operand {
         let op = self.lower_expr_inner(b, expr);
         // A value the context can't accept: it was evaluated (the CFG keeps
         // everything), now refuse to let it flow onward.
@@ -1259,7 +1343,21 @@ impl LowerCtx<'_> {
                 if self.value_traps.contains_key(&expr) {
                     return Operand::Const(Const::Unit);
                 }
-                self.lower_addr_of(b, expr, *mutable, *place)
+                self.lower_addr_of_flavored(b, expr, *mutable, *place, PtrFlavor::Raw)
+            }
+            // A SAFE borrow lowers exactly like its raw sibling — same
+            // place walk, same addressable marking, same resulting
+            // `(alloc, path)` value. The region is already gone (see
+            // `Self::ty`), and at runtime a borrow and a raw pointer to
+            // the same place are the same machine word; `Rvalue::Borrow`
+            // stays a variant of its own so a future dynamic aliasing
+            // check has one place to mint tracking state, not because the
+            // interpreter does anything different with it today.
+            ExprData::Borrow { mutable, place, .. } => {
+                if self.value_traps.contains_key(&expr) {
+                    return Operand::Const(Const::Unit);
+                }
+                self.lower_addr_of_flavored(b, expr, *mutable, *place, PtrFlavor::Borrow)
             }
             // `p.*` — a read through the pointer: a place-based load,
             // `Copy` of the pointer local's place extended with a `Deref`
@@ -1274,7 +1372,13 @@ impl LowerCtx<'_> {
                     return self.trap(b, expr, message);
                 }
                 match self.ty(*receiver) {
-                    Ty::RawPtr { .. } => {
+                    // Both pointer flavors read the same way — one
+                    // `ProjElem::Deref`. What differs is who checks the
+                    // read: `unsafe` for a raw pointer; a safe one needs no
+                    // marker, because the borrow checker's job is to make
+                    // the marker unnecessary (exclusivity checking itself
+                    // is a later stage, static or dynamic).
+                    Ty::RawPtr { .. } | Ty::Borrow { .. } => {
                         let root = self.operand_root_local(b, op, *receiver);
                         let dest = b.temp(self.ty(expr));
                         b.push_assign(
@@ -1713,7 +1817,7 @@ impl LowerCtx<'_> {
     /// and pattern bindings share the shape.
     fn alloc_binding_local(&mut self, b: &mut BodyBuilder, binding: BindingId) -> LocalId {
         let data = &self.body.bindings[binding];
-        let local = b.locals.alloc(LocalData {
+        let local = b.alloc_local(LocalData {
             ty: self
                 .infer
                 .type_of_binding
@@ -1745,7 +1849,7 @@ impl LowerCtx<'_> {
                     .get(pat)
                     .cloned()
                     .unwrap_or(Ty::Error);
-                let local = b.locals.alloc(LocalData {
+                let local = b.alloc_local(LocalData {
                     ty,
                     name: None,
                     binding: None,
@@ -1765,7 +1869,7 @@ impl LowerCtx<'_> {
                     .get(pat)
                     .cloned()
                     .unwrap_or(Ty::Error);
-                b.locals.alloc(LocalData {
+                b.alloc_local(LocalData {
                     ty,
                     name: None,
                     binding: None,
@@ -1774,7 +1878,7 @@ impl LowerCtx<'_> {
             }
             PatData::Variant { .. } => {
                 // Never produced by `binding_pattern`'s grammar; defensive.
-                b.locals.alloc(LocalData {
+                b.alloc_local(LocalData {
                     ty: Ty::Error,
                     name: None,
                     binding: None,
@@ -2136,7 +2240,7 @@ impl LowerCtx<'_> {
             // A broken receiver (not a `RawPtr` — `{error}`-typed, its own
             // story upstream) skips the write, like the field path's
             // missing-index case.
-            if !matches!(self.ty(receiver), Ty::RawPtr { .. }) {
+            if !matches!(self.ty(receiver), Ty::RawPtr { .. } | Ty::Borrow { .. }) {
                 return;
             }
             let local = self.operand_root_local(b, ptr_op, receiver);
@@ -2317,12 +2421,19 @@ impl LowerCtx<'_> {
     ///   addressed), and nothing is bounds-checked at minting — validity
     ///   is a deref-time judgement, so an out-of-range address mints
     ///   silently and every later deref of it is detected UB.
-    fn lower_addr_of(
+    ///
+    /// This is the ONE walk both `.&raw` and `.&` share. `flavor` decides
+    /// only which rvalue is planted at the end; every place rule, every
+    /// trap and the `addressable` marking are identical, which is the
+    /// point: the two flavors differ in what they PROMISE, never in what
+    /// they compute.
+    fn lower_addr_of_flavored(
         &mut self,
         b: &mut BodyBuilder,
         expr: ExprId,
         mutable: bool,
         place: ExprId,
+        flavor: PtrFlavor,
     ) -> Operand {
         // The chain's field-access and index expressions, outermost first;
         // `root` is the expression at its base. Like an assignment
@@ -2368,7 +2479,7 @@ impl LowerCtx<'_> {
             }
             // `{error}`-typed receiver, silently broken upstream: the
             // pointer value is never observable — keep lowering total.
-            if !matches!(self.ty(receiver), Ty::RawPtr { .. }) {
+            if !matches!(self.ty(receiver), Ty::RawPtr { .. } | Ty::Borrow { .. }) {
                 return Operand::Const(Const::Unit);
             }
             let local = self.operand_root_local(b, ptr_op, receiver);
@@ -2380,10 +2491,7 @@ impl LowerCtx<'_> {
             let dest = b.temp(self.ty(expr));
             b.push_assign(
                 dest,
-                Rvalue::AddrOf {
-                    mutable,
-                    place: Place { local, projection },
-                },
+                flavor.address_of(mutable, Place { local, projection }),
                 expr,
             );
             return Operand::Copy(dest.into());
@@ -2411,10 +2519,7 @@ impl LowerCtx<'_> {
                     let dest = b.temp(self.ty(expr));
                     b.push_assign(
                         dest,
-                        Rvalue::AddrOf {
-                            mutable,
-                            place: Place { local, projection },
-                        },
+                        flavor.address_of(mutable, Place { local, projection }),
                         expr,
                     );
                     Operand::Copy(dest.into())
@@ -2558,7 +2663,7 @@ impl LowerCtx<'_> {
         let ret_ty = Ty::Variant(variant.clone());
         let mut b = BodyBuilder::new(ret_ty, expr);
         for ty in payload_tys {
-            let local = b.locals.alloc(LocalData {
+            let local = b.alloc_local(LocalData {
                 ty: ty.clone(),
                 name: None,
                 binding: None,
@@ -2938,7 +3043,7 @@ impl BodyBuilder {
     fn new(ret_ty: Ty, origin: ExprId) -> BodyBuilder {
         let mut locals = Arena::default();
         let ret = locals.alloc(LocalData {
-            ty: ret_ty,
+            ty: ret_ty.erase_regions(),
             name: None,
             binding: None,
             addressable: false,
@@ -2975,12 +3080,23 @@ impl BodyBuilder {
     }
 
     fn temp(&mut self, ty: Ty) -> LocalId {
-        self.locals.alloc(LocalData {
+        self.alloc_local(LocalData {
             ty,
             name: None,
             binding: None,
             addressable: false,
         })
+    }
+
+    /// THE local-allocation chokepoint, and the second half of the region
+    /// boundary (`LowerCtx::ty` is the first). Every local's type is erased
+    /// here, so a type that reached MIR by any route — a binding's inferred
+    /// type, a pattern slot, a synthesized constructor parameter — arrives
+    /// region-free. One function, so "did we erase on this path?" is never
+    /// a question anyone has to re-answer.
+    fn alloc_local(&mut self, mut data: LocalData) -> LocalId {
+        data.ty = data.ty.erase_regions();
+        self.locals.alloc(data)
     }
 
     fn push_assign(&mut self, dest: impl Into<Place>, rvalue: Rvalue, origin: ExprId) {
@@ -2995,5 +3111,28 @@ impl BodyBuilder {
 
     fn terminate(&mut self, kind: TerminatorKind, origin: ExprId) {
         self.blocks[self.current].terminator = Terminator { kind, origin };
+    }
+}
+
+/// Which flavor of pointer a place walk mints. The place rules are
+/// identical for both — see [`LowerCtx::lower_addr_of_flavored`] — so the
+/// distinction lives here, in one two-armed constructor, rather than being
+/// smeared across the walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PtrFlavor {
+    /// `.&raw` / `.&raw mut` — by-access semantics, no aliasing node.
+    Raw,
+    /// `.&` / `.&mut` — a safe borrow. Structurally identical to `Raw`
+    /// today; kept distinct so a future dynamic aliasing check has one
+    /// place to mint tracking state.
+    Borrow,
+}
+
+impl PtrFlavor {
+    fn address_of(self, mutable: bool, place: Place) -> Rvalue {
+        match self {
+            PtrFlavor::Raw => Rvalue::AddrOf { mutable, place },
+            PtrFlavor::Borrow => Rvalue::Borrow { mutable, place },
+        }
     }
 }

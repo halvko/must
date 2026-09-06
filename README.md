@@ -89,9 +89,10 @@ requires byte-identical behavior. Design notes:
 (`state_machine.must`), loops and mutability (`loops.must`), functions,
 recursion, and higher-order calls (`functions.must`), compile-time evaluation
 (`compile_time.must`), generics (`generics.must`), fixed-size arrays
-(`arrays.must`), raw pointers (`pointers.must`) and the heap built on top of
-them (`heap.must`) — plus `errors.must`, an intentionally broken file pairing
-each diagnostic with the exact message `must-lsp check` prints for it.
+(`arrays.must`), raw pointers (`pointers.must`), the heap built on top of
+them (`heap.must`) and safe borrows (`borrows.must`) — plus `errors.must`, an
+intentionally broken file pairing each diagnostic with the exact message
+`must-lsp check` prints for it.
 
 Programs run even when they don't typecheck: execution proceeds until it
 reaches something broken, then crashes with the same message the editor

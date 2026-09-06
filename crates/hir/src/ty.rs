@@ -6,7 +6,9 @@ use base_db::{Db, SourceFile};
 use ena::unify::{InPlaceUnificationTable, NoError, UnifyKey, UnifyValue};
 use rustc_hash::FxHashMap;
 
-use crate::item_tree::{ConstArgRef, GenericArgRef, GenericParamKind, TypeRef, type_decl};
+use crate::item_tree::{
+    ConstArgRef, GenericArgRef, GenericParamKind, RegionRef, TypeRef, type_decl,
+};
 use crate::scopes::{Resolution, type_scope};
 use crate::{ItemId, ItemLoc};
 
@@ -313,6 +315,26 @@ pub enum Ty {
         mutable: bool,
         pointee: Arc<Ty>,
     },
+    /// `T.&::<@a>` / `T.&mut::<@a>`: a SAFE borrow. Carries its referent,
+    /// its mutability and its [`Region`].
+    ///
+    /// Regions are related INVARIANTLY: unification of two borrow types
+    /// unifies the referents and emits outlives constraints in BOTH
+    /// directions (see `Constraints::relate_regions`), never an equality
+    /// merge — the one implementation instruction that keeps variance a
+    /// later, additive change instead of a rewrite. There is no
+    /// `T.&mut` → `T.&` subtyping either: degradation is a REBORROW (the
+    /// region shrinks and the parent suspends), which is a checker event,
+    /// not a lattice edge.
+    ///
+    /// The region is part of this type's identity INSIDE hir, and nowhere
+    /// else: [`Ty::erase_regions`] runs at the MIR boundary, so MIR,
+    /// instance keys and the backend never see one.
+    Borrow {
+        mutable: bool,
+        region: Region,
+        referent: Arc<Ty>,
+    },
     /// `[T; N]`: a fixed-size array — structural, like [`Ty::Record`]
     /// (never a `Named` declaration). Unifies exactly: element pointwise,
     /// length by plain equality with [`ConstArgValue::Error`] infectious
@@ -338,6 +360,80 @@ pub enum Ty {
     /// Type of broken code. Infectious and silent: producing further
     /// diagnostics from an `Error` type would only be noise.
     Error,
+}
+
+/// A region: how long a borrow is good for.
+///
+/// Two populations, and the split is the whole design. A region written in a
+/// SIGNATURE is UNIVERSAL — a rigid [`Region::Param`], opaque to the body,
+/// which the body is checked *against*. A region arising inside a BODY is
+/// EXISTENTIAL — a [`Region::Var`] the outlives module solves for. Nothing
+/// infers a signature's regions from a body: that would make callers depend
+/// on callee bodies and blame go cross-body, which the server-first
+/// architecture forbids.
+///
+/// Regions never reach MIR. [`Ty::erase_regions`] maps every one to
+/// [`Region::Erased`] at that boundary, which is what keeps borrow checking
+/// a decl-level query (one check per body, not one per instantiation) and
+/// keeps regions out of instance keys.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Region {
+    /// `@a` declared by an enclosing binder — rigid and universal. Same
+    /// `(item, index)` identity scheme as [`Ty::Param`] and
+    /// [`ConstArgValue::Param`]; the name (sigil included) is display-only.
+    Param {
+        item: ItemLoc,
+        index: u32,
+        name: std::sync::Arc<str>,
+    },
+    /// A body-local existential region — an inference variable, identified
+    /// by a per-body index. Minted by `@_`, by every borrow expression, and
+    /// by every reborrow.
+    Var(RegionVar),
+    /// `@a + @b` — the join: outlived by every member. Kept structural
+    /// rather than solved on sight, so blame can point at the written join.
+    Join(Vec<Region>),
+    /// The erased region — what every region becomes at the MIR boundary.
+    /// Two borrow types differing only in their regions are the SAME type
+    /// to MIR, codegen and instance keys.
+    Erased,
+    /// A region argument that was missing, of the wrong kind, or naming
+    /// nothing in scope. Infectious and silent, like [`Ty::Error`].
+    Error,
+}
+
+/// A body-local region inference variable's identity — its index in the
+/// inference context's region table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RegionVar(pub u32);
+
+impl Region {
+    pub fn display(&self) -> String {
+        match self {
+            Region::Param { name, .. } => name.to_string(),
+            // Reached only where a region is rendered on its own (never
+            // through `Ty::display`, which elides the turbofish instead).
+            Region::Var(_) => "@_".to_owned(),
+            Region::Join(parts) => parts
+                .iter()
+                .map(Region::display)
+                .collect::<Vec<_>>()
+                .join(" + "),
+            // Erased regions only exist below the checker, where nothing
+            // renders types to users; showing the sigil alone is honest.
+            Region::Erased => "@".to_owned(),
+            Region::Error => "@{error}".to_owned(),
+        }
+    }
+
+    /// Every region variable mentioned, including inside a join.
+    pub fn vars(&self, out: &mut Vec<RegionVar>) {
+        match self {
+            Region::Var(var) => out.push(*var),
+            Region::Join(parts) => parts.iter().for_each(|part| part.vars(out)),
+            _ => {}
+        }
+    }
 }
 
 /// Identity of a rigid type parameter: the declaring item plus the
@@ -384,6 +480,12 @@ impl NamedTy {
 /// One generic argument of a [`NamedTy`]/[`VariantTy`], in binder order.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GenericArg {
+    /// A REGION argument. Only reachable through a region param on a TYPE
+    /// declaration, which is reserved for a later arc (variance and
+    /// well-formedness are undecided); the variant exists so binder arity
+    /// stays honest at such a mention instead of silently shifting the
+    /// other arguments' positions.
+    Region(Region),
     Ty(Ty),
     Const(ConstArgValue),
 }
@@ -428,6 +530,7 @@ impl ConstArgValue {
 impl GenericArg {
     pub fn display(&self) -> String {
         match self {
+            GenericArg::Region(region) => region.display(),
             GenericArg::Ty(ty) => ty.display(),
             GenericArg::Const(value) => value.display(),
         }
@@ -514,6 +617,49 @@ impl Ty {
         }
     }
 
+    pub fn borrow(mutable: bool, region: Region, referent: Ty) -> Ty {
+        Ty::Borrow {
+            mutable,
+            region,
+            referent: Arc::new(referent),
+        }
+    }
+
+    /// This type with EVERY region replaced by [`Region::Erased`] — the MIR
+    /// boundary, and the reason borrow checking is a decl-level query.
+    /// Applied to every type on its way out of hir into `mir`, so nothing
+    /// below can accidentally observe a region.
+    pub fn erase_regions(&self) -> Ty {
+        match self {
+            Ty::Borrow {
+                mutable,
+                referent,
+                region: _,
+            } => Ty::borrow(*mutable, Region::Erased, referent.erase_regions()),
+            Ty::RawPtr { mutable, pointee } => Ty::raw_ptr(*mutable, pointee.erase_regions()),
+            Ty::Array { elem, len } => Ty::array(elem.erase_regions(), len.clone()),
+            Ty::Fn(f) => Ty::fn_type(
+                f.params.iter().map(Ty::erase_regions).collect(),
+                f.ret.erase_regions(),
+            ),
+            Ty::Record(rec) => Ty::record(
+                rec.fields
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), ty.erase_regions()))
+                    .collect(),
+            ),
+            Ty::Named(named) => Ty::Named(NamedTy {
+                decl: named.decl.clone(),
+                args: named.args.iter().map(erase_regions_arg).collect(),
+            }),
+            Ty::Variant(variant) => Ty::Variant(VariantTy {
+                args: variant.args.iter().map(erase_regions_arg).collect(),
+                ..variant.clone()
+            }),
+            other => other.clone(),
+        }
+    }
+
     pub fn array(elem: Ty, len: ConstArgValue) -> Ty {
         Ty::Array {
             elem: Arc::new(elem),
@@ -541,6 +687,10 @@ impl Ty {
             Ty::Infer(_) | Ty::UnresolvedNumber => true,
             Ty::Fn(f) => f.ret.contains_infer() || f.params.iter().any(Ty::contains_infer),
             Ty::RawPtr { pointee, .. } => pointee.contains_infer(),
+            // A borrow's REGION is never "undetermined" in this sense: an
+            // unsolved region is the outlives module's business, never a
+            // reason to demand a type annotation.
+            Ty::Borrow { referent, .. } => referent.contains_infer(),
             // The length is never an inference variable (const args are
             // never inferred, TR06) — only the element can be undetermined.
             Ty::Array { elem, .. } => elem.contains_infer(),
@@ -562,12 +712,13 @@ impl Ty {
         match self {
             Ty::Fn(_) => true,
             Ty::RawPtr { pointee, .. } => pointee.mentions_fn(),
+            Ty::Borrow { referent, .. } => referent.mentions_fn(),
             Ty::Array { elem, .. } => elem.mentions_fn(),
             Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| ty.mentions_fn()),
             Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
                 args.iter().any(|arg| match arg {
                     GenericArg::Ty(ty) => ty.mentions_fn(),
-                    GenericArg::Const(_) => false,
+                    GenericArg::Region(_) | GenericArg::Const(_) => false,
                 })
             }
             _ => false,
@@ -584,12 +735,50 @@ impl Ty {
         match self {
             Ty::Array { .. } => true,
             Ty::RawPtr { pointee, .. } => pointee.mentions_array(),
+            Ty::Borrow { referent, .. } => referent.mentions_array(),
             Ty::Fn(f) => f.params.iter().any(Ty::mentions_array) || f.ret.mentions_array(),
             Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| ty.mentions_array()),
             Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
                 args.iter().any(|arg| match arg {
                     GenericArg::Ty(ty) => ty.mentions_array(),
-                    GenericArg::Const(_) => false,
+                    GenericArg::Region(_) | GenericArg::Const(_) => false,
+                })
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a borrow appears anywhere in this type.
+    ///
+    /// Asked by exactly one caller, and for a structural reason: any fast
+    /// path that agrees two types WITHOUT relating their regions has to
+    /// stand aside for a borrow, because `unify` is region-blind by design
+    /// and "they agree" is therefore always true of two borrows that
+    /// differ only in how long they live.
+    pub fn contains_borrow(&self) -> bool {
+        match self {
+            Ty::Borrow { .. } => true,
+            Ty::RawPtr { pointee, .. } => pointee.contains_borrow(),
+            Ty::Array { elem, .. } => elem.contains_borrow(),
+            Ty::Fn(f) => f.params.iter().any(Ty::contains_borrow) || f.ret.contains_borrow(),
+            Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| ty.contains_borrow()),
+            // BLIND SPOT, and it is the one that matters the day region
+            // parameters on type declarations are un-reserved: this reads
+            // a nominal type's generic ARGS, never the fields of its
+            // declaration. Today no `type` can name a region, so a
+            // declaration cannot hide one — the args are the whole story.
+            // The moment `struct::<@a, T>` becomes legal, a `Named` whose
+            // declaration stores a borrow will answer `false` here and
+            // slip through every guard this predicate protects.
+            Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
+                args.iter().any(|arg| match arg {
+                    GenericArg::Ty(ty) => ty.contains_borrow(),
+                    // A region argument is not a borrow, and a const one
+                    // cannot contain one. Exhaustive on purpose (see
+                    // `Constraints::freshen_regions_args`): this predicate
+                    // guards every region-blind fast path, so the next
+                    // argument kind must be decided here, not inherited.
+                    GenericArg::Region(_) | GenericArg::Const(_) => false,
                 })
             }
             _ => false,
@@ -601,6 +790,11 @@ impl Ty {
             Ty::Error => true,
             Ty::Fn(f) => f.ret.contains_error() || f.params.iter().any(Ty::contains_error),
             Ty::RawPtr { pointee, .. } => pointee.contains_error(),
+            // A broken region is this type's business — a borrow whose
+            // region names nothing cannot check.
+            Ty::Borrow {
+                referent, region, ..
+            } => referent.contains_error() || matches!(region, Region::Error),
             // A broken length is this type's business, exactly like a
             // broken generic const ARG on a `Named` mention.
             Ty::Array { elem, len } => elem.contains_error() || matches!(len, ConstArgValue::Error),
@@ -651,6 +845,27 @@ impl Ty {
                     format!("{}.&raw", pointee.display())
                 }
             }
+            Ty::Borrow {
+                mutable,
+                region,
+                referent,
+            } => {
+                let m = if *mutable { "mut" } else { "" };
+                match region {
+                    // Below the checker there IS no region, so no
+                    // turbofish is printed: a MIR snapshot showing one
+                    // would be advertising information that layer does not
+                    // have.
+                    //
+                    // An unsolved VARIABLE prints bare for a different
+                    // reason: `@_` is exactly what a signature may not
+                    // say, so a message rendering one shows the user a
+                    // type they are forbidden to write — and the mismatch
+                    // is never about the region anyway.
+                    Region::Erased | Region::Var(_) => format!("{}.&{m}", referent.display()),
+                    region => format!("{}.&{m}::<{}>", referent.display(), region.display()),
+                }
+            }
             Ty::Array { elem, len } => {
                 format!("[{}; {}]", elem.display(), len.display())
             }
@@ -686,13 +901,14 @@ impl GenericArg {
     fn contains_infer(&self) -> bool {
         match self {
             GenericArg::Ty(ty) => ty.contains_infer(),
-            GenericArg::Const(_) => false,
+            GenericArg::Region(_) | GenericArg::Const(_) => false,
         }
     }
 
     fn contains_error(&self) -> bool {
         match self {
             GenericArg::Ty(ty) => ty.contains_error(),
+            GenericArg::Region(region) => matches!(region, Region::Error),
             GenericArg::Const(value) => matches!(value, ConstArgValue::Error),
         }
     }
@@ -867,6 +1083,11 @@ fn lower_apply(
         .iter()
         .zip(written)
         .map(|(param, arg)| match (&param.kind, arg) {
+            // Region params on a TYPE declaration are reserved; the mirror
+            // pass carries the story. The slot is still filled so the
+            // remaining arguments keep their binder positions.
+            (GenericParamKind::Region, _) => GenericArg::Region(Region::Erased),
+            (_, GenericArgRef::Region(_)) => GenericArg::Ty(Ty::Error),
             (GenericParamKind::Type, GenericArgRef::Type(type_ref)) => {
                 GenericArg::Ty(lower_type_ref_in(db, file, type_ref, table, scope))
             }
@@ -908,6 +1129,12 @@ fn lower_const_arg_ref(value: &ConstArgRef, scope: &ParamScope) -> ConstArgValue
 /// outside a generic body.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ParamScope {
+    /// Region-param name (sigil included, `@a`) → its rigid
+    /// [`Region::Param`]. Regions are neither values nor types, so they
+    /// live in neither the expression namespace (`Resolution`) nor
+    /// [`Self::types`]: only REGION-argument positions consult this map,
+    /// and the mirror pass reports a region name used anywhere else.
+    pub(crate) regions: FxHashMap<String, Region>,
     /// Type-param name → its rigid [`Ty::Param`].
     pub(crate) types: FxHashMap<String, Ty>,
     /// Const-param name → its rigid identity. Const params are *value*
@@ -925,6 +1152,40 @@ impl ParamScope {
             .get(name)
             .cloned()
             .unwrap_or(ConstArgValue::Error)
+    }
+
+    /// The rigid region `name` denotes, or [`Region::Error`] when the
+    /// enclosing binder declares no such region (the mirror pass reports
+    /// it).
+    fn region_value(&self, name: &str) -> Region {
+        self.regions.get(name).cloned().unwrap_or(Region::Error)
+    }
+}
+
+/// Lower a written region argument under a binder's [`ParamScope`].
+///
+/// `fresh` mints the existential region a `@_` stands for. Signature
+/// lowering has no inference context and passes `None`, which turns a
+/// wildcard into [`Region::Error`] — that is the no-elision rule biting
+/// exactly where it should: a signature may not decline to name a region.
+pub(crate) fn lower_region_ref(
+    value: &RegionRef,
+    scope: &ParamScope,
+    fresh: &mut Option<&mut dyn FnMut() -> Region>,
+) -> Region {
+    match value {
+        RegionRef::Named(name) => scope.region_value(name),
+        RegionRef::Wildcard => match fresh {
+            Some(mint) => mint(),
+            None => Region::Error,
+        },
+        RegionRef::Join(parts) => Region::Join(
+            parts
+                .iter()
+                .map(|part| lower_region_ref(part, scope, fresh))
+                .collect(),
+        ),
+        RegionRef::Error => Region::Error,
     }
 }
 
@@ -965,6 +1226,23 @@ pub(crate) fn lower_type_ref_in(
         TypeRef::RawPtr { mutable, inner } => {
             Ty::raw_ptr(*mutable, lower_type_ref_in(db, file, inner, table, scope))
         }
+        // `T.&::<@a>` — a safe borrow. The region is resolved against the
+        // enclosing binder; a missing turbofish is `Region::Error` (no
+        // elision at launch — the mirror pass names the omission), and a
+        // wildcard needs an inference context, which this path does not
+        // have (see `lower_type_ref_in_body`).
+        TypeRef::Borrow {
+            mutable,
+            region,
+            inner,
+        } => Ty::borrow(
+            *mutable,
+            match region {
+                Some(region) => lower_region_ref(region, scope, &mut None),
+                None => Region::Error,
+            },
+            lower_type_ref_in(db, file, inner, table, scope),
+        ),
         TypeRef::Array { elem, len } => Ty::array(
             lower_type_ref_in(db, file, elem, table, scope),
             lower_const_arg_ref(len, scope),
@@ -1005,7 +1283,7 @@ pub fn const_param_declared_ty(db: &dyn Db, item: ItemId<'_>, index: u32) -> Ty 
         .and_then(|data| data.generics.get(index as usize))
         .and_then(|param| match &param.kind {
             GenericParamKind::Const(type_ref) => Some(type_ref.clone()),
-            GenericParamKind::Type => None,
+            GenericParamKind::Region | GenericParamKind::Type => None,
         });
     match declared {
         Some(type_ref) => lower_const_decl_ty(db, item.file(db), &type_ref),
@@ -1070,6 +1348,11 @@ pub fn member_self_ty(db: &dyn Db, item: ItemId<'_>) -> Option<Ty> {
                 index: index as u32,
                 name: std::sync::Arc::from(param.name.as_str()),
             })),
+            GenericParamKind::Region => GenericArg::Region(Region::Param {
+                item: member_loc.clone(),
+                index: index as u32,
+                name: std::sync::Arc::from(param.name.as_str()),
+            }),
             GenericParamKind::Const(_) => GenericArg::Const(ConstArgValue::Param {
                 item: member_loc.clone(),
                 index: index as u32,
@@ -1122,6 +1405,16 @@ pub(crate) fn generic_param_scope(
                         index: index as u32,
                         name: std::sync::Arc::from(param.name.as_str()),
                     }),
+                );
+            }
+            GenericParamKind::Region => {
+                scope.regions.insert(
+                    param.name.clone(),
+                    Region::Param {
+                        item: loc.clone(),
+                        index: index as u32,
+                        name: std::sync::Arc::from(param.name.as_str()),
+                    },
                 );
             }
             GenericParamKind::Const(_) => {
@@ -1232,6 +1525,11 @@ fn erase_infer(ty: &Ty) -> Ty {
             erase_infer(&f.ret),
         ),
         Ty::RawPtr { mutable, pointee } => Ty::raw_ptr(*mutable, erase_infer(pointee)),
+        Ty::Borrow {
+            mutable,
+            region,
+            referent,
+        } => Ty::borrow(*mutable, region.clone(), erase_infer(referent)),
         Ty::Array { elem, len } => Ty::array(erase_infer(elem), len.clone()),
         Ty::Record(rec) => Ty::record(
             rec.fields
@@ -1254,6 +1552,7 @@ fn erase_infer(ty: &Ty) -> Ty {
 fn erase_infer_arg(arg: &GenericArg) -> GenericArg {
     match arg {
         GenericArg::Ty(ty) => GenericArg::Ty(erase_infer(ty)),
+        GenericArg::Region(region) => GenericArg::Region(region.clone()),
         GenericArg::Const(value) => GenericArg::Const(value.clone()),
     }
 }
@@ -1285,6 +1584,15 @@ pub fn substitute_args(ty: &Ty, decl: &ItemLoc, args: &[GenericArg]) -> Ty {
         Ty::RawPtr { mutable, pointee } => {
             Ty::raw_ptr(*mutable, substitute_args(pointee, decl, args))
         }
+        Ty::Borrow {
+            mutable,
+            region,
+            referent,
+        } => Ty::borrow(
+            *mutable,
+            substitute_region(region, decl, args),
+            substitute_args(referent, decl, args),
+        ),
         Ty::Array { elem, len } => {
             let len = match len {
                 ConstArgValue::Param { item, index, .. } if item == decl => {
@@ -1326,13 +1634,18 @@ pub fn substitute_args(ty: &Ty, decl: &ItemLoc, args: &[GenericArg]) -> Ty {
 fn substitute_generic_arg(arg: &GenericArg, decl: &ItemLoc, args: &[GenericArg]) -> GenericArg {
     match arg {
         GenericArg::Ty(ty) => GenericArg::Ty(substitute_args(ty, decl, args)),
+        // A region ARGUMENT substitutes exactly as a borrow's region does
+        // (`substitute_region` a few arms up) — the same walk, one
+        // constructor along. Unreachable until a type declaration may take
+        // a region; correct the day it can.
+        GenericArg::Region(region) => GenericArg::Region(substitute_region(region, decl, args)),
         GenericArg::Const(ConstArgValue::Param { item, index, .. }) if item == decl => {
             match args.get(*index as usize) {
                 Some(GenericArg::Const(value)) => GenericArg::Const(value.clone()),
                 _ => GenericArg::Const(ConstArgValue::Error),
             }
         }
-        other => other.clone(),
+        GenericArg::Const(value) => GenericArg::Const(value.clone()),
     }
 }
 
@@ -1486,4 +1799,31 @@ pub fn signature_needs_annotation<'db>(db: &'db dyn Db, item: ItemId<'db>) -> bo
         return false;
     }
     signature(db, item).contains_error()
+}
+
+fn erase_regions_arg(arg: &GenericArg) -> GenericArg {
+    match arg {
+        GenericArg::Ty(ty) => GenericArg::Ty(ty.erase_regions()),
+        GenericArg::Region(_) => GenericArg::Region(Region::Erased),
+        GenericArg::Const(value) => GenericArg::Const(value.clone()),
+    }
+}
+
+/// Substitute a declaration's rigid region params by a mention's args — the
+/// region half of [`substitute_args`]. Only reachable once region params on
+/// type declarations are un-reserved; written now so the walk is total.
+fn substitute_region(region: &Region, decl: &ItemLoc, args: &[GenericArg]) -> Region {
+    match region {
+        Region::Param { item, index, .. } if item == decl => match args.get(*index as usize) {
+            Some(GenericArg::Region(region)) => region.clone(),
+            _ => Region::Error,
+        },
+        Region::Join(parts) => Region::Join(
+            parts
+                .iter()
+                .map(|part| substitute_region(part, decl, args))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }

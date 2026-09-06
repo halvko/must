@@ -99,6 +99,11 @@ fn slots_at(db: &dyn Db, ty: &Ty, depth: u32) -> Layout<u32> {
         Ty::RawPtr { .. } => Err(Unsupported::new(
             "a raw pointer (heap and pointer primitives are out of scope for this backend)",
         )),
+        // Refused BY NAME rather than laid out like a raw pointer. The
+        // machine word is the same, but a borrow carries an aliasing
+        // contract this backend has no way to honor and no way to check —
+        // and the only thing worse than refusing is compiling it wrong.
+        Ty::Borrow { .. } => Err(Unsupported::new("a safe borrow (`.&` / `.&mut`)")),
         Ty::Param(param) => Err(Unsupported::new(format!(
             "a value of the unresolved type parameter `{}`",
             param.name

@@ -265,6 +265,11 @@ impl<'db> Mono<'db> {
                 GenericParamKind::Type => {
                     GenericArg::Ty(types.next().cloned().flatten().unwrap_or(Ty::Error))
                 }
+                // Regions are ERASED — they never reach an `FnRef`, so
+                // there is no argument to consume here and never will be.
+                // Monomorphization is exactly where the specialization law
+                // would break if one ever did.
+                GenericParamKind::Region => GenericArg::Region(hir::Region::Erased),
                 GenericParamKind::Const(_) => GenericArg::Const(
                     consts
                         .next()

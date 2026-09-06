@@ -25,6 +25,8 @@
   consumer so they share one semantics. Lowering is total: an ill-typed body still lowers,
   with traps that borrow a diagnostic an upstream analysis already reported, so flow
   analyses run past errors. MIR is decl-keyed, erased, and not SSA.
+- **X07** The borrow checker does not run on MIR. Outlives is CFG-free, computed over
+  obligations recorded by inference.
 - **X08** One interpreter serves const eval, `run` and the debugger: same MIR, same machine,
   same UB findings.
 - **X09** The interpreter is an oracle, not a spec. A detected-UB stop is a property of the
@@ -55,6 +57,9 @@
   for "cannot be sent" anyone would guess.
 - **X16** Diagnostics have no stable codes. A severity word, free text and a caret are the whole
   contract. Warnings never affect exit status.
+- **X18** Intricate checkers stay separate. A checker's whole output is diagnostics, so
+  deleting it leaves the language compiling the same programs minus the rejections. That is
+  what makes a checker reimplementable if its approach is wrong.
 
 ## Discarded
 

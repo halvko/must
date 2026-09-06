@@ -4531,3 +4531,65 @@ static main = fn() -> usize { outer::<usize>(4) };
         "#]],
     );
 }
+
+// ---- safe borrows: runtime semantics -------------------------------------
+//
+// No exclusivity check exists yet, static or dynamic: a safe borrow reads
+// and writes exactly like a raw pointer at runtime, and the existing
+// dangling-pointer detection (frame pop, use-after-free) applies to it
+// unchanged, because that detection has nothing to do with exclusivity.
+
+#[test]
+fn a_borrow_reads_and_writes_the_place_it_borrows() {
+    check_run(
+        "static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
+         static f = fn () -> usize { let mut n: usize = 1; set(n.&mut, 9); n };",
+        "f()",
+        expect![[r#"
+            => 9
+        "#]],
+    );
+}
+
+#[test]
+fn many_shared_borrows_of_one_place_are_fine() {
+    // The shared regime: any number of readers, no invalidation — trivially
+    // true today since nothing tracks exclusivity yet, but pinned so a
+    // later dynamic check is built against a passing baseline, not a gap.
+    check_run(
+        "static get = fn::<@a>(r: usize.&::<@a>) -> usize { r.* };\n\
+         static f = fn () -> usize {\n\
+             let n: usize = 4;\n\
+             let a = n.&;\n\
+             let b = n.&;\n\
+             get(a) + get(b)\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 8
+        "#]],
+    );
+}
+
+#[test]
+fn a_nested_literal_frame_escape_is_caught_dynamically() {
+    // Known gap in the static checker (see hir's
+    // `a_nested_fn_literals_own_frame_escape_is_not_yet_caught` and
+    // `docs/main.typ`'s "What is checked, and what is checked yet"): a
+    // borrow returned at `@_` from a nested literal never reaches a
+    // universal of the ENCLOSING item, so the outlives module's escape
+    // check has nothing to reject. The interpreter still catches it — not
+    // as an aliasing violation, but as the same dangling-pointer trap a
+    // raw pointer would hit, because the borrowed local's storage really
+    // is gone once the nested literal's own frame returns.
+    check_run(
+        "static main = fn () -> usize {\n\
+             let f = fn () -> usize.&::<@_> { let mut n = 7; n.& };\n\
+             f().*\n\
+         };",
+        "main()",
+        expect![[r#"
+            error[UndefinedBehavior]: dangling pointer — the local it pointed to no longer exists (its frame has returned)
+        "#]],
+    );
+}

@@ -45,12 +45,25 @@ pub struct GenericParamData {
     pub kind: GenericParamKind,
     /// The `T: Display + Write` bounds, syntactic and in written order —
     /// trait names stay [`TypeRef`]s here (resolution is a per-file
-    /// judgement, see `crate::traits`). Always empty for const params.
+    /// judgement, see `crate::traits`). Always empty for const and region
+    /// params.
     pub bounds: Vec<TypeRef>,
+    /// The `@b: @a + @c` OUTLIVES bounds of a region param, as written
+    /// region names (sigil included). Always empty for type and const
+    /// params — a region's bounds are regions, never traits, so they get
+    /// their own field rather than sharing [`Self::bounds`]'s type domain.
+    pub outlives: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GenericParamKind {
+    /// `@a` — a rigid REGION parameter, the third binder kind. Regions ride
+    /// the same binder slot as types and consts (one list, three kinds) but
+    /// are DISTINGUISHED: a region argument is erased, so it never
+    /// participates in type identity, never reaches an instance key and
+    /// never reaches MIR (the specialization law — lifetimes may reject
+    /// programs, never select behaviors).
+    Region,
     /// `T` — a rigid type parameter.
     Type,
     /// `const N: usize` — a const parameter; carries its declared type.
@@ -121,6 +134,15 @@ pub enum TypeRef {
         mutable: bool,
         inner: Box<TypeRef>,
     },
+    /// `T.&::<@a>` / `T.&mut::<@a>` — a SAFE borrow type. The region rides
+    /// the borrow operator's own turbofish and is REQUIRED in signature
+    /// position (no elision at launch); `None` records that none was
+    /// written, so the mirror pass can say so instead of guessing.
+    Borrow {
+        mutable: bool,
+        region: Option<RegionRef>,
+        inner: Box<TypeRef>,
+    },
     Path(String),
     /// `Pair::<usize, 8>` — a generic type mention with its turbofish. The
     /// name stays syntactic (like [`TypeRef::Path`]); arity, kinds and
@@ -155,8 +177,53 @@ pub enum TypeRef {
 /// One generic argument of a [`TypeRef::Apply`], syntactic and range-free.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GenericArgRef {
+    Region(RegionRef),
     Type(TypeRef),
     Const(ConstArgRef),
+}
+
+/// A REGION argument, read straight off the syntax and range-free. Regions
+/// never carry values and never evaluate, so unlike [`ConstArgRef`] there is
+/// no firewall to keep — the whole domain is names.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RegionRef {
+    /// `@a` — a named region, resolved against the enclosing binder.
+    Named(String),
+    /// `@_` — "there is a region here, infer it". A written token resolved
+    /// locally, NOT elision: it says a region exists and declines to name
+    /// it, which is exactly what a body-local annotation needs and what a
+    /// signature may never say.
+    Wildcard,
+    /// `@a + @b` — the join. Reads as conjunction: the argument is outlived
+    /// by every member, i.e. it names their greatest lower bound.
+    Join(Vec<RegionRef>),
+    /// A written argument that is not a region at all (`T.&::<usize>`), or
+    /// broken syntax. The mirror pass carries the diagnostic.
+    Error,
+}
+
+impl RegionRef {
+    /// Read one region argument off its syntax node. A single token is a
+    /// name or the wildcard; several are a join.
+    pub fn from_ast(arg: &ast::RegionArg) -> RegionRef {
+        let mut regions = arg.regions().map(|token| {
+            if token.text() == "@_" {
+                RegionRef::Wildcard
+            } else {
+                RegionRef::Named(token.text().to_owned())
+            }
+        });
+        let Some(first) = regions.next() else {
+            return RegionRef::Error;
+        };
+        let rest: Vec<RegionRef> = regions.collect();
+        if rest.is_empty() {
+            return first;
+        }
+        let mut all = vec![first];
+        all.extend(rest);
+        RegionRef::Join(all)
+    }
 }
 
 /// A const argument in *annotation* position, read straight off the syntax
@@ -204,9 +271,19 @@ impl TypeRef {
                 },
                 None => TypeRef::Error,
             },
-            // `T.&` / `T.&mut` — reserved safe reference types (validation
-            // rejects them); a parse error covers the reservation.
-            ast::Type::BorrowType(_) => TypeRef::Error,
+            // `T.&::<@a>` / `T.&mut::<@a>` — a safe borrow type. Exactly
+            // one region argument is meaningful here; the mirror pass
+            // reports a wrong count or a wrong KIND (`T.&::<usize>`), which
+            // arrives as `RegionRef::Error` so checking still sees a borrow
+            // of the right referent.
+            ast::Type::BorrowType(it) => match it.ty() {
+                Some(inner) => TypeRef::Borrow {
+                    mutable: it.is_mut(),
+                    region: borrow_region_from_ast(&it),
+                    inner: Box::new(TypeRef::from_ast(inner)),
+                },
+                None => TypeRef::Error,
+            },
             ast::Type::PathType(it) => match it.generic_arg_list() {
                 Some(list) => match it.name_ref() {
                     Some(name) => TypeRef::Apply {
@@ -281,12 +358,13 @@ impl TypeRef {
                     || ret.as_ref().is_some_and(|r| r.contains_hole())
             }
             TypeRef::Ref(inner) => inner.contains_hole(),
-            TypeRef::RawPtr { inner, .. } => inner.contains_hole(),
+            TypeRef::RawPtr { inner, .. } | TypeRef::Borrow { inner, .. } => inner.contains_hole(),
             TypeRef::Apply { args, .. } => args.iter().any(|arg| match arg {
                 GenericArgRef::Type(ty) => ty.contains_hole(),
-                // Const args are never inferred (TR06); `_` is not even
-                // representable in one.
-                GenericArgRef::Const(_) => false,
+                // Neither a const arg (never inferred, TR06) nor a region can
+                // be a `_` hole in this sense — a region's `@_` is a region
+                // question, answered by the outlives module.
+                GenericArgRef::Region(_) | GenericArgRef::Const(_) => false,
             }),
             TypeRef::Record(fields) => fields.iter().any(|(_, ty)| ty.contains_hole()),
             TypeRef::Array { elem, .. } => elem.contains_hole(),
@@ -306,13 +384,16 @@ impl TypeRef {
                     && ret.as_ref().is_some_and(|r| r.is_fully_typed())
             }
             TypeRef::Ref(inner) => inner.is_fully_typed(),
-            TypeRef::RawPtr { inner, .. } => inner.is_fully_typed(),
+            // A borrow's REGION is not part of "fully typed": a missing or
+            // wildcard region is a region question, reported as one.
+            TypeRef::RawPtr { inner, .. } | TypeRef::Borrow { inner, .. } => inner.is_fully_typed(),
             TypeRef::Apply { args, .. } => args.iter().all(|arg| match arg {
                 GenericArgRef::Type(ty) => ty.is_fully_typed(),
                 // Const args are never inferred (TR06) — a written one is
                 // always "fully typed"; whether it is *legal* is a
-                // different question (the diagnostics pass).
-                GenericArgRef::Const(_) => true,
+                // different question (the diagnostics pass). Regions are
+                // outside the type question entirely.
+                GenericArgRef::Region(_) | GenericArgRef::Const(_) => true,
             }),
             TypeRef::Record(fields) => fields.iter().all(|(_, ty)| ty.is_fully_typed()),
             // The length is a written const value, never inferred (same
@@ -334,12 +415,12 @@ impl TypeRef {
         match self {
             TypeRef::Fn { .. } => true,
             TypeRef::Ref(inner) => inner.mentions_fn(),
-            TypeRef::RawPtr { inner, .. } => inner.mentions_fn(),
+            TypeRef::RawPtr { inner, .. } | TypeRef::Borrow { inner, .. } => inner.mentions_fn(),
             TypeRef::Record(fields) => fields.iter().any(|(_, ty)| ty.mentions_fn()),
             TypeRef::Array { elem, .. } => elem.mentions_fn(),
             TypeRef::Apply { args, .. } => args.iter().any(|arg| match arg {
                 GenericArgRef::Type(ty) => ty.mentions_fn(),
-                GenericArgRef::Const(_) => false,
+                GenericArgRef::Region(_) | GenericArgRef::Const(_) => false,
             }),
             TypeRef::Unit
             | TypeRef::Never
@@ -361,7 +442,7 @@ impl TypeRef {
         match self {
             TypeRef::Array { .. } => true,
             TypeRef::Ref(inner) => inner.mentions_array(),
-            TypeRef::RawPtr { inner, .. } => inner.mentions_array(),
+            TypeRef::RawPtr { inner, .. } | TypeRef::Borrow { inner, .. } => inner.mentions_array(),
             TypeRef::Record(fields) => fields.iter().any(|(_, ty)| ty.mentions_array()),
             TypeRef::Fn { params, ret } => {
                 params.iter().any(TypeRef::mentions_array)
@@ -369,7 +450,7 @@ impl TypeRef {
             }
             TypeRef::Apply { args, .. } => args.iter().any(|arg| match arg {
                 GenericArgRef::Type(ty) => ty.mentions_array(),
-                GenericArgRef::Const(_) => false,
+                GenericArgRef::Region(_) | GenericArgRef::Const(_) => false,
             }),
             TypeRef::Unit
             | TypeRef::Never
@@ -381,12 +462,32 @@ impl TypeRef {
     }
 }
 
+/// The region written on a borrow operator's own turbofish
+/// (`T.&mut::<@a>`). `None` when no turbofish was written at all — the
+/// no-elision rule makes that an error in signature position, and the
+/// mirror pass says so; `Some(RegionRef::Error)` when something was written
+/// that is not a region.
+fn borrow_region_from_ast(borrow: &ast::BorrowType) -> Option<RegionRef> {
+    let list = borrow.generic_arg_list()?;
+    let mut args = list.args();
+    let first = args.next()?;
+    // More than one argument is a wrong-arity mention; keep the first so
+    // the referent still checks, and let the mirror pass report the count.
+    Some(match first {
+        ast::GenericArg::RegionArg(region) => RegionRef::from_ast(&region),
+        _ => RegionRef::Error,
+    })
+}
+
 /// Read a turbofish in *annotation* position, range-free. Const arguments
 /// keep only their literal shape ([`ConstArgRef`]) — the firewall: nothing
 /// here can require evaluation.
 pub(crate) fn generic_args_from_ast(list: &ast::GenericArgList) -> Vec<GenericArgRef> {
     list.args()
         .map(|arg| match arg {
+            ast::GenericArg::RegionArg(region) => {
+                GenericArgRef::Region(RegionRef::from_ast(&region))
+            }
             ast::GenericArg::TypeArg(ty_arg) => {
                 GenericArgRef::Type(ty_arg.ty().map(TypeRef::from_ast).unwrap_or(TypeRef::Error))
             }
@@ -609,10 +710,20 @@ fn generics_from_param_list(list: Option<ast::GenericParamList>) -> Vec<GenericP
     };
     list.params()
         .map(|param| match param {
+            // A region param's NAME carries its sigil (`@a`), so region and
+            // type names live in disjoint spelling spaces and one binder
+            // list can hold both without a shadowing question.
+            ast::GenericParam::RegionParam(it) => GenericParamData {
+                name: it.name().unwrap_or_default(),
+                kind: GenericParamKind::Region,
+                bounds: Vec::new(),
+                outlives: it.bounds().map(|token| token.text().to_owned()).collect(),
+            },
             ast::GenericParam::TypeParam(it) => GenericParamData {
                 name: it.name().map(|n| n.text()).unwrap_or_default(),
                 kind: GenericParamKind::Type,
                 bounds: it.bounds().map(TypeRef::from_ast).collect(),
+                outlives: Vec::new(),
             },
             ast::GenericParam::ConstParam(it) => GenericParamData {
                 name: it.name().map(|n| n.text()).unwrap_or_default(),
@@ -620,6 +731,7 @@ fn generics_from_param_list(list: Option<ast::GenericParamList>) -> Vec<GenericP
                     it.ty().map(TypeRef::from_ast).unwrap_or(TypeRef::Error),
                 ),
                 bounds: Vec::new(),
+                outlives: Vec::new(),
             },
         })
         .collect()

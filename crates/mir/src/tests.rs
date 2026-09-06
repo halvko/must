@@ -2705,3 +2705,131 @@ fn unary_minus_on_a_literal_folds_and_on_a_value_lowers_to_a_neg() {
         "#]],
     );
 }
+
+// ---- regions stop at the MIR boundary -----------------------------------
+
+#[test]
+fn mir_is_region_erased() {
+    // THE erasure proof. Two functions whose signatures differ ONLY in
+    // their regions lower to MIR that is textually identical apart from
+    // their names — no `@a`, no `@b`, nothing to tell them apart. That is
+    // the specialization law made mechanical: nothing below this boundary
+    // can branch on a region, because there is no region to branch on.
+    check_mir(
+        "static one = fn::<@a>(r: usize.&::<@a>) -> usize { r.* };\n\
+         static two = fn::<@x, @y>(r: usize.&::<@x + @y>) -> usize { r.* };",
+        expect![[r#"
+            item one:
+            fn b0(_1: usize.&) -> usize {
+              _0: usize  // return
+              _1: usize.&  // param r
+              _2: usize
+              bb0:
+                _2 = _1.*
+                _0 = _2
+                return
+            }
+            fn b1() -> fn(usize.&) -> usize {
+              _0: fn(usize.&) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item two:
+            fn b0(_1: usize.&) -> usize {
+              _0: usize  // return
+              _1: usize.&  // param r
+              _2: usize
+              bb0:
+                _2 = _1.*
+                _0 = _2
+                return
+            }
+            fn b1() -> fn(usize.&) -> usize {
+              _0: fn(usize.&) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn a_safe_borrow_is_its_own_rvalue() {
+    // `.&`/`.&mut` and `.&raw`/`.&raw mut` compute the same address and
+    // lower through the same place walk, but they are DIFFERENT rvalues —
+    // so every exhaustive consumer has to decide what a borrow means for
+    // it instead of inheriting the raw answer. The wasm backend's refusal
+    // hangs off exactly this.
+    check_mir(
+        "static f = fn () -> () {\n\
+             let mut n: usize = 1;\n\
+             let borrowed = n.&mut;\n\
+             let r = n.&raw mut;\n\
+         };",
+        expect![[r#"
+            item f:
+            fn b0() -> () {
+              _0: ()  // return
+              _1: usize  // n
+              _2: usize.&mut
+              _3: usize.&mut  // borrowed
+              _4: usize.&raw mut
+              _5: usize.&raw mut  // r
+              bb0:
+                _1 = 1
+                _2 = &mut _1
+                _3 = _2
+                _4 = &raw mut _1
+                _5 = _4
+                _0 = ()
+                return
+            }
+            fn b1() -> fn() {
+              _0: fn()  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn a_reborrow_through_a_borrow_stays_a_borrow() {
+    // `m.*.&mut` mints a NEW node (it is `Rvalue::Borrow`), while
+    // `m.*.&raw mut` inherits `m`'s (it is `Rvalue::AddrOf`). That split
+    // is the ruling that `.&raw` is deliberately not a decayed safe
+    // borrow, visible in the IR.
+    check_mir(
+        "static f = fn::<@a>(m: usize.&mut::<@a>) -> () {\n\
+             let child = m.*.&mut::<@_>;\n\
+             let r = m.*.&raw mut;\n\
+         };",
+        expect![[r#"
+            item f:
+            fn b0(_1: usize.&mut) -> () {
+              _0: ()  // return
+              _1: usize.&mut  // param m
+              _2: usize.&mut
+              _3: usize.&mut  // child
+              _4: usize.&raw mut
+              _5: usize.&raw mut  // r
+              bb0:
+                _2 = &mut _1.*
+                _3 = _2
+                _4 = &raw mut _1.*
+                _5 = _4
+                _0 = ()
+                return
+            }
+            fn b1() -> fn(usize.&mut) {
+              _0: fn(usize.&mut)  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}

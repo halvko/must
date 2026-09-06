@@ -1047,7 +1047,7 @@ static b = fn {};
                     R_BRACE@43..44 "}"
                 SEMICOLON@44..45 ";"
               WHITESPACE@45..46 "\n"
-            error 19..20: unexpected character `@`
+            error 19..20: expected a region name after `@` (`@a`, or `@_` to infer one)
             error 21..22: unexpected character `%`
             error 23..27: expected an item (`static`, `const`, `type` or `trait`)
         "#]],
@@ -8068,9 +8068,9 @@ fn retired_prefix_raw_ptr_type_migration() {
 }
 
 #[test]
-fn reserved_safe_borrow_expr() {
-    // `x.&` / `x.&mut` (DOT AMP without `raw`) parse-and-reserve: a distinct
-    // node, rejected by validation for the borrow round.
+fn safe_borrow_expr() {
+    // `x.&` / `x.&mut` (DOT AMP without `raw`) — the postfix safe borrows.
+    // Their own node, no reservation error; hir owns them from here.
     check(
         "static f = fn { let a = x.&; let b = y.&mut; };",
         expect![[r#"
@@ -8126,19 +8126,17 @@ fn reserved_safe_borrow_expr() {
                     WHITESPACE@44..45 " "
                     R_BRACE@45..46 "}"
                 SEMICOLON@46..47 ";"
-            error 24..27: safe borrows (`.&`, `.&mut`) are not supported yet
-            error 37..43: safe borrows (`.&`, `.&mut`) are not supported yet
         "#]],
     );
 }
 
 #[test]
-fn reserved_safe_borrow_type() {
+fn safe_borrow_type() {
     check(
-        "static f = fn(a: usize.&, b: usize.&mut) -> () { };",
+        "static f = fn(a: usize.&::<@a>, b: usize.&mut::<@_>) -> () { };",
         expect![[r#"
-            SOURCE_FILE@0..51
-              STATIC_ITEM@0..51
+            SOURCE_FILE@0..63
+              STATIC_ITEM@0..63
                 STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
@@ -8146,53 +8144,63 @@ fn reserved_safe_borrow_type() {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                FN_LITERAL@11..50
+                FN_LITERAL@11..62
                   FN_KW@11..13 "fn"
-                  PARAM_LIST@13..40
+                  PARAM_LIST@13..52
                     L_PAREN@13..14 "("
-                    PARAM@14..24
+                    PARAM@14..30
                       BIND_PAT@14..15
                         NAME@14..15
                           IDENT@14..15 "a"
                       COLON@15..16 ":"
                       WHITESPACE@16..17 " "
-                      BORROW_TYPE@17..24
+                      BORROW_TYPE@17..30
                         PATH_TYPE@17..22
                           NAME_REF@17..22
                             IDENT@17..22 "usize"
                         DOT@22..23 "."
                         AMP@23..24 "&"
-                    COMMA@24..25 ","
-                    WHITESPACE@25..26 " "
-                    PARAM@26..39
-                      BIND_PAT@26..27
-                        NAME@26..27
-                          IDENT@26..27 "b"
-                      COLON@27..28 ":"
-                      WHITESPACE@28..29 " "
-                      BORROW_TYPE@29..39
-                        PATH_TYPE@29..34
-                          NAME_REF@29..34
-                            IDENT@29..34 "usize"
-                        DOT@34..35 "."
-                        AMP@35..36 "&"
-                        MUT_KW@36..39 "mut"
-                    R_PAREN@39..40 ")"
-                  WHITESPACE@40..41 " "
-                  RET_TYPE@41..46
-                    THIN_ARROW@41..43 "->"
-                    WHITESPACE@43..44 " "
-                    UNIT_TYPE@44..46
-                      L_PAREN@44..45 "("
-                      R_PAREN@45..46 ")"
-                  WHITESPACE@46..47 " "
-                  BLOCK_EXPR@47..50
-                    L_BRACE@47..48 "{"
-                    WHITESPACE@48..49 " "
-                    R_BRACE@49..50 "}"
-                SEMICOLON@50..51 ";"
-            error 17..24: safe borrows (`.&`, `.&mut`) are not supported yet
-            error 29..39: safe borrows (`.&`, `.&mut`) are not supported yet
+                        COLON2@24..26 "::"
+                        GENERIC_ARG_LIST@26..30
+                          L_ANGLE@26..27 "<"
+                          REGION_ARG@27..29
+                            REGION_IDENT@27..29 "@a"
+                          R_ANGLE@29..30 ">"
+                    COMMA@30..31 ","
+                    WHITESPACE@31..32 " "
+                    PARAM@32..51
+                      BIND_PAT@32..33
+                        NAME@32..33
+                          IDENT@32..33 "b"
+                      COLON@33..34 ":"
+                      WHITESPACE@34..35 " "
+                      BORROW_TYPE@35..51
+                        PATH_TYPE@35..40
+                          NAME_REF@35..40
+                            IDENT@35..40 "usize"
+                        DOT@40..41 "."
+                        AMP@41..42 "&"
+                        MUT_KW@42..45 "mut"
+                        COLON2@45..47 "::"
+                        GENERIC_ARG_LIST@47..51
+                          L_ANGLE@47..48 "<"
+                          REGION_ARG@48..50
+                            REGION_IDENT@48..50 "@_"
+                          R_ANGLE@50..51 ">"
+                    R_PAREN@51..52 ")"
+                  WHITESPACE@52..53 " "
+                  RET_TYPE@53..58
+                    THIN_ARROW@53..55 "->"
+                    WHITESPACE@55..56 " "
+                    UNIT_TYPE@56..58
+                      L_PAREN@56..57 "("
+                      R_PAREN@57..58 ")"
+                  WHITESPACE@58..59 " "
+                  BLOCK_EXPR@59..62
+                    L_BRACE@59..60 "{"
+                    WHITESPACE@60..61 " "
+                    R_BRACE@61..62 "}"
+                SEMICOLON@62..63 ";"
         "#]],
     );
 }
@@ -12576,4 +12584,431 @@ fn non_keyword_kinds_are_not_keywords() {
     }
     assert_eq!(crate::SyntaxKind::from_keyword("nonsense"), None);
     assert_eq!(crate::SyntaxKind::from_keyword("Self"), None);
+}
+
+// ---- regions -------------------------------------------------------------
+
+#[test]
+fn region_binders_are_a_third_kind_in_one_list() {
+    // ONE binder list, THREE kinds. Regions ride the same slot as types and
+    // consts, told apart by their sigil alone — no ordering rule, no
+    // separate list, and `@` is unclaimed everywhere else so the lexer
+    // needs no lookahead to know one.
+    check(
+        "static f = fn::<@a, T, const N: usize>(x: T) -> T { x };",
+        expect![[r#"
+            SOURCE_FILE@0..56
+              STATIC_ITEM@0..56
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..55
+                  FN_KW@11..13 "fn"
+                  GENERIC_PARAM_LIST@13..38
+                    COLON2@13..15 "::"
+                    L_ANGLE@15..16 "<"
+                    REGION_PARAM@16..18
+                      REGION_IDENT@16..18 "@a"
+                    COMMA@18..19 ","
+                    WHITESPACE@19..20 " "
+                    TYPE_PARAM@20..21
+                      NAME@20..21
+                        IDENT@20..21 "T"
+                    COMMA@21..22 ","
+                    WHITESPACE@22..23 " "
+                    CONST_PARAM@23..37
+                      CONST_KW@23..28 "const"
+                      WHITESPACE@28..29 " "
+                      NAME@29..30
+                        IDENT@29..30 "N"
+                      COLON@30..31 ":"
+                      WHITESPACE@31..32 " "
+                      PATH_TYPE@32..37
+                        NAME_REF@32..37
+                          IDENT@32..37 "usize"
+                    R_ANGLE@37..38 ">"
+                  PARAM_LIST@38..44
+                    L_PAREN@38..39 "("
+                    PARAM@39..43
+                      BIND_PAT@39..40
+                        NAME@39..40
+                          IDENT@39..40 "x"
+                      COLON@40..41 ":"
+                      WHITESPACE@41..42 " "
+                      PATH_TYPE@42..43
+                        NAME_REF@42..43
+                          IDENT@42..43 "T"
+                    R_PAREN@43..44 ")"
+                  WHITESPACE@44..45 " "
+                  RET_TYPE@45..49
+                    THIN_ARROW@45..47 "->"
+                    WHITESPACE@47..48 " "
+                    PATH_TYPE@48..49
+                      NAME_REF@48..49
+                        IDENT@48..49 "T"
+                  WHITESPACE@49..50 " "
+                  BLOCK_EXPR@50..55
+                    L_BRACE@50..51 "{"
+                    WHITESPACE@51..52 " "
+                    PATH_EXPR@52..53
+                      NAME_REF@52..53
+                        IDENT@52..53 "x"
+                    WHITESPACE@53..54 " "
+                    R_BRACE@54..55 "}"
+                SEMICOLON@55..56 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn region_params_carry_outlives_bounds() {
+    // Bounds live where the param is born, exactly as a type param's trait
+    // bounds do — and a region's bounds are regions, never traits.
+    check(
+        "static f = fn::<@a: @b + @c, @b, @c>() -> () {};",
+        expect![[r#"
+            SOURCE_FILE@0..48
+              STATIC_ITEM@0..48
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..47
+                  FN_KW@11..13 "fn"
+                  GENERIC_PARAM_LIST@13..36
+                    COLON2@13..15 "::"
+                    L_ANGLE@15..16 "<"
+                    REGION_PARAM@16..27
+                      REGION_IDENT@16..18 "@a"
+                      COLON@18..19 ":"
+                      WHITESPACE@19..20 " "
+                      REGION_IDENT@20..22 "@b"
+                      WHITESPACE@22..23 " "
+                      PLUS@23..24 "+"
+                      WHITESPACE@24..25 " "
+                      REGION_IDENT@25..27 "@c"
+                    COMMA@27..28 ","
+                    WHITESPACE@28..29 " "
+                    REGION_PARAM@29..31
+                      REGION_IDENT@29..31 "@b"
+                    COMMA@31..32 ","
+                    WHITESPACE@32..33 " "
+                    REGION_PARAM@33..35
+                      REGION_IDENT@33..35 "@c"
+                    R_ANGLE@35..36 ">"
+                  PARAM_LIST@36..38
+                    L_PAREN@36..37 "("
+                    R_PAREN@37..38 ")"
+                  WHITESPACE@38..39 " "
+                  RET_TYPE@39..44
+                    THIN_ARROW@39..41 "->"
+                    WHITESPACE@41..42 " "
+                    UNIT_TYPE@42..44
+                      L_PAREN@42..43 "("
+                      R_PAREN@43..44 ")"
+                  WHITESPACE@44..45 " "
+                  BLOCK_EXPR@45..47
+                    L_BRACE@45..46 "{"
+                    R_BRACE@46..47 "}"
+                SEMICOLON@47..48 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn the_region_wildcard_and_the_join() {
+    check(
+        "static f = fn::<@a, @b>(x: usize.&::<@a + @b>) -> () { let r: usize.&::<@_> = x; };",
+        expect![[r#"
+            SOURCE_FILE@0..83
+              STATIC_ITEM@0..83
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..82
+                  FN_KW@11..13 "fn"
+                  GENERIC_PARAM_LIST@13..23
+                    COLON2@13..15 "::"
+                    L_ANGLE@15..16 "<"
+                    REGION_PARAM@16..18
+                      REGION_IDENT@16..18 "@a"
+                    COMMA@18..19 ","
+                    WHITESPACE@19..20 " "
+                    REGION_PARAM@20..22
+                      REGION_IDENT@20..22 "@b"
+                    R_ANGLE@22..23 ">"
+                  PARAM_LIST@23..46
+                    L_PAREN@23..24 "("
+                    PARAM@24..45
+                      BIND_PAT@24..25
+                        NAME@24..25
+                          IDENT@24..25 "x"
+                      COLON@25..26 ":"
+                      WHITESPACE@26..27 " "
+                      BORROW_TYPE@27..45
+                        PATH_TYPE@27..32
+                          NAME_REF@27..32
+                            IDENT@27..32 "usize"
+                        DOT@32..33 "."
+                        AMP@33..34 "&"
+                        COLON2@34..36 "::"
+                        GENERIC_ARG_LIST@36..45
+                          L_ANGLE@36..37 "<"
+                          REGION_ARG@37..44
+                            REGION_IDENT@37..39 "@a"
+                            WHITESPACE@39..40 " "
+                            PLUS@40..41 "+"
+                            WHITESPACE@41..42 " "
+                            REGION_IDENT@42..44 "@b"
+                          R_ANGLE@44..45 ">"
+                    R_PAREN@45..46 ")"
+                  WHITESPACE@46..47 " "
+                  RET_TYPE@47..52
+                    THIN_ARROW@47..49 "->"
+                    WHITESPACE@49..50 " "
+                    UNIT_TYPE@50..52
+                      L_PAREN@50..51 "("
+                      R_PAREN@51..52 ")"
+                  WHITESPACE@52..53 " "
+                  BLOCK_EXPR@53..82
+                    L_BRACE@53..54 "{"
+                    WHITESPACE@54..55 " "
+                    LET_STMT@55..80
+                      LET_KW@55..58 "let"
+                      WHITESPACE@58..59 " "
+                      BIND_PAT@59..60
+                        NAME@59..60
+                          IDENT@59..60 "r"
+                      COLON@60..61 ":"
+                      WHITESPACE@61..62 " "
+                      BORROW_TYPE@62..75
+                        PATH_TYPE@62..67
+                          NAME_REF@62..67
+                            IDENT@62..67 "usize"
+                        DOT@67..68 "."
+                        AMP@68..69 "&"
+                        COLON2@69..71 "::"
+                        GENERIC_ARG_LIST@71..75
+                          L_ANGLE@71..72 "<"
+                          REGION_ARG@72..74
+                            REGION_IDENT@72..74 "@_"
+                          R_ANGLE@74..75 ">"
+                      WHITESPACE@75..76 " "
+                      EQ@76..77 "="
+                      WHITESPACE@77..78 " "
+                      PATH_EXPR@78..79
+                        NAME_REF@78..79
+                          IDENT@78..79 "x"
+                      SEMICOLON@79..80 ";"
+                    WHITESPACE@80..81 " "
+                    R_BRACE@81..82 "}"
+                SEMICOLON@82..83 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn a_bare_at_sign_is_an_error_that_names_the_spelling() {
+    check(
+        "static f = fn::<@>() -> () {};",
+        expect![[r#"
+            SOURCE_FILE@0..30
+              STATIC_ITEM@0..30
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..29
+                  FN_KW@11..13 "fn"
+                  GENERIC_PARAM_LIST@13..18
+                    COLON2@13..15 "::"
+                    L_ANGLE@15..16 "<"
+                    ERROR@16..17
+                      ERROR_TOKEN@16..17 "@"
+                    R_ANGLE@17..18 ">"
+                  PARAM_LIST@18..20
+                    L_PAREN@18..19 "("
+                    R_PAREN@19..20 ")"
+                  WHITESPACE@20..21 " "
+                  RET_TYPE@21..26
+                    THIN_ARROW@21..23 "->"
+                    WHITESPACE@23..24 " "
+                    UNIT_TYPE@24..26
+                      L_PAREN@24..25 "("
+                      R_PAREN@25..26 ")"
+                  WHITESPACE@26..27 " "
+                  BLOCK_EXPR@27..29
+                    L_BRACE@27..28 "{"
+                    R_BRACE@28..29 "}"
+                SEMICOLON@29..30 ";"
+            error 16..17: expected a region name after `@` (`@a`, or `@_` to infer one)
+        "#]],
+    );
+}
+
+#[test]
+fn borrow_expressions_take_their_own_turbofish() {
+    // The region rides the BORROW OPERATOR's turbofish, not the referent
+    // type's — `x.&mut::<@a>`, one list hanging off the borrow node, so no
+    // consumer can read it as anything else's arguments.
+    check(
+        "static f = fn () -> () { let a = x.&; let b = y.&mut::<@r>; };",
+        expect![[r#"
+            SOURCE_FILE@0..62
+              STATIC_ITEM@0..62
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..61
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  PARAM_LIST@14..16
+                    L_PAREN@14..15 "("
+                    R_PAREN@15..16 ")"
+                  WHITESPACE@16..17 " "
+                  RET_TYPE@17..22
+                    THIN_ARROW@17..19 "->"
+                    WHITESPACE@19..20 " "
+                    UNIT_TYPE@20..22
+                      L_PAREN@20..21 "("
+                      R_PAREN@21..22 ")"
+                  WHITESPACE@22..23 " "
+                  BLOCK_EXPR@23..61
+                    L_BRACE@23..24 "{"
+                    WHITESPACE@24..25 " "
+                    LET_STMT@25..37
+                      LET_KW@25..28 "let"
+                      WHITESPACE@28..29 " "
+                      BIND_PAT@29..30
+                        NAME@29..30
+                          IDENT@29..30 "a"
+                      WHITESPACE@30..31 " "
+                      EQ@31..32 "="
+                      WHITESPACE@32..33 " "
+                      BORROW_EXPR@33..36
+                        PATH_EXPR@33..34
+                          NAME_REF@33..34
+                            IDENT@33..34 "x"
+                        DOT@34..35 "."
+                        AMP@35..36 "&"
+                      SEMICOLON@36..37 ";"
+                    WHITESPACE@37..38 " "
+                    LET_STMT@38..59
+                      LET_KW@38..41 "let"
+                      WHITESPACE@41..42 " "
+                      BIND_PAT@42..43
+                        NAME@42..43
+                          IDENT@42..43 "b"
+                      WHITESPACE@43..44 " "
+                      EQ@44..45 "="
+                      WHITESPACE@45..46 " "
+                      BORROW_EXPR@46..58
+                        PATH_EXPR@46..47
+                          NAME_REF@46..47
+                            IDENT@46..47 "y"
+                        DOT@47..48 "."
+                        AMP@48..49 "&"
+                        MUT_KW@49..52 "mut"
+                        COLON2@52..54 "::"
+                        GENERIC_ARG_LIST@54..58
+                          L_ANGLE@54..55 "<"
+                          REGION_ARG@55..57
+                            REGION_IDENT@55..57 "@r"
+                          R_ANGLE@57..58 ">"
+                      SEMICOLON@58..59 ";"
+                    WHITESPACE@59..60 " "
+                    R_BRACE@60..61 "}"
+                SEMICOLON@61..62 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn outlives_clauses_ride_the_with_clause_grammar() {
+    // A region-headed constrain clause, the third `with_clause` shape.
+    // Parse-and-reserve — regions on type declarations are not decided yet,
+    // so this parses its real tree and validation says "not yet".
+    check(
+        "type Slice = struct::<@a, T> { n: usize } with @a: @b { impl Self {} };",
+        expect![[r#"
+            SOURCE_FILE@0..71
+              TYPE_ITEM@0..71
+                TYPE_KW@0..4 "type"
+                WHITESPACE@4..5 " "
+                NAME@5..10
+                  IDENT@5..10 "Slice"
+                WHITESPACE@10..11 " "
+                EQ@11..12 "="
+                WHITESPACE@12..13 " "
+                RECORD_EXPR@13..41
+                  STRUCT_KW@13..19 "struct"
+                  GENERIC_PARAM_LIST@19..28
+                    COLON2@19..21 "::"
+                    L_ANGLE@21..22 "<"
+                    REGION_PARAM@22..24
+                      REGION_IDENT@22..24 "@a"
+                    COMMA@24..25 ","
+                    WHITESPACE@25..26 " "
+                    TYPE_PARAM@26..27
+                      NAME@26..27
+                        IDENT@26..27 "T"
+                    R_ANGLE@27..28 ">"
+                  WHITESPACE@28..29 " "
+                  L_BRACE@29..30 "{"
+                  WHITESPACE@30..31 " "
+                  RECORD_EXPR_FIELD@31..39
+                    NAME_REF@31..32
+                      IDENT@31..32 "n"
+                    COLON@32..33 ":"
+                    WHITESPACE@33..34 " "
+                    PATH_TYPE@34..39
+                      NAME_REF@34..39
+                        IDENT@34..39 "usize"
+                  WHITESPACE@39..40 " "
+                  R_BRACE@40..41 "}"
+                WHITESPACE@41..42 " "
+                WITH_GROUP@42..70
+                  WITH_KW@42..46 "with"
+                  WHITESPACE@46..47 " "
+                  WITH_CLAUSE@47..53
+                    REGION_IDENT@47..49 "@a"
+                    COLON@49..50 ":"
+                    WHITESPACE@50..51 " "
+                    REGION_IDENT@51..53 "@b"
+                  WHITESPACE@53..54 " "
+                  L_BRACE@54..55 "{"
+                  WHITESPACE@55..56 " "
+                  IMPL_ELEMENT@56..68
+                    IMPL_KW@56..60 "impl"
+                    WHITESPACE@60..61 " "
+                    PATH_TYPE@61..65
+                      NAME_REF@61..65
+                        IDENT@61..65 "Self"
+                    WHITESPACE@65..66 " "
+                    L_BRACE@66..67 "{"
+                    R_BRACE@67..68 "}"
+                  WHITESPACE@68..69 " "
+                  R_BRACE@69..70 "}"
+                SEMICOLON@70..71 ";"
+            error 47..53: `with @a: ...` outlives groups are not supported yet
+        "#]],
+    );
 }

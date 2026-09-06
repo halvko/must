@@ -374,6 +374,19 @@ pub(crate) fn requirement_param_scope(
                     }),
                 );
             }
+            // Regions are neither values nor types: they enter the scope's
+            // own region map, consulted only from region-argument
+            // positions.
+            GenericParamKind::Region => {
+                scope.regions.insert(
+                    param.name.clone(),
+                    crate::ty::Region::Param {
+                        item: key.clone(),
+                        index: index as u32,
+                        name: std::sync::Arc::from(param.name.as_str()),
+                    },
+                );
+            }
             GenericParamKind::Const(_) => {
                 scope.consts.insert(
                     param.name.clone(),

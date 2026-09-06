@@ -22,8 +22,13 @@
   retired prefix `&raw x` / `&raw mut x` (and the type twins) superset-parse into the same
   nodes with a targeted migration diagnostic, never a silent reinterpretation; prefix
   `&T`/`&mut T` stay the pre-existing reservation for real references. Plain `x.&` / `x.&mut`
-  and `T.&` / `T.&mut`, with no `raw`, parse and are reserved for the borrow round —
-  validation rejects them.
+  and the type twins `T.&` / `T.&mut`, with no `raw`, are the SAFE borrows, with a region
+  turbofish of their own (`x.&mut::<@a>`) — optional on the borrow expression (inferred when
+  omitted) but required on the type form `T.&`/`T.&mut` everywhere, since no elision exists
+  yet for a hand-written type.
+- **G09** The region sigil is `@`: `@a`, wildcard `@_`, join `@a + @b`, binder slot
+  `fn::<@a, T, const N>`, outlives clause `@a: @b`. Chosen because `@` is unclaimed; migrating
+  it would be mechanical.
 - **G12** Record literals construct with `=`: `struct { x = 1 }`, spelled out
   `struct { a: usize = 10 }`. Colon means has-type, everywhere, so a field's annotation is a
   real type and fn, pointer and array field types are first class. Shorthand `struct { x }` is
@@ -62,9 +67,13 @@
   writes — type-check. A `let` initializer that diverges is not counted yet — `let x =
   return 1;` types the block off the binding, a step toward reachability analysis this rule
   isn't.
-- **G14** No auto-deref, ever, and no auto-ref. Resolution never reaches through a deref, so
-  an outer name disappearing can never silently re-resolve; a pointer to a type with members
-  does not dot-call them, because the receiver's type must BE the member's `Self`.
+- **G14** No auto-deref, ever, and no auto-ref, with one bounded exception. Resolution never
+  reaches through a deref, so an outer name disappearing can never silently re-resolve; a
+  pointer to a type with members does not dot-call them, because the receiver's type must BE
+  the member's `Self`. The exception: the compiler may insert a safe borrow of `x.*` where `x`
+  is already a borrow; never a borrow of `x` itself; never a raw borrow. The first clause
+  licenses implicit reborrow and degradation (M07); the second separates reborrow from
+  auto-ref; the third stops a call site minting `x.*.&raw mut` and laundering a region (M08).
 - **G25** A bare pattern name never reinterprets as a variant: it binds fresh with a
   shadowing warning, and `::Circle` is the variant spelling in a pattern. In expression
   position the qualified `Shape::Circle` is the spelling.
@@ -104,6 +113,11 @@
 - **Silent reinterpretation of a bare pattern name as a variant** — footgun. **G25**
 - **A null literal** — abstract memory has no address zero to spell. **Pointer ordering** —
   meaningless there. **G08**
+- **Region sigils that lost**: `'a` (a three-way contest for `'` with char literals and loop
+  labels, and it forces the char question first); `` `a `` (hover markup is markdown, so every
+  hover would escape it forever); `region a` (form disambiguation forces the keyword to repeat
+  in argument position); bare `a` (no form left to spell "infer this region"; identical trees
+  for different kinds); `%a`, `^a`, postfix `a'`. **G09**
 - **`t[0]`** — one sigil, one operation; it may return as an ordinary `Index` impl.
   **`t.0`** — float token-splitting hazard. **G07**
 - **`<T as Trait>::m`** — bare angles violate turbofish-everywhere, and it spends `as`

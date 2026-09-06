@@ -16,6 +16,8 @@ pub enum SyntaxKind {
     INT_NUMBER,
     STRING,
     LIFETIME_IDENT,
+    /// `@a` / `@_` — a region name or the region wildcard.
+    REGION_IDENT,
     L_PAREN,
     R_PAREN,
     L_BRACE,
@@ -123,9 +125,14 @@ pub enum SyntaxKind {
     GENERIC_PARAM_LIST,
     TYPE_PARAM,
     CONST_PARAM,
+    /// `@a` in a binder list — the THIRD generic parameter kind, with its
+    /// optional outlives bounds (`@b: @a`).
+    REGION_PARAM,
     GENERIC_ARG_LIST,
     TYPE_ARG,
     CONST_ARG,
+    /// `@a`, `@_`, or the join `@a + @b` in an argument list.
+    REGION_ARG,
     NAMED_ARG,
     MEMBER_GENERIC_ARGS,
     RAW_PTR_TYPE,

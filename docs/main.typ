@@ -795,7 +795,8 @@ auto-deref**, so `p.*` is the only way a pointer is ever read or written.
 The old prefix spelling (`&raw place` / `&raw mut place`) is retired:
 writing it gets a targeted migration diagnostic pointing at the postfix
 form, not a silent reinterpretation. Plain `.&` / `.&mut`, with no `raw`,
-are reserved for safe borrows — not supported yet.
+are the SAFE borrows — see "Safe borrows and regions" below. Everything
+else in this chapter is about the raw flavor.
 
 ```must
 static main = fn () -> usize {
@@ -827,7 +828,8 @@ Writing through a shared `T.&raw` is rejected (`cannot assign through
 through a shared pointer — minting a mutating address must not launder the
 shared flavor into a write permission. `p` itself never needs to be a `mut`
 binding — writing through it reassigns nothing — and derefs deeper in the
-chain are ordinary *reads*, whose pointers' flavors don't matter. A
+chain are ordinary *reads* of raw pointers, which copy the pointer, and a
+copy carries its whole permission, so their flavors don't matter. A
 deref-rooted address is the original allocation's address with the path
 extended — `p.*.x.&raw mut` hands out the very place `p` points to, one
 field in; no copy is materialized on the way.
@@ -926,6 +928,202 @@ static main = fn () -> () {
     };
 };
 ```
+
+== Safe borrows and regions
+
+A borrow is a checked pointer. `x.&` borrows a place for reading, `x.&mut`
+borrows it exclusively, and `r.*` reads through either — the same postfix
+deref a raw pointer uses. What makes them different is that a borrow needs
+no `unsafe`: safety is decided by the pointer's *flavor*, and `.&raw` is the
+unsafe flavor. There is no auto-ref and no auto-deref, ever.
+
+Every borrow says how long it is good for. That is its *region*, spelled
+`@a`, and it rides the borrow operator's own turbofish:
+
+```must
+static get = fn::<@a>(r: usize.&::<@a>) -> usize {
+    r.*
+};
+```
+
+`@a` is a parameter of `get`, exactly as `T` would be, and it rides the same
+binder list — `fn::<@a, T, const N: usize>` declares one of each. Regions
+are nonetheless a *distinguished* kind: they are erased before anything is
+compiled. Two functions whose signatures differ only in their regions lower
+to identical code, no region reaches a monomorphization key, and no backend
+ever sees one. A region can therefore reject a program and can never change
+what it does.
+
+Nothing is elided. Every region in a signature is written by hand, on
+purpose, until enough real code exists to say which elision rule would have
+earned its keep — so `usize.&` on its own is an error naming the spelling
+rather than a guess. Inside a *body* the situation is different: there the
+regions are inference variables, not parameters, so `@_` says "there is a
+region here, work it out" and an omitted turbofish on a borrow expression
+means the same. `@_` in a signature is rejected: a caller has to be able to
+name what they are choosing. A binder is where that naming happens, so `@_`
+is rejected there too — it asks for a region, it does not declare one.
+
+Two regions can be joined. `usize.&::<@a + @b>` is a borrow good for as long
+as *both* last — the largest region every listed region outlives — so `+`
+reads as conjunction here exactly as it does in bound composition. Which
+side of an obligation the join sits on decides what it costs: a borrow good
+for `@a + @b` being used somewhere shorter needs *both* members to outlive
+that place, while covering the join itself needs only *one* member covered,
+because covering either already covers their overlap.
+
+A branch construct forms a join without being written as one. Each branch
+reborrows into the result, so `if c { p } else { q }` over two unrelated
+regions is fine and its type is good for as long as both branches are — no
+relation between `@a` and `@b` is demanded, and a `&mut` branch degrades
+into a `&` context exactly as it would at a direct call. `match` arms, a
+`loop`'s `break` values and an array literal's elements are the same join
+through other spellings, and cost the same.
+
+One consequence worth knowing, because it is the same limitation twice. A
+value whose type comes from a join is not resolved until the end of the
+statement, so *projecting straight off it* — `.*`, `.field` or `[i]` — has
+nothing to project through yet, and reports that the type cannot be
+determined. Annotating fixes it, and that is the general answer.
+
+Borrows meet this in two places. An array literal whose elements are borrows
+is a join like any other, so `[p, q][0].*` needs the array annotated
+(`let arr: [usize.&::<@a>; 2] = [p, q];`). And an aggregate produced by a
+branch — `(if c { struct { x = p } } else { … }).x` — needs the same, or a
+function that takes the aggregate and does the projection inside. The
+limitation predates borrows and is not specific to them; borrows are simply
+what makes it common, because `.*` is the primary thing one does with a
+borrow.
+
+=== Exclusivity, and reborrowing at every use
+
+A `.&mut` is *affine*: it cannot be duplicated, because duplicating it would
+duplicate a permission. What repeats is projection *through* the place
+holding it. A mention of a borrow-typed place in a position that *wants* a
+borrow — an argument, an annotated binding, a return — mints a fresh,
+shorter reborrow with the parent suspended for exactly that reborrow's span,
+so a borrow can be passed to a function and then used again:
+
+```must
+static bump = fn::<@a>(m: usize.&mut::<@a>) -> () { m.* = m.* + 1; };
+
+static bump_twice = fn::<@a>(m: usize.&mut::<@a>) -> usize {
+    bump(m);
+    bump(m);
+    m.*
+};
+```
+
+A language that moved on the first use would reject that. Reborrowing is
+also what lets an exclusive borrow be used where a shared one is wanted:
+that is not subtyping (a callee could stash a shared reference for the whole
+of the parent's region) but a *shared reborrow* — the region shrinks and the
+parent suspends. Nothing is written at the use site; the compiler inserts
+it. That insertion is the single licensed exception to "no auto-ref, ever",
+and it is bounded exactly: the compiler may insert a *safe* borrow of `x.*`
+where `x` is already a borrow, never a borrow of `x` itself, and never a raw
+borrow.
+
+`.&mut` follows the same transitive-mutability rule assignments do — the
+root binding must be `mut` — and no write permission may be reached through
+a shared step, which is what stops a shared borrow laundering into one. That
+is judged over the whole place rather than its outermost step: writing
+through a `.&` is rejected (`cannot assign through `T.&`: writing needs a
+`.&mut` borrow`), and so is writing through a `.&mut` that is itself held
+behind a `.&`, because reading a `.&mut` out of a place *reborrows* it, and
+a shared place may grant no such reborrow. Minting `.&mut` or `.&raw mut`
+anywhere along such a chain is rejected the same way, and so is the implicit
+reborrow, which is that mint with the `.&mut` left unwritten. A `.&raw mut`
+in the middle stops the walk instead: reading a raw pointer out copies it,
+and a copy carries its whole permission — the raw world's own laundering,
+gated by `unsafe`. Neither safe flavor can be minted through a *raw* pointer
+(`p.*.&`, `p.*.&mut`) — a raw pointer carries no region, so a safe borrow
+minted through one would have nothing to bound it.
+
+Reading `r.*` copies the referent when the referent is copyable. When it is
+not, the read is rejected with `cannot move out of a borrow` — a rule that
+matters because a `.&mut` is itself affine. It is a rule about `r.*` as a
+*value*: a `.*` in place position — `r.*.x`, `r.*[i]`, `r.*.x = 9`,
+`r.*.x.&mut`, and `r.*.*` where the referent is itself a borrow — projects
+through the borrow instead of copying it, so an affine referent is no
+obstacle there. Nor is `r.*` handed to a parameter that wants a borrow: that
+is the reborrow above, which suspends the parent rather than copying it.
+
+=== Outlives clauses
+
+Returning a borrow at a region the caller chose is a promise that the value
+lives that long. When one region has to cover another, the signature says
+so:
+
+```must
+static longer = fn::<@a: @b, @b>(x: usize.&::<@a>) -> usize.&::<@b> {
+    x
+};
+```
+
+`@a: @b` reads "`@a` outlives `@b`", and the relation is transitive: with
+`@a: @b` and `@b: @c` declared, `@a: @c` needs no restating. Without the
+clause the same body is rejected, because only the caller knows which of two
+region parameters is longer — the compiler cannot pick, and the signature is
+where they are told. Borrowing a local and letting it escape the body is
+rejected for the same reason, with `borrowed value does not live long
+enough`.
+
+=== What is checked, and what is checked *yet*
+
+The shipped checker is the outlives module: it collects each body's outlives
+obligations, solves for every region's value, and rejects the two things
+that stage can see — an undeclared relation between signature regions, and a
+borrow of a local that escapes. It is a pure per-body query whose entire
+output is diagnostics; nothing it computes is consumed by lowering, layout
+or selection.
+
+What it does not yet do is *exclusivity*: deciding statically which borrows
+may be live at once. Until that lands, the interpreter detects violations
+dynamically — writing through a borrow that was invalidated by a later
+borrow of the same place, using a borrow whose parent has been written
+through, or touching a borrowed local by its own name while a borrow of it
+is live — reported as undefined behavior where it happens, with the borrow
+site and the invalidating site both named. That is the same treatment raw
+pointers get, and it is interpreter quality rather than a language
+guarantee.
+
+Four limits of that backstop are worth stating plainly rather than leaving
+to be discovered.
+
+It is *dynamic*, so it reports a violation only on a path that actually
+runs. A branch never taken is never checked, and a program that passes on
+one input says nothing about another.
+
+And its liveness notion is the FRAME, not the block. A borrow of a local
+declared in an inner block keeps working after that block ends, because the
+frame still owns the storage — the interpreter sees a live allocation and
+has nothing to object to. Statically that case belongs to loan liveness,
+which is the next stage. So a borrow of an inner-block local, read after its
+block ends, is caught by NEITHER layer today: the outlives module does not
+model it and the interpreter cannot see it. That shape stays uncaught until
+the loan checker lands.
+
+And the escape check's reach is the ENCLOSING ITEM's universals, not every
+frame in the body. A nested function literal that returns a borrow of its
+own local at `@_` escapes that literal's frame without ever reaching a
+universal of the outer item, so the static checker sees it as clean —
+the interpreter still catches it, because the local's storage really is
+gone. Like the inner-block case above, this stays uncaught statically
+until static loan liveness lands.
+
+Finally, the reborrow is minted only where the position *wants* a borrow. A
+borrow-typed place read into a position with no borrow-typed expectation — a
+bare `let c = b;`, or a read of an affine field, `p.q` — copies the borrow
+verbatim instead: no reborrow is minted, nothing is suspended, and the
+interpreter sees one borrow where there are two, so both writes land.
+Closing that means minting the reborrow (or a move) regardless of
+expectation, which is a change to typing rather than to either checker.
+
+Also not yet supported: regions on type declarations (`struct::<@a, T>`),
+implied bounds, elision of any kind, and compiling a program that uses safe
+borrows to wasm — the backend refuses those by name rather than dropping the
+contract silently. See `examples/borrows.must`.
 
 == Arrays
 

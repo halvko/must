@@ -372,6 +372,16 @@ impl<'a, 'db> Emitter<'a, 'db> {
                 &ctx.loc,
                 origin,
             )),
+            // Refused by its own name, not folded into the raw arm above.
+            // A borrow lowers to the same machine word, so this backend
+            // COULD emit something that runs — and would silently drop the
+            // exclusivity contract while doing it. Refusing is the whole
+            // job here.
+            Rvalue::Borrow { .. } => Err(Refusal::new(
+                "a safe borrow (`.&` / `.&mut`)",
+                &ctx.loc,
+                origin,
+            )),
         }
     }
 

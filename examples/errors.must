@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 24 errors and 1 warning.
+// exactly: found 25 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -249,3 +249,12 @@ trait Countable = requires {
     impl usize { count = fn (c: usize) -> usize { c }; }
 };
 static self_hole = fn (n: usize) -> usize { Countable::<Self = _>::count(n) };
+
+// 26. An OUTLIVES violation. Returning `x` at `@b` asks `@a` — the region
+//     the caller gave the argument — to cover `@b`, which the signature
+//     never promised. Both regions are parameters, so the compiler cannot
+//     pick between them: only the caller knows which is longer, and the
+//     signature is where they are told. Adding `@a: @b` to the binder is
+//     the fix, and it is exactly what the message says.
+//     error: using this borrow where a longer-lived one is expected needs `@a` to outlive `@b`, which this signature does not declare; add `@a: @b` to the binder
+static undeclared_outlives = fn::<@a, @b>(x: usize.&::<@a>) -> usize.&::<@b> { x };

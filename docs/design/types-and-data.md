@@ -75,6 +75,8 @@
 
 ## Re-evaluate when
 
+- **A conversion is wanted in depth** — variance. Judge it with the borrow subsystem's
+  variance question (M09). **T13**
 - **Dynamic strings** force the `let s2 = s;` cost question `str` currently dodges. Staging
   rule: keep literal `str` rodata-able and let dynamic strings arrive with an explicit
   allocating conversion. **T15**

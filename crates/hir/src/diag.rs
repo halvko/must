@@ -171,3 +171,59 @@ pub const ARRAY_CONST_ARG: &str = "an array value cannot be a const argument (ye
 /// and, as a belt, at every *mention* that would pass one — both render
 /// this exact text.
 pub const FN_CONST_ARG: &str = "a function value cannot be a const argument (yet)";
+
+// ---- regions and safe borrows --------------------------------------------
+
+/// A safe borrow type written with no region (`T.&`). Elision is DEFERRED,
+/// not absent by accident: every region is hand-written until a corpus says
+/// which elision rule earns its keep, so the omission is reported rather
+/// than guessed at. The message names the spelling so the fix is copyable.
+pub const BORROW_NEEDS_REGION: &str =
+    "a safe borrow must name its region (`T.&::<@a>`); regions are never elided yet";
+
+/// `@_` written in a SIGNATURE. The wildcard says "there is a region here,
+/// infer it", which a body can answer and a signature cannot: a signature's
+/// regions are parameters, so they need names in the binder.
+pub const WILDCARD_REGION_IN_SIGNATURE: &str = "`@_` cannot be used in a signature — declare the region in the binder \
+     (`fn::<@a>`) and name it here";
+
+/// `@_` written in a BINDER (`fn::<@_>`). The wildcard is the elision
+/// sigil, not a name: it asks for a region to be inferred, and a binder is
+/// where regions are declared, so there is nothing for it to denote — and
+/// a second `@_` in the same list would collide with the first as if two
+/// parameters had been named the same. Refused rather than accepted as a
+/// name nobody can mention.
+pub const WILDCARD_REGION_IN_BINDER: &str =
+    "`@_` is not a region name; a binder declares regions by name (`fn::<@a>`)";
+
+/// A region name that no enclosing binder declares.
+pub fn unknown_region(name: &str) -> String {
+    format!("no region named `{name}` is in scope; declare it in the binder (`fn::<{name}>`)")
+}
+
+/// A region argument where the binder declares a type or const parameter.
+pub fn unexpected_region_arg(param: &str) -> String {
+    format!("`{param}` is not a region parameter; a region argument (`@a`) does not belong here")
+}
+
+/// Region parameters on a TYPE declaration (`struct::<@a, T>`). Reserved,
+/// not rejected: making a declaration carry a region needs variance and
+/// well-formedness rulings this arc does not own, and granting it later
+/// deletes this diagnostic without changing the grammar.
+pub const REGION_ON_TYPE_DECL: &str =
+    "region parameters on type declarations are not supported yet";
+
+/// Reading `x.*` where the referent is not copyable — the rule safe `.*`
+/// makes load-bearing, since heap-backed types are noncopyable (T08). Named
+/// after the operation the user attempted, not the rule it broke.
+pub const MOVE_OUT_OF_BORROW: &str = "cannot move out of a borrow";
+
+/// A borrow's turbofish carrying the wrong number of arguments. A borrow
+/// takes exactly one thing: how long it is good for.
+pub fn borrow_region_arity(found: usize) -> String {
+    format!("a safe borrow takes exactly one region argument (`T.&::<@a>`), found {found}")
+}
+
+/// A borrow's turbofish carrying something that is not a region.
+pub const BORROW_REGION_KIND: &str =
+    "a safe borrow's argument is a region (`@a`, or `@_` to infer one) — not a type or a value";

@@ -163,7 +163,7 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
             compute_expr_scopes(body, scopes, *base, scope);
             compute_expr_scopes(body, scopes, *index, scope);
         }
-        ExprData::AddrOf { place, .. } => {
+        ExprData::AddrOf { place, .. } | ExprData::Borrow { place, .. } => {
             compute_expr_scopes(body, scopes, *place, scope);
         }
         ExprData::Deref { receiver } => {

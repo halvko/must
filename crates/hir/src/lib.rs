@@ -12,6 +12,7 @@ pub mod diag;
 pub mod groups;
 pub mod infer;
 pub mod item_tree;
+pub mod outlives;
 pub mod scopes;
 pub mod traits;
 pub mod ty;
@@ -27,20 +28,22 @@ use syntax::ast::{self, AstNode as _};
 pub use body::{BindingId, Body, BodySourceMap, ExprId, PatId, body_with_source_map};
 pub use const_check::ConstCheckDiagnostic;
 pub use constraint::Cause;
+pub use constraint::{RegionConstraint, RegionConstraintReason};
 pub use infer::{InferenceDiagnostic, InferenceResult};
 pub use item_tree::{
     Constness, ItemKind, ItemTree, MemberHome, TypeDeclData, TypeRef, item_source,
     trait_requirements, type_decl,
 };
+pub use outlives::{OutlivesDiagnostic, outlives_check};
 pub use scopes::{
     ALLOC_RESULT_NAME, BUILTIN_DISAMBIGUATOR, Builtin, Duplicate, ExprScopes, FileScope,
     Resolution, TypeScope, alloc_result_loc, expr_scopes, file_scope, resolutions, type_scope,
 };
 pub use traits::{BoundSlot, bound_slots, dict_param_count};
 pub use ty::{
-    ConstArgValue, FnTy, GenericArg, IntKind, IntValue, NamedTy, Ty, VariantTy, enum_variants,
-    member_is_dot_callable, member_self_ty, signature, substitute_args, type_underlying,
-    type_underlying_for, variant_payloads_for, widens_to,
+    ConstArgValue, FnTy, GenericArg, IntKind, IntValue, NamedTy, Region, RegionVar, Ty, VariantTy,
+    enum_variants, member_is_dot_callable, member_self_ty, signature, substitute_args,
+    type_underlying, type_underlying_for, variant_payloads_for, widens_to,
 };
 pub use unsafe_check::UnsafeCheckDiagnostic;
 
@@ -252,6 +255,7 @@ pub fn item_data<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<item_tree::I
                 name: "T".to_owned(),
                 kind: item_tree::GenericParamKind::Type,
                 bounds: Vec::new(),
+                outlives: Vec::new(),
             }],
         });
     }
@@ -355,6 +359,120 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         .collect();
 
     let item_name = |loc: &ItemLoc| item_source(db, loc.to_id(db)).and_then(|it| it.name());
+
+    // ---- regions: the no-elision rule, and the type-declaration reserve --
+    //
+    // Both are SYNTACTIC judgements, so they live here rather than in
+    // inference: what is wrong with `T.&` is that a token is missing, and
+    // no amount of type information changes that. Lowering stays permissive
+    // (a region-less borrow gets `Region::Error` and checking continues),
+    // which is the house split — recovery in the lowerer, the story here.
+    for borrow in parse(db, file)
+        .syntax_node()
+        .descendants()
+        .filter_map(ast::BorrowType::cast)
+    {
+        let anchor = borrow
+            .amp_token()
+            .map(|token| token.text_range())
+            .unwrap_or_else(|| borrow.syntax().text_range());
+        let Some(list) = borrow.generic_arg_list() else {
+            // NO turbofish at all. Elision is deferred, not absent by
+            // oversight: every region is hand-written until a corpus says
+            // which rule earns its keep, so this reports rather than
+            // guesses.
+            diagnostics.push(Diagnostic {
+                range: anchor,
+                severity: Severity::Error,
+                message: diag::BORROW_NEEDS_REGION.to_owned(),
+                fix: None,
+                related: Vec::new(),
+            });
+            continue;
+        };
+        let args: Vec<ast::GenericArg> = list.args().collect();
+        if args.len() != 1 {
+            diagnostics.push(Diagnostic {
+                range: list.syntax().text_range(),
+                severity: Severity::Error,
+                message: diag::borrow_region_arity(args.len()),
+                fix: None,
+                related: Vec::new(),
+            });
+            continue;
+        }
+        let ast::GenericArg::RegionArg(region) = &args[0] else {
+            diagnostics.push(Diagnostic {
+                range: args[0].syntax().text_range(),
+                severity: Severity::Error,
+                message: diag::BORROW_REGION_KIND.to_owned(),
+                fix: None,
+                related: Vec::new(),
+            });
+            continue;
+        };
+        // Every NAMED region must be declared by an enclosing binder. This
+        // is a syntactic question with a syntactic answer, and it has to be
+        // asked here: signature lowering resolves an unknown name to
+        // `Region::Error` and carries on, which without a diagnostic
+        // surfaced as the compiler accusing ITSELF ("this expression has
+        // type `{error}` but no error was reported") for a one-character
+        // typo. Inside a join it was worse — silently accepted, the
+        // obligation dropped.
+        let binder = enclosing_binder_info(borrow.syntax());
+        for token in region.regions() {
+            let text = token.text();
+            if text != "@_" && !binder.names_region(text) {
+                diagnostics.push(Diagnostic {
+                    range: token.text_range(),
+                    severity: Severity::Error,
+                    message: diag::unknown_region(text),
+                    fix: None,
+                    related: Vec::new(),
+                });
+            }
+        }
+        // `@_` says "there is a region here, infer it" — an answer a BODY
+        // can give and a SIGNATURE cannot, because a signature's regions
+        // are parameters the caller chooses. The two positions are told
+        // apart syntactically: a signature type sits under a `PARAM` or a
+        // `RET_TYPE`.
+        if !in_signature_position(borrow.syntax()) {
+            continue;
+        }
+        for token in region.regions() {
+            if token.text() == "@_" {
+                diagnostics.push(Diagnostic {
+                    range: token.text_range(),
+                    severity: Severity::Error,
+                    message: diag::WILDCARD_REGION_IN_SIGNATURE.to_owned(),
+                    fix: None,
+                    related: Vec::new(),
+                });
+            }
+        }
+    }
+
+    // Region parameters on a TYPE declaration (`struct::<@a, T>`). Reserved,
+    // not rejected: a region-carrying declaration needs variance and
+    // well-formedness rulings this arc does not own. Reported at the
+    // declaration so a user learns it once, where they wrote it.
+    for param in parse(db, file)
+        .syntax_node()
+        .descendants()
+        .filter_map(ast::RegionParam::cast)
+    {
+        if !region_param_on_type_declaration(param.syntax()) {
+            continue;
+        }
+        diagnostics.push(Diagnostic {
+            range: param.syntax().text_range(),
+            severity: Severity::Error,
+            message: diag::REGION_ON_TYPE_DECL.to_owned(),
+            fix: None,
+            related: Vec::new(),
+        });
+    }
 
     // Duplicate definitions, discovered by `file_scope` (the analysis that
     // decides first-wins also knows about the losers); only the range
@@ -521,13 +639,13 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         }
     }
 
-    // One binder, one name per parameter. Type and const params share the
-    // binder's namespace: a rigid `Ty::Param` is positional and a const
-    // param's mention resolves to the LAST declaration of the name, so a
-    // repeat leaves the earlier parameter unnameable rather than
-    // ambiguous. Reported at the second occurrence, pointing at the first.
-    // Per LIST, not per item: two binders are two namespaces, whoever owns
-    // them.
+    // One binder, one name per parameter, whatever the kind: a rigid
+    // `Ty::Param` is positional and a const param's mention resolves to the
+    // LAST declaration of the name, so a repeat leaves the earlier
+    // parameter unnameable rather than ambiguous. Reported at the second
+    // occurrence, pointing at the first. Per LIST, not per item: two
+    // binders are two namespaces, whoever owns them.
+    let named = |name: ast::Name| (name.text(), name.syntax().text_range());
     for list in parse(db, file)
         .syntax_node()
         .descendants()
@@ -535,20 +653,34 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     {
         let mut seen: Vec<(String, TextRange)> = Vec::new();
         for param in list.params() {
-            let name = match &param {
-                ast::GenericParam::TypeParam(it) => it.name(),
-                ast::GenericParam::ConstParam(it) => it.name(),
+            let declared = match &param {
+                ast::GenericParam::TypeParam(it) => it.name().map(named),
+                ast::GenericParam::ConstParam(it) => it.name().map(named),
+                // A region's name carries its `@` sigil, so it collides
+                // only with another region's — except `@_`, which is the
+                // elision sigil and not a name at all. Refused here, and
+                // left out of the collision bookkeeping so a second one
+                // gets the same true answer instead of "duplicate".
+                ast::GenericParam::RegionParam(it) => match it.region_token() {
+                    Some(token) if token.text() == "@_" => {
+                        diagnostics.push(Diagnostic {
+                            range: token.text_range(),
+                            severity: Severity::Error,
+                            message: diag::WILDCARD_REGION_IN_BINDER.to_owned(),
+                            fix: None,
+                            related: Vec::new(),
+                        });
+                        continue;
+                    }
+                    token => token.map(|token| (token.text().to_owned(), token.text_range())),
+                },
             };
-            let Some(name) = name else {
+            let Some((text, range)) = declared.filter(|(text, _)| !text.is_empty()) else {
                 continue;
             };
-            let text = name.text();
-            if text.is_empty() {
-                continue;
-            }
             match seen.iter().find(|(seen, _)| *seen == text) {
                 Some(&(_, first)) => diagnostics.push(Diagnostic {
-                    range: name.syntax().text_range(),
+                    range,
                     severity: Severity::Error,
                     message: format!("duplicate generic parameter `{text}`"),
                     fix: None,
@@ -558,7 +690,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                         message: "first declared here".to_owned(),
                     }],
                 }),
-                None => seen.push((text, name.syntax().text_range())),
+                None => seen.push((text, range)),
             }
         }
     }
@@ -753,6 +885,16 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     ast::PathExpr::cast(ptr.to_node(&syntax_root))
                         .and_then(|it| it.variant_name_ref())
                         .map(|n| n.syntax().text_range())
+                        .unwrap_or(range)
+                }
+                // The written region is the wrong part, not the mention it
+                // sits in — the same range the annotation mirror squiggles
+                // for the same mistake.
+                InferenceDiagnostic::UnexpectedRegionArg { index, .. } => {
+                    ast::PathExpr::cast(ptr.to_node(&syntax_root))
+                        .and_then(|path| path.generic_arg_list())
+                        .and_then(|list| list.args().nth(*index as usize))
+                        .map(|arg| arg.syntax().text_range())
                         .unwrap_or(range)
                 }
                 // Reported on the `match` keyword: the construct as a whole
@@ -1124,7 +1266,8 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                         .unwrap_or_default()
                 }
                 InferenceDiagnostic::AssignToItem { item: target, .. }
-                | InferenceDiagnostic::AddrOfMutItem { item: target, .. } => item_name(target)
+                | InferenceDiagnostic::AddrOfMutItem { item: target, .. }
+                | InferenceDiagnostic::BorrowMutItem { item: target, .. } => item_name(target)
                     .map(|name| {
                         vec![RelatedInfo {
                             file: target.file,
@@ -1282,6 +1425,22 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 message: diag.message(),
                 fix,
                 related,
+            });
+        }
+
+        // The outlives module — the borrow checker's first shipped stage.
+        // Aggregated exactly like every other analysis: findings travel
+        // with the query value, only ranges attach here.
+        for diag in outlives::outlives_check(db, item) {
+            let Some(ptr) = source_map.node_for_expr(diag.expr()) else {
+                continue;
+            };
+            diagnostics.push(Diagnostic {
+                range: ptr.text_range(),
+                severity: Severity::Error,
+                message: diag.message(),
+                fix: None,
+                related: Vec::new(),
             });
         }
 
@@ -2032,7 +2191,7 @@ fn type_param_binding(path_type: &ast::PathType, name: &str) -> TypeParamBinding
             .flat_map(|list| list.params())
             .any(|param| match param {
                 ast::GenericParam::TypeParam(it) => it.name().is_some_and(|n| n.text() == name),
-                ast::GenericParam::ConstParam(_) => false,
+                ast::GenericParam::RegionParam(_) | ast::GenericParam::ConstParam(_) => false,
             });
         if declares {
             return if inside_binder && passed_a_binder_list {
@@ -2078,11 +2237,16 @@ struct BinderInfo {
     type_params: Vec<String>,
     /// `(name, declared type)` per const param.
     const_params: Vec<(String, Option<ast::Type>)>,
+    /// Declared region names, sigil included (`@a`).
+    regions: Vec<String>,
 }
 
 impl BinderInfo {
     fn names_type_param(&self, name: &str) -> bool {
         self.type_params.iter().any(|param| param == name)
+    }
+    fn names_region(&self, name: &str) -> bool {
+        self.regions.iter().any(|region| region == name)
     }
     fn names_const_param(&self, name: &str) -> bool {
         self.const_params.iter().any(|(param, _)| param == name)
@@ -2161,6 +2325,11 @@ fn enclosing_binder_info(node: &syntax::SyntaxNode) -> BinderInfo {
                         info.const_params.push((name.text(), it.ty()));
                     }
                 }
+                ast::GenericParam::RegionParam(it) => {
+                    if let Some(name) = it.name() {
+                        info.regions.push(name);
+                    }
+                }
             }
         }
         return info;
@@ -2185,7 +2354,9 @@ fn in_const_arg_position(db: &dyn Db, file: SourceFile, path_type: &ast::PathTyp
     };
     let Some(index) = list.args().position(|arg| match &arg {
         ast::GenericArg::TypeArg(it) => it.syntax() == type_arg.syntax(),
-        ast::GenericArg::ConstArg(_) | ast::GenericArg::NamedArg(_) => false,
+        ast::GenericArg::RegionArg(_)
+        | ast::GenericArg::ConstArg(_)
+        | ast::GenericArg::NamedArg(_) => false,
     }) else {
         return false;
     };
@@ -2298,6 +2469,17 @@ fn apply_position_diagnostics(
             (_, ast::GenericArg::NamedArg(named)) => {
                 let arg_name = named.name_ref().map(|n| n.text()).unwrap_or_default();
                 diagnostics.push(simple(arg_range, diag::named_arg_not_a_trait(&arg_name)));
+            }
+            // A region parameter on a TYPE declaration — reserved: variance
+            // and well-formedness of region-carrying declarations are a
+            // later arc's decisions. Reported at the argument so the
+            // declaration's own reservation isn't repeated per mention.
+            (item_tree::GenericParamKind::Region, _) => {
+                diagnostics.push(simple(arg_range, diag::REGION_ON_TYPE_DECL.to_owned()));
+            }
+            // A region argument in a non-region slot.
+            (_, ast::GenericArg::RegionArg(_)) => {
+                diagnostics.push(simple(arg_range, diag::unexpected_region_arg(&param.name)));
             }
             // Inner type args are PathTypes of their own — the pass visits
             // them independently; nothing to add here.
@@ -2675,4 +2857,75 @@ fn simple_error(range: TextRange, message: String) -> Diagnostic {
         fix: None,
         related: Vec::new(),
     }
+}
+
+/// Whether a type node sits in a SIGNATURE — a parameter's annotation or a
+/// return type of an ITEM — as opposed to a body-local annotation.
+///
+/// The distinction is what makes `@_` legal in one place and not the other,
+/// and it is genuinely syntactic: an item's regions are its parameters, so
+/// they must be nameable by callers; a body's are inference variables, so
+/// declining to name one is the whole point.
+///
+/// A fn literal NESTED in a body is on the body's side of that line. Three
+/// intentional rules compose into what would otherwise be a cliff: a
+/// nested literal may not declare its own binder (generic literals are
+/// item-initializers only), `@_` was refused in every parameter position,
+/// and there is no elision — so no function literal in a body could take a
+/// borrow parameter BY ANY ROUTE. The smallest honest opening is to notice
+/// that a nested literal's regions genuinely ARE body-local existentials:
+/// it has no callers outside the body, nothing can instantiate it
+/// independently, and `@_` says exactly the true thing about them. The
+/// alternative was to reserve the whole shape by name, which buys a worse
+/// message for the same expressiveness.
+///
+/// Known gap: the outlives module's escape check (`outlives.rs`) measures
+/// a borrow's reach only against the ENCLOSING ITEM's universals, so a
+/// borrow that escapes a nested literal's own frame — without reaching any
+/// universal of the item — is invisible to it. See `docs/main.typ`'s "What
+/// is checked, and what is checked yet".
+fn in_signature_position(node: &syntax::SyntaxNode) -> bool {
+    let mut in_param_or_ret = false;
+    for ancestor in node.ancestors() {
+        match ancestor.kind() {
+            syntax::SyntaxKind::PARAM | syntax::SyntaxKind::RET_TYPE => in_param_or_ret = true,
+            syntax::SyntaxKind::FN_LITERAL => {
+                return in_param_or_ret && is_item_initializer(&ancestor);
+            }
+            // A colon-declared member/requirement signature is a contract
+            // like any item's: its regions are parameters.
+            syntax::SyntaxKind::FN_TYPE => return in_param_or_ret,
+            _ => {}
+        }
+    }
+    in_param_or_ret
+}
+
+/// Whether this fn literal IS an item's (or member's) value — the thing
+/// that makes its parameter list a published contract rather than a
+/// body-local detail.
+fn is_item_initializer(fn_literal: &syntax::SyntaxNode) -> bool {
+    fn_literal.parent().is_some_and(|parent| {
+        matches!(
+            parent.kind(),
+            syntax::SyntaxKind::STATIC_ITEM
+                | syntax::SyntaxKind::TYPE_ITEM
+                | syntax::SyntaxKind::MEMBER
+        )
+    })
+}
+
+/// Whether a region binder belongs to a `struct`/`enum` literal — i.e. to a
+/// TYPE declaration rather than to a function.
+fn region_param_on_type_declaration(node: &syntax::SyntaxNode) -> bool {
+    node.ancestors()
+        .find_map(|ancestor| match ancestor.kind() {
+            syntax::SyntaxKind::RECORD_EXPR | syntax::SyntaxKind::ENUM_EXPR => Some(true),
+            syntax::SyntaxKind::FN_LITERAL
+            | syntax::SyntaxKind::FN_TYPE
+            | syntax::SyntaxKind::WITH_GROUP
+            | syntax::SyntaxKind::REQUIRES_DEF => Some(false),
+            _ => None,
+        })
+        .unwrap_or(false)
 }

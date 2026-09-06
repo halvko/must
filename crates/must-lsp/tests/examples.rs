@@ -63,6 +63,7 @@ fn example_files() -> Vec<String> {
 /// test loudly, instead of the new file silently shipping unsmoke-tested.
 const COVERED: &[&str] = &[
     "arrays.must",
+    "borrows.must",
     "compile_time.must",
     "display.must",
     "errors.must",
@@ -179,6 +180,11 @@ fn assert_run(args: &[&str], want_code: i32, want: Expect) {
 #[test]
 fn arrays_checks_clean() {
     assert_check("arrays.must", 0, expect![[r#""#]]);
+}
+
+#[test]
+fn borrows_checks_clean() {
+    assert_check("borrows.must", 0, expect![[r#""#]]);
 }
 
 #[test]
@@ -361,7 +367,13 @@ fn errors_checks_dirty_with_the_documented_count() {
             251 | static self_hole = fn (n: usize) -> usize { Countable::<Self = _>::count(n) };
                 |                                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-            found 24 errors and 1 warning
+            error: using this borrow where a longer-lived one is expected needs `@a` to outlive `@b`, which this signature does not declare; add `@a: @b` to the binder
+              --> examples/errors.must:260:80
+                |
+            260 | static undeclared_outlives = fn::<@a, @b>(x: usize.&::<@a>) -> usize.&::<@b> { x };
+                |                                                                                ^
+
+            found 25 errors and 1 warning
         "#]],
     );
 }
@@ -420,6 +432,17 @@ fn arrays_runs() {
         index-assign: a[0] = 10 through a mut binding
         generic buffer: Buf::<2> holds a [usize; 2] summing to 42
     "#]],
+    );
+}
+
+#[test]
+fn borrows_runs() {
+    // No `-e` documented: the default entry (`main()`). The digits are the
+    // values each section produces — see the example's own commentary.
+    assert_run(
+        &["run", "examples/borrows.must"],
+        0,
+        expect!["1334080404040"],
     );
 }
 

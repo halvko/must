@@ -185,10 +185,10 @@ fn with_group(p: &mut Parser<'_>) {
     if p.at(COLON2) && p.nth(1) == L_ANGLE {
         generic_param_list(p);
     }
-    // Clause list: `T: Bound + Bound, U = usize, ...` — each clause opens
-    // with an IDENT (the brace opens the element block, so the boundary is
-    // token-recognizable).
-    while p.at(IDENT) {
+    // Clause list: `T: Bound + Bound, U = usize, @b: @a, ...` — each clause
+    // opens with an IDENT or a region (the brace opens the element block, so
+    // the boundary is token-recognizable).
+    while p.at(IDENT) || p.at(REGION_IDENT) {
         with_clause(p);
         if !p.at(L_BRACE) && !p.eat(COMMA) {
             break;
@@ -202,10 +202,25 @@ fn with_group(p: &mut Parser<'_>) {
     m.complete(p, WITH_GROUP);
 }
 
-/// One group clause: `T: Bound + Bound` (constrain) or `T = usize` (pin).
-/// Reserved (only plain groups are supported).
+/// One group clause: `T: Bound + Bound` (constrain), `T = usize` (pin), or
+/// the outlives form `@b: @a + @c` (constrain, region-headed — a region
+/// head takes only region bounds). Reserved (only plain groups are
+/// supported).
 fn with_clause(p: &mut Parser<'_>) {
     let m = p.start();
+    if p.at(REGION_IDENT) {
+        p.bump(REGION_IDENT);
+        if p.eat(COLON) {
+            region_bound(p);
+            while p.eat(PLUS) {
+                region_bound(p);
+            }
+        } else {
+            p.error("expected `:` followed by the regions `@…` must outlive");
+        }
+        m.complete(p, WITH_CLAUSE);
+        return;
+    }
     name_ref(p);
     if p.eat(COLON) {
         type_(p);
@@ -530,11 +545,12 @@ fn expr_bp(p: &mut Parser<'_>, min_bp: u8) -> Option<CompletedMarker> {
         }
         // Postfix address-of `x.&raw` / `x.&raw mut` — the dual of `.*`,
         // sitting in the same field-access tier so it chains greedily
-        // (`x.&raw mut.*`, `p.*.&raw mut`). The reserved safe borrows
-        // `x.&` / `x.&mut` (DOT AMP without `raw`) parse into their own node
-        // and are rejected by validation (parse-and-reserve). Lexed
-        // DOT AMP [raw] [mut]; checked before the plain field arm so the `.`
-        // never half-parses as a broken field access.
+        // (`x.&raw mut.*`, `p.*.&raw mut`) — and its SAFE siblings
+        // `x.&` / `x.&mut` (DOT AMP without `raw`), which carry an optional
+        // region turbofish of their own (`x.&mut::<@a>`; body-local
+        // annotations normally write `@_`). Lexed DOT AMP [raw] [mut];
+        // checked before the plain field arm so the `.` never half-parses
+        // as a broken field access.
         if p.at(DOT) && p.nth(1) == AMP {
             let m = lhs.precede(p);
             p.bump(DOT);
@@ -545,6 +561,7 @@ fn expr_bp(p: &mut Parser<'_>, min_bp: u8) -> Option<CompletedMarker> {
                 lhs = m.complete(p, ADDR_OF_EXPR);
             } else {
                 p.eat(MUT_KW);
+                borrow_op_generic_args(p);
                 lhs = m.complete(p, BORROW_EXPR);
             }
             continue;
@@ -1159,9 +1176,26 @@ fn generic_param_list(p: &mut Parser<'_>) {
     m.complete(p, GENERIC_PARAM_LIST);
 }
 
-/// One generic parameter: a bare name (`TYPE_PARAM`) or `const name: Type`
-/// (`CONST_PARAM`).
+/// One generic parameter: a region (`REGION_PARAM`), a bare name
+/// (`TYPE_PARAM`) or `const name: Type` (`CONST_PARAM`) — one binder list,
+/// three kinds. Regions ride the same slot as types and consts, told apart
+/// by their sigil, and are a distinguished kind downstream: erased, never
+/// reaching instance keys.
 fn generic_param(p: &mut Parser<'_>) {
+    if p.at(REGION_IDENT) {
+        let m = p.start();
+        p.bump(REGION_IDENT);
+        // `@b: @a + @c` — outlives bounds live where the param is born,
+        // exactly like a type param's trait bounds (TR05).
+        if p.eat(COLON) {
+            region_bound(p);
+            while p.eat(PLUS) {
+                region_bound(p);
+            }
+        }
+        m.complete(p, REGION_PARAM);
+        return;
+    }
     if p.at(CONST_KW) {
         let m = p.start();
         p.bump(CONST_KW);
@@ -1188,6 +1222,15 @@ fn generic_param(p: &mut Parser<'_>) {
         p.err_and_bump("expected a generic parameter");
     } else {
         p.error("expected a generic parameter");
+    }
+}
+
+/// One region on the right of an outlives `:` — always a region name, never
+/// a type. Kept a bare token (no wrapper node): the bound list of a
+/// [`REGION_PARAM`] is exactly its `REGION_IDENT` children after the first.
+fn region_bound(p: &mut Parser<'_>) {
+    if !p.eat(REGION_IDENT) {
+        p.error("expected a region name (`@a`) after `:`");
     }
 }
 
@@ -1303,6 +1346,18 @@ fn generic_arg(p: &mut Parser<'_>) {
         return;
     }
     match p.current() {
+        // Region by form: the `@` sigil. `@a`, the wildcard `@_`, or the
+        // join `@a + @b` — one argument, several regions, "outlived by all
+        // of them" (`+` reads as conjunction here, exactly as bound
+        // composition does).
+        REGION_IDENT => {
+            let m = p.start();
+            p.bump(REGION_IDENT);
+            while p.eat(PLUS) {
+                region_bound(p);
+            }
+            m.complete(p, REGION_ARG);
+        }
         // Const by form: a bare literal.
         INT_NUMBER | STRING | TRUE_KW | FALSE_KW => {
             let m = p.start();
@@ -1590,10 +1645,11 @@ fn type_(p: &mut Parser<'_>) {
     let Some(mut lhs) = type_core(p) else { return };
     loop {
         // Postfix raw pointer `T.&raw` / `T.&raw mut`, mirroring the
-        // expression-side postfix address-of, and the reserved safe
-        // reference types `T.&` / `T.&mut` (DOT AMP without `raw`, rejected
-        // by validation — parse-and-reserve). Chains the same way its
-        // expression dual does (`T.&raw mut.&raw`). Lexed DOT AMP [raw] [mut].
+        // expression-side postfix address-of, and the SAFE borrow types
+        // `T.&::<@a>` / `T.&mut::<@a>` (DOT AMP without `raw`), whose
+        // region rides the borrow operator's own turbofish. Chains the same
+        // way its expression dual does (`T.&raw mut.&raw`,
+        // `T.&::<@a>.&::<@b>`). Lexed DOT AMP [raw] [mut].
         if p.at(DOT) && p.nth(1) == AMP {
             let m = lhs.precede(p);
             p.bump(DOT);
@@ -1604,12 +1660,30 @@ fn type_(p: &mut Parser<'_>) {
                 lhs = m.complete(p, RAW_PTR_TYPE);
             } else {
                 p.eat(MUT_KW);
+                borrow_op_generic_args(p);
                 lhs = m.complete(p, BORROW_TYPE);
             }
             continue;
         }
         break;
     }
+}
+
+/// The borrow operator's OWN turbofish — `T.&::<@a>`, `x.&mut::<@_>`. A
+/// no-op unless the two-token `COLON2 L_ANGLE` lookahead is there (the same
+/// unambiguous gate every other turbofish uses); the list is an ordinary
+/// [`generic_arg_list`], so a wrong-kind argument (`T.&::<usize>`) parses
+/// into the tree it really is and hir says what was expected.
+///
+/// The list hangs directly off the `BORROW_TYPE`/`BORROW_EXPR` node, which
+/// has no other generic-argument child, so no ownership wrapper is needed
+/// (unlike a path's second segment — see [`member_generic_args`]).
+fn borrow_op_generic_args(p: &mut Parser<'_>) {
+    if !(p.at(COLON2) && p.nth(1) == L_ANGLE) {
+        return;
+    }
+    p.bump(COLON2);
+    generic_arg_list(p);
 }
 
 /// The core (non-postfix) type. Returns `None` only when nothing was parsed
@@ -1642,9 +1716,10 @@ fn type_core(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         }
         // Without the `raw` keyword the `&` parses as a reference type, which
         // stays reserved ("references are not supported yet", see validation)
-        // — `&T`/`&mut T` are kept unclaimed for real references later. (Safe
-        // references will spell postfix `T.&`; the prefix `&T` reservation
-        // remains until the borrow round rules on it.)
+        // — `&T`/`&mut T` are kept unclaimed for real references, which stay
+        // unspoken for. Safe borrows spell postfix `T.&`/`T.&mut` instead, a
+        // distinct `BORROW_TYPE` node parsed in `type_`'s own postfix loop
+        // above, never through this prefix arm.
         AMP => {
             let m = p.start();
             p.bump(AMP);

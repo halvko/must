@@ -21,13 +21,14 @@
 //! result variable say why the winning type won, and the sibling witnesses
 //! that match it say who voted for it.
 
-use ena::unify::InPlaceUnificationTable;
+use ena::unify::{InPlace, InPlaceUnificationTable, Snapshot};
+use la_arena::ArenaMap;
 use rustc_hash::FxHashMap;
 
 use crate::ItemLoc;
 use crate::body::{BindingId, ExprId};
 use crate::infer::InferenceDiagnostic;
-use crate::ty::{ConstArgValue, GenericArg, NamedTy, Ty, TyVar, TyVarValue, VariantTy};
+use crate::ty::{ConstArgValue, GenericArg, NamedTy, Region, Ty, TyVar, TyVarValue, VariantTy};
 
 /// Why a type was required or concluded. Attached to
 /// [`InferenceDiagnostic::TypeMismatch`] to render "because of this" hints;
@@ -142,6 +143,46 @@ pub(crate) struct Join {
 #[derive(Default)]
 pub(crate) struct Constraints {
     joins: Vec<Join>,
+    /// Every outlives obligation the body incurs, in emission order.
+    ///
+    /// Lives HERE rather than in `InferCtx` because the join solver runs
+    /// inside this store, after traversal, and a join leaf must produce
+    /// exactly the obligations a direct assignment would. Keeping two
+    /// emitters was the bug: joins went through `unify`, which is
+    /// region-blind by design, so wrapping any borrow in an `if` erased
+    /// the obligation its use site would otherwise impose. One emitter,
+    /// one answer.
+    region_edges: Vec<RegionConstraint>,
+    /// Where the checker INSERTED a reborrow, and what flavor came out.
+    /// Drained into the inference result so MIR can materialize the
+    /// operation: an implicit reborrow that produces no MIR would be
+    /// invisible to a future dynamic aliasing check, which needs the
+    /// parent/child relation it models to actually exist at runtime.
+    reborrows: ArenaMap<ExprId, bool>,
+    /// How many speculative snapshots are currently open.
+    ///
+    /// Region obligations are a plain `Vec` with no rollback of their own,
+    /// so a `relate` performed speculatively would leave PHANTOM edges
+    /// behind when the unification it belongs to is rolled back — an
+    /// obligation attributed to a program state that never happened. That
+    /// is a worse failure than the laundering this arc closed: laundering
+    /// accepts too much and is at least visible as a missing error, while
+    /// a phantom edge rejects a correct program for a reason that is not
+    /// in the source.
+    ///
+    /// Nothing does this today (the one snapshot site adopts, and adoption
+    /// emits nothing), but speculative unification is the obvious next
+    /// consumer — impl selection, coercions. Two cheap prophylactics keep
+    /// it from being inherited silently: [`Self::rollback_to`] truncates
+    /// the edges, and [`Self::push_outlives`] asserts no snapshot is open.
+    /// Whoever builds speculative `relate` gets an assertion failure and
+    /// has to design the interaction, rather than a bug.
+    snapshot_depth: u32,
+    /// The next region-variable index — minted here for the same reason
+    /// the edges are recorded here: the join solver needs a fresh region
+    /// for a voted borrow result (the MEET of its branches) and cannot
+    /// reach back into `InferCtx` to ask for one.
+    next_region: u32,
     /// Canonical root var → the causes that decided its concrete type.
     causes: FxHashMap<TyVar, Vec<Cause>>,
     /// Join witnesses the solver accepted by *widening* (variant → enum
@@ -152,6 +193,48 @@ pub(crate) struct Constraints {
     widenings: Vec<(ExprId, VariantTy)>,
 }
 
+/// One outlives obligation collected from a body: `sup` must outlive `sub`,
+/// i.e. `Values(sup) ⊇ Values(sub)`.
+///
+/// Directed, always — even where invariance emits both directions. Keeping
+/// the edge directed (rather than merging the two regions into an
+/// equivalence class) is what lets covariance arrive later as a change of
+/// which direction is emitted, instead of a rewrite of the solver: SCC
+/// condensation collapses a 2-cycle for free at solve time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegionConstraint {
+    /// The longer-lived region.
+    pub sup: Region,
+    /// The region it must cover.
+    pub sub: Region,
+    /// The expression that produced the obligation — blame's anchor.
+    pub origin: ExprId,
+    pub reason: RegionConstraintReason,
+}
+
+/// Why an outlives obligation exists. Carried so a violation can explain
+/// itself in the terms the user wrote, rather than as a solver fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionConstraintReason {
+    /// A borrow flowed into a position expecting a shorter one — the
+    /// implicit REBORROW that every mention of a borrow performs.
+    Reborrow,
+    /// A `&mut` flowed into a `&` position: degradation, which is a shared
+    /// reborrow (the region shrinks, the parent suspends) and never
+    /// subtyping.
+    Degradation,
+    /// Two borrow types had to be the same type — invariance, so both
+    /// directions are emitted. Only ever emitted for a borrow nested
+    /// INSIDE another type: forming a borrow is never invariant, because
+    /// each use mints its own reborrow.
+    Invariance,
+    /// A callee's declared outlives bound (`fn::<@a, @b: @a>`) travels
+    /// with the instantiation at a call site — the caller's own regions
+    /// must satisfy the bound the callee wrote, not a reborrow the caller
+    /// performed.
+    CalleeBound,
+}
+
 impl Constraints {
     pub(crate) fn push_join(&mut self, join: Join) {
         self.joins.push(join);
@@ -159,6 +242,321 @@ impl Constraints {
 
     pub(crate) fn take_widenings(&mut self) -> Vec<(ExprId, VariantTy)> {
         std::mem::take(&mut self.widenings)
+    }
+
+    pub(crate) fn take_region_edges(&mut self) -> Vec<RegionConstraint> {
+        std::mem::take(&mut self.region_edges)
+    }
+
+    pub(crate) fn take_reborrows(&mut self) -> ArenaMap<ExprId, bool> {
+        std::mem::take(&mut self.reborrows)
+    }
+
+    /// Open a speculative unification. Every snapshot goes through here so
+    /// the region-obligation contract above has somewhere to live; taking
+    /// `table.snapshot()` directly would bypass it.
+    pub(crate) fn snapshot(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+    ) -> (Snapshot<InPlace<TyVar>>, usize) {
+        self.snapshot_depth += 1;
+        (table.snapshot(), self.region_edges.len())
+    }
+
+    pub(crate) fn commit(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        (snapshot, _): (Snapshot<InPlace<TyVar>>, usize),
+    ) {
+        self.snapshot_depth -= 1;
+        table.commit(snapshot);
+    }
+
+    /// Undo a speculative unification — INCLUDING any obligations it
+    /// recorded. Truncation is exact because edges are only ever appended.
+    pub(crate) fn rollback_to(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        (snapshot, edges): (Snapshot<InPlace<TyVar>>, usize),
+    ) {
+        self.snapshot_depth -= 1;
+        table.rollback_to(snapshot);
+        self.region_edges.truncate(edges);
+    }
+
+    pub(crate) fn region_count(&self) -> u32 {
+        self.next_region
+    }
+
+    /// A fresh EXISTENTIAL region — one inference variable, numbered per
+    /// body. Minted by every borrow expression, every `@_`, every region
+    /// parameter of a callee at a call site, and every join of borrows
+    /// (whose result region is the MEET of its branches).
+    pub(crate) fn fresh_region(&mut self) -> Region {
+        let var = crate::ty::RegionVar(self.next_region);
+        self.next_region += 1;
+        Region::Var(var)
+    }
+
+    /// Record `sup: sub` — "`sup` outlives `sub`".
+    pub(crate) fn push_outlives(
+        &mut self,
+        sup: Region,
+        sub: Region,
+        origin: ExprId,
+        reason: RegionConstraintReason,
+    ) {
+        debug_assert!(
+            self.snapshot_depth == 0,
+            "an outlives obligation was recorded under a speculative \
+             unification — see `Constraints::snapshot_depth`; the rollback \
+             would undo the unification and keep the obligation"
+        );
+        // A broken region carries its own diagnostic; constraining it would
+        // only produce a second, derived one.
+        if matches!(sup, Region::Error) || matches!(sub, Region::Error) {
+            return;
+        }
+        self.region_edges.push(RegionConstraint {
+            sup,
+            sub,
+            origin,
+            reason,
+        });
+    }
+
+    /// Relate two regions INVARIANTLY — both directions, as two directed
+    /// edges. Never an equality merge: see [`RegionConstraint`].
+    fn relate_regions_invariant(&mut self, a: &Region, b: &Region, origin: ExprId) {
+        self.push_outlives(
+            a.clone(),
+            b.clone(),
+            origin,
+            RegionConstraintReason::Invariance,
+        );
+        self.push_outlives(
+            b.clone(),
+            a.clone(),
+            origin,
+            RegionConstraintReason::Invariance,
+        );
+    }
+
+    /// Every region pairing between two types that are being made equal —
+    /// the invariant walk, for borrows nested INSIDE another type. A
+    /// top-level borrow never comes here: forming one is a reborrow, which
+    /// is one directed edge.
+    pub(crate) fn relate_type_regions(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        a: &Ty,
+        b: &Ty,
+        origin: ExprId,
+    ) {
+        let (a, b) = (resolve_shallow(table, a), resolve_shallow(table, b));
+        match (&a, &b) {
+            (
+                Ty::Borrow {
+                    region: ra,
+                    referent: ta,
+                    ..
+                },
+                Ty::Borrow {
+                    region: rb,
+                    referent: tb,
+                    ..
+                },
+            ) => {
+                self.relate_regions_invariant(ra, rb, origin);
+                self.relate_type_regions(table, ta, tb, origin);
+            }
+            (Ty::RawPtr { pointee: pa, .. }, Ty::RawPtr { pointee: pb, .. }) => {
+                self.relate_type_regions(table, pa, pb, origin);
+            }
+            (Ty::Array { elem: ea, .. }, Ty::Array { elem: eb, .. }) => {
+                self.relate_type_regions(table, ea, eb, origin);
+            }
+            (Ty::Fn(fa), Ty::Fn(fb)) => {
+                for (pa, pb) in fa.params.iter().zip(&fb.params) {
+                    self.relate_type_regions(table, pa, pb, origin);
+                }
+                let (ra, rb) = (fa.ret.clone(), fb.ret.clone());
+                self.relate_type_regions(table, &ra, &rb, origin);
+            }
+            (Ty::Record(ra), Ty::Record(rb)) => {
+                for ((_, ta), (_, tb)) in ra.fields.iter().zip(&rb.fields) {
+                    let (ta, tb) = (ta.clone(), tb.clone());
+                    self.relate_type_regions(table, &ta, &tb, origin);
+                }
+            }
+            // A nominal type's generic ARGS are its identity, and a borrow
+            // may sit in one (`Option::<V.&mut::<@b>>`). Without this arm a
+            // generic type constructor is a laundry: `unify` agrees the two
+            // mentions are the same type (it is region-blind by design) and
+            // nothing relates the regions inside, so a borrow of a local
+            // flows into a caller's region with no diagnostic at all. Same
+            // obligation as `Ty::Record`'s, one constructor along.
+            //
+            // The declared SHAPE stays out of it, correctly: no `type` can
+            // name a region today (region params on type declarations are
+            // reserved), so a declaration cannot hide one — the args are
+            // the whole story. `Ty::contains_borrow` carries the note about
+            // the day that changes.
+            (Ty::Named(NamedTy { args: aa, .. }), Ty::Named(NamedTy { args: ab, .. }))
+            | (Ty::Variant(VariantTy { args: aa, .. }), Ty::Variant(VariantTy { args: ab, .. })) => {
+                for (ga, gb) in aa.iter().zip(ab) {
+                    match (ga, gb) {
+                        (GenericArg::Ty(ta), GenericArg::Ty(tb)) => {
+                            let (ta, tb) = (ta.clone(), tb.clone());
+                            self.relate_type_regions(table, &ta, &tb, origin);
+                        }
+                        // A region ARGUMENT is invariant exactly as a
+                        // borrow's own region is — a generic argument is
+                        // the type's identity, so it may neither grow nor
+                        // shrink. Unreachable until a type declaration may
+                        // take a region; exhaustive so the day it can is a
+                        // compile error here, not a silent skip.
+                        (GenericArg::Region(ra), GenericArg::Region(rb)) => {
+                            let (ra, rb) = (ra.clone(), rb.clone());
+                            self.relate_regions_invariant(&ra, &rb, origin);
+                        }
+                        // A const argument carries no region.
+                        (GenericArg::Const(_), GenericArg::Const(_)) => {}
+                        // Mismatched kinds: `unify` carries that error.
+                        (GenericArg::Ty(_) | GenericArg::Region(_) | GenericArg::Const(_), _) => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Every region in `ty` replaced by a fresh variable — the join
+    /// result's own regions, which every branch is then related into.
+    /// Taking the first branch's regions instead makes the join mean
+    /// "whatever branch one said", which is not what a join means.
+    fn freshen_regions(&mut self, ty: &Ty) -> Ty {
+        match ty {
+            Ty::Borrow {
+                mutable, referent, ..
+            } => {
+                let region = self.fresh_region();
+                Ty::borrow(*mutable, region, self.freshen_regions(referent))
+            }
+            Ty::RawPtr { mutable, pointee } => Ty::raw_ptr(*mutable, self.freshen_regions(pointee)),
+            Ty::Array { elem, len } => Ty::array(self.freshen_regions(elem), len.clone()),
+            Ty::Record(rec) => Ty::record(
+                rec.fields
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), self.freshen_regions(ty)))
+                    .collect(),
+            ),
+            Ty::Fn(f) => {
+                let params = f.params.iter().map(|p| self.freshen_regions(p)).collect();
+                Ty::fn_type(params, self.freshen_regions(&f.ret))
+            }
+            // A borrow inside a generic argument is as much the join's own
+            // region as a top-level one: without this the join's result
+            // keeps branch one's regions there, which is precisely what
+            // taking the first branch's regions was rejected for.
+            Ty::Named(named) => Ty::Named(NamedTy {
+                decl: named.decl.clone(),
+                args: self.freshen_regions_args(&named.args),
+            }),
+            Ty::Variant(variant) => Ty::Variant(VariantTy {
+                args: self.freshen_regions_args(&variant.args),
+                ..variant.clone()
+            }),
+            other => other.clone(),
+        }
+    }
+
+    fn freshen_regions_args(&mut self, args: &[GenericArg]) -> Vec<GenericArg> {
+        args.iter()
+            .map(|arg| match arg {
+                GenericArg::Ty(ty) => GenericArg::Ty(self.freshen_regions(ty)),
+                // A region ARGUMENT is as much the join's own region as one
+                // under a borrow: it was dropped here while the borrow case
+                // was handled, which is the same asymmetry that produced
+                // the four `Ty::Named` holes. Unreachable until a type
+                // declaration may take a region, and correct the day it can.
+                GenericArg::Region(_) => GenericArg::Region(self.fresh_region()),
+                // A const argument carries no region and never will —
+                // regions are erased and must never reach instance keys.
+                GenericArg::Const(value) => GenericArg::Const(value.clone()),
+            })
+            .collect()
+    }
+
+    /// The REBORROW relation, the one place a borrow may flow into a
+    /// position wanting a different region — and the ONE emitter, shared
+    /// by direct checks and by join leaves.
+    ///
+    /// `actual` is `T.&[mut]::<@src>`, `expected` is `T.&[mut]::<@tgt>`.
+    /// The referents are related invariantly (no variance anywhere yet);
+    /// the regions get ONE edge, `@src: @tgt` — the parent must outlive the
+    /// child it is suspended for. That single asymmetric edge IS
+    /// reborrow-at-every-use: every mention of a borrow-typed place mints a
+    /// fresh, shorter loan rather than moving the original, and a move is
+    /// just the case where the target needs the source's full region. Both
+    /// compile to a pointer copy, so preferring the more permissive branch
+    /// is free under the erasure law.
+    ///
+    /// `&mut` into a `&` position is the same event with the mutability
+    /// dropped — DEGRADATION, a shared reborrow, not subtyping (a callee
+    /// could stash a shared reference for all of the parent's region, so
+    /// the region must shrink and the parent must suspend).
+    ///
+    /// Returns `false` when the flavors cannot reborrow at all (`&` into a
+    /// `&mut` position), leaving the ordinary mismatch to report.
+    pub(crate) fn try_reborrow(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        actual: &Ty,
+        expected: &Ty,
+        origin: ExprId,
+    ) -> bool {
+        let (
+            Ty::Borrow {
+                mutable: m_src,
+                region: r_src,
+                referent: t_src,
+            },
+            Ty::Borrow {
+                mutable: m_tgt,
+                region: r_tgt,
+                referent: t_tgt,
+            },
+        ) = (
+            resolve_shallow(table, actual),
+            resolve_shallow(table, expected),
+        )
+        else {
+            return false;
+        };
+        // Shared can never become exclusive; exclusive may degrade.
+        if m_tgt && !m_src {
+            return false;
+        }
+        // Raw is correct here: the very next line relates the referents'
+        // regions, and the borrow's own regions get their directed edge
+        // below. This IS the edge-emitting wrapper.
+        if !self.unify(table, &t_src, &t_tgt, None) {
+            return false;
+        }
+        self.relate_type_regions(table, &t_src, &t_tgt, origin);
+        let reason = if m_src && !m_tgt {
+            RegionConstraintReason::Degradation
+        } else {
+            RegionConstraintReason::Reborrow
+        };
+        self.push_outlives(r_src, r_tgt, origin, reason);
+        // Record the insertion so MIR can MATERIALIZE it. M07 says
+        // degradation is not spelled `v.*.&` precisely "because the
+        // explicit form produces exactly the same child node" — which is
+        // only true if the implicit form produces one at all.
+        self.reborrows.insert(origin, m_tgt);
+        true
     }
 
     /// The [`Cause::GenericArg`]s recorded on `ty`'s variable (if it is
@@ -189,7 +587,58 @@ impl Constraints {
 
     /// The one unification entry point. Binding a variable to a concrete
     /// type records `cause` (first cause wins) for later blame attribution.
-    pub(crate) fn unify(
+    /// ADOPTION: one side is an unbound variable (or an `Error`), so it
+    /// takes the other's type WHOLESALE — including its regions. There is
+    /// no second set of regions to relate, so no obligation can be lost.
+    ///
+    /// This is one of the two ways to reach [`Self::unify`], and the
+    /// distinction is not stylistic. Region-blind unification of two types
+    /// that BOTH have regions silently discards every obligation between
+    /// them: `unify` answers "same type", and a region is deliberately not
+    /// part of a type's identity. That hole returned three times in this
+    /// arc — at direct joins, at array literals, and at aggregate join
+    /// leaves — each time because a new call site reached for `unify` and
+    /// there was nothing to stop it.
+    ///
+    /// So `unify` is private and the choice is now named. The debug
+    /// assertion below states the safety condition exactly, and runs over
+    /// the whole test corpus.
+    pub(crate) fn adopt(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        a: &Ty,
+        b: &Ty,
+        cause: Option<Cause>,
+    ) -> bool {
+        debug_assert!(
+            adoption_is_region_safe(table, a, b),
+            "`adopt` was called on two types that both carry regions, which \
+             silently discards every outlives obligation between them — use \
+             `relate` (a value meeting a context) or `try_reborrow` (a borrow \
+             meeting a borrow) instead"
+        );
+        self.unify(table, a, b, cause)
+    }
+
+    /// RELATION: a value meeting a CONTEXT that already has a type. Unifies
+    /// AND relates their regions — the second half is what `adopt` cannot
+    /// do and must never be asked to.
+    pub(crate) fn relate(
+        &mut self,
+        table: &mut InPlaceUnificationTable<TyVar>,
+        actual: &Ty,
+        expected: &Ty,
+        origin: ExprId,
+        cause: Option<Cause>,
+    ) -> bool {
+        if !self.unify(table, actual, expected, cause) {
+            return false;
+        }
+        self.relate_type_regions(table, actual, expected, origin);
+        true
+    }
+
+    fn unify(
         &mut self,
         table: &mut InPlaceUnificationTable<TyVar>,
         a: &Ty,
@@ -271,6 +720,31 @@ impl Constraints {
                     pointee: p2,
                 },
             ) => m1 == m2 && self.unify(table, &p1, &p2, cause),
+            // A safe borrow: same mutability, referent pointwise, and the
+            // REGIONS ARE NOT COMPARED HERE. Unification decides type
+            // IDENTITY; the outlives relation between two related regions
+            // is a separate judgement, emitted by `InferCtx` right after a
+            // successful unification (`relate_type_regions`) so that the
+            // edges carry the expression to blame — which this store,
+            // which sees only types, could not supply.
+            //
+            // Comparing them structurally instead would be wrong twice
+            // over: two borrows at different regions would fail to unify
+            // even when a reborrow makes them compatible, and the salsa
+            // memo for a signature would churn on region numbering that
+            // nothing below hir can observe.
+            (
+                Ty::Borrow {
+                    mutable: m1,
+                    referent: r1,
+                    ..
+                },
+                Ty::Borrow {
+                    mutable: m2,
+                    referent: r2,
+                    ..
+                },
+            ) => m1 == m2 && self.unify(table, &r1, &r2, cause),
             // Structural and exact: element pointwise, length by plain
             // equality with `Error` infectious on either side — the same
             // judgement generic const args get in `unify_args`. `[T; 8]`
@@ -356,6 +830,7 @@ impl Constraints {
         table: &mut InPlaceUnificationTable<TyVar>,
         actual: &Ty,
         expected: &Ty,
+        origin: ExprId,
     ) -> Option<VariantTy> {
         let (Ty::Variant(variant), Ty::Named(named)) = (actual, expected) else {
             return None;
@@ -364,8 +839,36 @@ impl Constraints {
             return None;
         }
         let variant = variant.clone();
-        self.unify_args(table, &variant.args, &named.args, None)
-            .then_some(variant)
+        if !self.unify_args(table, &variant.args, &named.args, None) {
+            return None;
+        }
+        // `unify_args` is region-blind, like every unification here — so
+        // the widening edge has to relate the args' regions itself, or the
+        // conversion is a laundry: `Opt::<usize.&::<@short>>::Some(..)`
+        // would flow into `Opt::<usize.&::<@long>>` with no obligation
+        // recorded anywhere. The tag injection changes the representation,
+        // not the payload, so the payload's regions are RELATED (both
+        // directions, no variance), exactly as `relate` would.
+        for (ga, gb) in variant.args.iter().zip(&named.args) {
+            match (ga, gb) {
+                (GenericArg::Ty(ta), GenericArg::Ty(tb)) => {
+                    let (ta, tb) = (ta.clone(), tb.clone());
+                    self.relate_type_regions(table, &ta, &tb, origin);
+                }
+                // A region ARGUMENT is related the same way, and for the
+                // same reason. Unreachable until a type declaration may
+                // take a region; exhaustive so that day is a compile error.
+                (GenericArg::Region(ra), GenericArg::Region(rb)) => {
+                    let (ra, rb) = (ra.clone(), rb.clone());
+                    self.relate_regions_invariant(&ra, &rb, origin);
+                }
+                // A const argument carries no region.
+                (GenericArg::Const(_), GenericArg::Const(_)) => {}
+                // Mismatched kinds: `unify_args` above already refused.
+                (GenericArg::Ty(_) | GenericArg::Region(_) | GenericArg::Const(_), _) => {}
+            }
+        }
+        Some(variant)
     }
 
     /// Solve all deferred joins, emitting blame-attributed diagnostics.
@@ -405,7 +908,7 @@ impl Constraints {
             // Errors are infectious and silent.
             Ty::Error => {
                 for witness in &join.witnesses {
-                    self.unify(table, &witness.ty, &Ty::Error, None);
+                    self.adopt(table, &witness.ty, &Ty::Error, None);
                 }
                 return;
             }
@@ -444,7 +947,7 @@ impl Constraints {
                     // Every leaf is still free: tie them together and let
                     // downstream axioms (or a caller) decide.
                     for witness in &join.witnesses {
-                        self.unify(table, &join.result, &witness.ty, None);
+                        self.adopt(table, &join.result, &witness.ty, None);
                     }
                     return;
                 };
@@ -453,7 +956,7 @@ impl Constraints {
                     // wrong, so report the disagreement itself and recover
                     // with the first witness so downstream code still checks.
                     push_tie_mismatch(&leaves, diagnostics);
-                    self.unify(table, &join.result, &join.witnesses[0].ty, None);
+                    self.adopt(table, &join.result, &join.witnesses[0].ty, None);
                     return;
                 }
                 let family = tally.iter().find(|&&(_, n)| n == max).unwrap().0.clone();
@@ -465,8 +968,34 @@ impl Constraints {
                 // Least upper bound within the family: identical leaves
                 // keep their exact type; anything mixed is only possible in
                 // an enum family, whose LUB is the enum itself.
-                let winner = if members.iter().all(|&ty| ty == members[0]) {
-                    members[0].clone()
+                // Compared region-erased, for the same reason the family
+                // key is: differing regions are not differing types, so
+                // they must not send this down the enum-LUB path (which
+                // would be unreachable for a borrow family).
+                let winner = if members
+                    .iter()
+                    .all(|&ty| ty.erase_regions() == members[0].erase_regions())
+                {
+                    // A voted BORROW result gets a FRESH region, not the
+                    // first branch's. `if c { p } else { q }` produces a
+                    // borrow good for as long as BOTH branches are — the
+                    // MEET — and every branch reborrows into it below.
+                    // Taking the first branch's region instead is what
+                    // made two independent universals demand mutual
+                    // outlives: an answer that was not only wrong but had
+                    // no workaround, since writing the ruled `@a + @b`
+                    // could not rescue it either.
+                    // Every region in the winner is freshened, not only a
+                    // top-level borrow's: an aggregate member carries its
+                    // branch's regions just as directly, and privileging
+                    // the first branch is the shape that was wrong for
+                    // bare borrows too.
+                    let winner = members[0].clone();
+                    if winner.contains_borrow() {
+                        self.freshen_regions(&winner)
+                    } else {
+                        winner
+                    }
                 } else {
                     let Family::Enum(loc) = &family else {
                         unreachable!("only enum families hold more than one type")
@@ -530,7 +1059,7 @@ impl Constraints {
                 // literal doesn't also report a no-defining-use error.
                 Ty::Infer(var) => {
                     let is_number = matches!(table.probe_value(var), TyVarValue::UnknownNumber);
-                    if self.unify(table, &witness.ty, &expected, None) {
+                    if self.adopt(table, &witness.ty, &expected, None) {
                         if is_number {
                             siblings.push(Cause::Branch(witness.blame));
                         }
@@ -543,12 +1072,44 @@ impl Constraints {
                         culprits.push((witness, actual));
                     }
                 }
+                // A borrow leaf meeting a borrow context is a REBORROW,
+                // exactly as it is at a direct check site — the one thing
+                // this loop used to skip, and the reason wrapping a borrow
+                // in an `if` erased every obligation its use site would
+                // have imposed. Tried before `unify`, which is
+                // region-blind by design; it also lets a `&mut` branch
+                // degrade into a `&` context, which a join could not do at
+                // all before.
+                actual
+                    if matches!(actual, Ty::Borrow { .. })
+                        && matches!(resolve_shallow(table, &expected), Ty::Borrow { .. }) =>
+                {
+                    if self.try_reborrow(table, &witness.ty, &expected, witness.blame) {
+                        siblings.push(Cause::Branch(witness.blame));
+                    } else {
+                        culprits.push((witness, actual));
+                    }
+                }
                 actual => {
-                    if self.unify(table, &witness.ty, &expected, None) {
+                    // `relate` rather than `unify`: a leaf that merely
+                    // CONTAINS borrows — a record, an array, a fn type —
+                    // is agreed by unification, which is region-blind.
+                    // Without the relate the whole laundering hole reopens
+                    // one level down: a join of two
+                    // `struct { x: usize.&::<@…> }` was accepted where the
+                    // no-`if` control was rejected, and could return a
+                    // borrow of a body-local.
+                    //
+                    // Invariant, both directions, because a borrow UNDER a
+                    // type constructor is not being formed — it is being
+                    // required to be the same type.
+                    if self.relate(table, &witness.ty, &expected, witness.blame, None) {
                         // Hint on the tail sub-expression that produced the
                         // type, not the whole branch.
                         siblings.push(Cause::Branch(witness.blame));
-                    } else if let Some(variant) = self.widen_to_enum(table, &actual, &expected) {
+                    } else if let Some(variant) =
+                        self.widen_to_enum(table, &actual, &expected, witness.blame)
+                    {
                         // Not unified (the leaf keeps its precise variant
                         // type) — the conversion op lands on this edge. Not
                         // a sibling either: a "this branch has type
@@ -603,7 +1164,7 @@ impl Constraints {
                 }
             }
         }
-        self.unify(table, &join.result, &expected, None);
+        self.adopt(table, &join.result, &expected, None);
     }
 }
 
@@ -628,7 +1189,16 @@ fn family_of(ty: &Ty) -> Family {
     match ty {
         Ty::Variant(variant) => Family::Enum(variant.decl.clone()),
         Ty::Named(named) => Family::Enum(named.decl.clone()),
-        other => Family::Shape(other.clone()),
+        // REGION-ERASED, and that is load-bearing rather than tidy: two
+        // borrows of the same referent are the same shape however long
+        // each is good for. Keying the family on the region would make a
+        // branch join between `@a` and `@b` report a TYPE mismatch — a
+        // lifetime question answered in the wrong vocabulary, and the
+        // exact confusion the erasure principle exists to prevent. The
+        // regions are related invariantly where the witnesses are
+        // collected, and their disagreement (if any) is reported by the
+        // outlives module as what it is.
+        other => Family::Shape(other.erase_regions()),
     }
 }
 
@@ -707,6 +1277,7 @@ pub(crate) fn poison_unresolved_number(table: &mut InPlaceUnificationTable<TyVar
             poison_unresolved_number(table, &f.ret);
         }
         Ty::RawPtr { pointee, .. } => poison_unresolved_number(table, &pointee),
+        Ty::Borrow { referent, .. } => poison_unresolved_number(table, &referent),
         Ty::Array { elem, .. } => poison_unresolved_number(table, &elem),
         Ty::Record(rec) => {
             for (_, field) in &rec.fields {
@@ -739,6 +1310,14 @@ pub(crate) fn resolve_fully(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty)
             Ty::fn_type(params, ret)
         }
         Ty::RawPtr { mutable, pointee } => Ty::raw_ptr(*mutable, resolve_fully(table, pointee)),
+        // The REGION is carried through untouched: it is not this table's
+        // to resolve — regions are solved by the outlives module, over
+        // constraints, not by unification.
+        Ty::Borrow {
+            mutable,
+            region,
+            referent,
+        } => Ty::borrow(*mutable, region.clone(), resolve_fully(table, referent)),
         Ty::Array { elem, len } => Ty::array(resolve_fully(table, elem), len.clone()),
         Ty::Record(rec) => Ty::record(
             rec.fields
@@ -783,6 +1362,15 @@ fn render_unresolved_numbers(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty
                 .collect(),
             render_unresolved_numbers(table, &f.ret),
         ),
+        Ty::Borrow {
+            mutable,
+            region,
+            referent,
+        } => Ty::borrow(
+            *mutable,
+            region.clone(),
+            render_unresolved_numbers(table, referent),
+        ),
         Ty::RawPtr { mutable, pointee } => {
             Ty::raw_ptr(*mutable, render_unresolved_numbers(table, pointee))
         }
@@ -800,7 +1388,7 @@ fn render_unresolved_numbers(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty
                 .iter()
                 .map(|arg| match arg {
                     GenericArg::Ty(ty) => GenericArg::Ty(render_unresolved_numbers(table, ty)),
-                    GenericArg::Const(value) => GenericArg::Const(value.clone()),
+                    GenericArg::Region(_) | GenericArg::Const(_) => arg.clone(),
                 })
                 .collect(),
         }),
@@ -810,7 +1398,7 @@ fn render_unresolved_numbers(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty
                 .iter()
                 .map(|arg| match arg {
                     GenericArg::Ty(ty) => GenericArg::Ty(render_unresolved_numbers(table, ty)),
-                    GenericArg::Const(value) => GenericArg::Const(value.clone()),
+                    GenericArg::Region(_) | GenericArg::Const(_) => arg.clone(),
                 })
                 .collect(),
             ..variant.clone()
@@ -829,7 +1417,7 @@ pub(crate) fn resolve_args_fully(
     args.iter()
         .map(|arg| match arg {
             GenericArg::Ty(ty) => GenericArg::Ty(resolve_fully(table, ty)),
-            GenericArg::Const(value) => GenericArg::Const(value.clone()),
+            GenericArg::Region(_) | GenericArg::Const(_) => arg.clone(),
         })
         .collect()
 }
@@ -847,14 +1435,45 @@ fn occurs(table: &mut InPlaceUnificationTable<TyVar>, var: TyVar, ty: &Ty) -> bo
         }
         Ty::Fn(f) => f.params.iter().any(|p| occurs(table, var, p)) || occurs(table, var, &f.ret),
         Ty::RawPtr { pointee, .. } => occurs(table, var, pointee),
+        // A borrow's referent is a type position like any other: without
+        // this arm `?0 := ?0.&mut` binds and the type is infinite. Every
+        // sibling walker in this file already recurses here.
+        Ty::Borrow { referent, .. } => occurs(table, var, referent),
         Ty::Array { elem, .. } => occurs(table, var, elem),
         Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| occurs(table, var, ty)),
         Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
             args.iter().any(|arg| match arg {
                 GenericArg::Ty(ty) => occurs(table, var, ty),
-                GenericArg::Const(_) => false,
+                GenericArg::Region(_) | GenericArg::Const(_) => false,
             })
         }
         _ => false,
     }
+}
+
+/// The exact condition under which region-blind unification loses nothing:
+/// one side adopts wholesale (an unbound variable, or the infectious
+/// `Error`), or neither side has a region to lose in the first place.
+///
+/// Stated as a runnable predicate rather than a comment, and asserted on
+/// every `adopt` — so the class of bug that returned three times in this
+/// arc cannot return silently a fourth. A new seam that reaches for
+/// adoption where it owes a relation fails the whole test corpus at that
+/// call site, naming the two alternatives.
+fn adoption_is_region_safe(table: &mut InPlaceUnificationTable<TyVar>, a: &Ty, b: &Ty) -> bool {
+    let (ra, rb) = (resolve_shallow(table, a), resolve_shallow(table, b));
+    let adopts = |ty: &Ty| {
+        matches!(
+            ty,
+            Ty::Infer(_) | Ty::UnresolvedNumber | Ty::Error | Ty::Never
+        )
+    };
+    // Identical types have nothing to relate: every pairing would be a
+    // region with itself, and `@r ⊇ @r` is vacuous. This is the shape the
+    // join solver's closing line has, where the result is re-bound to the
+    // very type it was already resolved to.
+    if ra == rb {
+        return true;
+    }
+    adopts(&ra) || adopts(&rb) || !ra.contains_borrow() || !rb.contains_borrow()
 }

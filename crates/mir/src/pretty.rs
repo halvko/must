@@ -101,6 +101,13 @@ fn render_rvalue(rvalue: &Rvalue) -> String {
             let flavor = if *mutable { "&raw mut" } else { "&raw" };
             format!("{flavor} {}", place(p))
         }
+        // Rendered without a region: MIR is region-erased, and a snapshot
+        // that showed one would be advertising information this layer does
+        // not have.
+        Rvalue::Borrow { mutable, place: p } => {
+            let flavor = if *mutable { "&mut" } else { "&" };
+            format!("{flavor} {}", place(p))
+        }
         Rvalue::AddrOfStatic { item, projection } => {
             let mut path = format!("&raw static {}", item.display_name());
             path.push_str(&projection_suffix(projection));

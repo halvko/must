@@ -19,16 +19,20 @@ use crate::body::{
     body,
 };
 use crate::constraint::{
-    self, Cause, Constraints, Join, Witness, is_unresolved_number, poison_unresolved_number,
-    resolve_args_fully, resolve_finished, resolve_fully,
+    self, Cause, Constraints, Join, RegionConstraint, RegionConstraintReason, Witness,
+    is_unresolved_number, poison_unresolved_number, resolve_args_fully, resolve_finished,
+    resolve_fully,
 };
-use crate::item_tree::{Constness, GenericParamData, GenericParamKind, TypeDeclData};
+use crate::item_tree::RegionRef;
+use crate::item_tree::{
+    Constness, GenericArgRef, GenericParamData, GenericParamKind, TypeDeclData,
+};
 use crate::scopes::{Builtin, Resolution, resolutions, type_scope};
 use crate::ty::{
-    ConstArgValue, GenericArg, IntKind, IntValue, NamedTy, ParamScope, Ty, TyVar, TyVarValue,
-    VariantTy, builtin_type_by_name, enum_variants, generic_param_scope, lower_type_ref_in,
-    member_is_dot_callable, member_self_ty, signature, signature_needs_annotation, substitute_args,
-    type_underlying_for,
+    ConstArgValue, GenericArg, IntKind, IntValue, NamedTy, ParamScope, Region, Ty, TyVar,
+    TyVarValue, VariantTy, builtin_type_by_name, enum_variants, generic_param_scope,
+    lower_type_ref_in, member_is_dot_callable, member_self_ty, signature,
+    signature_needs_annotation, substitute_args, type_underlying_for,
 };
 use crate::{ItemId, ItemLoc, Severity, TypeRef, item_loc};
 
@@ -119,7 +123,34 @@ pub struct InferenceResult {
     /// ([`crate::traits::bound_slots`]). MIR appends one operand per slot
     /// per trait requirement.
     pub bound_dicts_of_expr: ArenaMap<ExprId, Vec<DictEntry>>,
+    /// The body's OUTLIVES constraints, in emission order — the whole
+    /// input the outlives module needs from inference, RECORDED here
+    /// rather than re-derived from region-erased MIR (the wasm honesty
+    /// report's lesson, applied a third time).
+    ///
+    /// Nothing in hir consumes these. They are inert by construction: the
+    /// specialization law means no region can select an impl or change a
+    /// lowering, so the checker's entire output is diagnostics.
+    pub region_constraints: Vec<RegionConstraint>,
+    /// How many region variables this body minted — the outlives module's
+    /// table size. Variables are numbered `0..region_count`.
+    pub region_count: u32,
+    /// Expressions at which the checker INSERTED a reborrow, with the
+    /// flavor it produced (`true` = `.&mut`, `false` = a degradation to
+    /// `.&`). MIR materializes each one; G14's bounded auto-ref exception
+    /// is exactly this list — a compiler-inserted SAFE borrow of `x.*`
+    /// where `x` is already a borrow, never of `x` itself and never raw.
+    pub reborrows: ArenaMap<ExprId, bool>,
     pub diagnostics: Vec<InferenceDiagnostic>,
+}
+
+/// What is wrong with a written region argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegionArgProblem {
+    /// A name no enclosing binder declares.
+    Unknown(String),
+    /// Something that is not a region at all (`x.&::<usize>`).
+    NotARegion,
 }
 
 /// One qualified member reference used as a VALUE — see
@@ -576,6 +607,24 @@ pub enum InferenceDiagnostic {
         /// The turbofish mention expression.
         expr: ExprId,
     },
+    /// A REGION argument in a type or const slot of a TYPE's own list
+    /// (`Pair::<@a>`). Its own variant, and not
+    /// [`InferenceDiagnostic::GenericArgKindMismatch`], because the
+    /// ANNOTATION mirror (`apply_position_diagnostics`, at the crate root)
+    /// reports exactly this mistake: `Pair::<@a>` in a `static`'s type and
+    /// `Pair::<@a>(...)` in its value are one error, so they render one
+    /// sentence ([`crate::diag::unexpected_region_arg`]) over one range —
+    /// the written argument, not the mention around it.
+    UnexpectedRegionArg {
+        /// The turbofish mention expression.
+        expr: ExprId,
+        /// The argument's position in the written list. A type mention's
+        /// list is whole-binder positional (a type declaration's regions
+        /// are reserved), so the binder index IS the written position.
+        index: u32,
+        /// The parameter's declared name.
+        param: String,
+    },
     /// A turbofish argument of the wrong kind for its position: a value
     /// where the binder declares a type parameter, or a type where it
     /// declares a const parameter.
@@ -724,6 +773,70 @@ pub enum InferenceDiagnostic {
         expr: ExprId,
         builtin: Builtin,
     },
+    /// A field access or dot-call whose receiver is a BORROW. Reserved,
+    /// not rejected: reaching through would be auto-deref, which stays
+    /// reserved, and the explicit `r.*` escape already works.
+    DotThroughBorrow {
+        expr: ExprId,
+        name: String,
+        receiver_ty: Ty,
+    },
+    /// `.&`/`.&mut` of something that is not a place — the safe-borrow
+    /// twin of [`Self::AddrOfNonPlace`], with the same accepted places and
+    /// the same reason (borrowing a temporary would need rvalue promotion,
+    /// which the language does not have).
+    BorrowNonPlace { expr: ExprId },
+    /// `.&mut` of a place whose ROOT binding is not `mut` — the safe twin
+    /// of [`Self::AddrOfMutImmutable`], same transitive-mutability rule.
+    BorrowMutImmutable {
+        /// The whole borrow expression (where MIR refuses the value).
+        borrow: ExprId,
+        /// The root name expression (carries the squiggle).
+        root: ExprId,
+        /// The root binding's name.
+        name: String,
+        /// The whole place as written.
+        place: String,
+    },
+    /// `.&mut` of an item — a `static` has no `mut` form yet and a `const`
+    /// is a copied value, so neither is an exclusively-borrowable place.
+    BorrowMutItem {
+        borrow: ExprId,
+        root: ExprId,
+        item: ItemLoc,
+        constness: Constness,
+    },
+    /// `.&mut` reached through a SHARED borrow (`r.*.&mut` where
+    /// `r: T.&::<@a>`) — exactly the raw rule one flavor up: a shared
+    /// borrow must not launder into a write permission.
+    BorrowMutThroughShared {
+        borrow: ExprId,
+        /// The governing borrow's (shared) type.
+        ty: Ty,
+    },
+    /// `r.*.&`/`r.*.&mut` where the governing pointer (the receiver of
+    /// the place's outermost deref) is a RAW pointer — refused for both
+    /// flavors, because a raw pointer carries no region for the new
+    /// borrow to be bounded by. Distinct from [`Self::BorrowMutThroughShared`],
+    /// whose parent DOES have a region and is refused only for `.&mut`.
+    BorrowThroughRawPointer {
+        borrow: ExprId,
+        /// The governing pointer's type.
+        ty: Ty,
+    },
+    /// A region argument that names nothing, or that is not a region.
+    RegionArg {
+        expr: ExprId,
+        problem: RegionArgProblem,
+    },
+    /// Reading `x.*` where the referent cannot be copied — safe `.*` yields
+    /// a PLACE, and reading a place copies it, which an affine value
+    /// forbids.
+    MoveOutOfBorrow {
+        expr: ExprId,
+        /// The referent type that cannot be copied.
+        ty: Ty,
+    },
     /// `.&raw`/`.&raw mut` of something that is not a place — the accepted
     /// places are a variable, a chain of its fields and elements, a
     /// `static`/`const` item, or a chain rooted in a deref (`.&raw` of a
@@ -732,17 +845,17 @@ pub enum InferenceDiagnostic {
         /// The address-of expression.
         expr: ExprId,
     },
-    /// `p.*.x.&raw mut` (a `.&raw mut` of a deref-rooted place) where the
-    /// governing pointer (the receiver of the place's outermost deref) is a
-    /// shared `T.&raw` — minting a mutating address through it would
-    /// launder the shared flavor into a write permission. The write-side
-    /// twin is [`Self::AssignThroughImmutablePointer`]; `.&raw` (shared)
+    /// `p.*.x.&raw mut` (a `.&raw mut` of a deref-rooted place) where a
+    /// SHARED step governs the chain — a `T.&raw` or a `T.&`, at the
+    /// outermost deref or deeper. Minting a mutating address through it
+    /// would launder the shared flavor into a write permission. The
+    /// write-side twin is [`Self::AssignThroughShared`]; `.&raw` (shared)
     /// through any pointer is fine.
-    AddrOfMutThroughImmutablePointer {
+    AddrOfMutThroughShared {
         /// The whole address-of expression (carries the squiggle, and
         /// where MIR refuses the value).
         addr_of: ExprId,
-        /// The governing pointer's (shared) type.
+        /// The governing (shared) step's type.
         ty: Ty,
     },
     /// `.&raw mut` of a place whose ROOT binding is not `mut` — the same
@@ -772,17 +885,19 @@ pub enum InferenceDiagnostic {
         item: ItemLoc,
         constness: Constness,
     },
-    /// `p.* = v;` (or `p.*.x = v;`, any deref-rooted chain) where the
-    /// governing pointer — the receiver of the target's outermost deref —
-    /// is a `T.&raw`: writing through a pointer requires `T.&raw mut`.
-    /// (`p` itself need not be a `mut` binding: writing through it does
-    /// not reassign it. Derefs deeper in the chain are ordinary *reads*,
-    /// so their pointers' flavors don't matter.)
-    AssignThroughImmutablePointer {
+    /// `p.* = v;` (or `p.*.x = v;`, any deref-rooted chain) where a
+    /// SHARED step governs the chain: writing needs `T.&raw mut` or
+    /// `T.&mut` at every step it travels through. (`p` itself need not be
+    /// a `mut` binding: writing through it does not reassign it. A deeper
+    /// deref of a RAW mut pointer stops the walk — reading one out is a
+    /// copy, and a copy carries the whole permission — but a deeper
+    /// `T.&mut` does not: reading one out is a reborrow, which the place
+    /// holding it must be allowed to grant.)
+    AssignThroughShared {
         /// The governing deref expression (the target itself for
         /// `p.* = v;`, the chain's outermost deref otherwise).
         target: ExprId,
-        /// The pointer's type.
+        /// The governing (shared) step's type.
         ty: Ty,
     },
     /// A dot-call `recv.name(...)` where `name` is neither a field nor a
@@ -1144,6 +1259,7 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::GenericArgCount { expr, .. }
             | InferenceDiagnostic::NotGeneric { expr, .. }
             | InferenceDiagnostic::ConstArgHole { expr }
+            | InferenceDiagnostic::UnexpectedRegionArg { expr, .. }
             | InferenceDiagnostic::GenericArgKindMismatch { expr, .. }
             | InferenceDiagnostic::MissingConstArgs { expr, .. }
             | InferenceDiagnostic::CannotInferGenericParam { expr, .. }
@@ -1177,12 +1293,20 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::NestedBoundUse { expr }
             | InferenceDiagnostic::MemberOwnGenericArgs { expr, .. }
             | InferenceDiagnostic::VariantOwnGenericArgs { expr, .. }
-            | InferenceDiagnostic::AddrOfNonPlace { expr } => *expr,
+            | InferenceDiagnostic::AddrOfNonPlace { expr }
+            | InferenceDiagnostic::BorrowNonPlace { expr }
+            | InferenceDiagnostic::DotThroughBorrow { expr, .. }
+            | InferenceDiagnostic::RegionArg { expr, .. }
+            | InferenceDiagnostic::MoveOutOfBorrow { expr, .. } => *expr,
+            InferenceDiagnostic::BorrowMutImmutable { root, .. }
+            | InferenceDiagnostic::BorrowMutItem { root, .. } => *root,
+            InferenceDiagnostic::BorrowMutThroughShared { borrow, .. }
+            | InferenceDiagnostic::BorrowThroughRawPointer { borrow, .. } => *borrow,
             InferenceDiagnostic::BuiltinExpectsRawPtr { arg, .. } => *arg,
             InferenceDiagnostic::AddrOfMutImmutable { root, .. }
             | InferenceDiagnostic::AddrOfMutItem { root, .. } => *root,
-            InferenceDiagnostic::AddrOfMutThroughImmutablePointer { addr_of, .. } => *addr_of,
-            InferenceDiagnostic::AssignThroughImmutablePointer { target, .. } => *target,
+            InferenceDiagnostic::AddrOfMutThroughShared { addr_of, .. } => *addr_of,
+            InferenceDiagnostic::AssignThroughShared { target, .. } => *target,
             InferenceDiagnostic::UnreachableArm { match_expr, .. }
             | InferenceDiagnostic::NonEnumScrutineeVariantPat { match_expr, .. }
             | InferenceDiagnostic::PatNoSuchVariant { match_expr, .. }
@@ -1540,6 +1664,9 @@ impl InferenceDiagnostic {
                 crate::diag::takes_no_generic_args(name)
             }
             InferenceDiagnostic::ConstArgHole { .. } => crate::diag::CONST_ARG_HOLE.to_owned(),
+            InferenceDiagnostic::UnexpectedRegionArg { param, .. } => {
+                crate::diag::unexpected_region_arg(param)
+            }
             InferenceDiagnostic::GenericArgKindMismatch {
                 param,
                 param_is_const,
@@ -1612,16 +1739,71 @@ impl InferenceDiagnostic {
                     builtin.name()
                 )
             }
+            InferenceDiagnostic::DotThroughBorrow {
+                name, receiver_ty, ..
+            } => format!(
+                "`{}` is a borrow, so `.{name}` does not reach through it — \
+                 there is no auto-deref; write `.*.{name}`",
+                receiver_ty.display()
+            ),
+            InferenceDiagnostic::BorrowNonPlace { .. } => {
+                "`.&` can only borrow a variable, one of its fields, or a `static`".to_owned()
+            }
+            InferenceDiagnostic::BorrowMutImmutable { name, place, .. } => {
+                if place == name {
+                    format!("cannot borrow `{name}` as `.&mut`: it is not declared `mut`")
+                } else {
+                    format!("cannot borrow `{place}` as `.&mut`: `{name}` is not declared `mut`")
+                }
+            }
+            InferenceDiagnostic::BorrowMutItem { constness, .. } => match constness {
+                Constness::Static => {
+                    "cannot borrow a `static` as `.&mut`: `static mut` is not supported yet"
+                        .to_owned()
+                }
+                Constness::Const => {
+                    "cannot borrow a `const` as `.&mut`: a `const` is copied at every \
+                     mention, so there is no one place to borrow"
+                        .to_owned()
+                }
+            },
+            InferenceDiagnostic::BorrowMutThroughShared { ty, .. } => format!(
+                "cannot borrow `.&mut` through `{}`: an exclusive borrow needs {} parent",
+                ty.display(),
+                // The governing step may be a RAW pointer when a `.&mut`
+                // sits behind one: `pb.*.*.&mut` for `pb: T.&mut.&raw`.
+                match ty {
+                    Ty::Borrow { .. } => "a `.&mut`",
+                    _ => "a `.&raw mut`",
+                }
+            ),
+            InferenceDiagnostic::BorrowThroughRawPointer { ty, .. } => format!(
+                "cannot mint a safe borrow through `{}`: a raw pointer carries no region \
+                 for the new borrow to be bounded by",
+                ty.display()
+            ),
+            InferenceDiagnostic::RegionArg { problem, .. } => match problem {
+                RegionArgProblem::Unknown(name) => crate::diag::unknown_region(name),
+                RegionArgProblem::NotARegion => {
+                    "a borrow's turbofish takes exactly one region argument (`x.&mut::<@a>`)"
+                        .to_owned()
+                }
+            },
+            InferenceDiagnostic::MoveOutOfBorrow { ty, .. } => format!(
+                "{}: `{}` cannot be copied",
+                crate::diag::MOVE_OUT_OF_BORROW,
+                ty.display()
+            ),
             InferenceDiagnostic::AddrOfNonPlace { .. } => {
                 "`.&raw` can only take the address of a variable, a chain of its \
                  fields and elements, a `static`/`const` item, or a chain rooted \
                  in a deref"
                     .to_owned()
             }
-            InferenceDiagnostic::AddrOfMutThroughImmutablePointer { ty, .. } => format!(
-                "cannot take `.&raw mut` through `{}`: minting a mutating address \
-                 needs a `.&raw mut` pointer",
-                ty.display()
+            InferenceDiagnostic::AddrOfMutThroughShared { ty, .. } => format!(
+                "cannot take `.&raw mut` through `{}`: minting a mutating address needs {}",
+                ty.display(),
+                exclusive_flavor(ty)
             ),
             InferenceDiagnostic::AddrOfMutImmutable { name, place, .. } => {
                 if place == name {
@@ -1645,9 +1827,10 @@ impl InferenceDiagnostic {
                     item.display_name()
                 ),
             },
-            InferenceDiagnostic::AssignThroughImmutablePointer { ty, .. } => format!(
-                "cannot assign through `{}`: writing needs a `.&raw mut` pointer",
-                ty.display()
+            InferenceDiagnostic::AssignThroughShared { ty, .. } => format!(
+                "cannot assign through `{}`: writing needs {}",
+                ty.display(),
+                exclusive_flavor(ty)
             ),
             InferenceDiagnostic::TraitNotValue { name, .. } => {
                 format!("`{name}` is a trait, not a value")
@@ -1962,6 +2145,26 @@ pub(crate) struct InferCtx<'a, 'db> {
     /// bound-carrying generic mention must be in (its VALUE would need a
     /// captured dictionary, which is reserved).
     direct_callees: rustc_hash::FxHashSet<ExprId>,
+    /// Every expression standing in PLACE position: the receiver of a
+    /// field, deref or index step, the place under `.&`/`.&mut`/`.&raw`,
+    /// and an assignment target. A `.*` there is a projection STEP, not a
+    /// value read — see [`InferCtx::finish_deref_reads`].
+    place_positions: rustc_hash::FxHashSet<ExprId>,
+    /// The dot-call receivers a MEMBER took (as its last argument), so
+    /// they were consumed BY VALUE after all. The exception to
+    /// [`Self::place_positions`], and filled during inference because
+    /// only resolution knows it: an fn-typed field called with the same
+    /// syntax reads the field and leaves the receiver a place.
+    value_receivers: rustc_hash::FxHashSet<ExprId>,
+    /// Every `.*` read out of a borrow, with the referent type it read.
+    /// Judged at the end of inference, not at the expression — see
+    /// [`InferCtx::finish_deref_reads`].
+    deref_reads: Vec<(ExprId, Ty)>,
+    /// The projection steps of a chain rooted in a borrow `.*` whose own
+    /// read [`Self::place_positions`] defers — grown as the chain is
+    /// inferred, so the copy question lands on the step that actually
+    /// materializes a value. See [`InferCtx::carry_borrow_projection`].
+    borrow_projections: rustc_hash::FxHashSet<ExprId>,
 }
 
 /// One trait that could carry a concrete-receiver dot-call — see
@@ -2069,6 +2272,398 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     _ => None,
                 })
                 .collect(),
+            place_positions: place_positions(body),
+            value_receivers: rustc_hash::FxHashSet::default(),
+            deref_reads: Vec::new(),
+            borrow_projections: rustc_hash::FxHashSet::default(),
+        }
+    }
+
+    /// A fresh EXISTENTIAL region. Minted by the constraint store, which
+    /// also needs to mint (a voted join of borrows produces the MEET of
+    /// its branches) — one counter, one numbering.
+    fn fresh_region(&mut self) -> Region {
+        self.constraints.fresh_region()
+    }
+
+    fn push_outlives(
+        &mut self,
+        sup: Region,
+        sub: Region,
+        origin: ExprId,
+        reason: RegionConstraintReason,
+    ) {
+        self.constraints.push_outlives(sup, sub, origin, reason);
+    }
+
+    /// See `Constraints::try_reborrow` — the ONE emitter, shared with the
+    /// join solver so that wrapping a borrow in an `if` cannot change
+    /// which obligations it incurs.
+    fn try_reborrow(&mut self, expr: ExprId, actual: &Ty, expected: &Ty) -> bool {
+        self.constraints
+            .try_reborrow(self.table, actual, expected, expr)
+    }
+
+    /// The SHARED step governing a place chain, if there is one: `None`
+    /// when the place may be written through (or when nothing is known
+    /// about it yet), `Some(ty)` for the pointer or borrow whose shared
+    /// flavor refuses. The one judgement behind every "cannot write
+    /// through this" rule — assignment, `.&mut`, `.&raw mut`, and the
+    /// implicit mutable reborrow.
+    ///
+    /// Fields and elements are transparent. A deref is where a flavor
+    /// enters, and the two worlds part there:
+    ///
+    /// * `T.&raw mut` grants the permission and STOPS. Reading a raw
+    ///   pointer out of a place COPIES it, and a copy carries the full
+    ///   permission — that laundering is the raw world's own, gated by
+    ///   `unsafe` rather than by this walk.
+    /// * `T.&raw` and `T.&` stop too, refusing: a shared flavor never
+    ///   becomes a write permission.
+    /// * `T.&mut` RECURSES into the place that holds it. Reading a
+    ///   `.&mut` out is a REBORROW, not a copy (M07's affinity), so the
+    ///   holder must itself be reachable exclusively — `bb.*.* = 5`
+    ///   through a `.&mut` held behind a `.&` writes the root through a
+    ///   shared borrow, which is the one thing that may not happen.
+    ///
+    /// A name (or item) root permits: writing through a pointer
+    /// reassigns no binding, so the root's own `mut`ness is a different
+    /// rule, judged by the callers on NAME-rooted chains only.
+    fn shared_step_governing(&mut self, place: ExprId) -> Option<Ty> {
+        match &self.body.exprs[place] {
+            ExprData::Field { receiver, .. } => {
+                let receiver = *receiver;
+                self.shared_step_governing(receiver)
+            }
+            ExprData::Index { base, .. } => {
+                let base = *base;
+                self.shared_step_governing(base)
+            }
+            ExprData::Deref { receiver } => {
+                let receiver = *receiver;
+                let receiver_ty = self
+                    .result
+                    .type_of_expr
+                    .get(receiver)
+                    .cloned()
+                    .unwrap_or(Ty::Error);
+                match self.resolve_shallow(&receiver_ty) {
+                    Ty::RawPtr { mutable: true, .. } => None,
+                    Ty::Borrow { mutable: true, .. } => self.shared_step_governing(receiver),
+                    shared @ (Ty::RawPtr { .. } | Ty::Borrow { .. }) => Some(shared),
+                    // An unknown or broken receiver: the read already
+                    // carries its own diagnostic.
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The place rules for a SAFE borrow — `check_addr_of_place`'s twin,
+    /// one flavor up. The accepted places are identical (a variable, a
+    /// chain of its fields, a `static`, or a deref-rooted chain) and the
+    /// `mut` flavor asks the same question of the chain; only what the
+    /// deref case names differs, since a safe borrow must also be BOUNDED
+    /// by its parent's region.
+    ///
+    /// A `.&mut` is refused wherever a SHARED step governs the place —
+    /// through a shared parent (`b.*.&mut`), and through a `.&mut` that
+    /// itself sits behind one (`bb.*.*.&mut`), which
+    /// [`InferCtx::shared_step_governing`] walks out. A shared flavor
+    /// must never launder into a write permission. That single rule is
+    /// also what makes G14's auto-ref exception safe to apply — the
+    /// compiler-inserted borrow of `x.*` inherits `x`'s flavor and can
+    /// only weaken it.
+    ///
+    /// A deref-rooted place also incurs the SAME outlives edge an implicit
+    /// reborrow would (`try_reborrow`'s `r_src : r_tgt`): the parent
+    /// borrow's region must outlive `region`, the region this EXPLICIT
+    /// borrow is minted at. Without this a written `x.*.&`/`x.*.&mut`
+    /// is a silent, unbounded region-laundering path — the implicit path
+    /// (any other USE of a borrow-typed value) already pushes the edge,
+    /// so a spelled-out reborrow must not be the one place that skips it.
+    fn check_borrow_place(&mut self, borrow: ExprId, mutable: bool, place: ExprId, region: Region) {
+        // The whole chain's write permission, needed only by the `.&mut`
+        // flavor: a shared borrow of a shared place is exactly what a
+        // shared borrow is for.
+        let governing = mutable.then(|| self.shared_step_governing(place)).flatten();
+        let mut segments: Vec<String> = Vec::new();
+        let mut root = place;
+        loop {
+            match &self.body.exprs[root] {
+                ExprData::Field { receiver, name } => {
+                    segments.push(format!(".{name}"));
+                    root = *receiver;
+                }
+                ExprData::Index { base, .. } => {
+                    segments.push("[_]".to_owned());
+                    root = *base;
+                }
+                _ => break,
+            }
+        }
+        match &self.body.exprs[root] {
+            ExprData::NameRef(name) => match self.resolutions.get(root) {
+                Some(Resolution::Local(binding)) => {
+                    if mutable && !self.body.bindings[*binding].mutable {
+                        segments.reverse();
+                        let place_text = format!("{name}{}", segments.concat());
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::BorrowMutImmutable {
+                                borrow,
+                                root,
+                                name: name.clone(),
+                                place: place_text,
+                            });
+                    }
+                }
+                Some(Resolution::Item(loc)) => {
+                    if mutable {
+                        let constness = crate::item_data(self.db, loc.to_id(self.db))
+                            .as_ref()
+                            .and_then(|it| it.kind.constness())
+                            .unwrap_or(Constness::Static);
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::BorrowMutItem {
+                                borrow,
+                                root,
+                                item: loc.clone(),
+                                constness,
+                            });
+                    }
+                }
+                Some(
+                    Resolution::ConstParam(_)
+                    | Resolution::TypeItem(_)
+                    | Resolution::TraitItem(_)
+                    | Resolution::Builtin(_),
+                ) => {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::BorrowNonPlace { expr: borrow });
+                }
+                Some(Resolution::Ambiguous(_)) | None => {}
+            },
+            // `r.*.field.&mut` — a reborrow through the parent named by
+            // this outermost deref. A RAW parent is refused outright:
+            // `.&raw` is deliberately not a decayed safe borrow, so a
+            // safe borrow may not be minted from one.
+            ExprData::Deref { receiver } => {
+                let receiver_ty = self
+                    .result
+                    .type_of_expr
+                    .get(*receiver)
+                    .cloned()
+                    .unwrap_or(Ty::Error);
+                match self.resolve_shallow(&receiver_ty) {
+                    Ty::Borrow {
+                        mutable: parent_mutable,
+                        region: parent_region,
+                        ..
+                    } => {
+                        // A `.&mut` needs the whole chain to be reachable
+                        // exclusively, not merely its parent step.
+                        if let Some(ty) = governing {
+                            self.result
+                                .diagnostics
+                                .push(InferenceDiagnostic::BorrowMutThroughShared { borrow, ty });
+                            return;
+                        }
+                        // A `.&` through a `.&mut` parent: the parent
+                        // SUSPENDS — degradation, same as the implicit
+                        // path. Every other pairing is an ordinary
+                        // reborrow, bounded by the parent's region: a
+                        // shared parent does not mean an UNBOUNDED child.
+                        let reason = if parent_mutable && !mutable {
+                            RegionConstraintReason::Degradation
+                        } else {
+                            RegionConstraintReason::Reborrow
+                        };
+                        self.push_outlives(parent_region, region.clone(), borrow, reason);
+                    }
+                    resolved @ Ty::RawPtr { .. } => {
+                        // Refused for BOTH flavors, deliberately: a raw
+                        // pointer carries no region, so a safe borrow
+                        // minted through one would have nothing to bound
+                        // it. `.&mut` through a shared parent one flavor
+                        // up (`BorrowMutThroughShared`) is a different
+                        // rule — that parent DOES have a region, it is
+                        // just the wrong permission.
+                        self.result.diagnostics.push(
+                            InferenceDiagnostic::BorrowThroughRawPointer {
+                                borrow,
+                                ty: resolved,
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            ExprData::Missing => {}
+            _ => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::BorrowNonPlace { expr: borrow });
+            }
+        }
+    }
+
+    /// The region a borrow EXPRESSION carries. An omitted turbofish and a
+    /// written `@_` mean the same thing — mint an existential — because a
+    /// body's regions are inference variables, not parameters. A named
+    /// region resolves against the enclosing binder, so a body may pin a
+    /// borrow to one of its own signature's regions.
+    fn borrow_expr_region(&mut self, expr: ExprId, written: Option<&RegionRef>) -> Region {
+        let Some(written) = written else {
+            return self.fresh_region();
+        };
+        match written {
+            RegionRef::Wildcard => self.fresh_region(),
+            RegionRef::Named(name) => match self.type_params.regions.get(name) {
+                Some(region) => region.clone(),
+                None => {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::RegionArg {
+                            expr,
+                            problem: RegionArgProblem::Unknown(name.clone()),
+                        });
+                    Region::Error
+                }
+            },
+            RegionRef::Join(parts) => Region::Join(
+                parts
+                    .iter()
+                    .map(|part| self.borrow_expr_region(expr, Some(part)))
+                    .collect(),
+            ),
+            RegionRef::Error => {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::RegionArg {
+                        expr,
+                        problem: RegionArgProblem::NotARegion,
+                    });
+                Region::Error
+            }
+        }
+    }
+
+    /// Judge the recorded `.*` reads. Reading `x.*` copies the referent —
+    /// legal exactly when the referent IS copyable — the rule M07 makes
+    /// load-bearing, and the reason safe `.*` needed a ruling at all. But
+    /// none of the three questions it asks can be answered at the
+    /// expression, so all three are answered here.
+    ///
+    /// A read the checker turned into a REBORROW moved nothing: the
+    /// parent suspends for the child loan's region rather than being
+    /// duplicated. Whether that happened is known only once `check` has
+    /// run.
+    ///
+    /// A read in PLACE position — `b.*.x`, `b.*[i]`, `b.*.x = 9`,
+    /// `b.*.q.&mut`, `b.*.*` — copies only what lies beyond it (or
+    /// nothing at all), so an affine referent is no obstacle there: it is
+    /// projected THROUGH, never duplicated. That set is
+    /// [`place_positions`], collected up front because a `.*` is typed
+    /// long before its parent is. What lies beyond it is not thereby
+    /// unjudged: [`InferCtx::carry_borrow_projection`] pushes each further
+    /// step of the chain here in the deferred `.*`'s stead, so `b.*.q`
+    /// with an exclusive `q` is refused as the copy it is.
+    ///
+    /// Its one exception is resolution-dependent: a dot-call's receiver
+    /// becomes the member's last argument BY VALUE (G13's structural
+    /// selection), but the same syntax on an fn-typed FIELD reads the
+    /// field and leaves the receiver a place. Only the resolved call
+    /// knows which, so it records the by-value ones in
+    /// [`InferCtx::value_receivers`].
+    ///
+    /// What is left is a genuine copy.
+    fn finish_deref_reads(&mut self, reborrows: &ArenaMap<ExprId, bool>) {
+        for (expr, referent) in std::mem::take(&mut self.deref_reads) {
+            if reborrows.contains_idx(expr) {
+                continue;
+            }
+            if self.place_positions.contains(&expr) && !self.value_receivers.contains(&expr) {
+                continue;
+            }
+            let resolved = self.resolve_shallow(&referent);
+            if self.is_copyable(&resolved) {
+                continue;
+            }
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::MoveOutOfBorrow { expr, ty: resolved });
+        }
+    }
+
+    /// Judge the MUTABLE reborrows the checker inserted. An implicit
+    /// reborrow is a `.&mut` mint with the `.&mut` left unwritten —
+    /// `set_to(bb.*, 5)` is `set_to(bb.*.&mut, 5)` — so it answers to the
+    /// same rule [`InferCtx::check_borrow_place`] applies to the written
+    /// form: no shared step may govern the place it is minted from.
+    ///
+    /// Deferred to the end for the same reason the reads are: whether a
+    /// mention became a reborrow at all is the checker's answer, not the
+    /// expression's. A source that is no place (a call's result, a
+    /// spelled-out borrow) has no chain to walk and passes.
+    fn finish_mut_reborrows(&mut self, reborrows: &ArenaMap<ExprId, bool>) {
+        let sources: Vec<ExprId> = reborrows
+            .iter()
+            .filter(|(_, mutable)| **mutable)
+            .map(|(expr, _)| expr)
+            .collect();
+        for expr in sources {
+            if let Some(ty) = self.shared_step_governing(expr) {
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::BorrowMutThroughShared { borrow: expr, ty });
+            }
+        }
+    }
+
+    /// Carry a borrow-rooted projection chain one step. The `.*` at its
+    /// root read nothing — a place-position deref is projected THROUGH —
+    /// so THIS step's type is what a read would materialize, and it joins
+    /// [`Self::deref_reads`] to be judged by the one site that judges
+    /// them. A step that is itself a place position keeps the chain (and
+    /// the deferral) going, so the question always lands on the step the
+    /// value actually comes out of.
+    fn carry_borrow_projection(&mut self, expr: ExprId, receiver: ExprId, ty: &Ty) {
+        if !self.borrow_projections.contains(&receiver) {
+            return;
+        }
+        self.deref_reads.push((expr, ty.clone()));
+        if self.place_positions.contains(&expr) {
+            self.borrow_projections.insert(expr);
+        }
+    }
+
+    /// Whether a value of this type may be duplicated by a plain read.
+    ///
+    /// Today the ONLY affine type is `T.&mut`: duplicating it would
+    /// duplicate a PERMISSION, and the whole exclusivity story rests on it
+    /// being unduplicable. T08's other affine class — heap-backed types —
+    /// has no representation yet (no move tracker, no `clone`), so this
+    /// answers `true` for them; when that class becomes real it becomes an
+    /// arm here and nowhere else. The predicate is complete for what
+    /// exists, not for what T08 describes.
+    fn is_copyable(&self, ty: &Ty) -> bool {
+        match ty {
+            Ty::Borrow { mutable, .. } => !*mutable,
+            Ty::Record(rec) => rec.fields.iter().all(|(_, ty)| self.is_copyable(ty)),
+            Ty::Array { elem, .. } => self.is_copyable(elem),
+            Ty::Named(named) => match crate::ty::type_underlying_for(self.db, named) {
+                Some(underlying) => self.is_copyable(&underlying),
+                None => true,
+            },
+            Ty::Variant(variant) => match crate::ty::variant_payloads_for(self.db, variant) {
+                Some(payloads) => payloads.iter().all(|ty| self.is_copyable(ty)),
+                None => true,
+            },
+            _ => true,
         }
     }
 
@@ -2078,7 +2673,127 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// through the free function — that is what makes `x: T` inside a
     /// generic body resolve to the rigid param.
     fn lower_type_ref(&mut self, type_ref: &TypeRef) -> Ty {
-        lower_type_ref_in(self.db, self.file, type_ref, self.table, &self.type_params)
+        let ty = lower_type_ref_in(self.db, self.file, type_ref, self.table, &self.type_params);
+        // Signature lowering has no inference context, so it turns every
+        // `@_` into `Region::Error`. Inside a BODY the wildcard is exactly
+        // what it says — an existential — so mint one here. Body
+        // annotations are the only place `@_` is legal, which is the
+        // no-elision rule read correctly: a signature's regions are
+        // parameters and must be named.
+        self.mint_wildcard_regions(type_ref, &ty)
+    }
+
+    /// Replace the `Region::Error`s a wildcard produced with fresh
+    /// variables, guided by the SYNTAX (`type_ref`) so a genuinely broken
+    /// region — an unknown name, a wrong-kind argument — keeps its error.
+    fn mint_wildcard_regions(&mut self, type_ref: &TypeRef, ty: &Ty) -> Ty {
+        match (type_ref, ty) {
+            (
+                TypeRef::Borrow {
+                    region: written,
+                    inner,
+                    ..
+                },
+                Ty::Borrow {
+                    mutable,
+                    region,
+                    referent,
+                },
+            ) => {
+                let region = match written {
+                    Some(RegionRef::Wildcard) | None => self.fresh_region(),
+                    _ => region.clone(),
+                };
+                Ty::borrow(
+                    *mutable,
+                    region,
+                    self.mint_wildcard_regions(inner, referent),
+                )
+            }
+            (TypeRef::RawPtr { inner, .. }, Ty::RawPtr { mutable, pointee }) => {
+                Ty::raw_ptr(*mutable, self.mint_wildcard_regions(inner, pointee))
+            }
+            (TypeRef::Array { elem, .. }, Ty::Array { elem: lowered, len }) => {
+                Ty::array(self.mint_wildcard_regions(elem, lowered), len.clone())
+            }
+            (TypeRef::Fn { params, ret }, Ty::Fn(f)) => Ty::fn_type(
+                params
+                    .iter()
+                    .zip(&f.params)
+                    .map(|(w, l)| self.mint_wildcard_regions(w, l))
+                    .collect(),
+                match ret {
+                    Some(ret) => self.mint_wildcard_regions(ret, &f.ret),
+                    None => f.ret.clone(),
+                },
+            ),
+            (TypeRef::Record(written), Ty::Record(rec)) => Ty::record(
+                written
+                    .iter()
+                    .zip(&rec.fields)
+                    .map(|((_, w), (name, l))| (name.clone(), self.mint_wildcard_regions(w, l)))
+                    .collect(),
+            ),
+            // A generic type's ARGUMENTS — the same walker hole closed
+            // four times over: `Ty::Record`'s fields were walked,
+            // `Ty::Named`'s args were not. Without it,
+            // `let o: Opt::<usize.&::<@_>>` keeps the `Region::Error` the
+            // wildcard lowered to, which surfaces either as a type spelling
+            // nobody may write (`@{error}`) or as the compiler accusing
+            // itself — and `Opt::<V.&mut>` is a shape users write, so `@_`
+            // inside one is what they type.
+            //
+            // Both argument positions are handled: a wildcard NESTED in a
+            // type argument (`Opt::<usize.&::<@_>>`), and a wildcard that
+            // IS the argument (`Slice::<@_, usize>` — unreachable until a
+            // type declaration may take a region, live the day it can).
+            (TypeRef::Apply { args: written, .. }, Ty::Named(named)) => Ty::Named(NamedTy {
+                decl: named.decl.clone(),
+                args: self.mint_wildcard_regions_args(written, &named.args),
+            }),
+            (TypeRef::Apply { args: written, .. }, Ty::Variant(variant)) => {
+                Ty::Variant(VariantTy {
+                    args: self.mint_wildcard_regions_args(written, &variant.args),
+                    ..variant.clone()
+                })
+            }
+            _ => ty.clone(),
+        }
+    }
+
+    /// [`Self::mint_wildcard_regions`] over a generic argument list, paired
+    /// with the syntax that produced it.
+    fn mint_wildcard_regions_args(
+        &mut self,
+        written: &[GenericArgRef],
+        lowered: &[GenericArg],
+    ) -> Vec<GenericArg> {
+        // A length disagreement is an arity error, already diagnosed at the
+        // mention: pair by index and leave anything unpaired as lowered.
+        lowered
+            .iter()
+            .enumerate()
+            .map(|(index, arg)| match arg {
+                // Exhaustive on the LOWERED argument (see
+                // `freshen_regions_args`); the written side is an `Option`
+                // because an arity error leaves it unpaired, and then the
+                // lowered argument stands as it is.
+                GenericArg::Ty(ty) => match written.get(index) {
+                    Some(GenericArgRef::Type(w)) => {
+                        GenericArg::Ty(self.mint_wildcard_regions(w, ty))
+                    }
+                    _ => arg.clone(),
+                },
+                GenericArg::Region(_) => match written.get(index) {
+                    Some(GenericArgRef::Region(RegionRef::Wildcard)) => {
+                        GenericArg::Region(self.fresh_region())
+                    }
+                    _ => arg.clone(),
+                },
+                // A const argument carries no region.
+                GenericArg::Const(_) => arg.clone(),
+            })
+            .collect()
     }
 
     /// Solve the deferred constraints. Must run after traversal in *every*
@@ -2201,6 +2916,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 _ => {}
             }
         }
+        // Reborrows are final now, so the two deferred judgements can
+        // run — before `result` is taken, so their diagnostics are
+        // resolved by the loop below like every other one.
+        let reborrows = self.constraints.take_reborrows();
+        self.finish_deref_reads(&reborrows);
+        self.finish_mut_reborrows(&reborrows);
         let mut result = std::mem::take(&mut self.result);
         for (_, ty) in result.type_of_expr.iter_mut() {
             *ty = resolve_finished(self.table, ty);
@@ -2221,6 +2942,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         for (_, variant) in result.variant_of_pat.iter_mut() {
             variant.args = resolve_args_fully(self.table, &variant.args);
         }
+        result.region_count = self.constraints.region_count();
+        result.region_constraints = self.constraints.take_region_edges();
+        result.reborrows = reborrows;
         for diag in result.diagnostics.iter_mut() {
             match diag {
                 InferenceDiagnostic::TypeMismatch {
@@ -2280,8 +3004,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 InferenceDiagnostic::PatNotRecord { ty, .. }
                 | InferenceDiagnostic::DerefNonPointer { ty, .. }
                 | InferenceDiagnostic::IndexNonArray { ty, .. }
-                | InferenceDiagnostic::AssignThroughImmutablePointer { ty, .. }
-                | InferenceDiagnostic::AddrOfMutThroughImmutablePointer { ty, .. } => {
+                | InferenceDiagnostic::AssignThroughShared { ty, .. }
+                | InferenceDiagnostic::DotThroughBorrow {
+                    receiver_ty: ty, ..
+                }
+                | InferenceDiagnostic::BorrowMutThroughShared { ty, .. }
+                | InferenceDiagnostic::BorrowThroughRawPointer { ty, .. }
+                | InferenceDiagnostic::MoveOutOfBorrow { ty, .. }
+                | InferenceDiagnostic::AddrOfMutThroughShared { ty, .. } => {
                     *ty = resolve_finished(self.table, ty);
                 }
                 InferenceDiagnostic::PatNamedTypeMismatch {
@@ -2326,6 +3056,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::GenericArgCount { .. }
                 | InferenceDiagnostic::NotGeneric { .. }
                 | InferenceDiagnostic::ConstArgHole { .. }
+                | InferenceDiagnostic::UnexpectedRegionArg { .. }
                 | InferenceDiagnostic::GenericArgKindMismatch { .. }
                 | InferenceDiagnostic::MissingConstArgs { .. }
                 | InferenceDiagnostic::CannotInferGenericParam { .. }
@@ -2335,6 +3066,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::AddrOfNonPlace { .. }
                 | InferenceDiagnostic::AddrOfMutImmutable { .. }
                 | InferenceDiagnostic::AddrOfMutItem { .. }
+                | InferenceDiagnostic::BorrowNonPlace { .. }
+                | InferenceDiagnostic::BorrowMutImmutable { .. }
+                | InferenceDiagnostic::BorrowMutItem { .. }
+                | InferenceDiagnostic::RegionArg { .. }
                 | InferenceDiagnostic::IndexOutOfBounds { .. }
                 | InferenceDiagnostic::EmptyArrayNeedsAnnotation { .. }
                 | InferenceDiagnostic::ArrayConstArg { .. }
@@ -2872,7 +3607,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     match witnesses.len() {
                         // Every leaf diverges: so does the `if`.
                         0 => {
-                            self.unify(&result, &Ty::Never);
+                            self.adopt(&result, &Ty::Never);
                             Ty::Never
                         }
                         // One surviving leaf (the rest diverged): its type
@@ -2881,7 +3616,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         // routed the leaf here still resolve.
                         1 => {
                             let ty = witnesses.into_iter().next().unwrap().ty;
-                            self.unify(&result, &ty);
+                            self.adopt(&result, &ty);
                             ty
                         }
                         // Leaf agreement is a join: deferred so axioms
@@ -3233,7 +3968,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     Ty::Error
                 } else {
                     let resolved = self.resolve_shallow(&receiver_ty);
-                    self.field_access_ty(expr, receiver, &name, resolved)
+                    let ty = self.field_access_ty(expr, receiver, &name, resolved);
+                    self.carry_borrow_projection(expr, receiver, &ty);
+                    ty
                 }
             }
             ExprData::ArrayLit { elements } => {
@@ -3283,7 +4020,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         }
                         1 => {
                             let ty = witnesses.into_iter().next().unwrap().ty;
-                            self.unify(&result, &ty);
+                            self.adopt(&result, &ty);
                         }
                         _ => {
                             // Deferral exists so axioms arriving later can
@@ -3299,15 +4036,36 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             // join can't offer). Tried under a snapshot so
                             // a disagreement leaves no trace and defers to
                             // the blame-aware join solver.
-                            let snapshot = self.table.snapshot();
-                            let agree = witnesses.iter().all(|witness| {
-                                self.constraints
-                                    .unify(self.table, &result, &witness.ty, None)
-                            });
+                            //
+                            // A BORROW-typed element never takes this
+                            // path. `unify` is region-blind by design, so
+                            // two borrows differing only in region always
+                            // "agree" — the eager route would commit and
+                            // the join solver, which is the only thing
+                            // that reborrows a leaf into its context,
+                            // would never run. That is not a missing
+                            // relate to add here: relating against the
+                            // FIRST element is the shape that was wrong
+                            // for `if`/`else`, and there is one correct
+                            // implementation of a join. Elements go to it.
+                            //
+                            // Cost: an unannotated array of borrows loses
+                            // eager projection, so `arr[0].*` needs the
+                            // annotation. That is the same pre-existing
+                            // deferred-join limitation as `getx`-style
+                            // record projection, not a new one.
+                            let snapshot = self.constraints.snapshot(self.table);
+                            let agree = !witnesses
+                                .iter()
+                                .any(|witness| self.resolve_shallow(&witness.ty).contains_borrow())
+                                && witnesses.iter().all(|witness| {
+                                    self.constraints
+                                        .adopt(self.table, &result, &witness.ty, None)
+                                });
                             if agree {
-                                self.table.commit(snapshot);
+                                self.constraints.commit(self.table, snapshot);
                             } else {
-                                self.table.rollback_to(snapshot);
+                                self.constraints.rollback_to(self.table, snapshot);
                                 self.constraints.push_join(Join {
                                     expr,
                                     depth: self.scope_depth,
@@ -3356,7 +4114,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 let base_ty = self.infer_expr(base, &base_fresh);
                 // Indexing pins `usize` — a defining use.
                 self.infer_expr_with(index, &Ty::Int(IntKind::Usize), None);
-                match self.resolve_shallow(&base_ty) {
+                let element = match self.resolve_shallow(&base_ty) {
                     Ty::Array { elem, len } => {
                         // Both the length and the index compile-time known
                         // and out of bounds: squiggle here, trap at this
@@ -3400,11 +4158,31 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             .push(InferenceDiagnostic::IndexNonArray { expr, ty: other });
                         Ty::Error
                     }
-                }
+                };
+                self.carry_borrow_projection(expr, base, &element);
+                element
             }
             // `place.&raw` / `place.&raw mut`: the operand reads like any
             // expression (so field chains get their diagnostics on the
             // way), then the place rules are judged on its structure.
+            // `place.&` / `place.&mut` — a SAFE borrow. Same two-phase shape
+            // as `.&raw`: the operand reads like any expression (so field
+            // chains report their own problems), then the place rules are
+            // judged on its structure.
+            ExprData::Borrow {
+                mutable,
+                place,
+                region,
+            } => {
+                let mutable = *mutable;
+                let place = *place;
+                let written = region.clone();
+                let fresh = self.fresh_var();
+                let place_ty = self.infer_expr(place, &fresh);
+                let region = self.borrow_expr_region(expr, written.as_ref());
+                self.check_borrow_place(expr, mutable, place, region.clone());
+                Ty::borrow(mutable, region, place_ty)
+            }
             ExprData::AddrOf { mutable, place } => {
                 let mutable = *mutable;
                 let place = *place;
@@ -3422,6 +4200,24 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 let receiver_ty = self.infer_expr(receiver, &fresh);
                 match self.resolve_shallow(&receiver_ty) {
                     Ty::RawPtr { pointee, .. } => (*pointee).clone(),
+                    // Safe `.*`: deref of a borrow reads the referent, and
+                    // needs no `unsafe` — the pointer's FLAVOR determines
+                    // safety, which is already how the language works.
+                    // Whether the READ is legal (copy vs. move out of a
+                    // borrow) is [`InferCtx::finish_deref_reads`]'s
+                    // judgement, once inference has settled.
+                    Ty::Borrow { referent, .. } => {
+                        let referent = (*referent).clone();
+                        self.deref_reads.push((expr, referent.clone()));
+                        // A `.*` in place position reads nothing itself —
+                        // the field or element beyond it does. Its entry
+                        // above is skipped, so the chain it roots carries
+                        // the question onward, one step at a time.
+                        if self.place_positions.contains(&expr) {
+                            self.borrow_projections.insert(expr);
+                        }
+                        referent
+                    }
                     // Evaluating the receiver already diverges.
                     Ty::Never => Ty::Never,
                     // An undetermined receiver: like a field access, the
@@ -3540,7 +4336,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // never completes says nothing about what the function
                 // produces, so `!` is the honest one.
                 if matches!(self.resolve_shallow(&ret), Ty::Infer(_)) {
-                    self.unify(&ret, &body_ty);
+                    self.adopt(&ret, &body_ty);
                 }
                 return fn_ty;
             }
@@ -3594,12 +4390,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     match witnesses.len() {
                         // No break carries a value out: an infinite loop.
                         0 => {
-                            self.unify(&result, &Ty::Never);
+                            self.adopt(&result, &Ty::Never);
                             Ty::Never
                         }
                         1 => {
                             let ty = witnesses.into_iter().next().unwrap().ty;
-                            self.unify(&result, &ty);
+                            self.adopt(&result, &ty);
                             ty
                         }
                         _ => {
@@ -3738,6 +4534,30 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// path in the `Call` arm (which must decide field-vs-member before
     /// choosing a callee) shares it verbatim.
     fn field_access_ty(&mut self, expr: ExprId, receiver: ExprId, name: &str, resolved: Ty) -> Ty {
+        // A BORROW receiver. Reaching through it to the referent's fields
+        // and members would be auto-deref, which G14 rules out absolutely
+        // — and the one licensed exception runs the other way (the
+        // compiler may insert a borrow of `x.*`, never a deref of `x`).
+        // So this is RESERVED rather than silently unsupported: the day a
+        // member's receiver position can be spelled `Self.&::<@a>`, this
+        // diagnostic is deleted and nothing else moves.
+        //
+        // Not decided yet: making a `Self.&`-typed last parameter
+        // dot-callable does NOT fall out of the structural rule for free.
+        // It needs two things not built here — member-own binders (so a
+        // member can declare `@a`) and a receiver-matching rule that
+        // relates a borrow receiver to a borrow parameter. The escape
+        // exists today and is one character: write the deref.
+        if matches!(resolved, Ty::Borrow { .. }) {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::DotThroughBorrow {
+                    expr,
+                    name: name.to_owned(),
+                    receiver_ty: resolved,
+                });
+            return Ty::Error;
+        }
         match resolved {
             Ty::Record(rec) => match rec.field_ty(name) {
                 Some(field_ty) => field_ty.clone(),
@@ -3892,7 +4712,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             Ty::Infer(var) => {
                 let params: Vec<Ty> = args.iter().map(|_| self.fresh_var()).collect();
                 let ret = self.fresh_var();
-                if self.unify(&Ty::Infer(var), &Ty::fn_type(params.clone(), ret.clone())) {
+                if self.adopt(&Ty::Infer(var), &Ty::fn_type(params.clone(), ret.clone())) {
                     for (i, &arg) in args.iter().enumerate() {
                         self.infer_expr(arg, &params[i]);
                     }
@@ -4011,6 +4831,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             && !name.is_empty()
         {
             let param = param.clone();
+            // A member takes the receiver as its LAST ARGUMENT, so this
+            // mention is a value position however it is written — the
+            // answer `place_positions` could not have.
+            self.value_receivers.insert(receiver);
             let ty = self.infer_bound_member_dot_call(
                 expr,
                 callee,
@@ -4149,6 +4973,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     let named = named_recv
                         .clone()
                         .expect("an inherent member needs a named receiver");
+                    self.value_receivers.insert(receiver);
                     let sig = signature(self.db, member_loc.to_id(self.db));
                     let ret = self.infer_member_call(
                         expr,
@@ -4168,6 +4993,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         .member
                         .clone()
                         .expect("a carrying candidate has its impl member");
+                    self.value_receivers.insert(receiver);
                     let ty = self.infer_impl_member_call(
                         expr,
                         callee,
@@ -4336,6 +5162,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 GenericArg::Const(value) => {
                     const_subst.insert(index as u32, value.clone());
                 }
+                // Regions are erased: nothing to substitute into a scheme.
+                GenericArg::Region(_) => {}
             }
         }
         let inst = instantiate_scheme(&sig, &member_loc, &subst, &const_subst);
@@ -4853,7 +5681,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 Ty::Infer(_) => continue,
                 other => other,
             };
-            self.unify(&self_var, &candidate);
+            self.adopt(&self_var, &candidate);
         }
         for (arg, ty) in &self_args {
             self.check(
@@ -4987,28 +5815,17 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             }
         }
         let ExprData::NameRef(root_name) = &self.body.exprs[root] else {
-            // A deref roots the chain (`p.* = e;`, `p.*.x = e;`): the
-            // write goes through the pointer, so the judgement is the
-            // GOVERNING pointer's `.&raw mut`-ness — the receiver of the
-            // chain's outermost deref (derefs deeper down are ordinary
-            // reads; their flavors don't matter). No binding-`mut` rule
-            // applies: writing through a pointer reassigns nothing.
-            if let ExprData::Deref { receiver } = &self.body.exprs[root] {
-                let receiver_ty = self
-                    .result
-                    .type_of_expr
-                    .get(*receiver)
-                    .cloned()
-                    .unwrap_or(Ty::Error);
-                if let resolved @ Ty::RawPtr { mutable: false, .. } =
-                    self.resolve_shallow(&receiver_ty)
-                {
-                    self.result.diagnostics.push(
-                        InferenceDiagnostic::AssignThroughImmutablePointer {
-                            target: root,
-                            ty: resolved,
-                        },
-                    );
+            // A deref roots the chain (`p.* = e;`, `p.*.x = e;`, or
+            // `bb.*.* = e;`): the write goes through the pointers, so the
+            // judgement is [`InferCtx::shared_step_governing`]'s — every
+            // step of the chain must grant a write permission, not just
+            // the outermost one. No binding-`mut` rule applies: writing
+            // through a pointer reassigns nothing.
+            if matches!(self.body.exprs[root], ExprData::Deref { .. }) {
+                if let Some(ty) = self.shared_step_governing(root) {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::AssignThroughShared { target: root, ty });
                 }
                 return None;
             }
@@ -5092,9 +5909,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// binding to be `mut` — the same transitive-mutability rule
     /// assignments use — refuses items (`static mut` is deferred; a
     /// `const` has no place to hand out mutably), and, for deref-rooted
-    /// places, requires the GOVERNING pointer (the outermost deref's
-    /// receiver) to be `.&raw mut` itself.
+    /// places, requires every step the chain travels through to grant a
+    /// write permission ([`InferCtx::shared_step_governing`]).
     fn check_addr_of_place(&mut self, addr_of: ExprId, mutable: bool, place: ExprId) {
+        // The whole chain's write permission, needed only by the `mut`
+        // flavor: a shared address of a shared place is what `.&raw` is
+        // for.
+        let governing = mutable.then(|| self.shared_step_governing(place)).flatten();
         let mut segments: Vec<String> = Vec::new();
         let mut root = place;
         loop {
@@ -5167,29 +5988,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             }
             // `p.*....&raw [mut]`: a pointer into the pointee — the
             // result is the original allocation's address with an
-            // extended path. The `mut` flavor is judged on the GOVERNING
-            // pointer (this outermost deref's receiver): a shared `T.&raw`
-            // must not launder into a write permission. Deeper derefs are
-            // ordinary reads, already typed (and unsafe-checked) on their
-            // own.
-            ExprData::Deref { receiver } => {
-                if mutable {
-                    let receiver_ty = self
-                        .result
-                        .type_of_expr
-                        .get(*receiver)
-                        .cloned()
-                        .unwrap_or(Ty::Error);
-                    if let resolved @ Ty::RawPtr { mutable: false, .. } =
-                        self.resolve_shallow(&receiver_ty)
-                    {
-                        self.result.diagnostics.push(
-                            InferenceDiagnostic::AddrOfMutThroughImmutablePointer {
-                                addr_of,
-                                ty: resolved,
-                            },
-                        );
-                    }
+            // extended path. The `mut` flavor is judged by
+            // [`InferCtx::shared_step_governing`]: a shared step anywhere
+            // in the chain, `T.&raw` or `T.&`, must not launder into a
+            // write permission.
+            ExprData::Deref { .. } => {
+                if let Some(ty) = governing {
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::AddrOfMutThroughShared { addr_of, ty });
                 }
             }
             // Broken source: the parse error covers it.
@@ -5535,6 +6342,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 GenericArg::Const(value) => {
                     const_subst.insert(index as u32, value.clone());
                 }
+                // Regions are erased: nothing to substitute into a scheme.
+                GenericArg::Region(_) => {}
             }
         }
         let inst = instantiate_scheme(&sig, &member, &subst, &const_subst);
@@ -5590,6 +6399,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let mut positional = 0usize;
         for arg in args {
             match arg {
+                // A region argument never names `Self` and claims a
+                // positional slot like any other argument.
+                GenericArgData::Region(_) => positional += 1,
                 GenericArgData::Named { name, ty } if name == "Self" => {
                     if self_ref.is_some() {
                         self.result
@@ -5858,11 +6670,52 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         };
         let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
         let mut const_subst: FxHashMap<u32, ConstArgValue> = FxHashMap::default();
+        let mut region_subst: FxHashMap<u32, Region> = FxHashMap::default();
         let mut pending: Vec<(String, Ty)> = Vec::new();
         let mut const_args: Vec<(u32, ExprId)> = Vec::new();
         for (index, param) in generics.iter().enumerate() {
             let written = matched_args.map(|args| &args[index]);
             match &param.kind {
+                // A REGION parameter of the mentioned item. Regions are
+                // erased, so nothing is substituted into the SCHEME — but a
+                // WRITTEN region argument does constrain the borrow
+                // checker: it substitutes directly, exactly like
+                // `borrow_expr_region` treats a borrow expression's own
+                // turbofish. Without this a caller could write `@p`/`@q`
+                // at a mention and have it silently ignored in favor of a
+                // fresh existential, which also made a callee's declared
+                // bound (`fn::<@a, @b: @a>`) unreportable AS a callee
+                // bound: the fresh existential sits between the written
+                // regions and the obligation, so the violation surfaces at
+                // whichever argument's reborrow happens to carry the
+                // element across, blamed as an ordinary reborrow instead
+                // of the call that required it.
+                GenericParamKind::Region => {
+                    let var = match written {
+                        Some(GenericArgData::Region(region_ref)) => {
+                            self.borrow_expr_region(expr, Some(region_ref))
+                        }
+                        // No argument, or a name that belongs to a
+                        // different kind of parameter: infer it — a fresh
+                        // EXISTENTIAL, exactly as an omitted turbofish on
+                        // a borrow expression does. The callee's
+                        // universals become this body's inference
+                        // variables, and its outlives relations ride
+                        // along as constraints between them.
+                        None | Some(GenericArgData::Named { .. }) => self.fresh_region(),
+                        Some(GenericArgData::Type(_)) | Some(GenericArgData::Const(_)) => {
+                            self.result.diagnostics.push(
+                                InferenceDiagnostic::GenericArgKindMismatch {
+                                    expr,
+                                    param: param.name.clone(),
+                                    param_is_const: false,
+                                },
+                            );
+                            self.fresh_region()
+                        }
+                    };
+                    region_subst.insert(index as u32, var);
+                }
                 GenericParamKind::Type => {
                     let var = self.fresh_var();
                     match written {
@@ -5872,7 +6725,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             // `id::<T>`. A `_` lowers to a fresh variable —
                             // explicitly "infer this one".
                             let written_ty = self.lower_type_ref(type_ref);
-                            self.constraints.unify(
+                            self.constraints.adopt(
                                 self.table,
                                 &var,
                                 &written_ty,
@@ -5894,6 +6747,17 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             let fresh = self.fresh_var();
                             self.infer_expr(value, &fresh);
                         }
+                        // A region where a type belongs: same wrong-kind
+                        // report as a const, with nothing to infer from.
+                        Some(GenericArgData::Region(_)) => {
+                            self.result.diagnostics.push(
+                                InferenceDiagnostic::GenericArgKindMismatch {
+                                    expr,
+                                    param: param.name.clone(),
+                                    param_is_const: false,
+                                },
+                            );
+                        }
                         // Refused at the list (`reject_named_args`): only a
                         // trait has a nameable argument.
                         Some(GenericArgData::Named { .. }) | None => {}
@@ -5902,6 +6766,17 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     subst.insert(index as u32, var);
                 }
                 GenericParamKind::Const(declared) => match written {
+                    // A region where a const belongs — wrong kind, nothing
+                    // to evaluate.
+                    Some(GenericArgData::Region(_)) => {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::GenericArgKindMismatch {
+                                expr,
+                                param: param.name.clone(),
+                                param_is_const: true,
+                            });
+                    }
                     Some(GenericArgData::Const(value)) => {
                         let value = *value;
                         let declared = self.lower_const_param_ty(declared);
@@ -6017,7 +6892,28 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 params: pending,
             });
         }
-        instantiate_scheme(&sig, &loc, &subst, &const_subst)
+        // The callee's declared outlives bounds (`fn::<@a, @b: @a>`)
+        // travel with the instantiation: at this call site they become
+        // obligations between the fresh variables that stand for them.
+        for (index, param) in generics.iter().enumerate() {
+            if !matches!(param.kind, GenericParamKind::Region) {
+                continue;
+            }
+            let Some(sup) = region_subst.get(&(index as u32)).cloned() else {
+                continue;
+            };
+            for bound in &param.outlives {
+                let sub = generics
+                    .iter()
+                    .position(|other| other.name == *bound)
+                    .and_then(|i| region_subst.get(&(i as u32)).cloned());
+                if let Some(sub) = sub {
+                    self.push_outlives(sup.clone(), sub, expr, RegionConstraintReason::CalleeBound);
+                }
+            }
+        }
+        let inst = instantiate_scheme(&sig, &loc, &subst, &const_subst);
+        substitute_regions(&inst, &loc, &region_subst)
     }
 
     /// A turbofish mention `f::<usize, 42>`. The base resolves like any
@@ -6263,7 +7159,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             Builtin::Copy => {
                 let elem = self.fresh_var();
                 if let Some((_, pointee)) = ptr_arg(self, args[0]) {
-                    self.unify(&elem, pointee.as_ref());
+                    self.adopt(&elem, pointee.as_ref());
                 }
                 self.infer_expr_with(
                     args[1],
@@ -6348,7 +7244,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         decl: loc.clone(),
                         args,
                     };
-                    self.unify(&scrut_ty, &Ty::Named(named));
+                    self.adopt(&scrut_ty, &Ty::Named(named));
                     break;
                 }
             }
@@ -6520,12 +7416,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             match witnesses.len() {
                 // Every arm diverges (or there are none): so does the match.
                 0 => {
-                    self.unify(&result, &Ty::Never);
+                    self.adopt(&result, &Ty::Never);
                     Ty::Never
                 }
                 1 => {
                     let ty = witnesses.into_iter().next().unwrap().ty;
-                    self.unify(&result, &ty);
+                    self.adopt(&result, &ty);
                     ty
                 }
                 _ => {
@@ -6558,6 +7454,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 .iter()
                 .map(|param| match param.kind {
                     GenericParamKind::Type => GenericArg::Ty(Ty::Error),
+                    GenericParamKind::Region => GenericArg::Region(Region::Erased),
                     GenericParamKind::Const(_) => GenericArg::Const(ConstArgValue::Error),
                 })
                 .collect(),
@@ -6882,6 +7779,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             .iter()
             .map(|param| match param.kind {
                 GenericParamKind::Type => GenericArg::Ty(self.fresh_var()),
+                GenericParamKind::Region => GenericArg::Region(Region::Erased),
                 GenericParamKind::Const(_) => GenericArg::Const(ConstArgValue::Error),
             })
             .collect();
@@ -7200,7 +8098,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     match arg {
                         Some(GenericArgData::Type(type_ref)) => {
                             let written_ty = self.lower_type_ref(type_ref);
-                            self.constraints.unify(
+                            self.constraints.adopt(
                                 self.table,
                                 &var,
                                 &written_ty,
@@ -7222,14 +8120,39 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             let fresh = self.fresh_var();
                             self.infer_expr(value, &fresh);
                         }
+                        Some(GenericArgData::Region(_)) => {
+                            self.result.diagnostics.push(
+                                InferenceDiagnostic::UnexpectedRegionArg {
+                                    expr: mention,
+                                    index: index as u32,
+                                    param: param.name.clone(),
+                                },
+                            );
+                        }
                         // Refused at the list (`reject_named_args`).
                         Some(GenericArgData::Named { .. }) | None => {}
                     }
                     pending.push((param.name.clone(), var.clone()));
                     out.push(GenericArg::Ty(var));
                 }
+                // Regions on a TYPE declaration are reserved (variance and
+                // well-formedness are a later arc's decisions); the mirror
+                // pass says so. Arity stays honest — the slot is filled
+                // with the erased region so later arguments keep their
+                // positions.
+                GenericParamKind::Region => out.push(GenericArg::Region(Region::Erased)),
                 GenericParamKind::Const(declared) => {
                     let value = match arg {
+                        Some(GenericArgData::Region(_)) => {
+                            self.result.diagnostics.push(
+                                InferenceDiagnostic::UnexpectedRegionArg {
+                                    expr: mention,
+                                    index: index as u32,
+                                    param: param.name.clone(),
+                                },
+                            );
+                            ConstArgValue::Error
+                        }
                         Some(GenericArgData::Const(value)) => {
                             let value = *value;
                             let declared = self.lower_const_param_ty(declared);
@@ -7423,6 +8346,17 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         ) {
             return;
         }
+        // NO region relation here. Relating each branch to the FIRST
+        // branch was the wrong shape twice over: it demanded mutual
+        // outlives between two independent universals (an `if` over two
+        // borrows became unusable, and writing the ruled `@a + @b` could
+        // not rescue it), and it never related a branch to the join's
+        // CONTEXT at all — which is what let an `if` launder every
+        // obligation its leaves would otherwise have incurred.
+        //
+        // Both are the same missing edge, and it belongs where the context
+        // is known: the join solver reborrows every leaf into the join's
+        // result, exactly as a direct check site does.
         self.join_sinks[sink].witnesses.push(Witness {
             blame,
             ty: ty.clone(),
@@ -7452,14 +8386,29 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 _ => return expected.clone(),
             }
         }
-        if self.constraints.unify(self.table, &actual, expected, cause) {
+        // A borrow meeting a borrow is a REBORROW, not an equation: the
+        // regions get one directed edge instead of two, so the value may
+        // flow into a shorter-lived position (and an exclusive one may
+        // degrade to shared). Tried BEFORE unification, because unifying
+        // two borrow types is invariant by design and would pin the regions
+        // equal — which is exactly what reborrow-at-every-use avoids.
+        if matches!(self.resolve_shallow(&actual), Ty::Borrow { .. })
+            && matches!(self.resolve_shallow(expected), Ty::Borrow { .. })
+        {
+            if self.try_reborrow(expr, &actual, expected) {
+                return self.resolve_shallow(expected);
+            }
+        } else if self
+            .constraints
+            .relate(self.table, &actual, expected, expr, cause)
+        {
             return actual;
         }
         let resolved_actual = self.resolve_shallow(&actual);
         let resolved_expected = self.resolve_shallow(expected);
         if let Some(variant) =
             self.constraints
-                .widen_to_enum(self.table, &resolved_actual, &resolved_expected)
+                .widen_to_enum(self.table, &resolved_actual, &resolved_expected, expr)
         {
             self.result.widened.insert(expr, variant);
             // The context's type is what flows on from here — the value is
@@ -7504,8 +8453,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         expected.clone()
     }
 
-    pub(crate) fn unify(&mut self, a: &Ty, b: &Ty) -> bool {
-        self.constraints.unify(self.table, a, b, None)
+    /// Adoption — see `Constraints::adopt`. Every caller of this in the
+    /// traversal has a fresh variable on one side (a join sink's result, a
+    /// scrutinee variable, a pointee variable); a value meeting a CONTEXT
+    /// goes through `check`, which relates.
+    pub(crate) fn adopt(&mut self, a: &Ty, b: &Ty) -> bool {
+        self.constraints.adopt(self.table, a, b, None)
     }
 
     fn resolve_shallow(&mut self, ty: &Ty) -> Ty {
@@ -7540,6 +8493,60 @@ enum Cover {
     Variant(u32),
     /// Nothing (broken or rejected pattern, or an unreachable variant).
     Nothing,
+}
+
+/// The expressions a body consumes as a PLACE rather than as a value: the
+/// receiver of a field or deref step, the base of an index step, the
+/// operand of `.&`/`.&mut`/`.&raw`, and an assignment target. Only one
+/// judgement depends on the distinction today —
+/// [`InferCtx::finish_deref_reads`] — and it needs it for the whole body
+/// at once (a `.*` is typed long before its parent is), so the set is
+/// collected up front, exactly like [`InferCtx::direct_callees`].
+///
+/// Syntax is all this pass can see, so it is all it decides: a dot-call's
+/// receiver may turn out to be a value position, but only resolution
+/// knows, and [`InferCtx::value_receivers`] carries that answer.
+fn place_positions(body: &Body) -> rustc_hash::FxHashSet<ExprId> {
+    let mut set = rustc_hash::FxHashSet::default();
+    for (_, data) in body.exprs.iter() {
+        match data {
+            ExprData::Field { receiver, .. } => {
+                set.insert(*receiver);
+            }
+            // `bb.*.*`: the inner `.*` is the outer one's receiver, so it
+            // is a projection step like any other — without this arm a
+            // borrow behind a borrow could not be read at all.
+            ExprData::Deref { receiver } => {
+                set.insert(*receiver);
+            }
+            ExprData::Index { base, .. } => {
+                set.insert(*base);
+            }
+            ExprData::AddrOf { place, .. } | ExprData::Borrow { place, .. } => {
+                set.insert(*place);
+            }
+            ExprData::Block { stmts, .. } => {
+                for stmt in stmts {
+                    if let crate::body::Stmt::Assign { target, .. } = stmt {
+                        set.insert(*target);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    set
+}
+
+/// The exclusive flavor a write would need at a place step of this type —
+/// the one rule, spelled in each world's own syntax. Used by the three
+/// "cannot write through this" messages so they read as the twins they
+/// are.
+fn exclusive_flavor(ty: &Ty) -> &'static str {
+    match ty {
+        Ty::Borrow { .. } => "a `.&mut` borrow",
+        _ => "a `.&raw mut` pointer",
+    }
 }
 
 /// Dig through block and `const` block wrappers to the value-producing
@@ -7589,6 +8596,7 @@ fn builtin_generics(builtin: Builtin) -> Option<Vec<GenericParamData>> {
                 name: "T".to_owned(),
                 kind: GenericParamKind::Type,
                 bounds: Vec::new(),
+                outlives: Vec::new(),
             }])
         }
         Builtin::Print | Builtin::Panic | Builtin::Add | Builtin::Offset | Builtin::Copy => None,
@@ -7673,6 +8681,21 @@ fn instantiate_scheme(
             *mutable,
             instantiate_scheme(pointee, item, subst, const_subst),
         ),
+        // A borrow's REFERENT is an ordinary scheme position: `fn::<@b,
+        // T>(v: T.&mut::<@b>)` must instantiate `T` here, or the parameter
+        // stays rigid and every borrowed argument mismatches against a
+        // param the caller cannot possibly name. The REGION is untouched —
+        // it is [`substitute_regions`]'s, deliberately a separate walk (see
+        // its doc); the two compose, and neither may skip this constructor.
+        Ty::Borrow {
+            mutable,
+            region,
+            referent,
+        } => Ty::borrow(
+            *mutable,
+            region.clone(),
+            instantiate_scheme(referent, item, subst, const_subst),
+        ),
         // The scheme may embed a const param as an array LENGTH
         // (`fn::<const N: usize>(b: [usize; N])`): substitute the written
         // argument's type-level value, exactly like a generic-type
@@ -7714,6 +8737,100 @@ fn instantiate_scheme(
     }
 }
 
+/// Replace `item`'s rigid REGION params by a mention's fresh region
+/// variables. Deliberately a walk of its own rather than a fifth parameter
+/// threaded through [`instantiate_scheme`]: regions are erased, so nothing
+/// else in instantiation needs to know they exist, and keeping the walk
+/// separable is what lets the whole region layer be lifted out if the
+/// approach turns out wrong.
+fn substitute_regions(ty: &Ty, item: &ItemLoc, subst: &FxHashMap<u32, Region>) -> Ty {
+    if subst.is_empty() {
+        return ty.clone();
+    }
+    match ty {
+        Ty::Borrow {
+            mutable,
+            region,
+            referent,
+        } => Ty::borrow(
+            *mutable,
+            substitute_one_region(region, item, subst),
+            substitute_regions(referent, item, subst),
+        ),
+        Ty::Fn(f) => Ty::fn_type(
+            f.params
+                .iter()
+                .map(|p| substitute_regions(p, item, subst))
+                .collect(),
+            substitute_regions(&f.ret, item, subst),
+        ),
+        Ty::RawPtr { mutable, pointee } => {
+            Ty::raw_ptr(*mutable, substitute_regions(pointee, item, subst))
+        }
+        Ty::Array { elem, len } => Ty::array(substitute_regions(elem, item, subst), len.clone()),
+        Ty::Record(rec) => Ty::record(
+            rec.fields
+                .iter()
+                .map(|(name, ty)| (name.clone(), substitute_regions(ty, item, subst)))
+                .collect(),
+        ),
+        // A generic type mention's ARGS can carry a borrow, and a callee's
+        // return type is where they do: `-> Option::<V.&mut::<@b>>`. Left
+        // out, the callee's rigid `@b` survives into the CALLER's body,
+        // where the outlives solver reads a region param's binder index as
+        // a node number — so it silently becomes whichever universal of the
+        // caller sits at that index. `Ty::erase_regions` already recurses
+        // here; this is its instantiation-time twin.
+        Ty::Named(named) => Ty::Named(NamedTy {
+            decl: named.decl.clone(),
+            args: substitute_regions_args(&named.args, item, subst),
+        }),
+        Ty::Variant(variant) => Ty::Variant(VariantTy {
+            args: substitute_regions_args(&variant.args, item, subst),
+            ..variant.clone()
+        }),
+        other => other.clone(),
+    }
+}
+
+fn substitute_regions_args(
+    args: &[GenericArg],
+    item: &ItemLoc,
+    subst: &FxHashMap<u32, Region>,
+) -> Vec<GenericArg> {
+    args.iter()
+        .map(|arg| match arg {
+            GenericArg::Ty(ty) => GenericArg::Ty(substitute_regions(ty, item, subst)),
+            GenericArg::Region(region) => {
+                GenericArg::Region(substitute_one_region(region, item, subst))
+            }
+            // Exhaustive on purpose: see `freshen_regions_args`.
+            GenericArg::Const(value) => GenericArg::Const(value.clone()),
+        })
+        .collect()
+}
+
+fn substitute_one_region(
+    region: &Region,
+    item: &ItemLoc,
+    subst: &FxHashMap<u32, Region>,
+) -> Region {
+    match region {
+        Region::Param {
+            item: param_item,
+            index,
+            ..
+        } if param_item == item => subst.get(index).cloned().unwrap_or(Region::Error),
+        Region::Join(parts) => Region::Join(
+            parts
+                .iter()
+                .map(|part| substitute_one_region(part, item, subst))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 fn instantiate_scheme_args(
     args: &[GenericArg],
     item: &ItemLoc,
@@ -7733,7 +8850,13 @@ fn instantiate_scheme_args(
                     .cloned()
                     .unwrap_or(ConstArgValue::Error),
             ),
-            other => other.clone(),
+            GenericArg::Const(value) => GenericArg::Const(value.clone()),
+            // Regions are deliberately NOT this walk's business —
+            // `substitute_regions` is a separate pass, so that the whole
+            // region layer stays liftable. Stated as an arm rather than
+            // left to a catch-all: exhaustive on purpose, see
+            // `Constraints::freshen_regions_args`.
+            GenericArg::Region(region) => GenericArg::Region(region.clone()),
         })
         .collect()
 }
@@ -7744,6 +8867,7 @@ fn instantiate_scheme_args(
 fn ty_mentions_const_param(ty: &Ty, item: &ItemLoc, index: u32) -> bool {
     let in_args = |args: &[GenericArg]| {
         args.iter().any(|arg| match arg {
+            GenericArg::Region(_) => false,
             GenericArg::Ty(ty) => ty_mentions_const_param(ty, item, index),
             GenericArg::Const(ConstArgValue::Param {
                 item: param_item,
@@ -7760,6 +8884,10 @@ fn ty_mentions_const_param(ty: &Ty, item: &ItemLoc, index: u32) -> bool {
                 .any(|p| ty_mentions_const_param(p, item, index))
                 || ty_mentions_const_param(&f.ret, item, index)
         }
+        // `b: [usize; N].&::<@a>` embeds the const param under a borrow —
+        // same reachability question, same answer.
+        Ty::Borrow { referent, .. } => ty_mentions_const_param(referent, item, index),
+        Ty::RawPtr { pointee, .. } => ty_mentions_const_param(pointee, item, index),
         Ty::Record(rec) => rec
             .fields
             .iter()

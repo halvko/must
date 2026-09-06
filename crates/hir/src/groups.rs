@@ -245,7 +245,7 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
                 &mut table,
                 &in_group,
             );
-            ctx.unify(&in_group[loc], &Ty::Error);
+            ctx.adopt(&in_group[loc], &Ty::Error);
             continue;
         };
         // Whatever annotation this member has is hole-bearing (that's why
@@ -268,7 +268,7 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
             &in_group,
         );
         let root_ty = ctx.infer_expr(root, &expected);
-        let unified = ctx.unify(&in_group[loc], &root_ty);
+        let unified = ctx.adopt(&in_group[loc], &root_ty);
         // Solve this member's deferred joins *before* the next member runs:
         // a member's signature is decided by its own body (its axioms and
         // conclusions); later members may only fill variables the body left

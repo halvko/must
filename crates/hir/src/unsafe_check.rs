@@ -68,6 +68,7 @@ pub fn unsafe_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<UnsafeCheckD
     let mut ctx = CheckCtx {
         body,
         resolutions: resolutions(db, item),
+        infer: crate::infer::infer(db, item),
         diagnostics: Vec::new(),
     };
     if let Some(root) = body.root {
@@ -79,10 +80,37 @@ pub fn unsafe_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<UnsafeCheckD
 struct CheckCtx<'db> {
     body: &'db Body,
     resolutions: &'db ArenaMap<ExprId, Resolution>,
+    /// Consulted for exactly one question: is this `.*` through a raw
+    /// pointer or through a safe borrow? Safety is a property of the
+    /// pointer's flavor, and only inference knows the flavor.
+    infer: &'db crate::infer::InferenceResult,
     diagnostics: Vec<UnsafeCheckDiagnostic>,
 }
 
 impl CheckCtx<'_> {
+    /// Whether `receiver` — the operand of a `.*` — is a RAW pointer.
+    ///
+    /// A receiver whose type is unknown or broken answers `true`: the
+    /// stricter reading, so a program can never lose its `unsafe`
+    /// requirement to an inference failure that carries its own
+    /// diagnostic. Only a receiver KNOWN to be a safe borrow is exempt.
+    fn derefs_a_raw_pointer(&self, receiver: ExprId) -> bool {
+        match self.infer.type_of_expr.get(receiver) {
+            // A safe borrow: `.*` on it needs no `unsafe` — safety is
+            // decided by the pointer's FLAVOR.
+            Some(crate::ty::Ty::Borrow { .. }) => false,
+            // BROKEN receiver: errors are infectious and SILENT. The
+            // default below is deliberately fail-safe ("not known to be a
+            // safe borrow, so demand `unsafe`"), which is right for an
+            // unresolved type and wrong for an already-diagnosed one —
+            // `c.nosuch().*` reported "no field or member" and then
+            // accused the user of dereferencing a raw pointer that never
+            // existed. Any refusal of the callee in a postfix chain
+            // reaches this pair.
+            Some(ty) if ty.contains_error() => false,
+            _ => true,
+        }
+    }
     fn check_expr(&mut self, expr: ExprId, in_unsafe: bool) {
         match &self.body.exprs[expr] {
             ExprData::Missing | ExprData::Literal(_) | ExprData::NameRef(_) => {}
@@ -197,12 +225,19 @@ impl CheckCtx<'_> {
                 self.check_expr(*base, in_unsafe);
                 self.check_expr(*index, in_unsafe);
             }
-            // Taking `.&raw` is safe (the hazard is at the deref); the place
-            // may still contain a deref of its own, which is judged as one.
-            ExprData::AddrOf { place, .. } => self.check_expr(*place, in_unsafe),
-            // THE unsafe operation: deref, read or write.
+            // Taking an address or a borrow is safe (the hazard is at the
+            // deref); the place may still contain a deref of its own, which
+            // is judged as one.
+            ExprData::AddrOf { place, .. } | ExprData::Borrow { place, .. } => {
+                self.check_expr(*place, in_unsafe)
+            }
+            // THE unsafe operation — but only through a RAW pointer. Safe
+            // `.*` on a `T.&`/`T.&mut` needs no marker: the pointer's
+            // FLAVOR determines safety, which is already how the language
+            // works. That makes this the one place in the pass that needs
+            // types; everything else stays structural.
             ExprData::Deref { receiver } => {
-                if !in_unsafe {
+                if !in_unsafe && self.derefs_a_raw_pointer(*receiver) {
                     self.diagnostics
                         .push(UnsafeCheckDiagnostic::DerefOutsideUnsafe { expr });
                 }

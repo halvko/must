@@ -182,25 +182,11 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
                 range: ref_type.syntax().text_range(),
                 fix: None,
             });
-        } else if let Some(borrow_expr) = ast::BorrowExpr::cast(node.clone()) {
-            // `x.&` / `x.&mut` — the postfix safe borrows, duals of `.*`.
-            // Parse-and-reserve for the borrow round; `x.&raw` is a distinct
-            // node (`AddrOfExpr`) and never lands here.
-            errors.push(SyntaxError {
-                message: "safe borrows (`.&`, `.&mut`) are not supported yet".to_owned(),
-                range: borrow_expr.syntax().text_range(),
-                fix: None,
-            });
-        } else if let Some(borrow_type) = ast::BorrowType::cast(node.clone()) {
-            // `T.&` / `T.&mut` — the postfix safe reference types. Parse-and-
-            // reserve for the borrow round; `T.&raw` is a distinct node
-            // (`RawPtrType`) and never lands here.
-            errors.push(SyntaxError {
-                message: "safe borrows (`.&`, `.&mut`) are not supported yet".to_owned(),
-                range: borrow_type.syntax().text_range(),
-                fix: None,
-            });
         }
+        // `x.&` / `x.&mut` and `T.&::<@a>` / `T.&mut::<@a>` — the postfix
+        // SAFE borrows, duals of `.*`. Un-reserved; hir owns them from here
+        // (region kinds, reborrow, exclusivity), and `x.&raw` / `T.&raw`
+        // stay distinct nodes that never land here.
     }
     errors
 }
@@ -307,6 +293,8 @@ fn validate_with_group(group: &ast::WithGroup, errors: &mut Vec<SyntaxError>) {
     for clause in group.clauses() {
         let message = if clause.eq_token().is_some() {
             "`with T = ...` pin groups are not supported yet"
+        } else if clause.region_ident_token().is_some() {
+            "`with @a: ...` outlives groups are not supported yet"
         } else {
             "`with T: ...` constrained groups are not supported yet"
         };

@@ -54,6 +54,16 @@ const SUPPORTED: &[(&str, &str)] = &[
 /// The heap and raw pointers are out of scope for this backend; refusing
 /// them honestly is the requirement, and this is where that is checked.
 const UNSUPPORTED: &[(&str, &str, &str)] = &[
+    // Safe borrows: refused BY NAME, not folded into the raw-pointer
+    // refusal. A borrow lowers to the same machine word a raw pointer
+    // does, so this backend COULD emit something that runs — and would
+    // drop the exclusivity contract while doing it. The named refusal is
+    // what keeps that from being a silent miscompile.
+    (
+        "borrows.must",
+        "main()",
+        "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet",
+    ),
     (
         "heap.must",
         "main()",
@@ -145,6 +155,16 @@ fn unsupported_examples_are_refused_by_name() {
             message.contains(expected),
             "examples/{file} refused with the wrong diagnostic\n  \
              expected to contain: {expected}\n  got: {message}"
+        );
+        // `contains` alone cannot see a refusal that repeats the suffix
+        // `Refusal::message` already appends — the message stays a
+        // superstring of what the table asks for, so the assertion above
+        // passes while the user reads the sentence twice.
+        const SUFFIX: &str = "is not supported by the wasm backend yet";
+        assert_eq!(
+            message.matches(SUFFIX).count(),
+            usize::from(message.contains(SUFFIX)),
+            "examples/{file}'s refusal repeats its own suffix: {message}"
         );
     }
 }

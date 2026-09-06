@@ -74,6 +74,7 @@ fn next_token(rest: &str, inner: &mut Vec<InnerError>) -> (SyntaxKind, usize, Op
         }
         '"' => scan_string(rest, inner),
         '\'' => scan_lifetime(rest),
+        '@' => scan_region(rest),
         c if is_ident_start(c) => {
             let len = scan_while(rest, is_ident_continue);
             if len == 1 && c == '_' {
@@ -206,6 +207,26 @@ fn scan_lifetime(rest: &str) -> (SyntaxKind, usize, Option<String>) {
             SyntaxKind::ERROR_TOKEN,
             1,
             Some("expected a lifetime name after `'`".into()),
+        ),
+    }
+}
+
+/// `@a` — a REGION name; `@_` — the region wildcard ("there is a region
+/// here, infer it"). One token kind for both: `_` is an identifier start,
+/// so the wildcard falls out of the same scan and the two are told apart by
+/// text, exactly where the distinction matters (region lowering). `@` is
+/// otherwise unclaimed in Must, so a `@` at token start can only be a
+/// region — no lookahead, no ambiguity with anything else in the grammar.
+fn scan_region(rest: &str) -> (SyntaxKind, usize, Option<String>) {
+    match rest.chars().nth(1) {
+        Some(c) if is_ident_start(c) => {
+            let len = 1 + scan_while(&rest[1..], is_ident_continue);
+            (SyntaxKind::REGION_IDENT, len, None)
+        }
+        _ => (
+            SyntaxKind::ERROR_TOKEN,
+            1,
+            Some("expected a region name after `@` (`@a`, or `@_` to infer one)".into()),
         ),
     }
 }

@@ -251,7 +251,9 @@ impl CheckCtx<'_> {
             // contexts allow them (unsafe operations are legal in const
             // eval: every would-be UB there is a deterministic detected
             // trap); only the escape rule in `eval` guards the results.
-            ExprData::AddrOf { place, .. } => self.check_expr(*place, in_const),
+            ExprData::AddrOf { place, .. } | ExprData::Borrow { place, .. } => {
+                self.check_expr(*place, in_const)
+            }
             ExprData::Deref { receiver } => self.check_expr(*receiver, in_const),
             // `unsafe { ... }` is a checker region, orthogonal to
             // const-ness: the body sits in the same context.
