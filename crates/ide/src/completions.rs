@@ -47,7 +47,9 @@
 //! renumbering `Local`/`Item`/`Builtin`/`Keyword`. Gold candidates keep
 //! their provenance *and* get the type tier applied like everyone else
 //! (an uncovered variant under an enum-typed scrutinee trivially widens —
-//! tier `1` — so gold stays ahead within its context).
+//! tier `1` — so gold stays ahead within its context) — except the
+//! arm-list template ([`match_template_items`]), which has no type to
+//! compare against an expectation and is pinned at tier `0` instead.
 //!
 //! ## Snippets
 //!
@@ -58,11 +60,25 @@
 //! (`struct { $1 }` / `enum { $1 }`), a payload-carrying variant pattern in
 //! a match arm (`::Circle($1)` / `Pair($1, $2)` — **one tab stop per
 //! payload**, because `check_match_pat` counts bindings against payloads
-//! and a single stop would hand a two-payload variant an arity error), and
-//! a missing record-literal field (`x = $1`). Every snippet carries its
-//! own plain fallback for a client without `snippetSupport` —
-//! `must-lsp::to_proto` picks between the two per client capability;
-//! `ide` itself has no notion of "the client", only the two spellings.
+//! and a single stop would hand a two-payload variant an arity error), a
+//! missing record-literal field (`x = $1`), and the `match` arm-list
+//! template. Every snippet carries its own plain fallback for a client
+//! without `snippetSupport` — `must-lsp::to_proto` picks between the two
+//! per client capability; `ide` itself has no notion of "the client", only
+//! the two spellings.
+//!
+//! ## The `match` slots
+//!
+//! One position no earlier round classified, keyed off the scrutinee:
+//!
+//! - **The arm-list slot** — `match s ˽`, scrutinee written, no `{` yet.
+//!   Offers one gold snippet that writes the *rest* of the statement: every
+//!   variant as an arm, payload bindings and arm bodies as tab stops, house
+//!   formatting ([`match_template_items`]). Unlike every other context this
+//!   one is detected on the REAL tree, not the speculative one, and
+//!   [`match_awaiting_arms`] says why. It is strictly *additive*: the
+//!   ordinary expression candidates the position already produced stay
+//!   exactly where they were, the template just outranks them.
 //!
 //! ## Detail, and why there is no `completionItem/resolve`
 //!
@@ -152,6 +168,12 @@ pub enum CompletionItemKind {
     Enum,
     Constant,
     Keyword,
+    /// A multi-token template rather than a name — the `match` arm list.
+    /// Its own kind because the label deliberately does not equal the
+    /// insertion (the precedent is `type X = …`'s `struct`/`enum`, which
+    /// insert a whole shell), and an editor that renders kind icons should
+    /// say so rather than dressing it up as a keyword.
+    Snippet,
 }
 
 /// Where a candidate comes from — the sort tier, low to high. See the
@@ -451,8 +473,70 @@ pub(crate) fn completions(
         Some(Context::TypeItemRhs) => type_item_rhs_items(edit_range),
         None => Vec::new(),
     };
+    // The arm-list template is strictly ADDITIVE: the position also
+    // classifies as something (an ordinary fresh statement, usually — the
+    // splice detaches the marker from the arm-less `match`), and those
+    // candidates keep both their place and their ranking. The template just
+    // outranks them, being the one answer the grammar actually admits here.
+    if let Some(awaiting) = match_awaiting_arms(&real_root, edit_range) {
+        items.extend(match_template_items(
+            db, file, &real_root, real_text, &awaiting, edit_range,
+        ));
+    }
     items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
     items
+}
+
+/// A `match` whose scrutinee is written but whose arm list is not, with the
+/// cursor sitting exactly where the `{` belongs — the template slot.
+struct MatchAwaitingArms {
+    /// The scrutinee's range. It ends before the cursor, so (per the module
+    /// doc) it back-maps to an `ExprId` through [`expr_for_range`].
+    scrutinee_range: TextRange,
+    /// The `match` keyword's own start — the arm list's indentation is
+    /// measured from the line this sits on, not from the cursor's line (a
+    /// scrutinee may span lines).
+    match_start: TextSize,
+}
+
+/// Detect the template slot — **on the REAL tree**, which is the one
+/// departure from this module's usual "classify on the speculative tree"
+/// rule, and deliberate: the question is not where the marker sits but
+/// whether an arm list already exists, and the splice destroys the evidence.
+/// `match s ˽{ ::Circle(r) => 1 }` becomes `match s MARKER { … }`, where the
+/// expression parser stops at `MARKER`, closes the `MATCH_EXPR` without its
+/// braces, and leaves the real arm list re-parsed as an unrelated block —
+/// so the speculative tree reports "no arms yet" for a match that is fully
+/// written. The real tree is not spliced and answers correctly.
+///
+/// Requiring `edit_range.start()` to be past the scrutinee's end is what
+/// separates "the scrutinee is finished" from "the scrutinee is still being
+/// typed": at `match s|` the typed prefix IS the scrutinee's own text, and
+/// the user wants scrutinee candidates, not an arm list wrapped around a
+/// half-written name.
+///
+/// The ancestor walk starts at `edit_range.start()`, not `offset`: a typed
+/// prefix (`match s n|`) is real text the *real* tree already parsed, and
+/// starting from the cursor would land on the prefix's own token — which
+/// the splice-detaches-the-scrutinee failure mode already left outside the
+/// `MATCH_EXPR` once the parser gave up after the scrutinee. Starting
+/// before the prefix keeps the walk on ground the `MATCH_EXPR` still owns.
+fn match_awaiting_arms(real_root: &SyntaxNode, edit_range: TextRange) -> Option<MatchAwaitingArms> {
+    let mut token = real_root
+        .token_at_offset(edit_range.start())
+        .left_biased()?;
+    while matches!(token.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT) {
+        token = token.prev_token()?;
+    }
+    let match_expr = token.parent_ancestors().find_map(ast::MatchExpr::cast)?;
+    if match_expr.l_brace_token().is_some() {
+        return None;
+    }
+    let scrutinee_range = match_expr.scrutinee()?.syntax().text_range();
+    (scrutinee_range.end() <= edit_range.start()).then(|| MatchAwaitingArms {
+        scrutinee_range,
+        match_start: match_expr.syntax().text_range().start(),
+    })
 }
 
 /// Classify the marker's parent node (in the speculative tree) into one of
@@ -1210,6 +1294,150 @@ fn match_arm_items(
         items.extend(wildcard());
     }
     items
+}
+
+/// One level of indentation. House style, as every example file writes it;
+/// there is no formatter to ask and no per-file detection — a generated arm
+/// list that disagreed with the file around it would be worse than one that
+/// disagrees with an unusual file.
+const INDENT_UNIT: &str = "    ";
+
+/// The whole arm list for an arm-less `match` over an enum: one gold
+/// snippet writing every variant as an arm, payload bindings and arm bodies
+/// as tab stops in document order.
+///
+/// Empty unless the scrutinee's type is a `Ty::Named` enum. A variant-typed
+/// scrutinee is deliberately excluded even though it matches fine: the
+/// honest template for it is the single arm for that one variant, which is
+/// not "predict the rest of the statement" so much as "write the only line
+/// there is", and `match_arm_items` already declines variant-typed
+/// scrutinees for the same reason. Non-enum scrutinees offer nothing at all
+/// — there are no arms to guess.
+fn match_template_items(
+    db: &RootDatabase,
+    file: SourceFile,
+    real_root: &SyntaxNode,
+    real_text: &str,
+    awaiting: &MatchAwaitingArms,
+    edit_range: TextRange,
+) -> Vec<CompletionItem> {
+    let Some(anchor) = real_anchor(real_root, awaiting.scrutinee_range.start()) else {
+        return Vec::new();
+    };
+    let Some(item) = hir::checkable_item_at(db, file, &anchor) else {
+        return Vec::new();
+    };
+    let (_, source_map) = hir::body_with_source_map(db, item);
+    let Some(scrutinee) = expr_for_range(source_map, real_root, awaiting.scrutinee_range) else {
+        return Vec::new();
+    };
+    let inference = hir::infer::infer(db, item);
+    let Some(hir::Ty::Named(named)) = inference.type_of_expr.get(scrutinee) else {
+        return Vec::new();
+    };
+    let Some(variants) = hir::enum_variants(db, named.decl.to_id(db)).as_ref() else {
+        return Vec::new();
+    };
+    if variants.is_empty() {
+        return Vec::new();
+    }
+
+    let indent = line_indent(real_text, awaiting.match_start);
+    // Type tier `0`, not [`TYPE_TIER_NONE`]: the arm list is the one answer
+    // the grammar admits at this position regardless of what the position
+    // *expects* a value to look like, so it must lead even when a typed
+    // prefix (`match s n˽`) carries an expectation another candidate
+    // happens to satisfy exactly.
+    let mut template = completion_item(
+        "match arms",
+        CompletionItemKind::Snippet,
+        Provenance::Gold,
+        0,
+        Some(format!(
+            "all {} {} of {}",
+            variants.len(),
+            if variants.len() == 1 {
+                "variant"
+            } else {
+                "variants"
+            },
+            named.decl.name,
+        )),
+        edit_range,
+    );
+    template.text_edit.insert = InsertText::Snippet {
+        snippet: match_template(variants, &indent, true),
+        plain: match_template(variants, &indent, false),
+    };
+    vec![template]
+}
+
+/// The indentation of the line `offset` sits on — the leading run of spaces
+/// and tabs, copied verbatim as the arm list's own base. Only the base: a
+/// nested arm line adds [`INDENT_UNIT`] on top of it, which is always
+/// spaces, so a hard-tab file gets a hard-tab base under a spaces-indented
+/// body rather than hard tabs throughout.
+fn line_indent(text: &str, offset: TextSize) -> String {
+    let before = &text[..usize::from(offset)];
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    text[line_start..]
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect()
+}
+
+/// The arm-list text: one arm per variant, house-formatted, closing brace
+/// back at the `match`'s own indentation.
+///
+/// **The indentation is ABSOLUTE** — every continuation line carries the
+/// full indentation it should end up with, rather than the relative
+/// indentation a re-indenting client would add its own base to. That is
+/// correct for Zed as it stands, which is the client this repo ships: Zed's
+/// snippet insertion runs `AutoindentMode::Block`, whose shift comes from a
+/// tree-sitter `suggest_autoindents` result, and the Must extension
+/// deliberately registers NO grammar (see
+/// `editors/zed/languages/must/config.toml`) — so there is no suggestion,
+/// the shift is zero, and the body lands verbatim. `insertTextMode` cannot
+/// pin this down instead: Zed reads it only on its non-snippet path.
+/// The day the extension gains a grammar this constant-shaped choice has to
+/// flip to relative; `platform-codegen-and-tooling.md` carries that as a
+/// re-evaluate-when item.
+///
+/// `snippet` picks the two spellings apart. With tab stops, a payload gets
+/// **one stop per element** (`::Pair($1, $2)`) because a pattern must name
+/// exactly as many bindings as the variant declares. Without them the
+/// parens are dropped entirely rather than left empty — the same call
+/// `match_arm_items` makes for a single variant, and for the same reason:
+/// there is no sound name to invent, and `::Pair()` claims an arity of zero.
+fn match_template(variants: &[(String, Vec<hir::Ty>)], indent: &str, snippet: bool) -> String {
+    let mut out = String::from("{\n");
+    let mut stop = 1;
+    for (name, payload) in variants {
+        out.push_str(indent);
+        out.push_str(INDENT_UNIT);
+        out.push_str("::");
+        out.push_str(name);
+        if snippet && !payload.is_empty() {
+            out.push('(');
+            for i in 0..payload.len() {
+                if i > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str(&format!("${stop}"));
+                stop += 1;
+            }
+            out.push(')');
+        }
+        out.push_str(" => ");
+        if snippet {
+            out.push_str(&format!("${stop}"));
+            stop += 1;
+        }
+        out.push_str(",\n");
+    }
+    out.push_str(indent);
+    out.push('}');
+    out
 }
 
 /// A shorthand record-literal field name: the missing fields of the

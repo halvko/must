@@ -1033,6 +1033,14 @@ impl MatchExpr {
     pub fn arms(&self) -> impl Iterator<Item = MatchArm> + use<> {
         children(&self.syntax)
     }
+    /// The arm list's opening brace. Absent exactly when the arm list has
+    /// not been written yet (`match s` and nothing more): the parser
+    /// completes the `MATCH_EXPR` regardless, with an "expected `{`" error,
+    /// so this is what tells "no arm list yet" from "an arm list that
+    /// happens to be empty".
+    pub fn l_brace_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, L_BRACE)
+    }
 }
 
 impl MatchArm {

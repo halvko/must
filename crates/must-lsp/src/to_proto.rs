@@ -123,6 +123,7 @@ fn completion_item_kind(kind: ide::CompletionItemKind) -> lsp_types::CompletionI
         ide::CompletionItemKind::Enum => lsp_types::CompletionItemKind::ENUM,
         ide::CompletionItemKind::Constant => lsp_types::CompletionItemKind::CONSTANT,
         ide::CompletionItemKind::Keyword => lsp_types::CompletionItemKind::KEYWORD,
+        ide::CompletionItemKind::Snippet => lsp_types::CompletionItemKind::SNIPPET,
     }
 }
 

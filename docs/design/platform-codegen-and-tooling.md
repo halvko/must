@@ -50,6 +50,11 @@
   prefix words. The frame limit is 10,000, and the message quotes the number.
 - **P11** The debugger runs in-process on the const-eval interpreter (X08): same MIR, same
   machine, same UB findings.
+- **P12** `match` completions. An arm-list template that writes the rest of the
+  statement (every variant, payload bindings and arm bodies as tab stops in
+  definition order), on explicit invoke. Snippets are indented absolutely, because
+  the editor's snippet path shifts by a tree-sitter result and the extension
+  registers no grammar.
 - **P03** `print` emits exactly what it is given: `str` only, no newline, no formatting, no
   interpolation. The CLI runner writes to `stdout.lock()` — Rust's own line buffering, no
   per-call flush — and flushes it explicitly only before a crash report, so a program's
@@ -95,6 +100,10 @@
   guaranteed optimizations live there instead of being hoped for. **P08**
 - **The `str` platform ABI gets a second customer** — decide it on purpose before anything
   else depends on it. **P06**
+- **The editor extension gains a tree-sitter grammar** — the client then
+  re-indents multi-line snippet bodies and the template's absolute indentation
+  doubles. One function to fix; recorded because nobody would connect the
+  trigger to completions. **P12**
 - **Two open debug-adapter bugs**, not decisions: with loops and unfueled run mode an infinite
   loop hangs the session with no interrupt path; and breakpoint arrivals are deduped by
   frame/line/column, so a breakpoint in a loop body fires once per frame. **P11**

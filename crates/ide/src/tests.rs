@@ -2741,11 +2741,249 @@ static s = Shape::$0;
     );
 }
 
+// ---- The `match` arm-list template ----
+
+/// The sort key of one labelled candidate — read directly rather than
+/// eyeballing a rendered order.
+fn completion_sort_text(fixture_text: &str, label: &str) -> String {
+    let (analysis, _file, pos) = fixture(fixture_text);
+    let items = analysis.completions(pos);
+    items
+        .iter()
+        .find(|c| c.label == label)
+        .unwrap_or_else(|| panic!("no completion labeled {label:?}: {items:?}"))
+        .sort_text
+        .clone()
+}
+
+#[test]
+fn completions_match_template_writes_every_variant_as_an_arm() {
+    // The whole rest of the statement, house-formatted: arms one level in
+    // from the `match` keyword's own line, closing brace back at it. Tab
+    // stops run in DOCUMENT order — a variant's payload bindings, then its
+    // arm body, then on to the next arm.
+    assert_eq!(
+        completion_insert(
+            r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) {
+    match s $0
+};
+"#,
+            "match arms",
+        ),
+        crate::InsertText::Snippet {
+            snippet: "{\n        ::Circle($1) => $2,\n        ::Point => $3,\n    }".to_owned(),
+            plain: "{\n        ::Circle => ,\n        ::Point => ,\n    }".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn completions_match_template_gives_each_payload_its_own_tab_stop() {
+    // `check_match_pat` counts a pattern's bindings against the variant's
+    // payloads, so a two-payload variant needs two stops: one `$1` covering
+    // both would insert `::Pair($1)` and hand the user an arity error to
+    // fix. The numbering keeps running across arms.
+    let crate::InsertText::Snippet { snippet, .. } = completion_insert(
+        r#"
+type Shape = enum { Pair(usize, str), Point };
+static f = fn (s: Shape) {
+    match s $0
+};
+"#,
+        "match arms",
+    ) else {
+        panic!("the template is a snippet");
+    };
+    assert_eq!(
+        snippet,
+        "{\n        ::Pair($1, $2) => $3,\n        ::Point => $4,\n    }"
+    );
+}
+
+#[test]
+fn completions_match_template_indents_from_the_match_keyword() {
+    // Not from the cursor's line and not from a fixed column: the arm list
+    // is measured off the line the `match` itself sits on, so a nested one
+    // lands where a hand-written arm list would.
+    let crate::InsertText::Snippet { snippet, .. } = completion_insert(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) {
+    loop {
+        match s $0
+    }
+};
+"#,
+        "match arms",
+    ) else {
+        panic!("the template is a snippet");
+    };
+    assert_eq!(
+        snippet,
+        "{\n            ::Circle($1) => $2,\n            ::Point => $3,\n        }"
+    );
+}
+
+#[test]
+fn completions_match_template_plain_fallback_carries_no_tab_stops() {
+    // A snippet-incapable client must never see a literal `$1`. The parens
+    // go with the stops rather than being left empty, the same call
+    // `match_arm_items` makes for a single payload variant: `::Circle()`
+    // would claim an arity of zero, and there is no name to invent.
+    let crate::InsertText::Snippet { plain, .. } = completion_insert(
+        r#"
+type Shape = enum { Pair(usize, str), Point };
+static f = fn (s: Shape) {
+    match s $0
+};
+"#,
+        "match arms",
+    ) else {
+        panic!("the template is a snippet");
+    };
+    assert!(
+        !plain.contains('$'),
+        "plain fallback still has tab stops: {plain:?}"
+    );
+    assert_eq!(plain, "{\n        ::Pair => ,\n        ::Point => ,\n    }");
+}
+
+#[test]
+fn completions_match_template_ranks_first_but_suppresses_nothing() {
+    // Additive, not a replacement: the position also classifies as an
+    // ordinary fresh statement (the splice detaches the marker from the
+    // arm-less `match`), and those candidates keep their place. The
+    // template is gold, so it leads.
+    check_completions(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) {
+    match s $0
+};
+"#,
+        expect_test::expect![[r#"
+            match arms Snippet (all 2 variants of Shape)
+            s Variable (Shape)
+            AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            Shape Enum (enum { Circle(usize), Point })
+            f Function (fn(Shape) -> !)
+            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
+            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
+            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
+            dangling Function (fn::<T>() -> T.&raw mut)
+            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
+            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
+            panic Function (fn(str) -> !)
+            print Function (fn(str))
+            const Keyword
+            false Keyword
+            fn Keyword
+            if Keyword
+            let Keyword
+            loop Keyword
+            match Keyword
+            struct Keyword
+            true Keyword
+            unsafe Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_match_template_not_offered_without_an_enum_scrutinee() {
+    // No variants to predict: an integer, a struct-typed value and a
+    // scrutinee that resolves to nothing at all each offer no template
+    // (they keep their ordinary expression candidates, which the caller
+    // sees as "nothing changed here").
+    for fixture_text in [
+        "static f = fn (s: usize) { match s $0 };",
+        "type P = struct { x: usize };\nstatic f = fn (s: P) { match s $0 };",
+        "static f = fn { match nope $0 };",
+    ] {
+        check_no_completion(fixture_text, "match arms");
+    }
+}
+
+#[test]
+fn completions_match_template_not_offered_while_the_scrutinee_is_typed() {
+    // At `match s|` the typed prefix IS the scrutinee's own text — the user
+    // is still naming the value, and wrapping an arm list around a
+    // half-written name would be wrong. The scrutinee slot answers instead.
+    let fixture_text = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) { match s$0 };
+"#;
+    check_no_completion(fixture_text, "match arms");
+    check_has_completion(fixture_text, "s");
+}
+
+#[test]
+fn completions_match_template_not_offered_once_an_arm_list_exists() {
+    // The evidence lives in the REAL tree: splicing the marker in detaches
+    // the written arm list from its `match`, so the speculative tree would
+    // claim there is none. A template offered here would duplicate arms the
+    // user already wrote.
+    check_no_completion(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) { match s $0{ ::Point => 1 } };
+"#,
+        "match arms",
+    );
+    check_no_completion(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) { match s {$0} };
+"#,
+        "match arms",
+    );
+}
+
+#[test]
+fn completions_match_template_survives_a_typed_prefix_after_the_scrutinee() {
+    // The real tree's parser gives up on the match right after the
+    // scrutinee once it meets an unexpected token, so a typed prefix in the
+    // arm-list slot (`match s n˽`) looks — from the cursor's own token —
+    // like ordinary text outside any `MATCH_EXPR`. Anchoring the ancestor
+    // walk at `edit_range.start()` (before the prefix) rather than the
+    // cursor keeps it inside the match, so the template survives the first
+    // keystroke instead of vanishing.
+    let fixture_text = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) {
+    match s n$0
+};
+"#;
+    check_has_completion(fixture_text, "match arms");
+}
+
+#[test]
+fn completions_match_template_leads_even_under_a_matching_expectation() {
+    // The template's type tier is pinned to `0` rather than derived from an
+    // expectation it cannot have (a whole statement has no "type" to
+    // compare): without the pin, a typed prefix that happens to satisfy a
+    // surrounding expectation exactly (tier `0`) would outrank the template
+    // (tier `2`, `TYPE_TIER_NONE`) even though the template is the one
+    // answer the grammar admits at this position.
+    let fixture_text = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape, n: usize) {
+    let r: usize = match s n$0
+};
+"#;
+    assert_eq!(
+        completion_sort_text(fixture_text, "match arms"),
+        "0_00_match arms"
+    );
+}
+
 #[test]
 fn completions_match_arm_pattern_gives_each_payload_its_own_tab_stop() {
-    // The pattern slot's arity: a two-payload variant names two bindings.
-    // Both the bare (sigil-inserting) slot and a slot already past a `::`
-    // carry it.
+    // The pattern slot's own arity fix, matching the template's: a
+    // two-payload variant names two bindings. Both the bare (sigil-
+    // inserting) slot and a slot already past a `::` carry it.
     let bare = r#"
 type Shape = enum { Pair(usize, str), Point };
 static f = fn (s: Shape) {

@@ -19,9 +19,10 @@ Then install the editor extension once:
    `editors/zed/` from this repo.
 2. Open this repo in Zed and edit `examples/hello.must` — diagnostics, hover,
    goto-definition, quick fixes, and completions (type-directed ranking,
-   member/match-arm/record-field candidates, and snippets for parameterful
-   calls, `type` RHS shells, payload variants, and record fields when your
-   client supports them) come from your local build.
+   member/match-arm/record-field candidates, an arm-list template for an
+   arm-less `match`, and snippets for parameterful calls, `type` RHS shells,
+   payload variants, and record fields when your client supports them) come
+   from your local build.
 3. For syntax highlighting and the ▶ run buttons, enable LSP semantic
    tokens and code lenses in your Zed `settings.json` (Must has no
    tree-sitter grammar; the server is the only coloring source — and code

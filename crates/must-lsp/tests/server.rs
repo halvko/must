@@ -1105,6 +1105,92 @@ fn snippet_incapable_client_receives_the_plain_fallback() {
     drop(client);
 }
 
+/// Fetches the `match arms` template at the arm-list slot of an arm-less
+/// `match` over a two-variant enum — the multi-line snippet both capability
+/// tests below check.
+fn match_template_item(
+    client: &mut TestClient,
+    file: &lsp_types::Uri,
+) -> lsp_types::CompletionItem {
+    client.open(
+        file,
+        "type Shape = enum { Circle(usize), Point };\nstatic f = fn (s: Shape) {\n    match s \n};\n",
+    );
+    client.next_diagnostics();
+
+    let response = client.request::<lsp_types::request::Completion>(lsp_types::CompletionParams {
+        text_document_position: lsp_types::TextDocumentPositionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+            position: lsp_types::Position::new(2, 12),
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+        context: None,
+    });
+    let Some(lsp_types::CompletionResponse::Array(items)) = response else {
+        panic!("expected a plain array of completion items, got {response:?}");
+    };
+    items
+        .into_iter()
+        .find(|it| it.label == "match arms")
+        .expect("the arm-list template is offered")
+}
+
+#[test]
+fn snippet_capable_client_receives_the_match_arm_template() {
+    let mut client = TestClient::start_with(init_with_snippet_support(true));
+    let file = uri("file:///match_template_capable.must");
+
+    let template = match_template_item(&mut client, &file);
+    assert_eq!(
+        template.kind,
+        Some(lsp_types::CompletionItemKind::SNIPPET),
+        "the template announces itself as one"
+    );
+    assert_eq!(
+        template.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET)
+    );
+    let edit = match template.text_edit.as_ref().expect("has a text edit") {
+        lsp_types::CompletionTextEdit::Edit(edit) => edit,
+        other => panic!("expected a plain edit, got {other:?}"),
+    };
+    // Absolute indentation, measured off the `match` keyword's own line —
+    // see `ide::completions::match_template` for why it is not relative.
+    assert_eq!(
+        edit.new_text,
+        "{\n        ::Circle($1) => $2,\n        ::Point => $3,\n    }"
+    );
+
+    drop(client);
+}
+
+#[test]
+fn snippet_incapable_client_receives_the_match_template_fallback() {
+    // The one client-visible thing that must never happen: literal `$1`
+    // text pasted into a buffer by a client that cannot expand it.
+    let mut client = TestClient::start_with(init_with_snippet_support(false));
+    let file = uri("file:///match_template_incapable.must");
+
+    let template = match_template_item(&mut client, &file);
+    assert_eq!(template.insert_text_format, None);
+    let edit = match template.text_edit.as_ref().expect("has a text edit") {
+        lsp_types::CompletionTextEdit::Edit(edit) => edit,
+        other => panic!("expected a plain edit, got {other:?}"),
+    };
+    assert!(
+        !edit.new_text.contains('$'),
+        "snippet syntax leaked to a snippet-incapable client: {:?}",
+        edit.new_text
+    );
+    assert_eq!(
+        edit.new_text,
+        "{\n        ::Circle => ,\n        ::Point => ,\n    }"
+    );
+
+    drop(client);
+}
+
 /// Dogfood: open a real example file and ask for completions at a
 /// hand-picked, unremarkable spot (a fresh statement at the top of
 /// `run_lights`'s body). Not a snapshot of the whole list — examples are
