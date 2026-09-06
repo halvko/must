@@ -2741,6 +2741,43 @@ static s = Shape::$0;
     );
 }
 
+#[test]
+fn completions_match_arm_pattern_gives_each_payload_its_own_tab_stop() {
+    // The pattern slot's arity: a two-payload variant names two bindings.
+    // Both the bare (sigil-inserting) slot and a slot already past a `::`
+    // carry it.
+    let bare = r#"
+type Shape = enum { Pair(usize, str), Point };
+static f = fn (s: Shape) {
+    match s {
+        $0
+    }
+};
+"#;
+    assert_eq!(
+        completion_insert(bare, "::Pair"),
+        crate::InsertText::Snippet {
+            snippet: "::Pair($1, $2)".to_owned(),
+            plain: "::Pair".to_owned(),
+        }
+    );
+    let qualified = r#"
+type Shape = enum { Pair(usize, str), Point };
+static f = fn (s: Shape) {
+    match s {
+        Shape::$0
+    }
+};
+"#;
+    assert_eq!(
+        completion_insert(qualified, "Pair"),
+        crate::InsertText::Snippet {
+            snippet: "Pair($1, $2)".to_owned(),
+            plain: "Pair".to_owned(),
+        }
+    );
+}
+
 // ---- generics: ide smoke + real evaluation ----
 //
 // The no-panic smoke tests keep their smoke shape: completions/hover with the

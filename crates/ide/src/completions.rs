@@ -56,11 +56,13 @@
 //! (`name($1)`, unless the position expects the `fn` itself as a *value*,
 //! never called — then it's the bare name), a `type X = …` RHS
 //! (`struct { $1 }` / `enum { $1 }`), a payload-carrying variant pattern in
-//! a match arm (`::Circle($1)` / `Circle($1)`), and a missing record-literal
-//! field (`x = $1`). Every snippet carries its own plain fallback for a
-//! client without `snippetSupport` — `must-lsp::to_proto` picks between the
-//! two per client capability; `ide` itself has no notion of "the client",
-//! only the two spellings.
+//! a match arm (`::Circle($1)` / `Pair($1, $2)` — **one tab stop per
+//! payload**, because `check_match_pat` counts bindings against payloads
+//! and a single stop would hand a two-payload variant an arity error), and
+//! a missing record-literal field (`x = $1`). Every snippet carries its
+//! own plain fallback for a client without `snippetSupport` —
+//! `must-lsp::to_proto` picks between the two per client capability;
+//! `ide` itself has no notion of "the client", only the two spellings.
 //!
 //! ## Detail, and why there is no `completionItem/resolve`
 //!
@@ -1184,13 +1186,20 @@ fn match_arm_items(
                 item.filter_text = name.clone();
             }
             // A payload-carrying variant inserts a snippet with a
-            // tab-stop for the payload (`::Circle($1)` / `Circle($1)`,
-            // matching the context's own spelling); a snippet-incapable
-            // client falls back to the bare insertion (no parens —
-            // there's no sound single value to place there without one).
+            // tab-stop per payload element (`::Circle($1)` /
+            // `Pair($1, $2)`, matching the context's own spelling) — one
+            // stop each, not one for the lot, because `check_match_pat`
+            // counts a pattern's bindings against the variant's payloads
+            // and hands a mismatch the `PatternArity` error. A
+            // snippet-incapable client falls back to the bare insertion
+            // (no parens — there's no sound name to invent).
             if !payload.is_empty() {
+                let stops = (1..=payload.len())
+                    .map(|i| format!("${i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 item.text_edit.insert = InsertText::Snippet {
-                    snippet: format!("{insert}($1)"),
+                    snippet: format!("{insert}({stops})"),
                     plain: insert,
                 };
             }
