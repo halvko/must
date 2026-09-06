@@ -564,6 +564,28 @@ static describe = fn (s: Shape) -> str {
 };
 ```
 
+*The sigil mirrors into expression position too.* `::Circle(3)` and
+`::Point` build a variant of whatever enum the position *expects*, exactly
+as the pattern names a variant of whatever enum the scrutinee *has*:
+
+```
+static origin: Shape = ::Point;
+static make = fn (r: usize) -> Shape { ::Circle(r) };
+static describe_point = fn () -> str { describe(::Point) };
+```
+
+It reads the expected type and nothing else — it never runs inference
+backwards to find one. So it works wherever the position already has a
+type: an annotation, a return type, a call argument, an annotated `let`,
+a record-literal field, an array element, an assignment's right-hand
+side, a returned value, and the right operand of `==`/`!=`. Where
+nothing pins the position — an unannotated `let`, and today also a
+`match` arm's body or an `if` branch, whose types are decided by the
+join *after* the branches are checked — it is a plain error naming the
+qualified spelling. The qualified form is always available and stays the
+canonical one; the sigil only ever removes a rejection, so nothing is
+expressible with it that is not expressible without it.
+
 A bare name in pattern position — no `::`, no qualifying enum — *always*
 binds the whole scrutinee, even when it happens to spell a variant's name;
 matching a variant requires the `::` sigil. This is deliberate: silent

@@ -113,7 +113,10 @@ impl CheckCtx<'_> {
     }
     fn check_expr(&mut self, expr: ExprId, in_unsafe: bool) {
         match &self.body.exprs[expr] {
-            ExprData::Missing | ExprData::Literal(_) | ExprData::NameRef(_) => {}
+            ExprData::Missing
+            | ExprData::Literal(_)
+            | ExprData::NameRef(_)
+            | ExprData::ElidedVariant { .. } => {}
             // Both lists a path can carry — the owner's turbofish and a
             // second segment's own — hold ordinary const-arg expressions,
             // so both are walked (the reserved one still contains code).

@@ -189,6 +189,9 @@ impl LowerCtx<'_> {
                 // a FIELD — the wrong namespace): the path itself is the
                 // value that cannot be produced.
                 InferenceDiagnostic::NoSuchVariant { expr, .. }
+                // An elided variant with no enum in view: the sigil itself
+                // is the value that cannot be produced.
+                | InferenceDiagnostic::ElidedVariantNoEnum { expr, .. }
                 | InferenceDiagnostic::NoVariantsOnStruct { expr, .. }
                 | InferenceDiagnostic::QualifiedPathIsField { expr, .. }
                 | InferenceDiagnostic::VariantPathOnValue { expr, .. } => {
@@ -787,8 +790,10 @@ impl LowerCtx<'_> {
                 // aggregate. The callee path itself is not lowered (its
                 // first-class lowering would synthesize a constructor
                 // body nothing here needs).
-                if let ExprData::VariantPath { .. } = &body.exprs[*callee]
-                    && self.infer.variant_of_expr.get(*callee).is_some()
+                if matches!(
+                    &body.exprs[*callee],
+                    ExprData::VariantPath { .. } | ExprData::ElidedVariant { .. }
+                ) && self.infer.variant_of_expr.get(*callee).is_some()
                     && matches!(self.ty(*callee), Ty::Fn(_))
                 {
                     let arg_ops: Vec<Operand> =
@@ -1255,6 +1260,15 @@ impl LowerCtx<'_> {
             // first-class constructor function, synthesized as a tiny MIR
             // body (params → payload aggregate) so calling it through a
             // variable runs like any function value.
+            // `::None` / `::Some` — the elided sigil. Inference resolved
+            // it against the expected type and recorded exactly the
+            // `variant_of_expr` a qualified path records, so the value is
+            // built the identical way; an unresolved one is a pending
+            // value trap (`ElidedVariantNoEnum`).
+            ExprData::ElidedVariant { .. } => match self.infer.variant_of_expr.get(expr).cloned() {
+                Some(variant) => self.variant_value_operand(b, expr, &variant),
+                None => Operand::Const(Const::Unit),
+            },
             ExprData::VariantPath { base, .. } => {
                 // A qualified MEMBER reference (`Point::len`,
                 // `Display::<Self = Foo>::fmt`): the member item's fn value.
@@ -1269,28 +1283,7 @@ impl LowerCtx<'_> {
                     return self.member_value_operand(b, expr, expr, &value.member, &value.args);
                 }
                 match self.infer.variant_of_expr.get(expr).cloned() {
-                    Some(variant) => {
-                        // Substituted with the mention's enum args, so a
-                        // synthesized constructor body's param types are
-                        // the instance's, not the rigid generic body's.
-                        let payload_tys =
-                            hir::variant_payloads_for(self.db, &variant).unwrap_or_default();
-                        if payload_tys.is_empty() {
-                            let dest = b.temp(self.ty(expr));
-                            b.push_assign(
-                                dest,
-                                Rvalue::Aggregate {
-                                    kind: AggregateKind::VariantPayload,
-                                    ops: Vec::new(),
-                                },
-                                expr,
-                            );
-                            Operand::Copy(dest.into())
-                        } else {
-                            let body_id = self.synth_ctor_body(expr, &variant, &payload_tys);
-                            Operand::Const(Const::Fn(body_id))
-                        }
-                    }
+                    Some(variant) => self.variant_value_operand(b, expr, &variant),
                     // No resolved variant. The diagnosed cases
                     // (`NoSuchVariant`, `NoVariantsOnStruct`,
                     // `VariantPathOnValue`) are pending value traps — the
@@ -2751,6 +2744,42 @@ impl LowerCtx<'_> {
             }
         }
         Some(projection)
+    }
+
+    /// A resolved variant mention's value, whichever spelling reached it:
+    /// the payload-less variant IS the value (an empty tag-free payload),
+    /// and a payload-carrying one is a first-class constructor function,
+    /// synthesized as a tiny MIR body so calling it through a variable runs
+    /// like any function value.
+    ///
+    /// Shared by the qualified path and the elided sigil deliberately: they
+    /// resolve to the same `VariantTy`, so they must lower to the same
+    /// thing, and one function is how that stays true.
+    fn variant_value_operand(
+        &mut self,
+        b: &mut BodyBuilder,
+        expr: ExprId,
+        variant: &hir::VariantTy,
+    ) -> Operand {
+        // Substituted with the mention's enum args, so a synthesized
+        // constructor body's param types are the instance's, not the rigid
+        // generic body's.
+        let payload_tys = hir::variant_payloads_for(self.db, variant).unwrap_or_default();
+        if payload_tys.is_empty() {
+            let dest = b.temp(self.ty(expr));
+            b.push_assign(
+                dest,
+                Rvalue::Aggregate {
+                    kind: AggregateKind::VariantPayload,
+                    ops: Vec::new(),
+                },
+                expr,
+            );
+            Operand::Copy(dest.into())
+        } else {
+            let body_id = self.synth_ctor_body(expr, variant, &payload_tys);
+            Operand::Const(Const::Fn(body_id))
+        }
     }
 
     /// Synthesize the body of a first-class variant constructor

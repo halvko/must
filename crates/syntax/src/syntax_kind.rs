@@ -115,6 +115,7 @@ pub enum SyntaxKind {
     BREAK_EXPR,
     CONTINUE_EXPR,
     RETURN_EXPR,
+    ELIDED_VARIANT_EXPR,
     VARIANT_PAT,
     WILDCARD_PAT,
     BIND_PAT,

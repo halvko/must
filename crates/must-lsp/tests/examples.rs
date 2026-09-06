@@ -373,7 +373,13 @@ fn errors_checks_dirty_with_the_documented_count() {
             260 | static undeclared_outlives = fn::<@a, @b>(x: usize.&::<@a>) -> usize.&::<@b> { x };
                 |                                                                                ^
 
-            found 25 errors and 1 warning
+            error: cannot resolve `::Point` without an expected type — write `Enum::Point`
+              --> examples/errors.must:270:53
+                |
+            270 | static sigil_without_a_type = fn () -> () { let s = ::Point; };
+                |                                                     ^^^^^^^
+
+            found 26 errors and 1 warning
         "#]],
     );
 }

@@ -108,6 +108,14 @@ ast_node!(BinExpr: BIN_EXPR);
 ast_node!(IfExpr: IF_EXPR);
 ast_node!(Literal: LITERAL);
 ast_node!(PathExpr: PATH_EXPR);
+ast_node!(
+    /// `::Circle(3)` / `::None` — a variant of the EXPECTED type's
+    /// enum, enum segment dropped: the expression mirror of the
+    /// elided-sigil variant pattern. Exactly one `NameRef` child, with
+    /// the `COLON2` before it (so it can never be confused with a
+    /// `PathExpr`, which always starts at an `IDENT`).
+    ElidedVariantExpr: ELIDED_VARIANT_EXPR
+);
 ast_node!(FnType: FN_TYPE);
 ast_node!(UnitType: UNIT_TYPE);
 ast_node!(NeverType: NEVER_TYPE);
@@ -387,6 +395,7 @@ ast_enum!(
     Expr: FnLiteral,
     CallExpr,
     PathExpr,
+    ElidedVariantExpr,
     Literal,
     BlockExpr,
     ConstBlockExpr,
@@ -1089,6 +1098,15 @@ impl ReturnExpr {
     /// The returned value; `None` for a bare `return` (which returns `()`).
     pub fn expr(&self) -> Option<Expr> {
         child(&self.syntax)
+    }
+}
+
+impl ElidedVariantExpr {
+    /// The variant name (`Circle` in `::Circle(3)`). Resolved
+    /// type-directed during inference, like a variant path's second
+    /// segment — never by name resolution.
+    pub fn variant_name_ref(&self) -> Option<NameRef> {
+        children::<NameRef>(&self.syntax).next()
     }
 }
 

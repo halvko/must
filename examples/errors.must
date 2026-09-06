@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 25 errors and 1 warning.
+// exactly: found 26 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -258,3 +258,13 @@ static self_hole = fn (n: usize) -> usize { Countable::<Self = _>::count(n) };
 //     the fix, and it is exactly what the message says.
 //     error: using this borrow where a longer-lived one is expected needs `@a` to outlive `@b`, which this signature does not declare; add `@a: @b` to the binder
 static undeclared_outlives = fn::<@a, @b>(x: usize.&::<@a>) -> usize.&::<@b> { x };
+
+// 27. `::Variant` in EXPRESSION position with no enum in view. The sigil
+//     is the mirror of the variant PATTERN's: the pattern reads the
+//     scrutinee's enum, the expression reads the position's expected type.
+//     Here the `let` has no annotation, so there is no expected type to
+//     read — and rather than inferring one backwards, it refuses and names
+//     the qualified spelling, which is always available and stays the
+//     canonical one. Sugar that only ever removes a rejection.
+//     error: cannot resolve `::Point` without an expected type — write `Enum::Point`
+static sigil_without_a_type = fn () -> () { let s = ::Point; };

@@ -136,7 +136,13 @@ struct CheckCtx<'db> {
 impl CheckCtx<'_> {
     fn check_expr(&mut self, expr: ExprId, in_const: bool) {
         match &self.body.exprs[expr] {
-            ExprData::Missing | ExprData::Literal(_) | ExprData::NameRef(_) => {}
+            // An elided variant is a leaf like a literal: no children,
+            // and the value it builds is const-legal wherever the
+            // qualified spelling's payload-less form is.
+            ExprData::Missing
+            | ExprData::Literal(_)
+            | ExprData::NameRef(_)
+            | ExprData::ElidedVariant { .. } => {}
             // A variant path is a name (or a pure constructor value) —
             // nothing to reject; its base is a bare `NameRef`.
             ExprData::VariantPath { .. } => {}
@@ -314,6 +320,11 @@ impl CheckCtx<'_> {
                         .push(ConstCheckDiagnostic::ValueCall { callee });
                 }
             }
+            // The elided sigil is that same construction spelled shorter
+            // (`::Circle(3)`), and it can never be the trait-member case:
+            // a trait member needs the qualifying segment this spelling
+            // drops. So always const-legal, with no exception to carve.
+            ExprData::ElidedVariant { .. } => {}
             // A turbofish callee (`f::<usize>(4)`) is judged by what its
             // base names — calling an instantiated generic `const fn` in a
             // const context is legal (evaluation is staged, but the RULE

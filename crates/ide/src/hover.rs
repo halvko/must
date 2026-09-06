@@ -73,6 +73,27 @@ pub(crate) fn hover(
         );
     }
 
+    // `::Circle` in expression position: the same variant hover the
+    // qualified `Shape::Circle` gets — inference resolved it to one
+    // variant of one enum, and that is what the hover shows.
+    if let Some(name_ref) = ast::NameRef::cast(parent.clone())
+        && let Some(elided) = name_ref
+            .syntax()
+            .parent()
+            .and_then(ast::ElidedVariantExpr::cast)
+    {
+        let item = hir::checkable_item_at(db, file, elided.syntax())?;
+        let (_, source_map) = hir::body_with_source_map(db, item);
+        let expr = source_map.expr_for_node(SyntaxNodePtr::new(elided.syntax()))?;
+        let variant = hir::infer::infer(db, item).variant_of_expr.get(expr)?;
+        return variant_hover(
+            db,
+            &variant.decl,
+            &variant.name,
+            name_ref.syntax().text_range(),
+        );
+    }
+
     // The field name of a field access: the type of the whole access — the
     // field's type — under the field's name.
     if let Some(name_ref) = ast::NameRef::cast(parent.clone())

@@ -75,8 +75,10 @@
   licenses implicit reborrow and degradation (M07); the second separates reborrow from
   auto-ref; the third stops a call site minting `x.*.&raw mut` and laundering a region (M08).
 - **G25** A bare pattern name never reinterprets as a variant: it binds fresh with a
-  shadowing warning, and `::Circle` is the variant spelling in a pattern. In expression
-  position the qualified `Shape::Circle` is the spelling.
+  shadowing warning, and `::Circle` is the variant spelling. The sigil also works in
+  expression position as reject-only sugar: it reads the position's expected type and nothing
+  else, so it resolves wherever an expectation reaches and is refused elsewhere with the
+  qualified spelling named. The qualified spelling stays canonical.
 
 ## Discarded
 

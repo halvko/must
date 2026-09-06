@@ -241,6 +241,10 @@ fn classify_ident(
         // `Display::<Self = Foo>::fmt`): it names the trait's `Self`
         // parameter, so it reads like the type name it stands for.
         (NAME_REF, NAMED_ARG) => Some(classify_type_name(db, file, token.text())),
+        // The sigil's sole segment (`::Circle` in expression position) is
+        // an enum member, exactly as the second segment of the qualified
+        // spelling is — the node kind alone says so.
+        (NAME_REF, ELIDED_VARIANT_EXPR) => Some((HlTag::EnumMember, HlMods::NONE)),
         (NAME_REF, PATH_EXPR) => {
             if is_variant_segment(&parent) {
                 // A qualified MEMBER path wears the same two-segment shape

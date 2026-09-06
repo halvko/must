@@ -257,7 +257,14 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
                 compute_expr_scopes(body, scopes, *value, scope);
             }
         }
-        ExprData::Missing | ExprData::Literal(_) | ExprData::NameRef(_) | ExprData::Continue => {}
+        // An elided variant names nothing scopes can resolve: its one
+        // segment is the VARIANT, resolved type-directed during
+        // inference, exactly like a variant path's second segment.
+        ExprData::Missing
+        | ExprData::Literal(_)
+        | ExprData::NameRef(_)
+        | ExprData::ElidedVariant { .. }
+        | ExprData::Continue => {}
     }
 }
 

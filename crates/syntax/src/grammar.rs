@@ -661,6 +661,23 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
             p.bump_any();
             m.complete(p, LITERAL)
         }
+        // `::Variant` / `::Variant(args)` — the elided sigil in EXPRESSION
+        // position, the mirror of the pattern spelling: a variant of the
+        // *expected* type's enum, enum segment dropped. Same node shape as
+        // `VARIANT_PAT`'s sigil arm (one `NameRef`, `COLON2` before it),
+        // and the payload form is left to the ordinary postfix loop — so
+        // `::Some(v)` is a `CALL_EXPR` over this node exactly as
+        // `Option::Some(v)` is one over a `PATH_EXPR`.
+        COLON2 => {
+            let m = p.start();
+            p.bump(COLON2);
+            if p.at(IDENT) {
+                name_ref(p);
+            } else {
+                p.error("expected a variant name after `::`");
+            }
+            m.complete(p, ELIDED_VARIANT_EXPR)
+        }
         IDENT => {
             let m = p.start();
             name_ref(p);
@@ -1102,6 +1119,10 @@ fn at_expr_start(p: &Parser<'_>) -> bool {
     match p.current() {
         INT_NUMBER | STRING | TRUE_KW | FALSE_KW | IDENT | L_PAREN | L_BRACE | L_BRACKET
         | FN_KW | IF_KW | MATCH_KW | LOOP_KW | BREAK_KW | CONTINUE_KW | RETURN_KW | UNSAFE_KW
+        // `::Variant` — the elided sigil starts an expression too, so
+        // `return ::None;` and `break ::None;` carry their value instead of
+        // stopping at the keyword and leaving the sigil stranded.
+        | COLON2
         | MINUS => true,
         CONST_KW => matches!(p.nth(1), FN_KW | L_BRACE),
         STRUCT_KW | ENUM_KW => at_type_literal_body(p),

@@ -89,6 +89,22 @@ pub(crate) fn goto_definition(
         return nav_to_requirement(db, &bound_call.trait_, bound_call.member_index);
     }
 
+    // `::Circle` in expression position: the sigil's sole segment is the
+    // variant, resolved type-directed rather than by name — so the jump
+    // reads the same `variant_of_expr` entry the qualified spelling
+    // produces, and lands in the same place.
+    if let Some(elided) = name_ref
+        .syntax()
+        .parent()
+        .and_then(ast::ElidedVariantExpr::cast)
+    {
+        let item = hir::checkable_item_at(db, file, elided.syntax())?;
+        let (_, source_map) = hir::body_with_source_map(db, item);
+        let expr = source_map.expr_for_node(SyntaxNodePtr::new(elided.syntax()))?;
+        let variant = hir::infer::infer(db, item).variant_of_expr.get(expr)?;
+        return nav_to_variant(db, variant);
+    }
+
     let path_expr = name_ref.syntax().parent().and_then(ast::PathExpr::cast)?;
 
     // Which item are we inside?

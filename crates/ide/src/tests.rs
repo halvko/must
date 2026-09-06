@@ -1120,6 +1120,53 @@ static s: Shape::Cir$0cle = Shape::Circle(1);
 }
 
 #[test]
+fn goto_variant_from_the_expression_sigil() {
+    // `::Point` in expression position resolves to one variant of one
+    // enum, so it jumps exactly where the qualified spelling does.
+    check_goto(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static s: Shape = ::Poi$0nt;
+"#,
+        "Point",
+        0,
+    );
+}
+
+#[test]
+fn hover_the_expression_sigil_shows_the_variant() {
+    check_hover(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static s: Shape = ::Poi$0nt;
+"#,
+        "```must\nShape::Point\n```",
+    );
+}
+
+#[test]
+fn highlights_the_expression_sigil_as_an_enum_member() {
+    check_highlights(
+        r#"type Shape = enum { Circle(usize), Point };
+static s: Shape = ::Point;"#,
+        expect_test::expect![[r#"
+            0..4 "type" Keyword
+            5..10 "Shape" Type.declaration
+            11..12 "=" Operator
+            13..17 "enum" Keyword
+            20..26 "Circle" EnumMember.declaration
+            27..32 "usize" Type.defaultLibrary
+            35..40 "Point" EnumMember.declaration
+            44..50 "static" Keyword
+            51..52 "s" Variable.declaration.static
+            54..59 "Shape" Type
+            60..61 "=" Operator
+            64..69 "Point" EnumMember
+        "#]],
+    );
+}
+
+#[test]
 fn highlights_enum_declaration_and_variant_paths() {
     check_highlights(
         r#"type Shape = enum { Circle(usize), Point };

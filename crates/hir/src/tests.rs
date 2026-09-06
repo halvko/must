@@ -9902,6 +9902,85 @@ static f = fn(c: Cell) -> usize { c.nosuch().* };
     );
 }
 
+// ---- `::Variant` in expression position --------------------------------
+
+#[test]
+fn an_elided_variant_expression_resolves_from_the_expected_type() {
+    // The mirror of the elided-sigil variant PATTERN: the pattern reads the
+    // scrutinee's enum, the expression reads the position's expected type.
+    // Every axiom position works — an item annotation, a return type, a
+    // call argument, a `let` annotation — including a generic enum, whose
+    // ARGS come from the expectation rather than from a fresh mention.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+type Opt = enum::<T> { Some(T), None };
+static annotated: Shape = ::Circle(3);
+static returned = fn() -> Shape { ::Point };
+static taken = fn(s: Shape) -> usize { 1 };
+static passed = fn() -> usize { taken(::Point) };
+static bound = fn() -> usize {
+    let s: Shape = ::Circle(2);
+    1
+};
+static generic = fn::<@a>(p: usize.&::<@a>) -> Opt::<usize.&::<@a>> { ::Some(p) };
+static empty = fn::<@a>(p: usize.&::<@a>) -> Opt::<usize.&::<@a>> { ::None };
+static returned_by_keyword = fn() -> Shape { return ::Point; };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn an_elided_variant_expression_is_reject_only_sugar() {
+    // It reads `expected` and NOTHING else: no backwards inference, no
+    // sibling scan, no deferral. Where no enum is in view the qualified
+    // spelling is named, and it always works — so this only ever removes a
+    // rejection, and the qualified form stays canonical.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static unpinned = fn() -> usize {
+    let s = ::Point;
+    1
+};
+static not_an_enum = fn() -> usize { ::Point };
+static no_such_variant = fn() -> Shape { ::Square };
+"#,
+        expect![[r#"
+            91..98: cannot resolve `::Point` without an expected type — write `Enum::Point`
+            146..153: cannot resolve `::Point`: the expected type `usize` is not an enum — write `Enum::Point`
+            198..206: `Shape` has no variant `Square` (`Shape` is defined here at 6..11)
+        "#]],
+    );
+}
+
+#[test]
+fn an_elided_variant_expression_is_refused_in_a_join_position() {
+    // FLAGGED, and deliberate. A match arm's body and an `if` branch are
+    // JOIN leaves: each is inferred against a fresh variable so "outer
+    // expectation pressure never leaks in" (the join's own comment), and
+    // the construct's expectation is applied to the RESULT after every leaf
+    // has been visited. So there is genuinely no enum in view at the leaf,
+    // and the sigil is refused with the escape named.
+    //
+    // Lifting this is a second expectation channel through the join — an
+    // inference-shape decision, not sugar — and it is purely additive: it
+    // would only ever turn these errors into acceptances.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static in_arm = fn(c: bool) -> Shape { match c { _ => ::Point } };
+static in_branch = fn(c: bool) -> Shape { if c { ::Point } else { ::Point } };
+"#,
+        expect![[r#"
+            99..106: cannot resolve `::Point` without an expected type — write `Enum::Point`
+            161..168: cannot resolve `::Point` without an expected type — write `Enum::Point`
+            178..185: cannot resolve `::Point` without an expected type — write `Enum::Point`
+        "#]],
+    );
+}
+
 // ---- region obligations survive wrapping (joins, arrays, records) ------
 
 #[test]

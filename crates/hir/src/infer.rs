@@ -350,6 +350,20 @@ pub enum InferenceDiagnostic {
     /// `Shape::Missing` — the enum exists but declares no such variant.
     /// The squiggle narrows to the variant name; the declaration is the
     /// related location.
+    /// `::None` in expression position with no enum in view. The elided
+    /// sigil is REJECT-ONLY sugar: it reads the position's expected type
+    /// and nothing else — it never runs inference backwards to discover
+    /// one — so the qualified spelling stays canonical and is always the
+    /// named escape.
+    ElidedVariantNoEnum {
+        /// The elided-variant expression.
+        expr: ExprId,
+        /// The variant name as written.
+        variant: String,
+        /// The expected type, when the position had one that simply is not
+        /// an enum; `None` when nothing pinned the position at all.
+        expected: Option<Ty>,
+    },
     NoSuchVariant {
         /// The variant-path expression.
         expr: ExprId,
@@ -1245,6 +1259,7 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::NoSuchField { expr, .. }
             | InferenceDiagnostic::TypeNotValue { expr, .. }
             | InferenceDiagnostic::TypeCtorArgCount { expr, .. }
+            | InferenceDiagnostic::ElidedVariantNoEnum { expr, .. }
             | InferenceDiagnostic::NoSuchVariant { expr, .. }
             | InferenceDiagnostic::NoVariantsOnStruct { expr, .. }
             | InferenceDiagnostic::QualifiedPathIsField { expr, .. }
@@ -1514,6 +1529,19 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::NoSuchVariant { item, name, .. } => {
                 format!("`{}` has no variant `{name}`", item.display_name())
             }
+            InferenceDiagnostic::ElidedVariantNoEnum {
+                variant, expected, ..
+            } => match expected {
+                Some(expected) => format!(
+                    "cannot resolve `::{variant}`: the expected type `{}` is not an enum — \
+                     write `Enum::{variant}`",
+                    expected.display()
+                ),
+                None => format!(
+                    "cannot resolve `::{variant}` without an expected type — \
+                     write `Enum::{variant}`"
+                ),
+            },
             InferenceDiagnostic::NoVariantsOnStruct { item, .. } => {
                 format!(
                     "`{}` has no variants (it is a `struct` type)",
@@ -2973,6 +3001,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 InferenceDiagnostic::RecordLitExtraField { expected, .. } => {
                     *expected = resolve_finished(self.table, expected);
                 }
+                InferenceDiagnostic::ElidedVariantNoEnum {
+                    expected: Some(expected),
+                    ..
+                } => {
+                    *expected = resolve_finished(self.table, expected);
+                }
                 InferenceDiagnostic::NoSuchField { receiver_ty, .. }
                 | InferenceDiagnostic::NoSuchMember { receiver_ty, .. }
                 | InferenceDiagnostic::MemberCallAmbiguity { receiver_ty, .. } => {
@@ -3036,6 +3070,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::TypeNotValue { .. }
                 | InferenceDiagnostic::TypeCtorArgCount { .. }
                 | InferenceDiagnostic::NoSuchVariant { .. }
+                | InferenceDiagnostic::ElidedVariantNoEnum { expected: None, .. }
                 | InferenceDiagnostic::NoVariantsOnStruct { .. }
                 | InferenceDiagnostic::QualifiedPathIsField { .. }
                 | InferenceDiagnostic::VariantPathOnValue { .. }
@@ -3387,6 +3422,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 args.as_deref(),
                 member_args.as_deref(),
             ),
+            // `::None` — the elided sigil in expression position. Resolved
+            // against the position's EXPECTED type, which is why it is
+            // read here and nowhere else.
+            ExprData::ElidedVariant { variant } => {
+                let variant = variant.clone();
+                self.infer_elided_variant(expr, &variant, expected)
+            }
             ExprData::GenericApp { base, args } => self.infer_generic_app(expr, *base, args),
             ExprData::Call {
                 callee,
@@ -3483,6 +3525,28 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     let (callee, receiver, name) = (*callee, *receiver, name.clone());
                     return self
                         .infer_dot_call(expr, callee, receiver, &name, args, expected, cause);
+                }
+                // `::Some(v)` — the elided sigil with payloads. The
+                // CALLEE is what carries the sigil, but the enum is in the
+                // CALL's expectation, not the callee's (a callee's own
+                // expectation is a fn type), so the callee is resolved by
+                // hand against `expected` and the call then proceeds
+                // through the ordinary constructor-call machinery — the
+                // identical path `Option::Some(v)` takes.
+                if let ExprData::ElidedVariant { variant } = &self.body.exprs[*callee] {
+                    let (callee, variant) = (*callee, variant.clone());
+                    let callee_expectation = self.fresh_var();
+                    self.result
+                        .expectation_of_expr
+                        .insert(callee, callee_expectation);
+                    let callee_ty = self.infer_elided_variant(callee, &variant, expected);
+                    self.result.type_of_expr.insert(callee, callee_ty.clone());
+                    return {
+                        let ty = self.call_of_value(expr, callee, args, callee_ty);
+                        let ty = self.check(expr, ty, expected, cause);
+                        self.result.type_of_expr.insert(expr, ty.clone());
+                        ty
+                    };
                 }
                 let fresh = self.fresh_var();
                 let callee_ty = self.infer_expr(*callee, &fresh);
@@ -6259,6 +6323,96 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 self.infer_const_args_free(args.unwrap_or(&[]));
                 Ty::Error
             }
+        }
+    }
+
+    /// Resolve `::Variant` — the elided sigil in EXPRESSION position, the
+    /// mirror of the elided-sigil variant pattern. The pattern reads the
+    /// SCRUTINEE's enum; the expression reads the position's EXPECTED
+    /// type, and that is the whole of the rule.
+    ///
+    /// Deliberately REJECT-ONLY sugar, and the three properties that make
+    /// it so are worth stating together, because loosening any one turns it
+    /// into an inference feature:
+    ///
+    /// 1. It reads `expected` and nothing else. It never runs inference
+    ///    backwards, never scans siblings, never defers. A position whose
+    ///    expectation is still a variable — a match arm's body, an `if`
+    ///    branch, an unannotated `let` — has no enum in view and is
+    ///    REFUSED, with the qualified spelling named.
+    /// 2. It resolves to exactly what the qualified spelling resolves to,
+    ///    `variant_of_expr` included, so everything downstream (widening,
+    ///    MIR, hover) sees no difference at all.
+    /// 3. The enum's generic ARGS come from the expectation rather than
+    ///    from a fresh mention, which is what lets `-> Option::<V.&mut>`
+    ///    accept a bare `::None`: there is no second instantiation to
+    ///    reconcile.
+    ///
+    /// So the qualified spelling stays canonical — everything spellable
+    /// here is spellable there, and this only ever removes a rejection.
+    fn infer_elided_variant(&mut self, expr: ExprId, variant: &str, expected: &Ty) -> Ty {
+        let resolved = self.resolve_shallow(expected);
+        // A variant-typed expectation names its enum just as well; the
+        // value is then checked against the precise variant afterwards by
+        // the ordinary `check`, exactly as a qualified path would be.
+        let named = match &resolved {
+            Ty::Named(named) if enum_variants(self.db, named.decl.to_id(self.db)).is_some() => {
+                named.clone()
+            }
+            Ty::Variant(variant) => NamedTy {
+                decl: variant.decl.clone(),
+                args: variant.args.clone(),
+            },
+            // Errors are infectious and silent.
+            broken if broken.contains_error() => return Ty::Error,
+            other => {
+                // An unpinned expectation is "no enum in view", not "the
+                // wrong type": say so with the shape that names no type.
+                let expected = match other {
+                    Ty::Infer(_) | Ty::UnresolvedNumber => None,
+                    other => Some(other.clone()),
+                };
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::ElidedVariantNoEnum {
+                        expr,
+                        variant: variant.to_owned(),
+                        expected,
+                    });
+                return Ty::Error;
+            }
+        };
+        let variants = enum_variants(self.db, named.decl.to_id(self.db));
+        // A broken enum declaration carries its own diagnostic.
+        let Some(variants) = variants.as_ref() else {
+            return Ty::Error;
+        };
+        let Some(index) = variants.iter().position(|(name, _)| name == variant) else {
+            self.result
+                .diagnostics
+                .push(InferenceDiagnostic::NoSuchVariant {
+                    expr,
+                    item: named.decl.clone(),
+                    name: variant.to_owned(),
+                });
+            return Ty::Error;
+        };
+        let variant_ty = VariantTy {
+            decl: named.decl.clone(),
+            args: named.args,
+            index: index as u32,
+            name: std::sync::Arc::from(variant),
+        };
+        self.result.variant_of_expr.insert(expr, variant_ty.clone());
+        let payload = &variants[index].1;
+        if payload.is_empty() {
+            Ty::Variant(variant_ty)
+        } else {
+            let payload = payload
+                .iter()
+                .map(|ty| substitute_args(ty, &variant_ty.decl, &variant_ty.args))
+                .collect();
+            Ty::fn_type(payload, Ty::Variant(variant_ty))
         }
     }
 

@@ -3507,6 +3507,150 @@ fn variant_path_expression() {
 }
 
 #[test]
+fn elided_variant_expression() {
+    // The mirror of the elided-sigil variant PATTERN, same node shape: one
+    // `NameRef`, with the `COLON2` before it — so it can never be confused
+    // with a `PATH_EXPR`, which always starts at an `IDENT`.
+    check(
+        "static s: Shape = ::Point;",
+        expect![[r#"
+            SOURCE_FILE@0..26
+              STATIC_ITEM@0..26
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "s"
+                COLON@8..9 ":"
+                WHITESPACE@9..10 " "
+                PATH_TYPE@10..15
+                  NAME_REF@10..15
+                    IDENT@10..15 "Shape"
+                WHITESPACE@15..16 " "
+                EQ@16..17 "="
+                WHITESPACE@17..18 " "
+                ELIDED_VARIANT_EXPR@18..25
+                  COLON2@18..20 "::"
+                  NAME_REF@20..25
+                    IDENT@20..25 "Point"
+                SEMICOLON@25..26 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn elided_variant_expression_with_payload() {
+    // The payload form is left to the ordinary postfix loop, so it is a
+    // `CALL_EXPR` over the sigil node exactly as `Shape::Circle(3)` is one
+    // over a `PATH_EXPR`.
+    check(
+        "static s: Shape = ::Circle(3);",
+        expect![[r#"
+            SOURCE_FILE@0..30
+              STATIC_ITEM@0..30
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "s"
+                COLON@8..9 ":"
+                WHITESPACE@9..10 " "
+                PATH_TYPE@10..15
+                  NAME_REF@10..15
+                    IDENT@10..15 "Shape"
+                WHITESPACE@15..16 " "
+                EQ@16..17 "="
+                WHITESPACE@17..18 " "
+                CALL_EXPR@18..29
+                  ELIDED_VARIANT_EXPR@18..26
+                    COLON2@18..20 "::"
+                    NAME_REF@20..26
+                      IDENT@20..26 "Circle"
+                  ARG_LIST@26..29
+                    L_PAREN@26..27 "("
+                    LITERAL@27..28
+                      INT_NUMBER@27..28 "3"
+                    R_PAREN@28..29 ")"
+                SEMICOLON@29..30 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn elided_variant_expression_after_return() {
+    // `return`/`break` take a value only when the next token can start one,
+    // so `COLON2` has to be an expression starter or the sigil is stranded
+    // and the `return` silently becomes valueless.
+    check(
+        "static f = fn() -> Shape { return ::Point; };",
+        expect![[r#"
+            SOURCE_FILE@0..45
+              STATIC_ITEM@0..45
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..44
+                  FN_KW@11..13 "fn"
+                  PARAM_LIST@13..15
+                    L_PAREN@13..14 "("
+                    R_PAREN@14..15 ")"
+                  WHITESPACE@15..16 " "
+                  RET_TYPE@16..24
+                    THIN_ARROW@16..18 "->"
+                    WHITESPACE@18..19 " "
+                    PATH_TYPE@19..24
+                      NAME_REF@19..24
+                        IDENT@19..24 "Shape"
+                  WHITESPACE@24..25 " "
+                  BLOCK_EXPR@25..44
+                    L_BRACE@25..26 "{"
+                    WHITESPACE@26..27 " "
+                    EXPR_STMT@27..42
+                      RETURN_EXPR@27..41
+                        RETURN_KW@27..33 "return"
+                        WHITESPACE@33..34 " "
+                        ELIDED_VARIANT_EXPR@34..41
+                          COLON2@34..36 "::"
+                          NAME_REF@36..41
+                            IDENT@36..41 "Point"
+                      SEMICOLON@41..42 ";"
+                    WHITESPACE@42..43 " "
+                    R_BRACE@43..44 "}"
+                SEMICOLON@44..45 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn elided_variant_expression_missing_name() {
+    check(
+        "static s: Shape = ::;",
+        expect![[r#"
+            SOURCE_FILE@0..21
+              STATIC_ITEM@0..21
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "s"
+                COLON@8..9 ":"
+                WHITESPACE@9..10 " "
+                PATH_TYPE@10..15
+                  NAME_REF@10..15
+                    IDENT@10..15 "Shape"
+                WHITESPACE@15..16 " "
+                EQ@16..17 "="
+                WHITESPACE@17..18 " "
+                ELIDED_VARIANT_EXPR@18..20
+                  COLON2@18..20 "::"
+                SEMICOLON@20..21 ";"
+            error 20..21: expected a variant name after `::`
+        "#]],
+    );
+}
+
+#[test]
 fn variant_path_type_annotation() {
     check(
         "static s: Shape::Circle = c;",

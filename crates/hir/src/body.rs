@@ -73,6 +73,17 @@ pub enum ExprData {
         /// owner's binder, which is why the two lists never merge.
         member_args: Option<Vec<GenericArgData>>,
     },
+    /// `::Circle` / `::Circle(3)` — the elided-sigil variant EXPRESSION,
+    /// the mirror of the elided-sigil variant pattern. There is no base to
+    /// allocate: the enum comes from the position's EXPECTED type, the way
+    /// the pattern's comes from the scrutinee. Reject-only sugar — when no
+    /// expected enum is in view, inference refuses and names the qualified
+    /// spelling, which stays canonical.
+    ElidedVariant {
+        /// The variant's name. Empty when broken (`::` alone — the parse
+        /// error covers it).
+        variant: String,
+    },
     /// `f::<usize, 42>` — a turbofish mention. The base is a real
     /// [`ExprData::NameRef`] allocated on the first segment's node (same
     /// scheme as [`ExprData::VariantPath`]: resolution, goto-def and hover
@@ -650,6 +661,10 @@ impl LowerCtx {
                     );
                 }
                 self.alloc_expr(ExprData::NameRef(name_ref.text()), it.syntax())
+            }
+            ast::Expr::ElidedVariantExpr(it) => {
+                let variant = it.variant_name_ref().map(|n| n.text()).unwrap_or_default();
+                self.alloc_expr(ExprData::ElidedVariant { variant }, it.syntax())
             }
             ast::Expr::CallExpr(it) => {
                 let dot_call = matches!(it.callee(), Some(ast::Expr::FieldExpr(_)));
