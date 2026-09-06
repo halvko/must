@@ -73,6 +73,7 @@ fn next_token(rest: &str, inner: &mut Vec<InnerError>) -> (SyntaxKind, usize, Op
             (COMMENT, len, None)
         }
         '"' => scan_string(rest, inner),
+        '\'' => scan_char(rest),
         '@' => scan_region(rest),
         c if is_ident_start(c) => {
             let len = scan_while(rest, is_ident_continue);
@@ -125,21 +126,62 @@ fn next_token(rest: &str, inner: &mut Vec<InnerError>) -> (SyntaxKind, usize, Op
     }
 }
 
-/// The escape sequences a string literal may contain, C/Rust-conventional:
-/// `\n`, `\t`, `\r`, `\0`, `\\` and `\"`. `None` means "not an escape" —
-/// the lexer reports those as `unknown escape sequence`, so a backslash is
-/// never silently literal. Shared with HIR's literal lowering, which cooks
-/// the token text into the string's value: one table, one answer.
-pub fn unescape_char(c: char) -> Option<char> {
+/// The escape sequences BOTH literal forms share, C/Rust-conventional:
+/// `\n`, `\t`, `\r`, `\0` and `\\`. Each form adds its own closing quote on
+/// top ([`unescape_char`] adds `\"`, [`unescape_char_literal`] adds `\'`) —
+/// only the delimiter that would otherwise end the literal needs escaping,
+/// so `"it's"` and `'"'` both stay spellable without one.
+fn unescape_common(c: char) -> Option<char> {
     Some(match c {
         'n' => '\n',
         't' => '\t',
         'r' => '\r',
         '0' => '\0',
         '\\' => '\\',
-        '"' => '"',
         _ => return None,
     })
+}
+
+/// The escape sequences a STRING literal may contain: [`unescape_common`]
+/// plus `\"`. `None` means "not an escape" — the lexer reports those as
+/// `unknown escape sequence`, so a backslash is never silently literal.
+/// Shared with HIR's literal lowering, which cooks the token text into the
+/// string's value: one table, one answer.
+pub fn unescape_char(c: char) -> Option<char> {
+    match c {
+        '"' => Some('"'),
+        c => unescape_common(c),
+    }
+}
+
+/// The escape sequences a CHARACTER literal may contain:
+/// [`unescape_common`] plus `\'`. [`unescape_char`]'s twin, and crate-local
+/// where that one is not: HIR reads a character literal through
+/// [`char_literal_value`], which cooks a whole token off this table, rather
+/// than one escape at a time.
+fn unescape_char_literal(c: char) -> Option<char> {
+    match c {
+        '\'' => Some('\''),
+        c => unescape_common(c),
+    }
+}
+
+/// Cook a whole `'x'` token's text into the Unicode scalar value it spells.
+/// `None` for every shape the lexer already errored on (unterminated,
+/// empty, multi-character, unknown escape) — the diagnostic is the lexer's,
+/// so HIR lowering only has to know that there is no value here.
+///
+/// Lives beside [`scan_char`] on purpose: the scanner decides what is
+/// well-formed and this decides what it means, off the same two tables, so
+/// the two can never disagree about which literals have a value.
+pub fn char_literal_value(text: &str) -> Option<char> {
+    let body = text.strip_prefix('\'')?.strip_suffix('\'')?;
+    let mut chars = body.chars();
+    let value = match chars.next()? {
+        '\\' => unescape_char_literal(chars.next()?)?,
+        c => c,
+    };
+    chars.next().is_none().then_some(value)
 }
 
 /// Render the backslash-plus-`e` pair the user actually wrote, for a
@@ -152,7 +194,8 @@ pub fn unescape_char(c: char) -> Option<char> {
 /// something legal — copy-pasting the message would "fix" nothing.
 /// Embedding the raw byte instead would split the message across lines, or
 /// smuggle a bare CR from a CRLF file into an LSP diagnostic. `e` is never
-/// `\` or `"` here — both are valid escapes.
+/// `\` here, nor the caller's own closing quote — both are valid escapes in
+/// whichever literal form is asking.
 fn shown_escape(e: char) -> String {
     if e.is_control() {
         format!("\\u{{{:x}}}", e as u32)
@@ -177,7 +220,7 @@ fn scan_string(rest: &str, inner: &mut Vec<InnerError>) -> (SyntaxKind, usize, O
                 Some((_, e)) if unescape_char(e).is_some() => {}
                 Some((j, e)) => inner.push(InnerError {
                     range: i..j + e.len_utf8(),
-                    message: format!("unknown escape sequence `{}`", shown_escape(e)),
+                    message: escape_error(e),
                 }),
                 // Only reachable at end of input: before a closing quote a
                 // backslash would have escaped that quote instead.
@@ -194,6 +237,120 @@ fn scan_string(rest: &str, inner: &mut Vec<InnerError>) -> (SyntaxKind, usize, O
         rest.len(),
         Some("unterminated string".into()),
     )
+}
+
+/// `'x'` — a character literal, holding exactly one Unicode scalar value
+/// (any of them: `'æ'` and `'🦀'` are ordinary multi-byte literals).
+///
+/// Unlike a string, a character literal ENDS AT THE LINE: the closing quote
+/// is looked for on this line only, and when there is none the token is the
+/// lone quote. That asymmetry is deliberate and is what makes the freed `'`
+/// safe to type — a lone apostrophe, a half-typed literal in the editor, or
+/// a stale lifetime spelling costs ONE odd token and one honest message
+/// instead of swallowing the rest of the file (which is what a string's
+/// multiline rule would do here).
+///
+/// The bound is on the LINE, not on the token count: two odd quotes on one
+/// line pair up into a single literal, which is why `&'a T, b: &'b T` — two
+/// retired lifetimes in one parameter list — recovers poorly (the first
+/// quote closes on the second, swallowing what sits between). That case is
+/// pinned by a test; a heuristic that broke the pairing would have to give
+/// up the "you meant a string" message for `'hello world'`, which is a far
+/// more common mistake than a doubly-retired signature.
+///
+/// Every malformed shape still lexes as [`SyntaxKind::CHAR`], the way an
+/// unterminated string stays a `STRING`: the parser keeps seeing a literal
+/// where the user wrote one, and [`char_literal_value`] answers `None` for
+/// exactly the shapes that error here.
+fn scan_char(rest: &str) -> (SyntaxKind, usize, Option<String>) {
+    use SyntaxKind::CHAR;
+    let mut chars = rest.char_indices().skip(1).peekable();
+    let mut end = None;
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '\n' => break,
+            // A backslash consumes the next character — that is what keeps
+            // `'\''` one token — but NEVER a newline. Consuming one would
+            // carry the scan onto the following line and eat a whole
+            // innocent statement, which is precisely what the line bound
+            // exists to prevent: `let c = '\` at end of line must cost this
+            // line and no other.
+            '\\' => match chars.peek() {
+                Some(&(_, '\n')) | None => break,
+                Some(_) => {
+                    chars.next();
+                }
+            },
+            '\'' => {
+                end = Some(i);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let Some(end) = end else {
+        return (
+            CHAR,
+            1,
+            Some("unterminated character literal: expected a closing `'`".to_owned()),
+        );
+    };
+    let len = end + 1;
+    let body = &rest[1..end];
+    let mut body_chars = body.chars();
+    let error = match body_chars.next() {
+        None => Some(
+            "empty character literal: a character literal holds exactly one character".to_owned(),
+        ),
+        // A lone `\` cannot reach here: it would have escaped the quote
+        // that ended the token.
+        Some('\\') => {
+            let escape = body_chars.next().expect("a lone `\\` escapes the quote");
+            if unescape_char_literal(escape).is_none() {
+                Some(escape_error(escape))
+            } else {
+                multi_char_error(body_chars.next().is_some())
+            }
+        }
+        Some(_) => multi_char_error(body_chars.next().is_some()),
+    };
+    (CHAR, len, error)
+}
+
+/// The message for a backslash introducing no escape this language has.
+///
+/// Two shapes, and the split is the point. An escape the design has already
+/// RESERVED room for (`\u{...}` and byte escapes — G17) gets a "not
+/// supported yet": calling a spelling that is already spoken for "unknown"
+/// tells the user to go find another one, which is the opposite of true.
+/// Anything else is genuinely unknown.
+///
+/// Shared by both literal forms, so a reserved escape can never read as
+/// reserved in a string and unknown in a character.
+fn escape_error(e: char) -> String {
+    match e {
+        'u' => "`\\u{...}` escapes are not supported yet".to_owned(),
+        'x' => "byte escapes (`\\xNN`) are not supported yet".to_owned(),
+        e => format!("unknown escape sequence `{}`", shown_escape(e)),
+    }
+}
+
+/// The "you meant a string" message, when a character literal holds more
+/// than one character. Naming the string spelling matters more than naming
+/// the rule: `'ab'` is almost never a mistake about characters, it is a
+/// string written with the wrong quotes.
+///
+/// The offending text is deliberately NOT quoted back. It is source text
+/// that may already contain escapes (`'ab\n'`), so re-spelling it inside
+/// `"..."` would either be wrong about what the string means or smuggle a
+/// raw control character into an LSP diagnostic — see [`shown_escape`] for
+/// the same hazard one level down.
+fn multi_char_error(too_long: bool) -> Option<String> {
+    too_long.then(|| {
+        "a character literal holds exactly one character; \
+         use a string (`\"...\"`) to hold more"
+            .to_owned()
+    })
 }
 
 /// `@a` — a REGION name; `@_` — the region wildcard ("there is a region

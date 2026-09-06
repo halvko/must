@@ -436,13 +436,20 @@ pub(crate) fn completions(
 ) -> Vec<CompletionItem> {
     let real_text = file.text(db);
     let real_root = parse(db, file).syntax_node();
-    // A completion request inside a comment or a string literal offers
-    // nothing — the token at the cursor in the *real* tree (unaffected by
-    // whatever we're about to splice in) already answers this.
-    if real_root
-        .token_at_offset(offset)
-        .any(|t| matches!(t.kind(), SyntaxKind::COMMENT | SyntaxKind::STRING))
-    {
+    // A completion request inside a comment or a literal offers nothing —
+    // the token at the cursor in the *real* tree (unaffected by whatever
+    // we're about to splice in) already answers this.
+    //
+    // CHAR earns its place here for a reason strings don't have: a
+    // half-typed `'` is a CHAR token (the lexer's line-bounded scan, see
+    // `lexer::scan_char`), so without this line typing one apostrophe would
+    // pop the completion list open on the very next keystroke.
+    if real_root.token_at_offset(offset).any(|t| {
+        matches!(
+            t.kind(),
+            SyntaxKind::COMMENT | SyntaxKind::STRING | SyntaxKind::CHAR
+        )
+    }) {
         return Vec::new();
     }
 
@@ -931,14 +938,14 @@ fn type_item_rhs_items(edit_range: TextRange) -> Vec<CompletionItem> {
     .collect()
 }
 
-/// The integer types plus `str`/`string`/`bool` — the nameable builtin
-/// types (mirrors [`hir::ty::builtin_type_by_name`]'s name set). Rendered
-/// with the keyword kind (they're not declarations to navigate to) but the
-/// builtin sort tier.
+/// The integer types plus `str`/`string`/`bool`/`char` — the nameable
+/// builtin types (mirrors [`hir::ty::builtin_type_by_name`]'s name set).
+/// Rendered with the keyword kind (they're not declarations to navigate to)
+/// but the builtin sort tier.
 fn builtin_type_items(edit_range: TextRange) -> Vec<CompletionItem> {
     [
         "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize", "str", "string",
-        "bool",
+        "bool", "char",
     ]
     .iter()
     .map(|w| {
@@ -1086,7 +1093,7 @@ fn file_value_and_type_items(
                 // `fn` RETURNING an enum is deliberately not lifted — that
                 // is the unbuilt "easily produced enums" layer, recorded in
                 // the tooling doc, not smuggled in here.
-                let provenance = if scrutinee_slot && is_enum_typed(db, &ty) {
+                let provenance = if scrutinee_slot && dispatches_as_scrutinee(db, &ty) {
                     SCRUTINEE_ITEM_TIER
                 } else {
                     Provenance::Item as u8
@@ -1186,7 +1193,7 @@ fn expression_position_items(
                 // how far away its declaration is; everywhere else every
                 // local shares one tier, as it always has.
                 let provenance = match &local.ty {
-                    Some(ty) if scrutinee_slot && is_enum_typed(db, ty) => {
+                    Some(ty) if scrutinee_slot && dispatches_as_scrutinee(db, ty) => {
                         local.depth.min(SCRUTINEE_LOCAL_TIER_MAX as u32) as u8
                     }
                     _ => Provenance::Local as u8,
@@ -1206,15 +1213,16 @@ fn expression_position_items(
 
 /// Whether a value of this type can be a `match` scrutinee that dispatches
 /// — [`hir::dispatches_on`] behind one peeled borrow, so an enum, one of
-/// its variants (legal, and simply has one reachable arm), or a borrow of
-/// either, because `match` looks through a borrow. The scrutinee slot's
-/// test for its leading layers.
+/// its variants (legal, and simply has one reachable arm), a `char` (whose
+/// literal patterns dispatch by equality), or a borrow of any of them,
+/// because `match` looks through a borrow. The scrutinee slot's test for
+/// its leading layers.
 ///
-/// A `fn` returning an enum is NOT enum-typed: calling it would produce a
+/// A `fn` returning an enum does NOT dispatch: calling it would produce a
 /// scrutinee, and "one step of production" is the unbuilt layer. The
 /// distinction is exactly the one [`type_tier`] draws for a `fn` candidate
 /// under a value expectation, kept deliberately.
-fn is_enum_typed(db: &RootDatabase, ty: &hir::Ty) -> bool {
+fn dispatches_as_scrutinee(db: &RootDatabase, ty: &hir::Ty) -> bool {
     hir::dispatches_on(db, dispatch_ty(ty))
 }
 

@@ -160,6 +160,12 @@ ast_node!(
     VariantPat: VARIANT_PAT
 );
 ast_node!(
+    /// A literal as a whole match-arm pattern (`'(' => ...`). Carries the
+    /// literal token itself, read through the same [`Literal`] accessor
+    /// expression position uses — one literal vocabulary, two positions.
+    LiteralPat: LITERAL_PAT
+);
+ast_node!(
     /// `_` as a whole pattern.
     WildcardPat: WILDCARD_PAT
 );
@@ -418,12 +424,13 @@ ast_enum!(
     NegExpr
 );
 ast_enum!(
-    /// A pattern: a match-arm pattern (`VariantPat`/`WildcardPat`/`RestPat`)
-    /// or a `let`/parameter binding pattern (`BindPat`/`RecordPat`/
-    /// `NewtypePat`) — the grammar keeps the two vocabularies mostly
-    /// disjoint (see `crate::grammar`'s `match_pattern` vs
-    /// `binding_pattern`), but both lower through the same `Pat` arena.
+    /// A pattern: a match-arm pattern (`VariantPat`/`LiteralPat`/
+    /// `WildcardPat`/`RestPat`) or a `let`/parameter binding pattern
+    /// (`BindPat`/`RecordPat`/`NewtypePat`) — the grammar keeps the two
+    /// vocabularies mostly disjoint (see `crate::grammar`'s `match_pattern`
+    /// vs `binding_pattern`), but both lower through the same `Pat` arena.
     Pat: VariantPat,
+    LiteralPat,
     WildcardPat,
     BindPat,
     RestPat,
@@ -972,6 +979,10 @@ impl BinExpr {
 pub enum LiteralKind {
     Int(SyntaxToken),
     Str(SyntaxToken),
+    /// `'x'` — the token, uncooked; `lexer::char_literal_value` reads the
+    /// scalar value out of it (and answers `None` for the shapes the lexer
+    /// already errored on).
+    Char(SyntaxToken),
     Bool(bool),
 }
 
@@ -983,10 +994,19 @@ impl Literal {
             .find_map(|it| match it.kind() {
                 INT_NUMBER => Some(LiteralKind::Int(it)),
                 STRING => Some(LiteralKind::Str(it)),
+                CHAR => Some(LiteralKind::Char(it)),
                 TRUE_KW => Some(LiteralKind::Bool(true)),
                 FALSE_KW => Some(LiteralKind::Bool(false)),
                 _ => None,
             })
+    }
+}
+
+impl LiteralPat {
+    /// The literal this pattern matches, as the same [`Literal`] node an
+    /// expression carries.
+    pub fn literal(&self) -> Option<Literal> {
+        child(&self.syntax)
     }
 }
 

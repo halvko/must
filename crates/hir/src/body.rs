@@ -310,9 +310,9 @@ pub struct Param {
     pub type_ref: Option<TypeRef>,
 }
 
-/// A pattern. Match-arm patterns (`Wildcard`/`Bind`/`Variant`) stay
-/// deliberately flat (no nesting, or-patterns, guards or literal patterns —
-/// those land later as one coherent pattern-language feature); `Record` and
+/// A pattern. Match-arm patterns (`Wildcard`/`Bind`/`Variant`/`Char`) stay
+/// deliberately flat (no nesting, or-patterns or guards — those land later
+/// as one coherent pattern-language feature); `Record` and
 /// `Newtype` are `let`/parameter patterns, construction's mirror image, and
 /// only ever appear as a whole `let`/parameter pattern (or nested one level
 /// inside a `Newtype`) — never inside a variant pattern's payload.
@@ -333,6 +333,12 @@ pub enum PatData {
     /// bare name inside a [`PatData::Newtype`] binds the whole underlying
     /// value (`Foo(inner)`).
     Bind(BindingId),
+    /// `'x'` — a character literal pattern: matches exactly this scalar
+    /// value, binds nothing. The only literal pattern so far (`validation`
+    /// rejects the others, which parse into the same node), so it carries a
+    /// bare `char`; the day another literal kind becomes a pattern this
+    /// generalizes to a [`LiteralData`].
+    Char(char),
     /// `Circle(r)` / `Shape::Circle(r)`: a variant pattern, construction's
     /// mirror image. The variant resolves against the scrutinee's enum
     /// (bare) or the named enum (qualified) during inference.
@@ -388,7 +394,7 @@ impl Body {
     /// Every binding one pattern introduces, flattened in source order —
     /// the `let`/parameter counterpart of a scope's entries: a `Bind` binds
     /// itself, a `Record` its (possibly renamed) fields, a `Newtype`
-    /// whatever its inner pattern binds, and `Wildcard`/`Missing`/`Variant`
+    /// whatever its inner pattern binds, and `Wildcard`/`Missing`/`Char`/`Variant`
     /// (match-only in binding position; never produced there) bind nothing
     /// beyond what's already covered by their own call sites.
     pub fn pat_bindings(&self, pat: PatId) -> Vec<(String, BindingId)> {
@@ -399,7 +405,7 @@ impl Body {
 
     fn collect_pat_bindings(&self, pat: PatId, out: &mut Vec<(String, BindingId)>) {
         match &self.pats[pat] {
-            PatData::Missing | PatData::Wildcard => {}
+            PatData::Missing | PatData::Wildcard | PatData::Char(_) => {}
             PatData::Bind(binding) => out.push((self.bindings[*binding].name.clone(), *binding)),
             PatData::Variant { bindings, .. } => {
                 out.extend(bindings.iter().map(|&b| (self.bindings[b].name.clone(), b)));
@@ -422,6 +428,13 @@ pub enum LiteralData {
     Int(Option<u128>),
     Str(String),
     Bool(bool),
+    /// `'x'` — one Unicode scalar value, already cooked (escapes decoded).
+    /// Unlike [`LiteralData::Int`] there is no `Option` here: a literal the
+    /// lexer errored on lowers as [`ExprData::Missing`] instead, because a
+    /// character literal has no partial reading — an empty or two-character
+    /// literal names no value at all, whereas an over-long integer still
+    /// names a number the checker can talk about.
+    Char(char),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -596,6 +609,15 @@ impl LowerCtx {
                     }
                     Some(ast::LiteralKind::Str(token)) => LiteralData::Str(unescape(token.text())),
                     Some(ast::LiteralKind::Bool(value)) => LiteralData::Bool(value),
+                    // A malformed character literal names no value (see
+                    // `LiteralData::Char`): the lexer's diagnostic is the
+                    // whole story, so this lowers as broken source.
+                    Some(ast::LiteralKind::Char(token)) => {
+                        match syntax::char_literal_value(token.text()) {
+                            Some(value) => LiteralData::Char(value),
+                            None => return self.missing_expr(),
+                        }
+                    }
                     None => return self.missing_expr(),
                 };
                 self.alloc_expr(ExprData::Literal(data), it.syntax())
@@ -902,6 +924,18 @@ impl LowerCtx {
             ast::Pat::WildcardPat(it) => self.alloc_pat(PatData::Wildcard, it.syntax()),
             // Reserved syntax (validation rejects it): nothing to match.
             ast::Pat::RestPat(it) => self.alloc_pat(PatData::Missing, it.syntax()),
+            // Only the character literal has pattern semantics; the other
+            // literal kinds parse into this node so `validation` can name
+            // them, and lower as broken (their diagnostic is already
+            // written, and there is nothing to match on).
+            ast::Pat::LiteralPat(it) => {
+                let value = match it.literal().and_then(|lit| lit.kind()) {
+                    Some(ast::LiteralKind::Char(token)) => syntax::char_literal_value(token.text()),
+                    _ => None,
+                };
+                let data = value.map_or(PatData::Missing, PatData::Char);
+                self.alloc_pat(data, it.syntax())
+            }
             ast::Pat::BindPat(it) => {
                 let binding = self.alloc_binding(it.name(), None, false, it.syntax());
                 self.alloc_pat(PatData::Bind(binding), it.syntax())
@@ -994,6 +1028,7 @@ impl LowerCtx {
             ast::Pat::WildcardPat(it) => self.alloc_pat(PatData::Missing, it.syntax()),
             ast::Pat::VariantPat(it) => self.alloc_pat(PatData::Missing, it.syntax()),
             ast::Pat::RestPat(it) => self.alloc_pat(PatData::Missing, it.syntax()),
+            ast::Pat::LiteralPat(it) => self.alloc_pat(PatData::Missing, it.syntax()),
         }
     }
 

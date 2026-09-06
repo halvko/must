@@ -9205,8 +9205,9 @@ fn a_prefix_borrow_with_no_operand_migrates_without_a_fix() {
 fn retired_prefix_borrow_type_does_not_chase_a_retired_lifetime() {
     // The parser does not chase a retired spelling across token kinds
     // (G26). In legacy `&'a T` the `&` fires its own migration and stops;
-    // the freed `'` is an ordinary unexpected-character lexer error, and
-    // the referent never reaches the borrow — so no rewrite is offered and
+    // the freed `'` opens an unterminated character literal (the scan is
+    // bounded to the line, so it costs one token), and the referent never
+    // reaches the borrow — so no rewrite is offered and
     // what followed is recovered as further (garbage) parameters. Making
     // sense of the wreckage is diagnostics-layer work, not the base
     // parser's; what is pinned here is that the parse terminates, covers
@@ -9221,7 +9222,7 @@ fn retired_prefix_borrow_type_does_not_chase_a_retired_lifetime() {
         "the `&` still migrates: {messages:?}"
     );
     assert!(
-        messages.contains(&"unexpected character `'`"),
+        messages.contains(&"unterminated character literal: expected a closing `'`"),
         "the freed `'` is a plain lexer error: {messages:?}"
     );
     let root = parse.syntax_node();
@@ -9299,13 +9300,15 @@ fn bare_amp_between_expressions_is_not_a_binary_operator() {
 }
 
 #[test]
-fn bare_quote_is_an_honest_lexer_error() {
-    // The `'`-prefixed lifetime kind is retired outright: a bare `'`
-    // anywhere is now an ordinary unknown-character error, with no
-    // misdirection toward lifetimes (gone) or char literals (a future,
-    // unruled question) — and the identifier after it lexes and parses on
-    // its own, exactly like any other stray character would (statement-
-    // level recovery retries fresh at the next token).
+fn a_bare_quote_is_an_unterminated_character_literal() {
+    // The `'`-prefixed lifetime kind is retired (G26) and `'` now opens a
+    // character literal. A lone one is therefore an UNTERMINATED literal,
+    // not an unknown character — and the scan is bounded to the line
+    // (unlike a string's), so this single odd quote costs exactly one token
+    // and the identifier after it lexes and parses on its own, exactly as
+    // it did when `'` was a stray character. The bound survives a trailing
+    // backslash and does not survive a SECOND odd quote on the same line;
+    // both cases have tests of their own.
     check(
         "static x = fn { 'a; };",
         expect![[r#"
@@ -9324,8 +9327,9 @@ fn bare_quote_is_an_honest_lexer_error() {
                   BLOCK_EXPR@14..21
                     L_BRACE@14..15 "{"
                     WHITESPACE@15..16 " "
-                    ERROR@16..17
-                      ERROR_TOKEN@16..17 "'"
+                    EXPR_STMT@16..17
+                      LITERAL@16..17
+                        CHAR@16..17 "'"
                     EXPR_STMT@17..19
                       PATH_EXPR@17..18
                         NAME_REF@17..18
@@ -9334,7 +9338,259 @@ fn bare_quote_is_an_honest_lexer_error() {
                     WHITESPACE@19..20 " "
                     R_BRACE@20..21 "}"
                 SEMICOLON@21..22 ";"
-            error 16..17: unexpected character `'`
+            error 16..17: unterminated character literal: expected a closing `'`
+        "#]],
+    );
+}
+
+/// The errors a snippet produces, one per line — for the character literal
+/// shapes below, where the TREE is uninteresting (one `CHAR` token either
+/// way) and the message is the whole point.
+fn check_errors(input: &str, expect: Expect) {
+    let parse = crate::parse(input);
+    let text: String = parse
+        .errors()
+        .iter()
+        .map(|err| {
+            format!(
+                "{:?}..{:?}: {}\n",
+                u32::from(err.range.start()),
+                u32::from(err.range.end()),
+                err.message
+            )
+        })
+        .collect();
+    expect.assert_eq(&text);
+}
+
+#[test]
+fn character_literals_lex_as_one_token_each() {
+    // Every well-formed shape: plain ASCII, an escape, the escaped quote,
+    // and a multi-byte scalar value (one token whose LENGTH is its UTF-8
+    // width — `'æ'` is four bytes, not three).
+    check(
+        r"static x = fn { let a = 'a'; let b = '\n'; let c = '\''; let d = 'æ'; };",
+        expect![[r#"
+            SOURCE_FILE@0..73
+              STATIC_ITEM@0..73
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..72
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..72
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..28
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      BIND_PAT@20..21
+                        NAME@20..21
+                          IDENT@20..21 "a"
+                      WHITESPACE@21..22 " "
+                      EQ@22..23 "="
+                      WHITESPACE@23..24 " "
+                      LITERAL@24..27
+                        CHAR@24..27 "'a'"
+                      SEMICOLON@27..28 ";"
+                    WHITESPACE@28..29 " "
+                    LET_STMT@29..42
+                      LET_KW@29..32 "let"
+                      WHITESPACE@32..33 " "
+                      BIND_PAT@33..34
+                        NAME@33..34
+                          IDENT@33..34 "b"
+                      WHITESPACE@34..35 " "
+                      EQ@35..36 "="
+                      WHITESPACE@36..37 " "
+                      LITERAL@37..41
+                        CHAR@37..41 "'\\n'"
+                      SEMICOLON@41..42 ";"
+                    WHITESPACE@42..43 " "
+                    LET_STMT@43..56
+                      LET_KW@43..46 "let"
+                      WHITESPACE@46..47 " "
+                      BIND_PAT@47..48
+                        NAME@47..48
+                          IDENT@47..48 "c"
+                      WHITESPACE@48..49 " "
+                      EQ@49..50 "="
+                      WHITESPACE@50..51 " "
+                      LITERAL@51..55
+                        CHAR@51..55 "'\\''"
+                      SEMICOLON@55..56 ";"
+                    WHITESPACE@56..57 " "
+                    LET_STMT@57..70
+                      LET_KW@57..60 "let"
+                      WHITESPACE@60..61 " "
+                      BIND_PAT@61..62
+                        NAME@61..62
+                          IDENT@61..62 "d"
+                      WHITESPACE@62..63 " "
+                      EQ@63..64 "="
+                      WHITESPACE@64..65 " "
+                      LITERAL@65..69
+                        CHAR@65..69 "'æ'"
+                      SEMICOLON@69..70 ";"
+                    WHITESPACE@70..71 " "
+                    R_BRACE@71..72 "}"
+                SEMICOLON@72..73 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn malformed_character_literals_say_which_shape_is_wrong() {
+    // Each diagnostic names the specific mistake — an empty literal, one
+    // holding a whole word (the "you meant a string" case), and an escape
+    // the table doesn't have.
+    check_errors(
+        r"static x = fn { let a = ''; let b = 'ab'; let c = '\q'; };",
+        expect![[r#"
+            24..26: empty character literal: a character literal holds exactly one character
+            36..40: a character literal holds exactly one character; use a string (`"..."`) to hold more
+            50..54: unknown escape sequence `\q`
+        "#]],
+    );
+}
+
+#[test]
+fn a_character_literal_is_a_match_pattern() {
+    check(
+        "static x = fn (c) { match c { '(' => 1, _ => 0, } };",
+        expect![[r#"
+            SOURCE_FILE@0..52
+              STATIC_ITEM@0..52
+                STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..51
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  PARAM_LIST@14..17
+                    L_PAREN@14..15 "("
+                    PARAM@15..16
+                      BIND_PAT@15..16
+                        NAME@15..16
+                          IDENT@15..16 "c"
+                    R_PAREN@16..17 ")"
+                  WHITESPACE@17..18 " "
+                  BLOCK_EXPR@18..51
+                    L_BRACE@18..19 "{"
+                    WHITESPACE@19..20 " "
+                    MATCH_EXPR@20..49
+                      MATCH_KW@20..25 "match"
+                      WHITESPACE@25..26 " "
+                      PATH_EXPR@26..27
+                        NAME_REF@26..27
+                          IDENT@26..27 "c"
+                      WHITESPACE@27..28 " "
+                      L_BRACE@28..29 "{"
+                      WHITESPACE@29..30 " "
+                      MATCH_ARM@30..39
+                        LITERAL_PAT@30..33
+                          LITERAL@30..33
+                            CHAR@30..33 "'('"
+                        WHITESPACE@33..34 " "
+                        FAT_ARROW@34..36 "=>"
+                        WHITESPACE@36..37 " "
+                        LITERAL@37..38
+                          INT_NUMBER@37..38 "1"
+                        COMMA@38..39 ","
+                      WHITESPACE@39..40 " "
+                      MATCH_ARM@40..47
+                        WILDCARD_PAT@40..41
+                          HOLE@40..41 "_"
+                        WHITESPACE@41..42 " "
+                        FAT_ARROW@42..44 "=>"
+                        WHITESPACE@44..45 " "
+                        LITERAL@45..46
+                          INT_NUMBER@45..46 "0"
+                        COMMA@46..47 ","
+                      WHITESPACE@47..48 " "
+                      R_BRACE@48..49 "}"
+                    WHITESPACE@49..50 " "
+                    R_BRACE@50..51 "}"
+                SEMICOLON@51..52 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn a_backslash_at_end_of_line_does_not_escape_the_newline() {
+    // The line bound has to survive the escape rule, or it is not a bound:
+    // a backslash consumes the character after it, and consuming a NEWLINE
+    // would carry the scan onto the next line and eat a whole innocent
+    // statement. `let d = 'y';` below must lex exactly as it would with no
+    // broken literal above it — the errors stay on line one.
+    check_errors(
+        "static x = fn { let c = '\\\n    let d = 'y'; };",
+        expect![[r#"
+            24..25: unterminated character literal: expected a closing `'`
+            25..26: unexpected character `\`
+        "#]],
+    );
+}
+
+#[test]
+fn two_retired_lifetimes_on_one_line_pair_up() {
+    // The line bound is on the LINE, not on the token count: two odd
+    // quotes pair into one literal. Two retired `'a` lifetimes in one
+    // parameter list therefore recover poorly — the first quote closes on
+    // the second, swallowing the parameter between them, and what is left
+    // is recovered as further (garbage) parameters.
+    //
+    // Pinned rather than fixed. Every cheap heuristic that breaks the
+    // pairing (stop at whitespace, cap the body length) costs the "you
+    // meant a string" message for `'hello world'` — a mistake people
+    // actually make — to improve a signature that is doubly retired syntax
+    // and is being told to rewrite anyway.
+    check_errors(
+        "static f = fn(a: &'a str, b: &'b str) -> () { };",
+        expect![[r#"
+            17..18: borrow types are spelled postfix: `T.&` / `T.&mut`
+            18..31: a character literal holds exactly one character; use a string (`"..."`) to hold more
+            31..32: expected `,`
+            33..36: expected `,`
+        "#]],
+    );
+}
+
+#[test]
+fn reserved_escapes_say_reserved_not_unknown() {
+    // `\u{...}` and byte escapes have design room held for them, so
+    // "unknown escape sequence" would be a lie: it tells the user to go
+    // find another spelling when this one is already spoken for. Both
+    // literal forms answer identically — one table, one answer.
+    check_errors(
+        r#"static x = fn { let a = '\u{41}'; let b = "\u{41}"; let c = '\x41'; };"#,
+        expect![[r#"
+            24..32: `\u{...}` escapes are not supported yet
+            43..45: `\u{...}` escapes are not supported yet
+            60..66: byte escapes (`\xNN`) are not supported yet
+        "#]],
+    );
+}
+
+#[test]
+fn non_character_literal_patterns_are_refused_by_kind() {
+    // The grammar takes every literal kind so this message can name the
+    // one that was written; only `char` has pattern semantics so far.
+    check_errors(
+        "static x = fn (n) { match n { 0 => 1, \"s\" => 2, true => 3, _ => 0, } };",
+        expect![[r#"
+            30..31: integer literal patterns are not supported yet; only character literals (`'x'`) can be matched
+            38..41: string literal patterns are not supported yet; only character literals (`'x'`) can be matched
+            48..52: boolean literal patterns are not supported yet; only character literals (`'x'`) can be matched
         "#]],
     );
 }

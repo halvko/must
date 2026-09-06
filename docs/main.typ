@@ -611,7 +611,9 @@ check-time error on the `match` keyword naming each uncovered variant.
 Like every deferred error, running code that actually reaches an uncovered
 variant crashes with exactly the squiggle's message. Arms that can never
 run (after a catch-all, a variant already covered) are warnings, not
-errors. On a non-enum scrutinee only `_` or a binding can match (for now).
+errors. On a non-enum scrutinee only `_` or a binding can match (for
+now) — `char` is the one exception, whose literals are patterns too
+(see "Characters" below).
 
 *Matching a BORROW projects through it.* A scrutinee of type
 `Opt::<T>.&::<@a>` dispatches on the enum behind the borrow, and each payload
@@ -674,12 +676,18 @@ on one variant pays nothing for the enum it belongs to. Arms naming the
 `match` is pure control flow, so it is const-legal — fine inside `const
 fn` bodies and `const { ... }` blocks.
 
+*Character literals are patterns* (`'(' => ...`) — see "Characters" below.
+They dispatch by equality rather than by a tag, and a `char` scrutinee
+always needs a `_` arm.
+
 Not in v1 (landing later as one coherent pattern-language feature): nested
-patterns, or-patterns (`0 | 1`), guards, literal patterns, `if match`,
-`match ... else`, the statement form `match x => pat;`, and record
-patterns — though `..` is already reserved in pattern position for them.
-Nested patterns are the one whose absence is visible above: reaching into
-nested data through a borrow is spelled as two matches until they land.
+patterns, or-patterns (`0 | 1`), guards, literal patterns of the *other*
+kinds (integer, string, boolean — they parse, so the error names the kind
+that was written rather than shrugging), `if match`, `match ... else`, the
+statement form `match x => pat;`, and record patterns — though `..` is
+already reserved in pattern position for them. Nested patterns are the one
+whose absence is visible above: reaching into nested data through a borrow
+is spelled as two matches until they land.
 
 == Loops
 
@@ -1338,6 +1346,56 @@ N: usize` may be the length of a `[usize; N]` parameter, and a generic type
 may carry a `[usize; N]` field (`Buf::<2>` above). Not yet: a length
 accessor, and matching on arrays.
 
+== Characters
+
+`char` is a primitive holding one *Unicode scalar value* — a codepoint that
+is not a surrogate. It is not an integer with a nicer name: a `char` has
+equality and nothing else. No ordering, no arithmetic, no integer
+conversions, because those are exactly the operations that would let you
+build a value that is not a character. Equality is what reading text
+actually needs.
+
+Literals are written `'x'`, with the same escapes strings have and the
+quote swapped: `\n`, `\t`, `\r`, `\0`, `\\`, `\'`. Only the delimiter that
+would end the literal needs escaping, so `'"'` and `"it's"` are both
+written plainly. Any single scalar value is legal, multi-byte included.
+
+```must
+static open: char = '(';
+static newline = '\n';
+static bullet = '•';
+static same = 'x' == 'x';        // true
+```
+
+A character literal's type is *definite*, unlike an integer literal's:
+there is one character type, so `'x'` is a `char` the moment you write it,
+with no annotation and no defining use to wait for. There is no `{number}`
+equivalent to leave unresolved.
+
+Character literals are also *patterns*, which is the point of the feature —
+scanning text is a `match` over characters:
+
+```must
+static classify = fn (c: char) -> usize {
+    match c {
+        '(' => 1,
+        ')' => 2,
+        _ => 0,
+    }
+};
+```
+
+A `char` match *always* needs a `_` arm — as policy, not arithmetic: a
+`char` match is never exhaustive by enumeration, whatever the arms list.
+The arms are tried in source order as equality tests — first match wins, a
+repeated literal is an unreachable-arm warning.
+
+Like every other pattern, a character pattern *projects through a borrow*
+(see "Match" above): `match c { 'a' => ... }` means the same thing whether
+`c` is a `char` or a `char.&`, and the comparison is a real read through
+the borrow — so a scrutinee that has already been invalidated is caught at
+the `match` itself, not at whichever arm first looked at it.
+
 == Reading standard input
 
 `read_line()` is `print`'s twin — the stdin hook, a platform effect exactly
@@ -1418,6 +1476,9 @@ raw-pointer refusal: a borrow lowers to the same machine word, so this
 backend could emit something that runs while silently dropping the
 exclusivity contract. `read_line` has no wasm import yet either, so
 `examples/stdin.must` refuses by name.
+
+Characters themselves are no trouble: a `char` is one scalar slot here, so
+literals, `==` and character-pattern dispatch all compile.
 
 Monomorphization has refusals of its own. A program whose instantiations
 never bottom out — polymorphic recursion, where every call needs an

@@ -345,6 +345,10 @@ pub enum Const {
     Int(IntValue),
     Str(String),
     Bool(bool),
+    /// One Unicode scalar value. A `char`, not a `u32`, all the way down:
+    /// the invariant (never a surrogate) is carried by the type Rust
+    /// already checks, so no layer below has to re-establish it.
+    Char(char),
     /// The value of a top-level item, const-evaluated lazily on first use.
     Item(ItemLoc),
     Builtin(Builtin),

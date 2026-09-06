@@ -51,7 +51,9 @@
   trailing lone backslash, is an error anchored at the escape inside the token. Strings stay
   multiline — a literal newline inside a string is still legal. The lexer and the decoder
   share one table (`syntax::unescape_char`), so they can never disagree about what is an
-  escape.
+  escape. `\u{...}` and `\xNN` are answered "not supported yet" rather than "unknown", in
+  both literal forms from that one table: the design holds room for them, so calling either
+  unknown would send the reader hunting for a spelling that is already spoken for.
 - **G16** Full keywords: `raw unsafe with impl for trait requires` (`const`, `struct`, `enum`
   are contextual expression-starters). One `keywords!` table generates the set — `from_keyword`,
   `is_keyword`, and the table itself — so the highlighter (P10) and completions classify a
@@ -83,8 +85,18 @@
   corrective diagnostic and a rewriting fix — withheld where no postfix text means the
   same thing, as for a borrow of a `fn(..) -> T`. The parser does not chase a retired
   spelling across token kinds: in `&'a T` the `&` fires its own migration and the freed
-  `'` is an ordinary unexpected-character lexer error. That recovery is diagnostics-layer
+  `'` is an ordinary unterminated character literal. That recovery is diagnostics-layer
   work.
+- **G18** A character literal holds one Unicode scalar value; escapes are the string set
+  with the quote swapped, so only the delimiter that would end the literal needs one. The
+  scan is line-bounded, unlike a string's, so a half-typed quote costs one odd token on its
+  own line instead of the rest of the file. Known and accepted: two odd quotes on one line
+  pair up.
+- **G19** Literal patterns bind nothing; dispatch is a chain of equality tests in source
+  order, first match wins. A `char` match always needs a `_` arm, as policy, not arithmetic.
+  A repeated literal arm is an unreachable-arm warning keyed on the value, not on its
+  rendering. Every literal kind parses into the pattern node; validation names the kinds not
+  supported yet.
 
 ## Discarded
 

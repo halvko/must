@@ -1949,6 +1949,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 Const::Int(v) => Value::Int(*v),
                 Const::Str(s) => Value::Str(s.clone()),
                 Const::Bool(b) => Value::Bool(*b),
+                Const::Char(c) => Value::Char(*c),
                 Const::Builtin(b) => Value::Builtin(*b),
                 Const::Item(item) => self.force_item(item.clone())?,
                 // A fn literal constructed inside a generic frame inherits
@@ -2871,6 +2872,7 @@ fn value_ty(value: &Value) -> hir::Ty {
         Value::Int(iv) => hir::Ty::Int(iv.kind()),
         Value::Str(_) => hir::Ty::Str,
         Value::Bool(_) => hir::Ty::Bool,
+        Value::Char(_) => hir::Ty::Char,
         Value::Record { fields } => hir::Ty::record(
             fields
                 .iter()

@@ -35,6 +35,11 @@ pub enum Value {
     Int(IntValue),
     Str(String),
     Bool(bool),
+    /// One Unicode scalar value. Carried as Rust's `char`, so the "never a
+    /// surrogate" invariant is the host type's job and no operation here
+    /// has to re-check it; `==`/`!=` fall out of the derived `PartialEq`
+    /// like every other scalar's.
+    Char(char),
     Fn(FnValue),
     Builtin(Builtin),
     /// A record value: fields sorted by name, matching `Ty::Record` and
@@ -242,6 +247,7 @@ impl std::hash::Hash for Value {
             Value::Int(v) => v.hash(state),
             Value::Str(s) => s.hash(state),
             Value::Bool(b) => b.hash(state),
+            Value::Char(c) => c.hash(state),
             // Discriminant only — see the impl comment.
             Value::Fn(_) => {}
             Value::Builtin(b) => b.hash(state),
@@ -286,6 +292,9 @@ impl Value {
             Value::Int(v) => v.to_i128().to_string(),
             Value::Str(s) => format!("{s:?}"),
             Value::Bool(b) => b.to_string(),
+            // Quoted, like a string: `'a'` reads as a character
+            // everywhere a bare `a` would read as a name.
+            Value::Char(c) => format!("{c:?}"),
             Value::Fn(_) => "fn".to_owned(),
             Value::Builtin(b) => format!("builtin {}", b.name()),
             Value::Record { fields } => {
@@ -364,6 +373,7 @@ impl Value {
             | Value::Int(_)
             | Value::Str(_)
             | Value::Bool(_)
+            | Value::Char(_)
             | Value::Fn(_)
             | Value::Builtin(_)
             | Value::Uninit => false,
@@ -386,6 +396,7 @@ impl Value {
             | Value::Int(_)
             | Value::Str(_)
             | Value::Bool(_)
+            | Value::Char(_)
             | Value::Fn(_)
             | Value::Builtin(_)
             | Value::Ptr { .. } => false,

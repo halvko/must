@@ -41,6 +41,7 @@ impl SelfKey {
             Ty::Int(kind) => Some(SelfKey::Builtin(kind.name().to_owned())),
             Ty::Str => Some(SelfKey::Builtin("str".to_owned())),
             Ty::Bool => Some(SelfKey::Builtin("bool".to_owned())),
+            Ty::Char => Some(SelfKey::Builtin("char".to_owned())),
             _ => None,
         }
     }

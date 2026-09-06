@@ -664,7 +664,7 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         return Some(m.complete(p, NEG_EXPR));
     }
     let m = match p.current() {
-        INT_NUMBER | STRING | TRUE_KW | FALSE_KW => {
+        INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW => {
             let m = p.start();
             p.bump_any();
             m.complete(p, LITERAL)
@@ -894,13 +894,25 @@ fn skip_arm_body(p: &mut Parser<'_>) {
 /// scrutinee's enum, enum segment dropped), and the retired unqualified
 /// `Name(bindings...)` (still parsed as a `VARIANT_PAT` so `validation`
 /// can hand back an honest "write `::Name(...)`" error — patterns have no
-/// calls). Plus the *reserved* `..` (parses, validation rejects it). A
-/// bare name with no `::` and no parens is *always* a binding now — never
-/// reinterpreted type-directed as a variant (see `infer.rs`'s
-/// `check_match_pat` `PatData::Bind` arm). No nesting, or-patterns, guards
-/// or literal patterns yet.
+/// calls). Plus a LITERAL pattern (`'(' =>`), and the *reserved* `..`
+/// (parses, validation rejects it). A bare name with no `::` and no parens
+/// is *always* a binding now — never reinterpreted type-directed as a
+/// variant (see `infer.rs`'s `check_match_pat` `PatData::Bind` arm). No
+/// nesting, or-patterns or guards yet.
 fn match_pattern(p: &mut Parser<'_>) {
     match p.current() {
+        // A literal pattern. EVERY literal kind parses here, not just the
+        // character one that has semantics yet: `match n { 0 => ... }` is a
+        // thing people write, and the superset parse lets `validation` hand
+        // back "integer literal patterns are not supported yet" instead of
+        // the parser's blank "expected a pattern".
+        INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW => {
+            let m = p.start();
+            let lit = p.start();
+            p.bump_any();
+            lit.complete(p, LITERAL);
+            m.complete(p, LITERAL_PAT);
+        }
         HOLE => {
             let m = p.start();
             p.bump(HOLE);
@@ -1141,7 +1153,7 @@ fn unsafe_block_expr(p: &mut Parser<'_>) -> CompletedMarker {
 /// cases. Used where an expression is *optional* (a `break` value).
 fn at_expr_start(p: &Parser<'_>) -> bool {
     match p.current() {
-        INT_NUMBER | STRING | TRUE_KW | FALSE_KW | IDENT | L_PAREN | L_BRACE | L_BRACKET
+        INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW | IDENT | L_PAREN | L_BRACE | L_BRACKET
         | FN_KW | IF_KW | MATCH_KW | LOOP_KW | BREAK_KW | CONTINUE_KW | RETURN_KW | UNSAFE_KW
         // `::Variant` — the elided sigil starts an expression too, so
         // `return ::None;` and `break ::None;` carry their value instead of
@@ -1542,7 +1554,7 @@ fn generic_arg(p: &mut Parser<'_>) {
             m.complete(p, REGION_ARG);
         }
         // Const by form: a bare literal.
-        INT_NUMBER | STRING | TRUE_KW | FALSE_KW => {
+        INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW => {
             let m = p.start();
             let lit = p.start();
             p.bump_any();
@@ -1574,7 +1586,7 @@ fn generic_arg(p: &mut Parser<'_>) {
             // literal is legal. A compound expression must be a const block —
             // `const N + 1` and `const (a > b)` are gone; point at braces.
             match p.current() {
-                INT_NUMBER | STRING | TRUE_KW | FALSE_KW => {
+                INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW => {
                     let lit = p.start();
                     p.bump_any();
                     lit.complete(p, LITERAL);
@@ -1720,7 +1732,7 @@ fn record_expr_field(p: &mut Parser<'_>) {
     if p.eat(COLON) {
         if matches!(
             p.current(),
-            INT_NUMBER | STRING | TRUE_KW | FALSE_KW | MINUS
+            INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW | MINUS
         ) {
             // The retired `name: value` construction spelling, recognized
             // on a literal-shaped value before anything is consumed. A
@@ -1904,8 +1916,8 @@ fn type_core(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         // reinterpretation — so hir sees exactly the node it already knows
         // how to handle. The migration diagnostic is validation's job, keyed
         // off the missing leading `DOT`. Legacy `&'a T` is NOT recognized
-        // here: the `&` fires its own migration and the freed `'` is an
-        // ordinary unexpected-character lexer error (G26).
+        // here: the `&` fires its own migration and the freed `'` lexes as
+        // an unterminated character literal (G26).
         AMP => {
             let m = p.start();
             p.bump(AMP);
@@ -2005,7 +2017,7 @@ fn array_type(p: &mut Parser<'_>) -> CompletedMarker {
 /// needed to force the reading.
 fn array_len_arg(p: &mut Parser<'_>) {
     match p.current() {
-        INT_NUMBER | STRING | TRUE_KW | FALSE_KW => {
+        INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW => {
             let m = p.start();
             let lit = p.start();
             p.bump_any();
@@ -2032,7 +2044,7 @@ fn array_len_arg(p: &mut Parser<'_>) {
             let m = p.start();
             p.bump(CONST_KW);
             match p.current() {
-                INT_NUMBER | STRING | TRUE_KW | FALSE_KW => {
+                INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW => {
                     let lit = p.start();
                     p.bump_any();
                     lit.complete(p, LITERAL);

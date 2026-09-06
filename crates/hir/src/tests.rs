@@ -3664,7 +3664,7 @@ static f = fn (n: usize) -> usize {
 };
 "#,
         expect![[r#"
-            59..70: only `_` or a binding can match a `usize` (for now)
+            59..70: a variant pattern needs an enum scrutinee; only `_` or a binding can match a `usize`
         "#]],
     );
 }
@@ -6675,7 +6675,7 @@ static f = fn (a: [usize; 2]) -> usize {
 };
 "#,
         expect![[r#"
-            93..100: only `_` or a binding can match a `[usize; 2]` (for now)
+            93..100: a variant pattern needs an enum scrutinee; only `_` or a binding can match a `[usize; 2]`
         "#]],
     );
 }
@@ -7169,6 +7169,230 @@ static f = fn () -> ReadLineResult {
             87..121 'ReadLineResult(st...': ReadLineResult
             102..120 'struct { tag = 1 }': struct { tag: usize }
             117..118 '1': usize
+        "#]],
+    );
+}
+
+// --- char ---------------------------------------------------------------
+
+#[test]
+fn a_character_literal_has_a_definite_type() {
+    // No number-class variable, no defining use, no `{number}`: there is
+    // exactly one character type, so `'x'` is a `char` the moment it is
+    // written — annotated or not, and in either direction.
+    check_infer(
+        r#"
+static f = fn () {
+    let a = 'x';
+    let b: char = '\n';
+    let c = a == b;
+};
+"#,
+        expect![[r#"
+            12..82 'fn () {     let a...': fn()
+            18..82 '{     let a = 'x'...': ()
+            28..29 'a': char
+            32..35 ''x'': char
+            45..46 'b': char
+            55..59 ''\n'': char
+            69..70 'c': bool
+            73..74 'a': char
+            73..79 'a == b': bool
+            78..79 'b': char
+        "#]],
+    );
+}
+
+#[test]
+fn a_character_is_not_an_integer() {
+    // The ruling, checked: `char` is its own primitive, so it never
+    // unifies with an integer type in either direction, and it carries no
+    // arithmetic.
+    check_diagnostics(
+        r#"
+static a: char = 65;
+static b: usize = 'A';
+static c = fn (x: char) -> char { x + x };
+"#,
+        expect![[r#"
+            18..20: type mismatch: expected `char`, found `{number}` (expected `char` because of this annotation at 11..15)
+            40..43: type mismatch: expected `usize`, found `char` (expected `usize` because of this annotation at 32..37)
+            79..80: type mismatch: expected `{number}`, found `char` (`+` requires `{number}` operands at 81..82)
+        "#]],
+    );
+}
+
+#[test]
+fn a_character_match_needs_a_catch_all() {
+    // A `char` match is never exhaustive by enumeration, so the `_` arm is
+    // required as policy, not arithmetic; its absence gets the ordinary
+    // non-enum-scrutinee message.
+    check_diagnostics(
+        r#"
+static f = fn (c: char) -> usize {
+    match c {
+        '(' => 1,
+        ')' => 2,
+        _ => 0,
+    }
+};
+static g = fn (c: char) -> usize {
+    match c {
+        '(' => 1,
+        ')' => 2,
+    }
+};
+"#,
+        expect![[r#"
+            150..155: this `match` does not cover every possible `char`; add a `_` arm
+        "#]],
+    );
+}
+
+#[test]
+fn a_character_pattern_must_match_the_scrutinee() {
+    // A literal pattern's type is DEFINITE, so the pattern is what carries
+    // the blame — the scrutinee is not re-typed to suit it.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> usize {
+    match n {
+        'a' => 1,
+        _ => 0,
+    }
+};
+"#,
+        expect![[r#"
+            59..62: type mismatch: this `match` is on a `usize`, and `char` cannot match one
+        "#]],
+    );
+}
+
+#[test]
+fn a_character_pattern_pins_an_unknown_scrutinee() {
+    // The other direction of the same rule: the pattern's type is
+    // definite, so when the scrutinee is still a variable the pattern
+    // pins it — a literal pattern is construction's mirror image, like a
+    // qualified variant pattern.
+    check_infer(
+        r#"
+static f = fn (c) -> usize {
+    match c {
+        'a' => 1,
+        _ => 0,
+    }
+};
+"#,
+        expect![[r#"
+            12..85 'fn (c) -> usize {...': fn(char) -> usize
+            16..17 'c': char
+            28..85 '{     match c {  ...': usize
+            34..83 'match c {        ...': usize
+            40..41 'c': char
+            59..60 '1': usize
+            75..76 '0': usize
+        "#]],
+    );
+}
+
+#[test]
+fn a_repeated_character_arm_is_unreachable() {
+    // The variant precedent, applied to literals: the second `'a'` can
+    // never run, and saying so beats silently dropping it.
+    check_diagnostics(
+        r#"
+static f = fn (c: char) -> usize {
+    match c {
+        'a' => 1,
+        'b' => 2,
+        'a' => 3,
+        _ => 0,
+    }
+};
+"#,
+        expect![[r#"
+            94..97: unreachable arm: 'a' is already covered by a previous arm
+        "#]],
+    );
+}
+
+#[test]
+fn a_character_const_argument_type_checks_by_kind() {
+    // `char` is in the annotation-representable const domain because it
+    // fell out of the same machinery `usize`/`str`/`bool` use, not because
+    // it was carved in — so the mismatches have to be checked rather than
+    // assumed. An integer, a string and a MALFORMED literal each get their
+    // own answer; the malformed one is silent here because the lexer
+    // already said what is wrong with it (errors are infectious and
+    // silent, never doubled).
+    check_diagnostics(
+        r#"
+static pick = const fn::<const C: char>() -> char { C };
+static ok = pick::<'x'>();
+static from_int = pick::<5>();
+static from_str = pick::<"x">();
+static from_empty = pick::<''>();
+"#,
+        expect![[r#"
+            110..111: type mismatch: expected `char`, found `{number}`
+            141..144: type mismatch: expected `char`, found `str`
+            176..178: empty character literal: a character literal holds exactly one character
+        "#]],
+    );
+}
+
+#[test]
+fn a_character_pattern_projects_through_a_borrow() {
+    // M13's sealed rule is "the scrutinee's flavor decides, all the way
+    // down", and a literal pattern is a pattern: `match c { 'a' => ... }`
+    // means the same thing whether `c` is a `char` or a `char.&`.
+    // Exhaustiveness is unchanged — a `_` arm is still required — and the
+    // message now names the REFERENT rather than the borrow, because the
+    // lens is what the scrutinee is being read through.
+    check_diagnostics(
+        r#"
+static f = fn::<@a>(c: char.&::<@a>) -> usize {
+    match c {
+        '(' => 1,
+        ')' => 2,
+        _ => 0,
+    }
+};
+static g = fn::<@a>(c: char.&::<@a>) -> usize {
+    match c {
+        '(' => 1,
+    }
+};
+"#,
+        expect![[r#"
+            176..181: this `match` does not cover every possible `char`; add a `_` arm
+        "#]],
+    );
+}
+
+#[test]
+fn a_binder_on_a_borrowed_character_still_binds_the_borrow() {
+    // The whole-value binder rule, unchanged by the projection: it names
+    // the same place the scrutinee does, so it gets the borrow itself back
+    // at the scrutinee's own region — never a copied-out `char`.
+    check_infer(
+        r#"
+static f = fn::<@a>(c: char.&::<@a>) -> usize {
+    match c {
+        'x' => 1,
+        other => 0,
+    }
+};
+"#,
+        expect![[r#"
+            12..108 'fn::<@a>(c: char....': fn(char.&::<@a>) -> usize
+            21..22 'c': char.&::<@a>
+            47..108 '{     match c {  ...': usize
+            53..106 'match c {        ...': usize
+            59..60 'c': char.&::<@a>
+            78..79 '1': usize
+            89..94 'other': char.&::<@a>
+            98..99 '0': usize
         "#]],
     );
 }
@@ -11645,10 +11869,11 @@ fn a_borrow_where_the_owned_value_is_wanted_names_both_ways_out() {
 
 #[test]
 fn a_borrow_of_a_non_matchable_type_is_still_not_a_scrutinee() {
-    // The lens is lifted only for an enum or variant referent, so a
-    // `struct.&` (or a `usize.&`) scrutinee reaches exactly the
-    // diagnostics it always did, naming the BORROW rather than what is
-    // behind it. Nothing here was widened by accident.
+    // The lens is lifted only for a referent this match can DISPATCH on —
+    // an enum, a variant, or a `char` — so a `struct.&` (or a `usize.&`)
+    // scrutinee reaches exactly the diagnostics it always did, naming the
+    // BORROW rather than what is behind it. Nothing here was widened by
+    // accident when literal patterns arrived.
     check_diagnostics(
         "type P = struct { x: usize };\n\
          static f = fn::<@a>(p: P.&::<@a>, n: usize.&::<@a>) -> usize {\n\
@@ -11656,7 +11881,7 @@ fn a_borrow_of_a_non_matchable_type_is_still_not_a_scrutinee() {
          };\n\
          static g = fn::<@a>(n: usize.&::<@a>) -> usize { match n { } };",
         expect![[r#"
-            103..112: only `_` or a binding can match a `P.&::<@a>` (for now)
+            103..112: a variant pattern needs an enum scrutinee; only `_` or a binding can match a `P.&::<@a>`
             201..206: this `match` does not cover every possible `usize.&::<@a>`; add a `_` arm
         "#]],
     );

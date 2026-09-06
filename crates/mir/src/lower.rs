@@ -6,7 +6,7 @@
 //! by convention.
 
 use base_db::Db;
-use hir::body::{Body, ExprData, LiteralData, MatchArm, PatData, Stmt};
+use hir::body::{BinOp, Body, ExprData, LiteralData, MatchArm, PatData, Stmt};
 use hir::infer::{InferenceDiagnostic, InferenceResult};
 use hir::{BindingId, ExprId, ItemId, ItemLoc, PatId, Resolution, Ty};
 use la_arena::{Arena, ArenaMap};
@@ -219,6 +219,7 @@ impl LowerCtx<'_> {
                 InferenceDiagnostic::NonEnumScrutineeVariantPat { match_expr, .. }
                 | InferenceDiagnostic::PatNoSuchVariant { match_expr, .. }
                 | InferenceDiagnostic::PatWrongEnum { match_expr, .. }
+                | InferenceDiagnostic::PatLiteralTypeMismatch { match_expr, .. }
                 | InferenceDiagnostic::PatArity { match_expr, .. }
                 | InferenceDiagnostic::PatPathError { match_expr, .. }
                 | InferenceDiagnostic::VariantPatUnknownScrutinee { match_expr, .. } => {
@@ -669,6 +670,10 @@ impl LowerCtx<'_> {
             }
             ExprData::Literal(LiteralData::Str(s)) => Operand::Const(Const::Str(s.clone())),
             ExprData::Literal(LiteralData::Bool(v)) => Operand::Const(Const::Bool(*v)),
+            // No width to resolve and no range to check: a character
+            // literal that lowers at all already names its value (a
+            // malformed one lowers as `Missing`, upstream in hir).
+            ExprData::Literal(LiteralData::Char(c)) => Operand::Const(Const::Char(*c)),
             ExprData::NameRef(name) => self.lower_name_ref(b, expr, name),
             // A turbofish mention. Type arguments need nothing at runtime
             // (TR06: rigid params never affect lowering), so a mention with
@@ -1053,11 +1058,11 @@ impl LowerCtx<'_> {
                                     let local = self.alloc_binding_local(b, *binding);
                                     b.push_assign(local, Rvalue::Use(init_op), *init);
                                 }
-                                PatData::Wildcard | PatData::Missing => {
-                                    // Evaluated for effects only; nothing to
-                                    // bind (a hole lowers as `Bind` above,
-                                    // never reaches here in practice).
-                                }
+                                // Evaluated for effects only; nothing to
+                                // bind (a hole lowers as `Bind` above, and
+                                // a refutable pattern never reaches a
+                                // `let` — neither occurs in practice).
+                                PatData::Wildcard | PatData::Missing | PatData::Char(_) => {}
                                 // A destructuring pattern: stash the
                                 // initializer's value in a synthetic local,
                                 // then destructure out of it — the field
@@ -1563,9 +1568,10 @@ impl LowerCtx<'_> {
         // exactly the code it ran before this existed.
         //
         // The condition is the same predicate `infer_match` used —
-        // `hir::dispatches_on` — so a `struct.&` scrutinee still reaches
-        // the catch-all-only lowering as the BORROW it is, and its trap
-        // message does not move.
+        // `hir::dispatches_on`, which a `char` referent satisfies by
+        // literal equality just as an enum does by tag — so a `struct.&`
+        // scrutinee still reaches the catch-all-only lowering as the
+        // BORROW it is, and its trap message does not move.
         let mut lens = None;
         let mut dispatch_on = self.ty(scrutinee);
         if let Ty::Borrow {
@@ -1596,7 +1602,9 @@ impl LowerCtx<'_> {
                         .position(|arm| match self.arm_kind(arm.pat, Some(&variant.decl)) {
                             ArmKind::CatchAll => true,
                             ArmKind::Variant(index) => index == variant.index,
-                            ArmKind::Dead => false,
+                            // A literal can never match a variant-typed
+                            // value; inference already refused it.
+                            ArmKind::Literal(_) | ArmKind::Dead => false,
                         });
                 let fallback = InferenceDiagnostic::NonExhaustiveMatch {
                     expr,
@@ -1607,14 +1615,26 @@ impl LowerCtx<'_> {
                 self.lower_match_straight(b, expr, &scrut, arms, covering, fallback, lens)
             }
             scrut_ty => {
-                let covering = arms
-                    .iter()
-                    .position(|arm| matches!(self.arm_kind(arm.pat, None), ArmKind::CatchAll));
                 let fallback = InferenceDiagnostic::MatchWithoutCatchAll {
                     expr,
                     scrutinee: scrut_ty,
                 }
                 .message();
+                // LITERAL arms dispatch by TESTING, not by table lookup:
+                // `char`'s value space is a million wide and nothing about
+                // it is dense, so a switch would be a table of holes. A
+                // chain of `==` tests reuses the machinery equality and
+                // `if` already have — no new terminator, no new operation
+                // for eval or the backend to learn.
+                if arms
+                    .iter()
+                    .any(|arm| matches!(self.arm_kind(arm.pat, None), ArmKind::Literal(_)))
+                {
+                    return self.lower_match_literals(b, expr, &scrut, arms, fallback, lens);
+                }
+                let covering = arms
+                    .iter()
+                    .position(|arm| matches!(self.arm_kind(arm.pat, None), ArmKind::CatchAll));
                 self.lower_match_straight(b, expr, &scrut, arms, covering, fallback, lens)
             }
         }
@@ -1649,7 +1669,9 @@ impl LowerCtx<'_> {
                     }
                 }
                 ArmKind::CatchAll => otherwise = Some(block),
-                ArmKind::Dead => {}
+                // A literal can never match an enum-typed value; inference
+                // already refused it.
+                ArmKind::Literal(_) | ArmKind::Dead => {}
             }
         }
         let (otherwise_block, needs_trap) = match otherwise {
@@ -1756,6 +1778,122 @@ impl LowerCtx<'_> {
         Operand::Copy(dest.into())
     }
 
+    /// The LITERAL dispatch: one equality test per literal arm, in source
+    /// order, each falling through to the next — the shape a hand-written
+    /// `if`/`else if` chain has, and for the same reason (there is nothing
+    /// to index). A catch-all ends the chain; without one the fall-through
+    /// traps with the non-exhaustiveness message the editor already showed.
+    ///
+    /// MATCHING PROJECTS THROUGH BORROWS here too (M13: the scrutinee's
+    /// flavor decides, all the way down). Under a `lens` the equality test
+    /// reads THROUGH the borrow — the operand names the pointee place, the
+    /// same shape `lower_match_switch`'s tag test uses — so a scrutinee
+    /// that was invalidated is caught at the `match`, before any arm runs,
+    /// rather than at whichever arm first looked at it. A catch-all arm's
+    /// binder still binds the borrow itself: it names the very same place,
+    /// so there is nothing to project.
+    fn lower_match_literals(
+        &mut self,
+        b: &mut BodyBuilder,
+        expr: ExprId,
+        scrut: &Operand,
+        arms: &[MatchArm],
+        fallback: String,
+        lens: Option<BorrowedScrutinee>,
+    ) -> Operand {
+        let dest = b.temp(self.ty(expr));
+        let join = b.new_block();
+        // The value the tests compare against, and where to blame the read.
+        // The origin moves to the scrutinee only when there IS a read to
+        // blame — an owned match compares a detached copy and keeps the
+        // whole-match origin, exactly as the tag test does.
+        let (discr, origin) = match &lens {
+            Some(lens) => (
+                Operand::Copy(Place {
+                    local: lens.local,
+                    projection: vec![crate::ProjElem::Deref],
+                }),
+                lens.expr,
+            ),
+            None => (scrut.clone(), expr),
+        };
+        // Arms the chain never reaches (everything after a catch-all, and
+        // every dead pattern) still lower, as blocks no edge targets — the
+        // CFG stays total, exactly as in the other two lowerings.
+        let mut orphans: Vec<&MatchArm> = Vec::new();
+        let mut arms = arms.iter();
+        let mut covered = false;
+        for arm in arms.by_ref() {
+            match self.arm_kind(arm.pat, None) {
+                ArmKind::Literal(value) => {
+                    let test = b.temp(Ty::Bool);
+                    b.push_assign(
+                        test,
+                        Rvalue::BinaryOp(BinOp::Eq, discr.clone(), Operand::Const(value)),
+                        origin,
+                    );
+                    let then_block = b.new_block();
+                    let else_block = b.new_block();
+                    b.terminate(
+                        TerminatorKind::SwitchBool {
+                            discr: Operand::Copy(test.into()),
+                            then_block,
+                            else_block,
+                        },
+                        expr,
+                    );
+                    b.current = then_block;
+                    let op = self.lower_expr(b, arm.body);
+                    b.push_assign(dest, Rvalue::Use(op), arm.body);
+                    b.terminate(TerminatorKind::Goto { target: join }, expr);
+                    b.current = else_block;
+                }
+                ArmKind::CatchAll => {
+                    self.bind_match_pattern(b, arm.pat, scrut, arm.body, lens);
+                    let op = self.lower_expr(b, arm.body);
+                    b.push_assign(dest, Rvalue::Use(op), arm.body);
+                    b.terminate(TerminatorKind::Goto { target: join }, expr);
+                    covered = true;
+                    break;
+                }
+                // A broken pattern (its diagnostic is already written):
+                // no test, no edge — just a body to keep lowering.
+                ArmKind::Dead => orphans.push(arm),
+                // Variant arms cannot occur: the scrutinee is not an enum
+                // (this lowering is only reached from the `other` arm of
+                // `lower_match`), so `arm_kind` answered `Dead` for one.
+                ArmKind::Variant(_) => orphans.push(arm),
+            }
+        }
+        if !covered {
+            // Same fallback contract as the other two lowerings: normally
+            // seeded from the diagnostic, re-rendered identically here.
+            let message = self
+                .nonexhaustive_traps
+                .get(&expr)
+                .cloned()
+                .unwrap_or(fallback);
+            b.terminate(
+                TerminatorKind::Trap {
+                    message,
+                    dest,
+                    target: join,
+                },
+                expr,
+            );
+        }
+        orphans.extend(arms);
+        for arm in orphans {
+            b.current = b.new_block();
+            self.bind_match_pattern(b, arm.pat, scrut, arm.body, lens);
+            let op = self.lower_expr(b, arm.body);
+            b.push_assign(dest, Rvalue::Use(op), arm.body);
+            b.terminate(TerminatorKind::Goto { target: join }, expr);
+        }
+        b.current = join;
+        Operand::Copy(dest.into())
+    }
+
     /// The no-dispatch lowering: run the first covering arm straight-line
     /// (variant-typed scrutinees destructure the tag-free value directly;
     /// other scrutinees just bind), or trap when nothing covers. The
@@ -1829,6 +1967,7 @@ impl LowerCtx<'_> {
             // A bare bind always binds the whole scrutinee — never a
             // variant (see `check_match_pat`), so always a catch-all.
             PatData::Bind(_) => ArmKind::CatchAll,
+            PatData::Char(c) => ArmKind::Literal(Const::Char(*c)),
             PatData::Variant { .. } => match self.infer.variant_of_pat.get(pat) {
                 Some(vt) if scrut_enum.is_none_or(|d| *d == vt.decl) => ArmKind::Variant(vt.index),
                 _ => ArmKind::Dead,
@@ -1862,7 +2001,9 @@ impl LowerCtx<'_> {
         lens: Option<BorrowedScrutinee>,
     ) {
         match &self.body.pats[pat].clone() {
-            PatData::Missing | PatData::Wildcard => {}
+            // A literal pattern binds nothing: the test IS the whole
+            // pattern (see `lower_match_literals`).
+            PatData::Missing | PatData::Wildcard | PatData::Char(_) => {}
             PatData::Bind(binding) => {
                 // A bare bind always binds the whole scrutinee (never
                 // narrowed to a variant), so it just aliases the value.
@@ -1977,8 +2118,9 @@ impl LowerCtx<'_> {
                     addressable: false,
                 })
             }
-            PatData::Variant { .. } => {
-                // Never produced by `binding_pattern`'s grammar; defensive.
+            PatData::Variant { .. } | PatData::Char(_) => {
+                // Refutable shapes; never produced by `binding_pattern`'s
+                // grammar. Defensive.
                 b.alloc_local(LocalData {
                     ty: Ty::Error,
                     name: None,
@@ -2007,7 +2149,7 @@ impl LowerCtx<'_> {
         origin: ExprId,
     ) {
         match &self.body.pats[pat].clone() {
-            PatData::Missing | PatData::Wildcard => {}
+            PatData::Missing | PatData::Wildcard | PatData::Char(_) => {}
             PatData::Bind(binding) => {
                 let local = self.alloc_binding_local(b, *binding);
                 b.push_assign(local, Rvalue::Use(value.clone()), origin);
@@ -3195,6 +3337,7 @@ impl LowerCtx<'_> {
                 }
                 hir::ConstArgValue::Str(s) => Some(Operand::Const(Const::Str(s.to_string()))),
                 hir::ConstArgValue::Bool(v) => Some(Operand::Const(Const::Bool(v))),
+                hir::ConstArgValue::Char(c) => Some(Operand::Const(Const::Char(c))),
                 // The enclosing generic body forwards its own const param
                 // (a member calling a sibling member on `Self`).
                 hir::ConstArgValue::Param {
@@ -3271,6 +3414,9 @@ struct BorrowedScrutinee {
 enum ArmKind {
     /// Keyed by variant index in the scrutinee's enum.
     Variant(u32),
+    /// A literal arm: dispatched by an equality TEST against this value,
+    /// not by a table lookup — see [`LowerCtx::lower_match_literals`].
+    Literal(Const),
     /// A `_` or plain-binding arm: matches anything.
     CatchAll,
     /// Never dispatched to (broken pattern, wrong enum — already

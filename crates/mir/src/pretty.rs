@@ -204,6 +204,7 @@ fn operand(op: &Operand) -> String {
             Const::Int(v) => v.to_i128().to_string(),
             Const::Str(s) => format!("{s:?}"),
             Const::Bool(b) => b.to_string(),
+            Const::Char(c) => format!("{c:?}"),
             Const::Item(loc) => format!("item {}", loc.display_name()),
             Const::Builtin(b) => format!("builtin {}", b.name()),
             Const::Fn(body) => format!("fn {}", body_name(*body)),

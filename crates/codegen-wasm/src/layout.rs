@@ -62,7 +62,9 @@ fn slots_at(db: &dyn Db, ty: &Ty, depth: u32) -> Layout<u32> {
         // Nothing to carry: unit, divergence, and — the point of
         // monomorphization — function values.
         Ty::Unit | Ty::Never | Ty::Fn(_) => Ok(0),
-        Ty::Bool | Ty::Int(_) => Ok(1),
+        // `char` is a scalar like the others: one slot holding the
+        // Unicode scalar value.
+        Ty::Bool | Ty::Int(_) | Ty::Char => Ok(1),
         // (offset, length) into the module's data segment.
         Ty::Str => Ok(2),
         Ty::Record(record) => {
@@ -370,7 +372,7 @@ fn eq_plan_into(db: &dyn Db, ty: &Ty, out: &mut Vec<EqSlot>, depth: u32) -> Layo
     }
     match ty {
         Ty::Unit | Ty::Never | Ty::Fn(_) => Ok(()),
-        Ty::Bool | Ty::Int(_) => {
+        Ty::Bool | Ty::Int(_) | Ty::Char => {
             out.push(EqSlot::Value);
             Ok(())
         }

@@ -2760,6 +2760,7 @@ fn const_annotation_arg_error(
                 }
                 ast::LiteralKind::Str(_) => Ty::Str,
                 ast::LiteralKind::Bool(_) => Ty::Bool,
+                ast::LiteralKind::Char(_) => Ty::Char,
             };
             let expected = ty::lower_const_decl_ty(db, target.file, declared);
             if expected.contains_error() || expected == found {
@@ -2819,6 +2820,7 @@ fn array_len_expr_error(
                 }
                 ast::LiteralKind::Str(_) => Ty::Str,
                 ast::LiteralKind::Bool(_) => Ty::Bool,
+                ast::LiteralKind::Char(_) => Ty::Char,
             };
             Some(format!(
                 "type mismatch: expected `usize`, found `{}`",

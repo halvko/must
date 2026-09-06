@@ -796,6 +796,10 @@ impl<'a, 'db> Emitter<'a, 'db> {
             Const::Unit | Const::Fn(_) | Const::Builtin(_) => Ok(Vec::new()),
             Const::Int(value) => Ok(vec![value.to_i128() as i64]),
             Const::Bool(value) => Ok(vec![i64::from(*value)]),
+            // One slot holding the scalar value, exactly as an integer
+            // does — `char` IS an i32 quantity on this target (see
+            // `layout::slots`).
+            Const::Char(value) => Ok(vec![i64::from(u32::from(*value))]),
             Const::Str(text) => {
                 let (offset, len) = self.strings.intern(text);
                 Ok(vec![i64::from(offset), i64::from(len)])
@@ -851,6 +855,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
             Value::Unit | Value::Fn(_) | Value::Builtin(_) => Ok(Vec::new()),
             Value::Int(int) => Ok(vec![int.to_i128() as i64]),
             Value::Bool(b) => Ok(vec![i64::from(*b)]),
+            Value::Char(c) => Ok(vec![i64::from(u32::from(*c))]),
             Value::Str(text) => {
                 let (offset, len) = self.strings.intern(text);
                 Ok(vec![i64::from(offset), i64::from(len)])

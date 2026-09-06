@@ -74,11 +74,12 @@
   matching an owned place copies or moves as before; no new pattern grammar. The scrutinee's
   flavour decides, all the way down. Each payload binder gets a fresh region bounded by the
   scrutinee's (bounded, not shortened, so it can take the parent's whole region, which is what
-  makes an `as_ref`-shaped member writable). The tag test is a read through the borrow, so an
-  invalidated scrutinee is caught at the match; a match that dispatches on nothing performs no
-  tag test, and so no access. The rule moves by design: "a referent this match can dispatch on
-  lifts the lens" is defined by which patterns exist, so every future pattern-kind grant also
-  changes the lens for borrowed scrutinees of that type.
+  makes an `as_ref`-shaped member writable). The tag test — or, for a `char` referent, the
+  literal-equality test — is a read through the borrow, so an invalidated scrutinee is caught
+  at the match; a match that dispatches on nothing performs no tag test, and so no access.
+  The rule moves by design: "a referent this match can dispatch on lifts the lens" is defined
+  by which patterns exist, so every future pattern-kind grant also changes the lens for
+  borrowed scrutinees of that type.
 
 ### Ruled, not built
 

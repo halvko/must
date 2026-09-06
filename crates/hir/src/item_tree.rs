@@ -235,6 +235,7 @@ pub enum ConstArgRef {
     Int(u128),
     Str(String),
     Bool(bool),
+    Char(char),
     /// `const N` — a name forced to a value reading; resolved against the
     /// enclosing binder's const params during lowering.
     Name(String),
@@ -509,6 +510,10 @@ pub(crate) fn const_arg_ref_from_ast(arg: &ast::ConstArg) -> ConstArgRef {
                 ConstArgRef::Str(crate::body::unescape(token.text()))
             }
             Some(ast::LiteralKind::Bool(value)) => ConstArgRef::Bool(value),
+            // A malformed literal (`''`, `'ab'`) has no value; the lexer
+            // reported it, so this is the silent broken case.
+            Some(ast::LiteralKind::Char(token)) => syntax::char_literal_value(token.text())
+                .map_or(ConstArgRef::Error, ConstArgRef::Char),
             None => ConstArgRef::Error,
         },
         Some(ast::Expr::PathExpr(path)) => match path.name_ref() {

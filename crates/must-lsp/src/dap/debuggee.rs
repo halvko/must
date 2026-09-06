@@ -529,6 +529,7 @@ impl<W: Write + Clone> Debuggee<W> {
                     | hir::Ty::Int(_)
                     | hir::Ty::Str
                     | hir::Ty::Bool
+                    | hir::Ty::Char
                     | hir::Ty::Fn(_)
                     | hir::Ty::Record(_)
                     | hir::Ty::Array { .. }

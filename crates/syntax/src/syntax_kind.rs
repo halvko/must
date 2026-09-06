@@ -15,6 +15,8 @@ pub enum SyntaxKind {
     HOLE,
     INT_NUMBER,
     STRING,
+    /// `'x'` — a character literal, one Unicode scalar value.
+    CHAR,
     /// `@a` / `@_` — a region name or the region wildcard.
     REGION_IDENT,
     L_PAREN,
@@ -115,6 +117,10 @@ pub enum SyntaxKind {
     RETURN_EXPR,
     ELIDED_VARIANT_EXPR,
     VARIANT_PAT,
+    /// A literal in match-arm position (`'(' => ...`). Superset-parses
+    /// every literal kind; `validation` allows only the character one so
+    /// far.
+    LITERAL_PAT,
     WILDCARD_PAT,
     BIND_PAT,
     REST_PAT,

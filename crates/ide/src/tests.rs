@@ -442,6 +442,39 @@ fn highlights_split_multiline_strings_per_line() {
 }
 
 #[test]
+fn highlights_character_literals_as_strings() {
+    // A character literal is string-like and colored like one: the palette
+    // has no character class, and every theme already paints quoted text
+    // the same way whichever quote it is. A literal PATTERN gets the same
+    // tag as an expression — the token kind decides, and there is only one
+    // token kind for both positions.
+    check_highlights(
+        "static c = 'x';\nstatic f = fn (c: char) -> usize { match c { '\\n' => 1, _ => 0 } };",
+        expect_test::expect![[r#"
+            0..6 "static" Keyword
+            7..8 "c" Variable.declaration.static
+            9..10 "=" Operator
+            11..14 "'x'" String
+            16..22 "static" Keyword
+            23..24 "f" Function.declaration.static
+            25..26 "=" Operator
+            27..29 "fn" Keyword
+            31..32 "c" Parameter.declaration
+            34..38 "char" Type.defaultLibrary
+            40..42 "->" Operator
+            43..48 "usize" Type.defaultLibrary
+            51..56 "match" Keyword
+            57..58 "c" Parameter
+            61..65 "'\\n'" String
+            66..68 "=>" Operator
+            69..70 "1" Number
+            74..76 "=>" Operator
+            77..78 "0" Number
+        "#]],
+    );
+}
+
+#[test]
 fn diagnostics_include_mir_findings() {
     // Captures are invisible to name resolution and inference — only MIR
     // lowering notices the binding lives in an enclosing function.
@@ -1661,6 +1694,7 @@ static make_point = fn (x: usize) -> $0 { x };
             Point Struct (struct { x: usize, y: usize })
             ReadLineResult Enum (enum { Line(str), End })
             bool Keyword
+            char Keyword
             i16 Keyword
             i32 Keyword
             i64 Keyword
@@ -1935,6 +1969,21 @@ fn completions_dot_field_access_unknown_receiver_is_empty() {
         r#"
 static f = fn {
     nope.$0
+};
+"#,
+        expect_test::expect![""],
+    );
+}
+
+#[test]
+fn completions_are_suppressed_inside_a_character_literal() {
+    // A half-typed `'` is a CHAR token, so without this the list would pop
+    // open on the keystroke after the apostrophe — the same suppression a
+    // string and a comment get.
+    check_completions(
+        r#"
+static f = fn () {
+    let c = '$0';
 };
 "#,
         expect_test::expect![""],
@@ -2971,6 +3020,27 @@ fn completions_match_template_not_offered_without_an_enum_scrutinee() {
 }
 
 #[test]
+fn completions_match_template_not_offered_for_a_character_scrutinee() {
+    // A `char` DISPATCHES (its literal patterns do), so it is a scrutinee
+    // the arm-slot logic takes seriously — but there is no variant list to
+    // write out, so there is no template to offer. The arm slot still
+    // offers the `_` a `char` match always needs.
+    check_no_completion("static f = fn (c: char) { match c $0 };", "match arms");
+    check_completions(
+        r#"
+static f = fn (c: char) {
+    match c {
+        $0
+    }
+};
+"#,
+        expect_test::expect![[r#"
+            _ Keyword
+        "#]],
+    );
+}
+
+#[test]
 fn completions_match_template_not_offered_while_the_scrutinee_is_typed() {
     // At `match s|` the typed prefix IS the scrutinee's own text — the user
     // is still naming the value, and wrapping an arm list around a
@@ -3204,6 +3274,22 @@ fn completions_match_scrutinee_ranks_by_definition_scope_distance() {
         completion_sort_text(SCRUTINEE_LAYERS, "noise"),
         "2_10_noise"
     );
+}
+
+#[test]
+fn completions_match_scrutinee_lifts_a_character_typed_local() {
+    // The scrutinee slot's lift follows `hir::dispatches_on`, so it follows
+    // it to `char` too: a `char` local leads the slot the way an enum one
+    // does, while a `usize` local stays on the flat local tier.
+    const CHAR_SCRUTINEE: &str = r#"
+static f = fn () {
+    let n = 0;
+    let c = 'x';
+    match $0
+};
+"#;
+    assert_eq!(completion_sort_text(CHAR_SCRUTINEE, "c"), "2_00_c");
+    assert_eq!(completion_sort_text(CHAR_SCRUTINEE, "n"), "2_10_n");
 }
 
 #[test]

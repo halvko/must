@@ -103,7 +103,10 @@ pub(crate) fn lexical_tag(kind: SyntaxKind) -> Option<HlTag> {
     }
     Some(match kind {
         COMMENT => HlTag::Comment,
-        STRING => HlTag::String,
+        // A character literal is string-like, and colored like one: the
+        // palette has no character class, and every editor theme already
+        // paints quoted text the same way whichever quote it is.
+        STRING | CHAR => HlTag::String,
         INT_NUMBER => HlTag::Number,
         PLUS | MINUS | STAR | SLASH | EQ | THIN_ARROW | FAT_ARROW | AMP | EQ2 | NEQ | L_ANGLE
         | R_ANGLE | LTEQ | GTEQ => HlTag::Operator,

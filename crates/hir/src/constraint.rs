@@ -701,7 +701,8 @@ impl Constraints {
             (Ty::Unit, Ty::Unit)
             | (Ty::Never, Ty::Never)
             | (Ty::Str, Ty::Str)
-            | (Ty::Bool, Ty::Bool) => true,
+            | (Ty::Bool, Ty::Bool)
+            | (Ty::Char, Ty::Char) => true,
             // Same-kind only: `u8` never unifies with `u32` — no implicit
             // mixing, an ordinary type mismatch (no conversions in v1).
             (Ty::Int(k1), Ty::Int(k2)) => k1 == k2,

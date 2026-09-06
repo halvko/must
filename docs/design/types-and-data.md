@@ -57,6 +57,11 @@
   never widens to something else on a later use's say-so).
 - **T15** `str` is a primitive; `Vec`, `String` and `Slice` are library types, and slices
   are not primitive. Interpolation is a library feature.
+- **T16** `char` is a Unicode scalar value: its own primitive, never an integer alias,
+  holding a codepoint that is not a surrogate. A character literal's type is definite, which
+  lets a `'x'` pattern blame itself rather than re-type the scrutinee. `char` has equality
+  and nothing else: ordering and arithmetic are how a program builds a value that is not a
+  character.
 
 ## Discarded
 
@@ -73,6 +78,9 @@
   distinct. **Subtyping in generic positions.** **T03 T13**
 - **Equality on function values as a designed relation** — it fell out of a derive, not a
   decision, and is not to be relied on. **T09**
+- **`char` as a raw codepoint** — UTF-8 cannot encode a surrogate, so admitting them makes
+  every encoder fallible for values no text contains. **`char` as an integer alias** — an
+  alias hands back arithmetic and ordering, which is how a non-character gets built. **T16**
 
 ## Re-evaluate when
 
@@ -87,5 +95,6 @@
 - **Modules land** — the join plurality vote, `let mut` widening and per-file inference are
   observable rules that were never ruled. Per-file solving is invisible in a single-file world
   and will shape or break programs once modules exist. **T04 T11 T12**
-- **Integer conversions** land when a customer names itself. **Variadic generics** stay
-  parked; the first customer is interpolation. **T01 T15**
+- **Integer conversions** land when a customer names itself; `char ↔ u32` arrives fallible
+  in the integer-to-char direction. **Variadic generics** stay parked; the first customer is
+  interpolation. **T01 T15 T16**

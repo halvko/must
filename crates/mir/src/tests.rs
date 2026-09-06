@@ -3132,3 +3132,206 @@ static f = fn(o: Opt) -> usize {
         "#]],
     );
 }
+
+// ---- character literal patterns: dispatch by equality chain -------------
+
+#[test]
+fn a_character_match_lowers_to_a_chain_of_equality_tests() {
+    // No table, no switch: one `Eq` against the literal per arm, each
+    // `SwitchBool`ing into its own arm block and falling through to the
+    // next test. That is the whole reason `char` needed no new terminator
+    // and no new operation for eval or the backend to learn.
+    check_mir(
+        r#"
+static f = fn (c: char) -> usize {
+    match c {
+        '(' => 1,
+        ')' => 2,
+        _ => 0,
+    }
+};
+"#,
+        expect![[r#"
+            item f:
+            fn b0(_1: char) -> usize {
+              _0: usize  // return
+              _1: char  // param c
+              _2: char
+              _3: usize
+              _4: bool
+              _5: bool
+              bb0:
+                _2 = _1
+                _4 = Eq(_2, '(')
+                if _4 -> [then: bb2, else: bb3]
+              bb1:
+                _0 = _3
+                return
+              bb2:
+                _3 = 1
+                goto -> bb1
+              bb3:
+                _5 = Eq(_2, ')')
+                if _5 -> [then: bb4, else: bb5]
+              bb4:
+                _3 = 2
+                goto -> bb1
+              bb5:
+                _3 = 0
+                goto -> bb1
+            }
+            fn b1() -> fn(char) -> usize {
+              _0: fn(char) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn a_character_match_without_a_catch_all_traps_at_the_fall_through() {
+    // The chain runs out, and the last `else` edge is the deferred error —
+    // carrying the exact message the editor already showed, like every
+    // other non-exhaustive lowering.
+    check_mir(
+        r#"
+static f = fn (c: char) -> usize {
+    match c {
+        'a' => 1,
+    }
+};
+"#,
+        expect![[r#"
+            item f:
+            fn b0(_1: char) -> usize {
+              _0: usize  // return
+              _1: char  // param c
+              _2: char
+              _3: usize
+              _4: bool
+              bb0:
+                _2 = _1
+                _4 = Eq(_2, 'a')
+                if _4 -> [then: bb2, else: bb3]
+              bb1:
+                _0 = _3
+                return
+              bb2:
+                _3 = 1
+                goto -> bb1
+              bb3:
+                _3 = trap "this `match` does not cover every possible `char`; add a `_` arm" -> bb1
+            }
+            fn b1() -> fn(char) -> usize {
+              _0: fn(char) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn character_arms_after_a_catch_all_lower_as_orphan_blocks() {
+    // Everything after a catch-all is dead, but it still LOWERS — as a
+    // block no edge targets — so the CFG stays total, exactly as in the
+    // switch and straight-line lowerings. A capture error inside one is
+    // still reported: MIR lowering is the pass that finds captures.
+    check_mir(
+        r#"
+static f = fn (c: char) -> usize {
+    match c {
+        'a' => 1,
+        _ => 2,
+        'b' => 3,
+    }
+};
+"#,
+        expect![[r#"
+            item f:
+            fn b0(_1: char) -> usize {
+              _0: usize  // return
+              _1: char  // param c
+              _2: char
+              _3: usize
+              _4: bool
+              bb0:
+                _2 = _1
+                _4 = Eq(_2, 'a')
+                if _4 -> [then: bb2, else: bb3]
+              bb1:
+                _0 = _3
+                return
+              bb2:
+                _3 = 1
+                goto -> bb1
+              bb3:
+                _3 = 2
+                goto -> bb1
+              bb4:
+                _3 = 3
+                goto -> bb1
+            }
+            fn b1() -> fn(char) -> usize {
+              _0: fn(char) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn a_borrowed_character_match_tests_through_the_deref() {
+    // The projection rule reaching literal patterns (M13: the scrutinee's
+    // flavour decides, all the way down). The equality test names the
+    // POINTEE place, not a detached copy — so the interpreter's aliasing
+    // tree sees the access and an invalidated scrutinee is caught at the
+    // `match`, before any arm runs. The catch-all's binder still takes the
+    // borrow itself: it names the very same place.
+    check_mir(
+        r#"
+static f = fn::<@a>(c: char.&::<@a>) -> usize {
+    match c {
+        'a' => 1,
+        other => 0,
+    }
+};
+"#,
+        expect![[r#"
+            item f:
+            fn b0(_1: char.&) -> usize {
+              _0: usize  // return
+              _1: char.&  // param c
+              _2: char.&
+              _3: usize
+              _4: bool
+              _5: char.&  // other
+              bb0:
+                _2 = _1
+                _4 = Eq(_2.*, 'a')
+                if _4 -> [then: bb2, else: bb3]
+              bb1:
+                _0 = _3
+                return
+              bb2:
+                _3 = 1
+                goto -> bb1
+              bb3:
+                _5 = _2
+                _3 = 0
+                goto -> bb1
+            }
+            fn b1() -> fn(char.&) -> usize {
+              _0: fn(char.&) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}

@@ -443,6 +443,133 @@ static main = fn {
     );
 }
 
+// --- char -------------------------------------------------------------
+
+#[test]
+fn character_literals_are_values_with_equality() {
+    // Escapes are cooked here exactly as a string's are (one table, one
+    // answer), and `==`/`!=` fall out of the machine's structural operand
+    // equality — a `char` needs no comparison code of its own.
+    check_const(
+        r#"
+static a = 'x';
+static newline = '\n';
+static quote = '\'';
+static nul = '\0';
+static multibyte = 'æ';
+static same = 'x' == 'x';
+static different = 'x' == 'y';
+static unequal = 'x' != 'y';
+"#,
+        expect![[r#"
+            a = 'x'
+            newline = '\n'
+            quote = '\''
+            nul = '\0'
+            multibyte = 'æ'
+            same = true
+            different = false
+            unequal = true
+        "#]],
+    );
+}
+
+#[test]
+fn a_character_match_dispatches_on_the_value() {
+    // Dispatch is a chain of equality TESTS (there is no table to index
+    // into a million-wide space), so the first matching arm wins and the
+    // `_` arm catches everything else.
+    check_run(
+        r#"
+static classify = fn (c: char) -> usize {
+    match c {
+        '(' => 1,
+        ')' => 2,
+        'æ' => 3,
+        _ => 0,
+    }
+};
+static main = fn () -> usize {
+    classify('(') + classify(')') * 10 + classify('æ') * 100 + classify('z') * 1000
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 321
+        "#]],
+    );
+}
+
+#[test]
+fn a_borrowed_character_match_dispatches_through_the_borrow() {
+    // The projection rule reaching literal patterns, run for real: the
+    // equality test reads the POINTEE, so a `char.&` scrutinee dispatches
+    // exactly as the owned value would.
+    check_run(
+        "static classify = fn::<@a>(c: char.&::<@a>) -> usize {\n\
+             match c {\n\
+                 '(' => 1,\n\
+                 ')' => 2,\n\
+                 _ => 0,\n\
+             }\n\
+         };\n\
+         static f = fn() -> usize {\n\
+             let a = '(';\n\
+             let b = ')';\n\
+             let z = 'z';\n\
+             classify(a.&::<@_>) + classify(b.&::<@_>) * 10 + classify(z.&::<@_>) * 100\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 21
+        "#]],
+    );
+}
+
+#[test]
+fn a_borrowed_character_match_reads_through_the_borrow() {
+    // And the read is a real one THROUGH the borrow, not a detached copy:
+    // a scrutinee invalidated before the `match` is caught at the `match`
+    // itself — the same event the tag test is for an enum.
+    check_run(
+        "static f = fn() -> usize {\n\
+             let mut c = 'a';\n\
+             let m = c.&mut::<@_>;\n\
+             c = 'b';\n\
+             match m { 'a' => 1, _ => 0 }\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, or written through another borrow
+        "#]],
+    );
+}
+
+#[test]
+fn a_character_is_a_const_argument() {
+    // `char` joins the annotation-representable const domain alongside
+    // `usize`/`str`/`bool` — it fell out of the same machinery rather than
+    // being carved in, so it is pinned rather than assumed.
+    check_const(
+        r#"
+static pick = const fn::<const C: char>() -> char { C };
+static open = pick::<'('>();
+static newline = pick::<'\n'>();
+static multibyte = pick::<'æ'>();
+static same_instance = pick::<'x'>() == pick::<'x'>();
+"#,
+        expect![[r#"
+            pick = fn
+            open = '('
+            newline = '\n'
+            multibyte = 'æ'
+            same_instance = true
+        "#]],
+    );
+}
+
 #[test]
 fn read_line_crashes_on_input_it_cannot_decode() {
     // `ReadLineResult` has no error arm (P04), so a failed read is a

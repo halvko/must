@@ -516,6 +516,7 @@ impl<'db> Mono<'db> {
             Operand::Const(Const::ConstBlock(body)) => self.const_block(key, *body),
             Operand::Const(Const::Int(v)) => Some(Value::Int(*v)),
             Operand::Const(Const::Bool(b)) => Some(Value::Bool(*b)),
+            Operand::Const(Const::Char(c)) => Some(Value::Char(*c)),
             Operand::Const(Const::Str(s)) => Some(Value::Str(s.clone())),
             Operand::Const(Const::ConstParam(index)) => {
                 key.func.value.const_args.get(*index as usize).cloned()
@@ -680,6 +681,7 @@ impl<'db> Mono<'db> {
             Operand::Const(Const::Int(value)) => Ok(Ty::Int(value.kind())),
             Operand::Const(Const::Str(_)) => Ok(Ty::Str),
             Operand::Const(Const::Bool(_)) => Ok(Ty::Bool),
+            Operand::Const(Const::Char(_)) => Ok(Ty::Char),
             Operand::Const(Const::Item(item)) => Ok(hir::signature(self.db, item.to_id(self.db))),
             // A `fn` LITERAL. It occupies zero slots whatever its
             // signature is — its identity travels in the static-value
@@ -728,6 +730,7 @@ impl<'db> Mono<'db> {
                     Some(Value::Int(v)) => Ok(Ty::Int(v.kind())),
                     Some(Value::Bool(_)) => Ok(Ty::Bool),
                     Some(Value::Str(_)) => Ok(Ty::Str),
+                    Some(Value::Char(_)) => Ok(Ty::Char),
                     _ => Err(Unsupported::new("a const parameter of an unsupported type")),
                 }
             }
@@ -885,6 +888,7 @@ fn const_arg_value(value: &Value) -> ConstArgValue {
         },
         Value::Bool(b) => ConstArgValue::Bool(*b),
         Value::Str(s) => ConstArgValue::Str(s.as_str().into()),
+        Value::Char(c) => ConstArgValue::Char(*c),
         _ => ConstArgValue::Error,
     }
 }

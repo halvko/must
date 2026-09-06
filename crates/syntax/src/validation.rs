@@ -120,6 +120,8 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
                     fix: None,
                 });
             }
+        } else if let Some(literal_pat) = ast::LiteralPat::cast(node.clone()) {
+            reject_non_char_literal_pat(&literal_pat, &mut errors);
         } else if let Some(record_pat) = ast::RecordPat::cast(node.clone()) {
             let names = record_pat
                 .fields()
@@ -941,6 +943,36 @@ fn reject_unqualified_bare_variant_pat(
                 insert: "::".to_owned(),
             }],
         }),
+    });
+}
+
+/// Only CHARACTER literals are patterns so far. The grammar takes every
+/// literal kind (see `grammar::match_pattern`) so this can say which one
+/// was written and that it is a "not yet", rather than the parser handing
+/// back a blank "expected a pattern" for `match n { 0 => ... }`.
+///
+/// The reason `char` goes first is not favouritism: an integer pattern
+/// wants a range/exhaustiveness story (`0..=9`, and which widths a bare
+/// `0` covers) that a scalar with no arithmetic simply doesn't need, and a
+/// string pattern wants an equality-on-slices story. Both are pattern-
+/// language work, not char work.
+fn reject_non_char_literal_pat(literal_pat: &ast::LiteralPat, errors: &mut Vec<SyntaxError>) {
+    let Some(kind) = literal_pat.literal().and_then(|lit| lit.kind()) else {
+        return;
+    };
+    let what = match kind {
+        ast::LiteralKind::Char(_) => return,
+        ast::LiteralKind::Int(_) => "integer",
+        ast::LiteralKind::Str(_) => "string",
+        ast::LiteralKind::Bool(_) => "boolean",
+    };
+    errors.push(SyntaxError {
+        message: format!(
+            "{what} literal patterns are not supported yet; \
+             only character literals (`'x'`) can be matched"
+        ),
+        range: literal_pat.syntax().text_range(),
+        fix: None,
     });
 }
 

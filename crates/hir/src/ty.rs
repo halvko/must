@@ -277,6 +277,19 @@ pub enum Ty {
     Int(IntKind),
     Str,
     Bool,
+    /// `char`: ONE Unicode scalar value — a codepoint that is not a
+    /// surrogate. A primitive of its own, never an integer alias: `char`
+    /// has equality and nothing else (no ordering, no arithmetic), so the
+    /// operations an integer offers are exactly the ones that would let a
+    /// program build a value that is not a character.
+    ///
+    /// Scalar values, not raw codepoints, because UTF-8 cannot encode a
+    /// surrogate: admitting them would make every encoder — `str`
+    /// construction, `print`, the wasm data segment — fallible for values
+    /// no text ever contains. The narrower type pays for itself at the one
+    /// place it costs anything — decoding text, which reads from
+    /// already-valid UTF-8 and so can never produce one.
+    Char,
     Fn(Arc<FnTy>),
     /// `{ x: usize, y: str }`: a structural record. Two record types are the
     /// same type exactly when their field sets are equal (same names, same
@@ -500,6 +513,7 @@ pub enum ConstArgValue {
     Int(u128),
     Str(std::sync::Arc<str>),
     Bool(bool),
+    Char(char),
     /// A rigid const parameter of an enclosing generic binder (`N` in
     /// `Buf::<N>` inside another generic body) — the const-side sibling of
     /// [`Ty::Param`], with the same `(item, index)` identity scheme (the
@@ -521,6 +535,7 @@ impl ConstArgValue {
             ConstArgValue::Int(v) => v.to_string(),
             ConstArgValue::Str(s) => format!("{s:?}"),
             ConstArgValue::Bool(b) => b.to_string(),
+            ConstArgValue::Char(c) => format!("{c:?}"),
             ConstArgValue::Param { name, .. } => name.to_string(),
             ConstArgValue::Error => "{error}".to_owned(),
         }
@@ -825,6 +840,7 @@ impl Ty {
             Ty::Int(kind) => kind.name().to_owned(),
             Ty::Str => "str".to_owned(),
             Ty::Bool => "bool".to_owned(),
+            Ty::Char => "char".to_owned(),
             Ty::Error => "{error}".to_owned(),
             Ty::Fn(f) => {
                 let params = f
@@ -976,6 +992,7 @@ pub fn builtin_type_by_name(name: &str) -> Option<Ty> {
     match name {
         "str" | "string" => Some(Ty::Str),
         "bool" => Some(Ty::Bool),
+        "char" => Some(Ty::Char),
         _ => None,
     }
 }
@@ -1115,6 +1132,7 @@ fn lower_const_arg_ref(value: &ConstArgRef, scope: &ParamScope) -> ConstArgValue
         ConstArgRef::Int(v) => ConstArgValue::Int(*v),
         ConstArgRef::Str(s) => ConstArgValue::Str(std::sync::Arc::from(s.as_str())),
         ConstArgRef::Bool(b) => ConstArgValue::Bool(*b),
+        ConstArgRef::Char(c) => ConstArgValue::Char(*c),
         ConstArgRef::Name(name) => scope.const_param_value(name),
         // Blocks are outside the annotation domain (the firewall); the
         // mirror pass carries the diagnostic.
@@ -1553,8 +1571,9 @@ pub fn type_underlying<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<Ty> {
 }
 
 /// Whether a `match` on a value of this (shallow-resolved) type dispatches
-/// on it — an enum declaration, or one of its variants. Everything else can
-/// only be matched by a catch-all.
+/// on it — an enum declaration, one of its variants, or `char`, whose
+/// literal patterns dispatch by equality rather than by a tag. Everything
+/// else can only be matched by a catch-all.
 ///
 /// The one predicate every pass asks: inference uses it to decide whether
 /// a BORROWED scrutinee lifts the projection lens (M13 — `match` projects
@@ -1568,6 +1587,7 @@ pub fn dispatches_on(db: &dyn Db, ty: &Ty) -> bool {
     match ty {
         Ty::Named(named) => enum_variants(db, named.decl.to_id(db)).is_some(),
         Ty::Variant(_) => true,
+        Ty::Char => true,
         _ => false,
     }
 }

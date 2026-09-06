@@ -499,6 +499,64 @@ static main = fn () -> bool {
     );
 }
 
+#[test]
+fn character_literals_compare_and_dispatch() {
+    // `char` is a scalar on this target — one slot, like `bool` — so
+    // literals, `==`/`!=` and character-pattern dispatch all reach the
+    // ordinary scalar paths. A multi-byte literal is the same one slot:
+    // the value is a codepoint number, never its UTF-8 bytes.
+    check(
+        r#"
+static classify = fn (c: char) -> usize {
+    match c {
+        '(' => 1,
+        ')' => 2,
+        '\n' => 3,
+        'æ' => 4,
+        _ => 0,
+    }
+};
+static main = fn () -> bool {
+    let a = 'x';
+    let b = 'x';
+    if a == b { print("eq\n") } else { print("ne\n") };
+    if a == 'y' { print("wrong\n") } else { print("differs\n") };
+    if classify('(') == 1 { print("open\n") } else { print("bad\n") };
+    if classify(')') == 2 { print("close\n") } else { print("bad\n") };
+    if classify('\n') == 3 { print("newline\n") } else { print("bad\n") };
+    if classify('æ') == 4 { print("multibyte\n") } else { print("bad\n") };
+    if classify('z') == 0 { print("other\n") } else { print("bad\n") };
+    a != 'y'
+}
+"#,
+        "main()",
+    );
+}
+
+#[test]
+fn character_const_arguments_monomorphize() {
+    // `char` reaches the const-argument domain through the same machinery
+    // `usize`/`str`/`bool` use, which means it also reaches the INSTANCE
+    // KEY: two instantiations at different characters must be two
+    // functions with each one's value baked in, and two at the same
+    // character must collapse back into one.
+    check(
+        r#"
+static pick = const fn::<const C: char>() -> char { C };
+static is_open = const fn::<const C: char>(c: char) -> bool { c == C };
+static main = fn () -> bool {
+    if pick::<'('>() == '(' { print("open\n") } else { print("bad\n") };
+    if pick::<'æ'>() == 'æ' { print("multibyte\n") } else { print("bad\n") };
+    if pick::<'('>() == pick::<')'>() { print("bad\n") } else { print("distinct\n") };
+    if is_open::<'('>('(') { print("hit\n") } else { print("bad\n") };
+    if is_open::<'('>(')') { print("bad\n") } else { print("miss\n") };
+    pick::<'x'>() == pick::<'x'>()
+}
+"#,
+        "main()",
+    );
+}
+
 // --- functions, generics, traits ----------------------------------------
 
 #[test]
