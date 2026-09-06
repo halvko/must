@@ -56,12 +56,19 @@ pub fn server_capabilities() -> lsp_types::ServerCapabilities {
         code_lens_provider: Some(lsp_types::CodeLensOptions {
             resolve_provider: Some(false),
         }),
-        // Trigger chars registered for `.`/`::`/`{` — member/variant
-        // candidates classify the first two; `{` catches the auto-closed
-        // `match s {|}` empty-arm-list slot (`ArmListShape::EmptyBraces`).
+        // Trigger chars registered for `.`/`::` — member/variant
+        // candidates classify both.
+        //
+        // `{` is deliberately not one of them: opening any `{` — a
+        // function body chief among them — is the least-wanted prediction
+        // moment (P12 Discarded). The match arm-list template's
+        // auto-closed-braces slot
+        // (`ide::completions::ArmListShape::EmptyBraces`) stays reachable
+        // only by an explicit invoke at that position, same as the
+        // `NoBraces` shape always has been.
         completion_provider: Some(lsp_types::CompletionOptions {
             resolve_provider: Some(false),
-            trigger_characters: Some(vec![".".to_owned(), ":".to_owned(), "{".to_owned()]),
+            trigger_characters: Some(vec![".".to_owned(), ":".to_owned()]),
             ..Default::default()
         }),
         execute_command_provider: Some(lsp_types::ExecuteCommandOptions {

@@ -52,14 +52,12 @@
   machine, same UB findings.
 - **P12** `match` completions. Two things keyed off the scrutinee: an
   arm-list template that writes the rest of the statement (every variant,
-  payload bindings and arm bodies as tab stops in definition order),
-  offered on explicit invoke and on `{` as a trigger character — the slot
-  has two shapes, `match s ˽` (the template writes the braces) and an
-  editor's auto-closed `match s {˽}` (arms only; the client's `}` stays);
-  and scrutinee ranking that re-orders the expression set so enum-typed
-  values lead, ordered by definition-scope distance (scope-chain hop count,
-  not a hand-written tier list, so closures inherit the rule). Nothing is
-  suppressed. Snippets are indented absolutely, because the editor's
+  payload bindings and arm bodies as tab stops in definition order), and
+  scrutinee ranking that re-orders the expression set so enum-typed values
+  lead, ordered by definition-scope distance (scope-chain hop count, not a
+  hand-written tier list, so closures inherit the rule). Nothing is
+  suppressed. The template lives on an explicit invoke, not on a trigger
+  character. Snippets are indented absolutely, because the editor's
   snippet path shifts by a tree-sitter result and the extension registers
   no grammar.
 - **P03** `print` emits exactly what it is given: `str` only, no newline, no formatting, no
@@ -107,6 +105,8 @@
   linear memory** — address reuse makes use-after-free silently read new data, and the
   interpreter stops being a UB detector. **Handle/path fakes with no allocation table** —
   cannot represent heap allocations. **P11**
+- **`{` as a completion trigger character** — fired the template at the least wanted moment,
+  an opening function body chief among them; the template stays on explicit invoke. **P12**
 
 ## Re-evaluate when
 

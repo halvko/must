@@ -3013,11 +3013,13 @@ static f = fn (s: Shape) { match s { ::Point => 1, $0 } };
 #[test]
 fn completions_match_template_offered_inside_empty_braces() {
     // `match s {|}` — an editor that auto-closes `{` (Zed does, instantly)
-    // hands the server exactly this the moment `{` is typed, now that `{`
-    // is a trigger character. The template must fire here too, but without
-    // writing braces of its own: the pair already in the tree is the
-    // client's auto-close, and the server has no way to tell it to delete a
-    // second one. Compare the no-braces snippet
+    // leaves the cursor exactly here; an explicit invoke at this position
+    // must still fire the template (this crate has no notion of "trigger
+    // character" at all — that's a `must-lsp` capability concern; see
+    // `must_lsp::server_capabilities`'s comment, and P12, on why `{` isn't
+    // one spontaneously), but without writing braces of its own: the pair
+    // already in the tree is the client's auto-close, and the server has no
+    // way to tell it to delete a second one. Compare the no-braces snippet
     // (`completions_match_template_writes_every_variant_as_an_arm`): same
     // arm text, minus the `{` and the `}`.
     assert_eq!(
@@ -3291,11 +3293,13 @@ static f = fn (param: Shape) {
 
 #[test]
 fn completions_record_literal_brace_still_offers_fields_not_a_template() {
-    // `{` is now a trigger character (`must_lsp::server_capabilities`), so
-    // a record literal's own auto-closed braces fire a completion request
-    // too. Nothing here is a `match`, so `match_awaiting_arms` finds no
-    // enclosing `MatchExpr` and declines — the position keeps answering
-    // exactly what it always has (the missing-field candidates).
+    // A request landing right after a record literal's own auto-closed
+    // brace (however it got here — an explicit invoke, since `{` is not a
+    // trigger character; see `must_lsp::server_capabilities`) must not be
+    // confused for a match's. Nothing here is a `match`, so
+    // `match_awaiting_arms` finds no enclosing `MatchExpr` and declines —
+    // the position keeps answering exactly what it always has (the
+    // missing-field candidates).
     let fixture_text = r#"
 type Point = struct { x: usize, y: usize };
 static f = fn {

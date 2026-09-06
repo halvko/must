@@ -825,7 +825,13 @@ fn run_lens_executes_the_buffer() {
 }
 
 #[test]
-fn completion_capability_is_advertised_with_dot_colon_and_brace_triggers() {
+fn completion_capability_is_advertised_with_dot_and_colon_triggers() {
+    // `{` is deliberately NOT here: opening a `{` — a function body chief
+    // among them — is exactly where predictions are least wanted. The
+    // arm-list template at `match s {|}` still exists — see
+    // `snippet_capable_client_receives_the_match_arm_template_inside_empty_braces`
+    // below — it's just reachable only by an explicit invoke, not a
+    // spontaneous one fired the instant the client auto-closes `{`.
     let capabilities = must_lsp::server_capabilities();
     let completion = capabilities
         .completion_provider
@@ -833,7 +839,7 @@ fn completion_capability_is_advertised_with_dot_colon_and_brace_triggers() {
     assert_eq!(completion.resolve_provider, Some(false));
     assert_eq!(
         completion.trigger_characters,
-        Some(vec![".".to_owned(), ":".to_owned(), "{".to_owned()])
+        Some(vec![".".to_owned(), ":".to_owned()])
     );
 }
 
@@ -1205,9 +1211,11 @@ fn snippet_incapable_client_receives_the_match_template_fallback() {
 
 /// The other shape of the template slot, end to end: `match s {}` with the
 /// cursor already inside the pair an auto-closing editor supplied. `{` is
-/// now a registered trigger character (`server_capabilities`), so this is
-/// exactly the request a real editor fires the instant the user types `{`
-/// after the scrutinee.
+/// NOT a registered trigger character (see
+/// `completion_capability_is_advertised_with_dot_and_colon_triggers`), so a
+/// real editor does not fire this request spontaneously the instant `{` is
+/// typed — but the position still answers the template on an explicit
+/// invoke, which is exactly what this request represents.
 #[test]
 fn snippet_capable_client_receives_the_match_arm_template_inside_empty_braces() {
     let mut client = TestClient::start_with(init_with_snippet_support(true));

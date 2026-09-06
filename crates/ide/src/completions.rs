@@ -571,9 +571,8 @@ pub(crate) fn completions(
 /// itself is whether it writes its own braces ([`match_template`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ArmListShape {
-    /// `match s ˽` — no `{` typed yet. Reached today only by an explicit
-    /// invoke (no trigger character fires mid-whitespace), so the template
-    /// writes the whole `{ ... }` itself.
+    /// `match s ˽` — no `{` typed yet. Reached only by an explicit invoke,
+    /// so the template writes the whole `{ ... }` itself.
     NoBraces,
     /// `match s {˽}` — an editor that auto-closes `{` (Zed does, instantly)
     /// has already supplied both braces, and nothing sits between them yet
@@ -1670,10 +1669,10 @@ fn line_indent(text: &str, offset: TextSize) -> String {
 /// courtesy of the client's auto-close, per [`match_awaiting_arms`] — and
 /// this emits arms only, so the existing `}` lands, unduplicated, right
 /// after the last arm at `indent`. The output always starts with `\n`
-/// before the first arm: the tight auto-close case (the trigger character's
-/// own shape) needs it to put the arm list on its own line, and the
-/// across-whitespace `EmptyBraces` case is accepted as-is rather than
-/// stripped, leaving the buffer's own blank line where it was.
+/// before the first arm: the tight auto-close shape needs it to put the arm
+/// list on its own line, and the across-whitespace `EmptyBraces` case is
+/// accepted as-is rather than stripped, leaving the buffer's own blank line
+/// where it was.
 fn match_template(
     variants: &[(String, Vec<hir::Ty>)],
     indent: &str,
