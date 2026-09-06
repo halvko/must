@@ -345,6 +345,24 @@ pub enum Builtin {
     /// way `alloc_array` returns [`ALLOC_RESULT_NAME`]. Refused in const
     /// contexts like `print` (const evaluation cannot have side effects).
     ReadLine,
+    /// `s.next_char(i)` — index-threading codepoint access on `str`. The
+    /// one builtin reached as a MEMBER rather than a name: a free
+    /// `next_char(s, i)` would burn a top-level name for an operation that
+    /// only ever applies to one type, and the dot is where the reader
+    /// already looks for "what can this value do".
+    ///
+    /// SAFE and PURE: decoding a `str` observes nothing outside its own
+    /// arguments, so a `const` context takes it, like the pointer builtins
+    /// and unlike `print`/`read_line`, which have effects to refuse.
+    ///
+    /// Not in [`Builtin::by_name`] on purpose: the name is reachable only
+    /// through the dot on a `str` receiver, so nothing is taken out of the
+    /// value namespace and a user's own `next_char` is an ordinary,
+    /// unshadowed item. Inference re-opens it as a member candidate only
+    /// after user trait impls have had their turn, so a `next_char` written
+    /// in an `impl ... for str` still wins — the `print` shadowing rule,
+    /// applied to a member.
+    NextChar,
 }
 
 impl Builtin {
@@ -359,8 +377,31 @@ impl Builtin {
             "copy" => Some(Builtin::Copy),
             "dangling" => Some(Builtin::Dangling),
             "read_line" => Some(Builtin::ReadLine),
+            // `next_char` is deliberately absent: it is a MEMBER of `str`,
+            // not a top-level name (see `Builtin::NextChar`).
             _ => None,
         }
+    }
+
+    /// Every builtin MEMBER a receiver of type `recv` carries — the
+    /// member-side twin of [`Builtin::by_name`], and the single source of
+    /// truth both resolution ([`Builtin::member_by_name`]) and the editor's
+    /// dot-completions read, so neither can list a member the other
+    /// doesn't.
+    pub fn members_of(recv: &crate::Ty) -> &'static [Builtin] {
+        match recv {
+            crate::Ty::Str => &[Builtin::NextChar],
+            _ => &[],
+        }
+    }
+
+    /// The builtin member `name` names on a receiver of type `recv`, if
+    /// any.
+    pub fn member_by_name(recv: &crate::Ty, name: &str) -> Option<Builtin> {
+        Builtin::members_of(recv)
+            .iter()
+            .copied()
+            .find(|builtin| builtin.name() == name)
     }
 
     pub fn name(self) -> &'static str {
@@ -374,6 +415,7 @@ impl Builtin {
             Builtin::Copy => "copy",
             Builtin::Dangling => "dangling",
             Builtin::ReadLine => "read_line",
+            Builtin::NextChar => "next_char",
         }
     }
 
@@ -418,6 +460,31 @@ pub const ALLOC_RESULT_NAME: &str = "AllocResult";
 /// }
 /// ```
 pub const READ_LINE_RESULT_NAME: &str = "ReadLineResult";
+
+/// What `str.next_char(i)` answers (T16): a compiler-provided non-generic
+/// enum `NextChar = enum { Char(char, usize), End }`, one more row of
+/// [`synthetic_decls`].
+///
+/// The payload is TWO POSITIONAL fields, not a record: `char` is the scalar
+/// value starting at `i`, `usize` is the byte index of the NEXT boundary —
+/// the index to thread into the following call. Positional because that is
+/// what pattern binding is (flat, positional, one binder per payload), so
+/// the working idiom reads with no field access and no intermediate value:
+///
+/// ```text
+/// loop {
+///     match line.next_char(i) {
+///         ::Char(c, next) => { /* use c */ i = next; },
+///         ::End => break,
+///     }
+/// }
+/// ```
+///
+/// `End` means `i` is at or past the end of the string — genuinely no
+/// character here, the same "the input is over" reading `ReadLineResult`'s
+/// `End` has. An `i` in the MIDDLE of a codepoint is not this case: it is a
+/// program that lost track of its own index, and it traps.
+pub const NEXT_CHAR_NAME: &str = "NextChar";
 
 /// A declaration the compiler provides without source: the result enum some
 /// builtin returns. Provided per FILE — resolution is per-file today, so
@@ -472,6 +539,20 @@ pub fn synthetic_decls() -> &'static [SyntheticDecl] {
                     ("End".to_owned(), Vec::new()),
                 ],
             },
+            SyntheticDecl {
+                name: NEXT_CHAR_NAME,
+                generics: Vec::new(),
+                variants: vec![
+                    (
+                        "Char".to_owned(),
+                        vec![
+                            TypeRef::Path("char".to_owned()),
+                            TypeRef::Path("usize".to_owned()),
+                        ],
+                    ),
+                    ("End".to_owned(), Vec::new()),
+                ],
+            },
         ]
     });
     &DECLS
@@ -491,6 +572,11 @@ pub fn alloc_result_loc(file: SourceFile) -> ItemLoc {
 /// enum.
 pub fn read_line_result_loc(file: SourceFile) -> ItemLoc {
     synthetic_decl_loc(file, READ_LINE_RESULT_NAME)
+}
+
+/// The [`ItemLoc`] of `file`'s compiler-provided [`NEXT_CHAR_NAME`] enum.
+pub fn next_char_loc(file: SourceFile) -> ItemLoc {
+    synthetic_decl_loc(file, NEXT_CHAR_NAME)
 }
 
 /// Top-level names of a file, *including* what's wrong with them: the scope

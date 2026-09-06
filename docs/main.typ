@@ -1396,6 +1396,46 @@ Like every other pattern, a character pattern *projects through a borrow*
 the borrow — so a scrutinee that has already been invalidated is caught at
 the `match` itself, not at whichever arm first looked at it.
 
+=== Walking a string
+
+`str.next_char(i)` is the only way to look inside a string, and the only
+builtin reached through a dot rather than by name. It takes a *byte* index
+and answers the compiler-provided `NextChar` enum, `Char(char, usize) |
+End`: the scalar value starting at `i`, plus the byte index of the *next*
+boundary — the value you thread into the following call. `End` means `i` is
+at or past the end of the string. `NextChar` is minted per file exactly as
+`ReadLineResult` and `AllocResult` are: an ordinary nominal enum, nameable,
+matchable and shadowable.
+
+There is no Iterator yet, so the walk is a `loop`/`match` idiom, the same
+shape draining stdin has:
+
+```must
+static char_count = fn (s: str) -> usize {
+    let mut n = 0;
+    let mut i = 0;
+    loop {
+        match s.next_char(i) {
+            ::Char(c, next) => { n = n + 1; i = next; },
+            ::End => break n,
+        }
+    }
+};
+```
+
+Threading the index is what makes the loop correct rather than merely
+convenient: characters are not bytes. `"smørre"` is six characters and
+seven bytes, and `next` is how the walk knows the difference. An index that
+lands in the *middle* of a character is a program that lost track of where
+it was, so it *panics* — it is neither `End` nor a silent slide to the next
+boundary, because rounding it would turn a bug into wrong output.
+
+`next_char` is pure, so a `const` context accepts it — like the pointer
+builtins, and unlike `print` and `read_line`, which have effects: you can
+walk a literal at compile time and freeze the answer into a static. See
+`examples/chars.must` for the whole picture — reading lines, counting
+parentheses, and the byte-versus-character distinction in one program.
+
 == Reading standard input
 
 `read_line()` is `print`'s twin — the stdin hook, a platform effect exactly
@@ -1475,7 +1515,9 @@ borrow is refused by name too, and deliberately not folded into the
 raw-pointer refusal: a borrow lowers to the same machine word, so this
 backend could emit something that runs while silently dropping the
 exclusivity contract. `read_line` has no wasm import yet either, so
-`examples/stdin.must` refuses by name.
+`examples/stdin.must` refuses by name — and so does `examples/chars.must`,
+which reads a line before it walks it. `next_char` has no wasm story either
+and refuses by name in its turn.
 
 Characters themselves are no trouble: a `char` is one scalar slot here, so
 literals, `==` and character-pattern dispatch all compile.

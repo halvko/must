@@ -1345,6 +1345,29 @@ fn field_items(
             items.push(item);
         }
     }
+    // BUILTIN members (`"...".next_char`), offered on the same dot. Ranked
+    // as a builtin, like the builtin *functions* in expression position —
+    // a user's own member of the same name shadows it in resolution, and
+    // sorting it below theirs here says the same thing.
+    for &builtin in hir::Builtin::members_of(ty) {
+        let sig = hir::infer::builtin_type(builtin, file);
+        // The receiver does not count toward the written arity here either.
+        let written_params = match &sig {
+            hir::Ty::Fn(f) => f.params.len().saturating_sub(1),
+            _ => 0,
+        };
+        let tier = type_tier(None, expected);
+        let mut item = completion_item(
+            builtin.name(),
+            CompletionItemKind::Function,
+            Provenance::Builtin,
+            tier,
+            Some(sig.display()),
+            edit_range,
+        );
+        item.text_edit.insert = fn_call_insert(&item.label, written_params, tier);
+        items.push(item);
+    }
     items
 }
 

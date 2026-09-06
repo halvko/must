@@ -64,6 +64,7 @@ fn example_files() -> Vec<String> {
 const COVERED: &[&str] = &[
     "arrays.must",
     "borrows.must",
+    "chars.must",
     "compile_time.must",
     "display.must",
     "errors.must",
@@ -228,6 +229,11 @@ fn arrays_checks_clean() {
 #[test]
 fn borrows_checks_clean() {
     assert_check("borrows.must", 0, expect![[r#""#]]);
+}
+
+#[test]
+fn chars_checks_clean() {
+    assert_check("chars.must", 0, expect![[r#""#]]);
 }
 
 #[test]
@@ -957,5 +963,60 @@ fn stdin_runs() {
         "a\nb\nc\nd",
         0,
         expect!["read more lines than expected\n"],
+    );
+}
+
+#[test]
+fn chars_runs() {
+    // The documented invocation: two lines in, the running paren balance
+    // out, plus the two fixed-string demonstrations that need no input.
+    assert_run_with_input(
+        &["run", "examples/chars.must"],
+        "(a(b)c)\n(()\n",
+        0,
+        expect![[r#"
+            paren balance: 1
+            left something open
+            "smørre": six characters, seven bytes
+            a multi-byte character compares equal to itself
+        "#]],
+    );
+    // Balanced input takes the zero branch...
+    assert_run_with_input(
+        &["run", "examples/chars.must"],
+        "(())\n()\n",
+        0,
+        expect![[r#"
+            paren balance: 0
+            balanced
+            "smørre": six characters, seven bytes
+            a multi-byte character compares equal to itself
+        "#]],
+    );
+    // ...and a line that closes more than it opens drives the total
+    // NEGATIVE, which is the whole reason the running count is `isize`.
+    assert_run_with_input(
+        &["run", "examples/chars.must"],
+        "())\n",
+        0,
+        expect![[r#"
+            paren balance: -1
+            closed more than it opened
+            "smørre": six characters, seven bytes
+            a multi-byte character compares equal to itself
+        "#]],
+    );
+    // Empty input: no lines, no parentheses, and the loop still terminates
+    // on genuine end-of-input.
+    assert_run_with_input(
+        &["run", "examples/chars.must"],
+        "",
+        0,
+        expect![[r#"
+            paren balance: 0
+            balanced
+            "smørre": six characters, seven bytes
+            a multi-byte character compares equal to itself
+        "#]],
     );
 }

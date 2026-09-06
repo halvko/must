@@ -26,10 +26,10 @@
   no impls of its own to dispatch to). A NESTED `Self` position (inside a receiver-like
   argument's own type, never the position itself) does not widen; a variant that reaches
   there lands on the sound `NoTraitImpl` rather than silently picking its enum's impl.
-- **T23** The compiler-provided enums (`AllocResult`, `ReadLineResult`) are the prelude Must
-  cannot write yet: ordinary declarations minted per file from one table, user-shadowable and
-  never duplicate-flagged; the table's order is the variant index. It goes away when modules
-  land.
+- **T23** The compiler-provided enums (`AllocResult`, `ReadLineResult`, `NextChar`) are the
+  prelude Must cannot write yet: ordinary declarations minted per file from one table,
+  user-shadowable and never duplicate-flagged; the table's order is the variant index. It
+  goes away when modules land.
 - **T07** Mutability. `let mut` declares a mutable binding; assignment is a statement; local
   mutation inside a const context is fine; `mut` parameters are local copies; an assignment
   the checker rejects traps rather than proceeding. Field assignment is legal exactly when the
@@ -61,7 +61,9 @@
   holding a codepoint that is not a surrogate. A character literal's type is definite, which
   lets a `'x'` pattern blame itself rather than re-type the scrutinee. `char` has equality
   and nothing else: ordering and arithmetic are how a program builds a value that is not a
-  character.
+  character. `str.next_char(i)` answers a scalar plus the next boundary's byte index, and an
+  index in the middle of a codepoint panics rather than sliding, because the program has lost
+  track of its own index.
 
 ## Discarded
 

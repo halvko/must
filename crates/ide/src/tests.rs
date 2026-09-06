@@ -1617,6 +1617,7 @@ static main = fn {
             panic Function (fn(str) -> !)
             x Variable (usize)
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            NextChar Enum (enum { Char(char, usize), End })
             ReadLineResult Enum (enum { Line(str), End })
             Shape Struct (struct { r: usize })
             area Function (fn(usize) -> usize)
@@ -1658,6 +1659,7 @@ static main = fn {
         expect_test::expect![[r#"
             x Variable (mut usize)
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            NextChar Enum (enum { Char(char, usize), End })
             ReadLineResult Enum (enum { Line(str), End })
             main Function (fn())
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
@@ -1691,6 +1693,7 @@ static make_point = fn (x: usize) -> $0 { x };
 "#,
         expect_test::expect![[r#"
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            NextChar Enum (enum { Char(char, usize), End })
             Point Struct (struct { x: usize, y: usize })
             ReadLineResult Enum (enum { Line(str), End })
             bool Keyword
@@ -1972,6 +1975,44 @@ static f = fn {
 };
 "#,
         expect_test::expect![""],
+    );
+}
+
+#[test]
+fn completions_dot_offers_the_builtin_member_of_str() {
+    // `next_char` is reachable only through the dot, so the dot is where
+    // it has to be discoverable. Rendered with its real type, `str` last —
+    // the dot-callable shape (TR01), the way the call checks.
+    check_completions(
+        r#"
+static f = fn (s: str) {
+    s.$0
+};
+"#,
+        expect_test::expect![[r#"
+            next_char Function (fn(usize, str) -> NextChar)
+        "#]],
+    );
+}
+
+#[test]
+fn completions_snippet_builtin_member_call_with_params() {
+    // A builtin member is fn-shaped like any other dot candidate, so
+    // accepting it inserts the call, not the bare name. The receiver is
+    // not a written argument, so the index is the only tab stop.
+    assert_eq!(
+        completion_insert(
+            r#"
+static f = fn (s: str) {
+    s.$0
+};
+"#,
+            "next_char",
+        ),
+        crate::InsertText::Snippet {
+            snippet: "next_char($1)".to_owned(),
+            plain: "next_char()".to_owned(),
+        }
     );
 }
 
@@ -2272,6 +2313,7 @@ static main = fn (s: str, n: usize) {
             panic Function (fn(str) -> !)
             n Variable (usize)
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            NextChar Enum (enum { Char(char, usize), End })
             ReadLineResult Enum (enum { Line(str), End })
             main Function (fn(str, usize))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
@@ -2312,6 +2354,7 @@ static main = fn {
             get_s Function (fn() -> str)
             panic Function (fn(str) -> !)
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            NextChar Enum (enum { Char(char, usize), End })
             ReadLineResult Enum (enum { Line(str), End })
             get_n Function (fn() -> usize)
             main Function (fn())
@@ -2352,6 +2395,7 @@ static main = fn {
             helper Function (fn() -> usize)
             panic Function (fn(str) -> !)
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            NextChar Enum (enum { Char(char, usize), End })
             ReadLineResult Enum (enum { Line(str), End })
             main Function (fn())
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
@@ -2393,6 +2437,7 @@ static main = fn (p: Point, n: usize) {
             panic Function (fn(str) -> !)
             n Variable (usize)
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            NextChar Enum (enum { Char(char, usize), End })
             Point Struct (struct { x: usize })
             ReadLineResult Enum (enum { Line(str), End })
             main Function (fn(Point, usize))
@@ -2501,6 +2546,7 @@ static main = fn {
         expect_test::expect![[r#"
             s Variable (str)
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            NextChar Enum (enum { Char(char, usize), End })
             ReadLineResult Enum (enum { Line(str), End })
             main Function (fn())
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
@@ -2978,6 +3024,7 @@ static f = fn (s: Shape) {
             match arms Snippet (all 2 variants of Shape)
             s Variable (Shape)
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            NextChar Enum (enum { Char(char, usize), End })
             ReadLineResult Enum (enum { Line(str), End })
             Shape Enum (enum { Circle(usize), Point })
             f Function (fn(Shape) -> !)
@@ -3305,6 +3352,7 @@ fn completions_match_scrutinee_does_not_suppress_the_normal_set() {
             ambient Constant (Shape)
             noise Variable (usize)
             AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            NextChar Enum (enum { Char(char, usize), End })
             ReadLineResult Enum (enum { Line(str), End })
             Shape Enum (enum { Circle(usize), Point })
             f Function (fn(Shape) -> !)

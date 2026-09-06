@@ -114,6 +114,16 @@ const UNSUPPORTED: &[(&str, &str, &str)] = &[
         "main()",
         "the `read_line` builtin is not supported by the wasm backend yet",
     ),
+    // `chars.must` reads stdin too, so `read_line` is what its `main`
+    // reaches first. Its OTHER refusal — `next_char`, which this backend
+    // has no string decoder for — is pinned on its own program in
+    // `differential.rs`'s `next_char_is_refused_by_name`, so neither
+    // builtin can quietly start compiling behind the other.
+    (
+        "chars.must",
+        "main()",
+        "the `read_line` builtin is not supported by the wasm backend yet",
+    ),
     // Intentionally dirty: `errors.must` exists to show diagnostics, and
     // its erroneous items have no compilable meaning.
     (

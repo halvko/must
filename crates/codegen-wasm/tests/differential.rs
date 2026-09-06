@@ -557,6 +557,30 @@ static main = fn () -> bool {
     );
 }
 
+#[test]
+fn next_char_is_refused_by_name() {
+    // `next_char` decodes a `str` at a byte index, and this backend has no
+    // way to do that: a string is (offset, length) into a data segment,
+    // with no runtime decoder anywhere. Refused BY NAME, through the same
+    // per-builtin path `read_line` takes — never half-implemented, and
+    // never folded into a vaguer "strings are limited" excuse.
+    let message = harness::refusal(
+        r#"
+static main = fn () -> usize {
+    match "ab".next_char(0) {
+        ::Char(c, next) => next,
+        ::End => 0,
+    }
+}
+"#,
+        "main()",
+    );
+    assert!(
+        message.contains("the `next_char` builtin is not supported by the wasm backend yet"),
+        "unexpected refusal: {message}"
+    );
+}
+
 // --- functions, generics, traits ----------------------------------------
 
 #[test]

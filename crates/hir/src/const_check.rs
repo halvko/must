@@ -282,6 +282,12 @@ impl CheckCtx<'_> {
             // the member is a statically known fn item — judge its literal's
             // marker exactly like a named callee's. A field-valued callee
             // (no member resolution) stays the conservative value call.
+            // A BUILTIN member dot-call. `next_char` is pure — decoding a
+            // `str` observes nothing outside its own arguments — so it is
+            // const-legal, for the same reason the pointer builtins below
+            // are. Judged here rather than in `check_named_callee` because
+            // a builtin member is reached through the dot, never by name.
+            ExprData::Field { .. } if self.infer.builtin_member_of_expr.contains_idx(call) => {}
             ExprData::Field { .. } => match self.infer.member_of_expr.get(call) {
                 Some(member) => match root_fn_is_const(self.db, member.to_id(self.db)) {
                     Some(true) => {}
@@ -374,8 +380,16 @@ impl CheckCtx<'_> {
             // and `copy` writes only through pointers whose targets already
             // exist in const memory (would-be UB there is a deterministic
             // detected trap; the escape rule guards the results).
+            // `next_char` cannot arrive by name — it is a member, judged
+            // by the dot arm above — but it is const-legal for the same
+            // reason those are: it is pure.
             Some(Resolution::Builtin(
-                Builtin::Panic | Builtin::Add | Builtin::Offset | Builtin::Copy | Builtin::Dangling,
+                Builtin::Panic
+                | Builtin::Add
+                | Builtin::Offset
+                | Builtin::Copy
+                | Builtin::Dangling
+                | Builtin::NextChar,
             )) => {}
             Some(Resolution::Builtin(builtin @ (Builtin::Print | Builtin::ReadLine))) => {
                 self.diagnostics.push(ConstCheckDiagnostic::SideEffectCall {

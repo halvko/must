@@ -7317,6 +7317,151 @@ static f = fn (c: char) -> usize {
 }
 
 #[test]
+fn next_char_is_a_builtin_member_of_str() {
+    // Reached through the dot on a `str` receiver, so its type has the
+    // dot-callable shape every member has — `str` last (TR01) — and it
+    // answers the per-file `NextChar` decl, the way `read_line` answers
+    // `ReadLineResult`.
+    check_infer(
+        r#"
+static f = fn (s: str) {
+    let n = s.next_char(0);
+};
+"#,
+        expect![[r#"
+            12..55 'fn (s: str) {    ...': fn(str)
+            16..17 's': str
+            24..55 '{     let n = s.n...': ()
+            34..35 'n': NextChar
+            38..39 's': str
+            38..49 's.next_char': fn(usize, str) -> NextChar
+            38..52 's.next_char(0)': NextChar
+            50..51 '0': usize
+        "#]],
+    );
+}
+
+#[test]
+fn a_builtin_member_call_counts_only_the_written_arguments() {
+    // The receiver supplies one parameter, so arity is reported against
+    // what was written. Not a rule of its own: this is the shared
+    // receiver-appending tail, down to the follow-on mismatch an extra
+    // argument gets from landing in the receiver's slot.
+    check_diagnostics(
+        r#"
+type Cell = struct { v: usize } with {
+    impl Self {
+        plus = fn(extra: usize, c: Self) -> usize { c.v + extra };
+    }
+};
+static f = fn (s: str, c: Cell) {
+    let a = s.next_char();
+    let b = s.next_char(0, 1);
+    let d = c.plus();
+    let e = c.plus(0, 1);
+};
+"#,
+        expect![[r#"
+            178..191: expected 1 argument(s), found 0
+            205..222: expected 1 argument(s), found 2
+            220..221: type mismatch: expected `str`, found `{number}`
+            236..244: expected 1 argument(s), found 0
+            258..270: expected 1 argument(s), found 2
+            268..269: type mismatch: expected `Cell`, found `{number}`
+        "#]],
+    );
+}
+
+#[test]
+fn next_char_walks_a_string_in_the_documented_idiom() {
+    // The idiom `NextChar`'s doc comment shows: thread the index back in,
+    // stop at `::End`. Typechecks with no annotation anywhere.
+    check_diagnostics(
+        r#"
+static count = fn (s: str) -> usize {
+    let mut n = 0;
+    let mut i = 0;
+    loop {
+        match s.next_char(i) {
+            ::Char(c, next) => { n = n + 1; i = next; },
+            ::End => break n,
+        }
+    }
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn next_char_is_not_a_top_level_name() {
+    // The member is reachable only through the dot: `next_char` claims
+    // nothing in the value namespace, so a bare mention is an ordinary
+    // unresolved name and a user's own `next_char` item is unshadowed.
+    check_diagnostics(
+        r#"
+static f = fn (s: str) { next_char(s, 0); };
+"#,
+        expect![[r#"
+            26..35: unresolved name `next_char`
+        "#]],
+    );
+}
+
+#[test]
+fn next_char_is_only_a_member_of_str() {
+    // Not a member of every type: a non-`str` receiver gets the ordinary
+    // "no such member" story, not a special case.
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) { n.next_char(0); };
+"#,
+        expect![[r#"
+            28..42: no field or member `next_char` on `usize`
+        "#]],
+    );
+}
+
+#[test]
+fn user_declarations_shadow_the_builtin_next_char_enum() {
+    // The `AllocResult`/`ReadLineResult` precedent once more: a file
+    // declaring its own `NextChar` sees its own everywhere.
+    check_infer(
+        r#"
+type NextChar = struct { tag: usize };
+static f = fn () -> NextChar {
+    NextChar(struct { tag = 1 })
+};
+"#,
+        expect![[r#"
+            51..105 'fn () -> NextChar...': fn() -> NextChar
+            69..105 '{     NextChar(st...': NextChar
+            75..83 'NextChar': fn(struct { tag: usize }) -> NextChar
+            75..103 'NextChar(struct {...': NextChar
+            84..102 'struct { tag = 1 }': struct { tag: usize }
+            99..100 '1': usize
+        "#]],
+    );
+}
+
+#[test]
+fn next_char_is_const_legal() {
+    // Decoding a `str` is pure, so there is no effect for a const context
+    // to refuse — the pointer builtins' reason, reached through the dot.
+    check_diagnostics(
+        r#"
+static first = const {
+    match "ab".next_char(0) {
+        ::Char(c, next) => next,
+        ::End => 0,
+    }
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
 fn a_character_const_argument_type_checks_by_kind() {
     // `char` is in the annotation-representable const domain because it
     // fell out of the same machinery `usize`/`str`/`bool` use, not because
@@ -7337,6 +7482,57 @@ static from_empty = pick::<''>();
             110..111: type mismatch: expected `char`, found `{number}`
             141..144: type mismatch: expected `char`, found `str`
             176..178: empty character literal: a character literal holds exactly one character
+        "#]],
+    );
+}
+
+#[test]
+fn next_char_through_a_borrow_names_the_deref() {
+    // A builtin member takes its receiver BY VALUE, so a borrow does not
+    // reach it — that is auto-deref, sealed. The refusal must be the one a
+    // value-`Self` USER member gets in the same position (`.*.name`), not
+    // "no such member": the member plainly exists, and saying otherwise
+    // would send the reader hunting for a spelling instead of a `.*`.
+    check_diagnostics(
+        r#"
+static f = fn::<@a>(r: str.&::<@a>) -> () {
+    let n = r.next_char(0);
+};
+"#,
+        expect![[r#"
+            57..68: `str.&::<@a>` is a borrow, so `.next_char` does not reach through it — there is no auto-deref; write `.*.next_char`
+        "#]],
+    );
+}
+
+#[test]
+fn a_user_member_shadows_the_builtin_next_char() {
+    // Load-bearing in three doc comments: builtin members are consulted
+    // only after every user candidate has had its turn, so a `next_char`
+    // written in an `impl ... for str` WINS. The return type is the
+    // witness — `usize` here, `NextChar` if the builtin had taken it.
+    check_infer(
+        r#"
+trait Chars = requires {
+    next_char: fn(i: usize, s: Self) -> usize;
+} with {
+    impl str {
+        next_char = fn (i: usize, s: str) -> usize { i };
+    }
+};
+static f = fn (s: str) {
+    let n = s.next_char(0);
+};
+"#,
+        expect![[r#"
+            175..218 'fn (s: str) {    ...': fn(str)
+            179..180 's': str
+            187..218 '{     let n = s.n...': ()
+            197..198 'n': usize
+            201..202 's': str
+            201..212 's.next_char': fn(usize, str) -> usize
+            201..215 's.next_char(0)': usize
+            213..214 '0': usize
         "#]],
     );
 }

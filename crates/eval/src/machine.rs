@@ -2128,7 +2128,85 @@ impl<'db, M: Mode> Machine<'db, M> {
                 expect_args(self, 0)?;
                 Ok(self.builtin_dangling())
             }
+            // No const fence: decoding a `str` is pure (see
+            // `Builtin::NextChar`), so it runs identically at compile time
+            // and at run time — which is the whole reason it needs no
+            // special case here.
+            Builtin::NextChar => {
+                expect_args(self, 2)?;
+                // Dot-callable shape: the receiver is the LAST argument
+                // (TR01), so the `str` is `args[1]` and the index is
+                // `args[0]` — the order they were written in, too.
+                self.builtin_next_char(&args[1], &args[0], loc, origin)
+            }
         }
+    }
+
+    /// `s.next_char(i)`: the scalar value starting at byte index `i`, plus
+    /// the index of the next boundary — or `End` at or past the end.
+    ///
+    /// Interpreter strings ARE Rust strings, so UTF-8 validity is given and
+    /// the decode cannot fail on its own terms. The one thing that CAN go
+    /// wrong is the caller's index landing mid-codepoint, and that is a
+    /// PANIC, not an `End` and not a silent slide to the next boundary: an
+    /// index that is not a boundary means the program lost track of where
+    /// it was, and quietly rounding it would turn a bug into wrong output.
+    fn builtin_next_char(
+        &mut self,
+        text: &Value,
+        index: &Value,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<Value, EvalError> {
+        let Value::Str(text) = text else {
+            return Err(self.ill_typed("a `str` argument", text, loc, origin));
+        };
+        let Value::Int(index) = index else {
+            return Err(self.ill_typed("a `usize` argument", index, loc, origin));
+        };
+        let index = usize::try_from(index.to_i128().max(0)).unwrap_or(usize::MAX);
+        let end = Value::Variant {
+            decl: hir::next_char_loc(loc.file),
+            index: 1,
+            name: "End".to_owned(),
+            payload: Vec::new(),
+        };
+        if index >= text.len() {
+            return Ok(end);
+        }
+        if !text.is_char_boundary(index) {
+            return Err(EvalError {
+                kind: EvalErrorKind::Panic,
+                message: format!(
+                    "next_char: byte index {index} is not a char boundary; \
+                     it is inside a multi-byte character"
+                ),
+                origin: Some((loc.clone(), origin)),
+                notes: Vec::new(),
+            });
+        }
+        let Some(c) = text[index..].chars().next() else {
+            // Unreachable: `index < len` and `index` is a boundary.
+            return Ok(end);
+        };
+        // The next boundary. A `usize` is 64-bit here and the index came
+        // from a `str` that fits in memory, so the only way this fails is
+        // an internal invariant break, not a program's doing.
+        let Some(next) = i128::try_from(index + c.len_utf8())
+            .ok()
+            .and_then(|v| hir::IntValue::new(hir::IntKind::Usize, v))
+        else {
+            return Err(self.internal_error(
+                "next_char: the next boundary does not fit in `usize`".to_owned(),
+                Some((loc.clone(), origin)),
+            ));
+        };
+        Ok(Value::Variant {
+            decl: hir::next_char_loc(loc.file),
+            index: 0,
+            name: "Char".to_owned(),
+            payload: vec![Value::Char(c), Value::Int(next)],
+        })
     }
 
     /// `alloc_array::<T>(n)`: one fresh heap allocation of `n`

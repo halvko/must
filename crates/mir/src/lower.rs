@@ -867,6 +867,32 @@ impl LowerCtx<'_> {
                         Ok(Operand::Const(Const::Item(member)))
                     });
                 }
+                // A dot-call resolved to a BUILTIN member
+                // (`line.next_char(i)`): the user-member lowering below
+                // with the builtin's value as the callee — the receiver is
+                // appended LAST there too, because a builtin member is
+                // spelled to the dot-callable shape like any other (TR01),
+                // so the written arguments evaluate first and there is no
+                // second calling convention here.
+                if let Some(builtin) = self.infer.builtin_member_of_expr.get(expr).copied() {
+                    let receiver = match &body.exprs[*callee] {
+                        ExprData::Field { receiver, .. } => Some(*receiver),
+                        _ => None,
+                    };
+                    if let Some(receiver) = receiver {
+                        let mut arg_ops: Vec<Operand> =
+                            args.iter().map(|&arg| self.lower_expr(b, arg)).collect();
+                        arg_ops.push(self.lower_expr(b, receiver));
+                        let callee_expr = *callee;
+                        return self.lower_resolved_member_call(
+                            b,
+                            expr,
+                            callee_expr,
+                            arg_ops,
+                            |_, _| Ok(Operand::Const(Const::Builtin(builtin))),
+                        );
+                    }
+                }
                 // A dot-call resolved to an inherent (or trait-impl)
                 // member (TR01): an ordinary direct call of the statically
                 // known member fn, with the receiver appended as the LAST

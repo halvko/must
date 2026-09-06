@@ -501,6 +501,145 @@ static main = fn () -> usize {
 }
 
 #[test]
+fn next_char_walks_a_string_and_ends_at_its_end() {
+    // The index-threading walk: each step gives the scalar value AT `i`
+    // and the index of the NEXT boundary, and `i == len` answers `End`.
+    check_run(
+        r#"
+static main = fn () -> str {
+    let mut i = 0;
+    loop {
+        match "hey".next_char(i) {
+            ::Char(c, next) => { i = next; },
+            ::End => break "done",
+        }
+    }
+};
+"#,
+        "main()",
+        expect![[r#"
+            => "done"
+        "#]],
+    );
+}
+
+#[test]
+fn next_char_counts_characters_not_bytes() {
+    // "smørre" is six characters and seven bytes: the walk visits six
+    // times, and the last `next` is the byte length.
+    check_run(
+        r#"
+static main = fn () -> usize {
+    let mut n = 0;
+    let mut i = 0;
+    loop {
+        match "smørre".next_char(i) {
+            ::Char(c, next) => { n = n + 1; i = next; },
+            ::End => break n,
+        }
+    }
+};
+static bytes = fn () -> usize {
+    let mut i = 0;
+    loop {
+        match "smørre".next_char(i) {
+            ::Char(c, next) => { i = next; },
+            ::End => break i,
+        }
+    }
+};
+"#,
+        "struct { chars = main(), bytes = bytes() }",
+        expect![[r#"
+            => { bytes = 7, chars = 6 }
+        "#]],
+    );
+}
+
+#[test]
+fn next_char_past_the_end_is_end() {
+    // At OR PAST the length: an index beyond the string is `End`, not a
+    // trap — the same "the input is over" reading `read_line`'s `End` has.
+    check_run(
+        r#"
+static at = fn () -> usize {
+    match "ab".next_char(2) { ::Char(c, next) => 1, ::End => 0 }
+};
+static past = fn () -> usize {
+    match "ab".next_char(99) { ::Char(c, next) => 1, ::End => 0 }
+};
+"#,
+        "at() + past()",
+        expect![[r#"
+            => 0
+        "#]],
+    );
+}
+
+#[test]
+fn next_char_mid_codepoint_panics() {
+    // An index INSIDE a multi-byte character is a program that lost track
+    // of its own index. That is a panic, not an `End` and not a silent
+    // slide to the next boundary — rounding it would turn a bug into
+    // wrong output. "ø" occupies bytes 1 and 2 of "sø".
+    check_run(
+        r#"
+static main = fn () -> usize {
+    match "sø".next_char(2) { ::Char(c, next) => next, ::End => 0 }
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[Panic]: next_char: byte index 2 is not a char boundary; it is inside a multi-byte character
+        "#]],
+    );
+}
+
+#[test]
+fn next_char_runs_at_compile_time() {
+    // Pure, so const-legal: the same decode runs in a const context and
+    // the answer freezes into the static.
+    check_const(
+        r#"
+static first_boundary = const {
+    match "æb".next_char(0) {
+        ::Char(c, next) => next,
+        ::End => 0,
+    }
+};
+"#,
+        expect![[r#"
+            first_boundary = 2
+        "#]],
+    );
+}
+
+#[test]
+fn a_builtin_dot_calls_arguments_evaluate_before_its_receiver() {
+    // A builtin member is not an exception to TR01: like every other
+    // dot-call it means `next_char(at(0), text("ab"))`, so the written
+    // argument runs before the receiver expression. Both sides print, so
+    // the order is observable rather than asserted.
+    check_run(
+        r#"
+static text = fn (s: str) -> str { print("recv "); s };
+static at = fn (i: usize) -> usize { print("arg "); i };
+static main = fn () -> usize {
+    match text("ab").next_char(at(0)) {
+        ::Char(c, next) => next,
+        ::End => 0,
+    }
+};
+"#,
+        "main()",
+        expect![[r#"
+            output: "arg recv "
+            => 1
+        "#]],
+    );
+}
+
+#[test]
 fn a_borrowed_character_match_dispatches_through_the_borrow() {
     // The projection rule reaching literal patterns, run for real: the
     // equality test reads the POINTEE, so a `char.&` scrutinee dispatches

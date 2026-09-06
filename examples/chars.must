@@ -1,0 +1,122 @@
+// Characters. `char` is one Unicode scalar value — its own primitive, not
+// an integer alias — written `'x'`, matchable as a pattern, and produced by
+// `str.next_char(i)`, the index-threading walk over a string's codepoints.
+//
+// `next_char` is a builtin MEMBER of `str`: it answers the compiler-
+// provided `NextChar` enum, `Char(char, usize) | End`, where the `usize` is
+// the byte index of the NEXT boundary — the value you thread into the
+// following call. `End` means the index is at (or past) the end of the
+// string. There is no Iterator yet, so the `loop`/`match` below is the
+// whole idiom for walking a string, exactly as it is for draining stdin.
+//
+// Run: printf '(a(b)c)\n(()\n' | must-lsp run examples/chars.must
+//
+// An Advent-of-Code-shaped demo: read every line, add one for each `(` and
+// subtract one for each `)`, and print where the running total ends up.
+
+// One line's contribution to the running total, threading the byte index
+// from `next_char` back into the next call. The total is SIGNED: a line may
+// close more parentheses than it opens.
+static balance_of = fn (line: str, start: isize) -> isize {
+    let mut count = start;
+    let mut i = 0;
+    loop {
+        match line.next_char(i) {
+            ::Char(c, next) => {
+                // A character match needs a `_` arm and always will: a
+                // `char` match is never exhaustive by enumeration, so the
+                // arm is required as policy, not arithmetic.
+                count = match c {
+                    '(' => count + 1,
+                    ')' => count - 1,
+                    _ => count,
+                };
+                i = next;
+            },
+            ::End => break count,
+        }
+    }
+};
+
+// How many characters — not bytes — a string holds. The two differ the
+// moment anything outside ASCII shows up, which is the whole reason the
+// walk threads an index instead of counting by one.
+static char_count = fn (s: str) -> usize {
+    let mut n = 0;
+    let mut i = 0;
+    loop {
+        match s.next_char(i) {
+            ::Char(c, next) => {
+                n = n + 1;
+                i = next;
+            },
+            ::End => break n,
+        }
+    }
+};
+
+// Digits render by pushing "0".."9" — there is no int→str conversion, and
+// no `%` operator either, so the remainder is `n - (n / 10) * 10`.
+static digit = fn (d: isize) -> str {
+    if d == 0 { "0" } else if d == 1 { "1" } else if d == 2 { "2" }
+    else if d == 3 { "3" } else if d == 4 { "4" } else if d == 5 { "5" }
+    else if d == 6 { "6" } else if d == 7 { "7" } else if d == 8 { "8" }
+    else { "9" }
+};
+
+static print_digits = fn (n: isize) -> () {
+    if n < 10 {
+        print(digit(n));
+    } else {
+        print_digits(n / 10);
+        print(digit(n - (n / 10) * 10));
+    };
+};
+
+static print_isize = fn (n: isize) -> () {
+    if n < 0 {
+        print("-");
+        print_digits(0 - n);
+    } else {
+        print_digits(n);
+    };
+};
+
+static main = fn {
+    let mut count = 0;
+    loop {
+        match read_line() {
+            ::Line(s) => { count = balance_of(s, count); },
+            ::End => break,
+        };
+    };
+    print("paren balance: ");
+    print_isize(count);
+    print("\n");
+    if count == 0 {
+        print("balanced\n");
+    } else if count < 0 {
+        print("closed more than it opened\n");
+    } else {
+        print("left something open\n");
+    };
+
+    // A multi-byte character is one `char` but several bytes: "smørre" is
+    // six characters and seven bytes, and `next_char` walks the six —
+    // which is exactly why the loop threads the index it is given instead
+    // of adding one.
+    if char_count("smørre") == 6 {
+        print("\"smørre\": six characters, seven bytes\n");
+    } else {
+        print("unexpected\n");
+    };
+
+    // `char` has equality and nothing else — no ordering, no arithmetic.
+    // Equality is all a scanner needs.
+    let bullet = '•';
+    if bullet == '•' {
+        print("a multi-byte character compares equal to itself\n");
+    } else {
+        print("unexpected\n");
+    };
+};

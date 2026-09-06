@@ -111,6 +111,13 @@ pub struct InferenceResult {
     /// member, TR01). MIR lowers these to the member item's value; a direct
     /// call of one is then an ordinary call.
     pub member_value_of_expr: ArenaMap<ExprId, QualifiedMemberValue>,
+    /// Dot-calls that resolved to a BUILTIN member (`line.next_char(i)`),
+    /// keyed by the CALL expression. MIR lowers these exactly as it lowers
+    /// a user member's dot-call: a direct call of the builtin's value with
+    /// the receiver appended LAST, because dot-callability is structural
+    /// and a builtin member is spelled to the same shape (TR01) — no
+    /// second convention for the backend or the interpreter to learn.
+    pub builtin_member_of_expr: ArenaMap<ExprId, Builtin>,
     /// Bound-directed member calls — `x.fmt(w)` on a rigid `T: Display`
     /// receiver, or a qualified call whose `Self` resolved to a bounded
     /// rigid param — keyed by the CALL expression. MIR lowers these as
@@ -5222,6 +5229,43 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     );
                     return self.finish_dot_call(expr, ty, expected, cause);
                 }
+                // A BUILTIN member (`line.next_char(i)`). Consulted HERE,
+                // after every user candidate has had its turn and found
+                // nothing: a `next_char` written in an `impl ... for str`
+                // shadows this one, which is the `print` rule (user
+                // declarations shadow builtins) applied to a member.
+                if let Some(builtin) = Builtin::member_by_name(&member_recv, name) {
+                    // A builtin member takes its receiver BY VALUE, so a
+                    // borrow receiver does not reach it — that would be
+                    // auto-deref, sealed. It gets the same refusal a
+                    // value-`Self` user member gets in this position
+                    // (`receiver_shape_refusal`'s `(Borrow, Value)` arm):
+                    // named, on the callee, pointing at `.*`. Falling
+                    // through to "no such member" instead would have been
+                    // a lie about a member that plainly exists.
+                    if receiver_shape.is_borrow() {
+                        self.result
+                            .diagnostics
+                            .push(InferenceDiagnostic::DotThroughBorrow {
+                                expr: callee,
+                                name: name.to_owned(),
+                                receiver_ty: resolved.clone(),
+                            });
+                        self.result.type_of_expr.insert(callee, Ty::Error);
+                        self.infer_args_broken(args);
+                        return self.finish_dot_call(expr, Ty::Error, expected, cause);
+                    }
+                    let ty = self.infer_builtin_member_call(
+                        expr,
+                        callee,
+                        receiver,
+                        &receiver_ty,
+                        builtin,
+                        args,
+                        &callee_expectation,
+                    );
+                    return self.finish_dot_call(expr, ty, expected, cause);
+                }
                 // Nothing carries the call: an impl missing the
                 // requirement, a member without the dot-callable shape
                 // (TR01 is structural), or an unknown name. A field — even a
@@ -5457,6 +5501,32 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     .map(|data| data.generics.len())
             })
             .unwrap_or_default()
+    }
+
+    /// The BUILTIN-member half of a dot-call (`line.next_char(i)`):
+    /// [`Self::infer_member_call`]'s shape with none of the instantiation
+    /// (a builtin member has no binder, no owner and no regions), so it is
+    /// just the signature and the shared receiver-appending tail.
+    fn infer_builtin_member_call(
+        &mut self,
+        expr: ExprId,
+        callee: ExprId,
+        receiver: ExprId,
+        receiver_ty: &Ty,
+        builtin: Builtin,
+        args: &[ExprId],
+        callee_expectation: &Ty,
+    ) -> Ty {
+        self.result.builtin_member_of_expr.insert(expr, builtin);
+        self.finish_receiver_call(
+            expr,
+            callee,
+            receiver,
+            receiver_ty,
+            builtin_type(builtin, self.file),
+            callee_expectation,
+            args,
+        )
     }
 
     /// Mint one fresh EXISTENTIAL per member-own REGION binder, and relate
@@ -9216,7 +9286,9 @@ fn peel_blocks(body: &Body, mut expr: ExprId) -> ExprId {
     }
 }
 
-fn builtin_type(builtin: Builtin, file: SourceFile) -> Ty {
+/// The type of a builtin, the one resolution and checking use. `pub` so the
+/// editor's dot-completions render exactly what a call would check against.
+pub fn builtin_type(builtin: Builtin, file: SourceFile) -> Ty {
     match builtin {
         Builtin::Print => Ty::fn_type(vec![Ty::Str], Ty::Unit),
         Builtin::Panic => Ty::fn_type(vec![Ty::Str], Ty::Never),
@@ -9228,6 +9300,14 @@ fn builtin_type(builtin: Builtin, file: SourceFile) -> Ty {
         Builtin::ReadLine => Ty::fn_type(
             Vec::new(),
             Ty::Named(NamedTy::plain(crate::read_line_result_loc(file))),
+        ),
+        // `s.next_char(i)` — a DOT-CALLABLE shape, so its `str` parameter
+        // is LAST, which is what makes it reachable through the dot at all
+        // (TR01 is structural, and it does not have one rule for builtins).
+        // The same `file` trick names the per-file `NextChar` declaration.
+        Builtin::NextChar => Ty::fn_type(
+            vec![Ty::Int(IntKind::Usize), Ty::Str],
+            Ty::Named(NamedTy::plain(crate::next_char_loc(file))),
         ),
         // The generic builtins have no ONE type — every mention
         // instantiates [`builtin_scheme`] instead (see the `NameRef` and
@@ -9264,7 +9344,8 @@ fn builtin_generics(builtin: Builtin) -> Option<Vec<GenericParamData>> {
         | Builtin::Add
         | Builtin::Offset
         | Builtin::Copy
-        | Builtin::ReadLine => None,
+        | Builtin::ReadLine
+        | Builtin::NextChar => None,
     }
 }
 
@@ -9306,7 +9387,8 @@ fn builtin_scheme(builtin: Builtin, file: SourceFile) -> (ItemLoc, Ty) {
         | Builtin::Add
         | Builtin::Offset
         | Builtin::Copy
-        | Builtin::ReadLine => {
+        | Builtin::ReadLine
+        | Builtin::NextChar => {
             unreachable!("not a scheme-shaped builtin")
         }
     };
