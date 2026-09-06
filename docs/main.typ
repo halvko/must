@@ -653,8 +653,9 @@ naming the bound the signature would have to declare.
 Because every binding is a borrow, you can never *move* a payload out of a
 borrowed scrutinee. Reading one is the ordinary `t.*`, which copies, so the
 payload has to be copyable; a payload that must move needs the owned place
-matched instead. Matching an *owned* scrutinee is unchanged in every
-respect — it still copies, and still moves payloads that cannot be copied.
+matched instead. The mismatch you get for using a binding where the value
+is wanted names both routes. Matching an *owned* scrutinee is unchanged in
+every respect — it still copies, and still moves payloads that cannot be copied.
 
 Since a binding is itself a borrow, matching *it* projects again, which is
 how the rule reaches nested data today (nested patterns are not grammar
@@ -1125,6 +1126,10 @@ matters because a `.&mut` is itself affine. It is a rule about `r.*` as a
 through the borrow instead of copying it, so an affine referent is no
 obstacle there. Nor is `r.*` handed to a parameter that wants a borrow: that
 is the reborrow above, which suspends the parent rather than copying it.
+
+Using a borrow where the value itself is wanted is a plain type mismatch,
+and its message names both ways out: `.*` to copy through the borrow, or
+the owned value in place of a borrow of it.
 
 === Members that borrow `Self`
 

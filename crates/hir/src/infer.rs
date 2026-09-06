@@ -1425,13 +1425,29 @@ impl InferenceDiagnostic {
                 // be the declared shape, but a named type never coerces —
                 // say how to actually make one.
                 if let (Ty::Named(named), Ty::Record(_)) = (expected, actual) {
-                    format!(
+                    return format!(
                         "{base}; `{name}` is a distinct type — construct it with `{name}(...)`",
                         name = named.decl.display_name()
-                    )
-                } else {
-                    base
+                    );
                 }
+                // The BORROW-where-owned near-miss: found is a borrow of
+                // exactly the type wanted. The gate is that shape alone, so
+                // this fires wherever a value is wanted — a typed `let`, an
+                // argument, a return — and names both routes out: `.*` for
+                // a copyable referent, and the owned value for anything
+                // that has to move. Every binding a `match` through a
+                // borrow makes is one of these, so it is also the message
+                // borrowed-match arm bodies land on.
+                if let Ty::Borrow { referent, .. } = actual
+                    && referent.as_ref() == expected
+                {
+                    return format!(
+                        "{base}; a borrow is not the value — write `.*` to read through it \
+                         (a copy, so the referent must be copyable), or use the owned value \
+                         instead of a borrow of it"
+                    );
+                }
+                base
             }
             InferenceDiagnostic::AllBranchesMismatch {
                 expected, actual, ..

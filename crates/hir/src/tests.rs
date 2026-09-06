@@ -11204,6 +11204,34 @@ fn a_borrowed_match_of_a_noncopyable_payload_refuses_the_read() {
 }
 
 #[test]
+fn a_borrow_where_the_owned_value_is_wanted_names_both_ways_out() {
+    // The hint is gated on shape alone — found is a borrow of exactly the
+    // type wanted — so it is language-wide: a plain typed `let` gets it,
+    // with no `match` anywhere. Both routes out are named, because which
+    // one is right depends on the referent: `.*` for a copyable one, the
+    // owned value for anything that has to move.
+    check_diagnostics(
+        "static f = fn::<@a>(r: usize.&::<@a>) -> usize { let x: usize = r; x };",
+        expect![[r#"
+            64..65: type mismatch: expected `usize`, found `usize.&::<@a>`; a borrow is not the value — write `.*` to read through it (a copy, so the referent must be copyable), or use the owned value instead of a borrow of it (expected `usize` because of this annotation at 56..61)
+        "#]],
+    );
+    // And its loudest customer: the message someone lands on the first
+    // time they match a borrow, where the binder is a borrow and the
+    // position wants the value.
+    check_diagnostics(
+        &format!(
+            "{OPT}static f = fn::<@a>(s: Opt::<usize>.&::<@a>) -> usize {{\n\
+                 match s {{ ::Some(t) => t, ::None => 0 }}\n\
+             }};"
+        ),
+        expect![[r#"
+            119..120: type mismatch: expected `usize`, found `usize.&`; a borrow is not the value — write `.*` to read through it (a copy, so the referent must be copyable), or use the owned value instead of a borrow of it (expected `usize` because of this return type at 85..93)
+        "#]],
+    );
+}
+
+#[test]
 fn a_borrow_of_a_non_matchable_type_is_still_not_a_scrutinee() {
     // The lens is lifted only for an enum or variant referent, so a
     // `struct.&` (or a `usize.&`) scrutinee reaches exactly the
