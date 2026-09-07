@@ -1997,6 +1997,7 @@ static f = fn (s: str) {
 };
 "#,
         expect_test::expect![[r#"
+            len Function (fn(str) -> usize)
             next_char Function (fn(usize, str) -> NextChar)
         "#]],
     );

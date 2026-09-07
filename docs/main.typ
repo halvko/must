@@ -1398,8 +1398,9 @@ the `match` itself, not at whichever arm first looked at it.
 
 === Walking a string
 
-`str.next_char(i)` is the only way to look inside a string, and the only
-builtin reached through a dot rather than by name. It takes a *byte* index
+`str.next_char(i)` is the only way to look inside a string. It and
+`s.len()` are the two builtins reached through a dot rather than by name.
+It takes a *byte* index
 and answers the compiler-provided `NextChar` enum, `Char(char, usize) |
 End`: the scalar value starting at `i`, plus the byte index of the *next*
 boundary — the value you thread into the following call. `End` means `i` is
@@ -1430,7 +1431,13 @@ lands in the *middle* of a character is a program that lost track of where
 it was, so it *panics* — it is neither `End` nor a silent slide to the next
 boundary, because rounding it would turn a bug into wrong output.
 
-`next_char` is pure, so a `const` context accepts it — like the pointer
+`s.len()` answers the same currency the walk indexes in: the number of
+*bytes*, so `"smørre".len()` is seven, not six. That is deliberate — every
+other `str` operation counts bytes (`next_char` threads a byte index, both
+blesses take a byte length), and a character count wearing the shorter name
+would be a trap. Counting characters is the loop above.
+
+Both are pure, so a `const` context accepts them — like the pointer
 builtins, and unlike `print` and `read_line`, which have effects: you can
 walk a literal at compile time and freeze the answer into a static. See
 `examples/chars.must` for the whole picture — reading lines, counting
@@ -1469,6 +1476,13 @@ naming the offset of the first bad byte. That is not politeness — a `str`
 whose contents are not a string is a value the language says cannot exist,
 so a program that mints one has broken an invariant everything else relies
 on, and finding out immediately is the only useful outcome.
+
+The other direction is `str_bytes(s, dst)`: it writes `s.len()` bytes of an
+existing string into storage you own. It is `unsafe` for the mirror-image
+reason — that `dst` addresses that many *writable* bytes is your claim, and
+nothing checks it — and between the two you can take a string apart and put
+it back together without the compiler knowing anything about where the
+storage came from.
 
 The pointer is to `u8`, always: this is a bytes-first boundary, and a
 claim about some other element type would be about layout, not text. Both
@@ -1698,9 +1712,11 @@ exclusivity contract. `read_line` has no wasm import yet either, so
 which reads a line before it walks it. `next_char` has no wasm story either
 and refuses by name in its turn. Characters themselves are no trouble: a
 `char` is one scalar slot here, so literals, `==` and character-pattern
-dispatch all compile. The two blesses refuse by name as well;
-`examples/stdin_lib.must` would reach them too, but stops at `alloc_array`
-first, so no example here actually gets far enough to exercise them.
+dispatch all compile. The two `str` primitives, `len` and `str_bytes`,
+have no wasm story either and refuse by name in their turn. The two
+blesses refuse by name as well; `examples/stdin_lib.must` would reach
+them too, but stops at `alloc_array` first, so no example here actually
+gets far enough to exercise them.
 
 Monomorphization has refusals of its own. A program whose instantiations
 never bottom out — polymorphic recursion, where every call needs an

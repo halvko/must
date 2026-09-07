@@ -12270,3 +12270,21 @@ fn both_blesses_are_const_legal() {
         expect![""],
     );
 }
+
+#[test]
+fn str_bytes_requires_unsafe_and_both_str_primitives_are_const_legal() {
+    // `str_bytes` is the only one of the two that touches raw memory, and
+    // it WRITES: that `dst` addresses `s.len()` writable bytes is the
+    // caller's unchecked claim, so it carries `copy`'s destination gate.
+    // `len` reads a value it was handed and carries none. Const-legality is
+    // orthogonal to `unsafe` and is `next_char`'s reason for both: neither
+    // observes anything outside its arguments.
+    check_diagnostics(
+        "static f = fn(p: u8.&raw mut) -> () { str_bytes(\"hi\", p); };\n\
+         static n = const { \"hi\".len() };\n\
+         static z = const { unsafe { str_bytes(\"\", dangling::<u8>()) } };",
+        expect![[r#"
+            38..56: calling `str_bytes` requires an `unsafe { ... }` block
+        "#]],
+    );
+}

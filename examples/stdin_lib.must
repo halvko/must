@@ -241,10 +241,11 @@ static main = fn () -> () {
     r.deinit();
 };
 
-// `str` has no length accessor yet, so the codepoint walk stands in for
-// one — but it must not count the WALK's steps, which are characters. The
+// The long way round to `s.len()`, kept because it is what the walk
+// TEACHES: it must not count the WALK's steps, which are characters. The
 // index it threads is a BYTE index, so the last boundary it reaches is the
-// answer: "smørre" walks six times and returns seven.
+// answer — "smørre" walks six times and returns seven, which is exactly
+// what `s.len()` says in one call.
 static count_bytes = fn (s: str) -> usize {
     let mut i = 0;
     loop {

@@ -72,6 +72,11 @@
   over another element type would be a layout claim. Both are flavour-polymorphic and so not
   first-class values, and both are pure and so const-legal. The error carries no payload,
   because a payload cannot be taken away later.
+- **T18** Two `str` primitives read the bless backwards. `s.len()` is the byte length, because
+  bytes are what every other `str` operation counts and a character count under the shorter
+  name would be a trap. `str_bytes(s, dst)` writes those bytes into storage the caller owns;
+  `unsafe`, with the marker about the destination as the bless's is about the source. Both
+  retire toward the str-view fork.
 
 ## Discarded
 
@@ -103,7 +108,7 @@
   borrowed representation (a byte-range path element, an overlap rule, every `str` consumer
   learning a second shape, and a collision with the discarded byte-addressed interpreter
   memory); a region-carrying `str::<@a>` (not spellable, since regions on type declarations
-  do not exist). The second is the likely answer. **T17**
+  do not exist). The second is the likely answer. **T17 T18**
 - **A conversion is wanted in depth** — variance. Judge it with the borrow subsystem's
   variance question (M09). **T13**
 - **Dynamic strings** force the `let s2 = s;` cost question `str` currently dodges. Staging

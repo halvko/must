@@ -2425,7 +2425,100 @@ impl<'db, M: Mode> Machine<'db, M> {
                 expect_args(self, 2)?;
                 self.builtin_bless(builtin, &args[0], &args[1], loc, origin)
             }
+            // `s.len()` — pure, like `next_char`, and for the same reason
+            // needs no const-context case of its own.
+            Builtin::StrLen => {
+                expect_args(self, 1)?;
+                let Value::Str(text) = &args[0] else {
+                    return Err(self.ill_typed("a `str` argument", &args[0], loc, origin));
+                };
+                Ok(Value::Int(hir::IntValue::Usize(text.len() as u64)))
+            }
+            Builtin::StrBytes => {
+                expect_args(self, 2)?;
+                self.builtin_str_bytes(&args[0], &args[1], loc, origin)
+            }
         }
+    }
+
+    /// `str_bytes(s, dst)` — the bless read backwards: the bytes of `s`,
+    /// written into caller storage as `u8` elements.
+    ///
+    /// The whole of the safety story is the destination, and it is the
+    /// caller's claim: that `dst` addresses `s.len()` writable `u8`
+    /// elements. The interpreter still catches every case its typed memory
+    /// can see — a freed allocation, a range that runs off the end,
+    /// read-only memory, and a live safe borrow of one of the bytes — by
+    /// making exactly the judgements `copy`'s destination half makes, in
+    /// its order, rather than growing a second set of its own.
+    ///
+    /// A zero-length string looks at no pointer at all, matching the
+    /// blesses' rule from the other side: the empty string is written by
+    /// writing nothing.
+    fn builtin_str_bytes(
+        &mut self,
+        text: &Value,
+        dst: &Value,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<Value, EvalError> {
+        let Value::Str(text) = text else {
+            return Err(self.ill_typed("a `str` argument", text, loc, origin));
+        };
+        let bytes: Vec<Value> = text
+            .as_bytes()
+            .iter()
+            .map(|byte| Value::Int(hir::IntValue::U8(*byte)))
+            .collect();
+        if bytes.is_empty() {
+            if !matches!(dst, Value::Ptr { .. }) {
+                return Err(self.ill_typed("a raw pointer", dst, loc, origin));
+            }
+            return Ok(Value::Unit);
+        }
+        let n = bytes.len() as u128;
+        self.copy_range(dst, n, "str_bytes", "destination", loc, origin)?;
+        // The aliasing check rides the write exactly as it does for
+        // `copy`'s destination half — and, like `copy`, after the bytes to
+        // be written are already materialized. Writing a range is not a
+        // route around the tree: a live safe borrow of one of these bytes
+        // must be foreign to this write, same as `p.*[i] = v` would be.
+        if let Value::Ptr { alloc, path, tag } = dst {
+            self.aliasing_access_range(*tag, *alloc, path, n, Access::Write, loc, origin)?;
+        }
+        let Value::Ptr {
+            alloc,
+            path,
+            tag: _,
+        } = dst
+        else {
+            unreachable!("copy_range verified the pointer shape");
+        };
+        let Some(PathElem::Index(head)) = path.last() else {
+            unreachable!("copy_range verified the element shape");
+        };
+        let head = *head as usize;
+        let allocation = self.memory.get_mut(alloc).expect("checked by copy_range");
+        if !allocation.writable {
+            return Err(EvalError {
+                kind: EvalErrorKind::UndefinedBehavior,
+                message: "write through a pointer into read-only memory (a `static`)".to_owned(),
+                origin: Some((loc.clone(), origin)),
+                notes: Vec::new(),
+            });
+        }
+        let parent = &path[..path.len() - 1];
+        let slot = match project_path_mut(&mut allocation.value, parent) {
+            Ok(slot) => slot,
+            Err(error) => return Err(self.ptr_path_error(error, loc, origin)),
+        };
+        let Value::Array(values) = slot else {
+            unreachable!("copy_range verified the array shape");
+        };
+        for (offset, byte) in bytes.into_iter().enumerate() {
+            values[head + offset] = byte;
+        }
+        Ok(Value::Unit)
     }
 
     /// `s.next_char(i)`: the scalar value starting at byte index `i`, plus
@@ -3746,7 +3839,8 @@ impl<M> Machine<'_, M> {
     }
 
     /// `aliasing_access` for the `n` array elements a range builtin
-    /// touches (`copy` on either side, a bless on its buffer), starting at
+    /// touches (`copy` on either side, a bless on its buffer, `str_bytes`
+    /// on its destination), starting at
     /// `path` (whose last step is the head element's `Index`) — one call
     /// per element, since a node's path is an exact field/index chain and
     /// cannot name a whole range at once. Reading or writing a range is

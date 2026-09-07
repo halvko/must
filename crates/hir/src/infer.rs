@@ -9365,6 +9365,16 @@ pub fn builtin_type(builtin: Builtin, file: SourceFile) -> Ty {
             vec![Ty::Int(IntKind::Usize), Ty::Str],
             Ty::Named(NamedTy::plain(crate::next_char_loc(file))),
         ),
+        // `s.len()` — the receiver is the only parameter, so `next_char`'s
+        // receiver-LAST shape is the whole signature here.
+        Builtin::StrLen => Ty::fn_type(vec![Ty::Str], Ty::Int(IntKind::Usize)),
+        // `str_bytes(s, dst)` — a written destination is `u8.&raw mut` and
+        // nothing else, so unlike the blesses this one HAS a `fn` type and
+        // is first-class like `print`.
+        Builtin::StrBytes => Ty::fn_type(
+            vec![Ty::Str, Ty::raw_ptr(true, Ty::Int(IntKind::U8))],
+            Ty::Unit,
+        ),
         // The generic builtins have no ONE type — every mention
         // instantiates [`builtin_scheme`] instead (see the `NameRef` and
         // `GenericApp` arms); the flavor-polymorphic builtins have no fn
@@ -9407,6 +9417,8 @@ fn builtin_generics(builtin: Builtin) -> Option<Vec<GenericParamData>> {
         | Builtin::Copy
         | Builtin::ReadLine
         | Builtin::NextChar
+        | Builtin::StrLen
+        | Builtin::StrBytes
         | Builtin::StrFromUtf8
         | Builtin::StrFromUtf8Unchecked => None,
     }
@@ -9452,6 +9464,8 @@ fn builtin_scheme(builtin: Builtin, file: SourceFile) -> (ItemLoc, Ty) {
         | Builtin::Copy
         | Builtin::ReadLine
         | Builtin::NextChar
+        | Builtin::StrLen
+        | Builtin::StrBytes
         | Builtin::StrFromUtf8
         | Builtin::StrFromUtf8Unchecked => {
             unreachable!("not a scheme-shaped builtin")

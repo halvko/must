@@ -6794,3 +6794,112 @@ fn the_stdin_library_refuses_a_line_longer_than_its_buffer() {
         "#]],
     );
 }
+
+// ---- `str_bytes` and `s.len()`: the bless, read backwards ---------------
+
+#[test]
+fn str_bytes_writes_the_text_and_len_counts_the_bytes_it_wrote() {
+    // The round trip that `String` is built on: `len` says how much storage
+    // to ask for, `str_bytes` fills it, and the claimed bless reads it back
+    // — so a value that went out as a `str` comes back as the same `str`
+    // through storage the program owns.
+    check_run(
+        "static f = fn() -> str {\n\
+             let text = \"smørre\";\n\
+             let n = text.len();\n\
+             match alloc_array::<u8>(n) {\n\
+                 AllocResult::Ok(p) => {\n\
+                     unsafe { str_bytes(text, p); };\n\
+                     let back = unsafe { str_from_utf8_unchecked(p, n) };\n\
+                     unsafe { dealloc_array(p, n); };\n\
+                     back\n\
+                 }\n\
+                 AllocResult::Err => \"oom\",\n\
+             }\n\
+         };",
+        "f()",
+        expect![[r#"
+            => "smørre"
+        "#]],
+    );
+}
+
+#[test]
+fn len_is_bytes_not_characters_and_is_const_legal() {
+    // Bytes, because bytes are what every other `str` operation counts:
+    // `next_char` threads a byte index and both blesses take a byte length.
+    // Pure, so a `const` context accepts it — `next_char`'s reasoning.
+    check_run(
+        "static n: usize = const { \"smørre\".len() };\n\
+         static f = fn() -> usize { n };",
+        "f()",
+        expect![[r#"
+            => 7
+        "#]],
+    );
+}
+
+#[test]
+fn str_bytes_past_the_end_of_the_destination_is_detected_ub() {
+    // The destination claim is the caller's, exactly as the source claim is
+    // a bless's — and the interpreter still catches every case its typed
+    // memory can see.
+    check_run(
+        "static f = fn() -> usize {\n\
+             match alloc_array::<u8>(2) {\n\
+                 AllocResult::Ok(p) => {\n\
+                     unsafe { str_bytes(\"hello\", p); };\n\
+                     unsafe { dealloc_array(p, 2); };\n\
+                     0\n\
+                 }\n\
+                 AllocResult::Err => 1,\n\
+             }\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: `str_bytes` out of bounds — the destination names 5 element(s) from index 0, but the array has 2
+              note: allocated here
+        "#]],
+    );
+}
+
+#[test]
+fn str_bytes_of_the_empty_string_looks_at_no_pointer_at_all() {
+    // The blesses' zero-length rule, from the other side: writing nothing
+    // writes nothing, so the empty `String` needs no allocation and no
+    // special case beyond the one `alloc_array(0)` forces.
+    check_run(
+        "static f = fn() -> usize {\n\
+             let p = unsafe { dangling::<u8>() };\n\
+             unsafe { str_bytes(\"\", p); };\n\
+             \"\".len()\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 0
+        "#]],
+    );
+}
+
+#[test]
+fn str_bytes_is_foreign_to_a_live_borrow_of_a_byte_it_writes() {
+    // The write-side mirror of the bless's read: `str_bytes` writes its
+    // range through the aliasing tree, exactly as `copy`'s destination half
+    // does, so a live exclusive borrow of one of the bytes it overwrites is
+    // invalidated as `a[0] = 7;` would invalidate it. Writing bytes is not
+    // a route around exclusivity.
+    check_run(
+        "static f = fn () -> u8 {\n\
+             let mut a: [u8; 4] = [1, 2, 3, 4];\n\
+             let m = a[0].&mut;\n\
+             unsafe { str_bytes(\"hi\", a[0].&raw mut); };\n\
+             m.*\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, or written through another borrow, while this borrow was still live
+              note: this borrow was created here
+              note: invalidated here — the value was borrowed again, or written through another borrow
+        "#]],
+    );
+}

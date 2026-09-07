@@ -425,7 +425,12 @@ impl CheckCtx<'_> {
                 // heap fence already stops the interesting cases, since
                 // there is no const-context way to get a buffer.
                 | Builtin::StrFromUtf8
-                | Builtin::StrFromUtf8Unchecked,
+                | Builtin::StrFromUtf8Unchecked
+                // `len` is pure like `next_char`; `str_bytes` is const-legal
+                // like `copy` — it writes only through a pointer whose
+                // target already exists in const memory.
+                | Builtin::StrLen
+                | Builtin::StrBytes,
             )) => {}
             Some(Resolution::Builtin(builtin @ (Builtin::Print | Builtin::ReadLine))) => {
                 self.diagnostics.push(ConstCheckDiagnostic::SideEffectCall {

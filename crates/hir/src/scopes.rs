@@ -391,6 +391,31 @@ pub enum Builtin {
     /// invariant says cannot exist, so producing one silently is exactly
     /// the class of bug this machine exists to catch.
     StrFromUtf8Unchecked,
+    /// `s.len()` — the BYTE length of a `str`. A member, like
+    /// [`Builtin::NextChar`], and for the same reason: it is a question
+    /// about a value, so the dot is where a reader already looks for it.
+    ///
+    /// SAFE and PURE, so const-legal. Bytes and not characters, because
+    /// bytes are what every other `str` operation counts — `next_char`
+    /// threads a byte index, both blesses take a byte length, and a
+    /// character count that agreed with none of them would be a trap
+    /// wearing the shorter name.
+    StrLen,
+    /// `str_bytes(s, dst)` — the bless read backwards: `s.len()` bytes of
+    /// `s`, written to `dst`.
+    ///
+    /// UNSAFE, and the marker is about the DESTINATION, exactly as
+    /// [`Builtin::StrFromUtf8`]'s is about the source: that `dst` addresses
+    /// `s.len()` WRITABLE bytes is the caller's claim and nothing checks
+    /// it. Unlike the blesses this one is not flavor-polymorphic — a
+    /// destination is written, so it is `u8.&raw mut` and nothing else,
+    /// which also makes it the one `str` byte builtin with an ordinary
+    /// first-class `fn` type.
+    ///
+    /// PURE in the sense const contexts care about (it writes only through
+    /// a pointer whose target already exists), so it is const-legal on
+    /// `copy`'s reasoning rather than `next_char`'s.
+    StrBytes,
 }
 
 impl Builtin {
@@ -407,6 +432,10 @@ impl Builtin {
             "read_line" => Some(Builtin::ReadLine),
             "str_from_utf8" => Some(Builtin::StrFromUtf8),
             "str_from_utf8_unchecked" => Some(Builtin::StrFromUtf8Unchecked),
+            "str_bytes" => Some(Builtin::StrBytes),
+            // `len` is deliberately absent for `next_char`'s reason: it is
+            // a MEMBER of `str`, so the name stays out of the value
+            // namespace entirely.
             // `next_char` is deliberately absent: it is a MEMBER of `str`,
             // not a top-level name (see `Builtin::NextChar`).
             _ => None,
@@ -420,7 +449,7 @@ impl Builtin {
     /// doesn't.
     pub fn members_of(recv: &crate::Ty) -> &'static [Builtin] {
         match recv {
-            crate::Ty::Str => &[Builtin::NextChar],
+            crate::Ty::Str => &[Builtin::NextChar, Builtin::StrLen],
             _ => &[],
         }
     }
@@ -448,6 +477,8 @@ impl Builtin {
             Builtin::NextChar => "next_char",
             Builtin::StrFromUtf8 => "str_from_utf8",
             Builtin::StrFromUtf8Unchecked => "str_from_utf8_unchecked",
+            Builtin::StrLen => "len",
+            Builtin::StrBytes => "str_bytes",
         }
     }
 
@@ -457,9 +488,9 @@ impl Builtin {
     /// freeing invalidates every pointer into the allocation, `copy`
     /// writes through a raw pointer, `add` on a pointer that does not
     /// address an array element (with `i > 0`) is detected UB at the call,
-    /// and both blesses read a whole RANGE on the caller's word that it is
+    /// both blesses read a whole RANGE on the caller's word that it is
     /// readable (the unchecked one additionally claiming the bytes spell a
-    /// string).
+    /// string), and `str_bytes` WRITES a range on the same kind of word.
     pub fn requires_unsafe(self) -> bool {
         matches!(
             self,
@@ -469,6 +500,11 @@ impl Builtin {
                 | Builtin::Offset
                 | Builtin::StrFromUtf8
                 | Builtin::StrFromUtf8Unchecked
+                // Writes a RANGE through a raw pointer on the caller's
+                // word that it is writable — `copy`'s destination half,
+                // with the length coming from the text instead of an
+                // argument.
+                | Builtin::StrBytes
         )
     }
 

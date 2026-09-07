@@ -602,7 +602,9 @@ impl<'db> Mono<'db> {
                     | Builtin::ReadLine
                     | Builtin::NextChar
                     | Builtin::StrFromUtf8
-                    | Builtin::StrFromUtf8Unchecked => {}
+                    | Builtin::StrFromUtf8Unchecked
+                    | Builtin::StrLen
+                    | Builtin::StrBytes => {}
                 }
                 return CallTarget::Refused(Refusal::new(
                     format!("the `{}` builtin", builtin.name()),
