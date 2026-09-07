@@ -23,6 +23,7 @@ fn at_expr_recovery(p: &Parser<'_>) -> bool {
             | LET_KW
             | ELSE_KW
             | WITH_KW
+            | WITHOUT_KW
             | IMPL_KW
             | FOR_KW
     )
@@ -65,8 +66,17 @@ fn item(p: &mut Parser<'_>) {
         // with { elements } with { ... };` (TR01). Parsed on any item
         // kind (superset — validation rejects them on `static`/`const`
         // items).
-        while p.at(WITH_KW) {
-            with_group(p);
+        //
+        // `without forget` rides the SAME trailing slot, in either order
+        // (`} without forget with { ... }` and `} with { ... } without
+        // forget` both parse) — one loop, so the pair reads as a pair and
+        // no order is privileged by the grammar.
+        while p.at(WITH_KW) || p.at(WITHOUT_KW) {
+            if p.at(WITH_KW) {
+                with_group(p);
+            } else {
+                without_clause(p);
+            }
         }
         // Brace rule: items whose value ends in `}` don't need a `;`.
         // A value "ending" in `;` only happens in broken nesting (e.g. an
@@ -1292,6 +1302,13 @@ fn generic_param(p: &mut Parser<'_>) {
                 region_bound(p);
             }
         }
+        // Superset: a capability opt-out on a REGION parameter is
+        // meaningless (a region names a duration, not a value), but
+        // parsing it keeps the error one validation message instead of a
+        // cascade of "expected `,`".
+        if p.at(WITHOUT_KW) {
+            without_clause(p);
+        }
         m.complete(p, REGION_PARAM);
         return;
     }
@@ -1303,6 +1320,11 @@ fn generic_param(p: &mut Parser<'_>) {
             type_(p);
         } else {
             p.error("expected `:` followed by the const parameter's type");
+        }
+        // Superset, like the region arm: a const parameter's values are
+        // always plain data, so it has no capability to shed.
+        if p.at(WITHOUT_KW) {
+            without_clause(p);
         }
         m.complete(p, CONST_PARAM);
     } else if matches!(p.current(), IDENT | HOLE) {
@@ -1316,12 +1338,56 @@ fn generic_param(p: &mut Parser<'_>) {
                 type_(p);
             }
         }
+        // `T without forget` — the opt-out from the DEFAULT bound, in the
+        // one place a parameter's requirements are written. It follows the
+        // written bounds because it subtracts from what is otherwise
+        // assumed: read the line left to right and the requirements
+        // accumulate, then one is taken away.
+        if p.at(WITHOUT_KW) {
+            without_clause(p);
+            // Superset: the REVERSE order (`T without forget: Bound`)
+            // parses into the same node, so validation can say which order
+            // to write instead of the parser reporting a missing comma
+            // twice at tokens that are individually fine.
+            if p.eat(COLON) {
+                type_(p);
+                while p.eat(PLUS) {
+                    type_(p);
+                }
+            }
+        }
         m.complete(p, TYPE_PARAM);
     } else if !p.at(COMMA) && !p.at(R_ANGLE) {
         p.err_and_bump("expected a generic parameter");
     } else {
         p.error("expected a generic parameter");
     }
+}
+
+/// `without forget` (or `without forget + send`) — a capability opt-out.
+/// ONE production, both homes: trailing a declaration and riding a generic
+/// parameter. The capability names are ordinary [`NAME_REF`]s — a
+/// capability is a thing the language knows about by name, not a keyword
+/// each — and they compose with `+`, exactly as bounds do (TR05), because
+/// this list reads as a conjunction too: "without forget, and without
+/// send".
+fn without_clause(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.bump(WITHOUT_KW);
+    if p.at(IDENT) {
+        name_ref(p);
+        while p.eat(PLUS) {
+            if p.at(IDENT) {
+                name_ref(p);
+            } else {
+                p.error("expected a capability name after `+`");
+                break;
+            }
+        }
+    } else {
+        p.error("expected a capability name after `without` (`without forget`)");
+    }
+    m.complete(p, WITHOUT_CLAUSE);
 }
 
 /// One region on the right of an outlives `:` — always a region name, never
@@ -1528,7 +1594,9 @@ fn scan_bare_angle_group(p: &Parser<'_>) -> Option<BareAngleGroup> {
             // angle counters and every bail but the brace — reads `nest`.
             EQ2 | NEQ | LTEQ | GTEQ | FAT_ARROW if nest == 0 => return None,
             SEMICOLON if nest == 0 => return None,
-            STATIC_KW | TRAIT_KW | TYPE_KW | LET_KW | WITH_KW | IMPL_KW | FOR_KW if nest == 0 => {
+            STATIC_KW | TRAIT_KW | TYPE_KW | LET_KW | WITH_KW | WITHOUT_KW | IMPL_KW | FOR_KW
+                if nest == 0 =>
+            {
                 return None;
             }
             _ => {}

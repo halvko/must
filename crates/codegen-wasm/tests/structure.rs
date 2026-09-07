@@ -438,3 +438,34 @@ fn an_extern_fn_may_not_claim_a_name_the_compiler_already_imports() {
          not at the call that reached it"
     );
 }
+
+/// Linearity is CHECK-TIME ONLY. The `forget` capability decides which
+/// programs the checker accepts and nothing else: there is no drop glue to
+/// emit, no flag to track, no cleanup block to branch to. The claim is
+/// structural, so it is pinned structurally — the same program with and
+/// without the opt-out must compile to the same bytes, down to the last
+/// one.
+#[test]
+fn a_linear_type_changes_nothing_about_the_emitted_module() {
+    const PROGRAM: &str = r#"
+type Res = struct { id: usize, size: usize }PLACEHOLDER with {
+    impl Self {
+        drop = fn(r: Self) -> usize {
+            let Res(struct { id, size }) = r;
+            id + size
+        };
+    }
+};
+static main = fn () -> usize {
+    let r = Res(struct { id = 3, size = 4 });
+    r.drop()
+};
+"#;
+    let linear = compile(&PROGRAM.replace("PLACEHOLDER", " without forget"), "main()");
+    let plain = compile(&PROGRAM.replace("PLACEHOLDER", ""), "main()");
+    assert_eq!(
+        linear.wasm, plain.wasm,
+        "a checked-linear type must have no codegen consequence at all"
+    );
+    assert_eq!(linear.instances, plain.instances);
+}

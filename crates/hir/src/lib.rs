@@ -6,12 +6,14 @@
 //! therefore only reach other items if a *value* on that path changes.
 
 pub mod body;
+pub mod capability;
 pub mod const_check;
 pub mod constraint;
 pub mod diag;
 pub mod groups;
 pub mod infer;
 pub mod item_tree;
+pub mod linear_check;
 pub mod outlives;
 pub mod scopes;
 pub mod traits;
@@ -290,6 +292,9 @@ pub fn item_data<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<item_tree::I
             kind: item_tree::ItemKind::Member,
             type_ref: data.type_ref.clone(),
             generics,
+            // A member is a value item; only a `type` declaration sheds a
+            // capability.
+            without_forget: false,
         });
     }
     if let Some(decl) = synthetic_decl(db, item) {
@@ -298,6 +303,8 @@ pub fn item_data<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<item_tree::I
             kind: item_tree::ItemKind::Type,
             type_ref: None,
             generics: decl.generics.clone(),
+            // A compiler-provided declaration sheds nothing.
+            without_forget: false,
         });
     }
     item_tree::item_tree(db, item.file(db))
@@ -1578,6 +1585,56 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 related,
             });
         }
+
+        // Must-consume findings: a value whose type has no `forget`
+        // capability, on a path that never disposes of it (or on one that
+        // disposes of it twice). Every one of them names a BINDING, so the
+        // related note is that binding's own declaration — "this is where
+        // the obligation started" is the sentence a reader needs, and the
+        // squiggle sits on the path that broke it instead.
+        for diag in linear_check::linear_check(db, item) {
+            let range = match (diag.expr(), diag.pat()) {
+                (Some(expr), _) => source_map.node_for_expr(expr).map(|p| p.text_range()),
+                (None, Some(pat)) => source_map.node_for_pat(pat).map(|p| p.text_range()),
+                _ => None,
+            };
+            let Some(range) = range else {
+                continue;
+            };
+            let name = diag
+                .binding()
+                .map(|binding| body.bindings[binding].name.clone())
+                .unwrap_or_default();
+            let mut related = Vec::new();
+            if let Some(binding) = diag.binding()
+                && let Some(ptr) = source_map.node_for_binding(binding)
+            {
+                related.push(RelatedInfo {
+                    file,
+                    range: ptr.text_range(),
+                    message: format!(
+                        "{} is born here and must be consumed",
+                        diag::linear_subject(&name)
+                    ),
+                });
+            }
+            if let Some(first) = diag.related_expr()
+                && let Some(ptr) = source_map.node_for_expr(first)
+            {
+                related.push(RelatedInfo {
+                    file,
+                    range: ptr.text_range(),
+                    message: "first consumed here".to_owned(),
+                });
+            }
+            diagnostics.push(Diagnostic {
+                range,
+                severity: Severity::Error,
+                message: diag.message(&name),
+                fix: None,
+                related,
+            });
+        }
     }
 
     // Tripwire (rustc's "delayed bug" pattern): the invariant is that every
@@ -2693,8 +2750,42 @@ fn apply_position_diagnostics(
                 diagnostics.push(simple(arg_range, diag::unexpected_region_arg(&param.name)));
             }
             // Inner type args are PathTypes of their own — the pass visits
-            // them independently; nothing to add here.
-            (item_tree::GenericParamKind::Type, ast::GenericArg::TypeArg(_)) => {}
+            // them independently. What is left is the one judgement about
+            // the ARGUMENT AS A WHOLE: the default `forget` bound. Checked
+            // here as well as at expression-position mentions, because a
+            // signature (`fn(b: Box::<Lin>)`) is an instantiation edge that
+            // no expression ever crosses.
+            //
+            // A CONCRETE argument is what this can judge: `lower_decl_ty`
+            // is scope-less, so an argument naming the enclosing binder's
+            // own parameter lowers to `{error}` and passes silently.
+            // Containment is the net under that — the annotated value is
+            // linear inside the body either way — and the flag's polarity
+            // stays in one place (`GenericParamData::without_forget`, read
+            // at `forget_of`'s `Ty::Param` arm) rather than being mirrored
+            // into the syntax-side binder here.
+            (item_tree::GenericParamKind::Type, ast::GenericArg::TypeArg(ty_arg)) => {
+                if !param.without_forget
+                    && let Some(written) = ty_arg.ty()
+                {
+                    let ty = ty::lower_decl_ty(db, file, &item_tree::TypeRef::from_ast(written));
+                    if !capability::has_forget(db, &ty) {
+                        let reason = capability::no_forget_reason(db, &ty)
+                            .unwrap_or_else(|| format!("`{}` has no `forget`", ty.display()));
+                        diagnostics.push(Diagnostic {
+                            range: arg_range,
+                            severity: Severity::Error,
+                            message: diag::forget_bound_unsatisfied(
+                                &param.name,
+                                &ty.display(),
+                                &reason,
+                            ),
+                            fix: None,
+                            related: declared_here(db, &target),
+                        });
+                    }
+                }
+            }
             (item_tree::GenericParamKind::Type, ast::GenericArg::ConstArg(_)) => {
                 diagnostics.push(simple(arg_range, diag::type_param_needs_type(&param.name)));
             }
@@ -2766,7 +2857,7 @@ fn const_annotation_arg_error(
                     // An integer literal type-checks against ANY declared
                     // integer type (literal typing is inferred, never
                     // defaulted) — but must fit its range.
-                    let expected = ty::lower_const_decl_ty(db, target.file, declared);
+                    let expected = ty::lower_decl_ty(db, target.file, declared);
                     return match expected {
                         Ty::Int(kind) => {
                             let fits = i128::try_from(value)
@@ -2787,7 +2878,7 @@ fn const_annotation_arg_error(
                 ast::LiteralKind::Bool(_) => Ty::Bool,
                 ast::LiteralKind::Char(_) => Ty::Char,
             };
-            let expected = ty::lower_const_decl_ty(db, target.file, declared);
+            let expected = ty::lower_decl_ty(db, target.file, declared);
             if expected.contains_error() || expected == found {
                 return None;
             }
@@ -2858,7 +2949,7 @@ fn array_len_expr_error(
                 return Some(diag::TYPE_CONST_ARG_NOT_LITERAL.to_owned());
             }
             let own_declared = TypeRef::from_ast(binder.const_param_ty(&name)?.clone());
-            let found = ty::lower_const_decl_ty(db, file, &own_declared);
+            let found = ty::lower_decl_ty(db, file, &own_declared);
             if found.contains_error() || found == Ty::Int(ty::IntKind::Usize) {
                 return None;
             }
@@ -2885,9 +2976,9 @@ fn const_param_agreement_error(
     binder: &BinderInfo,
     param_name: &str,
 ) -> Option<String> {
-    let expected = ty::lower_const_decl_ty(db, target.file, declared);
+    let expected = ty::lower_decl_ty(db, target.file, declared);
     let own_declared = TypeRef::from_ast(binder.const_param_ty(param_name)?.clone());
-    let found = ty::lower_const_decl_ty(db, file, &own_declared);
+    let found = ty::lower_decl_ty(db, file, &own_declared);
     if expected.contains_error() || found.contains_error() || expected == found {
         return None;
     }

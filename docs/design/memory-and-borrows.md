@@ -80,6 +80,13 @@
   The rule moves by design: "a referent this match can dispatch on lifts the lens" is defined
   by which patterns exist, so every future pattern-kind grant also changes the lens for
   borrowed scrutinees of that type.
+- **M16** Must-consume is the dual of use-after-move: one walk, one fact per binding, so the
+  checker that refuses a double disposal is the one that refuses a leak. No unwinding pays for
+  it: a panic traps, so every exit from a scope is written in the source, and a checker that
+  visits `return`/`break`/`continue`/fall-off has visited all of them. A language with
+  unwinding has an implicit exit edge at every call, which is why such languages need
+  destructors. A `break` is not a back edge; it carries its state to the loop's exit join,
+  while a `continue` answers the same entry-equals-back-edge invariant a fall-through does.
 
 ### Ruled, not built
 
@@ -122,7 +129,8 @@
 - **Second-class references / mutable value semantics** — overridden, not refuted: its case
   was that first-class references are the single largest complexity cliff available, and that
   bill is being paid deliberately. **Raw pointers only** — every collection API would be
-  unsafe-flavoured. **Full linearity** — ergonomically heavy at scale. **M04**
+  unsafe-flavoured. **Full linearity** — ergonomically heavy at scale; the useful fragment
+  returned as must-consume (M16). **M04**
 - **Coarse scoping (locality modes, second-class values)** — a two-point lattice can say
   "escapes nothing" but never "outlives arena A but not B"; it tracks escape rather than
   allocator origin; and a container stores its handle, which is first-class use by definition.

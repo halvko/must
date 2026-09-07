@@ -12288,3 +12288,956 @@ fn str_bytes_requires_unsafe_and_both_str_primitives_are_const_legal() {
         "#]],
     );
 }
+
+// ---- linear types: the `forget` capability and must-consume checking ----
+
+/// The shape every test below builds on: a nominal type that has shed
+/// `forget`, plus a consuming `drop` that takes it apart. `drop` needs no
+/// compiler support — destructuring hands the obligation to the parts, and
+/// the parts are two integers.
+const LINEAR_PRELUDE: &str = r#"
+type Res = struct { id: usize, size: usize } without forget with {
+    impl Self {
+        drop = fn(r: Self) -> () {
+            let Res(struct { id, size }) = r;
+            print_two(id, size);
+        };
+    }
+};
+static print_two = fn(a: usize, b: usize) -> () { };
+static make = fn(id: usize) -> Res { Res(struct { id, size = 1 }) };
+"#;
+
+fn check_linear(body: &str, expect: Expect) {
+    check_diagnostics(&format!("{LINEAR_PRELUDE}{body}"), expect);
+}
+
+#[test]
+fn a_linear_consumed_on_the_one_path_is_clean() {
+    check_linear(
+        r#"
+static main = fn() -> () {
+    let r = make(1);
+    r.drop();
+};
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn a_linear_left_alive_at_the_end_of_a_scope_is_a_leak() {
+    check_linear(
+        r#"
+static main = fn() -> () {
+    let r = make(1);
+};
+"#,
+        expect![[r#"
+            366..390: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 376..377)
+        "#]],
+    );
+}
+
+#[test]
+fn consuming_a_linear_twice_is_the_use_after_move_error() {
+    check_linear(
+        r#"
+static main = fn() -> () {
+    let r = make(1);
+    r.drop();
+    r.drop();
+};
+"#,
+        expect![[r#"
+            407..408: `r` was already consumed (`r` is born here and must be consumed at 376..377) (first consumed here at 393..394)
+        "#]],
+    );
+}
+
+#[test]
+fn a_linear_consumed_in_one_arm_only_fails_at_the_join() {
+    check_linear(
+        r#"
+static main = fn(c: bool) -> () {
+    let r = make(1);
+    if c { r.drop(); } else { };
+};
+"#,
+        expect![[r#"
+            400..427: `r` is consumed on some paths through this expression and not on others (`r` is born here and must be consumed at 383..384)
+        "#]],
+    );
+}
+
+#[test]
+fn both_arms_consuming_is_clean_and_a_diverging_arm_needs_nothing() {
+    check_linear(
+        r#"
+static both = fn(c: bool) -> () {
+    let r = make(1);
+    if c { r.drop(); } else { r.drop(); };
+};
+static diverging = fn(c: bool) -> () {
+    let r = make(1);
+    if c { r.drop(); } else { panic("no"); };
+};
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn a_diverging_tail_owes_nothing_and_a_falling_one_still_does() {
+    check_linear(
+        r#"
+static nope = fn() -> ! { panic("n") };
+static panicking = fn() -> usize {
+    let r = make(1);
+    panic("gone")
+};
+static returning = fn() -> usize {
+    let r = make(1);
+    return panic("gone")
+};
+static nested = fn() -> usize {
+    let r = make(1);
+    { panic("gone") }
+};
+static by_name = fn() -> usize {
+    let r = make(1);
+    nope()
+};
+static branching = fn(c: bool) -> usize {
+    let r = make(1);
+    if c { panic("a") } else { panic("b") }
+};
+static looping = fn() -> usize {
+    let r = make(1);
+    loop {}
+};
+static falling = fn() -> usize {
+    let r = make(1);
+    1
+};
+"#,
+        expect![[r#"
+            898..928: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 908..909)
+        "#]],
+    );
+}
+
+#[test]
+fn returning_a_linear_consumes_it_and_leaving_one_behind_does_not() {
+    check_linear(
+        r#"
+static handed_back = fn() -> Res {
+    let r = make(1);
+    r
+};
+static returned_early = fn(c: bool) -> () {
+    let r = make(1);
+    if c { return; };
+    r.drop();
+};
+"#,
+        expect![[r#"
+            482..488: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 458..459)
+        "#]],
+    );
+}
+
+#[test]
+fn a_discarded_linear_temporary_is_reported_without_a_name() {
+    check_linear(
+        r#"
+static main = fn() -> () {
+    make(1);
+};
+"#,
+        expect![[r#"
+            372..379: this value must be consumed; its type has no `forget` capability, so it cannot be discarded
+        "#]],
+    );
+}
+
+#[test]
+fn a_static_cannot_hold_a_linear() {
+    check_linear(
+        r#"
+static held = Res(struct { id = 1, size = 2 });
+"#,
+        expect![[r#"
+            355..387: an item's value must have the `forget` capability: a `static` is never destroyed, so nothing could ever consume this
+        "#]],
+    );
+}
+
+#[test]
+fn assigning_over_a_live_linear_loses_it() {
+    check_linear(
+        r#"
+static main = fn() -> () {
+    let mut r = make(1);
+    r = make(2);
+    r.drop();
+};
+"#,
+        expect![[r#"
+            397..398: `r` still holds a value that must be consumed; assigning here would lose it (`r` is born here and must be consumed at 380..381)
+        "#]],
+    );
+}
+
+#[test]
+fn assigning_over_a_linear_place_with_no_name_loses_it_too() {
+    // The same loss where no binding names the place — a field, an
+    // element, a `.&mut` referent. Liveness cannot say the old value is
+    // already gone (there is nothing to track it on) and the TYPE says one
+    // is there, so the write always loses one.
+    check_linear(
+        r#"
+type Holder = struct { res: Res, tag: usize };
+static overwrite_field = fn::<@a>(h: Holder.&mut::<@a>) -> () { h.*.res = make(2); };
+static overwrite_elem = fn::<@a>(a: [Res; 3].&mut::<@a>) -> () { a.*[0] = make(2); };
+static overwrite_referent = fn::<@a>(m: Res.&mut::<@a>) -> () { m.* = make(2); };
+"#,
+        expect![[r#"
+            452..459: this place still holds a value that must be consumed; assigning here would lose it
+            539..545: this place still holds a value that must be consumed; assigning here would lose it
+            624..627: this place still holds a value that must be consumed; assigning here would lose it
+        "#]],
+    );
+    // The raw hatch is the one way past it, where it always was: writing
+    // through a raw pointer is `unsafe`, and what it does to an obligation
+    // is the caller's word.
+    check_linear(
+        r#"
+static overwrite_raw = fn(p: Res.&raw mut) -> () { unsafe { p.* = make(2); }; };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_const_block_may_not_produce_a_linear() {
+    // A `const { ... }` is a CONSTANT — computed once and copied into
+    // every evaluation — so a linear one is one obligation per evaluation
+    // and no path discharges it once. `ItemHoldsLinear`'s reason, one
+    // nesting level down, and not covered by the leaked-INSIDE-the-block
+    // case: here the block itself hands the value out.
+    check_linear(
+        r#"
+static const_make = const fn(id: usize) -> Res { Res(struct { id, size = 1 }) };
+static main = fn() -> () {
+    let r = const { const_make(1) };
+    r.drop();
+};
+"#,
+        expect![[r#"
+            461..484: a `const` block's value must have the `forget` capability: it is computed once and copied into every evaluation, so no single path could consume it
+        "#]],
+    );
+}
+
+#[test]
+fn a_diverging_const_block_answers_for_the_type_it_was_pinned_to() {
+    // The block's TYPE decides this, not a path through it — the same
+    // question the item-level twin asks. A diverging body is no excuse:
+    // pinned by an annotation the block still promises a `Res` per
+    // evaluation, while unpinned its own type is `!`, which anyone may
+    // forget. The binding is not reported either way: nothing reaches it.
+    check_linear(
+        r#"
+static main = fn() -> usize {
+    let pinned: Res = const { panic("x") };
+    1
+};
+static free = fn() -> usize {
+    let loose = const { panic("y") };
+    1
+};
+"#,
+        expect![[r#"
+            393..413: a `const` block's value must have the `forget` capability: it is computed once and copied into every evaluation, so no single path could consume it
+        "#]],
+    );
+}
+
+#[test]
+fn a_static_holding_a_const_block_says_it_once() {
+    // Both rules fire on the same range here — the block's and the item's,
+    // which is the block's one level up. One mistake gets one sentence, and
+    // it is the item's: a `static` is never destroyed, which is the reason
+    // a reader needs.
+    check_linear(
+        r#"
+static const_make = const fn(id: usize) -> Res { Res(struct { id, size = 1 }) };
+static held = const { const_make(1) };
+"#,
+        expect![[r#"
+            436..459: an item's value must have the `forget` capability: a `static` is never destroyed, so nothing could ever consume this
+        "#]],
+    );
+}
+
+#[test]
+fn a_borrow_of_a_linear_consumes_nothing_and_a_copy_out_is_refused() {
+    check_linear(
+        r#"
+static peek = fn::<@a>(r: Res.&::<@a>) -> usize { r.*.id };
+static main = fn() -> () {
+    let r = make(1);
+    let n = peek(r.&);
+    r.drop();
+};
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn containment_infects_a_container_and_a_rest_pattern_cannot_skip_it() {
+    check_linear(
+        r#"
+type Holder = struct { res: Res, tag: usize };
+static take = fn(h: Holder) -> () {
+    let Holder(struct { res, tag }) = h;
+    res.drop();
+};
+static skipped = fn(h: Holder) -> () {
+    let Holder(struct { tag, .. }) = h;
+};
+"#,
+        expect![[r#"
+            538..556: `..` would skip `res`, which must be consumed; name it in the pattern so it has somewhere to go
+        "#]],
+    );
+}
+
+#[test]
+fn a_field_read_of_a_linear_field_is_a_copy_and_is_refused() {
+    check_linear(
+        r#"
+type Holder = struct { res: Res, tag: usize };
+static main = fn(h: Holder) -> () {
+    let r = h.res;
+    r.drop();
+};
+"#,
+        expect![[r#"
+            422..458: `h` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`h` is born here and must be consumed at 405..406)
+            436..441: cannot copy a value that must be consumed out of a place; take the whole value apart instead (`let Name(struct { .. }) = value;`)
+        "#]],
+    );
+}
+
+#[test]
+fn matching_an_owned_linear_enum_consumes_it_through_its_payloads() {
+    check_linear(
+        r#"
+type Maybe = enum { One(Res), Nothing };
+static main = fn(m: Maybe) -> () {
+    match m {
+        ::One(r) => { r.drop(); },
+        ::Nothing => { },
+    };
+};
+static leaky = fn(m: Maybe) -> () {
+    match m {
+        ::One(r) => { },
+        ::Nothing => { },
+    };
+};
+"#,
+        expect![[r#"
+            572..575: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 566..567)
+        "#]],
+    );
+}
+
+#[test]
+fn a_loop_may_not_consume_a_linear_born_outside_it() {
+    check_linear(
+        r#"
+static main = fn(n: usize) -> () {
+    let r = make(1);
+    loop {
+        r.drop();
+    };
+};
+"#,
+        expect![[r#"
+            406..431: `r` is left in a different state than the loop found it in; the next iteration would run against a world this body was not checked in (`r` is born here and must be consumed at 384..385)
+        "#]],
+    );
+}
+
+#[test]
+fn a_loop_that_replaces_what_it_consumed_is_clean() {
+    check_linear(
+        r#"
+static main = fn(n: usize) -> () {
+    let mut r = make(1);
+    loop {
+        r.drop();
+        r = make(2);
+        if n == 0 { break; };
+    };
+    r.drop();
+};
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn a_linear_born_and_consumed_inside_a_loop_is_clean_and_a_break_checks_it() {
+    check_linear(
+        r#"
+static clean = fn(n: usize) -> () {
+    loop {
+        let r = make(1);
+        r.drop();
+        if n == 0 { break; };
+    };
+};
+static broken = fn(n: usize) -> () {
+    loop {
+        let r = make(1);
+        if n == 0 { break; };
+        r.drop();
+    };
+};
+"#,
+        expect![[r#"
+            564..569: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 531..532)
+        "#]],
+    );
+}
+
+#[test]
+fn a_linear_cannot_be_repeated_into_an_array() {
+    check_linear(
+        r#"
+static main = fn() -> () {
+    let r = make(1);
+    let a = [r; 3];
+};
+"#,
+        expect![[r#"
+            366..410: `a` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`a` is born here and must be consumed at 397..398)
+            402..403: cannot repeat a value that must be consumed: the copies would each have to be consumed, and there is only one value
+        "#]],
+    );
+}
+
+#[test]
+fn a_linear_born_in_a_const_context_must_be_consumed_there() {
+    check_linear(
+        r#"
+static const_make = const fn(id: usize) -> Res { Res(struct { id, size = 1 }) };
+static n: usize = const { let r = const_make(1); 5 };
+"#,
+        expect![[r#"
+            446..474: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 452..453)
+        "#]],
+    );
+}
+
+#[test]
+fn the_forget_bound_is_the_default_on_every_type_parameter() {
+    // Nothing was written about `T`, so `T` requires `forget` — and the
+    // refusal names the bound and the spelling that relaxes it. Note the
+    // second diagnostic: containment made `Box::<Res>` linear anyway, so
+    // the bound is a promise about the binder, not the safety net.
+    check_linear(
+        r#"
+type Box = enum::<T> { Full(T), Empty };
+static main = fn() -> () {
+    let r = make(1);
+    let b = Box::Full(r);
+};
+"#,
+        expect![[r#"
+            407..457: `b` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`b` is born here and must be consumed at 438..439)
+            442..451: `Res` cannot be a `T`: `Res` is declared `without forget`, and `T` requires `forget` (every type parameter does unless it is written `T without forget`)
+        "#]],
+    );
+}
+
+#[test]
+fn opting_a_parameter_out_lets_it_carry_a_linear() {
+    // `unwrap`'s shape is the reason rigid checking is bearable: inside the
+    // body the only things you can do with a `T` you may not forget are
+    // hand it back and pass it on — and handing it back is what a container
+    // is for.
+    check_linear(
+        r#"
+type Box = enum::<T without forget> { Full(T), Empty } with {
+    impl Self {
+        unwrap = fn(b: Self) -> T {
+            match b {
+                ::Full(t) => t,
+                ::Empty => panic("empty box"),
+            }
+        };
+    }
+};
+static clean = fn() -> () {
+    let r = make(1);
+    let b = Box::Full(r);
+    let back = b.unwrap();
+    back.drop();
+};
+static leaky = fn() -> () {
+    let r = make(1);
+    let b = Box::Full(r);
+};
+static forgettable = fn() -> usize {
+    let b = Box::<usize>::Full(5);
+    b.unwrap()
+};
+"#,
+        expect![[r#"
+            738..788: `b` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`b` is born here and must be consumed at 769..770)
+        "#]],
+    );
+}
+
+#[test]
+fn an_opted_out_parameter_is_checked_rigidly_inside_the_generic_body() {
+    // The caller may hand it a linear, so the body may not assume it can
+    // drop one on the floor — even though `T` might be `usize`.
+    check_linear(
+        r#"
+static ignore = fn::<T without forget>(t: T) -> () { };
+static hand_back = fn::<T without forget>(t: T) -> T { t };
+"#,
+        expect![[r#"
+            392..395: `t` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`t` is born here and must be consumed at 380..381)
+        "#]],
+    );
+}
+
+#[test]
+fn an_opted_out_parameter_cannot_satisfy_the_bound_and_is_blamed_as_one() {
+    // The blame root for a parameter is not a declaration: `U` was never
+    // declared `without forget`, it opted out of the bound every type
+    // parameter carries by default, and the sentence has to say so.
+    check_linear(
+        r#"
+type Box = enum::<T> { Full(T), Empty };
+static wrap = fn::<U without forget>(u: U) -> () {
+    let b = Box::Full(u);
+};
+"#,
+        expect![[r#"
+            431..460: `b` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`b` is born here and must be consumed at 441..442)
+            445..454: `U` cannot be a `T`: `U` is a type parameter written `without forget`, and `T` requires `forget` (every type parameter does unless it is written `T without forget`)
+        "#]],
+    );
+}
+
+#[test]
+fn a_match_arm_wildcard_cannot_swallow_an_owned_linear() {
+    // The match CONSUMED the scrutinee; `_` bound nothing to consume it
+    // with. Its neighbours (`let _ = s`, `::Some(_)`) were caught from the
+    // start — this is the same sentence at the third position, and it
+    // composes: the nested `match x { _ => {} }` is the same mistake one
+    // level down.
+    check_linear(
+        r#"
+type Maybe = enum::<T without forget> { One(T), Nothing };
+static direct = fn() -> () {
+    let r = make(1);
+    match r {
+        _ => { },
+    };
+};
+static catch_all = fn(m: Maybe::<Res>) -> () {
+    match m {
+        _ => { },
+    };
+};
+static nested = fn(m: Maybe::<Res>) -> () {
+    match m {
+        ::One(x) => {
+            match x {
+                _ => { },
+            };
+        },
+        ::Nothing => { },
+    };
+};
+"#,
+        expect![[r#"
+            472..473: `_` matches the value without binding it, and it must be consumed; give it a name so it has somewhere to go
+            561..562: `_` matches the value without binding it, and it must be consumed; give it a name so it has somewhere to go
+            699..700: `_` matches the value without binding it, and it must be consumed; give it a name so it has somewhere to go
+        "#]],
+    );
+}
+
+#[test]
+fn a_match_arm_wildcard_through_a_borrow_owes_nothing() {
+    // Nothing was consumed, so nothing is owed — the scrutinee decides,
+    // exactly as match projection already rules.
+    check_linear(
+        r#"
+static peek = fn::<@a>(r: Res.&::<@a>) -> usize {
+    match r {
+        _ => { 0 },
+    }
+};
+static main = fn() -> () {
+    let r = make(1);
+    let n = peek(r.&);
+    r.drop();
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_break_carries_its_state_out_instead_of_restoring_the_loop() {
+    // A break is not a back edge: it LEAVES. So the take-ownership-and-stop
+    // search loop — the shape every search is written in — checks clean,
+    // while falling off the body's end (which runs it again) still has to
+    // leave the world as it found it.
+    check_linear(
+        r#"
+static takes_and_stops = fn(n: usize) -> () {
+    let r = make(1);
+    let mut i = 0;
+    loop {
+        i = i + 1;
+        if i > n {
+            r.drop();
+            break;
+        };
+    };
+};
+static nested_break = fn(n: usize) -> () {
+    let r = make(1);
+    let mut i = 0;
+    loop {
+        loop {
+            i = i + 1;
+            if i > n { break; };
+        };
+        r.drop();
+        break;
+    };
+};
+static falls_off_the_end = fn() -> () {
+    let r = make(1);
+    loop {
+        r.drop();
+    };
+};
+"#,
+        expect![[r#"
+            827..852: `r` is left in a different state than the loop found it in; the next iteration would run against a world this body was not checked in (`r` is born here and must be consumed at 805..806)
+        "#]],
+    );
+}
+
+#[test]
+fn a_broken_consumption_site_poisons_the_value_rather_than_accusing_it() {
+    // Half-typed (`s.`) and unresolvable (`s.nope()`) consumptions are
+    // consumptions in progress. Reporting a leak beside the real error
+    // would accuse the writer of the opposite of what they are doing —
+    // which is the promise `crate::capability` makes about broken
+    // programs, now kept.
+    check_linear(
+        r#"
+static half_typed = fn() -> () {
+    let r = make(1);
+    r.
+};
+static unresolvable = fn() -> () {
+    let r = make(1);
+    r.nope();
+};
+"#,
+        expect![[r#"
+            402..403: expected a field name after `.`
+            465..473: no field or member `nope` on `Res`
+        "#]],
+    );
+}
+
+#[test]
+fn a_copy_out_of_a_borrow_is_diagnosed_once() {
+    // `r.*[0]` of a linear element is BOTH "cannot move out of a borrow"
+    // and "cannot copy a value that must be consumed". One mistake, one
+    // message — the borrow-side one, which names the place.
+    check_linear(
+        r#"
+static elem = fn::<@a>(r: [Res; 3].&::<@a>) -> Res { r.*[0] };
+"#,
+        expect![[r#"
+            394..400: cannot move out of a borrow: `Res` cannot be copied
+        "#]],
+    );
+}
+
+#[test]
+fn the_heap_builtins_take_a_linear_element_type() {
+    // `alloc_array::<T>` hands out a POINTER to storage and never holds a
+    // `T`, so its binder opts out of the bound — and `AllocResult::<T>`,
+    // whose payload is that pointer, opts out for the same reason. The two
+    // have to agree: accepting the result type while refusing the call
+    // that produces it is not a rule, it is a bug.
+    check_linear(
+        r#"
+static main = fn() -> () {
+    let p = match alloc_array::<Res>(4) {
+        ::Ok(p) => p,
+        ::Err => panic("oom"),
+    };
+    unsafe { p.* = make(7); };
+    unsafe { dealloc_array(p, 4); };
+};
+static result_shape = fn(r: AllocResult::<Res>) -> () {
+    match r {
+        ::Ok(p) => { },
+        ::Err => { },
+    };
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn the_forget_bound_is_checked_in_annotation_position_too() {
+    // A signature is an instantiation edge no expression ever crosses.
+    // Checking only expression mentions would let `fn(b: Box::<Res>)` in
+    // through the front door. The argument has to name a CONCRETE type to
+    // be judged here: a declared type lowers scope-lessly, so one naming
+    // the enclosing binder's own parameter is `{error}` and silent —
+    // containment still makes the annotated value linear inside the body.
+    check_linear(
+        r#"
+type Box = struct::<T> { v: T };
+static take = fn(b: Box::<Res>) -> () {
+    let Box(struct { v }) = b;
+    v.drop();
+};
+"#,
+        expect![[r#"
+            400..403: `Res` cannot be a `T`: `Res` is declared `without forget`, and `T` requires `forget` (every type parameter does unless it is written `T without forget`) (declared here at 346..349)
+        "#]],
+    );
+}
+
+// ---- `String`: the first linear type, as a library ----------------------
+
+/// The acid test: an OWNED, allocation-backed string, declared as a library
+/// type and not as a compiler special case. Nothing in `hir` knows the name;
+/// the whole of what makes it work is the clause and the members below, and
+/// the refusals that follow are the ones a user of it would meet.
+const STRING_PRELUDE: &str = r#"
+type String = struct {
+    ptr: u8.&raw mut,
+    len: usize,
+    cap: usize,
+} without forget with {
+    impl Self {
+        as_str = fn::<@a>(s: Self.&::<@a>) -> str {
+            unsafe { str_from_utf8_unchecked(s.*.ptr, s.*.len) }
+        };
+        len = fn::<@a>(s: Self.&::<@a>) -> usize { s.*.len };
+        drop = fn(s: Self) -> () {
+            let String(struct { ptr, cap, .. }) = s;
+            if cap > 0 {
+                unsafe { dealloc_array(ptr, cap); };
+            };
+        };
+    }
+};
+static empty_string = fn() -> String {
+    String(struct { ptr = unsafe { dangling::<u8>() }, len = 0, cap = 0 })
+};
+static to_owned = fn::<@a>(s: str.&::<@a>) -> String {
+    let text = s.*;
+    let n = text.len();
+    if n == 0 { return empty_string(); };
+    let p = match alloc_array::<u8>(n) {
+        ::Ok(p) => p,
+        ::Err => panic("out of memory"),
+    };
+    unsafe { str_bytes(text, p); };
+    String(struct { ptr = p, len = n, cap = n })
+};
+"#;
+
+fn check_string(body: &str, expect: Expect) {
+    check_diagnostics(&format!("{STRING_PRELUDE}{body}"), expect);
+}
+
+#[test]
+fn the_string_library_itself_checks_clean() {
+    check_string(
+        r#"
+static main = fn(text: str) -> usize {
+    let s = to_owned(text.&);
+    let n = s.&.len();
+    print(s.&.as_str());
+    s.drop();
+    n
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn not_dropping_a_string_is_a_check_error() {
+    check_string(
+        r#"
+static leak = fn(text: str) -> () {
+    let s = to_owned(text.&);
+    print(s.&.as_str());
+};
+"#,
+        expect![[r#"
+            1001..1059: `s` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`s` is born here and must be consumed at 1011..1012)
+        "#]],
+    );
+}
+
+#[test]
+fn dropping_a_string_twice_is_a_check_error() {
+    check_string(
+        r#"
+static double = fn(text: str) -> () {
+    let s = to_owned(text.&);
+    s.drop();
+    s.drop();
+};
+"#,
+        expect![[r#"
+            1053..1054: `s` was already consumed (`s` is born here and must be consumed at 1013..1014) (first consumed here at 1039..1040)
+        "#]],
+    );
+}
+
+#[test]
+fn a_string_cannot_be_copied_out_of_a_borrow_or_a_container() {
+    check_string(
+        r#"
+type Pair = struct { left: String, right: String };
+static steal = fn::<@a>(s: String.&::<@a>) -> String { s.* };
+static halve = fn(p: Pair) -> String {
+    let Pair(struct { left, right }) = p;
+    right.drop();
+    left
+};
+static half_only = fn(p: Pair) -> String { p.left };
+"#,
+        expect![[r#"
+            1074..1077: cannot move out of a borrow: `String` cannot be copied
+            1233..1243: `p` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`p` is born here and must be consumed at 1214..1215)
+            1235..1241: cannot copy a value that must be consumed out of a place; take the whole value apart instead (`let Name(struct { .. }) = value;`)
+        "#]],
+    );
+}
+
+#[test]
+fn an_option_of_string_is_the_container_shape_that_has_to_work() {
+    // The member shape a generic option owes — a borrowing `is_some`, a
+    // consuming `unwrap`, a region-projecting `as_ref` — over a linear
+    // payload. Nothing here is `String`-specific: it is the acid test that
+    // the capability machinery composes with the generic machinery.
+    check_string(
+        r#"
+type Option = enum::<T without forget> {
+    Some(T),
+    None,
+} with {
+    impl Self {
+        is_some = const fn::<@local>(s: Self.&::<@local>) -> bool {
+            match s {
+                ::Some(_) => true,
+                ::None => false,
+            }
+        }
+        unwrap = const fn(s: Self) -> T {
+            match s {
+                ::Some(t) => t,
+                ::None => panic("unwrap was called on a ::None value"),
+            }
+        }
+        as_ref = fn::<@a>(s: Self.&::<@a>) -> Option::<T.&::<@a>> {
+            match s {
+                ::Some(t) => Option::Some(t),
+                ::None => Option::None,
+            }
+        }
+    }
+};
+static main = fn(text: str) -> () {
+    // Annotated so the variant widens to its enum — the ordinary
+    // variant-vs-enum story, nothing to do with the payload.
+    let o: Option::<String> = Option::Some(to_owned(text.&));
+    let present = o.&.is_some();
+    // `as_ref` projects the payload as a BORROW, so the `Option` it hands
+    // back is FORGETTABLE even though the one it came from is not — the
+    // containment rule read through indirection, and the reason `as_ref`
+    // needs no consuming of its own.
+    let borrowed = o.&.as_ref();
+    let still_there = borrowed.&.is_some();
+    let s = o.unwrap();
+    s.drop();
+};
+static leaks_the_payload = fn(text: str) -> () {
+    let o: Option::<String> = Option::Some(to_owned(text.&));
+    match o {
+        ::Some(s) => { },
+        ::None => { },
+    };
+};
+"#,
+        expect![[r#"
+            2426..2429: `s` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`s` is born here and must be consumed at 2420..2421)
+        "#]],
+    );
+}
+
+#[test]
+fn a_hole_binding_cannot_swallow_a_linear_and_says_so_without_a_name() {
+    // `let _ = ...` binds nothing to quote, and quoting the empty string
+    // reads as a compiler bug — so the message names the position instead.
+    check_linear(
+        r#"
+static main = fn() -> () {
+    let _ = make(1);
+};
+"#,
+        expect![[r#"
+            366..390: the value bound by `_` is not consumed on this path; its type has no `forget` capability, so every path must consume it (the value bound by `_` is born here and must be consumed at 376..377)
+        "#]],
+    );
+}
+
+#[test]
+fn a_join_that_produces_a_fresh_linear_still_has_to_answer_for_the_old_one() {
+    // Affine would let the untaken branch's value fall on the floor. Linear
+    // does not: the `else` path never consumed `r`, and the join is where
+    // that shows.
+    check_linear(
+        r#"
+static main = fn(c: bool) -> Res {
+    let r = make(1);
+    if c { r } else { make(2) }
+};
+"#,
+        expect![[r#"
+            401..428: `r` is consumed on some paths through this expression and not on others (`r` is born here and must be consumed at 384..385)
+        "#]],
+    );
+}

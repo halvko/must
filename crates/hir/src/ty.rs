@@ -1296,17 +1296,19 @@ pub fn const_param_declared_ty(db: &dyn Db, item: ItemId<'_>, index: u32) -> Ty 
             GenericParamKind::Region | GenericParamKind::Type => None,
         });
     match declared {
-        Some(type_ref) => lower_const_decl_ty(db, item.file(db), &type_ref),
+        Some(type_ref) => lower_decl_ty(db, item.file(db), &type_ref),
         None => Ty::Error,
     }
 }
 
-/// Lower a const param's *declared* type outside any inference context —
-/// scope-less (dependent `const N: T` is rejected, TR06) and hole-free (any
-/// minted variable erases to `{error}`; the declaration has nothing to
-/// fill it with). Used by the annotation mirror in
-/// [`crate::file_diagnostics`] for literal/forwarded const-arg checks.
-pub(crate) fn lower_const_decl_ty(db: &dyn Db, file: SourceFile, type_ref: &TypeRef) -> Ty {
+/// Lower a DECLARED type outside any inference context — scope-less
+/// (dependent `const N: T` is rejected, TR06; a mention of an enclosing
+/// binder's param therefore lowers to `{error}`, which is silent
+/// everywhere this is consulted) and hole-free (any minted variable erases
+/// to `{error}`; a declaration has nothing to fill one with). Used by the
+/// annotation mirror in [`crate::file_diagnostics`], for const-param
+/// agreement and for the `forget` bound at annotation-position mentions.
+pub(crate) fn lower_decl_ty(db: &dyn Db, file: SourceFile, type_ref: &TypeRef) -> Ty {
     let mut table = InPlaceUnificationTable::new();
     let ty = lower_type_ref_in(db, file, type_ref, &mut table, &ParamScope::default());
     if ty.contains_infer() { Ty::Error } else { ty }

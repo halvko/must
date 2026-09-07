@@ -620,6 +620,12 @@ pub fn synthetic_decls() -> &'static [SyntheticDecl] {
                     kind: GenericParamKind::Type,
                     bounds: Vec::new(),
                     outlives: Vec::new(),
+                    // `AllocResult::<T>` only ever holds a POINTER to a
+                    // `T` (`Ok(T.&raw mut)`), never a `T`, so it can carry
+                    // a linear element type without ever being able to
+                    // lose one. The default `forget` bound would refuse
+                    // `alloc_array::<String>` for nothing.
+                    without_forget: true,
                 }],
                 variants: vec![
                     (

@@ -350,6 +350,15 @@ ast_node!(
     WithClause: WITH_CLAUSE
 );
 ast_node!(
+    /// `without forget` — a capability opt-out, in either of its two
+    /// homes: trailing a `type` declaration (this declaration does not
+    /// have the capability) or riding a generic parameter (this parameter
+    /// is not REQUIRED to have it). One node, one spelling; which of the
+    /// two readings applies is decided by where it sits, and both are the
+    /// same sentence about the same capability.
+    WithoutClause: WITHOUT_CLAUSE
+);
+ast_node!(
     /// `impl ⟨head⟩ { member* }` or the body-elided `impl ⟨head⟩;`.
     /// `impl Self { ... }` (inherent members) and a bare trait/type name
     /// (a trait impl, at the trait's or the self-type's head) are
@@ -485,6 +494,25 @@ impl Item {
     pub fn with_groups(&self) -> impl Iterator<Item = WithGroup> + use<> {
         children(self.syntax())
     }
+
+    /// The `without ⟨capability⟩` clauses trailing the item, in source
+    /// order — meaningful on `type` declarations only (superset-parsed and
+    /// rejected elsewhere: a `static` declares a value, and a value has
+    /// whatever capabilities its type has).
+    pub fn without_clauses(&self) -> impl Iterator<Item = WithoutClause> + use<> {
+        children(self.syntax())
+    }
+}
+
+impl WithoutClause {
+    pub fn without_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, WITHOUT_KW)
+    }
+    /// The capability names, in source order (`without forget + send`
+    /// yields two).
+    pub fn capabilities(&self) -> impl Iterator<Item = NameRef> + use<> {
+        children(&self.syntax)
+    }
 }
 
 impl StaticItem {
@@ -496,6 +524,12 @@ impl StaticItem {
     }
     pub fn body(&self) -> Option<Expr> {
         child(&self.syntax)
+    }
+    /// Superset-parsed capability opt-outs (validation rejects them on
+    /// `static`/`const` items — a `without` clause attaches to a `type`
+    /// declaration only, exactly as a `with`-chain does).
+    pub fn without_clauses(&self) -> impl Iterator<Item = WithoutClause> + use<> {
+        children(&self.syntax)
     }
     /// Whether the item is introduced by `const` (as opposed to `static`).
     /// Only the item's own leading keyword counts — a `const` starting the
@@ -638,6 +672,11 @@ impl TypeItem {
     pub fn with_groups(&self) -> impl Iterator<Item = WithGroup> + use<> {
         children(&self.syntax)
     }
+    /// The `without ⟨capability⟩` clauses trailing the declaration, in
+    /// source order — the declaration-site capability opt-out.
+    pub fn without_clauses(&self) -> impl Iterator<Item = WithoutClause> + use<> {
+        children(&self.syntax)
+    }
     /// The declaration's RHS — restricted to a `struct` literal by hir, but
     /// any expression parses (resilience).
     pub fn body(&self) -> Option<Expr> {
@@ -743,6 +782,13 @@ impl TypeParam {
     }
     pub fn colon_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, COLON)
+    }
+    /// The `without ⟨capability⟩` opt-out riding this parameter, when
+    /// written. Subtracts from the parameter's DEFAULT bounds, which is why
+    /// it is not one of [`Self::bounds`]: those are what the parameter must
+    /// have, this is what it need not.
+    pub fn without_clause(&self) -> Option<WithoutClause> {
+        child(&self.syntax)
     }
 }
 

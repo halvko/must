@@ -261,3 +261,124 @@ pub fn borrow_region_arity(found: usize) -> String {
 /// A borrow's turbofish carrying something that is not a region.
 pub const BORROW_REGION_KIND: &str =
     "a safe borrow's argument is a region (`@a`, or `@_` to infer one) — not a type or a value";
+
+// ---- capabilities and must-consume checking (linear types) --------------
+
+/// How a must-consume diagnostic NAMES the thing it is about. A hole
+/// binding (`let _ = ...`) has no name to quote, and quoting the empty
+/// string reads as a compiler bug — so it gets a phrase instead, and one
+/// that says where to look.
+pub fn linear_subject(name: &str) -> String {
+    if name.is_empty() {
+        "the value bound by `_`".to_owned()
+    } else {
+        format!("`{name}`")
+    }
+}
+
+/// The leak: a value of a type without `forget` reached the end of its
+/// scope alive. The message names the ONE thing that discharges the
+/// obligation in general terms, because which method does it is the
+/// library's business, not the compiler's.
+pub fn not_consumed(name: &str) -> String {
+    format!(
+        "{} is not consumed on this path; its type has no `forget` capability, \
+         so every path must consume it",
+        linear_subject(name)
+    )
+}
+
+/// Use-after-consume — which for a linear type is also disposal twice.
+/// Named after what the user did, with the earlier site as a related note.
+pub fn already_consumed(name: &str) -> String {
+    format!("{} was already consumed", linear_subject(name))
+}
+
+/// A linear value produced and dropped on the floor by a statement. There
+/// is no binding to name, so the message names the type's obligation
+/// instead.
+pub const DISCARDED_LINEAR: &str = "this value must be consumed; its type has no `forget` \
+     capability, so it cannot be discarded";
+
+/// Writing over a live linear: the old value is gone, and nothing was done
+/// about it. The same leak as [`not_consumed`] at a different moment.
+pub fn assign_over_live(name: &str) -> String {
+    format!(
+        "{} still holds a value that must be consumed; assigning here would lose it",
+        linear_subject(name)
+    )
+}
+
+/// The join case, stated as the disagreement it is. Joins resolve at
+/// statement boundaries, so the squiggle sits on the whole `if`/`match`
+/// rather than on one arm — neither arm is wrong on its own.
+pub fn join_disagrees(name: &str) -> String {
+    format!(
+        "{} is consumed on some paths through this expression and not on others",
+        linear_subject(name)
+    )
+}
+
+/// Copying a linear out of a place. Says what to do instead, because the
+/// answer is not obvious and is the same every time: take the whole value
+/// apart.
+pub const COPIED_OUT_LINEAR: &str = "cannot copy a value that must be consumed out of a place; \
+     take the whole value apart instead (`let Name(struct { .. }) = value;`)";
+
+/// `[s; 3]` where `s` must be consumed: the repeat form would make three
+/// obligations out of one value.
+pub const REPEATED_LINEAR: &str = "cannot repeat a value that must be consumed: the copies would each have to be consumed, \
+     and there is only one value";
+
+/// A `..` skipping a field that must be consumed. `..` means "don't bind
+/// the rest", which for such a field means "lose it".
+pub fn rest_skips_linear(field: &str) -> String {
+    format!(
+        "`..` would skip `{field}`, which must be consumed; name it in the pattern so it has \
+         somewhere to go"
+    )
+}
+
+/// The loop invariant. Phrased as the next iteration's problem, because
+/// that is what makes it one — the body read on its own is fine.
+pub fn loop_changes_linear(name: &str) -> String {
+    format!(
+        "{} is left in a different state than the loop found it in; \
+         the next iteration would run against a world this body was not checked in",
+        linear_subject(name)
+    )
+}
+
+/// An item whose own value must be consumed. A `static` is never destroyed,
+/// so there is no path to put the consumption on.
+pub const ITEM_HOLDS_LINEAR: &str = "an item's value must have the `forget` capability: a `static` is never destroyed, \
+     so nothing could ever consume this";
+
+/// A `const { ... }` whose own value must be consumed. Same shape as
+/// [`ITEM_HOLDS_LINEAR`], one nesting level down, and the reason is the
+/// one that makes a const block a constant rather than a block.
+pub const CONST_BLOCK_HOLDS_LINEAR: &str = "a `const` block's value must have the `forget` capability: \
+     it is computed once and copied into every evaluation, so no single path could consume it";
+
+/// Writing over a place that holds a value which must be consumed, where
+/// no binding names it — a field, an element, a `.&mut` referent. The twin
+/// of [`assign_over_live`], with "this place" standing in for the name.
+pub const ASSIGN_OVER_PLACE: &str = "this place still holds a value that must be consumed; \
+     assigning here would lose it";
+
+/// Instantiating a `forget`-bounded generic parameter with a type that has
+/// no `forget`. The default bound, named, plus the spelling that relaxes it.
+pub fn forget_bound_unsatisfied(param: &str, ty: &str, reason: &str) -> String {
+    format!(
+        "`{ty}` cannot be a `{param}`: {reason}, and `{param}` requires `forget` \
+         (every type parameter does unless it is written `{param} without forget`)"
+    )
+}
+
+/// A match-arm `_` on a value that must be consumed. The match already
+/// consumed the scrutinee, and `_` bound nothing to consume it with — the
+/// same sentence [`rest_skips_linear`] says about a record field, and the
+/// same one the unnamed `let _ =` binding gets through
+/// [`linear_subject`].
+pub const WILDCARD_SKIPS_LINEAR: &str = "`_` matches the value without binding it, and it must be consumed; \
+     give it a name so it has somewhere to go";

@@ -69,6 +69,11 @@ pub enum SyntaxKind {
     RAW_KW,
     UNSAFE_KW,
     WITH_KW,
+    /// `without` — the capability opt-out head. `with` ATTACHES (members,
+    /// impls); `without` REMOVES (a capability the language would
+    /// otherwise assume), and the two ride the same trailing slot on a
+    /// declaration so they read as the pair they are.
+    WITHOUT_KW,
     IMPL_KW,
     FOR_KW,
     TRAIT_KW,
@@ -153,6 +158,12 @@ pub enum SyntaxKind {
     NEG_EXPR,
     WITH_GROUP,
     WITH_CLAUSE,
+    /// `without forget` — a capability opt-out. Two homes, one node: it
+    /// trails a declaration (`type S = struct { … } without forget;`) and
+    /// it rides a generic parameter (`enum::<T without forget>`), which is
+    /// what makes the declaration-site form and the bound-relaxing form
+    /// the same spelling.
+    WITHOUT_CLAUSE,
     IMPL_ELEMENT,
     UNSAFE_ELEMENT,
     FOR_ELEMENT,
@@ -235,6 +246,7 @@ keywords! {
     "raw" => RAW_KW,
     "unsafe" => UNSAFE_KW,
     "with" => WITH_KW,
+    "without" => WITHOUT_KW,
     "impl" => IMPL_KW,
     "for" => FOR_KW,
     "trait" => TRAIT_KW,

@@ -393,7 +393,12 @@ impl LowerCtx<'_> {
                 // dot-form/qualified sites (the call operation is what
                 // cannot execute) and on the MENTION for path calls (its
                 // value refuses before the call).
+                //
+                // The `forget` bound joins them: it is a bound failure at
+                // an instantiation edge like any other, and the value the
+                // mention would produce is the thing it refuses.
                 InferenceDiagnostic::UnsatisfiedBound { expr, .. }
+                | InferenceDiagnostic::ForgetBoundUnsatisfied { expr, .. }
                 | InferenceDiagnostic::NoTraitImpl { expr, .. }
                 | InferenceDiagnostic::MemberCallAmbiguity { expr, .. }
                 | InferenceDiagnostic::NestedBoundUse { expr }

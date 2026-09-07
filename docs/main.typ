@@ -1300,6 +1300,188 @@ implied bounds, elision of any kind, and compiling a program that uses safe
 borrows to wasm — the backend refuses those by name rather than dropping the
 contract silently. See `examples/borrows.must`.
 
+== Values that must be consumed
+
+Some values stand for a resource — memory you asked the allocator for, a
+handle the host gave you — and letting one go out of scope quietly is a bug,
+not a shrug. Must does not solve that with destructors. It solves it by
+refusing to compile the program.
+
+A type declaration can say that its values may not simply be forgotten:
+
+```must
+type Res = struct {
+    id: usize,
+    size: usize,
+} without forget with {
+    impl Self {
+        drop = fn(r: Self) -> () {
+            let Res(struct { id, size }) = r;
+            release(id, size);
+        };
+    }
+};
+```
+
+`without forget` is the whole feature. `with` attaches things to a
+declaration; `without` takes one away, and what it takes away here is
+`forget` — the ability to let a value go with nothing done about it. A type
+without it must be *consumed*, exactly once, on every path out of every
+scope it lives in.
+
+Consuming is not a special operation. Passing the value to a function
+consumes it, returning it consumes it, binding it to another name consumes
+it, matching an owned value consumes it (and hands the obligation to
+whatever the pattern bound). So does `r.drop()` above, which is an ordinary
+method that takes `Self` by value — there is no `Drop` trait, no drop glue,
+and nothing the compiler emits. `drop` is just the one everybody writes.
+
+What that method does inside is the interesting part, because it is where
+the obligation *ends*:
+
+```must
+let Res(struct { id, size }) = r;
+```
+
+Taking the value apart hands its obligation to its parts, and the parts are
+two integers, which anyone may forget. That is the rule read backwards: a
+record whose field must be consumed must itself be consumed, so a record
+with nothing left in it that must be consumed is free. Containment is why
+`without forget` spreads without being written twice —
+
+```must
+type Holder = struct { res: Res, tag: usize };
+```
+
+— `Holder` must be consumed too, and so must an `enum` with a `Res` in any
+payload, and an array of them. A borrow of one, though, is an ordinary
+value: `Res.&::<@a>` may be forgotten freely, because the thing that has to
+be consumed is still where it was.
+
+=== What the compiler refuses
+
+Every refusal below is the same sentence at a different moment.
+
+```must
+static leaked = fn () -> () {
+    let r = make(1);
+};
+```
+
+answers "`r` is not consumed on this path; its type has no `forget`
+capability, so every path must consume it". The squiggle is on the block —
+the path that failed — with a note on `r`'s declaration, where the
+obligation started.
+
+```must
+static twice = fn () -> () {
+    let r = make(1);
+    r.drop();
+    r.drop();
+};
+```
+
+answers "`r` was already consumed", with a note pointing at the first
+`drop()`. That is the ordinary use-after-move error; for a value that must
+be consumed it is also the double-disposal error, and it is the same check
+either way.
+
+```must
+static one_arm = fn (c: bool) -> () {
+    let r = make(1);
+    if c { r.drop(); } else { };
+};
+```
+
+answers "`r` is consumed on some paths through this expression and not on
+others", reported on the whole `if`, because neither branch is wrong on its
+own. Divergence is not a path: `if c { r.drop(); } else { panic("no"); }` is
+fine, and so is a `return` that consumes on the way out.
+
+```must
+static every_time = fn () -> () {
+    let r = make(1);
+    loop { r.drop(); };
+};
+```
+
+answers "`r` is left in a different state than the loop found it in": the
+second iteration would consume it again. Putting a fresh value back
+(`r.drop(); r = make(2);`) satisfies the loop, and so does moving the
+declaration inside it.
+
+The rule is about the *back edge* — the path that runs the body again — and
+a `break` is not one. Taking ownership of something and stopping is
+therefore the ordinary shape it looks like:
+
+```must
+static until = fn (n: usize) -> () {
+    let mut i: usize = 0;
+    let r = make(1);
+    loop {
+        i = i + 1;
+        if i > n {
+            r.drop();
+            break;
+        } else { };
+    };
+};
+```
+
+which is clean: the `break` leaves, carrying what it did with it, and there
+is no next iteration to answer to.
+
+A few smaller ones, each closing a way to make two obligations out of one
+value — or to lose one: you cannot copy such a value out of a place (`h.res`
+— take the whole thing apart instead), a `_` arm may not swallow one (give it
+a name so it has somewhere to go), a `..` in a pattern may not skip a field
+that must be consumed, `[r; 3]` is refused, and writing over a place that
+holds one (`h.res = make(2);`, `m.* = make(2);`) is refused for the same
+reason writing over a live binding is. Two places may not hold one at all:
+a `static`, which is never destroyed, and a `const { ... }`, whose value is
+computed once and copied into every evaluation.
+
+One thing is *not* closed, and it is closed by `unsafe` instead. Raw storage
+holds whatever you put in it: `alloc_array::<Res>(4)` is allowed — it hands
+back a pointer and never holds a `Res` — so writing one through that pointer
+and then freeing the buffer leaks it, and nothing says so. That is the same
+hatch every raw pointer already is, and it is where it has always been: on
+the other side of the marker.
+
+=== In generic code
+
+Every type parameter requires `forget` unless it says otherwise, so a
+container has to opt in before it can hold one:
+
+```must
+type Box = enum::<T without forget> { Full(T), Empty } with {
+    impl Self {
+        unwrap = fn(b: Self) -> T {
+            match b {
+                ::Full(t) => t,
+                ::Empty => panic("empty box"),
+            }
+        };
+    }
+};
+```
+
+Without the `without forget` on `T`, `Box::Full(r)` is refused, and the
+message names the bound and the spelling that relaxes it. With it, `Box`
+inherits the obligation exactly as a struct field does: `Box::<Res>` must be
+consumed, `Box::<usize>` need not.
+
+Inside such a body the parameter is checked as if it always had to be
+consumed — the caller may hand it one, so the body may not assume otherwise.
+That makes `unwrap`'s shape the shape that works: hand the value back, or
+pass it on. A body that quietly drops a `T` on the floor is refused, which
+is the point.
+
+None of this reaches the generated code. A program using values that must be
+consumed compiles to exactly the same bytes as the same program without the
+`without forget` on its declaration: the clause decides which programs are
+accepted, and nothing else.
+
 == Arrays
 
 Fixed-size arrays `[T; N]` — the length is part of the type. Literals

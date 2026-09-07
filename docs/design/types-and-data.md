@@ -36,7 +36,8 @@
   root binding is `mut`, and a deref is a new root whose legality is the pointer's mutability.
 - **T08** Copyability is a builtin structural judgment, never a user trait; there is no
   `Copy` trait. Scalars, records of copyable fields and variants are copyable. Heap-backed
-  types are ruled noncopyable: assignment and passing move, duplication is explicit.
+  and linear types are ruled noncopyable: assignment and passing move, duplication is
+  explicit.
   Noncopyable-plus-moves does not foreclose implicit copying later (copy-on-write is an
   optimization of copy); implicit copying would foreclose the move guarantees.
 - **T10** Joins resolve at statement boundaries, function return included; nested joins
@@ -77,6 +78,33 @@
   name would be a trap. `str_bytes(s, dst)` writes those bytes into storage the caller owns;
   `unsafe`, with the marker about the destination as the bless's is about the source. Both
   retire toward the str-view fork.
+- **T20** A capability names something you can DO with a value. One exists, `forget` — let a
+  value go with nothing done about it — and every type has it unless a `type` declaration
+  sheds it with a trailing `without forget` clause, which rides `with`'s slot in either order
+  and is parsed by one loop so neither is privileged. Capability names are ordinary name refs
+  composed with `+`; `send`, `sync` and `destruct` are named in the doctrine and refused as
+  not existing yet, the clause is superset-parsed and refused on `static`/`const`/`trait`
+  items and on region and const params, and a declaration sheds once. A type without `forget`
+  is linear: every path consumes a value of it exactly once. There is no destructor, no drop
+  glue and no unwinding; the checker is the whole mechanism, and codegen never learns the type
+  is linear (identical output bytes with and without the clause). Every type PARAMETER
+  requires `forget` unless written `T without forget`, checked at expression mentions and at
+  annotation arguments that name a concrete type — a signature is an instantiation edge no
+  expression crosses — with an opted-out parameter checked rigidly as possibly-linear inside
+  its own body. The bound is a promise about an API; containment is the safety net under it.
+- **T21** Containment infects; indirection does not. A record, enum or array holding a linear
+  is linear, and widening a variant never changes the answer. A borrow, a raw pointer or a
+  `fn` type mentioning one keeps `forget`, because the obligation stayed with the owner, which
+  is what lets the allocator take a linear element type at no cost. That is a hatch: raw
+  storage will hold a linear nothing tracks. It is the same hatch as writing any value through
+  a raw pointer, it lives behind `unsafe`, and the alternative (refusing linear element types
+  at the allocator) would make an owned collection of linears unwritable. A linear ends by
+  being taken apart: destructuring hands the container's obligation to its parts, so `drop()`
+  is an ordinary consuming method with zero codegen. The hole is closed at the pattern: `..`
+  may not skip a linear field, `let _ =` may not swallow one, and neither may a match-arm `_`.
+  A `static` cannot hold one, because a static is never destroyed, and neither can a
+  `const { ... }`, whose value is copied into every evaluation; the refusal does not depend on
+  whether the surrounding path completes — a const block is judged like an item initializer.
 
 ## Discarded
 
@@ -91,6 +119,11 @@
 - **Transparent type aliases** — two identical spellings are two types, always.
   **Nominal-to-structural coercion** — a named type and its identical record shape stay
   distinct. **Subtyping in generic positions.** **T03 T13**
+- **`linear struct { ... }`** — names a property, not a capability, and does not extend. **A
+  marker element in the `with`-chain** — that brace holds impl elements; reusing it makes
+  "what is in a `with` block" two questions. **A negative bound in the `type` item's `: Type`
+  slot** — validation already rejects that slot. **An attribute** — there are none, and adding
+  a surface for one fact is how a language grows two ways to say everything. **T20**
 - **Equality on function values as a designed relation** — it fell out of a derive, not a
   decision, and is not to be relied on. **T09**
 - **`char` as a raw codepoint** — UTF-8 cannot encode a surrogate, so admitting them makes
@@ -109,6 +142,15 @@
   learning a second shape, and a collision with the discarded byte-addressed interpreter
   memory); a region-carrying `str::<@a>` (not spellable, since regions on type declarations
   do not exist). The second is the likely answer. **T17 T18**
+- **A capability grants duplication** — closed today; granting it later is the reversible
+  relaxation. **T08 T20**
+- **In-place replacement of a linear behind `.&mut`.** A linear reached only through an
+  exclusive borrow can be neither moved out (a copy out of a borrow) nor written over (that
+  would lose it), so `take`/`swap`/`replace` — an `Option::take`, a collection's slot — has no
+  safe spelling; today it is the raw hatch or restructuring to pass ownership. **T21**
+- **Linear types meet concurrency** — a linear inside a shared handle, sent across a thread,
+  or stranded in a deadlocked one are combinations no API can build today. That API's ruling
+  decides whether "exactly once on every path" survives threads. **T20**
 - **A conversion is wanted in depth** — variance. Judge it with the borrow subsystem's
   variance question (M09). **T13**
 - **Dynamic strings** force the `let s2 = s;` cost question `str` currently dodges. Staging

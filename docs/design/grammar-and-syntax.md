@@ -54,9 +54,9 @@
   escape. `\u{...}` and `\xNN` are answered "not supported yet" rather than "unknown", in
   both literal forms from that one table: the design holds room for them, so calling either
   unknown would send the reader hunting for a spelling that is already spoken for.
-- **G16** Full keywords: `raw unsafe with impl for trait requires extern` (`const`, `struct`,
-  `enum` are contextual expression-starters). One `keywords!` table generates the set —
-  `from_keyword`, `is_keyword`, and the table itself — so the highlighter (P10) and
+- **G16** Full keywords: `raw unsafe with impl for trait requires extern without` (`const`,
+  `struct`, `enum` are contextual expression-starters). One `keywords!` table generates the
+  set — `from_keyword`, `is_keyword`, and the table itself — so the highlighter (P10) and
   completions classify a keyword by asking, never by enumerating kinds.
 - **G15** `return` is an expression of type `Never`, constrained through the same seam tail
   expressions use (an annotated return type blames the operand and cites the annotation; an

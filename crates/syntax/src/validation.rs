@@ -153,6 +153,8 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             }
         } else if let Some(group) = ast::WithGroup::cast(node.clone()) {
             validate_with_group(&group, &mut errors);
+        } else if let Some(without) = ast::WithoutClause::cast(node.clone()) {
+            validate_without_clause(&without, &mut errors);
         } else if let Some(unsafe_element) = ast::UnsafeElement::cast(node.clone()) {
             // Reserved (TR01): the `unsafe` modifier head — `unsafe impl
             // send;` markers and `unsafe { ... }` element groups.
@@ -321,6 +323,108 @@ fn validate_with_group(group: &ast::WithGroup, errors: &mut Vec<SyntaxError>) {
             fix: None,
         });
     }
+}
+
+/// Where a capability opt-out may sit, and which capabilities it may name.
+///
+/// Two homes are live: a `type` declaration (the declaration does not have
+/// the capability) and a TYPE parameter of any binder (the parameter is not
+/// required to have it). The superset-parsed homes — `static`/`const`/
+/// `trait` items, region and const parameters — are rejected here, each in
+/// its own words, because "why not" differs: a value item has no say over
+/// its type's capabilities, and a region or a const parameter never denotes
+/// something that could hold one.
+///
+/// Only `forget` exists. `send`/`sync`/`destruct` are named in the
+/// capability doctrine and have no meaning yet, so naming one is an error
+/// rather than a silent no-op — the message says which it is, so the
+/// reservation reads as a reservation.
+fn validate_without_clause(without: &ast::WithoutClause, errors: &mut Vec<SyntaxError>) {
+    let anchor = without
+        .without_token()
+        .map(|t| t.text_range())
+        .unwrap_or_else(|| without.syntax().text_range());
+    let parent = without.syntax().parent().map(|p| p.kind());
+    let misplaced = match parent {
+        Some(SyntaxKind::TYPE_ITEM) | Some(SyntaxKind::TYPE_PARAM) => None,
+        Some(SyntaxKind::STATIC_ITEM) => Some(
+            "a capability opt-out belongs on a `type` declaration; \
+             a `static` has whatever capabilities its type has",
+        ),
+        Some(SyntaxKind::TRAIT_ITEM) => {
+            Some("a capability opt-out belongs on a `type` declaration, not on a `trait`")
+        }
+        Some(SyntaxKind::REGION_PARAM) => Some(
+            "a region parameter names a duration, not a value, \
+             so it has no capability to opt out of",
+        ),
+        Some(SyntaxKind::CONST_PARAM) => Some(
+            "a const parameter's values are always plain data, \
+             so it has no capability to opt out of",
+        ),
+        _ => Some("a capability opt-out cannot go here"),
+    };
+    if let Some(message) = misplaced {
+        errors.push(SyntaxError {
+            message: message.to_owned(),
+            range: anchor,
+            fix: None,
+        });
+        return;
+    }
+    // Every capability this DECLARATION has already shed, in source order
+    // across all its clauses — so `without forget without forget` and
+    // `without forget + forget` are the same mistake and get the same
+    // answer. Saying it twice is not saying it twice as hard; it means the
+    // writer thought one of the two was doing something else.
+    let mut seen: Vec<String> = Vec::new();
+    let owner = without.syntax().parent();
+    let mut reached_this_clause = false;
+    for clause in owner
+        .iter()
+        .flat_map(|owner| owner.children())
+        .filter_map(ast::WithoutClause::cast)
+    {
+        let is_this = clause.syntax() == without.syntax();
+        for capability in clause.capabilities() {
+            let name = capability.text();
+            if is_this {
+                if seen.contains(&name) {
+                    errors.push(SyntaxError {
+                        message: format!("`{name}` is already opted out of here"),
+                        range: capability.syntax().text_range(),
+                        fix: None,
+                    });
+                    continue;
+                }
+                let message = match name.as_str() {
+                    "forget" => {
+                        seen.push(name);
+                        continue;
+                    }
+                    "send" | "sync" | "destruct" => format!(
+                        "the `{name}` capability does not exist yet; \
+                         `forget` is the only one that can be opted out of"
+                    ),
+                    _ => format!(
+                        "unknown capability `{name}`; \
+                         `forget` is the only one that can be opted out of"
+                    ),
+                };
+                errors.push(SyntaxError {
+                    message,
+                    range: capability.syntax().text_range(),
+                    fix: None,
+                });
+            }
+            seen.push(name);
+        }
+        if is_this {
+            reached_this_clause = true;
+            break;
+        }
+    }
+    debug_assert!(reached_this_clause, "the clause is a child of its parent");
 }
 
 /// The liveness/reservation checks for one `impl` element. Live forms:
@@ -870,6 +974,21 @@ fn validate_trait_item(trait_item: &ast::TraitItem, errors: &mut Vec<SyntaxError
 fn validate_type_param_bounds(type_param: &ast::TypeParam, errors: &mut Vec<SyntaxError>) {
     if type_param.colon_token().is_none() {
         return;
+    }
+    // Written the other way round (`T without forget: Bound`). Both orders
+    // parse; only one reads correctly, and it is the one where the
+    // requirements accumulate before the subtraction.
+    if let Some(without) = type_param.without_clause()
+        && let Some(token) = without.without_token()
+        && let Some(colon) = type_param.colon_token()
+        && token.text_range().start() < colon.text_range().start()
+    {
+        errors.push(SyntaxError {
+            message: "write the bounds before the opt-out (`T: Bound without forget`): a capability opt-out subtracts from what the bounds ask for"
+                .to_owned(),
+            range: without.syntax().text_range(),
+            fix: None,
+        });
     }
     let owner = type_param.syntax().parent().and_then(|list| list.parent());
     if let Some(owner) = &owner {

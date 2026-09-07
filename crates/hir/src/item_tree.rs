@@ -33,6 +33,16 @@ pub struct ItemData {
     /// is ignored here), or `None` when the fully-annotated rule is
     /// violated.
     pub generics: Vec<GenericParamData>,
+    /// `type S = struct { ... } without forget;` — this DECLARATION has no
+    /// `forget` capability, whatever its fields say. A name-level fact on
+    /// purpose: it gates every mention (instantiating a `forget`-bounded
+    /// parameter with it is refused), so it belongs where arity and kinds
+    /// already live rather than in [`type_decl`] — editing the
+    /// declaration's fields must not churn it.
+    ///
+    /// Only meaningful on a `type` item; `validation` rejects the clause
+    /// everywhere else, and the flag stays `false` there.
+    pub without_forget: bool,
 }
 
 /// One generic parameter of an item's binder, in declaration order — the
@@ -53,6 +63,16 @@ pub struct GenericParamData {
     /// params — a region's bounds are regions, never traits, so they get
     /// their own field rather than sharing [`Self::bounds`]'s type domain.
     pub outlives: Vec<String>,
+    /// `T without forget` — this parameter is not REQUIRED to have the
+    /// `forget` capability, the opt-out from the default bound every type
+    /// parameter otherwise carries. Not one of [`Self::bounds`] because it
+    /// subtracts: bounds say what the parameter must have, this says what
+    /// it need not.
+    ///
+    /// Inside the declaring body the param is then checked RIGIDLY as a
+    /// value that must be consumed — the caller may hand it a linear, so
+    /// the body may not assume otherwise.
+    pub without_forget: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -552,6 +572,9 @@ pub fn item_tree(db: &dyn Db, file: SourceFile) -> ItemTree {
                     }),
                     type_ref,
                     generics,
+                    // Superset-parsed here (validation rejects it); a
+                    // value item's capabilities are its type's.
+                    without_forget: false,
                 }
             }
             ast::Item::TypeItem(it) => ItemData {
@@ -565,6 +588,11 @@ pub fn item_tree(db: &dyn Db, file: SourceFile) -> ItemTree {
                 kind: ItemKind::Type,
                 type_ref: None,
                 generics: generics_from_type_literal(it.body()),
+                // The declaration-site opt-out. Read off the item, not the
+                // type literal: the clause trails the whole declaration
+                // (`= struct { ... } without forget;`), in the same slot
+                // `with` groups use.
+                without_forget: item.without_clauses().any(|c| names_forget(&c)),
             },
             ast::Item::TraitItem(it) => ItemData {
                 name: item.name().map(|n| n.text()).unwrap_or_default(),
@@ -577,6 +605,9 @@ pub fn item_tree(db: &dyn Db, file: SourceFile) -> ItemTree {
                 generics: generics_from_param_list(
                     it.requires_def().and_then(|def| def.generic_param_list()),
                 ),
+                // Superset-parsed here too: a trait classifies types, so
+                // it has no capabilities of its own to shed.
+                without_forget: false,
             },
         })
         .collect();
@@ -690,6 +721,13 @@ fn generics_from_type_literal(body: Option<ast::Expr>) -> Vec<GenericParamData> 
     generics_from_param_list(list)
 }
 
+/// Whether a `without ...` clause names `forget`. Unknown capability names
+/// are `validation`'s error, not this function's: an opt-out that names
+/// nothing the language knows about opts out of nothing.
+fn names_forget(clause: &ast::WithoutClause) -> bool {
+    clause.capabilities().any(|name| name.text() == "forget")
+}
+
 fn generics_from_param_list(list: Option<ast::GenericParamList>) -> Vec<GenericParamData> {
     let Some(list) = list else {
         return Vec::new();
@@ -704,12 +742,18 @@ fn generics_from_param_list(list: Option<ast::GenericParamList>) -> Vec<GenericP
                 kind: GenericParamKind::Region,
                 bounds: Vec::new(),
                 outlives: it.bounds().map(|token| token.text().to_owned()).collect(),
+                // A region names a duration; validation rejects the clause
+                // here, so the flag can never be set.
+                without_forget: false,
             },
             ast::GenericParam::TypeParam(it) => GenericParamData {
                 name: it.name().map(|n| n.text()).unwrap_or_default(),
                 kind: GenericParamKind::Type,
                 bounds: it.bounds().map(TypeRef::from_ast).collect(),
                 outlives: Vec::new(),
+                without_forget: it
+                    .without_clause()
+                    .is_some_and(|clause| names_forget(&clause)),
             },
             ast::GenericParam::ConstParam(it) => GenericParamData {
                 name: it.name().map(|n| n.text()).unwrap_or_default(),
@@ -718,6 +762,9 @@ fn generics_from_param_list(list: Option<ast::GenericParamList>) -> Vec<GenericP
                 ),
                 bounds: Vec::new(),
                 outlives: Vec::new(),
+                // Const values are plain data; validation rejects the
+                // clause here too.
+                without_forget: false,
             },
         })
         .collect()

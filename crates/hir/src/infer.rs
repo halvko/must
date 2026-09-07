@@ -699,6 +699,26 @@ pub enum InferenceDiagnostic {
         /// The undetermined type parameter's name.
         param: String,
     },
+    /// A generic type parameter instantiated with a type that has no
+    /// `forget` capability, where the parameter did not opt out of the
+    /// default bound. The refusal is about the CONTRACT, not about safety:
+    /// containment would make the resulting type linear anyway (see
+    /// [`crate::capability`]), so nothing could leak — what the bound buys
+    /// is that a generic's callers can read off its binder whether it may
+    /// hold something that must be consumed.
+    ForgetBoundUnsatisfied {
+        /// The mention that instantiated the binder.
+        expr: ExprId,
+        /// The generic item whose parameter was instantiated.
+        item: ItemLoc,
+        /// The parameter's declared name.
+        param: String,
+        /// What it was instantiated with.
+        ty: Ty,
+        /// Why that type has no `forget` (see
+        /// [`crate::capability::no_forget_reason`]).
+        reason: String,
+    },
     /// An assignment whose target resolves to a const parameter of the
     /// enclosing generic binder — a compile-time value, not a place.
     AssignToConstParam {
@@ -1337,6 +1357,7 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::GenericArgKindMismatch { expr, .. }
             | InferenceDiagnostic::MissingConstArgs { expr, .. }
             | InferenceDiagnostic::CannotInferGenericParam { expr, .. }
+            | InferenceDiagnostic::ForgetBoundUnsatisfied { expr, .. }
             | InferenceDiagnostic::FnConstArg { expr }
             | InferenceDiagnostic::TypeConstArgUnsupported { expr, .. }
             | InferenceDiagnostic::CannotInferNumberType { expr }
@@ -1835,6 +1856,9 @@ impl InferenceDiagnostic {
                     item.display_name()
                 )
             }
+            InferenceDiagnostic::ForgetBoundUnsatisfied {
+                param, ty, reason, ..
+            } => crate::diag::forget_bound_unsatisfied(param, &ty.display(), reason),
             InferenceDiagnostic::AssignToConstParam { name, .. } => {
                 format!("cannot assign to `{name}`: it is a const parameter")
             }
@@ -2359,8 +2383,12 @@ struct PendingInstantiation {
     /// The mentioning expression (a `NameRef` or `GenericApp`).
     expr: ExprId,
     item: ItemLoc,
-    /// `(param name, the fresh variable)` per *type* param.
-    params: Vec<(String, Ty)>,
+    /// `(param name, the fresh variable, whether it opted out of the
+    /// default `forget` bound)` per *type* param. The opt-out flag is
+    /// CARRIED rather than re-derived at check time: a builtin's binder has
+    /// no item tree to look it up in, so re-deriving silently lost the flag
+    /// and refused `alloc_array::<Lin>` — record, don't re-derive.
+    params: Vec<(String, Ty, bool)>,
 }
 
 /// A join under construction. The root `if` of a nest opens one; every
@@ -2786,14 +2814,18 @@ impl<'a, 'db> InferCtx<'a, 'db> {
 
     /// Whether a value of this type may be duplicated by a plain read.
     ///
-    /// Today the ONLY affine type is `T.&mut`: duplicating it would
-    /// duplicate a PERMISSION, and the whole exclusivity story rests on it
-    /// being unduplicable. T08's other affine class — heap-backed types —
-    /// has no representation yet (no move tracker, no `clone`), so this
-    /// answers `true` for them; when that class becomes real it becomes an
-    /// arm here and nowhere else. The predicate is complete for what
-    /// exists, not for what T08 describes.
+    /// Two affine classes now. `T.&mut`: duplicating it would duplicate a
+    /// PERMISSION, and the whole exclusivity story rests on it being
+    /// unduplicable. And LINEAR types — those without the `forget`
+    /// capability: duplicating one would duplicate an OBLIGATION whose two
+    /// copies name the same resource, which is how a checked-linear
+    /// `String` would come to be freed twice. Copyability is therefore not
+    /// a separate judgement from linearity; it follows from it, and the one
+    /// arm below is the whole of the connection.
     fn is_copyable(&self, ty: &Ty) -> bool {
+        if !crate::capability::has_forget(self.db, ty) {
+            return false;
+        }
         match ty {
             Ty::Borrow { mutable, .. } => !*mutable,
             Ty::Record(rec) => rec.fields.iter().all(|(_, ty)| self.is_copyable(ty)),
@@ -2977,8 +3009,31 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // fine, this particular use just doesn't say which type it wants.
         let pending = std::mem::take(&mut self.pending_instantiations);
         for instantiation in pending {
-            for (param, var) in instantiation.params {
-                if !resolve_fully(self.table, &var).contains_infer() {
+            for (param, var, opted_out) in instantiation.params {
+                let resolved = resolve_fully(self.table, &var);
+                // The DEFAULT BOUND, checked at the one place a binder is
+                // spent: every type parameter requires `forget` unless it
+                // was written `T without forget`. The flag rode here from
+                // the binder itself — a builtin's binder has no item tree
+                // to look it back up in.
+                if !opted_out
+                    && !resolved.contains_infer()
+                    && !crate::capability::has_forget(self.db, &resolved)
+                {
+                    let reason = crate::capability::no_forget_reason(self.db, &resolved)
+                        .unwrap_or_else(|| format!("`{}` has no `forget`", resolved.display()));
+                    self.result
+                        .diagnostics
+                        .push(InferenceDiagnostic::ForgetBoundUnsatisfied {
+                            expr: instantiation.expr,
+                            item: instantiation.item.clone(),
+                            param: param.clone(),
+                            ty: resolved.clone(),
+                            reason,
+                        });
+                    continue;
+                }
+                if !resolved.contains_infer() {
                     continue;
                 }
                 // A type param whose only information is a bare literal
@@ -3219,6 +3274,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::GenericArgKindMismatch { .. }
                 | InferenceDiagnostic::MissingConstArgs { .. }
                 | InferenceDiagnostic::CannotInferGenericParam { .. }
+                | InferenceDiagnostic::ForgetBoundUnsatisfied { .. }
                 | InferenceDiagnostic::AssignToConstParam { .. }
                 | InferenceDiagnostic::FnConstArg { .. }
                 | InferenceDiagnostic::TypeConstArgUnsupported { .. }
@@ -5797,11 +5853,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             return sig;
         }
         let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
-        let mut pending: Vec<(String, Ty)> = Vec::new();
+        let mut pending: Vec<(String, Ty, bool)> = Vec::new();
         for (index, param) in generics.iter().enumerate() {
             if matches!(param.kind, GenericParamKind::Type) {
                 let var = self.fresh_var();
-                pending.push((param.name.clone(), var.clone()));
+                pending.push((param.name.clone(), var.clone(), param.without_forget));
                 subst.insert(index as u32, var);
             }
         }
@@ -5991,14 +6047,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let mut scope = crate::ty::ParamScope::default();
         scope.types.insert("Self".to_owned(), self_ty);
         let mut var_of: FxHashMap<u32, Ty> = FxHashMap::default();
-        let mut pending: Vec<(String, Ty)> = Vec::new();
+        let mut pending: Vec<(String, Ty, bool)> = Vec::new();
         for (index, gp) in req.generics.iter().enumerate() {
             if !matches!(gp.kind, GenericParamKind::Type) || gp.name.is_empty() {
                 continue;
             }
             let var = self.fresh_var();
             scope.types.insert(gp.name.clone(), var.clone());
-            pending.push((gp.name.clone(), var.clone()));
+            pending.push((gp.name.clone(), var.clone(), gp.without_forget));
             var_of.insert(index as u32, var);
         }
         // A requirement's REGION params are existentials of THIS call. The
@@ -7242,7 +7298,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
         let mut const_subst: FxHashMap<u32, ConstArgValue> = FxHashMap::default();
         let mut region_subst: FxHashMap<u32, Region> = FxHashMap::default();
-        let mut pending: Vec<(String, Ty)> = Vec::new();
+        let mut pending: Vec<(String, Ty, bool)> = Vec::new();
         let mut const_args: Vec<(u32, ExprId)> = Vec::new();
         for (index, param) in generics.iter().enumerate() {
             let written = matched_args.map(|args| &args[index]);
@@ -7333,7 +7389,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         // trait has a nameable argument.
                         Some(GenericArgData::Named { .. }) | None => {}
                     }
-                    pending.push((param.name.clone(), var.clone()));
+                    pending.push((param.name.clone(), var.clone(), param.without_forget));
                     subst.insert(index as u32, var);
                 }
                 GenericParamKind::Const(declared) => match written {
@@ -8828,7 +8884,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 None
             }
         };
-        let mut pending: Vec<(String, Ty)> = Vec::new();
+        let mut pending: Vec<(String, Ty, bool)> = Vec::new();
         let mut out: Vec<GenericArg> = Vec::with_capacity(generics.len());
         for (index, param) in generics.iter().enumerate() {
             let arg = matched.map(|args| &args[index]);
@@ -8872,7 +8928,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         // Refused at the list (`reject_named_args`).
                         Some(GenericArgData::Named { .. }) | None => {}
                     }
-                    pending.push((param.name.clone(), var.clone()));
+                    pending.push((param.name.clone(), var.clone(), param.without_forget));
                     out.push(GenericArg::Ty(var));
                 }
                 // Regions on a TYPE declaration are reserved (variance and
@@ -9408,6 +9464,12 @@ fn builtin_generics(builtin: Builtin) -> Option<Vec<GenericParamData>> {
                 kind: GenericParamKind::Type,
                 bounds: Vec::new(),
                 outlives: Vec::new(),
+                // The heap builtins never hold a `T`: they hand out and
+                // take back POINTERS to storage. Nothing here can lose a
+                // value, so nothing here needs the `forget` bound —
+                // `alloc_array::<String>` is exactly as sound as
+                // `alloc_array::<usize>`.
+                without_forget: true,
             }])
         }
         Builtin::Print

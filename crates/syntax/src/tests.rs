@@ -14627,3 +14627,165 @@ fn extern_fn_error_forms() {
         "#]],
     );
 }
+
+// ---- capability opt-outs (`without forget`) -----------------------------
+
+#[test]
+fn without_forget_trails_a_type_declaration() {
+    // The chosen spelling: `without` rides the same trailing slot `with`
+    // does, so the pair reads as a pair — `with` attaches, `without`
+    // removes.
+    check(
+        "type S = struct { n: usize } without forget;",
+        expect![[r#"
+            SOURCE_FILE@0..44
+              TYPE_ITEM@0..44
+                TYPE_KW@0..4 "type"
+                WHITESPACE@4..5 " "
+                NAME@5..6
+                  IDENT@5..6 "S"
+                WHITESPACE@6..7 " "
+                EQ@7..8 "="
+                WHITESPACE@8..9 " "
+                RECORD_EXPR@9..28
+                  STRUCT_KW@9..15 "struct"
+                  WHITESPACE@15..16 " "
+                  L_BRACE@16..17 "{"
+                  WHITESPACE@17..18 " "
+                  RECORD_EXPR_FIELD@18..26
+                    NAME_REF@18..19
+                      IDENT@18..19 "n"
+                    COLON@19..20 ":"
+                    WHITESPACE@20..21 " "
+                    PATH_TYPE@21..26
+                      NAME_REF@21..26
+                        IDENT@21..26 "usize"
+                  WHITESPACE@26..27 " "
+                  R_BRACE@27..28 "}"
+                WHITESPACE@28..29 " "
+                WITHOUT_CLAUSE@29..43
+                  WITHOUT_KW@29..36 "without"
+                  WHITESPACE@36..37 " "
+                  NAME_REF@37..43
+                    IDENT@37..43 "forget"
+                SEMICOLON@43..44 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn without_forget_rides_a_generic_parameter() {
+    check(
+        "type Option = enum::<T without forget> { Some(T), None };",
+        expect![[r#"
+            SOURCE_FILE@0..57
+              TYPE_ITEM@0..57
+                TYPE_KW@0..4 "type"
+                WHITESPACE@4..5 " "
+                NAME@5..11
+                  IDENT@5..11 "Option"
+                WHITESPACE@11..12 " "
+                EQ@12..13 "="
+                WHITESPACE@13..14 " "
+                ENUM_EXPR@14..56
+                  ENUM_KW@14..18 "enum"
+                  GENERIC_PARAM_LIST@18..38
+                    COLON2@18..20 "::"
+                    L_ANGLE@20..21 "<"
+                    TYPE_PARAM@21..37
+                      NAME@21..22
+                        IDENT@21..22 "T"
+                      WHITESPACE@22..23 " "
+                      WITHOUT_CLAUSE@23..37
+                        WITHOUT_KW@23..30 "without"
+                        WHITESPACE@30..31 " "
+                        NAME_REF@31..37
+                          IDENT@31..37 "forget"
+                    R_ANGLE@37..38 ">"
+                  WHITESPACE@38..39 " "
+                  L_BRACE@39..40 "{"
+                  WHITESPACE@40..41 " "
+                  ENUM_VARIANT@41..48
+                    NAME@41..45
+                      IDENT@41..45 "Some"
+                    L_PAREN@45..46 "("
+                    PATH_TYPE@46..47
+                      NAME_REF@46..47
+                        IDENT@46..47 "T"
+                    R_PAREN@47..48 ")"
+                  COMMA@48..49 ","
+                  WHITESPACE@49..50 " "
+                  ENUM_VARIANT@50..54
+                    NAME@50..54
+                      IDENT@50..54 "None"
+                  WHITESPACE@54..55 " "
+                  R_BRACE@55..56 "}"
+                SEMICOLON@56..57 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn without_and_with_compose_in_either_order() {
+    // One loop parses both, so neither order is privileged by the grammar.
+    let a = crate::parse("type S = struct { n: usize } without forget with { impl Self {} };");
+    let b = crate::parse("type S = struct { n: usize } with { impl Self {} } without forget;");
+    assert!(a.errors().is_empty(), "{:?}", a.errors());
+    assert!(b.errors().is_empty(), "{:?}", b.errors());
+    assert_eq!(a.debug_dump().matches("WITHOUT_CLAUSE").count(), 1);
+    assert_eq!(b.debug_dump().matches("WITHOUT_CLAUSE").count(), 1);
+}
+
+#[test]
+fn without_clause_misplacements_and_unknown_capabilities() {
+    check_errors(
+        "static x = 5 without forget;\n\
+         trait T = requires {} without forget;\n\
+         type A = struct {} without leak;\n\
+         type B = struct {} without send;\n\
+         type C = enum::<@a without forget> { X };\n\
+         type D = enum::<const N: usize without forget> { X };\n\
+         type E = struct {} without;\n",
+        expect![[r#"
+            13..20: a capability opt-out belongs on a `type` declaration; a `static` has whatever capabilities its type has
+            51..58: a capability opt-out belongs on a `type` declaration, not on a `trait`
+            94..98: unknown capability `leak`; `forget` is the only one that can be opted out of
+            127..131: the `send` capability does not exist yet; `forget` is the only one that can be opted out of
+            152..159: a region parameter names a duration, not a value, so it has no capability to opt out of
+            206..213: a const parameter's values are always plain data, so it has no capability to opt out of
+            255..256: expected a capability name after `without` (`without forget`)
+        "#]],
+    );
+}
+
+#[test]
+fn the_bounds_come_before_the_opt_out() {
+    // Both orders parse — the reverse one so validation can name the order
+    // instead of the parser reporting a missing comma twice at tokens that
+    // are individually fine.
+    check_errors(
+        "static f = fn::<T: Display without forget>(t: T) -> T { t };\n\
+         static g = fn::<T without forget: Display>(t: T) -> T { t };\n",
+        expect![[r#"
+            79..93: write the bounds before the opt-out (`T: Bound without forget`): a capability opt-out subtracts from what the bounds ask for
+        "#]],
+    );
+}
+
+#[test]
+fn a_capability_cannot_be_opted_out_of_twice() {
+    // Saying it twice is not saying it twice as hard: it means the writer
+    // thought one of the two was doing something else. Both spellings of
+    // the repeat — a second clause and a second `+` term — are the same
+    // mistake, so they get the same answer.
+    check_errors(
+        "type C = struct { n: usize } without forget without forget;\n\
+         type D = struct { n: usize } without forget + forget;\n\
+         type E = enum::<T without forget + forget> { X(T) };\n",
+        expect![[r#"
+            52..58: `forget` is already opted out of here
+            106..112: `forget` is already opted out of here
+            149..155: `forget` is already opted out of here
+        "#]],
+    );
+}
