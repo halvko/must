@@ -5,11 +5,12 @@
 //
 // The whole feature is one clause:
 //
-//     type String = struct { ... } without forget;
+//     type String = struct { ... } only move;
 //
-// `with` attaches things to a declaration; `without` takes one away. What it
-// takes away here is `forget` — the ability to let a value go out of scope
-// with nothing done about it. A `String` must therefore be CONSUMED, exactly
+// `with` attaches things to a declaration; `only` caps it. The cap here is
+// the disposal ladder's `move` rung: a `String` may be passed around, and
+// that is all — it may not be let go with nothing done about it, the way a
+// forgettable type may. A `String` must therefore be CONSUMED, exactly
 // once, on every path, and the compiler refuses the program otherwise. There
 // is no `Drop` trait, no drop glue, and nothing emitted: `drop` below is an
 // ordinary method that takes `Self` by value, and the identical program with
@@ -40,7 +41,7 @@ type String = struct {
     ptr: u8.&raw mut,
     len: usize,
     cap: usize,
-} without forget with {
+} only move with {
     impl Self {
         // Read the owned bytes back. The bytes came from a `str`, so they
         // are UTF-8 by provenance and the CLAIMED bless is the right one:
@@ -134,7 +135,7 @@ static to_owned = fn::<@a>(s: str.&::<@a>) -> String {
 // ---- the reader (condensed from `stdin_lib.must` — the comments live
 // there; only the panic prefixes differ here) -----------------------------
 //
-// `Reader` is `without forget` here too, same as it is there, and `drop`
+// `Reader` is `only move` here too, same as it is there, and `drop`
 // takes it apart the same way: the two copies agree.
 
 extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
@@ -170,7 +171,7 @@ type Reader = struct {
     len: usize,
     eof: bool,
     line: str,
-} without forget with {
+} only move with {
     impl Self {
         next_line = fn::<@b>(r: Self.&mut::<@b>) -> Option::<str.&::<@b>> {
             loop {

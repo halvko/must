@@ -6106,7 +6106,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
 
     /// Mint one fresh variable per member-own TYPE binder — unified with
     /// the written turbofish argument when the use site spelled one — and
-    /// register them for the `forget` default bound and the cannot-infer
+    /// register them for the written `forget` bound and the cannot-infer
     /// report. The TYPE half of instantiating a member at a use site; its
     /// region twin is [`Self::member_own_region_subst`], and the two
     /// compose exactly as [`instantiate_scheme`] and [`substitute_regions`]

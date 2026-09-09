@@ -861,7 +861,7 @@ fn a_capability_answer_follows_an_edit_to_a_reachable_declaration() {
     // a stale answer is wrong either way round. Both hops are pinned: the
     // declaration the answer is memoized on (`Box`), and one it only
     // READS (`Res`, two edges from `f`).
-    let pointer = "type Res = struct { fd: usize } without forget;\n\
+    let pointer = "type Res = struct { fd: usize } only move;\n\
                    type Box = struct::<T> { p: T.&raw };\n\
                    static f = fn(x: Box::<Res>) -> usize { 1 };\n";
     let held = pointer.replace("p: T.&raw", "p: T");
@@ -888,7 +888,7 @@ fn a_capability_answer_follows_an_edit_to_a_reachable_declaration() {
     // `Box`'s summary, and putting it back must reach it again.
     let held_forgettable = pointer
         .replace("p: T.&raw", "p: T")
-        .replace(" without forget", "");
+        .replace(" only move", "");
     host.set_file_text(file, held_forgettable);
     assert_eq!(host.snapshot().diagnostics(file), vec![]);
 

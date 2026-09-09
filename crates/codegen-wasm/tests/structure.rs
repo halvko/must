@@ -479,7 +479,7 @@ fn an_import_may_not_claim_a_name_the_compiler_already_imports() {
 /// programs the checker accepts and nothing else: there is no drop glue to
 /// emit, no flag to track, no cleanup block to branch to. The claim is
 /// structural, so it is pinned structurally — the same program with and
-/// without the opt-out must compile to the same bytes, down to the last
+/// without the ceiling must compile to the same bytes, down to the last
 /// one.
 #[test]
 fn a_linear_type_changes_nothing_about_the_emitted_module() {
@@ -497,7 +497,7 @@ static main = fn () -> usize {
     r.drop()
 };
 "#;
-    let linear = compile(&PROGRAM.replace("PLACEHOLDER", " without forget"), "main()");
+    let linear = compile(&PROGRAM.replace("PLACEHOLDER", " only move"), "main()");
     let plain = compile(&PROGRAM.replace("PLACEHOLDER", ""), "main()");
     assert_eq!(
         linear.wasm, plain.wasm,

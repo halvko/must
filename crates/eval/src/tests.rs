@@ -7081,7 +7081,7 @@ fn moving_a_value_invalidates_borrows_of_it_exactly_as_writing_does() {
     // twin (below) was caught, which is what made the gap a bug rather
     // than a limit.
     check_run(
-        "type Lin = struct { id: usize } without forget with {\n\
+        "type Lin = struct { id: usize } only move with {\n\
              impl Self {\n\
                  eat = fn(s: Self) -> () { let Lin(struct { id }) = s; };\n\
              }\n\
@@ -7104,7 +7104,7 @@ fn moving_a_value_invalidates_borrows_of_it_exactly_as_writing_does() {
 #[test]
 fn the_write_shaped_twin_of_a_move_invalidation_says_the_same_thing() {
     check_run(
-        "type Lin = struct { id: usize } without forget with {\n\
+        "type Lin = struct { id: usize } only move with {\n\
              impl Self {\n\
                  eat = fn(s: Self) -> () { let Lin(struct { id }) = s; };\n\
              }\n\
@@ -7131,7 +7131,7 @@ fn a_move_with_no_borrow_outstanding_costs_nothing_and_still_runs() {
     // The invalidation is one map lookup on an address-taken local, so a
     // body that never borrows pays for the distinction with nothing.
     check_run(
-        "type Lin = struct { id: usize } without forget with {\n\
+        "type Lin = struct { id: usize } only move with {\n\
              impl Self {\n\
                  into_id = fn(s: Self) -> usize { let Lin(struct { id }) = s; id };\n\
              }\n\

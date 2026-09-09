@@ -25,7 +25,7 @@ fn at_expr_recovery(p: &Parser<'_>) -> bool {
             | LET_KW
             | ELSE_KW
             | WITH_KW
-            | WITHOUT_KW
+            | ONLY_KW
             | IMPL_KW
             | FOR_KW
     )
@@ -118,22 +118,24 @@ fn item(p: &mut Parser<'_>) {
 
 /// The clauses that trail an item's head: attachment `with`-chains
 /// (`type X = struct { ... } with { elements } with { ... };`, TR01) and
-/// the capability opt-out `without forget`, in either order
-/// (`} without forget with { ... }` and `} with { ... } without forget`
-/// both parse) — one loop, so the pair reads as a pair and no order is
-/// privileged by the grammar.
+/// the capability CEILING `only move` (G21), in either order
+/// (`} only move with { ... }` and `} with { ... } only move` both parse)
+/// — one loop, so the pair reads as a pair and no order is privileged by
+/// the grammar.
 ///
-/// Superset on every item head, `extern` included. An import is why this
-/// is a function and not a loop written once: it has no `= rhs` for a
-/// clause to trail, so it needs the same call from its own arm — without
-/// it a clause written on an import cascades instead of earning
-/// validation's one sentence.
+/// Superset on every item head, `extern` included: validation rejects a
+/// clause wherever it is not at home, in that head's own words. An import
+/// is why this is a function and not a loop written once — it has no
+/// `= rhs` for a clause to trail, so it needs the same call from its own
+/// arm.
 fn trailing_clauses(p: &mut Parser<'_>) {
-    while p.at(WITH_KW) || p.at(WITHOUT_KW) {
+    while p.at(WITH_KW) || p.at(ONLY_KW) || p.at_word("without") {
         if p.at(WITH_KW) {
             with_group(p);
+        } else if p.at(ONLY_KW) {
+            only_clause(p);
         } else {
-            without_clause(p);
+            retired_without_clause(p);
         }
     }
 }
@@ -1366,8 +1368,8 @@ fn generic_param(p: &mut Parser<'_>) {
                 region_bound(p);
             }
         }
-        if p.at(WITHOUT_KW) {
-            retired_param_clause(p, REGION_PARAM);
+        if at_param_capability_clause(p) {
+            param_capability_clause(p, REGION_PARAM);
         }
         m.complete(p, REGION_PARAM);
         return;
@@ -1381,8 +1383,8 @@ fn generic_param(p: &mut Parser<'_>) {
         } else {
             p.error("expected `:` followed by the const parameter's type");
         }
-        if p.at(WITHOUT_KW) {
-            retired_param_clause(p, CONST_PARAM);
+        if at_param_capability_clause(p) {
+            param_capability_clause(p, CONST_PARAM);
         }
         m.complete(p, CONST_PARAM);
     } else if matches!(p.current(), IDENT | HOLE) {
@@ -1400,11 +1402,12 @@ fn generic_param(p: &mut Parser<'_>) {
                 type_(p);
             }
         }
-        // The retired spelling's parameter home, refused in the words of
-        // the ruling that deleted it (T22) rather than as two "expected
-        // `,`" errors at tokens that are each individually fine. Consumes
-        // the whole clause, so the binder list after it still parses —
-        // recovery for a retired spelling is diagnostics-layer work (G26).
+        // A capability clause in the parameter home, in EITHER spelling,
+        // refused in the words of the ruling that left it no home (T22)
+        // rather than as two "expected `,`" errors at tokens that are each
+        // individually fine. Consumes the whole clause, so the binder list
+        // after it still parses — recovery for a retired spelling is
+        // diagnostics-layer work (G26).
         //
         // Superset, as the retired grammar itself was: the REVERSE order
         // (`T without forget: Bound`) parsed into the same node, so the
@@ -1412,8 +1415,8 @@ fn generic_param(p: &mut Parser<'_>) {
         // trailing `: Bound` strands and the one refusal grows two
         // "expected `,`" errors behind it — the cascade this arm exists
         // to prevent.
-        if p.at(WITHOUT_KW) {
-            retired_param_clause(p, TYPE_PARAM);
+        if at_param_capability_clause(p) {
+            param_capability_clause(p, TYPE_PARAM);
             if p.eat(COLON) {
                 type_(p);
                 while p.eat(PLUS) {
@@ -1429,19 +1432,35 @@ fn generic_param(p: &mut Parser<'_>) {
     }
 }
 
-/// `T without forget` — the retired capability clause at a generic
-/// parameter, recognized only to say what replaced it. All three parameter
-/// KINDS reach it: the clause was superset-parsed on region and const
-/// params too, and consuming it there keeps their refusal one sentence
-/// instead of two "expected `,`" errors at tokens that are each
-/// individually fine (G26: recovery for a retired spelling is
-/// diagnostics-layer work).
+/// Whether a capability clause is starting here, in either spelling: the
+/// retired `without` (an ordinary identifier now — see [`Parser::at_word`])
+/// or the live `only`, which is a keyword but is a DECLARATION's word.
+fn at_param_capability_clause(p: &Parser<'_>) -> bool {
+    p.at(ONLY_KW) || p.at_word("without")
+}
+
+/// `T without forget` / `T only move` — a capability clause where no
+/// capability clause belongs, recognized only to say where the two
+/// spellings' meanings went. All three parameter KINDS reach it: the
+/// retired clause was superset-parsed on region and const params too, and
+/// consuming it there keeps their refusal one sentence instead of two
+/// "expected `,`" errors at tokens that are each individually fine (G26:
+/// recovery for a retired spelling is diagnostics-layer work).
 ///
-/// What the three are TOLD differs, because "why not" does. Only a type
-/// parameter ever stood for something that could hold a capability, so it
-/// is the only one offered a migration; a region names a duration and a
-/// const's values are plain data, and each is told that instead of advice
-/// it cannot take.
+/// Both spellings are recognized because a reader who learns the new one
+/// first will write it in the old one's home, and a ceiling written on a
+/// parameter is exactly as wrong as the opt-out it replaced — for a
+/// different reason, which is why the two leads differ. G21 promises the
+/// recognition and one diagnostic, not a rewriting fix: in this corpus a
+/// retired spelling's fix is attached in VALIDATION over a castable node,
+/// so offering one here would mean superset-parsing the clause into a real
+/// node and deciding what it MEANS in hir — more than the row asks for.
+///
+/// What the three parameter kinds are TOLD differs, because "why not"
+/// does. Only a TYPE parameter ever stood for something that could hold a
+/// capability, so it is the only one offered a migration; a region names a
+/// duration and a const's values are plain data, and each is told that
+/// instead of advice it cannot take.
 ///
 /// The type parameter's sentence is position-neutral in the other
 /// direction: that arm is every binder's — a fn literal's, a fn type's, a
@@ -1450,26 +1469,34 @@ fn generic_param(p: &mut Parser<'_>) {
 /// opt-out said "this may be a linear", which is what a bare `T` now says,
 /// while the bound says the opposite ("this may be discarded"). Naming the
 /// bound first would steer a migration into reversing its own meaning.
-fn retired_param_clause(p: &mut Parser<'_>, kind: SyntaxKind) {
+fn param_capability_clause(p: &mut Parser<'_>, kind: SyntaxKind) {
     let m = p.start();
-    p.error(match kind {
-        REGION_PARAM => {
-            "a capability clause on a parameter is retired, and a region parameter never had \
-             one to lose: a region names a duration, not a value, so it has no capability \
-             to speak of"
-        }
-        CONST_PARAM => {
-            "a capability clause on a parameter is retired, and a const parameter never had \
-             one to lose: a const parameter's values are always plain data"
-        }
+    let message = match kind {
+        // Neither of these says "retired": both spellings reach them now,
+        // and neither kind ever had a capability for either one to talk
+        // about.
+        REGION_PARAM => "a capability clause has no place on a region parameter: a region names \
+             a duration, not a value, so it has no capability to speak of"
+            .to_owned(),
+        CONST_PARAM => "a capability clause has no place on a const parameter: a const \
+             parameter's values are always plain data"
+            .to_owned(),
         _ => {
-            "a capability clause on a parameter is retired: `T without forget` is now spelled \
-             `T` — an unbounded parameter is already checked as one that may have to be \
-             consumed; write `T: forget` only where the body DISCARDS a `T`, and a `type` \
-             declaration's parameters carry no capability bounds at all"
+            let lead = if p.at(ONLY_KW) {
+                "a capability ceiling is a `type` declaration's, not a parameter's"
+            } else {
+                "a capability clause on a parameter is retired: `T without forget` is now \
+                 spelled `T`"
+            };
+            format!(
+                "{lead} — an unbounded parameter is already checked as one that may have to be \
+                 consumed; write `T: forget` only where the body DISCARDS a `T`, and a `type` \
+                 declaration's parameters carry no capability bounds at all"
+            )
         }
-    });
-    p.bump(WITHOUT_KW);
+    };
+    p.error(message);
+    p.bump_any();
     if p.at(IDENT) {
         p.bump(IDENT);
         while p.eat(PLUS) && p.at(IDENT) {
@@ -1479,17 +1506,56 @@ fn retired_param_clause(p: &mut Parser<'_>, kind: SyntaxKind) {
     m.complete(p, ERROR);
 }
 
-/// `without forget` (or `without forget + send`) — a capability opt-out.
-/// ONE production, ONE home: trailing a `type` declaration. A capability is
-/// a fact about a declared type, and nothing else in the language declares
-/// one; a generic parameter takes no clause at all (T22). The capability
-/// names are ordinary [`NAME_REF`]s — a capability is a thing the language
-/// knows about by name, not a keyword each — and they compose with `+`,
-/// exactly as bounds do (TR05), because this list reads as a conjunction
-/// too: "without forget, and without send".
-fn without_clause(p: &mut Parser<'_>) {
+/// `} without forget;` — the retired capability clause at a declaration,
+/// recognized ONLY here (the trailing slot it used to live in) and only to
+/// say what replaced it. `without` is not a keyword any more: it lexes as
+/// an ordinary identifier, and this is one of the two places the parser
+/// looks at a WORD rather than a kind.
+///
+/// It consumes the whole clause it recognizes — the head and the `+`-joined
+/// capability names — so the refusal is ONE sentence instead of the
+/// three-error desync a stranded identifier produced (the item ends at the
+/// word, then the file-level loop reports `expected an item` and bumps,
+/// twice). That is diagnostics-layer work, which is exactly where G26 puts
+/// recovery for a retired spelling — and it costs the language nothing,
+/// because it reserves no word and deletes cleanly the day nobody has the
+/// old form left.
+///
+/// No rewriting FIX rides it, and G21 is the authority for that: it
+/// promises the site is recognized and consumed, one diagnostic, and the
+/// item after it still parses. Every rewriting fix in this corpus is
+/// attached in `validation` over a castable node, never by the parser —
+/// offering one here would mean superset-parsing `without forget` into a
+/// real node and then deciding whether it still MEANS `only move` in hir,
+/// which is more than the ruling asks for.
+fn retired_without_clause(p: &mut Parser<'_>) {
     let m = p.start();
-    p.bump(WITHOUT_KW);
+    p.error(
+        "the `without` clause is retired: write the ceiling instead \
+         (`only move` where you wrote `without forget`)",
+    );
+    p.bump(IDENT);
+    if p.at(IDENT) {
+        p.bump(IDENT);
+        while p.eat(PLUS) && p.at(IDENT) {
+            p.bump(IDENT);
+        }
+    }
+    m.complete(p, ERROR);
+}
+
+/// `only move` (or `only move + send`) — the capability CEILING of a `type`
+/// declaration: the MOST that can be done with a value of it. ONE
+/// production, ONE home — a ceiling is a fact about a declared type, and
+/// nothing else in the language declares one; a generic parameter takes no
+/// clause at all (T22). The capability names are ordinary [`NAME_REF`]s — a
+/// capability is a thing the language knows about by name, not a keyword
+/// each — and they compose with `+`, exactly as bounds do (TR05), because
+/// the list reads as a conjunction too: "the most you can do is move it,
+/// and send it".
+fn only_clause(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.bump(ONLY_KW);
     if p.at(IDENT) {
         name_ref(p);
         while p.eat(PLUS) {
@@ -1501,9 +1567,9 @@ fn without_clause(p: &mut Parser<'_>) {
             }
         }
     } else {
-        p.error("expected a capability name after `without` (`without forget`)");
+        p.error("expected a capability name after `only` (`only move`)");
     }
-    m.complete(p, WITHOUT_CLAUSE);
+    m.complete(p, ONLY_CLAUSE);
 }
 
 /// One region on the right of an outlives `:` — always a region name, never
@@ -1709,8 +1775,8 @@ fn scan_bare_angle_group(p: &Parser<'_>) -> Option<BareAngleGroup> {
             // angle counters and every bail but the brace — reads `nest`.
             EQ2 | NEQ | LTEQ | GTEQ | FAT_ARROW if nest == 0 => return None,
             SEMICOLON if nest == 0 => return None,
-            STATIC_KW | TRAIT_KW | TYPE_KW | EXTERN_KW | LET_KW | WITH_KW | WITHOUT_KW
-            | IMPL_KW | FOR_KW
+            STATIC_KW | TRAIT_KW | TYPE_KW | EXTERN_KW | LET_KW | WITH_KW | ONLY_KW | IMPL_KW
+            | FOR_KW
                 if nest == 0 =>
             {
                 return None;

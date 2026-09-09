@@ -27,17 +27,34 @@ pub(crate) enum Event {
 
 pub(crate) struct Parser<'t> {
     tokens: &'t [SyntaxKind],
+    /// The source text of each token in [`Self::tokens`], same indexing.
+    /// The parser is KIND-driven everywhere but one place: a RETIRED
+    /// spelling lexes as an ordinary identifier, and the only way to
+    /// refuse it by name — instead of desyncing on tokens that are each
+    /// individually fine — is to look at the word (see
+    /// [`Parser::at_word`]).
+    texts: &'t [&'t str],
     pos: usize,
     events: Vec<Event>,
 }
 
 impl<'t> Parser<'t> {
-    pub(crate) fn new(tokens: &'t [SyntaxKind]) -> Parser<'t> {
+    pub(crate) fn new(tokens: &'t [SyntaxKind], texts: &'t [&'t str]) -> Parser<'t> {
+        debug_assert_eq!(tokens.len(), texts.len());
         Parser {
             tokens,
+            texts,
             pos: 0,
             events: Vec::new(),
         }
+    }
+
+    /// Whether the current token is an identifier spelling `word` — the
+    /// contextual test, for retired spellings only. Everything the language
+    /// still HAS is a kind; nothing here should ever grow a second user
+    /// without a keyword to go with it.
+    pub(crate) fn at_word(&self, word: &str) -> bool {
+        self.at(IDENT) && self.texts.get(self.pos).is_some_and(|t| *t == word)
     }
 
     pub(crate) fn finish(self) -> Vec<Event> {

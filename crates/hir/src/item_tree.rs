@@ -33,16 +33,20 @@ pub struct ItemData {
     /// is ignored here), or `None` when the fully-annotated rule is
     /// violated.
     pub generics: Vec<GenericParamData>,
-    /// `type S = struct { ... } without forget;` — this DECLARATION has no
-    /// `forget` capability, whatever its fields say. A name-level fact on
-    /// purpose: it gates every mention (instantiating a `forget`-bounded
-    /// parameter with it is refused), so it belongs where arity and kinds
-    /// already live rather than in [`type_decl`] — editing the
+    /// `type S = struct { ... } only move;` — this DECLARATION's ceiling is
+    /// `move`: a value of it may be moved around and nothing more, so it
+    /// must be consumed. A name-level fact on purpose: it decides what
+    /// every mention of the name may do, so it belongs where arity and
+    /// kinds already live rather than in [`type_decl`] — editing the
     /// declaration's fields must not churn it.
+    ///
+    /// A `bool` because `move` is the only ceiling a declaration can write;
+    /// a second live rung, or a second ladder, turns this into a per-ladder
+    /// requirement at the same place.
     ///
     /// Only meaningful on a `type` item; `validation` rejects the clause
     /// everywhere else, and the flag stays `false` there.
-    pub without_forget: bool,
+    pub only_move: bool,
     /// `extern static read: unsafe fn(...) -> T;` — this item is a HOST
     /// IMPORT: a DECLARATION that promises a name of this type exists and
     /// leaves providing it to whatever is on the other side of the boundary.
@@ -663,8 +667,8 @@ pub fn item_tree(db: &dyn Db, file: SourceFile) -> ItemTree {
                     type_ref,
                     generics,
                     // Superset-parsed here (validation rejects it); a
-                    // value item's capabilities are its type's.
-                    without_forget: false,
+                    // value item's ceiling is its type's.
+                    only_move: false,
                     // Both spellings, one bit — and never where a value
                     // is written (see `ast::StaticItem::declares_host_import`).
                     is_extern,
@@ -681,11 +685,11 @@ pub fn item_tree(db: &dyn Db, file: SourceFile) -> ItemTree {
                 kind: ItemKind::Type,
                 type_ref: None,
                 generics: generics_from_type_literal(it.body()),
-                // The declaration-site opt-out. Read off the item, not the
-                // type literal: the clause trails the whole declaration
-                // (`= struct { ... } without forget;`), in the same slot
-                // `with` groups use.
-                without_forget: item.without_clauses().any(|c| names_forget(&c)),
+                // The declared ceiling. Read off the item, not the type
+                // literal: the clause trails the whole declaration
+                // (`= struct { ... } only move;`), in the same slot `with`
+                // groups use.
+                only_move: item.only_clauses().any(|c| names_move(&c)),
                 // Only a `static` can be `extern` (validation says so); a
                 // marker written here is superset-parsed and inert.
                 is_extern: false,
@@ -703,8 +707,8 @@ pub fn item_tree(db: &dyn Db, file: SourceFile) -> ItemTree {
                 ),
                 is_extern: false,
                 // Superset-parsed here too: a trait classifies types, so
-                // it has no capabilities of its own to shed.
-                without_forget: false,
+                // it has no ceiling of its own.
+                only_move: false,
             },
         })
         .collect();
@@ -818,11 +822,12 @@ fn generics_from_type_literal(body: Option<ast::Expr>) -> Vec<GenericParamData> 
     generics_from_param_list(list)
 }
 
-/// Whether a `without ...` clause names `forget`. Unknown capability names
-/// are `validation`'s error, not this function's: an opt-out that names
-/// nothing the language knows about opts out of nothing.
-fn names_forget(clause: &ast::WithoutClause) -> bool {
-    clause.capabilities().any(|name| name.text() == "forget")
+/// Whether an `only ...` clause names `move` — the one ceiling below the
+/// top. Unknown capability names are `validation`'s error, not this
+/// function's: a ceiling that names nothing the language knows about caps
+/// nothing.
+fn names_move(clause: &ast::OnlyClause) -> bool {
+    clause.capabilities().any(|name| name.text() == "move")
 }
 
 /// Whether a written bound names the `forget` CAPABILITY rather than a

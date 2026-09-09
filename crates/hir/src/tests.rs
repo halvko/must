@@ -10493,7 +10493,7 @@ fn the_five_option_members_check_clean_over_any_payload() {
 #[test]
 fn the_five_option_members_check_clean_over_option_of_string() {
     // The acid test's point, exercised on the real linear type: `String`
-    // is `without forget`, and `Option` is CLAUSE-FREE — `Option::<String>`
+    // is `only move`, and `Option` is CLAUSE-FREE — `Option::<String>`
     // is linear because `String` is, and nobody had to tell the enum. All
     // five members, and `flat_map`/`map` over a payload that must be
     // consumed.
@@ -10640,14 +10640,14 @@ type Wrap = struct { n: usize } with {
         hand_back = fn::<U>(u: U, w: Self) -> U { u };
     }
 };
-type Lin = struct { n: usize } without forget with {
+type Lin = struct { n: usize } only move with {
     impl Self { sink = fn(l: Self) -> usize { let Lin(struct { n }) = l; n }; }
 };
 static refused = fn(w: Wrap, l: Lin) -> usize { w.take(l) };
 static allowed = fn(w: Wrap, l: Lin) -> usize { w.hand_back(l).sink() };
 "#,
         expect![[r#"
-            368..377: `Lin` cannot be a `U`: `Lin` is declared `without forget`, and `U: forget` asks for a type whose values may be dropped on the floor
+            363..372: `Lin` cannot be a `U`: `Lin` is declared `only move`, and `U: forget` asks for a type whose values may be dropped on the floor
         "#]],
     );
 }
@@ -14374,7 +14374,7 @@ fn str_bytes_requires_unsafe_and_both_str_primitives_are_const_legal() {
 /// compiler support — destructuring hands the obligation to the parts, and
 /// the parts are two integers.
 const LINEAR_PRELUDE: &str = r#"
-type Res = struct { id: usize, size: usize } without forget with {
+type Res = struct { id: usize, size: usize } only move with {
     impl Self {
         drop = fn(r: Self) -> () {
             let Res(struct { id, size }) = r;
@@ -14412,7 +14412,7 @@ static main = fn() -> () {
 };
 "#,
         expect![[r#"
-            366..390: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 376..377)
+            361..385: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 371..372)
         "#]],
     );
 }
@@ -14428,7 +14428,7 @@ static main = fn() -> () {
 };
 "#,
         expect![[r#"
-            407..408: `r` was already consumed (`r` is born here and must be consumed at 376..377) (first consumed here at 393..394)
+            402..403: `r` was already consumed (`r` is born here and must be consumed at 371..372) (first consumed here at 388..389)
         "#]],
     );
 }
@@ -14443,7 +14443,7 @@ static main = fn(c: bool) -> () {
 };
 "#,
         expect![[r#"
-            400..427: `r` is consumed on some paths through this expression and not on others (`r` is born here and must be consumed at 383..384)
+            395..422: `r` is consumed on some paths through this expression and not on others (`r` is born here and must be consumed at 378..379)
         "#]],
     );
 }
@@ -14500,7 +14500,7 @@ static falling = fn() -> usize {
 };
 "#,
         expect![[r#"
-            898..928: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 908..909)
+            893..923: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 903..904)
         "#]],
     );
 }
@@ -14520,7 +14520,7 @@ static returned_early = fn(c: bool) -> () {
 };
 "#,
         expect![[r#"
-            482..488: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 458..459)
+            477..483: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 453..454)
         "#]],
     );
 }
@@ -14534,7 +14534,7 @@ static main = fn() -> () {
 };
 "#,
         expect![[r#"
-            372..379: this value must be consumed; its type has no `forget` capability, so it cannot be discarded
+            367..374: this value must be consumed; its type has no `forget` capability, so it cannot be discarded
         "#]],
     );
 }
@@ -14546,7 +14546,7 @@ fn a_static_cannot_hold_a_linear() {
 static held = Res(struct { id = 1, size = 2 });
 "#,
         expect![[r#"
-            355..387: an item's value must have the `forget` capability: a `static` is never destroyed, so nothing could ever consume this
+            350..382: an item's value must have the `forget` capability: a `static` is never destroyed, so nothing could ever consume this
         "#]],
     );
 }
@@ -14562,7 +14562,7 @@ static main = fn() -> () {
 };
 "#,
         expect![[r#"
-            397..398: `r` still holds a value that must be consumed; assigning here would lose it (`r` is born here and must be consumed at 380..381)
+            392..393: `r` still holds a value that must be consumed; assigning here would lose it (`r` is born here and must be consumed at 375..376)
         "#]],
     );
 }
@@ -14581,9 +14581,9 @@ static overwrite_elem = fn::<@a>(a: [Res; 3].&mut::<@a>) -> () { a.*[0] = make(2
 static overwrite_referent = fn::<@a>(m: Res.&mut::<@a>) -> () { m.* = make(2); };
 "#,
         expect![[r#"
-            452..459: this place still holds a value that must be consumed; assigning here would lose it
-            539..545: this place still holds a value that must be consumed; assigning here would lose it
-            624..627: this place still holds a value that must be consumed; assigning here would lose it
+            447..454: this place still holds a value that must be consumed; assigning here would lose it
+            534..540: this place still holds a value that must be consumed; assigning here would lose it
+            619..622: this place still holds a value that must be consumed; assigning here would lose it
         "#]],
     );
     // The raw hatch is the one way past it, where it always was: writing
@@ -14613,7 +14613,7 @@ static main = fn() -> () {
 };
 "#,
         expect![[r#"
-            461..484: a `const` block's value must have the `forget` capability: it is computed once and copied into every evaluation, so no single path could consume it
+            456..479: a `const` block's value must have the `forget` capability: it is computed once and copied into every evaluation, so no single path could consume it
         "#]],
     );
 }
@@ -14637,7 +14637,7 @@ static free = fn() -> usize {
 };
 "#,
         expect![[r#"
-            393..413: a `const` block's value must have the `forget` capability: it is computed once and copied into every evaluation, so no single path could consume it
+            388..408: a `const` block's value must have the `forget` capability: it is computed once and copied into every evaluation, so no single path could consume it
         "#]],
     );
 }
@@ -14654,7 +14654,7 @@ static const_make = const fn(id: usize) -> Res { Res(struct { id, size = 1 }) };
 static held = const { const_make(1) };
 "#,
         expect![[r#"
-            436..459: an item's value must have the `forget` capability: a `static` is never destroyed, so nothing could ever consume this
+            431..454: an item's value must have the `forget` capability: a `static` is never destroyed, so nothing could ever consume this
         "#]],
     );
 }
@@ -14688,7 +14688,7 @@ static skipped = fn(h: Holder) -> () {
 };
 "#,
         expect![[r#"
-            538..556: `..` would skip `res`, which must be consumed; name it in the pattern so it has somewhere to go
+            533..551: `..` would skip `res`, which must be consumed; name it in the pattern so it has somewhere to go
         "#]],
     );
 }
@@ -14704,8 +14704,8 @@ static main = fn(h: Holder) -> () {
 };
 "#,
         expect![[r#"
-            422..458: `h` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`h` is born here and must be consumed at 405..406)
-            436..441: cannot copy a value that must be consumed out of a place; take the whole value apart instead (`let Name(struct { .. }) = value;`)
+            417..453: `h` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`h` is born here and must be consumed at 400..401)
+            431..436: cannot copy a value that must be consumed out of a place; take the whole value apart instead (`let Name(struct { .. }) = value;`)
         "#]],
     );
 }
@@ -14729,7 +14729,7 @@ static leaky = fn(m: Maybe) -> () {
 };
 "#,
         expect![[r#"
-            572..575: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 566..567)
+            567..570: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 561..562)
         "#]],
     );
 }
@@ -14746,7 +14746,7 @@ static main = fn(n: usize) -> () {
 };
 "#,
         expect![[r#"
-            406..431: `r` is left in a different state than the loop found it in; the next iteration would run against a world this body was not checked in (`r` is born here and must be consumed at 384..385)
+            401..426: `r` is left in a different state than the loop found it in; the next iteration would run against a world this body was not checked in (`r` is born here and must be consumed at 379..380)
         "#]],
     );
 }
@@ -14789,7 +14789,7 @@ static broken = fn(n: usize) -> () {
 };
 "#,
         expect![[r#"
-            564..569: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 531..532)
+            559..564: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 526..527)
         "#]],
     );
 }
@@ -14804,8 +14804,8 @@ static main = fn() -> () {
 };
 "#,
         expect![[r#"
-            366..410: `a` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`a` is born here and must be consumed at 397..398)
-            402..403: cannot repeat a value that must be consumed: the copies would each have to be consumed, and there is only one value
+            361..405: `a` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`a` is born here and must be consumed at 392..393)
+            397..398: cannot repeat a value that must be consumed: the copies would each have to be consumed, and there is only one value
         "#]],
     );
 }
@@ -14818,7 +14818,7 @@ static const_make = const fn(id: usize) -> Res { Res(struct { id, size = 1 }) };
 static n: usize = const { let r = const_make(1); 5 };
 "#,
         expect![[r#"
-            446..474: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 452..453)
+            441..469: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 447..448)
         "#]],
     );
 }
@@ -14839,7 +14839,7 @@ static main = fn() -> () {
 };
 "#,
         expect![[r#"
-            407..457: `b` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`b` is born here and must be consumed at 438..439)
+            402..452: `b` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`b` is born here and must be consumed at 433..434)
         "#]],
     );
 }
@@ -14878,7 +14878,7 @@ static forgettable = fn() -> usize {
 };
 "#,
         expect![[r#"
-            723..773: `b` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`b` is born here and must be consumed at 754..755)
+            718..768: `b` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`b` is born here and must be consumed at 749..750)
         "#]],
     );
 }
@@ -14896,7 +14896,7 @@ static ignore = fn::<T>(t: T) -> () { };
 static hand_back = fn::<T>(t: T) -> T { t };
 "#,
         expect![[r#"
-            377..380: `t` is not consumed on this path, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded (`t` is born here and must be consumed at 365..366)
+            372..375: `t` is not consumed on this path, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded (`t` is born here and must be consumed at 360..361)
         "#]],
     );
 }
@@ -14914,7 +14914,7 @@ static fine = fn() -> () { ignore::<usize>(5) };
 static refused = fn() -> () { ignore::<Res>(make(1)) };
 "#,
         expect![[r#"
-            469..482: `Res` cannot be a `T`: `Res` is declared `without forget`, and `T: forget` asks for a type whose values may be dropped on the floor
+            464..477: `Res` cannot be a `T`: `Res` is declared `only move`, and `T: forget` asks for a type whose values may be dropped on the floor
         "#]],
     );
 }
@@ -14997,7 +14997,7 @@ type Box = struct::<T> { v: T } with {
         read = fn::<@a>(b: Self.&::<@a>) -> T { b.*.v };
     }
 };
-type Lin = struct { n: usize } without forget with {
+type Lin = struct { n: usize } only move with {
     impl Self { drop = fn(l: Self) -> () { let Lin(struct { n }) = l; }; }
 };
 type LinBox = struct { v: Lin } with {
@@ -15009,7 +15009,7 @@ type LinBox = struct { v: Lin } with {
 "#,
         expect![[r#"
             171..176: cannot move out of a borrow: `T` cannot be copied
-            494..499: cannot move out of a borrow: `Lin` cannot be copied
+            489..494: cannot move out of a borrow: `Lin` cannot be copied
         "#]],
     );
 }
@@ -15088,9 +15088,9 @@ static skips_decl = fn::<T>(x: Two::<T>) -> T { let Two(struct { t, .. }) = x; t
 static swallows = fn::<T>(o: Opt::<T>) -> usize { match o { _ => 1, } };
 "#,
         expect![[r#"
-            514..530: `..` would skip `v`, and `T` may be a type that must be consumed: name it in the pattern so it has somewhere to go, or write `T: forget` to require one that can be discarded
-            598..614: `..` would skip `r`, which must be consumed; name it in the pattern so it has somewhere to go
-            686..687: `_` matches the value without binding it, and `T` may be a type that must be consumed: give it a name so it has somewhere to go, or write `T: forget` to require one that can be discarded
+            509..525: `..` would skip `v`, and `T` may be a type that must be consumed: name it in the pattern so it has somewhere to go, or write `T: forget` to require one that can be discarded
+            593..609: `..` would skip `r`, which must be consumed; name it in the pattern so it has somewhere to go
+            681..682: `_` matches the value without binding it, and `T` may be a type that must be consumed: give it a name so it has somewhere to go, or write `T: forget` to require one that can be discarded
         "#]],
     );
 }
@@ -15194,7 +15194,7 @@ fn a_declaration_that_names_itself_is_summarized_not_expanded() {
     // time: `L::<usize, Res>` holds the `Res`, `L::<Res, usize>` never does.
     check_diagnostics(
         r#"
-type Res = struct { id: usize } without forget with {
+type Res = struct { id: usize } only move with {
     impl Self { drop = fn(r: Self) -> () { let Res(struct { id }) = r; }; };
 };
 type W = struct::<T> { v: T };
@@ -15214,8 +15214,8 @@ static swapped = fn(x: L::<usize, Res>) -> usize { 1 };
 static unswapped = fn(x: L::<Res, usize>) -> usize { 1 };
 "#,
         expect![[r#"
-            614..619: `n` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`n` is born here and must be consumed at 589..590)
-            844..849: `x` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`x` is born here and must be consumed at 815..816)
+            609..614: `n` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`n` is born here and must be consumed at 584..585)
+            839..844: `x` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`x` is born here and must be consumed at 810..811)
         "#]],
     );
 }
@@ -15234,7 +15234,7 @@ fn ordinary_nested_generics_are_judged_from_their_arguments() {
     // parameter each argument was given for.
     check_diagnostics(
         r#"
-type Res = struct { id: usize } without forget with {
+type Res = struct { id: usize } only move with {
     impl Self { drop = fn(r: Self) -> () { let Res(struct { id }) = r; }; };
 };
 type Opt = enum::<T> { S(T), N };
@@ -15249,9 +15249,9 @@ static owned = fn(x: Opt::<Row2>) -> usize { 1 };
 static asks = fn(x: Opt::<Row2>) -> () { ignore(x) };
 "#,
         expect![[r#"
-            535..540: `x` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`x` is born here and must be consumed at 496..497)
-            585..590: `x` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`x` is born here and must be consumed at 560..561)
-            633..639: `Opt::<Row2>` cannot be a `T`: `Res` is declared `without forget`, reached through `Opt`'s `T`, through field `cell`, through `Opt`'s `T`, and `T: forget` asks for a type whose values may be dropped on the floor
+            530..535: `x` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`x` is born here and must be consumed at 491..492)
+            580..585: `x` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`x` is born here and must be consumed at 555..556)
+            628..634: `Opt::<Row2>` cannot be a `T`: `Res` is declared `only move`, reached through `Opt`'s `T`, through field `cell`, through `Opt`'s `T`, and `T: forget` asks for a type whose values may be dropped on the floor
         "#]],
     );
 }
@@ -15365,19 +15365,24 @@ trait Agrees = requires { m: fn::<W: forget>(w: W, x: Self) -> W; } with { impl 
 fn only_forget_can_be_required_of_a_parameter() {
     // The bound side of the capability vocabulary, read off the one table
     // rather than a second enumeration. `forget` is the only capability a
-    // body can require of its caller; the reserved names are refused AS
-    // reserved, so a reservation reads as a reservation and not as a typo.
-    // A name that is no capability at all stays an ordinary trait bound
-    // and gets the ordinary unresolved answer.
+    // body can require of its caller, and the three ways of not being it
+    // are three different facts. A LIVE capability that is not a bound
+    // (`move`) is refused for what it would mean — nothing, since every
+    // value can be moved; a RESERVED name is refused as reserved, so a
+    // reservation reads as a reservation and not as a typo; a name that is
+    // no capability at all stays an ordinary trait bound and gets the
+    // ordinary unresolved answer.
     check_diagnostics(
         r#"
 static ok = fn::<T: forget>(t: T) -> usize { 1 };
+static live = fn::<T: move>(t: T) -> T { t };
 static reserved = fn::<T: send>(t: T) -> T { t };
 static ordinary = fn::<T: Display>(t: T) -> T { t };
 "#,
         expect![[r#"
-            77..81: the `send` capability does not exist yet; `forget` is the only one a body can require
-            127..134: unknown trait `Display`
+            73..77: every value can be moved, so `move` is not worth requiring; an unbounded parameter can already be moved, returned and passed on
+            123..127: the `send` capability does not exist yet; `forget` is the only one a body can require
+            173..180: unknown trait `Display`
         "#]],
     );
 }
@@ -15406,8 +15411,8 @@ static one_reason = fn::<T>(t: T) -> usize {
 };
 "#,
         expect![[r#"
-            469..527: `m` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`m` is born here and must be consumed at 479..480)
-            572..621: `b` is not consumed on this path, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded (`b` is born here and must be consumed at 582..583)
+            464..522: `m` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`m` is born here and must be consumed at 474..475)
+            567..616: `b` is not consumed on this path, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded (`b` is born here and must be consumed at 577..578)
         "#]],
     );
 }
@@ -15475,9 +15480,9 @@ static nested = fn(m: Maybe::<Res>) -> () {
 };
 "#,
         expect![[r#"
-            457..458: `_` matches the value without binding it, and it must be consumed; give it a name so it has somewhere to go
-            546..547: `_` matches the value without binding it, and it must be consumed; give it a name so it has somewhere to go
-            684..685: `_` matches the value without binding it, and it must be consumed; give it a name so it has somewhere to go
+            452..453: `_` matches the value without binding it, and it must be consumed; give it a name so it has somewhere to go
+            541..542: `_` matches the value without binding it, and it must be consumed; give it a name so it has somewhere to go
+            679..680: `_` matches the value without binding it, and it must be consumed; give it a name so it has somewhere to go
         "#]],
     );
 }
@@ -15542,7 +15547,7 @@ static falls_off_the_end = fn() -> () {
 };
 "#,
         expect![[r#"
-            827..852: `r` is left in a different state than the loop found it in; the next iteration would run against a world this body was not checked in (`r` is born here and must be consumed at 805..806)
+            822..847: `r` is left in a different state than the loop found it in; the next iteration would run against a world this body was not checked in (`r` is born here and must be consumed at 800..801)
         "#]],
     );
 }
@@ -15566,8 +15571,8 @@ static unresolvable = fn() -> () {
 };
 "#,
         expect![[r#"
-            402..403: expected a field name after `.`
-            465..473: no field or member `nope` on `Res`
+            397..398: expected a field name after `.`
+            460..468: no field or member `nope` on `Res`
         "#]],
     );
 }
@@ -15582,7 +15587,7 @@ fn a_copy_out_of_a_borrow_is_diagnosed_once() {
 static elem = fn::<@a>(r: [Res; 3].&::<@a>) -> Res { r.*[0] };
 "#,
         expect![[r#"
-            394..400: cannot move out of a borrow: `Res` cannot be copied
+            389..395: cannot move out of a borrow: `Res` cannot be copied
         "#]],
     );
 }
@@ -15590,8 +15595,8 @@ static elem = fn::<@a>(r: [Res; 3].&::<@a>) -> Res { r.*[0] };
 #[test]
 fn the_heap_builtins_take_a_linear_element_type() {
     // `alloc_array::<T>` hands out a POINTER to storage and never holds a
-    // `T`, so its binder opts out of the bound — and `AllocResult::<T>`,
-    // whose payload is that pointer, opts out for the same reason. The two
+    // `T`, so its binder asks for nothing — and `AllocResult::<T>`, whose
+    // payload is that pointer, is forgettable for the same reason. The two
     // have to agree: accepting the result type while refusing the call
     // that produces it is not a rule, it is a bug.
     check_linear(
@@ -15651,7 +15656,7 @@ type String = struct {
     ptr: u8.&raw mut,
     len: usize,
     cap: usize,
-} without forget with {
+} only move with {
     impl Self {
         as_str = fn::<@a>(s: Self.&::<@a>) -> str {
             unsafe { str_from_utf8_unchecked(s.*.ptr, s.*.len) }
@@ -15711,7 +15716,7 @@ static leak = fn(text: str) -> () {
 };
 "#,
         expect![[r#"
-            1001..1059: `s` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`s` is born here and must be consumed at 1011..1012)
+            996..1054: `s` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`s` is born here and must be consumed at 1006..1007)
         "#]],
     );
 }
@@ -15727,7 +15732,7 @@ static double = fn(text: str) -> () {
 };
 "#,
         expect![[r#"
-            1053..1054: `s` was already consumed (`s` is born here and must be consumed at 1013..1014) (first consumed here at 1039..1040)
+            1048..1049: `s` was already consumed (`s` is born here and must be consumed at 1008..1009) (first consumed here at 1034..1035)
         "#]],
     );
 }
@@ -15746,9 +15751,9 @@ static halve = fn(p: Pair) -> String {
 static half_only = fn(p: Pair) -> String { p.left };
 "#,
         expect![[r#"
-            1074..1077: cannot move out of a borrow: `String` cannot be copied
-            1233..1243: `p` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`p` is born here and must be consumed at 1214..1215)
-            1235..1241: cannot copy a value that must be consumed out of a place; take the whole value apart instead (`let Name(struct { .. }) = value;`)
+            1069..1072: cannot move out of a borrow: `String` cannot be copied
+            1228..1238: `p` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`p` is born here and must be consumed at 1209..1210)
+            1230..1236: cannot copy a value that must be consumed out of a place; take the whole value apart instead (`let Name(struct { .. }) = value;`)
         "#]],
     );
 }
@@ -15812,7 +15817,7 @@ static leaks_the_payload = fn(text: str) -> () {
 };
 "#,
         expect![[r#"
-            2411..2414: `s` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`s` is born here and must be consumed at 2405..2406)
+            2406..2409: `s` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`s` is born here and must be consumed at 2400..2401)
         "#]],
     );
 }
@@ -15828,7 +15833,7 @@ static main = fn() -> () {
 };
 "#,
         expect![[r#"
-            366..390: the value bound by `_` is not consumed on this path; its type has no `forget` capability, so every path must consume it (the value bound by `_` is born here and must be consumed at 376..377)
+            361..385: the value bound by `_` is not consumed on this path; its type has no `forget` capability, so every path must consume it (the value bound by `_` is born here and must be consumed at 371..372)
         "#]],
     );
 }
@@ -15846,12 +15851,12 @@ static main = fn(c: bool) -> Res {
 };
 "#,
         expect![[r#"
-            401..428: `r` is consumed on some paths through this expression and not on others (`r` is born here and must be consumed at 384..385)
+            396..423: `r` is consumed on some paths through this expression and not on others (`r` is born here and must be consumed at 379..380)
         "#]],
     );
 }
 
-// ---- `Reader`: a heap-owning type declared `without forget` -------------
+// ---- `Reader`: a heap-owning type declared `only move` ------------------
 
 /// The shipped `examples/stdin_lib.must` `Reader`, trimmed to what the
 /// checker sees — the buffering/line-scanning machinery is not the point
@@ -15864,7 +15869,7 @@ type Reader = struct {
     buf: u8.&raw mut,
     cap: usize,
     eof: bool,
-} without forget with {
+} only move with {
     impl Self {
         drop = fn(r: Self) -> () {
             let Reader(struct { buf, cap, .. }) = r;
@@ -15900,7 +15905,7 @@ static main = fn() -> () {
 
 #[test]
 fn not_dropping_a_reader_is_a_check_error() {
-    // `Reader` owns an allocation and is `without forget`, so a path that
+    // `Reader` owns an allocation and is `only move`, so a path that
     // never calls `drop` is refused (T20, M16).
     check_reader(
         r#"
@@ -15909,7 +15914,7 @@ static leak = fn() -> () {
 };
 "#,
         expect![[r#"
-            510..541: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 520..521)
+            505..536: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 515..516)
         "#]],
     );
 }
@@ -15925,7 +15930,7 @@ fn a_reader_drop_that_only_reads_a_field_is_refused() {
 type Reader = struct {
     buf: u8.&raw mut,
     cap: usize,
-} without forget with {
+} only move with {
     impl Self {
         drop = fn(r: Self) -> () {
             unsafe { dealloc_array(r.buf, r.cap); };
@@ -15934,7 +15939,7 @@ type Reader = struct {
 };
 "#,
         expect![[r#"
-            135..199: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 120..121)
+            130..194: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 115..116)
         "#]],
     );
 }

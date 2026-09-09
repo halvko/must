@@ -1497,13 +1497,14 @@ handle the host gave you — and letting one go out of scope quietly is a bug,
 not a shrug. Must does not solve that with destructors. It solves it by
 refusing to compile the program.
 
-A type declaration can say that its values may not simply be forgotten:
+A type declaration can say how far its values may go — its *ceiling*, the
+most that can be done with one:
 
 ```must
 type Res = struct {
     id: usize,
     size: usize,
-} without forget with {
+} only move with {
     impl Self {
         drop = fn(r: Self) -> () {
             let Res(struct { id, size }) = r;
@@ -1513,11 +1514,24 @@ type Res = struct {
 };
 ```
 
-`without forget` is the whole feature. `with` attaches things to a
-declaration; `without` takes one away, and what it takes away here is
-`forget` — the ability to let a value go with nothing done about it. A type
-without it must be *consumed*, exactly once, on every path out of every
-scope it lives in.
+`only move` is the whole feature. `with` attaches things to a declaration
+and `only` caps it, and they ride the same trailing slot in either order.
+What it caps here is the *disposal* ladder, whose rungs are `access` (may
+not even be moved), `move` (may be passed around, and that is all) and
+`forget` (may be let go with nothing done about it). `access` is a rung the
+ladder holds room for rather than a spelling that works yet — writing it
+answers "the `access` capability does not exist yet". `forget` is the top and
+the default, so a type that writes nothing keeps it; a type capped at `move`
+must be *consumed*, exactly once, on every path out of every scope it lives
+in.
+
+`only` names a position on the ladder rather than an absence, and that is
+what makes it survive company: a clause caps only the ladders it names, so
+the day a `send` capability arrives, every `only move` type already written
+keeps whatever the send axis defaults to. What it refuses is every clause
+that would say one thing twice or say nothing at all: two rungs of one
+ladder, because a declaration caps a ladder once; the same rung named again;
+and `only forget`, which is the default, so it declares nothing.
 
 Consuming is not a special operation. Passing the value to a function
 consumes it, returning it consumes it, binding it to another name consumes
@@ -1537,7 +1551,7 @@ Taking the value apart hands its obligation to its parts, and the parts are
 two integers, which anyone may forget. That is the rule read backwards: a
 record whose field must be consumed must itself be consumed, so a record
 with nothing left in it that must be consumed is free. Containment is why
-`without forget` spreads without being written twice —
+the ceiling spreads without being written twice —
 
 ```must
 type Holder = struct { res: Res, tag: usize };
@@ -1748,8 +1762,8 @@ discipline is what makes borrows *shaped* correctly, and the interpreter is
 what catches a program that got the shape right and the order wrong.
 
 None of this reaches the generated code. A program using values that must be
-consumed compiles to exactly the same bytes as the same program without the
-`without forget` on its declaration: the clause decides which programs are
+consumed compiles to exactly the same bytes as the same program without
+`only move` on its declaration: the clause decides which programs are
 accepted, and nothing else.
 
 == Arrays
@@ -2160,7 +2174,7 @@ next refill only because `str` is an owned value today — "Owned strings"
 below builds `String`, the shape that keeps working once that changes.
 
 The reader itself cannot be dropped on the floor, either: `Reader` is
-declared `without forget`, so a path that never calls `drop` — leaking the
+declared `only move`, so a path that never calls `drop` — leaking the
 buffer it owns — is refused at check time, not merely bad style. A `panic`
 never falls off the end, so a path that ends in one owes nothing. See
 "Values that must be consumed" for what that check does and what it
@@ -2185,7 +2199,7 @@ type String = struct {
     ptr: u8.&raw mut,
     len: usize,
     cap: usize,
-} without forget with {
+} only move with {
     impl Self {
         as_str = fn::<@a>(s: Self.&::<@a>) -> str {
             unsafe { str_from_utf8_unchecked(s.*.ptr, s.*.len) }
@@ -2217,7 +2231,7 @@ static to_owned = fn::<@a>(s: str.&::<@a>) -> String {
 };
 ```
 
-`without forget` is what makes it safe to write: a `String` must be consumed
+`only move` is what makes it safe to write: a `String` must be consumed
 on every path, so the compiler will not let you forget the `drop()`. See
 "Values that must be consumed" for what that check does and what it refuses.
 

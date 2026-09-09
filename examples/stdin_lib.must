@@ -9,8 +9,7 @@
 //   * a language feature: `extern static` (the import declaration), `read`
 //     (the host's byte move), `str_from_utf8` (the validity claim), the heap
 //     builtins, the borrow rules, and the `forget` capability (`Reader` is
-//     declared `without forget`, so a path that never calls `drop` is
-//     refused);
+//     declared `only move`, so a path that never calls `drop` is refused);
 //   * NOT a language feature, and written below: buffering, finding a line
 //     boundary, stripping CRLF, deciding that a blank line is a line and
 //     that end-of-input is not, and handing a line out without copying it.
@@ -89,10 +88,10 @@ type Option = enum::<T> { Some(T), None };
 // invalidates it. That is not a convention: it is the aliasing model, and
 // the interpreter enforces it.
 //
-// `without forget`: the Reader owns a heap allocation (`buf`), so letting
-// one go out of scope with nothing done about it is a leak. The compiler
-// refuses that — every path must call `drop`, panic-diverging paths
-// excepted (a `panic` never falls off the end, so it owes nothing there).
+// `only move`: the Reader owns a heap allocation (`buf`), so letting one go
+// out of scope with nothing done about it is a leak. The compiler refuses
+// that — every path must call `drop`, panic-diverging paths excepted (a
+// `panic` never falls off the end, so it owes nothing there).
 type Reader = struct {
     buf: u8.&raw mut,   // the allocation head, and what `drop` frees
     cap: usize,
@@ -102,7 +101,7 @@ type Reader = struct {
     len: usize,         // bytes of the current line so far — `cur - start`
     eof: bool,
     line: str,
-} without forget with {
+} only move with {
     impl Self {
         // The one operation. `@b` is the member's own region binder — a
         // member that borrows `Self` declares the region it borrows for —

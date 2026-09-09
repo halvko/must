@@ -1,11 +1,14 @@
 //! Capabilities: what you can DO with a value of a type.
 //!
-//! One capability exists so far — `forget`, the ability to let a value go
-//! out of scope with nothing done about it. Every type has it by default;
-//! a declaration sheds it by saying so (`type S = struct { … } without
-//! forget;`), and a container inherits the loss from its parts.
+//! A declaration states its CEILING — the most that can be done with one of
+//! its values — and the ceiling is a rung of a ladder (T20). Two rungs
+//! exist so far: `move` (pass it around, and that is all) and `forget` (let
+//! it go out of scope with nothing done about it), which is the top and
+//! therefore the default. A declaration that writes `type S = struct { … }
+//! only move;` sits one rung down, and a container inherits the lower
+//! ceiling from its parts.
 //!
-//! A type WITHOUT `forget` is a linear type: a value of it must be consumed
+//! A type capped at `move` is a linear type: a value of it must be consumed
 //! exactly once on every path. That is the whole of the disposal story —
 //! there is no destructor, no drop glue and no unwinding, so the checker
 //! (see [`crate::linear_check`]) is the only thing that runs, and it runs at
@@ -64,20 +67,20 @@ use crate::{ItemId, ItemLoc};
 /// broken program never grows must-consume errors on top of the error it
 /// already has.
 pub fn has_forget(db: &dyn Db, ty: &Ty) -> bool {
-    find_component(db, ty, None, &mut Search::default(), &without_forget_leaf).is_none()
+    find_component(db, ty, None, &mut Search::default(), &no_forget_leaf).is_none()
 }
 
 /// What a DISPOSAL walk looks for: something that costs a value of this
 /// type the `forget` capability. Two things do, and containment carries
 /// either up to whatever holds it.
-fn without_forget_leaf(db: &dyn Db, ty: &Ty) -> Option<()> {
+fn no_forget_leaf(db: &dyn Db, ty: &Ty) -> Option<()> {
     match ty {
-        // A declaration that shed the capability.
-        Ty::Named(named) if decl_without_forget(db, &named.decl) => Some(()),
+        // A declaration that capped itself.
+        Ty::Named(named) if decl_only_move(db, &named.decl) => Some(()),
         // A variant-typed value is its payload tuple; the enum's own
-        // opt-out covers it too, since widening one to the other must not
+        // ceiling covers it too, since widening one to the other must not
         // change what has to happen to it.
-        Ty::Variant(variant) if decl_without_forget(db, &variant.decl) => Some(()),
+        Ty::Variant(variant) if decl_only_move(db, &variant.decl) => Some(()),
         // A rigid parameter is whatever its binder ASKED FOR. `T: forget`
         // makes every caller supply a forgettable type, so the body may
         // forget it; no bound assumes nothing, so the body is checked as
@@ -137,14 +140,14 @@ fn affine_leaf(db: &dyn Db, ty: &Ty) -> Option<Affine> {
         Ty::Borrow { mutable: true, .. } => Some(Affine::MutBorrow),
         // Everything a value must be consumed FOR, it must also not be
         // duplicated for. The leaves are the disposal walk's own.
-        _ => without_forget_leaf(db, ty).map(|()| Affine::Linear),
+        _ => no_forget_leaf(db, ty).map(|()| Affine::Linear),
     }
 }
 
 /// A one-line explanation of why `ty` lacks `forget`, for the diagnostic
-/// that refuses it — `None` when it has the capability. Names what shed the
-/// capability and, when the loss came through containment, the path that
-/// carried it (`through field \`buf\``).
+/// that refuses it — `None` when it has the capability. Names what CAPPED
+/// itself below the capability and, when the cap came through containment,
+/// the path that carried it (`through field \`buf\``).
 pub fn no_forget_reason(db: &dyn Db, ty: &Ty) -> Option<String> {
     let mut path = Vec::new();
     let root = blame(db, ty, None, &mut Search::default(), &mut path)?;
@@ -606,11 +609,11 @@ fn variant_count(db: &dyn Db, decl: &ItemLoc) -> u32 {
         .map_or(0, |variants| variants.len() as u32)
 }
 
-/// Whether the `type` declaration at `decl` wrote `without forget`.
-pub fn decl_without_forget(db: &dyn Db, decl: &ItemLoc) -> bool {
+/// Whether the `type` declaration at `decl` wrote `only move`.
+pub fn decl_only_move(db: &dyn Db, decl: &ItemLoc) -> bool {
     crate::item_data(db, decl.to_id(db))
         .as_ref()
-        .is_some_and(|data| data.without_forget)
+        .is_some_and(|data| data.only_move)
 }
 
 /// Whether the generic parameter at `(item, index)` wrote the `forget`
@@ -627,9 +630,9 @@ pub fn param_has_forget_bound(db: &dyn Db, item: &ItemLoc, index: u32) -> bool {
 /// root is a rigid PARAMETER rather than a declaration — its name.
 struct Blame {
     /// The root clause, already phrased: the two kinds of root are
-    /// different sentences (a DECLARATION shed the capability; a rigid
-    /// PARAMETER simply never asked for anything), so the caller is not
-    /// left to guess a verb for a bare name.
+    /// different sentences (a DECLARATION capped itself; a rigid PARAMETER
+    /// simply never asked for anything), so the caller is not left to guess
+    /// a verb for a bare name.
     sentence: String,
     /// `Some` exactly when the root is a parameter — the one case where a
     /// diagnostic can offer `T: forget` and be right about it.
@@ -639,7 +642,7 @@ struct Blame {
 impl Blame {
     fn decl(decl: &ItemLoc) -> Blame {
         Blame {
-            sentence: format!("`{}` is declared `without forget`", decl.display_name()),
+            sentence: format!("`{}` is declared `only move`", decl.display_name()),
             param: None,
         }
     }
@@ -655,10 +658,10 @@ impl Blame {
 }
 
 /// The named-in-the-message half of [`no_forget_reason`]: the clause that
-/// shed the capability, said as a sentence, plus the containment path back
-/// to `ty`. A declaration IS declared `without forget`; a type parameter is
-/// not declared anything — it simply never asked for the capability — so
-/// the two roots read differently, and only the second has a fix to offer.
+/// caps the capability, said as a sentence, plus the containment path back
+/// to `ty`. A declaration IS declared `only move`; a type parameter is not
+/// declared anything — it simply never asked for the capability — so the
+/// two roots read differently, and only the second has a fix to offer.
 ///
 /// [`find_component`]'s walk with a path built on the way out, which is
 /// the one thing that walk cannot do for it: the step names it reports
@@ -679,13 +682,13 @@ fn blame(
     }
     match ty {
         Ty::Named(named) => {
-            if decl_without_forget(db, &named.decl) {
+            if decl_only_move(db, &named.decl) {
                 return Some(Blame::decl(&named.decl));
             }
             blame_mention(db, &named.decl, None, &named.args, owner, search, path)
         }
         Ty::Variant(variant) => {
-            if decl_without_forget(db, &variant.decl) {
+            if decl_only_move(db, &variant.decl) {
                 return Some(Blame::decl(&variant.decl));
             }
             blame_mention(

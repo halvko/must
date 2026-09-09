@@ -163,8 +163,8 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             }
         } else if let Some(group) = ast::WithGroup::cast(node.clone()) {
             validate_with_group(&group, &mut errors);
-        } else if let Some(without) = ast::WithoutClause::cast(node.clone()) {
-            validate_without_clause(&without, &mut errors);
+        } else if let Some(only) = ast::OnlyClause::cast(node.clone()) {
+            validate_only_clause(&only, &mut errors);
         } else if let Some(unsafe_element) = ast::UnsafeElement::cast(node.clone()) {
             // Reserved (TR01): the `unsafe` modifier head — `unsafe impl
             // send;` markers and `unsafe { ... }` element groups.
@@ -336,37 +336,51 @@ fn validate_with_group(group: &ast::WithGroup, errors: &mut Vec<SyntaxError>) {
     }
 }
 
-/// Where a capability opt-out may sit, and which capabilities it may name.
+/// Where a capability ceiling may sit, and which capabilities it may name.
 ///
-/// ONE home is live: a `type` declaration, which does not have the
-/// capability it sheds. The superset-parsed homes (`static`/`const`/`trait`
-/// items, which share the item shape) are rejected here, each in its own
-/// words, because "why not" differs: a value item has no say over its
-/// type's capabilities, and a trait classifies types rather than being one.
-/// A generic PARAMETER carries no capability clause at all — what a body
-/// needs of its parameter is written in the parameter's BOUNDS (T22), so
-/// the grammar no longer parses one there and this function never sees it.
+/// ONE home is live: a `type` declaration — a ceiling is a fact about a
+/// declared type, and only a `type` item declares one (G21). The
+/// superset-parsed homes (`static`/`const`/`trait` items, which share the
+/// item shape) are rejected here, each in its own words, because "why not"
+/// differs: a value item has no say over its type's capabilities, and a
+/// trait classifies types rather than being one. A generic PARAMETER
+/// carries no capability clause at all — what a body needs of its parameter
+/// is written in the parameter's BOUNDS (T22), so the grammar no longer
+/// parses one there and this function never sees it.
 ///
-/// Which names may be written is read off [`CAPABILITIES`], the one list
-/// this crate keeps: `forget` is the only capability that exists, and the
-/// doctrine's reserved names are an error rather than a silent no-op — the
+/// The ceiling is a RUNG of a LADDER, and an `only` clause ceils only the
+/// ladders it NAMES (T20). `move` is the one rung below the top of the
+/// disposal ladder: it says a value may be moved around and nothing more,
+/// so it must be consumed. `forget` is that ladder's top — the default — so
+/// writing it declares nothing and gets said so. `access` (a value that may
+/// not even be moved) and the doctrine's `send`/`sync`/`destruct` have no
+/// meaning yet, so naming one is an error rather than a silent no-op: the
 /// message says which it is, so the reservation reads as a reservation.
-fn validate_without_clause(without: &ast::WithoutClause, errors: &mut Vec<SyntaxError>) {
-    let anchor = without
-        .without_token()
+/// Every one of those judgements is read off [`CAPABILITIES`], the one list
+/// this crate keeps.
+///
+/// Because a clause ceils per ladder, the once-only rule is per LADDER too:
+/// two rungs of one ladder are a contradiction (a declaration ceils it
+/// once), while one rung each of two different ladders would compose — the
+/// day a second ladder exists. Nothing today can spell a legal composition,
+/// since `move` is the only live rung; the rule is implemented rather than
+/// deferred so that the day it can, it already reads correctly.
+fn validate_only_clause(only: &ast::OnlyClause, errors: &mut Vec<SyntaxError>) {
+    let anchor = only
+        .only_token()
         .map(|t| t.text_range())
-        .unwrap_or_else(|| without.syntax().text_range());
-    let parent = without.syntax().parent().map(|p| p.kind());
+        .unwrap_or_else(|| only.syntax().text_range());
+    let parent = only.syntax().parent().map(|p| p.kind());
     let misplaced = match parent {
         Some(SyntaxKind::TYPE_ITEM) => None,
         Some(SyntaxKind::STATIC_ITEM) => Some(
-            "a capability opt-out belongs on a `type` declaration; \
-             a `static` has whatever capabilities its type has",
+            "a capability ceiling belongs on a `type` declaration; \
+             an item has whatever ceiling its type has",
         ),
         Some(SyntaxKind::TRAIT_ITEM) => {
-            Some("a capability opt-out belongs on a `type` declaration, not on a `trait`")
+            Some("a capability ceiling belongs on a `type` declaration, not on a `trait`")
         }
-        _ => Some("a capability opt-out cannot go here"),
+        _ => Some("a capability ceiling cannot go here"),
     };
     if let Some(message) = misplaced {
         errors.push(SyntaxError {
@@ -376,50 +390,32 @@ fn validate_without_clause(without: &ast::WithoutClause, errors: &mut Vec<Syntax
         });
         return;
     }
-    // Every capability this DECLARATION has already shed, in source order
-    // across all its clauses — so `without forget without forget` and
-    // `without forget + forget` are the same mistake and get the same
-    // answer. Saying it twice is not saying it twice as hard; it means the
-    // writer thought one of the two was doing something else.
+    // Every capability this DECLARATION has already named, in source order
+    // across all its clauses — so `only move only move` and `only move +
+    // move` are the same mistake and get the same answer. Saying it twice
+    // is not saying it twice as hard; it means the writer thought one of
+    // the two was doing something else. Two DIFFERENT rungs of one ladder
+    // are the same mistake wearing a second word.
     let mut seen: Vec<String> = Vec::new();
-    let owner = without.syntax().parent();
+    let owner = only.syntax().parent();
     let mut reached_this_clause = false;
     for clause in owner
         .iter()
         .flat_map(|owner| owner.children())
-        .filter_map(ast::WithoutClause::cast)
+        .filter_map(ast::OnlyClause::cast)
     {
-        let is_this = clause.syntax() == without.syntax();
+        let is_this = clause.syntax() == only.syntax();
         for capability in clause.capabilities() {
             let name = capability.text();
             if is_this {
-                if seen.contains(&name) {
+                let message = ceiling_error(&name, &seen);
+                if let Some(message) = message {
                     errors.push(SyntaxError {
-                        message: format!("`{name}` is already opted out of here"),
+                        message,
                         range: capability.syntax().text_range(),
                         fix: None,
                     });
-                    continue;
                 }
-                let message = match capability_named(&name) {
-                    Some(known) if known.clause => {
-                        seen.push(name);
-                        continue;
-                    }
-                    Some(_) => format!(
-                        "the `{name}` capability does not exist yet; \
-                         `forget` is the only one that can be opted out of"
-                    ),
-                    None => format!(
-                        "unknown capability `{name}`; \
-                         `forget` is the only one that can be opted out of"
-                    ),
-                };
-                errors.push(SyntaxError {
-                    message,
-                    range: capability.syntax().text_range(),
-                    fix: None,
-                });
             }
             seen.push(name);
         }
@@ -429,6 +425,51 @@ fn validate_without_clause(without: &ast::WithoutClause, errors: &mut Vec<Syntax
         }
     }
     debug_assert!(reached_this_clause, "the clause is a child of its parent");
+}
+
+/// Why `name` cannot be this declaration's ceiling, given the capabilities
+/// already named on it — `None` when it can.
+///
+/// The order is what makes each answer the useful one. A REPEAT comes
+/// first, because a writer who said it twice already knows what the word
+/// means. A RESERVATION comes next, before anything about composition:
+/// `only move + access` is refused for `access` being a word with no
+/// meaning yet, not for the ladder it would sit on if it had one — the
+/// reservation is why the name is in the table at all, and a reservation
+/// has to read as a reservation wherever it is written.
+fn ceiling_error(name: &str, seen: &[String]) -> Option<String> {
+    if seen.iter().any(|s| s == name) {
+        return Some(format!("`{name}` is already this declaration's ceiling"));
+    }
+    let Some(capability) = capability_named(name) else {
+        return Some(format!(
+            "unknown capability `{name}`; `move` is the only ceiling that can be written"
+        ));
+    };
+    if !capability.live {
+        return Some(format!(
+            "the `{name}` capability does not exist yet; \
+             `move` is the only ceiling that can be written"
+        ));
+    }
+    if let Some(other) = seen
+        .iter()
+        .find(|s| capability_named(s).is_some_and(|c| c.ladder == capability.ladder))
+    {
+        return Some(format!(
+            "`{other}` and `{name}` are rungs of the same ladder — \
+             a declaration ceils one ladder once"
+        ));
+    }
+    if capability.clause {
+        return None;
+    }
+    // Only `forget` reaches this: it is the disposal ladder's TOP, so
+    // naming it as a ceiling declares nothing.
+    Some(format!(
+        "`{name}` is the default ceiling: a type whose values may be \
+         dropped on the floor needs no `only` clause"
+    ))
 }
 
 /// The liveness/reservation checks for one `impl` element. Live forms:
@@ -968,12 +1009,36 @@ fn validate_trait_item(trait_item: &ast::TraitItem, errors: &mut Vec<SyntaxError
     }
 }
 
-/// One capability: a thing you can DO with a value, and where its name may
-/// be written. A table of FACTS — every layer that asks phrases its own
-/// refusal, so no diagnostic text lives here for another crate to import.
+/// The ladders capabilities are rungs of. What a ladder MEANS is the
+/// question its rungs answer in common — disposal is what may become of a
+/// value on the way out of a scope — and only rungs of one ladder can
+/// contradict each other, which is the one thing this is compared for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ladder {
+    Disposal,
+    /// Reserved: `send` and `sync`.
+    Threading,
+    /// Reserved: `destruct`.
+    Destruction,
+}
+
+/// One capability: a thing you can DO with a value, which LADDER it is a
+/// rung of, and where its name may be written. A table of FACTS — every
+/// layer that asks phrases its own refusal, so no diagnostic text lives
+/// here for another crate to import.
 pub struct Capability {
     pub name: &'static str,
-    /// Whether a `type` declaration may name it in its capability clause.
+    /// The ladder this is a rung of. An `only` clause caps the ladders it
+    /// names and leaves every other one at its default, so this is what
+    /// decides whether two written names contradict each other or compose:
+    /// `access` < `move` < `forget` order one thing (what may become of a
+    /// value on the way out of scope), and `send`/`sync` will order another.
+    pub ladder: Ladder,
+    /// Whether the language HAS this capability yet, as opposed to
+    /// reserving the word. A reserved name is refused as reserved rather
+    /// than as a typo.
+    pub live: bool,
+    /// Whether a `type` declaration may name it as its ceiling.
     pub clause: bool,
     /// Whether a generic body may require it of a parameter (`T: forget`).
     pub bound: bool,
@@ -981,31 +1046,56 @@ pub struct Capability {
 
 /// The capability vocabulary — the language's own words, live or reserved.
 /// ONE list, asked rather than enumerated: validation reads it to decide
-/// what a clause may shed and what a bound is asking for, and `hir` reads
+/// what a clause may CEIL and what a bound is asking for, and `hir` reads
 /// it for the same two questions one layer down (P10's idiom, the way
 /// `keywords!` is the one keyword table).
 ///
-/// `forget` is the only capability that exists. The rest are named in the
+/// Two capabilities exist, and they are the two live rungs of the disposal
+/// ladder: `move` is the ceiling a declaration can write, `forget` is that
+/// ladder's top and the bound a body can require. The rest are named in the
 /// capability doctrine and mean nothing yet, which is why they are here at
-/// all: a reservation that is not written down reads as a typo.
+/// all: a reservation that is not written down reads as a typo. Rows are in
+/// ladder order, lowest rung first.
 pub const CAPABILITIES: &[Capability] = &[
     Capability {
-        name: "forget",
+        name: "access",
+        ladder: Ladder::Disposal,
+        live: false,
+        clause: false,
+        bound: false,
+    },
+    Capability {
+        name: "move",
+        ladder: Ladder::Disposal,
+        live: true,
         clause: true,
+        bound: false,
+    },
+    Capability {
+        name: "forget",
+        ladder: Ladder::Disposal,
+        live: true,
+        clause: false,
         bound: true,
     },
     Capability {
         name: "send",
+        ladder: Ladder::Threading,
+        live: false,
         clause: false,
         bound: false,
     },
     Capability {
         name: "sync",
+        ladder: Ladder::Threading,
+        live: false,
         clause: false,
         bound: false,
     },
     Capability {
         name: "destruct",
+        ladder: Ladder::Destruction,
+        live: false,
         clause: false,
         bound: false,
     },

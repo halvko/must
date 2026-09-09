@@ -187,7 +187,7 @@ impl LinearDiagnostic {
     ///
     /// EVERY message that explains why a value could not be lost or read
     /// again takes the hint, because inside a generic body all of them are
-    /// about the binder: nothing was declared `without forget`, so a reader
+    /// about the binder: nothing was declared `only move`, so a reader
     /// sent looking for a declaration finds none.
     ///
     /// Which hint, and therefore which advice, is decided by

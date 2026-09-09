@@ -69,11 +69,11 @@ pub enum SyntaxKind {
     RAW_KW,
     UNSAFE_KW,
     WITH_KW,
-    /// `without` — the capability opt-out head. `with` ATTACHES (members,
-    /// impls); `without` REMOVES (a capability the language would
-    /// otherwise assume), and the two ride the same trailing slot on a
+    /// `only` — the capability CEILING head. `with` ATTACHES (members,
+    /// impls); `only` CAPS (the most that can be done with a value of the
+    /// declared type), and the two ride the same trailing slot on a
     /// declaration so they read as the pair they are.
-    WITHOUT_KW,
+    ONLY_KW,
     IMPL_KW,
     FOR_KW,
     TRAIT_KW,
@@ -158,12 +158,13 @@ pub enum SyntaxKind {
     NEG_EXPR,
     WITH_GROUP,
     WITH_CLAUSE,
-    /// `without forget` — a capability opt-out. Two homes, one node: it
-    /// trails a declaration (`type S = struct { … } without forget;`) and
-    /// it rides a generic parameter (`enum::<T without forget>`), which is
-    /// what makes the declaration-site form and the bound-relaxing form
-    /// the same spelling.
-    WITHOUT_CLAUSE,
+    /// `only move` — a capability CEILING, trailing a `type` declaration
+    /// (`type S = struct { … } only move;`). ONE home: a ceiling is a fact
+    /// about a declared type, and nothing else in the language declares
+    /// one. Generic parameters carry no capability clause at all — what a
+    /// body may do with a `T` is written in the parameter's BOUNDS
+    /// (`T: forget`), the ordinary positive slot (T22).
+    ONLY_CLAUSE,
     IMPL_ELEMENT,
     UNSAFE_ELEMENT,
     FOR_ELEMENT,
@@ -246,7 +247,7 @@ keywords! {
     "raw" => RAW_KW,
     "unsafe" => UNSAFE_KW,
     "with" => WITH_KW,
-    "without" => WITHOUT_KW,
+    "only" => ONLY_KW,
     "impl" => IMPL_KW,
     "for" => FOR_KW,
     "trait" => TRAIT_KW,

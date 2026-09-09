@@ -297,9 +297,9 @@ pub fn item_data<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<item_tree::I
             kind: item_tree::ItemKind::Member,
             type_ref: data.type_ref.clone(),
             generics,
-            // A member is a value item; only a `type` declaration sheds a
-            // capability.
-            without_forget: false,
+            // A member is a value item; only a `type` declaration writes a
+            // ceiling.
+            only_move: false,
             // A member is DEFINED where it is declared; an import is the
             // one value in the language that is not.
             is_extern: false,
@@ -311,8 +311,9 @@ pub fn item_data<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<item_tree::I
             kind: item_tree::ItemKind::Type,
             type_ref: None,
             generics: decl.generics.clone(),
-            // A compiler-provided declaration sheds nothing.
-            without_forget: false,
+            // No compiler-provided declaration caps itself: every one of
+            // them can be dropped on the floor.
+            only_move: false,
             is_extern: false,
         });
     }
@@ -2893,8 +2894,8 @@ fn apply_position_diagnostics(
             // Nothing left to judge about a type argument AS A WHOLE.
             // Inner type args are PathTypes of their own and the pass
             // visits them independently; the one judgement that used to
-            // live here was the default `forget` bound, and a data-side
-            // parameter no longer carries one (T22). That deletion also
+            // live here was the retired data-side `forget` bound, which a
+            // parameter no longer carries (T22). That deletion also
             // closes the annotation-position hole BY CONSTRUCTION: the
             // check that could be laundered by lowering an argument to
             // `{error}` no longer exists to be laundered.
@@ -3293,14 +3294,26 @@ enum CapabilityBound {
 /// own, so a file that happens to declare a `trait forget` does not change
 /// what `T: forget` asks for.
 fn capability_bound(name: &str) -> CapabilityBound {
-    match syntax::capability_named(name) {
-        None => CapabilityBound::NotOne,
-        Some(capability) if capability.bound => CapabilityBound::Forget,
-        Some(_) => CapabilityBound::Refused(format!(
-            "the `{name}` capability does not exist yet; \
-             `forget` is the only one a body can require"
-        )),
+    let Some(capability) = syntax::capability_named(name) else {
+        return CapabilityBound::NotOne;
+    };
+    if capability.bound {
+        return CapabilityBound::Forget;
     }
+    // Only `move` reaches this: asking for it asks for nothing, since every
+    // value can be moved — which is exactly what an unbounded parameter may
+    // already do.
+    if capability.live {
+        return CapabilityBound::Refused(
+            "every value can be moved, so `move` is not worth requiring; \
+             an unbounded parameter can already be moved, returned and passed on"
+                .to_owned(),
+        );
+    }
+    CapabilityBound::Refused(format!(
+        "the `{name}` capability does not exist yet; \
+         `forget` is the only one a body can require"
+    ))
 }
 
 /// Whether a type node sits in a SIGNATURE — a parameter's annotation or a

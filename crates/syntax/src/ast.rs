@@ -350,13 +350,12 @@ ast_node!(
     WithClause: WITH_CLAUSE
 );
 ast_node!(
-    /// `without forget` — a capability opt-out, in either of its two
-    /// homes: trailing a `type` declaration (this declaration does not
-    /// have the capability) or riding a generic parameter (this parameter
-    /// is not REQUIRED to have it). One node, one spelling; which of the
-    /// two readings applies is decided by where it sits, and both are the
-    /// same sentence about the same capability.
-    WithoutClause: WITHOUT_CLAUSE
+    /// `only move` — a capability CEILING, trailing a `type` declaration:
+    /// the most that can be done with a value of it. One home, because a
+    /// ceiling is a fact about a declared type and nothing else in the
+    /// language declares one; a generic parameter carries no capability
+    /// clause at all (T22).
+    OnlyClause: ONLY_CLAUSE
 );
 ast_node!(
     /// `impl ⟨head⟩ { member* }` or the body-elided `impl ⟨head⟩;`.
@@ -495,21 +494,21 @@ impl Item {
         children(self.syntax())
     }
 
-    /// The `without ⟨capability⟩` clauses trailing the item, in source
-    /// order — meaningful on `type` declarations only (superset-parsed and
-    /// rejected elsewhere: a `static` declares a value, and a value has
-    /// whatever capabilities its type has).
-    pub fn without_clauses(&self) -> impl Iterator<Item = WithoutClause> + use<> {
+    /// The `only ⟨capability⟩` clauses trailing the item, in source order —
+    /// meaningful on `type` declarations only (superset-parsed and rejected
+    /// elsewhere: a `static` declares a value, and a value has whatever
+    /// ceiling its type has).
+    pub fn only_clauses(&self) -> impl Iterator<Item = OnlyClause> + use<> {
         children(self.syntax())
     }
 }
 
-impl WithoutClause {
-    pub fn without_token(&self) -> Option<SyntaxToken> {
-        token(&self.syntax, WITHOUT_KW)
+impl OnlyClause {
+    pub fn only_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, ONLY_KW)
     }
-    /// The capability names, in source order (`without forget + send`
-    /// yields two).
+    /// The capability names, in source order (`only move + send` yields
+    /// two).
     pub fn capabilities(&self) -> impl Iterator<Item = NameRef> + use<> {
         children(&self.syntax)
     }
@@ -525,10 +524,10 @@ impl StaticItem {
     pub fn body(&self) -> Option<Expr> {
         child(&self.syntax)
     }
-    /// Superset-parsed capability opt-outs (validation rejects them on
-    /// `static`/`const` items — a `without` clause attaches to a `type`
+    /// Superset-parsed capability ceilings (validation rejects them on
+    /// `static`/`const` items — an `only` clause attaches to a `type`
     /// declaration only, exactly as a `with`-chain does).
-    pub fn without_clauses(&self) -> impl Iterator<Item = WithoutClause> + use<> {
+    pub fn only_clauses(&self) -> impl Iterator<Item = OnlyClause> + use<> {
         children(&self.syntax)
     }
     /// Whether the item is introduced by `const` (as opposed to `static`).
@@ -713,9 +712,9 @@ impl TypeItem {
     pub fn with_groups(&self) -> impl Iterator<Item = WithGroup> + use<> {
         children(&self.syntax)
     }
-    /// The `without ⟨capability⟩` clauses trailing the declaration, in
-    /// source order — the declaration-site capability opt-out.
-    pub fn without_clauses(&self) -> impl Iterator<Item = WithoutClause> + use<> {
+    /// The `only ⟨capability⟩` clauses trailing the declaration, in source
+    /// order — the declared capability ceiling.
+    pub fn only_clauses(&self) -> impl Iterator<Item = OnlyClause> + use<> {
         children(&self.syntax)
     }
     /// The declaration's RHS — restricted to a `struct` literal by hir, but

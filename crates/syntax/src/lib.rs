@@ -121,12 +121,21 @@ impl Parse {
 
 pub fn parse(text: &str) -> Parse {
     let (tokens, lex_errors) = lexer::tokenize(text);
-    let kinds: Vec<SyntaxKind> = tokens
-        .iter()
-        .map(|t| t.kind)
-        .filter(|k| !k.is_trivia())
-        .collect();
-    let mut parser = parser::Parser::new(&kinds);
+    // The parser sees KINDS, plus the text of each one: a retired spelling
+    // is an ordinary identifier to the lexer, and refusing it by name is
+    // the only way to say what replaced it (`grammar`'s `without`).
+    let mut kinds: Vec<SyntaxKind> = Vec::with_capacity(tokens.len());
+    let mut texts: Vec<&str> = Vec::with_capacity(tokens.len());
+    let mut offset = TextSize::new(0);
+    for token in &tokens {
+        let end = offset + token.len;
+        if !token.kind.is_trivia() {
+            kinds.push(token.kind);
+            texts.push(&text[TextRange::new(offset, end)]);
+        }
+        offset = end;
+    }
+    let mut parser = parser::Parser::new(&kinds, &texts);
     grammar::source_file(&mut parser);
     let events = parser.finish();
     let (green, mut errors) = builder::build(text, &tokens, events, lex_errors);

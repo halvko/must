@@ -137,18 +137,17 @@
   annotation. One population gets the type without writing it: every builtin that requires the
   marker and has a first-class fn type (`dealloc_array`, `str_bytes`). An import writes it —
   the declaration is the whole contract, and `unsafe` is part of what it says (G22).
-- **T20** A capability names something you can DO with a value. One exists, `forget` — let a
-  value go with nothing done about it — and every type has it unless a `type` declaration
-  sheds it with a trailing `without forget` clause, which rides `with`'s slot in either order
-  and is parsed by one loop so neither is privileged. Capability names are ordinary name refs
-  composed with `+`; `send`, `sync` and `destruct` are named in the doctrine and refused as
-  not existing yet, the clause is superset-parsed and refused on `static`/`const`/`trait`
-  items — imports included, which have no `= rhs` for it to trail — and on every generic
-  parameter, a region and a const parameter each for their own reason. A declaration sheds
-  once. A type without `forget` is linear: every path consumes a value of it exactly once.
-  There is no destructor, no drop glue and no unwinding; the checker is the whole mechanism,
-  and codegen never learns the type is linear (identical output bytes with and without the
-  clause).
+- **T20** The `only move` ceiling. A capability names something you can do with a value; a
+  declaration states its ceiling, the most that can be done on the ladders the clause names.
+  One ladder exists, disposal, with rungs `access` < `move` < `forget`; `forget` is the top
+  and the default, so a forgettable type writes nothing. An `only` clause belongs to a `type`
+  declaration: it is superset-parsed and refused, in one sentence, on `static`, `const` and
+  `trait` items — imports included, which have no `= rhs` for it to trail — as on every
+  generic parameter (G21). A type capped at `move` is linear: every path consumes a value of
+  it exactly once. There is no destructor, no drop glue and no unwinding; the checker is the
+  whole mechanism, and codegen never learns the type is linear (identical output bytes with
+  and without the clause). An `only` clause ceils only the ladders it names, so when a `send`
+  capability lands every existing `only move` type keeps the send-axis default.
 - **T21** Containment infects; indirection does not. A record, enum or array holding a linear
   is linear, and widening a variant never changes the answer. A borrow, a raw pointer or a
   `fn` type mentioning one keeps `forget`, because the obligation stayed with the owner, which
@@ -191,11 +190,19 @@
 - **Transparent type aliases** — two identical spellings are two types, always.
   **Nominal-to-structural coercion** — a named type and its identical record shape stay
   distinct. **Subtyping in generic positions.** **T03 T13**
+- **A subtractive capability clause (`without forget`)** — said the same thing, and the
+  checker did not change; the reading did. `without` names an absence against a default the
+  reader must supply from memory, and there is no natural way to write "and it may not even be
+  moved" as a further subtraction that reads as a lower rung. `only` names a position on a
+  ladder, so it stays true as rungs are added below. **T20**
 - **`linear struct { ... }`** — names a property, not a capability, and does not extend. **A
   marker element in the `with`-chain** — that brace holds impl elements; reusing it makes
   "what is in a `with` block" two questions. **A negative bound in the `type` item's `: Type`
   slot** — validation already rejects that slot. **An attribute** — there are none, and adding
   a surface for one fact is how a language grows two ways to say everything. **T20**
+- **A total-ceiling reading of `only`** ("`move` and nothing else, ever") — the arrival of a
+  new capability would silently remove it from every declaration already written, the
+  retrofit the ladder exists to avoid. **T20**
 - **A `forget` default bound on every type parameter with opt-out** — its argument was timing:
   such a bound cannot be retrofitted against an ecosystem. That only proves a needed bound
   must be installed early, and this one was not needed: containment already makes a container

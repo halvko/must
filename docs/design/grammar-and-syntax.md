@@ -64,7 +64,7 @@
   escape. `\u{...}` and `\xNN` are answered "not supported yet" rather than "unknown", in
   both literal forms from that one table: the design holds room for them, so calling either
   unknown would send the reader hunting for a spelling that is already spoken for.
-- **G16** Full keywords: `raw unsafe with impl for trait requires extern without` (`const`,
+- **G16** Full keywords: `raw unsafe with impl for trait requires extern only` (`const`,
   `struct`, `enum` are contextual expression-starters). `extern` also OPENS an item, the
   fifth after `static`/`const`/`type`/`trait` (G22). One `keywords!` table generates the
   set — `from_keyword`, `is_keyword`, and the table itself — so the highlighter (P10) and
@@ -98,6 +98,24 @@
   spelling across token kinds: in `&'a T` the `&` fires its own migration and the freed
   `'` is an ordinary unterminated character literal. That recovery is diagnostics-layer
   work.
+- **G21** `only` is the capability ceiling clause (T20). One production, one home:
+
+  ```
+  item        := ('static'|'const'|'type'|'trait') pattern (':' type)?
+                 '=' rhs (with-group | only-clause)* ';'
+  import      := 'extern' 'static' pattern ':' type
+                 (with-group | only-clause)* ';'
+  only-clause := 'only' name-ref ('+' name-ref)*
+  ```
+
+  `with` attaches and `only` caps; they share the trailing slot in either order, parsed by one
+  loop, on every item head — an import, which has no `= rhs` to trail, reads them too, so a
+  ceiling written on one is a refusal rather than a parse cascade. Capability names are
+  ordinary name refs composed with `+`, and `+` here names one ceiling per ladder, so two
+  rungs of one ladder contradict rather than accumulate. A ceiling is written once per
+  declaration per ladder; a generic parameter takes no capability clause.
+  The retired `without forget` is still recognized in both old homes and consumed, so each site
+  is one diagnostic and the item after it still parses.
 - **G18** A character literal holds one Unicode scalar value; escapes are the string set
   with the quote swapped, so only the delimiter that would end the literal needs one. The
   scan is line-bounded, unlike a string's, so a half-typed quote costs one odd token on its
@@ -205,6 +223,9 @@
   no postfix text means the same thing. **G08 G26**
 - **A safe-to-call import gets a declaration-side vouch spelling** — G22's required `unsafe`
   is conservative, blocked on that marker rather than rejected. **G22**
+- **`only` as a global keyword becomes a problem** — it cannot be an identifier anywhere,
+  though the language reads it in one slot; the contextual alternative is one line, at the
+  cost of a clause head that lexes as an identifier. **G21**
 - **A region in argument position gets painful** — nothing is unsayable, so this is
   ergonomics: ask why inference could not get there rather than putting the argument back on
   the operation. **Patterns grow type ascription** — a pattern is neither a type mention nor
