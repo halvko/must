@@ -1515,26 +1515,27 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             // very call whose argument carries the mismatch).
             related.retain(|r| !(r.file == file && r.range.contains_range(range)));
             let fix = match diag {
-                // Insert `mut ` right before the binding's name, whether it
-                // came from a `let` or a parameter — both render the fixed
-                // source as `let mut x = …` / `fn (mut n: usize)`. A hole
-                // (`_`) never resolves as an assignment target, so this
-                // shouldn't fire for one; skip defensively rather than offer
-                // a nonsensical `mut _`.
+                // Insert `mut ` where the grammar has a slot for it before
+                // this binding — a `let`, a parameter, or a record-pattern
+                // field (before the FIELD name, which for a rename is not
+                // the name the related note points at). A match-arm bind, a
+                // variant payload and a newtype's inner bind have no such
+                // slot, so no fix is offered there. A hole has one
+                // (`let mut _` parses) but never reaches here: a hole is
+                // not an assignment target, and `mut` on one is its own
+                // diagnostic.
                 InferenceDiagnostic::AssignToImmutable { binding, name, .. }
-                | InferenceDiagnostic::AddrOfMutImmutable { binding, name, .. }
-                    if name != "_" =>
-                {
-                    source_map
-                        .node_for_binding(*binding)
-                        .map(|ptr| syntax::Fix {
-                            label: format!("Make `{name}` mutable"),
-                            edits: vec![syntax::TextEdit {
-                                range: TextRange::empty(ptr.text_range().start()),
-                                insert: "mut ".to_owned(),
-                            }],
-                        })
-                }
+                | InferenceDiagnostic::AddrOfMutImmutable { binding, name, .. } => source_map
+                    .node_for_binding(*binding)
+                    .and_then(|ptr| ast::Name::cast(ptr.to_node(&syntax_root)))
+                    .and_then(|decl| decl.mut_slot())
+                    .map(|slot| syntax::Fix {
+                        label: format!("Make `{name}` mutable"),
+                        edits: vec![syntax::TextEdit {
+                            range: TextRange::empty(slot),
+                            insert: "mut ".to_owned(),
+                        }],
+                    }),
                 // "Add missing match arms" — one generated arm per name in
                 // `uncovered`. An empty arm list and a partially-covered one
                 // both fall out of the same path with no special-casing (see

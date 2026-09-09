@@ -2,7 +2,7 @@
 //! a node produced from broken code may be missing ~any child.
 
 use crate::SyntaxKind::{self, *};
-use crate::{MustLanguage, SyntaxNode, SyntaxToken};
+use crate::{MustLanguage, SyntaxNode, SyntaxToken, TextSize};
 
 pub use rowan::ast::{AstNode, AstPtr};
 
@@ -743,6 +743,29 @@ impl Name {
     /// `grammar::pattern`), so this is the complement of having text.
     pub fn is_hole(&self) -> bool {
         token(&self.syntax, HOLE).is_some()
+    }
+
+    /// Where the insert-`mut` fix may write `mut` for this name, if
+    /// anywhere: the name's own start for a `let` binding or a parameter,
+    /// and the field name's start for a record-pattern field (`mut? field
+    /// (as rename)?` — `mut` goes before the FIELD name even when the name
+    /// bound is the rename). `None` at every other binding site — a
+    /// match-arm bind, a variant payload, a newtype's inner pattern —
+    /// where no `mut` can be written at all, and `None` for a hole, which
+    /// does have the slot (`let mut _` parses) but is no assignment
+    /// target, so the only `mut` it could take is the one `hir` already
+    /// refuses on its own.
+    pub fn mut_slot(&self) -> Option<TextSize> {
+        if self.is_hole() {
+            return None;
+        }
+        let parent = self.syntax.parent()?;
+        let slot = match parent.kind() {
+            RECORD_PAT_FIELD => RecordPatField::cast(parent)?.field_name()?.syntax,
+            BIND_PAT if matches!(parent.parent()?.kind(), LET_STMT | PARAM) => self.syntax.clone(),
+            _ => return None,
+        };
+        Some(slot.text_range().start())
     }
 }
 

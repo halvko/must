@@ -1918,6 +1918,102 @@ fn assign_to_immutable_param_offers_a_make_mutable_fix() {
 }
 
 #[test]
+fn variant_payload_binding_assign_offers_no_fix() {
+    // A variant payload has no `mut` slot (`pattern_binding_list` parses
+    // `IDENT | HOLE` only), so `ast::Name::mut_slot` is `None` and the
+    // insert-`mut` fix stays away; the diagnostic and its "declared
+    // without `mut` here" note still fire.
+    let text = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(r) => { r = 2; r },
+        ::Point => 0,
+    }
+};
+"#;
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    let diag = diagnostics
+        .iter()
+        .find(|d| d.message.starts_with("cannot assign to `r`"))
+        .unwrap_or_else(|| panic!("no assign-to-immutable diagnostic in {diagnostics:?}"));
+    assert_eq!(
+        diag.message,
+        "cannot assign to `r`: it is not declared `mut`"
+    );
+    assert!(diag.fix.is_none(), "expected no fix, got {:?}", diag.fix);
+    assert_eq!(diag.related.len(), 1, "related: {:?}", diag.related);
+    assert_eq!(
+        diag.related[0].message,
+        "`r` is declared without `mut` here"
+    );
+}
+
+#[test]
+fn match_arm_bind_assign_offers_no_fix() {
+    // A bare match-arm bind (`n => …`) has no `mut` slot either —
+    // `match_pattern`'s `BIND_PAT` arm never eats `MUT_KW`.
+    let text = r#"
+static f = fn (x: usize) -> usize {
+    match x {
+        n => { n = 2; n },
+    }
+};
+"#;
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    let diag = diagnostics
+        .iter()
+        .find(|d| d.message.starts_with("cannot assign to `n`"))
+        .unwrap_or_else(|| panic!("no assign-to-immutable diagnostic in {diagnostics:?}"));
+    assert_eq!(
+        diag.message,
+        "cannot assign to `n`: it is not declared `mut`"
+    );
+    assert!(diag.fix.is_none(), "expected no fix, got {:?}", diag.fix);
+    assert_eq!(diag.related.len(), 1, "related: {:?}", diag.related);
+    assert_eq!(
+        diag.related[0].message,
+        "`n` is declared without `mut` here"
+    );
+}
+
+#[test]
+fn newtype_nested_binding_assign_offers_no_fix() {
+    // A newtype's inner bind (`Foo(inner)`) has no `mut` slot at any
+    // depth: `newtype_pat` never eats `MUT_KW`, so `Foo(mut inner)` does
+    // not parse and the fix must not offer it.
+    let text = r#"
+type Foo = struct { n: usize };
+static f = fn (v: Foo) -> usize {
+    let Foo(inner) = v;
+    inner = 2;
+    inner
+};
+"#;
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    let diag = diagnostics
+        .iter()
+        .find(|d| d.message.starts_with("cannot assign to `inner`"))
+        .unwrap_or_else(|| panic!("no assign-to-immutable diagnostic in {diagnostics:?}"));
+    assert_eq!(
+        diag.message,
+        "cannot assign to `inner`: it is not declared `mut`"
+    );
+    assert!(diag.fix.is_none(), "expected no fix, got {:?}", diag.fix);
+    assert_eq!(diag.related.len(), 1, "related: {:?}", diag.related);
+    assert_eq!(
+        diag.related[0].message,
+        "`inner` is declared without `mut` here"
+    );
+}
+
+#[test]
 fn mut_on_hole_offers_a_remove_mut_fix() {
     // Validation's "`mut` has no effect on `_`" error carries a fix that
     // deletes the `mut` keyword and the whitespace up to the hole.
@@ -4522,6 +4618,51 @@ fn record_pattern_binding_without_mut_is_immutable() {
 }
 
 #[test]
+fn record_pattern_field_offers_the_make_mut_fix() {
+    // A record-pattern field carries its own `mut` (`struct { mut x }`),
+    // so `ast::Name::mut_slot` puts the fix right before the field name.
+    let text = "static f = fn { let struct { x } = struct { x = 1 }; x = 2; };";
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    let diag = diagnostics
+        .iter()
+        .find(|d| d.message.starts_with("cannot assign to `x`"))
+        .unwrap_or_else(|| panic!("no assign-to-immutable diagnostic in {diagnostics:?}"));
+    let fix = diag.fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Make `x` mutable");
+    assert_eq!(fix.edits.len(), 1);
+    assert_eq!(fix.edits[0].insert, "mut ");
+    // Immediately before the field's own name `x` in `struct { x }`
+    // (offset 29): applying it yields `struct { mut x }`.
+    assert_eq!(u32::from(fix.edits[0].range.start()), 29);
+}
+
+#[test]
+fn renamed_record_pattern_field_puts_mut_before_the_field_name() {
+    // `record_pat_field` is `mut? field (as rename)?`: the one `mut` goes
+    // before the FIELD name, not the bound rename, so the fix for `a`
+    // inserts before `x` — `struct { x as mut a }` would not parse.
+    let text = "static f = fn { let struct { x as a } = struct { x = 1 }; a = 2; };";
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    let diag = diagnostics
+        .iter()
+        .find(|d| d.message.starts_with("cannot assign to `a`"))
+        .unwrap_or_else(|| panic!("no assign-to-immutable diagnostic in {diagnostics:?}"));
+    let fix = diag.fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Make `a` mutable");
+    assert_eq!(fix.edits.len(), 1);
+    assert_eq!(fix.edits[0].insert, "mut ");
+    // Before `x` in `struct { x as a }` (offset 29): applying it yields
+    // `struct { mut x as a }`. The related note still points at `a`.
+    assert_eq!(u32::from(fix.edits[0].range.start()), 29);
+    assert_eq!(diag.related.len(), 1, "related: {:?}", diag.related);
+    assert_eq!(u32::from(diag.related[0].range.start()), 34);
+}
+
+#[test]
 fn let_mut_on_a_destructuring_pattern_is_a_syntax_error() {
     check_diagnostics(
         r#"static f = fn { let mut struct { x } = struct { x = 1 }; };"#,
@@ -6018,6 +6159,25 @@ fn addr_of_mut_requires_a_mut_root() {
             38..39: cannot take `.&raw mut` of `x`: it is not declared `mut` (`x` is declared without `mut` here at 23..24)
         "#]],
     );
+}
+
+#[test]
+fn addr_of_mut_immutable_offers_the_make_mut_fix() {
+    // Same machinery as `assign_to_immutable_let_offers_a_make_mutable_fix`:
+    // `.&raw mut` of a non-`mut` root anchors the insert-`mut` fix at the
+    // binding's declaration, not the address-of.
+    let text = "static f = fn { let x: usize = 1; let p = x.&raw mut; };";
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Make `x` mutable");
+    assert_eq!(fix.edits.len(), 1);
+    assert_eq!(fix.edits[0].insert, "mut ");
+    // Immediately before the binding's name `x` in `let x` (offset 20):
+    // applying it yields `let mut x = 1;`.
+    assert_eq!(u32::from(fix.edits[0].range.start()), 20);
 }
 
 #[test]
