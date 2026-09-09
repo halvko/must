@@ -338,18 +338,19 @@ fn validate_with_group(group: &ast::WithGroup, errors: &mut Vec<SyntaxError>) {
 
 /// Where a capability opt-out may sit, and which capabilities it may name.
 ///
-/// Two homes are live: a `type` declaration (the declaration does not have
-/// the capability) and a TYPE parameter of any binder (the parameter is not
-/// required to have it). The superset-parsed homes — `static`/`const`/
-/// `trait` items, region and const parameters — are rejected here, each in
-/// its own words, because "why not" differs: a value item has no say over
-/// its type's capabilities, and a region or a const parameter never denotes
-/// something that could hold one.
+/// ONE home is live: a `type` declaration, which does not have the
+/// capability it sheds. The superset-parsed homes (`static`/`const`/`trait`
+/// items, which share the item shape) are rejected here, each in its own
+/// words, because "why not" differs: a value item has no say over its
+/// type's capabilities, and a trait classifies types rather than being one.
+/// A generic PARAMETER carries no capability clause at all — what a body
+/// needs of its parameter is written in the parameter's BOUNDS (T22), so
+/// the grammar no longer parses one there and this function never sees it.
 ///
-/// Only `forget` exists. `send`/`sync`/`destruct` are named in the
-/// capability doctrine and have no meaning yet, so naming one is an error
-/// rather than a silent no-op — the message says which it is, so the
-/// reservation reads as a reservation.
+/// Which names may be written is read off [`CAPABILITIES`], the one list
+/// this crate keeps: `forget` is the only capability that exists, and the
+/// doctrine's reserved names are an error rather than a silent no-op — the
+/// message says which it is, so the reservation reads as a reservation.
 fn validate_without_clause(without: &ast::WithoutClause, errors: &mut Vec<SyntaxError>) {
     let anchor = without
         .without_token()
@@ -357,7 +358,7 @@ fn validate_without_clause(without: &ast::WithoutClause, errors: &mut Vec<Syntax
         .unwrap_or_else(|| without.syntax().text_range());
     let parent = without.syntax().parent().map(|p| p.kind());
     let misplaced = match parent {
-        Some(SyntaxKind::TYPE_ITEM) | Some(SyntaxKind::TYPE_PARAM) => None,
+        Some(SyntaxKind::TYPE_ITEM) => None,
         Some(SyntaxKind::STATIC_ITEM) => Some(
             "a capability opt-out belongs on a `type` declaration; \
              a `static` has whatever capabilities its type has",
@@ -365,14 +366,6 @@ fn validate_without_clause(without: &ast::WithoutClause, errors: &mut Vec<Syntax
         Some(SyntaxKind::TRAIT_ITEM) => {
             Some("a capability opt-out belongs on a `type` declaration, not on a `trait`")
         }
-        Some(SyntaxKind::REGION_PARAM) => Some(
-            "a region parameter names a duration, not a value, \
-             so it has no capability to opt out of",
-        ),
-        Some(SyntaxKind::CONST_PARAM) => Some(
-            "a const parameter's values are always plain data, \
-             so it has no capability to opt out of",
-        ),
         _ => Some("a capability opt-out cannot go here"),
     };
     if let Some(message) = misplaced {
@@ -408,16 +401,16 @@ fn validate_without_clause(without: &ast::WithoutClause, errors: &mut Vec<Syntax
                     });
                     continue;
                 }
-                let message = match name.as_str() {
-                    "forget" => {
+                let message = match capability_named(&name) {
+                    Some(known) if known.clause => {
                         seen.push(name);
                         continue;
                     }
-                    "send" | "sync" | "destruct" => format!(
+                    Some(_) => format!(
                         "the `{name}` capability does not exist yet; \
                          `forget` is the only one that can be opted out of"
                     ),
-                    _ => format!(
+                    None => format!(
                         "unknown capability `{name}`; \
                          `forget` is the only one that can be opted out of"
                     ),
@@ -975,6 +968,72 @@ fn validate_trait_item(trait_item: &ast::TraitItem, errors: &mut Vec<SyntaxError
     }
 }
 
+/// One capability: a thing you can DO with a value, and where its name may
+/// be written. A table of FACTS — every layer that asks phrases its own
+/// refusal, so no diagnostic text lives here for another crate to import.
+pub struct Capability {
+    pub name: &'static str,
+    /// Whether a `type` declaration may name it in its capability clause.
+    pub clause: bool,
+    /// Whether a generic body may require it of a parameter (`T: forget`).
+    pub bound: bool,
+}
+
+/// The capability vocabulary — the language's own words, live or reserved.
+/// ONE list, asked rather than enumerated: validation reads it to decide
+/// what a clause may shed and what a bound is asking for, and `hir` reads
+/// it for the same two questions one layer down (P10's idiom, the way
+/// `keywords!` is the one keyword table).
+///
+/// `forget` is the only capability that exists. The rest are named in the
+/// capability doctrine and mean nothing yet, which is why they are here at
+/// all: a reservation that is not written down reads as a typo.
+pub const CAPABILITIES: &[Capability] = &[
+    Capability {
+        name: "forget",
+        clause: true,
+        bound: true,
+    },
+    Capability {
+        name: "send",
+        clause: false,
+        bound: false,
+    },
+    Capability {
+        name: "sync",
+        clause: false,
+        bound: false,
+    },
+    Capability {
+        name: "destruct",
+        clause: false,
+        bound: false,
+    },
+];
+
+/// The capability `name` spells, if it spells one. Deliberately scope-free:
+/// the vocabulary is the language's, so no file can declare its way into or
+/// out of one.
+pub fn capability_named(name: &str) -> Option<&'static Capability> {
+    CAPABILITIES
+        .iter()
+        .find(|capability| capability.name == name)
+}
+
+/// Whether a bound names a capability rather than a trait. A BARE path
+/// only: `forget::<usize>` is not this capability wearing arguments, it is
+/// a shape the bound rules already refuse.
+fn names_capability(bound: &ast::Type) -> bool {
+    let ast::Type::PathType(path) = bound else {
+        return false;
+    };
+    path.variant_name_ref().is_none()
+        && path.generic_arg_list().is_none()
+        && path
+            .name_ref()
+            .is_some_and(|name| capability_named(&name.text()).is_some())
+}
+
 /// Bound-position rules on one generic type parameter (`T: Display`).
 /// Bounds are LIVE on fn binders (item fns, impl members, requirement
 /// signatures); a bound on a `type` declaration's `struct`/`enum` binder
@@ -986,21 +1045,6 @@ fn validate_type_param_bounds(type_param: &ast::TypeParam, errors: &mut Vec<Synt
     if type_param.colon_token().is_none() {
         return;
     }
-    // Written the other way round (`T without forget: Bound`). Both orders
-    // parse; only one reads correctly, and it is the one where the
-    // requirements accumulate before the subtraction.
-    if let Some(without) = type_param.without_clause()
-        && let Some(token) = without.without_token()
-        && let Some(colon) = type_param.colon_token()
-        && token.text_range().start() < colon.text_range().start()
-    {
-        errors.push(SyntaxError {
-            message: "write the bounds before the opt-out (`T: Bound without forget`): a capability opt-out subtracts from what the bounds ask for"
-                .to_owned(),
-            range: without.syntax().text_range(),
-            fix: None,
-        });
-    }
     let owner = type_param.syntax().parent().and_then(|list| list.parent());
     if let Some(owner) = &owner {
         // Reserved binder homes carry group-level reservations of their
@@ -1011,8 +1055,19 @@ fn validate_type_param_bounds(type_param: &ast::TypeParam, errors: &mut Vec<Synt
             return;
         }
         if ast::RecordExpr::can_cast(owner.kind()) || ast::EnumExpr::can_cast(owner.kind()) {
+            // A CAPABILITY bound on the data side is not "not yet": it is
+            // the thing T22 deleted. A container's capabilities are read
+            // off what it CONTAINS — `Option::<T>` is linear exactly when
+            // the `T` it was given is — so there is nothing for a
+            // data-side parameter to require, now or later.
+            let message = if type_param.bounds().any(|bound| names_capability(&bound)) {
+                "a `type` declaration's parameters carry no capability bounds: \
+                 a container is linear when what it holds is"
+            } else {
+                "bounds on a `type` declaration's binder are not supported yet"
+            };
             errors.push(SyntaxError {
-                message: "bounds on a `type` declaration's binder are not supported yet".to_owned(),
+                message: message.to_owned(),
                 range: type_param.syntax().text_range(),
                 fix: None,
             });

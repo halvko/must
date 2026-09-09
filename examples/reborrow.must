@@ -9,8 +9,9 @@
 //     — so a member declares its own region binder (`fn::<@b>`);
 //   * a dot-call whose receiver is already a borrow, which reborrows into
 //     that region instead of dereferencing (there is no auto-deref, ever);
-//   * `T` inferred through a borrow, so `Self.&mut::<@b>` matches a
-//     `Map::<K, V>.&mut::<@a>` argument;
+//   * a generic payload pinned by INFERENCE alone: `::Some(m.*.v0.&mut)`
+//     makes the `Option`'s `T` a `usize.&mut::<@b>`, with nothing written
+//     down anywhere to say so;
 //   * `::Some` / `::None` in EXPRESSION position, resolved from the type
 //     the position expects.
 //
@@ -45,20 +46,27 @@ type Option = enum::<T> {
 // Two fixed slots: there is no heap in this example, and none is needed to
 // show the borrow story. What matters is the SIGNATURES.
 
-type Map = struct::<K, V> {
-    k0: K, v0: V, used0: bool,
-    k1: K, v1: V, used1: bool,
+// The keys and values are `usize` rather than a `K` and a `V`, and that is
+// a language limit rather than a simplification. A generic map cannot be
+// written today for two reasons, neither about capability bounds: `m.*.k0
+// == key` READS a key out of a borrow, which for a rigid parameter is a
+// copy nothing licenses; and `m.*.v0 = val` writes over a slot that may
+// still hold a value, which needs a REPLACE primitive handing the old one
+// back — the gap TR11 registers, and the reserved constrained attachment
+// group (TR01) is where a bound on the owner's parameter would have gone.
+type Map = struct {
+    k0: usize, v0: usize, used0: bool,
+    k1: usize, v1: usize, used1: bool,
 } with {
     impl Self {
         // `@b` is the member's OWN region binder, and it has nowhere else
-        // to come from: `Map`'s binder carries `K` and `V`, regions on type
-        // declarations are not a thing yet, and a signature elides nothing.
-        // So a member that borrows `Self` declares the region it borrows
-        // for.
+        // to come from: regions on type declarations are not a thing yet,
+        // and a signature elides nothing. So a member that borrows `Self`
+        // declares the region it borrows for.
         //
         // It is instantiated FRESH at every call, exactly like a free
         // function's — two calls in one body get two independent regions.
-        get = fn::<@b>(key: K, m: Self.&mut::<@b>) -> Option::<V.&mut::<@b>> {
+        get = fn::<@b>(key: usize, m: Self.&mut::<@b>) -> Option::<usize.&mut::<@b>> {
             // `::Some(...)` — the elided sigil in expression position, the
             // mirror of the pattern spelling. The enum comes from the
             // position's expected type, which here is the `return`'s: the
@@ -70,7 +78,7 @@ type Map = struct::<K, V> {
             ::None
         };
 
-        insert = fn::<@b>(key: K, val: V, m: Self.&mut::<@b>) -> () {
+        insert = fn::<@b>(key: usize, val: usize, m: Self.&mut::<@b>) -> () {
             if m.*.used0 == false {
                 m.*.k0 = key;
                 m.*.v0 = val;
@@ -98,9 +106,9 @@ type Map = struct::<K, V> {
 // mentions may be a copy — each is a fresh, shorter loan with the parent
 // suspended for exactly its span. Reborrow-at-every-use is what makes
 // writing this feel like nothing at all.
-static get_or_default = fn::<@a, K, V>(
-    key: K, val: V, map: Map::<K, V>.&mut::<@a>
-) -> V.&mut::<@a> {
+static get_or_default = fn::<@a>(
+    key: usize, val: usize, map: Map.&mut::<@a>
+) -> usize.&mut::<@a> {
     match map.get(key) {
         ::Some(v) => v,
         ::None => {
@@ -113,7 +121,7 @@ static get_or_default = fn::<@a, K, V>(
 // ---- the answer ---------------------------------------------------------
 
 static main = fn() -> usize {
-    let mut m = Map::<usize, usize>(struct {
+    let mut m = Map(struct {
         k0 = 0, v0 = 0, used0 = false,
         k1 = 0, v1 = 0, used1 = false,
     });

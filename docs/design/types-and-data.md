@@ -37,9 +37,10 @@
 - **T08** Copyability is a builtin structural judgment, never a user trait; there is no
   `Copy` trait. Scalars, records of copyable fields and variants are copyable. Heap-backed
   and linear types are ruled noncopyable: assignment and passing move, duplication is
-  explicit.
-  Noncopyable-plus-moves does not foreclose implicit copying later (copy-on-write is an
-  optimization of copy); implicit copying would foreclose the move guarantees.
+  explicit. So is every rigid type parameter, bound or not — a capability bound grants
+  discard, never duplication (TR11). Noncopyable-plus-moves does not foreclose implicit
+  copying later (copy-on-write is an optimization of copy); implicit copying would foreclose
+  the move guarantees.
 - **T10** Joins resolve at statement boundaries, function return included; nested joins
   flatten to one, and blame treats the nest as one statement.
 - **T11** Inference groups use bidirected edges, not pure SCCs, because higher-order functions
@@ -142,15 +143,12 @@
   and is parsed by one loop so neither is privileged. Capability names are ordinary name refs
   composed with `+`; `send`, `sync` and `destruct` are named in the doctrine and refused as
   not existing yet, the clause is superset-parsed and refused on `static`/`const`/`trait`
-  items — imports included, which have no `= rhs` for it to trail — and on region and const
-  params, and a declaration sheds once. A type without `forget` is linear: every path consumes
-  a value of it exactly once. There is no destructor, no drop glue and no unwinding; the
-  checker is the whole mechanism, and codegen never learns the type is linear (identical
-  output bytes with and without the clause). Every type PARAMETER requires `forget` unless
-  written `T without forget`, checked at expression mentions and at annotation arguments that
-  name a concrete type — a signature is an instantiation edge no expression crosses — with an
-  opted-out parameter checked rigidly as possibly-linear inside its own body. The bound is a
-  promise about an API; containment is the safety net under it.
+  items — imports included, which have no `= rhs` for it to trail — and on every generic
+  parameter, a region and a const parameter each for their own reason. A declaration sheds
+  once. A type without `forget` is linear: every path consumes a value of it exactly once.
+  There is no destructor, no drop glue and no unwinding; the checker is the whole mechanism,
+  and codegen never learns the type is linear (identical output bytes with and without the
+  clause).
 - **T21** Containment infects; indirection does not. A record, enum or array holding a linear
   is linear, and widening a variant never changes the answer. A borrow, a raw pointer or a
   `fn` type mentioning one keeps `forget`, because the obligation stayed with the owner, which
@@ -164,6 +162,21 @@
   A `static` cannot hold one, because a static is never destroyed, and neither can a
   `const { ... }`, whose value is copied into every evaluation; the refusal does not depend on
   whether the surrounding path completes — a const block is judged like an item initializer.
+- **T22** A data-side type parameter says nothing about capabilities: no default, no opt-out,
+  no opt-in. `Option::<String>` is linear because `String` is, and the enum never had to be
+  told. The answer for an instance is COMPOSITIONAL rather than a walk over the instantiated
+  type: each declaration is summarized once — whether its own components cost it the capability
+  whatever its arguments are, and which of its parameters reach a value position of it — and
+  `D::<args>` has the capability when the declaration does and every argument in a reaching
+  position has it. A rigid parameter answers from its bound, which is where the recursion
+  bottoms out. The summary is a least fixpoint over the declaration graph, which is finite, so
+  a declaration that names itself with LARGER arguments is answered rather than bounded:
+  `type Nest = enum::<T> { Cons(T, Nest::<Pair::<T>>), Nil }` is forgettable at `usize` and
+  linear at a linear payload, and no nested mention is ever expanded to say so. A parameter
+  that reaches no value position constrains nothing — every value position of a
+  `type P = struct::<T> { v: P::<W::<T>> }` is another `P`, so a `P` holds no `T` and no
+  argument makes one linear. Nothing here needs a depth limit or a termination guess, and
+  nothing inhabited is refused for want of one.
 
 ## Discarded
 
@@ -183,6 +196,11 @@
   "what is in a `with` block" two questions. **A negative bound in the `type` item's `: Type`
   slot** — validation already rejects that slot. **An attribute** — there are none, and adding
   a surface for one fact is how a language grows two ways to say everything. **T20**
+- **A `forget` default bound on every type parameter with opt-out** — its argument was timing:
+  such a bound cannot be retrofitted against an ecosystem. That only proves a needed bound
+  must be installed early, and this one was not needed: containment already makes a container
+  of linears linear whether or not any bound is checked. Its cost was every container written
+  twice, once per payload kind, differing by a clause that changed no behaviour. **T22**
 - **Equality on function values as a designed relation** — it fell out of a derive, not a
   decision, and is not to be relied on. **T09**
 - **`char` as a raw codepoint** — UTF-8 cannot encode a surrogate, so admitting them makes

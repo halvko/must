@@ -4,10 +4,13 @@
 // BORROWED receiver (`Self.&::<@local>`), `unwrap` CONSUMES its receiver,
 // `flat_map`/`map` take a `fn` VALUE as an argument through a member-own
 // type parameter, and `as_ref` projects the payload's type through the
-// receiver's region. `T` here is a plain type parameter (no `without
-// forget`) — the linear-payload proof is the `hir` test
-// `an_option_of_string_is_the_container_shape_that_has_to_work`, not this
-// file.
+// receiver's region. `T` here carries no capability clause and no bound,
+// because a data-side parameter never does (T22): ONE declaration, five
+// members, and it checks clean over a forgettable payload and over one
+// that must be consumed alike — `Option::<String>` is linear because
+// `String` is, and the enum was never told. The `hir` test
+// `the_five_option_members_check_clean_over_option_of_string` runs these
+// same five bodies over `String`.
 //
 // Run: must-lsp run examples/option.must -e '{ let o: Option::<usize> = Option::Some(1); o.&.is_some() }'  (=> true)
 // Run: must-lsp run examples/option.must -e '{ let o: Option::<usize> = Option::Some(1); o.unwrap() }'      (=> 1)

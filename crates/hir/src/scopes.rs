@@ -755,12 +755,12 @@ pub fn synthetic_decls() -> &'static [SyntheticDecl] {
         vec![
             // `AllocResult::<T> = enum { Ok(T.&raw mut), Err }` — the one
             // generic row. `AllocResult::<T>` only ever holds a POINTER to a
-            // `T` (`Ok(T.&raw mut)`), never a `T`, so `T` can be linear
-            // without ever being able to lose one: the default `forget`
-            // bound would refuse `alloc_array::<String>` for nothing.
+            // `T` (`Ok(T.&raw mut)`), never a `T`, so a linear `T` costs
+            // it nothing — and a data-side parameter asks for no
+            // capability anyway (T22).
             SyntheticDecl {
                 name: ALLOC_RESULT_NAME,
-                generics: vec![type_param_without_forget("T")],
+                generics: vec![type_param("T")],
                 variants: vec![
                     ("Ok".to_owned(), vec![raw_ptr_mut("T")]),
                     ("Err".to_owned(), Vec::new()),
@@ -817,17 +817,16 @@ fn raw_ptr_mut(name: &str) -> TypeRef {
     }
 }
 
-/// A rigid TYPE parameter that OPTS OUT of the default `forget` bound —
-/// `T without forget`. The only binder shape any row needs so far; an
-/// ordinary parameter (or a const or region one) would be its own helper
-/// beside this, spelled where the reader is already looking.
-fn type_param_without_forget(name: &str) -> GenericParamData {
+/// A rigid, unbounded TYPE parameter — the only binder shape any row needs
+/// so far; a bounded parameter (or a const or region one) would be its own
+/// helper beside this, spelled where the reader is already looking.
+fn type_param(name: &str) -> GenericParamData {
     GenericParamData {
         name: name.to_owned(),
         kind: GenericParamKind::Type,
         bounds: Vec::new(),
         outlives: Vec::new(),
-        without_forget: true,
+        forget: false,
     }
 }
 

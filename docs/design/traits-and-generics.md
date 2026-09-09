@@ -93,6 +93,23 @@
   arguments, including an empty `::<>`. There are three spend sites (inherent member,
   trait-impl member, bound-directed requirement), each of which consumes the written list, so
   no already-refused path adds a second diagnostic.
+- **TR11** `T: forget` is the one capability bound, and it is positive. A type parameter asks
+  nothing about capabilities unless its body needs something. A parameter with no bound is
+  checked rigidly, as if linear, because the caller may hand it one: moving, returning and
+  passing on are fine; discarding is not, and neither is reading it twice. Every refusal names
+  the binder, because that is where the fix goes. A rigid parameter is answered from its BOUND
+  and never by looking into it — there is nothing there to look into — which is the base case
+  the data side's per-declaration summary bottoms out on (T22). The bound grants discard, never
+  duplication; the language's own witness that they differ is `T.&mut`, which has `forget`
+  (losing a borrow loses no obligation) and is refused copying anyway, since a copy would be
+  two exclusive borrows of one place. Every rigid parameter is non-copyable and tracked by the
+  must-consume walk, which asks the copy rule's own question rather than a narrower one of its
+  own — so the exclusive borrow a bounded `T` may be instantiated with is tracked wherever it is
+  held; the bound waives exactly the obligation to consume before scope end.
+  Capability names are the language's: a trait of the same name changes nothing. A capability
+  bound takes no dictionary slot but is part of a requirement's contract. Consequence: with no
+  trait bounds, a generic body can only hand an unbounded parameter back or pass it on, which
+  is `unwrap`'s shape.
 
 ## Discarded
 
@@ -166,6 +183,19 @@
   rigidity transplanted, no new inference domain. **TR08**
 - **Member-own const binders** — trip-wire: instantiation grows a member-side argument list,
   or instance identity moves off the receiver's type. **TR10**
+- **A container needs more than lending** — lending a payload out already works: a borrow of a
+  field through a borrow of the whole copies nothing and is accepted for a rigid parameter and
+  a concrete linear alike. What a generic container still cannot do is write a bound on its
+  OWNER's parameter — the slot is the reserved constrained attachment group (TR01's sealed
+  grammar) — and REPLACE a payload: writing over a slot that may still hold a value loses it,
+  so a container wants equality over borrows plus a primitive that hands the old value back.
+  **TR11**
+- **A bound is asked to grant duplication** — copy-soundness is closed strict: no bound grants
+  it, every rigid parameter is non-copyable, and generic code borrows for a second read.
+  Duplication is orthogonal to the disposal ladder (as `send` is), so granting it means a
+  capability of its own rather than a rung of that one — and such a capability is what would
+  let `T.&mut`'s refusal to copy be stated as a missing one instead of a rule of its own.
+  **TR11**
 - **Derive replacement is designed** — introspection. **TR12**
 - **A `send` assertion form** is owed and unruled: the mitigation for the private-field semver
   hazard, which is inherent to derived-from-structure. **TR09**

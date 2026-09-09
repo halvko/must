@@ -2108,6 +2108,11 @@ fn type_only_generic_mention_lowers_to_the_plain_item_value() {
     // Type args need nothing at runtime (TR06): with no const params there
     // is no `instantiate` — the mention lowers to the item's own value,
     // exactly like a non-generic mention.
+    //
+    // The `move` on the parameter read is the other half of T22 landing
+    // here: an UNBOUNDED `T` has no `forget`, so a read of one is a move
+    // like any other non-copyable value's. Nothing about lowering changed
+    // — `has_forget` simply answers differently now.
     check_mir(
         "static id = fn::<T>(x: T) -> T { x };\nstatic g = fn () -> usize { id::<usize>(4) };",
         expect![[r#"
@@ -2116,7 +2121,7 @@ fn type_only_generic_mention_lowers_to_the_plain_item_value() {
               _0: T  // return
               _1: T  // param x
               bb0:
-                _0 = _1
+                _0 = move _1
                 return
             }
             fn b1() -> fn(T) -> T {

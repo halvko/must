@@ -3,6 +3,7 @@
 //! sub-parsers refuse to consume tokens their caller can recover on.
 
 use crate::BRACE_RULE;
+use crate::SyntaxKind;
 use crate::SyntaxKind::*;
 use crate::parser::{CompletedMarker, Parser};
 
@@ -1365,12 +1366,8 @@ fn generic_param(p: &mut Parser<'_>) {
                 region_bound(p);
             }
         }
-        // Superset: a capability opt-out on a REGION parameter is
-        // meaningless (a region names a duration, not a value), but
-        // parsing it keeps the error one validation message instead of a
-        // cascade of "expected `,`".
         if p.at(WITHOUT_KW) {
-            without_clause(p);
+            retired_param_clause(p, REGION_PARAM);
         }
         m.complete(p, REGION_PARAM);
         return;
@@ -1384,34 +1381,39 @@ fn generic_param(p: &mut Parser<'_>) {
         } else {
             p.error("expected `:` followed by the const parameter's type");
         }
-        // Superset, like the region arm: a const parameter's values are
-        // always plain data, so it has no capability to shed.
         if p.at(WITHOUT_KW) {
-            without_clause(p);
+            retired_param_clause(p, CONST_PARAM);
         }
         m.complete(p, CONST_PARAM);
     } else if matches!(p.current(), IDENT | HOLE) {
         let m = p.start();
         pattern(p, "expected a type parameter name");
         // `T: Display + Debug` — bounds live where params are born (TR05:
-        // binder-position bounds, `+` composition).
+        // binder-position bounds, `+` composition). A CAPABILITY the body
+        // needs rides this same slot (`T: forget`, T22): it is a positive
+        // requirement on the argument like any other, so it is written
+        // where requirements are written, and the grammar needs no clause
+        // of its own for it.
         if p.eat(COLON) {
             type_(p);
             while p.eat(PLUS) {
                 type_(p);
             }
         }
-        // `T without forget` — the opt-out from the DEFAULT bound, in the
-        // one place a parameter's requirements are written. It follows the
-        // written bounds because it subtracts from what is otherwise
-        // assumed: read the line left to right and the requirements
-        // accumulate, then one is taken away.
+        // The retired spelling's parameter home, refused in the words of
+        // the ruling that deleted it (T22) rather than as two "expected
+        // `,`" errors at tokens that are each individually fine. Consumes
+        // the whole clause, so the binder list after it still parses —
+        // recovery for a retired spelling is diagnostics-layer work (G26).
+        //
+        // Superset, as the retired grammar itself was: the REVERSE order
+        // (`T without forget: Bound`) parsed into the same node, so the
+        // bounds slot is offered again after the clause. Without that the
+        // trailing `: Bound` strands and the one refusal grows two
+        // "expected `,`" errors behind it — the cascade this arm exists
+        // to prevent.
         if p.at(WITHOUT_KW) {
-            without_clause(p);
-            // Superset: the REVERSE order (`T without forget: Bound`)
-            // parses into the same node, so validation can say which order
-            // to write instead of the parser reporting a missing comma
-            // twice at tokens that are individually fine.
+            retired_param_clause(p, TYPE_PARAM);
             if p.eat(COLON) {
                 type_(p);
                 while p.eat(PLUS) {
@@ -1427,13 +1429,64 @@ fn generic_param(p: &mut Parser<'_>) {
     }
 }
 
+/// `T without forget` — the retired capability clause at a generic
+/// parameter, recognized only to say what replaced it. All three parameter
+/// KINDS reach it: the clause was superset-parsed on region and const
+/// params too, and consuming it there keeps their refusal one sentence
+/// instead of two "expected `,`" errors at tokens that are each
+/// individually fine (G26: recovery for a retired spelling is
+/// diagnostics-layer work).
+///
+/// What the three are TOLD differs, because "why not" does. Only a type
+/// parameter ever stood for something that could hold a capability, so it
+/// is the only one offered a migration; a region names a duration and a
+/// const's values are plain data, and each is told that instead of advice
+/// it cannot take.
+///
+/// The type parameter's sentence is position-neutral in the other
+/// direction: that arm is every binder's — a fn literal's, a fn type's, a
+/// `type` declaration's — so it leads with the instruction that is right in
+/// all of them. It leads with the DELETION, not with `T: forget`: the
+/// opt-out said "this may be a linear", which is what a bare `T` now says,
+/// while the bound says the opposite ("this may be discarded"). Naming the
+/// bound first would steer a migration into reversing its own meaning.
+fn retired_param_clause(p: &mut Parser<'_>, kind: SyntaxKind) {
+    let m = p.start();
+    p.error(match kind {
+        REGION_PARAM => {
+            "a capability clause on a parameter is retired, and a region parameter never had \
+             one to lose: a region names a duration, not a value, so it has no capability \
+             to speak of"
+        }
+        CONST_PARAM => {
+            "a capability clause on a parameter is retired, and a const parameter never had \
+             one to lose: a const parameter's values are always plain data"
+        }
+        _ => {
+            "a capability clause on a parameter is retired: `T without forget` is now spelled \
+             `T` — an unbounded parameter is already checked as one that may have to be \
+             consumed; write `T: forget` only where the body DISCARDS a `T`, and a `type` \
+             declaration's parameters carry no capability bounds at all"
+        }
+    });
+    p.bump(WITHOUT_KW);
+    if p.at(IDENT) {
+        p.bump(IDENT);
+        while p.eat(PLUS) && p.at(IDENT) {
+            p.bump(IDENT);
+        }
+    }
+    m.complete(p, ERROR);
+}
+
 /// `without forget` (or `without forget + send`) — a capability opt-out.
-/// ONE production, both homes: trailing a declaration and riding a generic
-/// parameter. The capability names are ordinary [`NAME_REF`]s — a
-/// capability is a thing the language knows about by name, not a keyword
-/// each — and they compose with `+`, exactly as bounds do (TR05), because
-/// this list reads as a conjunction too: "without forget, and without
-/// send".
+/// ONE production, ONE home: trailing a `type` declaration. A capability is
+/// a fact about a declared type, and nothing else in the language declares
+/// one; a generic parameter takes no clause at all (T22). The capability
+/// names are ordinary [`NAME_REF`]s — a capability is a thing the language
+/// knows about by name, not a keyword each — and they compose with `+`,
+/// exactly as bounds do (TR05), because this list reads as a conjunction
+/// too: "without forget, and without send".
 fn without_clause(p: &mut Parser<'_>) {
     let m = p.start();
     p.bump(WITHOUT_KW);

@@ -829,13 +829,6 @@ impl TypeParam {
     pub fn colon_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, COLON)
     }
-    /// The `without ⟨capability⟩` opt-out riding this parameter, when
-    /// written. Subtracts from the parameter's DEFAULT bounds, which is why
-    /// it is not one of [`Self::bounds`]: those are what the parameter must
-    /// have, this is what it need not.
-    pub fn without_clause(&self) -> Option<WithoutClause> {
-        child(&self.syntax)
-    }
 }
 
 impl TraitItem {

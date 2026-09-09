@@ -8,6 +8,8 @@
 //! `message()`) and nowhere else. [`crate::ConstCheckDiagnostic::message`]
 //! renders by delegating to the functions below.
 
+use crate::capability::Affine;
+
 pub fn unresolved_name(name: &str) -> String {
     format!("unresolved name `{name}`")
 }
@@ -302,6 +304,72 @@ pub fn linear_subject(name: &str) -> String {
     }
 }
 
+/// The related note on the binding a must-consume finding names: where the
+/// value came from, and what it owes. A LINEAR value owes a consumption;
+/// one tracked only against DUPLICATION owes nothing but its own
+/// singleness, and saying "must be consumed" of it would be false.
+pub fn born_here(name: &str, linear: bool) -> String {
+    if linear {
+        format!("{} is born here and must be consumed", linear_subject(name))
+    } else {
+        format!(
+            "{} is born here, and there is only one of it",
+            linear_subject(name)
+        )
+    }
+}
+
+/// Why a LEAK refusal fired inside a generic body: the binder promised
+/// nothing about the value, so the body is checked against every type a
+/// caller might supply.
+fn leak_reason(param: &str) -> String {
+    format!("`{param}` may be a type that must be consumed")
+}
+
+/// The way out of a leak that is the same in every position: narrow the
+/// callers with the bound.
+fn forget_advice(param: &str) -> String {
+    format!("write `{param}: forget` to require one that can be discarded")
+}
+
+/// The shared tail of the LEAK refusals whose position also offers the
+/// ORDINARY way out — consume the value where it stands. Three positions
+/// do not (a `const` block's value, a skipped field, a swallowed
+/// scrutinee), and each says what its own way out is before naming the
+/// bound.
+fn leak_hint(param: &str) -> String {
+    format!(
+        "{}; consume it, or {}",
+        leak_reason(param),
+        forget_advice(param)
+    )
+}
+
+/// What a DUPLICATION refusal is about, said as a noun phrase, and why a
+/// second read of it would be a second value. `None` for a LINEAR root:
+/// its declaration says what it is, and the plain sentences point at it
+/// without a clause of their own.
+///
+/// Neither of the other two offers the bound, and that is load-bearing
+/// rather than cautious: `forget` answers what may be LOST, a second read
+/// asks what may be DUPLICATED, and no bound in the language grants the
+/// second — `T.&mut` is forgettable and refuses copying, which is both why
+/// a bounded parameter is tracked exactly as an unbounded one is (TR11)
+/// and why the borrow it may be instantiated with is tracked too.
+fn duplication_of(root: &Affine) -> Option<(String, String)> {
+    match root {
+        Affine::Linear => None,
+        Affine::Param(param) => Some((
+            format!("a value of `{param}`"),
+            format!("a value of `{param}` may not be duplicated, and no bound grants copying"),
+        )),
+        Affine::MutBorrow => Some((
+            "a value holding an exclusive borrow".to_owned(),
+            "an exclusive borrow may not be duplicated: the two would name one place".to_owned(),
+        )),
+    }
+}
+
 /// The leak: a value of a type without `forget` reached the end of its
 /// scope alive. The message names the ONE thing that discharges the
 /// obligation in general terms, because which method does it is the
@@ -314,10 +382,35 @@ pub fn not_consumed(name: &str) -> String {
     )
 }
 
+/// The same leak inside a GENERIC body, where the value's type is a rigid
+/// parameter with no `forget` bound. A different sentence, because the fix
+/// is a different one: nothing was declared linear here — the body is
+/// checked against every type the caller might supply.
+pub fn not_consumed_param(name: &str, param: &str) -> String {
+    format!(
+        "{} is not consumed on this path, and {}",
+        linear_subject(name),
+        leak_hint(param)
+    )
+}
+
 /// Use-after-consume — which for a linear type is also disposal twice.
 /// Named after what the user did, with the earlier site as a related note.
 pub fn already_consumed(name: &str) -> String {
     format!("{} was already consumed", linear_subject(name))
+}
+
+/// Use-after-consume where the reason is a root with no declaration to
+/// point at — a binder, or an exclusive borrow held inside the value.
+/// Names it, because "already consumed" alone sends the reader looking for
+/// a declaration that says so and there is none. Offers BORROWING, never
+/// the bound — see [`duplication_of`].
+pub fn already_consumed_dup(name: &str, root: &Affine) -> Option<String> {
+    let (_, hint) = duplication_of(root)?;
+    Some(format!(
+        "{} was already consumed: {hint} — borrow it for the second use",
+        linear_subject(name)
+    ))
 }
 
 /// A linear value produced and dropped on the floor by a statement. There
@@ -326,12 +419,29 @@ pub fn already_consumed(name: &str) -> String {
 pub const DISCARDED_LINEAR: &str = "this value must be consumed; its type has no `forget` \
      capability, so it cannot be discarded";
 
+/// [`DISCARDED_LINEAR`] where the discarded value's type is a rigid
+/// parameter — the statement-position twin of [`not_consumed_param`].
+pub fn discarded_param(param: &str) -> String {
+    format!("this value is discarded here, and {}", leak_hint(param))
+}
+
 /// Writing over a live linear: the old value is gone, and nothing was done
 /// about it. The same leak as [`not_consumed`] at a different moment.
 pub fn assign_over_live(name: &str) -> String {
     format!(
         "{} still holds a value that must be consumed; assigning here would lose it",
         linear_subject(name)
+    )
+}
+
+/// [`assign_over_live`] where the binder is the reason the old value had
+/// to go somewhere. A LEAK-family message, so it may offer the bound: it
+/// fires only for a parameter nobody constrained.
+pub fn assign_over_live_param(name: &str, param: &str) -> String {
+    format!(
+        "{} still holds a value that must be consumed, and {}",
+        linear_subject(name),
+        leak_hint(param)
     )
 }
 
@@ -345,16 +455,48 @@ pub fn join_disagrees(name: &str) -> String {
     )
 }
 
+/// [`join_disagrees`] where the binder is the reason the paths had to
+/// agree. Leak family, so the bound is one way out.
+pub fn join_disagrees_param(name: &str, param: &str) -> String {
+    format!(
+        "{} is consumed on some paths through this expression and not on others, and {}",
+        linear_subject(name),
+        leak_hint(param)
+    )
+}
+
 /// Copying a linear out of a place. Says what to do instead, because the
 /// answer is not obvious and is the same every time: take the whole value
 /// apart.
 pub const COPIED_OUT_LINEAR: &str = "cannot copy a value that must be consumed out of a place; \
      take the whole value apart instead (`let Name(struct { .. }) = value;`)";
 
+/// [`COPIED_OUT_LINEAR`] where the copy is refused for a root with no
+/// declaration behind it. A generic body cannot take an opaque `T` apart —
+/// it has no pattern for one — so the advice changes with the reason.
+pub fn copied_out_dup(root: &Affine) -> Option<String> {
+    let (subject, hint) = duplication_of(root)?;
+    Some(format!(
+        "cannot copy {subject} out of a place: {hint} — borrow the place, \
+         or move the whole value"
+    ))
+}
+
 /// `[s; 3]` where `s` must be consumed: the repeat form would make three
 /// obligations out of one value.
 pub const REPEATED_LINEAR: &str = "cannot repeat a value that must be consumed: the copies would each have to be consumed, \
      and there is only one value";
+
+/// [`REPEATED_LINEAR`] where the repeat is refused for a root with no
+/// declaration behind it. DUPLICATION family, so it says nothing about
+/// consuming: such a value may not need consuming at all, and the repeat
+/// is refused anyway because nothing grants copying.
+pub fn repeated_dup(root: &Affine) -> Option<String> {
+    let (subject, hint) = duplication_of(root)?;
+    Some(format!(
+        "cannot repeat {subject}: {hint} — there is only one value"
+    ))
+}
 
 /// A `..` skipping a field that must be consumed. `..` means "don't bind
 /// the rest", which for such a field means "lose it".
@@ -362,6 +504,19 @@ pub fn rest_skips_linear(field: &str) -> String {
     format!(
         "`..` would skip `{field}`, which must be consumed; name it in the pattern so it has \
          somewhere to go"
+    )
+}
+
+/// [`rest_skips_linear`] inside a generic body, where the SKIPPED FIELD's
+/// type is a rigid parameter. Leak family — the field goes nowhere — so it
+/// offers the bound, and it names the binder for the reason every other
+/// twin does: no declaration in sight said anything about this type.
+pub fn rest_skips_param(field: &str, param: &str) -> String {
+    format!(
+        "`..` would skip `{field}`, and {}: name it in the pattern so it has somewhere to \
+         go, or {}",
+        leak_reason(param),
+        forget_advice(param)
     )
 }
 
@@ -375,6 +530,18 @@ pub fn loop_changes_linear(name: &str) -> String {
     )
 }
 
+/// [`loop_changes_linear`] where the value is merely unduplicable.
+/// Duplication family: what the next iteration would do is READ a value
+/// this one already moved, which nothing makes legal.
+pub fn loop_changes_dup(name: &str, root: &Affine) -> Option<String> {
+    let (_, hint) = duplication_of(root)?;
+    Some(format!(
+        "{} is left in a different state than the loop found it in: {hint} — \
+         the next iteration would read one this one already moved",
+        linear_subject(name)
+    ))
+}
+
 /// An item whose own value must be consumed. A `static` is never destroyed,
 /// so there is no path to put the consumption on.
 pub const ITEM_HOLDS_LINEAR: &str = "an item's value must have the `forget` capability: a `static` is never destroyed, \
@@ -386,18 +553,48 @@ pub const ITEM_HOLDS_LINEAR: &str = "an item's value must have the `forget` capa
 pub const CONST_BLOCK_HOLDS_LINEAR: &str = "a `const` block's value must have the `forget` capability: \
      it is computed once and copied into every evaluation, so no single path could consume it";
 
+/// [`CONST_BLOCK_HOLDS_LINEAR`] inside a generic body, where the block's
+/// value is a rigid parameter — reached through the ANNOTATION, since
+/// `let x: T = const { ... }` types the block from its position while a
+/// diverging body supplies the value.
+///
+/// Leak family, and the one leak position where [`leak_hint`]'s advice
+/// cannot be taken: the value is computed once and copied into every
+/// evaluation, so there is no path to consume it on — which is what its
+/// non-generic twin says in so many words. It therefore composes its own
+/// tail, and the bound is the whole of the way out.
+pub fn const_block_holds_param(param: &str) -> String {
+    format!(
+        "a `const` block's value must have the `forget` capability, and {} — no path here \
+         could consume it, so {}",
+        leak_reason(param),
+        forget_advice(param)
+    )
+}
+
 /// Writing over a place that holds a value which must be consumed, where
 /// no binding names it — a field, an element, a `.&mut` referent. The twin
 /// of [`assign_over_live`], with "this place" standing in for the name.
 pub const ASSIGN_OVER_PLACE: &str = "this place still holds a value that must be consumed; \
      assigning here would lose it";
 
-/// Instantiating a `forget`-bounded generic parameter with a type that has
-/// no `forget`. The default bound, named, plus the spelling that relaxes it.
+/// [`ASSIGN_OVER_PLACE`] where the place's type is a rigid parameter. Leak
+/// family, and the binder is the only thing there is to name: a bounded
+/// parameter is forgettable, so this never fires for one.
+pub fn assign_over_place_param(param: &str) -> String {
+    format!(
+        "this place still holds a value that must be consumed, and {}",
+        leak_hint(param)
+    )
+}
+
+/// Instantiating a parameter that WROTE `T: forget` with a type that has
+/// none. Names the bound as the promise it is, and says what the promise
+/// was for — the body may drop a `T`, and this one cannot be dropped.
 pub fn forget_bound_unsatisfied(param: &str, ty: &str, reason: &str) -> String {
     format!(
-        "`{ty}` cannot be a `{param}`: {reason}, and `{param}` requires `forget` \
-         (every type parameter does unless it is written `{param} without forget`)"
+        "`{ty}` cannot be a `{param}`: {reason}, and `{param}: forget` \
+         asks for a type whose values may be dropped on the floor"
     )
 }
 
@@ -408,3 +605,15 @@ pub fn forget_bound_unsatisfied(param: &str, ty: &str, reason: &str) -> String {
 /// [`linear_subject`].
 pub const WILDCARD_SKIPS_LINEAR: &str = "`_` matches the value without binding it, and it must be consumed; \
      give it a name so it has somewhere to go";
+
+/// [`WILDCARD_SKIPS_LINEAR`] inside a generic body, where the SCRUTINEE's
+/// type is a rigid parameter. Leak family, like the `..` it is the arm-shaped
+/// twin of.
+pub fn wildcard_skips_param(param: &str) -> String {
+    format!(
+        "`_` matches the value without binding it, and {}: give it a name so it has \
+         somewhere to go, or {}",
+        leak_reason(param),
+        forget_advice(param)
+    )
+}

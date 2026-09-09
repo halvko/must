@@ -54,6 +54,18 @@ fn check_infer(text: &str, expect: Expect) {
     expect.assert_eq(&rendered);
 }
 
+/// Every diagnostic's message, in order, for a program a fixture cannot
+/// spell out by hand — one built by a loop, where the ranges an
+/// `expect![]` would carry say nothing a reader could check.
+fn diagnostic_messages(text: &str) -> Vec<String> {
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    crate::file_diagnostics(&db, file)
+        .into_iter()
+        .map(|diagnostic| diagnostic.message)
+        .collect()
+}
+
 #[test]
 fn unresolved_name() {
     check_diagnostics(
@@ -5007,23 +5019,35 @@ fn generic_fn_missing_return_type_errors() {
 
 #[test]
 fn rigid_param_passes_stores_returns_and_compares() {
-    // Everything an opaque value supports: pass through a `let` (with a
-    // `T` annotation resolving to the rigid param), store in a record
-    // field, compare with `==`, return through a join.
+    // Everything an opaque value supports, with NO bound written: pass
+    // through a `let` (with a `T` annotation resolving to the rigid
+    // param), store it in a record field, take it back out by
+    // destructuring, return it through a join, and compare two of them
+    // with `==`.
+    //
+    // Every one of those moves a value exactly once, which is why none of
+    // them needs a bound. The shape this replaces read one `x` four times
+    // and leaned on the default bound to allow it — which a bound does not
+    // do: it waives the obligation to CONSUME, never the ban on
+    // DUPLICATING (see `the_forget_bound_is_not_permission_to_copy`).
     check_diagnostics(
-        "static f = fn::<T>(x: T) -> T { let y: T = x; let r = struct { v = y }; if x == y { r.v } else { x } };",
+        "static f = fn::<T>(x: T, c: bool) -> T { let y: T = x; let r = struct { v = y }; let struct { v } = r; if c { v } else { v } };\nstatic eq = fn::<T>(a: T, b: T) -> bool { a == b };",
         expect![[r#""#]],
     );
 }
 
 #[test]
 fn rigid_param_field_access_call_and_arithmetic_error_ordinarily() {
+    // One refusal per body, and none of the three needs a bound: each
+    // reads its `x` exactly once. (The one-body version this replaces read
+    // it four times, which no capability bound licenses — copying is a
+    // question the language has not answered.)
     check_diagnostics(
-        "static f = fn::<T>(x: T) -> T { let a = x.field; let b = x(); let c = x + 1; x };",
+        "static f = fn::<T>(x: T) -> T { let a = x.field; x };\nstatic g = fn::<T>(x: T) -> usize { x() };\nstatic h = fn::<T>(x: T, y: T) -> T { let n = x + 1; y };",
         expect![[r#"
             42..47: no field `field` on `T`
-            57..58: expression of type `T` is not callable
-            70..71: type mismatch: expected `{number}`, found `T` (`+` requires `{number}` operands at 72..73)
+            90..91: expression of type `T` is not callable
+            143..144: type mismatch: expected `{number}`, found `T` (`+` requires `{number}` operands at 145..146)
         "#]],
     );
 }
@@ -5081,9 +5105,9 @@ fn const_param_hole_type_is_rejected() {
 #[test]
 fn variant_path_on_type_param_errors() {
     check_diagnostics(
-        "static f = fn::<T>(x: T) -> usize { let y: T::Bad = 1; 1 };",
+        "static f = fn::<T: forget>(x: T) -> usize { let y: T::Bad = 1; 1 };",
         expect![[r#"
-            43..49: `T` has no variants (it is a type parameter)
+            51..57: `T` has no variants (it is a type parameter)
         "#]],
     );
 }
@@ -5184,7 +5208,7 @@ fn turbofish_arity_mismatch() {
 #[test]
 fn turbofish_hole_leaves_a_type_param_to_inference() {
     check_diagnostics(
-        "static pick = fn::<A, B>(a: A, b: B) -> A { a };\nstatic g = fn () -> usize { pick::<_, str>(4, \"x\") };",
+        "static pick = fn::<A, B: forget>(a: A, b: B) -> A { a };\nstatic g = fn () -> usize { pick::<_, str>(4, \"x\") };",
         expect![[r#""#]],
     );
 }
@@ -5407,7 +5431,7 @@ fn divergence_widens_into_a_rigid_param_return() {
     // `!` widens to everything, a rigid param included (divergence produces
     // no value to convert); no VALUE type widens to or from a param.
     check_diagnostics(
-        "static f = fn::<T>(x: T) -> T { panic(\"unimplemented\") };",
+        "static f = fn::<T: forget>(x: T) -> T { panic(\"unimplemented\") };",
         expect![[r#""#]],
     );
 }
@@ -5439,9 +5463,9 @@ fn a_binder_names_each_const_param_once() {
 #[test]
 fn type_and_const_params_share_the_binders_namespace() {
     check_diagnostics(
-        "static f = fn::<T, const T: usize>(x: T) -> usize { T };",
+        "static f = fn::<T: forget, const T: usize>(x: T) -> usize { T };",
         expect![[r#"
-            25..26: duplicate generic parameter `T` (first declared here at 16..17)
+            33..34: duplicate generic parameter `T` (first declared here at 16..17)
         "#]],
     );
 }
@@ -8309,26 +8333,25 @@ fn dot_call_on_generic_type_member() {
         r#"
 type Box2 = struct::<T> { v: T } with {
     impl Self {
-        get = fn(b: Self) -> T { b.v };
-        put = fn(x: T, b: Self) -> Self { Box2::<T>(struct { v = x }) };
+        get = fn(b: Self) -> T { let Box2(struct { v }) = b; v };
+        remade = fn(b: Self) -> Self { let Box2(struct { v }) = b; Box2::<T>(struct { v }) };
     }
 };
 static main = fn() -> str {
-    Box2(struct { v = "hi" }).put("ho").get()
+    Box2(struct { v = "hi" }).remade().get()
 };
 "#,
         expect![[r#"
-            193..254 'fn() -> str {    ...': fn() -> str
-            205..254 '{     Box2(struct...': str
-            211..215 'Box2': fn(struct { v: str }) -> Box2::<str>
-            211..236 'Box2(struct { v =...': Box2::<str>
-            211..240 'Box2(struct { v =...': fn(str, Box2::<str>) -> Box2::<str>
-            211..246 'Box2(struct { v =...': Box2::<str>
-            211..250 'Box2(struct { v =...': fn(Box2::<str>) -> str
-            211..252 'Box2(struct { v =...': str
-            216..235 'struct { v = "hi" }': struct { v: str }
-            229..233 '"hi"': str
-            241..245 '"ho"': str
+            240..300 'fn() -> str {    ...': fn() -> str
+            252..300 '{     Box2(struct...': str
+            258..262 'Box2': fn(struct { v: str }) -> Box2::<str>
+            258..283 'Box2(struct { v =...': Box2::<str>
+            258..290 'Box2(struct { v =...': fn(Box2::<str>) -> Box2::<str>
+            258..292 'Box2(struct { v =...': Box2::<str>
+            258..296 'Box2(struct { v =...': fn(Box2::<str>) -> str
+            258..298 'Box2(struct { v =...': str
+            263..282 'struct { v = "hi" }': struct { v: str }
+            276..280 '"hi"': str
         "#]],
     );
 }
@@ -8819,14 +8842,20 @@ fn generic_owner_member_annotations_are_clean() {
         r#"
 type Stack = struct::<T> { top: T, rest: usize } with {
     impl Self {
-        peek = fn(s: Self) -> T { s.top };
-        with_top = fn(x: T, s: Self) -> Stack::<T> {
-            let keep: T = x;
-            Stack::<T>(struct { top = keep, rest = s.rest })
+        peek = fn(s: Self) -> T { let Stack(struct { top, rest }) = s; top };
+        rebuilt = fn(s: Self) -> Stack::<T> {
+            let Stack(struct { top, rest }) = s;
+            let keep: T = top;
+            Stack::<T>(struct { top = keep, rest })
         };
+        // The owner's `T` as a member PARAMETER annotation, and TWO
+        // occurrences of it unifying with each other — both read once, so
+        // neither needs a bound the owner's binder could not carry.
+        echo = fn::<@a>(x: T, s: Self.&::<@a>) -> T { x };
+        same = fn::<@a>(x: T, y: T, s: Self.&::<@a>) -> bool { x == y };
     }
 };
-static main = fn() -> usize { Stack(struct { top = 4, rest = 0 }).with_top(9).peek() };
+static main = fn() -> usize { Stack(struct { top = 4, rest = 0 }).rebuilt().peek() };
 "#,
         expect![[r#""#]],
     );
@@ -8859,15 +8888,16 @@ fn expression_self_is_rigid() {
 type Box2 = struct::<T> { v: T } with {
     impl Self {
         keep = fn(b: Self) -> Self {
-            let x: Self = Self(struct { v = b.v });
+            let Box2(struct { v }) = b;
+            let x: Self = Self(struct { v });
             x
         };
-        bad = fn(b: Self) -> Self { Self(struct { v = 1 }) };
+        bad = fn::<@a>(b: Self.&::<@a>) -> Self { Self(struct { v = 1 }) };
     }
 };
 "#,
         expect![[r#"
-            225..226: type mismatch: expected `T`, found `{number}` (expected `T` because of this field declaration at 27..31)
+            273..274: type mismatch: expected `T`, found `{number}` (expected `T` because of this field declaration at 27..31)
         "#]],
     );
 }
@@ -9147,7 +9177,7 @@ trait W = requires { p: fn(x: Self) -> usize; } with {
     impl usize { p = fn(x: usize) -> usize { 1 }; }
 };
 trait D = requires { m: fn::<X: W>(v: X, x: Self) -> usize; } with {
-    impl usize { m = fn::<X>(v: X, x: usize) -> usize { 1 }; }
+    impl usize { m = fn::<X: forget>(v: X, x: usize) -> usize { 1 }; }
 };
 "#,
         expect![[r#"
@@ -9160,14 +9190,14 @@ trait D = requires { m: fn::<X: W>(v: X, x: Self) -> usize; } with {
 fn unknown_trait_in_bound_and_impl_head() {
     check_diagnostics(
         r#"
-static f = fn::<T: Nope>(x: T) -> usize { 1 };
+static f = fn::<T: Nope + forget>(x: T) -> usize { 1 };
 type P = struct { a: usize } with {
     impl Missing { m = fn(x: Self) -> usize { 1 }; }
 };
 "#,
         expect![[r#"
             20..24: unknown trait `Nope`
-            93..100: unknown trait `Missing`
+            102..109: unknown trait `Missing`
         "#]],
     );
 }
@@ -9177,12 +9207,12 @@ fn bound_naming_a_type_is_not_a_trait() {
     check_diagnostics(
         r#"
 type P = struct { a: usize };
-static f = fn::<T: P>(x: T) -> usize { 1 };
-static g = fn::<T: usize>(x: T) -> usize { 1 };
+static f = fn::<T: P + forget>(x: T) -> usize { 1 };
+static g = fn::<T: usize + forget>(x: T) -> usize { 1 };
 "#,
         expect![[r#"
             50..51: `P` is not a trait
-            94..99: `usize` is not a trait
+            103..108: `usize` is not a trait
         "#]],
     );
 }
@@ -9455,15 +9485,15 @@ trait Size = requires { size: fn(x: Self) -> usize; } with {
     impl usize { size = fn(x: usize) -> usize { x }; }
 };
 static bounded = fn::<T: Size>(x: T) -> usize { x.size() };
-static outer = fn::<T: Size>(x: T) -> usize {
+static outer = fn::<T: Size>(x: T, z: T) -> usize {
     let f = fn(y: T) -> usize { y.size() };
     let g = fn(y: T) -> usize { bounded(y) };
-    f(x) + g(x)
+    f(x) + g(z)
 };
 "#,
         expect![[r#"
-            258..266: code nested inside a bounded fn (a nested fn literal or a `const` block) cannot use the enclosing bounds yet (it would have to capture the dictionary)
-            302..309: code nested inside a bounded fn (a nested fn literal or a `const` block) cannot use the enclosing bounds yet (it would have to capture the dictionary)
+            264..272: code nested inside a bounded fn (a nested fn literal or a `const` block) cannot use the enclosing bounds yet (it would have to capture the dictionary)
+            308..315: code nested inside a bounded fn (a nested fn literal or a `const` block) cannot use the enclosing bounds yet (it would have to capture the dictionary)
         "#]],
     );
 }
@@ -9657,7 +9687,7 @@ fn bound_directed_collision_is_ambiguous() {
 trait A = requires { m: fn(x: Self) -> usize; };
 trait B = requires { m: fn(x: Self) -> usize; };
 static collides = fn::<T: A + B>(x: T) -> usize { x.m() };
-static escapes = fn::<T: A + B>(x: T) -> usize { A::m(x) + B::<Self = T>::m(x) };
+static escapes = fn::<T: A + B>(x: T, y: T) -> usize { A::m(x) + B::<Self = T>::m(y) };
 "#,
         expect![[r#"
             149..154: `m` is ambiguous on `T`: it could be `A`'s member (`A::m(value)`) or `B`'s member (`B::m(value)`) — spell the one you mean (required by the trait here at 22..23) (required by the trait here at 71..72)
@@ -10144,8 +10174,8 @@ fn member_own_generic_arguments_do_not_instantiate_the_owner() {
     // what the type side below pins.
     check_diagnostics(
         r#"
-type Pair = struct::<T> { a: T, b: T } with {
-    impl Self { first = fn(p: Self) -> T { p.a }; }
+type Pair = struct::<T> { a: T, b: usize } with {
+    impl Self { first = fn(p: Self) -> T { let Pair(struct { a, b }) = p; a }; }
 };
 static main = fn() -> usize {
     let p = Pair::<usize>(struct { a = 1, b = 2 });
@@ -10153,25 +10183,25 @@ static main = fn() -> usize {
 };
 "#,
         expect![[r#"
-            188..208: `Pair::first` takes no generic arguments; if these are meant for `Pair`, write `Pair::<...>::first`
+            221..241: `Pair::first` takes no generic arguments; if these are meant for `Pair`, write `Pair::<...>::first`
         "#]],
     );
     // And the type side of the same claim: the OWNER's argument came from
     // `p`, never from the written list.
     check_infer(
         r#"
-type Pair = struct::<T> { a: T, b: T } with {
-    impl Self { first = fn(p: Self) -> T { p.a }; }
+type Pair = struct::<T> { a: T, b: usize } with {
+    impl Self { first = fn(p: Self) -> T { let Pair(struct { a, b }) = p; a }; }
 };
 static main = fn(p: Pair::<usize>) -> usize { Pair::first::<usize>(p) };
 "#,
         expect![[r#"
-            116..173 'fn(p: Pair::<usiz...': fn(Pair::<usize>) -> usize
-            119..120 'p': Pair::<usize>
-            146..173 '{ Pair::first::<u...': usize
-            148..168 'Pair::first::<usize>': fn(Pair::<usize>) -> usize
-            148..171 'Pair::first::<usi...': usize
-            169..170 'p': Pair::<usize>
+            149..206 'fn(p: Pair::<usiz...': fn(Pair::<usize>) -> usize
+            152..153 'p': Pair::<usize>
+            179..206 '{ Pair::first::<u...': usize
+            181..201 'Pair::first::<usize>': fn(Pair::<usize>) -> usize
+            181..204 'Pair::first::<usi...': usize
+            202..203 'p': Pair::<usize>
         "#]],
     );
 }
@@ -10183,8 +10213,8 @@ fn member_own_generic_arguments_no_hint_when_the_owner_list_is_already_written()
     // must not repeat the user's own spelling back at them.
     check_diagnostics(
         r#"
-type Pair = struct::<T> { a: T, b: T } with {
-    impl Self { first = fn(p: Self) -> T { p.a }; }
+type Pair = struct::<T> { a: T, b: usize } with {
+    impl Self { first = fn(p: Self) -> T { let Pair(struct { a, b }) = p; a }; }
 };
 static main = fn() -> usize {
     let p = Pair::<usize>(struct { a = 1, b = 2 });
@@ -10192,7 +10222,7 @@ static main = fn() -> usize {
 };
 "#,
         expect![[r#"
-            188..217: `Pair::first` takes no generic arguments
+            221..250: `Pair::first` takes no generic arguments
         "#]],
     );
 }
@@ -10262,8 +10292,8 @@ fn trait_member_own_type_generic_arguments_are_spendable_in_both_forms() {
     // the one `matched_member_args` every member path shares.
     check_diagnostics(
         r#"
-trait D = requires { n: fn::<T>(t: T, s: Self) -> usize; } with {
-    impl usize { n = fn::<T>(t: T, s: usize) -> usize { s }; }
+trait D = requires { n: fn::<T: forget>(t: T, s: Self) -> usize; } with {
+    impl usize { n = fn::<T: forget>(t: T, s: usize) -> usize { s }; }
 };
 static value = fn() -> usize {
     let f = D::<Self = usize>::n::<usize>;
@@ -10271,7 +10301,7 @@ static value = fn() -> usize {
 };
 static called = fn(s: usize) -> usize { D::n::<usize>(1, s) };
 "#,
-        expect![[r#""#]],
+        expect![""],
     );
     // And the binder-less report on a requirement with none of its own —
     // the same sentence an inherent member gets, named for the trait whose
@@ -10306,12 +10336,12 @@ fn a_member_reached_through_a_borrow_is_named_by_its_impl_head() {
         r#"
 trait Peek = requires {
     none: fn::<@a>(s: Self.&::<@a>) -> usize;
-    one: fn::<@a, U>(u: U, s: Self.&mut::<@a>) -> usize;
+    one: fn::<@a, U: forget>(u: U, s: Self.&mut::<@a>) -> usize;
     counted: fn::<@a, const N: usize>(s: Self.&::<@a>) -> usize;
 } with {
     impl usize {
         none = fn::<@a>(s: usize.&::<@a>) -> usize { 1 };
-        one = fn::<@a, U>(u: U, s: usize.&mut::<@a>) -> usize { 1 };
+        one = fn::<@a, U: forget>(u: U, s: usize.&mut::<@a>) -> usize { 1 };
         counted = fn::<@a, const N: usize>(s: usize.&::<@a>) -> usize { N };
     }
 };
@@ -10320,9 +10350,9 @@ static f = fn::<@a>(n: usize.&::<@a>, m: usize.&mut::<@a>) -> usize {
 };
 "#,
         expect![[r#"
-            506..522: `usize::none` takes no generic arguments
-            525..549: `usize::one` takes 1 generic argument, found 2
-            552..568: `usize::counted` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)
+            522..538: `usize::none` takes no generic arguments
+            541..565: `usize::one` takes 1 generic argument, found 2
+            568..584: `usize::counted` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)
         "#]],
     );
 }
@@ -10392,7 +10422,7 @@ fn the_member_generic_program_the_future_made_legal() {
         r#"
 type Measured = struct { n: usize } with {
     impl Self {
-        size = fn::<T>(m: Self, t: T) -> usize { m.n };
+        size = fn::<T: forget>(m: Self, t: T) -> usize { m.n };
     }
 };
 static main = fn() -> usize {
@@ -10400,7 +10430,7 @@ static main = fn() -> usize {
     0
 };
 "#,
-        expect![[r#""#]],
+        expect![""],
     );
 }
 
@@ -10444,7 +10474,14 @@ const OPTION_MEMBERS: &str = r#"    impl Self {
     }"#;
 
 #[test]
-fn the_five_option_members_check_clean_over_a_forgettable_payload() {
+fn the_five_option_members_check_clean_over_any_payload() {
+    // ONE source for both payload kinds, which is the whole of the ruling
+    // (T22): the binder says nothing about capabilities, so there is no
+    // second spelling of `Option` for the linear case to check separately.
+    // Nothing in `flat_map` or `map` moves a `T` twice or drops one, so
+    // nothing fires here for either — and
+    // `the_five_option_members_check_clean_over_option_of_string` runs the
+    // same five bodies over a payload that must be consumed.
     check_diagnostics(
         &format!(
             "\ntype Option = enum::<T> {{\n    Some(T),\n    None,\n}} with {{\n{OPTION_MEMBERS}\n}}\n"
@@ -10454,30 +10491,16 @@ fn the_five_option_members_check_clean_over_a_forgettable_payload() {
 }
 
 #[test]
-fn the_five_option_members_check_clean_over_a_linear_payload() {
-    // The SAME five bodies with `without forget` on the binder — the one
-    // type-level clause that says the payload may be linear. Nothing in
-    // `flat_map` or `map` moves a `T` twice or drops one, so nothing here
-    // should fire; a spurious linear diagnostic would mean the member's
-    // own `U` had quietly leaked into the payload's obligations.
-    check_diagnostics(
-        &format!(
-            "\ntype Option = enum::<T without forget> {{\n    Some(T),\n    None,\n}} with {{\n{OPTION_MEMBERS}\n}}\n"
-        ),
-        expect![[r#""#]],
-    );
-}
-
-#[test]
 fn the_five_option_members_check_clean_over_option_of_string() {
     // The acid test's point, exercised on the real linear type: `String`
-    // is `without forget`, so `Option::<String>` is the instantiation the
-    // type-level clause exists for. All five members, and `flat_map`/`map`
-    // over a payload that must be consumed.
+    // is `without forget`, and `Option` is CLAUSE-FREE — `Option::<String>`
+    // is linear because `String` is, and nobody had to tell the enum. All
+    // five members, and `flat_map`/`map` over a payload that must be
+    // consumed.
     check_string(
         &format!(
             r#"
-type Option = enum::<T without forget> {{
+type Option = enum::<T> {{
     Some(T),
     None,
 }} with {{
@@ -10603,26 +10626,28 @@ type Wrap = struct { n: usize } with {
 }
 
 #[test]
-fn the_forget_default_bound_applies_to_a_member_own_type_param() {
-    // A member's `U` is a type parameter like any other: it requires
-    // `forget` unless it says otherwise, and the check happens at the
-    // instantiation edge the member call is.
+fn a_member_own_type_param_takes_the_forget_bound_and_it_is_checked_at_the_call() {
+    // A member's `U` is a type parameter like any other: it asks for
+    // nothing unless the body needs something. `take` DISCARDS its `u`, so
+    // it has to say `U: forget` — and saying it is a promise, checked at
+    // the instantiation edge the member call is. `hand_back` needs no
+    // bound at all: passing a value on is not discarding it.
     check_diagnostics(
         r#"
 type Wrap = struct { n: usize } with {
     impl Self {
-        take = fn::<U>(u: U, w: Self) -> usize { w.n };
-        take_linear = fn::<U without forget>(u: U, w: Self) -> U { u };
+        take = fn::<U: forget>(u: U, w: Self) -> usize { w.n };
+        hand_back = fn::<U>(u: U, w: Self) -> U { u };
     }
 };
 type Lin = struct { n: usize } without forget with {
     impl Self { sink = fn(l: Self) -> usize { let Lin(struct { n }) = l; n }; }
 };
 static refused = fn(w: Wrap, l: Lin) -> usize { w.take(l) };
-static allowed = fn(w: Wrap, l: Lin) -> usize { w.take_linear(l).sink() };
+static allowed = fn(w: Wrap, l: Lin) -> usize { w.hand_back(l).sink() };
 "#,
         expect![[r#"
-            377..386: `Lin` cannot be a `U`: `Lin` is declared `without forget`, and `U` requires `forget` (every type parameter does unless it is written `U without forget`)
+            368..377: `Lin` cannot be a `U`: `Lin` is declared `without forget`, and `U: forget` asks for a type whose values may be dropped on the floor
         "#]],
     );
 }
@@ -10657,13 +10682,13 @@ fn a_member_own_type_param_shadows_a_same_named_owner_param() {
         r#"
 type P = struct::<T> { a: T } with {
     impl Self {
-        m = fn::<T>(t: T, p: Self) -> T { t };
+        m = fn::<@r, T>(t: T, p: Self.&::<@r>) -> T { t };
     }
 };
-static main = fn(p: P::<usize>) -> bool { p.m::<bool>(true) };
+static main = fn(p: P::<usize>) -> bool { p.&.m::<bool>(true) };
 static plain = fn(p: P::<usize>) -> usize { p.a };
 "#,
-        expect![[r#""#]],
+        expect![""],
     );
 }
 
@@ -10681,7 +10706,7 @@ fn every_refused_member_turbofish_still_types_its_const_arguments() {
     check_diagnostics(
         r#"
 type Shape = enum::<T> { Circle(T), Point } with {
-    impl Self { area = fn(s: Self) -> usize { 1 }; }
+    impl Self { keep = fn(s: Self) -> Self { s }; }
 };
 trait D = requires { n: fn(s: Self) -> usize; } with {
     impl usize { n = fn(s: usize) -> usize { s }; }
@@ -10693,16 +10718,16 @@ static no_impl = fn() -> usize { let f = D::<Self = bool>::n::<const { 1 + true 
 static on_a_value = fn(n: usize) -> usize { n.oops::<const { 1 + true }>(); 0 };
 "#,
         expect![[r#"
-            255..262: `Shape` has no variant `missing` (`Shape` is defined here at 6..11)
-            277..281: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 275..276)
-            332..367: a variant has no generic arguments of its own: they belong to the owner — write `Shape::<...>::Circle`
-            360..364: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 358..359)
-            416..445: `D` has no requirement `gone`
-            438..442: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 436..437)
-            493..534: `bool` does not implement `D`
-            527..531: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 525..526)
-            585..615: no field or member `oops` on `usize`
-            606..610: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 604..605)
+            254..261: `Shape` has no variant `missing` (`Shape` is defined here at 6..11)
+            276..280: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 274..275)
+            331..366: a variant has no generic arguments of its own: they belong to the owner — write `Shape::<...>::Circle`
+            359..363: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 357..358)
+            415..444: `D` has no requirement `gone`
+            437..441: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 435..436)
+            492..533: `bool` does not implement `D`
+            526..530: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 524..525)
+            584..614: no field or member `oops` on `usize`
+            605..609: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 603..604)
         "#]],
     );
 }
@@ -10718,7 +10743,14 @@ fn a_refused_member_turbofish_says_nothing_it_cannot_back_up() {
     check_diagnostics(
         r#"
 type Option = enum::<T> { Some(T), None } with {
-    impl Self { map_to = fn::<U>(f: fn(T) -> U, s: Self) -> U { panic("x") }; }
+    impl Self {
+        map_to = fn::<U>(f: fn(T) -> U, s: Self) -> U {
+            match s {
+                ::Some(t) => f(t),
+                ::None => panic("x"),
+            }
+        };
+    }
 };
 type Holder = struct { go: fn(usize) -> usize };
 static half_typed = fn(o: Option::<usize>) -> usize { o.map_to::<>; 0 };
@@ -10733,11 +10765,11 @@ static dropped_number = fn(h: Holder) -> usize { h.go::<3>(1) };
 static unknown_number = fn(h: Holder) -> usize { h.nope::<3>(1) };
 "#,
         expect![[r#"
-            236..248: `map_to` is a member fn, not a field; call it: `.map_to(...)`
-            309..330: no field or member `map_two` on `Option::<usize>`
-            359..363: unknown type `Nope`
-            801..810: `go` takes no generic arguments
-            866..880: no field or member `nope` on `Holder`
+            354..366: `map_to` is a member fn, not a field; call it: `.map_to(...)`
+            427..448: no field or member `map_two` on `Option::<usize>`
+            477..481: unknown type `Nope`
+            919..928: `go` takes no generic arguments
+            984..998: no field or member `nope` on `Holder`
         "#]],
     );
 }
@@ -10904,12 +10936,12 @@ fn a_refused_region_argument_does_not_also_miscount_the_list() {
     // re-check.
     check_diagnostics(
         r#"
-type Opt = enum::<T> { Some(T), None } with {
+type Opt = enum { Some(usize), None } with {
     impl Self { pick = fn::<U>(alt: U, s: Self) -> U { alt }; }
 };
 static id = fn::<T>(x: T) -> T { x };
 static z1 = fn::<@a, T>(x: T, p: usize.&::<@a>) -> T { x };
-static main = fn::<@b>(o: Opt::<usize>, q: usize.&::<@b>) -> usize {
+static main = fn::<@b>(o: Opt, q: usize.&::<@b>) -> usize {
     let a: usize = id::<@z>(1);
     let b: bool = o.pick::<@a>(true);
     let c: usize = z1::<@_, usize, bool>(1, q);
@@ -10917,9 +10949,9 @@ static main = fn::<@b>(o: Opt::<usize>, q: usize.&::<@b>) -> usize {
 };
 "#,
         expect![[r#"
-            305..307: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
-            340..342: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
-            375..377: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            295..297: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            330..332: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            365..367: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
         "#]],
     );
 }
@@ -10988,7 +11020,14 @@ fn a_member_turbofish_has_no_nameable_argument() {
     check_diagnostics(
         r#"
 type Option = enum::<T> { Some(T), None } with {
-    impl Self { map_to = fn::<U>(f: fn(T) -> U, s: Self) -> U { panic("x") }; }
+    impl Self {
+        map_to = fn::<U>(f: fn(T) -> U, s: Self) -> U {
+            match s {
+                ::Some(t) => f(t),
+                ::None => panic("x"),
+            }
+        };
+    }
 };
 trait Pk = requires { pick: fn::<U>(alt: U, s: Self) -> U; } with {
     impl usize { pick = fn::<U>(alt: U, s: usize) -> U { alt }; }
@@ -11001,11 +11040,11 @@ static trait_path = fn(n: usize) -> bool { Pk::pick::<Self = bool>(true, n) };
 static bound = fn::<T: Pk>(x: T) -> bool { x.pick::<Self = bool>(true) };
 "#,
         expect![[r#"
-            366..396: only a trait has a `Self` argument to name
-            449..478: only a trait has a `Self` argument to name
-            533..560: a member's own generic arguments are positional: `Self` is the owner's, one segment to the left (`Trait::<Self = Type>::member`)
-            607..639: a member's own generic arguments are positional: `Self` is the owner's, one segment to the left (`Trait::<Self = Type>::member`)
-            686..713: a member's own generic arguments are positional: `Self` is the owner's, one segment to the left (`Trait::<Self = Type>::member`)
+            484..514: only a trait has a `Self` argument to name
+            567..596: only a trait has a `Self` argument to name
+            651..678: a member's own generic arguments are positional: `Self` is the owner's, one segment to the left (`Trait::<Self = Type>::member`)
+            725..757: a member's own generic arguments are positional: `Self` is the owner's, one segment to the left (`Trait::<Self = Type>::member`)
+            804..831: a member's own generic arguments are positional: `Self` is the owner's, one segment to the left (`Trait::<Self = Type>::member`)
         "#]],
     );
 }
@@ -11024,26 +11063,26 @@ fn cannot_infer_a_member_own_param_names_the_spelling_that_pins_it() {
     // below is checked clean when written out.
     check_diagnostics(
         r#"
-type Option = enum::<T> { Some(T), None } with {
+type Option = enum { Some(usize), None } with {
     impl Self { fresh = fn::<U>(s: Self) -> U { panic("x") }; }
 };
 trait Mk = requires { mk: fn::<U>(s: Self) -> U; } with {
     impl usize { mk = fn::<U>(s: usize) -> U { panic("x") }; }
 };
-static a = fn(o: Option::<usize>) -> usize { o.fresh(); 1 };
-static b = fn(o: Option::<usize>) -> usize { Option::fresh(o); 1 };
+static a = fn(o: Option) -> usize { o.fresh(); 1 };
+static b = fn(o: Option) -> usize { Option::fresh(o); 1 };
 static c = fn(n: usize) -> usize { n.mk(); 1 };
 static d = fn(n: usize) -> usize { Mk::mk(n); 1 };
 static e = fn::<T: Mk>(x: T) -> usize { x.mk(); 1 };
 static f = fn(n: usize) -> usize { let g = Mk::<Self = usize>::mk; g(n); 1 };
 "#,
         expect![[r#"
-            286..295: cannot infer the type parameter `U` of `Option::fresh`; write `.fresh::<...>(...)` to specify it
-            347..360: cannot infer the type parameter `U` of `Option::fresh`; write `Option::fresh::<...>` to specify it
-            405..411: cannot infer the type parameter `U` of `usize::mk`; write `.mk::<...>(...)` to specify it
-            453..462: cannot infer the type parameter `U` of `Mk::mk`; write `Mk::mk::<...>` to specify it (defined here at 123..125)
-            509..515: cannot infer the type parameter `U` of `Mk::mk`; write `.mk::<...>(...)` to specify it (defined here at 123..125)
-            565..587: cannot infer the type parameter `U` of `Mk::mk`; write `Mk::<Self = usize>::mk::<...>` to specify it
+            276..285: cannot infer the type parameter `U` of `Option::fresh`; write `.fresh::<...>(...)` to specify it
+            328..341: cannot infer the type parameter `U` of `Option::fresh`; write `Option::fresh::<...>` to specify it
+            386..392: cannot infer the type parameter `U` of `usize::mk`; write `.mk::<...>(...)` to specify it
+            434..443: cannot infer the type parameter `U` of `Mk::mk`; write `Mk::mk::<...>` to specify it (defined here at 122..124)
+            490..496: cannot infer the type parameter `U` of `Mk::mk`; write `.mk::<...>(...)` to specify it (defined here at 122..124)
+            546..568: cannot infer the type parameter `U` of `Mk::mk`; write `Mk::<Self = usize>::mk::<...>` to specify it
         "#]],
     );
 }
@@ -11076,15 +11115,15 @@ fn a_member_turbofish_argument_is_named_in_the_blame() {
     // argument instead, which is the wrong node and the wrong `usize`.
     check_diagnostics(
         r#"
-type Cell = struct::<T> { v: T } with {
+type Cell = struct { v: usize } with {
     impl Self { pick = fn::<U>(alt: U, c: Self) -> U { alt }; }
 };
-static dotted = fn(c: Cell::<usize>) -> bool { c.pick::<bool>(1) };
-static pathed = fn(c: Cell::<usize>) -> bool { Cell::<usize>::pick::<bool>(1, c) };
+static dotted = fn(c: Cell) -> bool { c.pick::<bool>(1) };
+static pathed = fn(c: Cell) -> bool { Cell::pick::<bool>(1, c) };
 "#,
         expect![[r#"
-            170..171: type mismatch: expected `bool`, found `{number}` (because this member argument instantiated the parameter to `bool` at 164..168)
-            251..252: type mismatch: expected `bool`, found `{number}` (because this member argument instantiated the parameter to `bool` at 245..249)
+            160..161: type mismatch: expected `bool`, found `{number}` (because this member argument instantiated the parameter to `bool` at 154..158)
+            223..224: type mismatch: expected `bool`, found `{number}` (because this member argument instantiated the parameter to `bool` at 217..221)
         "#]],
     );
 }
@@ -11100,12 +11139,12 @@ fn two_same_named_parameters_are_told_apart_in_the_message() {
         r#"
 type P = struct::<T> { a: T } with {
     impl Self {
-        bad = fn::<T>(t: T, p: Self) -> T { p.a };
+        bad = fn::<T: forget>(t: T, p: Self) -> T { let P(struct { a }) = p; a };
     }
 };
 "#,
         expect![[r#"
-            98..101: type mismatch: expected `T`, found `T` — `P::bad` declares `T` twice (the owner's parameters come first, then the member's own, and every kind counts — regions included): this position wants the one at binder index 1, the value has the one at index 0 — rename one of them (expected `T` because of this return type at 91..95)
+            131..132: type mismatch: expected `T`, found `T` — `P::bad` declares `T` twice (the owner's parameters come first, then the member's own, and every kind counts — regions included): this position wants the one at binder index 1, the value has the one at index 0 — rename one of them (expected `T` because of this return type at 99..103)
         "#]],
     );
     // The pair need not be the WHOLE type: the shape the blessing invites
@@ -11118,14 +11157,14 @@ type P = struct::<T> { a: T } with {
         r#"
 type P = struct::<T> { a: T } with {
     impl Self {
-        nested = fn::<T>(t: T, p: Self) -> P::<T> { p };
-        deep = fn::<@x, T>(t: T, p: Self.&::<@x>) -> P::<T>.&::<@x> { p };
+        nested = fn::<T: forget>(t: T, p: Self) -> P::<T> { p };
+        deep = fn::<@x, T: forget>(t: T, p: Self.&::<@x>) -> P::<T>.&::<@x> { p };
     }
 };
 "#,
         expect![[r#"
-            106..107: type mismatch: expected `P::<T>`, found `P::<T>` — `P::nested` declares `T` twice (the owner's parameters come first, then the member's own, and every kind counts — regions included): this position wants the one at binder index 1, the value has the one at index 0 — rename one of them (expected `P::<T>` because of this return type at 94..103)
-            181..182: type mismatch: expected `P::<T>.&::<@x>`, found `P::<T>.&::<@x>` — `P::deep` declares `T` twice (the owner's parameters come first, then the member's own, and every kind counts — regions included): this position wants the one at binder index 2, the value has the one at index 0 — rename one of them (expected `P::<T>.&::<@x>` because of this return type at 161..178)
+            114..115: type mismatch: expected `P::<T>`, found `P::<T>` — `P::nested` declares `T` twice (the owner's parameters come first, then the member's own, and every kind counts — regions included): this position wants the one at binder index 1, the value has the one at index 0 — rename one of them (expected `P::<T>` because of this return type at 102..111)
+            197..198: type mismatch: expected `P::<T>.&::<@x>`, found `P::<T>.&::<@x>` — `P::deep` declares `T` twice (the owner's parameters come first, then the member's own, and every kind counts — regions included): this position wants the one at binder index 2, the value has the one at index 0 — rename one of them (expected `P::<T>.&::<@x>` because of this return type at 177..194)
         "#]],
     );
     // The note's OTHER branch (two different items each declaring the
@@ -11139,14 +11178,14 @@ type P = struct::<T> { a: T } with {
         r#"
 type P = struct::<T> { a: T } with {
     impl Self {
-        one = fn::<T>(t: T, p: Self) -> T { P::two(t, p) };
-        two = fn::<T>(t: T, p: Self) -> T { t };
+        one = fn::<T: forget>(t: T, p: Self) -> Self { P::two(t, p) };
+        two = fn::<T: forget>(t: T, p: Self) -> Self { p };
     }
 };
 static f = fn::<T>(x: T) -> T { g(x) };
 static g = fn::<T>(x: T) -> T { x };
 "#,
-        expect![[r#""#]],
+        expect![""],
     );
 }
 
@@ -11309,9 +11348,9 @@ fn named_self_reservations_survive() {
 trait Gen = requires::<T> { g: fn(x: Self) -> T; };
 trait D = requires {
     type Item;
-    m: fn::<W: D>(w: W, x: Self) -> usize;
+    m: fn::<W: D + forget>(w: W, x: Self) -> usize;
 } with {
-    impl usize { m = fn::<W: D>(w: W, x: usize) -> usize { x }; }
+    impl usize { m = fn::<W: D + forget>(w: W, x: usize) -> usize { x }; }
 };
 static a = fn(x: usize) -> usize { D::<Self = usize>::Item };
 static b = fn(x: usize) -> usize { Gen::<Self = usize>::g(x) };
@@ -11320,9 +11359,9 @@ static c = fn(x: usize) -> usize { let f = D::<Self = usize>::m; 1 };
         expect![[r#"
             21..26: generic traits are not supported yet
             78..82: associated types are not supported yet
-            245..268: `D::Item` is an associated type; associated types are not supported yet
-            307..329: `Gen` is a reserved generic trait (generic traits are not supported yet) and cannot be used
-            379..399: `D::m` has bounds on its type parameters, so it cannot be used as a value yet; call it directly
+            263..286: `D::Item` is an associated type; associated types are not supported yet
+            325..347: `Gen` is a reserved generic trait (generic traits are not supported yet) and cannot be used
+            397..417: `D::m` has bounds on its type parameters, so it cannot be used as a value yet; call it directly
         "#]],
     );
 }
@@ -11534,11 +11573,11 @@ fn a_dot_call_receiver_is_a_value_position() {
     // the one field receiver that is not a place.
     check_diagnostics(
         "type Cell = struct::<T> { v: T } with \
-         { impl Self { take = fn (c: Self) -> T { c.v }; } }; \
+         { impl Self { take = fn (c: Self) -> T { let Cell(struct { v }) = c; v }; } }; \
          static f = fn::<@a>(r: Cell::<usize.&mut::<@a>>.&mut::<@a>) -> () \
          { let m = r.*.take(); };",
         expect![[r#"
-            167..170: cannot move out of a borrow: `Cell::<usize.&mut::<@a>>` cannot be copied
+            193..196: cannot move out of a borrow: `Cell::<usize.&mut::<@a>>` cannot be copied
         "#]],
     );
     // Which is why the question waits for resolution: the SAME syntax on
@@ -12195,12 +12234,12 @@ fn a_member_own_const_binder_stays_reserved_precisely() {
         r#"
 type Measured = struct { n: usize } with {
     impl Self {
-        size = fn::<@b, T, const N: usize>(m: Self.&::<@b>, t: T) -> usize { m.*.n };
+        size = fn::<@b, T: forget, const N: usize>(m: Self.&::<@b>, t: T) -> usize { m.*.n };
     }
 };
 "#,
         expect![[r#"
-            87..101: a member's own const parameters are not supported yet (a const argument is part of an instance's identity, and a member's arguments are read off the receiver's own type)
+            95..109: a member's own const parameters are not supported yet (a const argument is part of an instance's identity, and a member's arguments are read off the receiver's own type)
         "#]],
     );
 }
@@ -12359,12 +12398,12 @@ fn a_trait_requirement_may_carry_a_region_binder() {
 type Cell = struct { n: usize };
 trait A = requires { f: fn(x: usize, s: Self) -> usize; }
   with { impl Cell { f = fn(x: usize, s: Self) -> usize { x }; } };
-trait B = requires { g: fn::<T>(x: T, s: Self) -> usize; }
-  with { impl Cell { g = fn::<T>(x: T, s: Self) -> usize { 1 }; } };
+trait B = requires { g: fn::<T: forget>(x: T, s: Self) -> usize; }
+  with { impl Cell { g = fn::<T: forget>(x: T, s: Self) -> usize { 1 }; } };
 trait C = requires { h: fn::<@b>(x: usize.&::<@b>, s: Self) -> usize; }
   with { impl Cell { h = fn::<@b>(x: usize.&::<@b>, s: Self) -> usize { 1 }; } };
 "#,
-        expect![[r#""#]],
+        expect![""],
     );
 }
 
@@ -12732,16 +12771,16 @@ type Option = enum::<T> {
     }
 }
 
-type Map = struct::<K, V> { } with {
+type Map = struct { } with {
     impl Self {
-        get = fn::<@b>(key: K, m: Self.&mut::<@b>) -> Option::<V.&mut::<@b>> { ::None };
-        insert = fn::<@b>(key: K, val: V, m: Self.&mut::<@b>) -> () { };
+        get = fn::<@b>(key: usize, m: Self.&mut::<@b>) -> Option::<usize.&mut::<@b>> { ::None };
+        insert = fn::<@b>(key: usize, val: usize, m: Self.&mut::<@b>) -> () { };
     }
 };
 
-static get_or_default = fn::<@a, K, V>(
-    key: K, val: V, map: Map::<K, V>.&mut::<@a>
-) -> V.&mut::<@a> {
+static get_or_default = fn::<@a>(
+    key: usize, val: usize, map: Map.&mut::<@a>
+) -> usize.&mut::<@a> {
     match map.get(key) {
         ::Some(v) => v,
         ::None => {
@@ -12751,7 +12790,7 @@ static get_or_default = fn::<@a, K, V>(
     }
 };
 "#,
-        expect![[r#""#]],
+        expect![""],
     );
 }
 
@@ -14785,11 +14824,12 @@ static n: usize = const { let r = const_make(1); 5 };
 }
 
 #[test]
-fn the_forget_bound_is_the_default_on_every_type_parameter() {
-    // Nothing was written about `T`, so `T` requires `forget` — and the
-    // refusal names the bound and the spelling that relaxes it. Note the
-    // second diagnostic: containment made `Box::<Res>` linear anyway, so
-    // the bound is a promise about the binder, not the safety net.
+fn a_container_holds_a_linear_with_nothing_written_on_its_binder() {
+    // The ruling, at its smallest (T22): `Box` says nothing about `T`, and
+    // `Box::<Res>` is linear anyway — CONTAINMENT decided, which is what
+    // it always did. The one diagnostic left is the leak the program
+    // really has; the refusal that used to sit beside it was bookkeeping
+    // about a bound nobody needed.
     check_linear(
         r#"
 type Box = enum::<T> { Full(T), Empty };
@@ -14800,20 +14840,19 @@ static main = fn() -> () {
 "#,
         expect![[r#"
             407..457: `b` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`b` is born here and must be consumed at 438..439)
-            442..451: `Res` cannot be a `T`: `Res` is declared `without forget`, and `T` requires `forget` (every type parameter does unless it is written `T without forget`)
         "#]],
     );
 }
 
 #[test]
-fn opting_a_parameter_out_lets_it_carry_a_linear() {
+fn a_container_parameter_carries_a_linear_and_hands_it_back() {
     // `unwrap`'s shape is the reason rigid checking is bearable: inside the
     // body the only things you can do with a `T` you may not forget are
     // hand it back and pass it on — and handing it back is what a container
     // is for.
     check_linear(
         r#"
-type Box = enum::<T without forget> { Full(T), Empty } with {
+type Box = enum::<T> { Full(T), Empty } with {
     impl Self {
         unwrap = fn(b: Self) -> T {
             match b {
@@ -14839,41 +14878,566 @@ static forgettable = fn() -> usize {
 };
 "#,
         expect![[r#"
-            738..788: `b` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`b` is born here and must be consumed at 769..770)
+            723..773: `b` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`b` is born here and must be consumed at 754..755)
         "#]],
     );
 }
 
 #[test]
-fn an_opted_out_parameter_is_checked_rigidly_inside_the_generic_body() {
+fn an_unbounded_parameter_is_checked_rigidly_inside_the_generic_body() {
     // The caller may hand it a linear, so the body may not assume it can
-    // drop one on the floor — even though `T` might be `usize`.
+    // drop one on the floor — even though `T` might be `usize`. The
+    // message names the binder, because that is where the fix goes: this
+    // body discarded a `T`, and nothing about `T` said it could.
+    // `hand_back` needs nothing: passing a value on is not discarding it.
     check_linear(
         r#"
-static ignore = fn::<T without forget>(t: T) -> () { };
-static hand_back = fn::<T without forget>(t: T) -> T { t };
+static ignore = fn::<T>(t: T) -> () { };
+static hand_back = fn::<T>(t: T) -> T { t };
 "#,
         expect![[r#"
-            392..395: `t` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`t` is born here and must be consumed at 380..381)
+            377..380: `t` is not consumed on this path, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded (`t` is born here and must be consumed at 365..366)
         "#]],
     );
 }
 
 #[test]
-fn an_opted_out_parameter_cannot_satisfy_the_bound_and_is_blamed_as_one() {
-    // The blame root for a parameter is not a declaration: `U` was never
-    // declared `without forget`, it opted out of the bound every type
-    // parameter carries by default, and the sentence has to say so.
+fn the_forget_bound_lets_a_generic_body_discard_its_parameter() {
+    // The body-side dual, written: `T: forget` is what a body says when it
+    // genuinely drops a `T` on the floor. Its price is at the call — the
+    // instantiation must supply a type that can be dropped, so the linear
+    // one is refused there instead of leaking here.
     check_linear(
         r#"
-type Box = enum::<T> { Full(T), Empty };
-static wrap = fn::<U without forget>(u: U) -> () {
-    let b = Box::Full(u);
+static ignore = fn::<T: forget>(t: T) -> () { };
+static fine = fn() -> () { ignore::<usize>(5) };
+static refused = fn() -> () { ignore::<Res>(make(1)) };
+"#,
+        expect![[r#"
+            469..482: `Res` cannot be a `T`: `Res` is declared `without forget`, and `T: forget` asks for a type whose values may be dropped on the floor
+        "#]],
+    );
+}
+
+#[test]
+fn a_trait_named_after_a_capability_is_declarable_and_unreachable() {
+    // Capability names are not reserved words, so this declaration is
+    // fine — but a bound naming one asks the LANGUAGE for the capability
+    // and never performs a scope lookup, so nothing can reach this trait
+    // through `T: forget`. A warning, because the declaration is legal and
+    // only its reachability is surprising.
+    check_diagnostics(
+        r#"
+trait forget = requires { m: fn(s: Self) -> usize; };
+static f = fn::<T: forget>(t: T) -> usize { 1 };
+"#,
+        expect![[r#"
+            7..13: `forget` is the name of a capability, so `T: forget` asks for the capability and never for this trait; nothing can reach it through a bound
+        "#]],
+    );
+}
+
+#[test]
+fn the_forget_bound_is_not_permission_to_copy() {
+    // The soundness line the bound must not cross, in both of the places
+    // it could have been crossed (TR11). `forget` answers what may be
+    // LOST; duplication asks what may be COPIED, and the language has its
+    // own witness that the two come apart: `T.&mut` HAS `forget` (losing a
+    // borrow loses no obligation) and is refused copying anyway. So a
+    // bounded `T` at `usize.&mut` would hand out two exclusive borrows of
+    // one place — through `r.*` in the first body, and through a second
+    // READ of one binding in the second.
+    //
+    // Both are refused: every rigid parameter is non-copyable, and every
+    // one is tracked by the must-consume walk, bound or not. What the
+    // bound buys is the LAST body — the obligation to consume before the
+    // scope ends is waived, which is the whole of what it was asked for.
+    // Strict-first: if a capability is ever ruled to grant duplication,
+    // granting it is the relaxation.
+    //
+    // `in_enum` is the same question one CONTAINMENT level down, and it is
+    // pinned because the answer used to depend on which declaration form
+    // held the parameter: the copy walk reads a mention's components, and
+    // an enum's are its variant payloads exactly as a struct's are its
+    // fields.
+    check_diagnostics(
+        r#"
+type Opt = enum::<T> { S(T), N };
+static deref = fn::<@a, T: forget>(r: T.&::<@a>) -> T { r.* };
+static in_enum = fn::<@a, T: forget>(o: Opt::<T>.&::<@a>) -> Opt::<T> { o.* };
+static pair = fn::<T: forget>(x: T) -> struct { a: T, b: T } { struct { a = x, b = x } };
+static lend = fn::<@a, T: forget>(r: T.&::<@a>) -> T.&::<@a> { r };
+static discards = fn::<T: forget>(x: T) -> usize { 1 };
+"#,
+        expect![[r#"
+            91..94: cannot move out of a borrow: `T` cannot be copied
+            170..173: cannot move out of a borrow: `Opt::<T>` cannot be copied
+            260..261: `x` was already consumed: a value of `T` may not be duplicated, and no bound grants copying — borrow it for the second use (`x` is born here, and there is only one of it at 207..208) (first consumed here at 253..254)
+        "#]],
+    );
+}
+
+#[test]
+fn lending_a_payload_out_of_a_container_works_and_reading_one_out_does_not() {
+    // The lending shape a generic container needs, pinned as a fact
+    // rather than a memory: `b.*.v.&` takes a borrow of a field through a
+    // borrow of the whole, COPIES NOTHING, and is accepted — for an
+    // unbounded `T` and for a concrete linear payload alike, so nothing
+    // about it is a capability-bound question.
+    //
+    // The controls are the two shapes that genuinely duplicate: reading
+    // `b.*.v` out through a borrow is a copy, and so is reading it out of
+    // an owned box. That is what makes a container's `replace`/`take`
+    // unwritable today (TR11's Re-evaluate) — not lending.
+    check_diagnostics(
+        r#"
+type Box = struct::<T> { v: T } with {
+    impl Self {
+        lend = fn::<@a>(b: Self.&::<@a>) -> T.&::<@a> { b.*.v.& };
+        read = fn::<@a>(b: Self.&::<@a>) -> T { b.*.v };
+    }
+};
+type Lin = struct { n: usize } without forget with {
+    impl Self { drop = fn(l: Self) -> () { let Lin(struct { n }) = l; }; }
+};
+type LinBox = struct { v: Lin } with {
+    impl Self {
+        lend = fn::<@a>(b: Self.&::<@a>) -> Lin.&::<@a> { b.*.v.& };
+        read = fn::<@a>(b: Self.&::<@a>) -> Lin { b.*.v };
+    }
 };
 "#,
         expect![[r#"
-            431..460: `b` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`b` is born here and must be consumed at 441..442)
-            445..454: `U` cannot be a `T`: `U` is a type parameter written `without forget`, and `T` requires `forget` (every type parameter does unless it is written `T without forget`)
+            171..176: cannot move out of a borrow: `T` cannot be copied
+            494..499: cannot move out of a borrow: `Lin` cannot be copied
+        "#]],
+    );
+}
+
+#[test]
+fn the_rest_of_the_linear_family_names_the_binder_too() {
+    // The families that used to compute a hint and drop it. Two are
+    // LEAK-shaped (an assignment over a live value, a join that disagrees)
+    // and may offer the bound, because they fire only where an unbounded
+    // parameter is why the value had to be consumed. Two are
+    // DUPLICATION-shaped (a repeat, a loop that consumes what it found)
+    // and must not: a bounded parameter reaches them, and for the repeat
+    // below consumption has already been waived — "a value that must be
+    // consumed" would be a false sentence about it.
+    check_diagnostics(
+        r#"
+static keep = fn::<U>(u: U) -> U { u };
+static repeated = fn::<T: forget>(t: T) -> usize { let a = [t; 3]; 1 };
+static assigned = fn::<T>(mut t: T, u: T) -> T { t = u; t };
+static joined = fn::<T>(t: T, c: bool) -> usize { if c { let x = keep::<T>(t); 0 } else { 0 } };
+static looped = fn::<T: forget>(t: T) -> usize { loop { let x = t; }; };
+"#,
+        expect![[r#"
+            101..102: cannot repeat a value of `T`: a value of `T` may not be duplicated, and no bound grants copying — there is only one value
+            162..163: `t` still holds a value that must be consumed, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded (`t` is born here and must be consumed at 143..144)
+            224..267: `t` is consumed on some paths through this expression and not on others, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded (`t` is born here and must be consumed at 198..199)
+            229..256: `x` is not consumed on this path, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded (`x` is born here and must be consumed at 235..236)
+            325..339: `t` is left in a different state than the loop found it in: a value of `T` may not be duplicated, and no bound grants copying — the next iteration would read one this one already moved (`t` is born here, and there is only one of it at 303..304)
+        "#]],
+    );
+}
+
+#[test]
+fn a_place_written_over_inside_a_generic_body_names_the_binder() {
+    // The one finding with no BINDING to name: a place written over (a
+    // field, an element, a `.&mut` referent). LEAK family — the old value
+    // goes nowhere — so it may offer the bound, and it names the binder
+    // because there is no declaration in sight to point at.
+    //
+    // The control is the same shape with `T: forget`: a bounded `T` is
+    // forgettable, so nothing is lost and nothing fires.
+    check_diagnostics(
+        r#"
+type Box = struct::<T> { v: T };
+static over_field = fn::<T>(mut b: Box::<T>, t: T) -> usize { b.v = t; 1 };
+static over_field_bounded = fn::<T: forget>(mut b: Box::<T>, t: T) -> usize { b.v = t; 1 };
+"#,
+        expect![[r#"
+            94..108: `b` is not consumed on this path, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded (`b` is born here and must be consumed at 66..67)
+            96..99: this place still holds a value that must be consumed, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded
+        "#]],
+    );
+}
+
+#[test]
+fn the_pattern_shaped_refusals_name_the_binder_too() {
+    // The two refusals that land on a PATTERN rather than on a binding or
+    // an expression: a `..` that skips a field, and a match arm `_` that
+    // swallows the scrutinee. Both are LEAK-shaped — the value was
+    // produced and given nowhere to go — so both offer the bound, and both
+    // name the binder for the reason every other twin does.
+    //
+    // Neither type is a binding's or an expression's, which is why the
+    // walk carries the blame instead of the render site looking one up:
+    // the `..` answers for the FIELD it skipped, not for the record that
+    // holds it, and the second declaration is the control that proves it —
+    // `Two`'s skipped field is the concrete `Res`, so its refusal names no
+    // binder even though a `T` sits right beside it in the same pattern.
+    check_linear(
+        r#"
+type Box = struct::<T> { v: T, n: usize };
+type Two = struct::<T> { r: Res, t: T };
+type Opt = enum::<T> { S(T), N };
+static skips = fn::<T>(b: Box::<T>) -> usize { let Box(struct { n, .. }) = b; n };
+static skips_decl = fn::<T>(x: Two::<T>) -> T { let Two(struct { t, .. }) = x; t };
+static swallows = fn::<T>(o: Opt::<T>) -> usize { match o { _ => 1, } };
+"#,
+        expect![[r#"
+            514..530: `..` would skip `v`, and `T` may be a type that must be consumed: name it in the pattern so it has somewhere to go, or write `T: forget` to require one that can be discarded
+            598..614: `..` would skip `r`, which must be consumed; name it in the pattern so it has somewhere to go
+            686..687: `_` matches the value without binding it, and `T` may be a type that must be consumed: give it a name so it has somewhere to go, or write `T: forget` to require one that can be discarded
+        "#]],
+    );
+}
+
+#[test]
+fn a_const_block_typed_as_a_parameter_names_the_binder() {
+    // A const context cannot READ a runtime binding, but it can be typed
+    // by one: `let x: T = const { ... }` takes its expected type from the
+    // annotation while a diverging body supplies the value. So the
+    // const-block refusal does reach a generic body, and it names the
+    // binder like its neighbours.
+    //
+    // Its hint is the one leak hint that does not offer consumption: the
+    // block's value is computed once and copied into every evaluation, so
+    // there is no path to consume it on and the bound is all there is.
+    // The bounded body is the control — a forgettable `T` needs no path.
+    //
+    // `x` itself is not reported: the block diverges, so nothing reaches
+    // the binding. The block still answers for the type it was pinned to.
+    check_diagnostics(
+        r#"
+static held = fn::<T>(t: T) -> T { let x: T = const { panic("x") }; t };
+static held_bounded = fn::<T: forget>(t: T) -> T { let x: T = const { panic("x") }; t };
+"#,
+        expect![[r#"
+            47..67: a `const` block's value must have the `forget` capability, and `T` may be a type that must be consumed — no path here could consume it, so write `T: forget` to require one that can be discarded
+        "#]],
+    );
+}
+
+#[test]
+fn a_self_referential_declaration_does_not_hang_the_copy_walk() {
+    // The copy walk descends into a mention's components, so a
+    // declaration that mentions itself is a cycle. It contributes
+    // nothing — a declaration reached twice adds no component the walk has
+    // not judged — and the non-recursive parts decide, which for both of
+    // these is "copyable".
+    check_diagnostics(
+        r#"
+type S = struct { next: S };
+type L = enum { C(L), N };
+static s = fn::<@a>(r: S.&::<@a>) -> S { r.* };
+static l = fn::<@a>(r: L.&::<@a>) -> L { r.* };
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn nesting_a_declaration_inside_itself_is_not_a_cycle() {
+    // A declaration is summarized ONCE — whether its own components cost it
+    // the capability, and which of its parameters reach a value position of
+    // it — and an instance is judged from that summary and its arguments.
+    // So `B::<B::<X>>` names one declaration twice and neither mention is a
+    // cycle: `B`'s own component is its own `T`, which holds nothing by
+    // itself, and the answer comes from the argument, one level at a time,
+    // however many levels there are. A walk that read the repeated
+    // declaration as a cycle and answered "found nothing" would copy the
+    // exclusive borrow one level down out of a shared borrow, and leak the
+    // payload one level down.
+    check_diagnostics(
+        r#"
+type B = struct::<T> { v: T };
+type Opt = enum::<T> { S(T), N };
+static nested = fn::<@a, @b>(r: B::<B::<usize.&mut::<@b>>>.&::<@a>) -> B::<B::<usize.&mut::<@b>>> { r.* };
+static flat = fn::<@a, @b>(r: B::<usize.&mut::<@b>>.&::<@a>) -> B::<usize.&mut::<@b>> { r.* };
+static leaks = fn::<T>(x: Opt::<Opt::<T>>) -> usize { 1 };
+"#,
+        expect![[r#"
+            166..169: cannot move out of a borrow: `B::<B::<usize.&mut::<@b>>>` cannot be copied
+            261..264: cannot move out of a borrow: `B::<usize.&mut::<@b>>` cannot be copied
+            320..325: `x` is not consumed on this path, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded (`x` is born here and must be consumed at 291..292)
+        "#]],
+    );
+}
+
+#[test]
+fn a_declaration_that_names_itself_is_summarized_not_expanded() {
+    // The summary is a property of the DECLARATION graph, which is finite,
+    // so a declaration that mentions itself with LARGER arguments is
+    // answered rather than bounded: nothing limits how deep or how large a
+    // type the check will read, and no inhabited type is refused for want of
+    // such a limit.
+    //
+    // `Nest` is the classic nested datatype. Its `T` reaches a value
+    // position (a `::Cons` holds one), so `Nest::<usize>` may be forgotten
+    // and copied and `Nest::<Res>` may not — and the `Nest::<Pair::<T>>`
+    // beside it never has to be expanded to say either.
+    //
+    // `P` and `Pe` are the same shape with nothing reaching a value
+    // position: every value position of a `P` is another `P`, so no `T` is
+    // ever held. No finite value inhabits `P` at all; `Pe` has a base
+    // variant, so `Pe::<Res>` IS inhabited — by `::N`, and by `::S` of a
+    // `Pe` of something bigger — and not one of its inhabitants holds a
+    // `Res`. Both are clean, which is the exact answer, and it is the least
+    // fixpoint that gives it: assume a parameter flows and it flows
+    // forever, taking every argument any `Pe` was ever given with it.
+    //
+    // `L` and `M` swap their parameters through each other, which is why
+    // the fixpoint is over the whole graph rather than one declaration at a
+    // time: `L::<usize, Res>` holds the `Res`, `L::<Res, usize>` never does.
+    check_diagnostics(
+        r#"
+type Res = struct { id: usize } without forget with {
+    impl Self { drop = fn(r: Self) -> () { let Res(struct { id }) = r; }; };
+};
+type W = struct::<T> { v: T };
+type Pair = struct::<T> { l: T, r: T };
+type Nest = enum::<T> { Cons(T, Nest::<Pair::<T>>), Nil };
+type P = struct::<T> { v: P::<W::<T>> };
+type Pe = enum::<T> { S(Pe::<W::<T>>), N };
+type L = enum::<S, T> { C(T, M::<T, S>), N };
+type M = enum::<S, T> { C(S, L::<T, S>), N };
+static holds = fn(n: Nest::<usize>) -> usize { 1 };
+static copies = fn::<@a>(r: Nest::<usize>.&::<@a>) -> Nest::<usize> { r.* };
+static leaks = fn(n: Nest::<Res>) -> usize { 1 };
+static empty = fn(p: P::<usize>) -> usize { 1 };
+static copies_empty = fn::<@a>(r: P::<usize>.&::<@a>) -> P::<usize> { r.* };
+static based = fn(p: Pe::<Res>) -> usize { 1 };
+static swapped = fn(x: L::<usize, Res>) -> usize { 1 };
+static unswapped = fn(x: L::<Res, usize>) -> usize { 1 };
+"#,
+        expect![[r#"
+            614..619: `n` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`n` is born here and must be consumed at 589..590)
+            844..849: `x` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`x` is born here and must be consumed at 815..816)
+        "#]],
+    );
+}
+
+#[test]
+fn ordinary_nested_generics_are_judged_from_their_arguments() {
+    // Nesting one generic inside another is the everyday case and costs
+    // nothing: `Row` holds an `Opt::<Pair::<usize, usize>>`, so an
+    // `Opt::<Row>` holds no obligation and may be both dropped and copied
+    // out of a shared borrow. The same shape with a linear leaf anywhere in
+    // it is refused — containment does not care how many mentions it
+    // travelled through — and so is a mention of a declaration whose OWN
+    // component is linear whatever its arguments are (`Row2`), which is the
+    // half of a summary no argument can change. The message walks back out
+    // through both halves: the declaration's own containment steps, and the
+    // parameter each argument was given for.
+    check_diagnostics(
+        r#"
+type Res = struct { id: usize } without forget with {
+    impl Self { drop = fn(r: Self) -> () { let Res(struct { id }) = r; }; };
+};
+type Opt = enum::<T> { S(T), N };
+type Pair = struct::<A, B> { a: A, b: B };
+type Row = struct { cell: Opt::<Pair::<usize, usize>> };
+type Row2 = struct { cell: Opt::<Res> };
+static ignore = fn::<T: forget>(t: T) -> () { };
+static plain = fn(x: Opt::<Row>) -> usize { 1 };
+static copies = fn::<@a>(r: Opt::<Row>.&::<@a>) -> Opt::<Row> { r.* };
+static deep = fn(x: Opt::<Pair::<usize, Res>>) -> usize { 1 };
+static owned = fn(x: Opt::<Row2>) -> usize { 1 };
+static asks = fn(x: Opt::<Row2>) -> () { ignore(x) };
+"#,
+        expect![[r#"
+            535..540: `x` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`x` is born here and must be consumed at 496..497)
+            585..590: `x` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`x` is born here and must be consumed at 560..561)
+            633..639: `Opt::<Row2>` cannot be a `T`: `Res` is declared `without forget`, reached through `Opt`'s `T`, through field `cell`, through `Opt`'s `T`, and `T: forget` asks for a type whose values may be dropped on the floor
+        "#]],
+    );
+}
+
+#[test]
+fn a_deep_chain_of_wrappers_is_judged_at_the_bottom() {
+    // Containment infects however far it has to travel. Eighty wrappers
+    // are an ordinary type, a leak eighty levels down is an ordinary leak,
+    // and nothing in a program would say which side of a cutoff it sat on
+    // — so there is no depth at which the walk stops looking and answers
+    // that it found nothing.
+    //
+    // `D30` is the other half of the same walk: each level holds the
+    // level below it twice, so a query that forgot which declarations it
+    // had already looked inside would walk `D0` 2^30 times — once for the
+    // disposal answer and again for the blame that names `T`. It answers
+    // instantly, or this test hangs.
+    let mut src = String::from("type L0 = struct::<T> { v: T };\n");
+    for level in 1..=80 {
+        src += &format!(
+            "type L{level} = struct::<T> {{ v: L{}::<T> }};\n",
+            level - 1
+        );
+    }
+    src += "type D0 = struct::<T> { v: T };\n";
+    for level in 1..=30 {
+        src += &format!(
+            "type D{level} = struct::<T> {{ a: D{below}::<T>, b: D{below}::<T> }};\n",
+            below = level - 1
+        );
+    }
+    src += "static leaks = fn::<T>(x: L80::<T>) -> usize { 1 };\n";
+    src += "static copies = fn::<@a, @b>(r: L80::<usize.&mut::<@b>>.&::<@a>) \
+            -> L80::<usize.&mut::<@b>> { r.* };\n";
+    src += "static doubled = fn(x: D30::<usize>) -> usize { 1 };\n";
+    src += "static doubled_leaks = fn::<T>(x: D30::<T>) -> usize { 1 };\n";
+    let messages = diagnostic_messages(&src);
+    assert_eq!(messages.len(), 3, "{messages:#?}");
+    assert!(
+        messages[0].starts_with("`x` is not consumed on this path"),
+        "{messages:#?}"
+    );
+    assert!(
+        messages[1].starts_with("cannot move out of a borrow"),
+        "{messages:#?}"
+    );
+    assert!(
+        messages[2].starts_with("`x` is not consumed on this path"),
+        "{messages:#?}"
+    );
+}
+
+#[test]
+fn a_value_holding_an_exclusive_borrow_is_read_once() {
+    // The instantiation TR11 names, written out concretely. A bounded `T`
+    // may be `usize.&mut`, so the walk's second obligation has to hold for
+    // the borrow itself — otherwise the generic body is refused and the
+    // program it stands for is not, which is the wrong way round.
+    //
+    // Both would run: two handles on one loan, interleaved writes, and
+    // nothing in the aliasing tree to see it, because each read is one
+    // `Move` of the same pointer. The refusal is the walk's, and its root
+    // is neither a declaration nor a binder.
+    //
+    // A BARE borrow is the control, and M07 is why: a mention in a
+    // borrow-wanting position reborrows, and one in any other position
+    // copies invisibly — a typing question that ruling leaves open, not
+    // this checker's to answer.
+    check_diagnostics(
+        r#"
+type W = struct::<T> { m: T };
+type Opt = enum::<T> { S(T), N };
+static held = fn::<@a>(w: W::<usize.&mut::<@a>>) -> usize { let a = w; let b = w; 1 };
+static wrapped = fn::<@a>(o: Opt::<usize.&mut::<@a>>) -> usize { let a = o; let b = o; 1 };
+static bare = fn::<@a>(q: usize.&mut::<@a>) -> usize { let x = q; let y = q; 0 };
+"#,
+        expect![[r#"
+            145..146: `w` was already consumed: an exclusive borrow may not be duplicated: the two would name one place — borrow it for the second use (`w` is born here, and there is only one of it at 89..90) (first consumed here at 134..135)
+            237..238: `o` was already consumed: an exclusive borrow may not be duplicated: the two would name one place — borrow it for the second use (`o` is born here, and there is only one of it at 179..180) (first consumed here at 226..227)
+        "#]],
+    );
+}
+
+#[test]
+fn a_capability_bound_is_part_of_a_requirements_contract() {
+    // The one place a capability bound crosses into the trait system. It
+    // takes no dictionary slot — it resolves to no trait — but it is part
+    // of what the requirement promised its callers, so an impl that asks
+    // `W: forget` where the requirement did not demands more of every
+    // caller than the requirement did.
+    //
+    // The OTHER direction is refused too, and not because the impl is
+    // stricter (it is the reverse). Binder matching here is an EQUALITY,
+    // deliberately: there is no variance story for binders, and the
+    // neighbours compare the same way — trait bounds as an exact set,
+    // `outlives` positionally. Strict-first, so loosening stays additive.
+    check_diagnostics(
+        r#"
+trait Adds = requires { m: fn::<W>(w: W, x: Self) -> W; } with { impl usize { m = fn::<W: forget>(w: W, x: usize) -> W { w }; } };
+trait Omits = requires { m: fn::<W: forget>(w: W, x: Self) -> W; } with { impl usize { m = fn::<W>(w: W, x: usize) -> W { w }; } };
+trait Agrees = requires { m: fn::<W: forget>(w: W, x: Self) -> W; } with { impl usize { m = fn::<W: forget>(w: W, x: usize) -> W { w }; } };
+"#,
+        expect![[r#"
+            79..80: member `m`'s generic binder does not match `Adds`'s requirement (arity, kinds and bounds must agree) (required by the trait here at 25..26)
+            219..220: member `m`'s generic binder does not match `Omits`'s requirement (arity, kinds and bounds must agree) (required by the trait here at 157..158)
+        "#]],
+    );
+}
+
+#[test]
+fn only_forget_can_be_required_of_a_parameter() {
+    // The bound side of the capability vocabulary, read off the one table
+    // rather than a second enumeration. `forget` is the only capability a
+    // body can require of its caller; the reserved names are refused AS
+    // reserved, so a reservation reads as a reservation and not as a typo.
+    // A name that is no capability at all stays an ordinary trait bound
+    // and gets the ordinary unresolved answer.
+    check_diagnostics(
+        r#"
+static ok = fn::<T: forget>(t: T) -> usize { 1 };
+static reserved = fn::<T: send>(t: T) -> T { t };
+static ordinary = fn::<T: Display>(t: T) -> T { t };
+"#,
+        expect![[r#"
+            77..81: the `send` capability does not exist yet; `forget` is the only one a body can require
+            127..134: unknown trait `Display`
+        "#]],
+    );
+}
+
+#[test]
+fn a_value_linear_for_two_reasons_is_not_offered_the_binder_fix() {
+    // The advice has to survive being TAKEN. `Mixed` is linear twice over
+    // — a field whose declaration shed the capability, and a payload whose
+    // binder promised nothing — and only one of those is fixed by writing
+    // `T: forget`. So the hint is the blame walk's OWN root rather than a
+    // second search with its own preference order: name the parameter when
+    // the parameter is the reason, and the declaration otherwise.
+    //
+    // The second body is the control: one reason, and it is the binder.
+    check_linear(
+        r#"
+type Mixed = struct::<T> { a: Res, b: T };
+type Box = struct::<T> { v: T };
+static two_reasons = fn::<T>(r: Res, t: T) -> usize {
+    let m = Mixed::<T>(struct { a = r, b = t });
+    1
+};
+static one_reason = fn::<T>(t: T) -> usize {
+    let b = Box::<T>(struct { v = t });
+    1
+};
+"#,
+        expect![[r#"
+            469..527: `m` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`m` is born here and must be consumed at 479..480)
+            572..621: `b` is not consumed on this path, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded (`b` is born here and must be consumed at 582..583)
+        "#]],
+    );
+}
+
+#[test]
+fn every_linear_refusal_in_a_generic_body_names_the_binder() {
+    // A generic body has no declaration for a reader to go look at, so
+    // "its type has no `forget` capability" is both unhelpful and false —
+    // nothing declared anything. All four families name the BINDER
+    // instead, including the one that reaches it through containment
+    // (`Box::<T>` is linear only because its payload might be).
+    //
+    // The two that are about discarding name `T: forget` as the way out.
+    // The two that are about duplicating name BORROWING, because the bound
+    // does not grant copying (see `the_forget_bound_is_not_permission_to_copy`).
+    check_diagnostics(
+        r#"
+type Box = struct::<T> { v: T };
+static leaks = fn::<T>(x: T) -> usize { let b = Box::<T>(struct { v = x }); 1 };
+static twice = fn::<T>(x: T) -> T { let y: T = x; x };
+static copies_out = fn::<T>(b: Box::<T>) -> T { b.v };
+static discards = fn::<T>(t: T) -> usize { t; 1 };
+"#,
+        expect![[r#"
+            72..113: `b` is not consumed on this path, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded (`b` is born here and must be consumed at 78..79)
+            149..168: `y` is not consumed on this path, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded (`y` is born here and must be consumed at 155..156)
+            165..166: `x` was already consumed: a value of `T` may not be duplicated, and no bound grants copying — borrow it for the second use (`x` is born here and must be consumed at 138..139) (first consumed here at 162..163)
+            216..223: `b` is not consumed on this path, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded (`b` is born here and must be consumed at 198..199)
+            218..221: cannot copy a value of `T` out of a place: a value of `T` may not be duplicated, and no bound grants copying — borrow the place, or move the whole value
+            268..269: this value is discarded here, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded
         "#]],
     );
 }
@@ -14887,7 +15451,7 @@ fn a_match_arm_wildcard_cannot_swallow_an_owned_linear() {
     // level down.
     check_linear(
         r#"
-type Maybe = enum::<T without forget> { One(T), Nothing };
+type Maybe = enum::<T> { One(T), Nothing };
 static direct = fn() -> () {
     let r = make(1);
     match r {
@@ -14911,9 +15475,9 @@ static nested = fn(m: Maybe::<Res>) -> () {
 };
 "#,
         expect![[r#"
-            472..473: `_` matches the value without binding it, and it must be consumed; give it a name so it has somewhere to go
-            561..562: `_` matches the value without binding it, and it must be consumed; give it a name so it has somewhere to go
-            699..700: `_` matches the value without binding it, and it must be consumed; give it a name so it has somewhere to go
+            457..458: `_` matches the value without binding it, and it must be consumed; give it a name so it has somewhere to go
+            546..547: `_` matches the value without binding it, and it must be consumed; give it a name so it has somewhere to go
+            684..685: `_` matches the value without binding it, and it must be consumed; give it a name so it has somewhere to go
         "#]],
     );
 }
@@ -15052,13 +15616,14 @@ static result_shape = fn(r: AllocResult::<Res>) -> () {
 }
 
 #[test]
-fn the_forget_bound_is_checked_in_annotation_position_too() {
-    // A signature is an instantiation edge no expression ever crosses.
-    // Checking only expression mentions would let `fn(b: Box::<Res>)` in
-    // through the front door. The argument has to name a CONCRETE type to
-    // be judged here: a declared type lowers scope-lessly, so one naming
-    // the enclosing binder's own parameter is `{error}` and silent —
-    // containment still makes the annotated value linear inside the body.
+fn a_data_side_parameter_takes_a_linear_in_annotation_position() {
+    // What used to be refused here, and where the annotation-position hole
+    // was: a signature is an instantiation edge no expression ever
+    // crosses, so the data-side bound needed a second checker there — one
+    // an argument lowering to `{error}` could launder past. The hole
+    // closes BY CONSTRUCTION (T22): there is no data-side bound left to
+    // check, so `fn(b: Box::<Res>)` is an ordinary signature and the body
+    // that takes the box apart and drops its payload is clean.
     check_linear(
         r#"
 type Box = struct::<T> { v: T };
@@ -15067,9 +15632,7 @@ static take = fn(b: Box::<Res>) -> () {
     v.drop();
 };
 "#,
-        expect![[r#"
-            400..403: `Res` cannot be a `T`: `Res` is declared `without forget`, and `T` requires `forget` (every type parameter does unless it is written `T without forget`) (declared here at 346..349)
-        "#]],
+        expect![""],
     );
 }
 
@@ -15194,12 +15757,14 @@ static half_only = fn(p: Pair) -> String { p.left };
 fn an_option_of_string_is_the_container_shape_that_has_to_work() {
     // Three of `examples/option.must`'s five members — a borrowing
     // `is_some`, a consuming `unwrap`, a region-projecting `as_ref` — over
-    // a payload binder that sheds `forget` (the example itself keeps a
-    // plain `T`). Nothing here is `String`-specific: it is the acid test
-    // that the capability machinery composes with the generic machinery.
+    // a payload that must be consumed. The binder says nothing about
+    // capabilities and did not have to (T22): `Option::<String>` is linear
+    // because `String` is. Nothing here is `String`-specific either — it is
+    // the acid test that the capability machinery composes with the generic
+    // machinery.
     check_string(
         r#"
-type Option = enum::<T without forget> {
+type Option = enum::<T> {
     Some(T),
     None,
 } with {
@@ -15247,7 +15812,7 @@ static leaks_the_payload = fn(text: str) -> () {
 };
 "#,
         expect![[r#"
-            2426..2429: `s` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`s` is born here and must be consumed at 2420..2421)
+            2411..2414: `s` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`s` is born here and must be consumed at 2405..2406)
         "#]],
     );
 }

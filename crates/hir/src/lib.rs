@@ -1659,6 +1659,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         // related note is that binding's own declaration — "this is where
         // the obligation started" is the sentence a reader needs, and the
         // squiggle sits on the path that broke it instead.
+        let types = infer::infer(db, item);
         for diag in linear_check::linear_check(db, item) {
             let range = match (diag.expr(), diag.pat()) {
                 (Some(expr), _) => source_map.node_for_expr(expr).map(|p| p.text_range()),
@@ -1672,16 +1673,26 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 .binding()
                 .map(|binding| body.bindings[binding].name.clone())
                 .unwrap_or_default();
+            let ty = diag
+                .binding()
+                .and_then(|binding| types.type_of_binding.get(binding))
+                .or_else(|| diag.expr().and_then(|expr| types.type_of_expr.get(expr)));
             let mut related = Vec::new();
             if let Some(binding) = diag.binding()
                 && let Some(ptr) = source_map.node_for_binding(binding)
             {
+                // The walk tracks two kinds of value and the note says
+                // which this is. A value that merely may not be
+                // DUPLICATED — one holding a rigid parameter, or an
+                // exclusive borrow — need never be consumed at all, and
+                // telling its owner otherwise sends them looking for a
+                // disposal method that does not exist.
                 related.push(RelatedInfo {
                     file,
                     range: ptr.text_range(),
-                    message: format!(
-                        "{} is born here and must be consumed",
-                        diag::linear_subject(&name)
+                    message: diag::born_here(
+                        &name,
+                        ty.is_some_and(|ty| !capability::has_forget(db, ty)),
                     ),
                 });
             }
@@ -1694,10 +1705,24 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     message: "first consumed here".to_owned(),
                 });
             }
+            // Inside a generic body the obligation can come from the
+            // BINDER rather than from any declaration: a parameter with no
+            // `forget` bound is checked as if it were linear, and so is
+            // anything CONTAINING one. Both cases name the binder, because
+            // a message that says "its type has no `forget` capability"
+            // sends the reader looking for a declaration that says so, and
+            // in a generic body there is none to find.
+            let root = ty.and_then(|ty| {
+                if diag.about_duplication() {
+                    capability::affine_root(db, ty)
+                } else {
+                    capability::blaming_param(db, ty).map(capability::Affine::Param)
+                }
+            });
             diagnostics.push(Diagnostic {
                 range,
                 severity: Severity::Error,
-                message: diag.message(&name),
+                message: diag.message(&name, root.as_ref()),
                 fix: None,
                 related,
             });
@@ -2023,6 +2048,29 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
         let Some(ast::Item::TraitItem(decl)) = item_source(db, item) else {
             continue;
         };
+        // A trait named after a CAPABILITY. Legal — capability names are
+        // not reserved words — but a bound naming one asks the language for
+        // the capability and never looks a trait up (see
+        // [`capability_bound`]), so this trait can never be reached through
+        // `T: forget`. A warning rather than an error: the declaration is
+        // fine and only its reachability is surprising, which is exactly
+        // what a warning is for.
+        if let Some(name) = decl.name()
+            && !matches!(capability_bound(&name.text()), CapabilityBound::NotOne)
+        {
+            diagnostics.push(Diagnostic {
+                range: name.syntax().text_range(),
+                severity: Severity::Warning,
+                message: format!(
+                    "`{}` is the name of a capability, so `T: {}` asks for the capability \
+                     and never for this trait; nothing can reach it through a bound",
+                    name.text(),
+                    name.text()
+                ),
+                fix: None,
+                related: Vec::new(),
+            });
+        }
         let Some(requires) = decl.requires_def() else {
             continue;
         };
@@ -2108,6 +2156,21 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
                 continue;
             };
             let name = name_ref.text();
+            // A CAPABILITY in the bounds slot is not a trait lookup at all:
+            // the vocabulary is the language's (`syntax::CAPABILITIES`), so
+            // no file can declare its way into or out of one, and no scope
+            // answer can turn `forget` into a missing trait. `forget` is
+            // the only one a body can ask for; the rest of the vocabulary
+            // is named so the reservation reads as a reservation instead of
+            // as a typo.
+            match capability_bound(&name) {
+                CapabilityBound::NotOne => {}
+                CapabilityBound::Forget => continue,
+                CapabilityBound::Refused(message) => {
+                    diagnostics.push(simple_error(bound.syntax().text_range(), message));
+                    continue;
+                }
+            }
             let message = match file_scope(db, file).resolve(&name) {
                 // A RESERVED generic trait must not go semantically live
                 // through a bound (reserved for generic traits).
@@ -2827,43 +2890,15 @@ fn apply_position_diagnostics(
             (_, ast::GenericArg::RegionArg(_)) => {
                 diagnostics.push(simple(arg_range, diag::unexpected_region_arg(&param.name)));
             }
-            // Inner type args are PathTypes of their own — the pass visits
-            // them independently. What is left is the one judgement about
-            // the ARGUMENT AS A WHOLE: the default `forget` bound. Checked
-            // here as well as at expression-position mentions, because a
-            // signature (`fn(b: Box::<Lin>)`) is an instantiation edge that
-            // no expression ever crosses.
-            //
-            // A CONCRETE argument is what this can judge: `lower_decl_ty`
-            // is scope-less, so an argument naming the enclosing binder's
-            // own parameter lowers to `{error}` and passes silently.
-            // Containment is the net under that — the annotated value is
-            // linear inside the body either way — and the flag's polarity
-            // stays in one place (`GenericParamData::without_forget`, read
-            // at `forget_of`'s `Ty::Param` arm) rather than being mirrored
-            // into the syntax-side binder here.
-            (item_tree::GenericParamKind::Type, ast::GenericArg::TypeArg(ty_arg)) => {
-                if !param.without_forget
-                    && let Some(written) = ty_arg.ty()
-                {
-                    let ty = ty::lower_decl_ty(db, file, &item_tree::TypeRef::from_ast(written));
-                    if !capability::has_forget(db, &ty) {
-                        let reason = capability::no_forget_reason(db, &ty)
-                            .unwrap_or_else(|| format!("`{}` has no `forget`", ty.display()));
-                        diagnostics.push(Diagnostic {
-                            range: arg_range,
-                            severity: Severity::Error,
-                            message: diag::forget_bound_unsatisfied(
-                                &param.name,
-                                &ty.display(),
-                                &reason,
-                            ),
-                            fix: None,
-                            related: declared_here(db, &target),
-                        });
-                    }
-                }
-            }
+            // Nothing left to judge about a type argument AS A WHOLE.
+            // Inner type args are PathTypes of their own and the pass
+            // visits them independently; the one judgement that used to
+            // live here was the default `forget` bound, and a data-side
+            // parameter no longer carries one (T22). That deletion also
+            // closes the annotation-position hole BY CONSTRUCTION: the
+            // check that could be laundered by lowering an argument to
+            // `{error}` no longer exists to be laundered.
+            (item_tree::GenericParamKind::Type, ast::GenericArg::TypeArg(_)) => {}
             (item_tree::GenericParamKind::Type, ast::GenericArg::ConstArg(_)) => {
                 diagnostics.push(simple(arg_range, diag::type_param_needs_type(&param.name)));
             }
@@ -3238,6 +3273,33 @@ fn simple_error(range: TextRange, message: String) -> Diagnostic {
         message,
         fix: None,
         related: Vec::new(),
+    }
+}
+
+/// What a bound's bare name means when it spells one of the language's
+/// CAPABILITIES (`syntax::CAPABILITIES`) rather than a trait.
+enum CapabilityBound {
+    /// Not a capability name — an ordinary trait bound, resolved as one.
+    NotOne,
+    /// `T: forget` — the one capability a body can require of its caller,
+    /// and the whole of the generic side of the linearity story (TR11).
+    Forget,
+    /// A capability name that cannot be required, with the reason.
+    Refused(String),
+}
+
+/// Read a bare bound name against the capability vocabulary. Deliberately
+/// scope-free, because the table is: capability names are the language's
+/// own, so a file that happens to declare a `trait forget` does not change
+/// what `T: forget` asks for.
+fn capability_bound(name: &str) -> CapabilityBound {
+    match syntax::capability_named(name) {
+        None => CapabilityBound::NotOne,
+        Some(capability) if capability.bound => CapabilityBound::Forget,
+        Some(_) => CapabilityBound::Refused(format!(
+            "the `{name}` capability does not exist yet; \
+             `forget` is the only one a body can require"
+        )),
     }
 }
 

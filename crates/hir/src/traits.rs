@@ -423,10 +423,10 @@ pub fn lower_requirement_sig(
 }
 
 /// Whether two binders match for impl-vs-requirement purposes: same
-/// arity, same kinds position by position, the same RESOLVED bound set per
-/// type param, and the same OUTLIVES set per region param (both
-/// order-insensitive; unresolvable bounds compare by absence — their own
-/// diagnostics tell that story).
+/// arity, same kinds position by position, the same RESOLVED bound set and
+/// the same `forget` requirement per type param, and the same OUTLIVES set
+/// per region param (the sets order-insensitive; unresolvable bounds
+/// compare by absence — their own diagnostics tell that story).
 ///
 /// A REGION param matches a region param. Without that arm a requirement
 /// could not carry a region binder at all — and a requirement whose member
@@ -484,6 +484,25 @@ pub(crate) fn binders_match(
                 out
             };
             return positions(&r.outlives, &req_index) == positions(&m.outlives, &member_index);
+        }
+        // The CAPABILITY bound is part of the contract too, and it is not
+        // among the trait bounds (it resolves to no dictionary): an impl
+        // asking `T: forget` where the requirement does not demands more of
+        // every caller than the requirement promised.
+        //
+        // The OTHER direction — an impl OMITTING a bound its requirement
+        // writes — is refused too, and the honest reason is not that the
+        // impl is stricter (it is the reverse: a body that asks less is
+        // usable everywhere the requirement is). It is that binder matching
+        // here is an EQUALITY, deliberately: there is no variance story for
+        // binders, and accepting one direction would mean defending it
+        // against the neighbours that compare the same way — trait bounds
+        // as an exact set, `outlives` positionally — and keeping it right
+        // the day a dictionary starts carrying capability information.
+        // Strict-first: loosening is additive, and this is the record that
+        // the symmetry was chosen rather than fallen into.
+        if r.forget != m.forget {
+            return false;
         }
         let resolve = |bounds: &[TypeRef]| {
             let mut traits: Vec<ItemLoc> = bounds

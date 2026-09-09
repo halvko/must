@@ -15352,53 +15352,27 @@ fn without_forget_trails_a_type_declaration() {
 }
 
 #[test]
-fn without_forget_rides_a_generic_parameter() {
-    check(
-        "type Option = enum::<T without forget> { Some(T), None };",
+fn a_capability_clause_on_a_parameter_is_retired() {
+    // T22 deleted the parameter home outright: `T without forget` is what
+    // a bare `T` now means. Recognized and CONSUMED so the refusal is one
+    // sentence and the binder list after it still parses — all three
+    // parameter kinds, since the clause was superset-parsed on every one,
+    // and in BOTH orders, since the retired grammar took the bounds on
+    // either side of the clause. Only the TYPE parameter is offered a
+    // migration: the other two never stood for something that could hold a
+    // capability, so they are told what they are instead.
+    check_errors(
+        "type Option = enum::<T without forget> { Some(T), None };\n\
+         static f = fn::<T without forget, U>(t: T, u: U) -> T { t };\n\
+         type A = enum::<@a without forget> { X };\n\
+         type B = enum::<const N: usize without forget> { X };\n\
+         static g = fn::<T without forget: usize>(t: T) -> T { t };\n",
         expect![[r#"
-            SOURCE_FILE@0..57
-              TYPE_ITEM@0..57
-                TYPE_KW@0..4 "type"
-                WHITESPACE@4..5 " "
-                NAME@5..11
-                  IDENT@5..11 "Option"
-                WHITESPACE@11..12 " "
-                EQ@12..13 "="
-                WHITESPACE@13..14 " "
-                ENUM_EXPR@14..56
-                  ENUM_KW@14..18 "enum"
-                  GENERIC_PARAM_LIST@18..38
-                    COLON2@18..20 "::"
-                    L_ANGLE@20..21 "<"
-                    TYPE_PARAM@21..37
-                      NAME@21..22
-                        IDENT@21..22 "T"
-                      WHITESPACE@22..23 " "
-                      WITHOUT_CLAUSE@23..37
-                        WITHOUT_KW@23..30 "without"
-                        WHITESPACE@30..31 " "
-                        NAME_REF@31..37
-                          IDENT@31..37 "forget"
-                    R_ANGLE@37..38 ">"
-                  WHITESPACE@38..39 " "
-                  L_BRACE@39..40 "{"
-                  WHITESPACE@40..41 " "
-                  ENUM_VARIANT@41..48
-                    NAME@41..45
-                      IDENT@41..45 "Some"
-                    L_PAREN@45..46 "("
-                    PATH_TYPE@46..47
-                      NAME_REF@46..47
-                        IDENT@46..47 "T"
-                    R_PAREN@47..48 ")"
-                  COMMA@48..49 ","
-                  WHITESPACE@49..50 " "
-                  ENUM_VARIANT@50..54
-                    NAME@50..54
-                      IDENT@50..54 "None"
-                  WHITESPACE@54..55 " "
-                  R_BRACE@55..56 "}"
-                SEMICOLON@56..57 ";"
+            23..30: a capability clause on a parameter is retired: `T without forget` is now spelled `T` — an unbounded parameter is already checked as one that may have to be consumed; write `T: forget` only where the body DISCARDS a `T`, and a `type` declaration's parameters carry no capability bounds at all
+            76..83: a capability clause on a parameter is retired: `T without forget` is now spelled `T` — an unbounded parameter is already checked as one that may have to be consumed; write `T: forget` only where the body DISCARDS a `T`, and a `type` declaration's parameters carry no capability bounds at all
+            138..145: a capability clause on a parameter is retired, and a region parameter never had one to lose: a region names a duration, not a value, so it has no capability to speak of
+            192..199: a capability clause on a parameter is retired, and a const parameter never had one to lose: a const parameter's values are always plain data
+            233..240: a capability clause on a parameter is retired: `T without forget` is now spelled `T` — an unbounded parameter is already checked as one that may have to be consumed; write `T: forget` only where the body DISCARDS a `T`, and a `type` declaration's parameters carry no capability bounds at all
         "#]],
     );
 }
@@ -15425,8 +15399,6 @@ fn without_clause_misplacements_and_unknown_capabilities() {
          trait T = requires {} without forget;\n\
          type A = struct {} without leak;\n\
          type B = struct {} without send;\n\
-         type C = enum::<@a without forget> { X };\n\
-         type D = enum::<const N: usize without forget> { X };\n\
          type E = struct {} without;\n\
          extern static rd: unsafe fn(n: usize) -> isize without forget;\n",
         expect![[r#"
@@ -15434,24 +15406,26 @@ fn without_clause_misplacements_and_unknown_capabilities() {
             51..58: a capability opt-out belongs on a `type` declaration, not on a `trait`
             94..98: unknown capability `leak`; `forget` is the only one that can be opted out of
             127..131: the `send` capability does not exist yet; `forget` is the only one that can be opted out of
-            152..159: a region parameter names a duration, not a value, so it has no capability to opt out of
-            206..213: a const parameter's values are always plain data, so it has no capability to opt out of
-            255..256: expected a capability name after `without` (`without forget`)
-            304..311: a capability opt-out belongs on a `type` declaration; a `static` has whatever capabilities its type has
+            159..160: expected a capability name after `without` (`without forget`)
+            208..215: a capability opt-out belongs on a `type` declaration; a `static` has whatever capabilities its type has
         "#]],
     );
 }
 
 #[test]
-fn the_bounds_come_before_the_opt_out() {
-    // Both orders parse — the reverse one so validation can name the order
-    // instead of the parser reporting a missing comma twice at tokens that
-    // are individually fine.
+fn a_capability_bound_rides_the_ordinary_bounds_slot() {
+    // T22: a capability a BODY needs is a positive requirement, so it is
+    // written where requirements are written. On the DATA side there is
+    // nothing to require — a container is linear when what it holds is —
+    // and saying "not supported yet" there would promise a spelling that
+    // is never coming.
     check_errors(
-        "static f = fn::<T: Display without forget>(t: T) -> T { t };\n\
-         static g = fn::<T without forget: Display>(t: T) -> T { t };\n",
+        "static f = fn::<T: forget>(t: T) -> usize { 0 };\n\
+         type Box = struct::<T: forget> { v: T };\n\
+         type Pair = struct::<T: Display> { a: T };\n",
         expect![[r#"
-            79..93: write the bounds before the opt-out (`T: Bound without forget`): a capability opt-out subtracts from what the bounds ask for
+            69..78: a `type` declaration's parameters carry no capability bounds: a container is linear when what it holds is
+            111..121: bounds on a `type` declaration's binder are not supported yet
         "#]],
     );
 }
@@ -15464,12 +15438,10 @@ fn a_capability_cannot_be_opted_out_of_twice() {
     // mistake, so they get the same answer.
     check_errors(
         "type C = struct { n: usize } without forget without forget;\n\
-         type D = struct { n: usize } without forget + forget;\n\
-         type E = enum::<T without forget + forget> { X(T) };\n",
+         type D = struct { n: usize } without forget + forget;\n",
         expect![[r#"
             52..58: `forget` is already opted out of here
             106..112: `forget` is already opted out of here
-            149..155: `forget` is already opted out of here
         "#]],
     );
 }

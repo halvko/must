@@ -854,6 +854,59 @@ fn a_closed_file_analyzes_again_on_the_same_handle() {
 }
 
 #[test]
+fn a_capability_answer_follows_an_edit_to_a_reachable_declaration() {
+    // `Box::<Res>` is judged from `Box`'s summary, memoized per
+    // declaration. The memo reads other declarations to build itself, so
+    // an edit to any of them has to reach it — in both directions, since
+    // a stale answer is wrong either way round. Both hops are pinned: the
+    // declaration the answer is memoized on (`Box`), and one it only
+    // READS (`Res`, two edges from `f`).
+    let pointer = "type Res = struct { fd: usize } without forget;\n\
+                   type Box = struct::<T> { p: T.&raw };\n\
+                   static f = fn(x: Box::<Res>) -> usize { 1 };\n";
+    let held = pointer.replace("p: T.&raw", "p: T");
+    let mut host = AnalysisHost::new();
+    let file = host.create_file("test.must".to_owned(), pointer.to_owned());
+    assert_eq!(host.snapshot().diagnostics(file), vec![]);
+
+    host.set_file_text(file, held);
+    let errors: Vec<_> = host
+        .snapshot()
+        .diagnostics(file)
+        .into_iter()
+        .filter(|d| d.severity == crate::Severity::Error)
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert!(
+        errors[0].starts_with("`x` is not consumed on this path"),
+        "{errors:#?}"
+    );
+
+    // Two hops: `Res` is not mentioned by `Box`'s own text as a linear —
+    // it is the argument. Making it forgettable must reach `f` through
+    // `Box`'s summary, and putting it back must reach it again.
+    let held_forgettable = pointer
+        .replace("p: T.&raw", "p: T")
+        .replace(" without forget", "");
+    host.set_file_text(file, held_forgettable);
+    assert_eq!(host.snapshot().diagnostics(file), vec![]);
+
+    host.set_file_text(file, pointer.replace("p: T.&raw", "p: T"));
+    let errors: Vec<_> = host
+        .snapshot()
+        .diagnostics(file)
+        .into_iter()
+        .filter(|d| d.severity == crate::Severity::Error)
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+
+    host.set_file_text(file, pointer.to_owned());
+    assert_eq!(host.snapshot().diagnostics(file), vec![]);
+}
+
+#[test]
 fn if_branch_mismatch_hint_points_to_other_branch() {
     let src = r#"
 static f = fn (n: usize) -> () {

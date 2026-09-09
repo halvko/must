@@ -75,10 +75,16 @@ static shadow_variant = fn (s: Shape) -> str {
 //    would be for any other non-integer type — no caller's instantiation
 //    ever makes `T` support an operation the body wasn't checked against.
 //    (See `generics.must` for what a rigid `T` *does* support.)
+//    Two parameters, and the one that comes back is not the one the
+//    arithmetic reads: a parameter nobody constrained may be a type that
+//    must be consumed, so each has to go somewhere exactly once. No bound
+//    is needed for that, and none would help — `T: forget` says a value
+//    may be DISCARDED, which is not the same question as whether it may be
+//    read twice.
 //    error: type mismatch: expected `{number}`, found `T`
-static rigid_add_one = fn::<T>(x: T) -> T {
-    let y = x + 1;
-    x
+static rigid_add_one = fn::<T>(x: T, y: T) -> T {
+    let n = x + 1;
+    y
 };
 
 // 9. Compile-time out-of-bounds: an array length is part of its type, so an
@@ -392,8 +398,8 @@ extern static a_partial_contract: unsafe fn(n: _) -> i64;
 //     counts and the call is otherwise checked (see 23 above: a member's
 //     list gets the same sentence).
 //     error: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
-static first = fn::<@a, T>(r: T.&::<@a>) -> T { r.* };
-static region_at_a_call = fn::<@b>(p: usize.&::<@b>) -> usize { first::<@b, usize>(p) };
+static first = fn::<@a, T>(r: T.&::<@a>) -> T.&::<@a> { r };
+static region_at_a_call = fn::<@b>(p: usize.&::<@b>) -> usize { first::<@b, usize>(p).* };
 
 // 39. A region parameter AFTER a type parameter in a binder. Regions come
 //     first (`fn::<@a, T>`): a turbofish spells the binder minus its
@@ -401,7 +407,7 @@ static region_at_a_call = fn::<@b>(p: usize.&::<@b>) -> usize { first::<@b, usiz
 //     part is a contiguous prefix. Checking itself does not need the
 //     order, so the binder still works as declared.
 //     error: region parameters come first in a binder; move `@a` before `T`
-static misordered_binder = fn::<T, @a>(r: T.&::<@a>) -> T { r.* };
+static misordered_binder = fn::<T, @a>(r: T.&::<@a>) -> T.&::<@a> { r };
 
 // 40. A region written on a BORROW expression. Regions are written only in
 //     type positions, and a borrow is an operation: its region is inferred,

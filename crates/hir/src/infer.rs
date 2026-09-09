@@ -745,13 +745,11 @@ pub enum InferenceDiagnostic {
         /// `ItemLoc` renders.
         spelling: TurbofishSpelling,
     },
-    /// A generic type parameter instantiated with a type that has no
-    /// `forget` capability, where the parameter did not opt out of the
-    /// default bound. The refusal is about the CONTRACT, not about safety:
-    /// containment would make the resulting type linear anyway (see
-    /// [`crate::capability`]), so nothing could leak — what the bound buys
-    /// is that a generic's callers can read off its binder whether it may
-    /// hold something that must be consumed.
+    /// A generic type parameter that WROTE `T: forget` instantiated with a
+    /// type that has none. The refusal is about safety, not bookkeeping:
+    /// the bound exists because the body drops a `T` on the floor, so an
+    /// argument that must be consumed would be lost inside a body that has
+    /// no site to consume it at.
     ForgetBoundUnsatisfied {
         /// The mention that instantiated the binder.
         expr: ExprId,
@@ -2542,11 +2540,11 @@ struct PendingInstantiation {
     /// member's is not written the way its `ItemLoc` renders).
     owner: String,
     spelling: TurbofishSpelling,
-    /// `(param name, the fresh variable, whether it opted out of the
-    /// default `forget` bound)` per *type* param. The opt-out flag is
-    /// CARRIED rather than re-derived at check time: a builtin's binder has
-    /// no item tree to look it up in, so re-deriving silently lost the flag
-    /// and refused `alloc_array::<Lin>` — record, don't re-derive.
+    /// `(param name, the fresh variable, whether the binder wrote
+    /// `T: forget`)` per *type* param. The bound flag is CARRIED rather
+    /// than re-derived at check time: a builtin's binder has no item tree
+    /// to look it up in, so re-deriving would answer out of thin air —
+    /// record, don't re-derive.
     params: Vec<(String, Ty, bool)>,
 }
 
@@ -2879,7 +2877,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 continue;
             }
             let resolved = self.resolve_shallow(&referent);
-            if self.is_copyable(&resolved) {
+            if crate::capability::is_copyable(self.db, &resolved) {
                 continue;
             }
             self.result
@@ -2927,36 +2925,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         self.deref_reads.push((expr, ty.clone()));
         if self.place_positions.contains(&expr) {
             self.borrow_projections.insert(expr);
-        }
-    }
-
-    /// Whether a value of this type may be duplicated by a plain read.
-    ///
-    /// Two affine classes now. `T.&mut`: duplicating it would duplicate a
-    /// PERMISSION, and the whole exclusivity story rests on it being
-    /// unduplicable. And LINEAR types — those without the `forget`
-    /// capability: duplicating one would duplicate an OBLIGATION whose two
-    /// copies name the same resource, which is how a checked-linear
-    /// `String` would come to be freed twice. Copyability is therefore not
-    /// a separate judgement from linearity; it follows from it, and the one
-    /// arm below is the whole of the connection.
-    fn is_copyable(&self, ty: &Ty) -> bool {
-        if !crate::capability::has_forget(self.db, ty) {
-            return false;
-        }
-        match ty {
-            Ty::Borrow { mutable, .. } => !*mutable,
-            Ty::Record(rec) => rec.fields.iter().all(|(_, ty)| self.is_copyable(ty)),
-            Ty::Array { elem, .. } => self.is_copyable(elem),
-            Ty::Named(named) => match crate::ty::type_underlying_for(self.db, named) {
-                Some(underlying) => self.is_copyable(&underlying),
-                None => true,
-            },
-            Ty::Variant(variant) => match crate::ty::variant_payloads_for(self.db, variant) {
-                Some(payloads) => payloads.iter().all(|ty| self.is_copyable(ty)),
-                None => true,
-            },
-            _ => true,
         }
     }
 
@@ -3127,14 +3095,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // fine, this particular use just doesn't say which type it wants.
         let pending = std::mem::take(&mut self.pending_instantiations);
         for instantiation in pending {
-            for (param, var, opted_out) in instantiation.params {
+            for (param, var, needs_forget) in instantiation.params {
                 let resolved = resolve_fully(self.table, &var);
-                // The DEFAULT BOUND, checked at the one place a binder is
-                // spent: every type parameter requires `forget` unless it
-                // was written `T without forget`. The flag rode here from
-                // the binder itself — a builtin's binder has no item tree
-                // to look it back up in.
-                if !opted_out
+                // A body writes `T: forget` when it genuinely drops a `T`
+                // on the floor; this is the promise that keeps it honest.
+                // Hand such a body a value that must be consumed and the
+                // value would be lost inside it, with no site to blame.
+                // The flag rode here from the binder itself — a builtin's
+                // binder has no item tree to look it back up in.
+                if needs_forget
                     && !resolved.contains_infer()
                     && !crate::capability::has_forget(self.db, &resolved)
                 {
@@ -6186,7 +6155,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             {
                 self.spend_member_arg(key, mention, at, &param.name, arg, &var);
             }
-            pending.push((param.name.clone(), var.clone(), param.without_forget));
+            pending.push((param.name.clone(), var.clone(), param.forget));
             subst.insert(index, var);
         }
         if !sig.contains_error() && !pending.is_empty() {
@@ -6723,7 +6692,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 continue;
             }
             scope.types.insert(gp.name.clone(), var.clone());
-            pending.push((gp.name.clone(), var.clone(), gp.without_forget));
+            pending.push((gp.name.clone(), var.clone(), gp.forget));
             var_of.insert(index, var);
         }
         // A requirement's REGION params are existentials of THIS call. The
@@ -8080,7 +8049,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         | Some(GenericArgData::Named { .. })
                         | None => {}
                     }
-                    pending.push((param.name.clone(), var.clone(), param.without_forget));
+                    pending.push((param.name.clone(), var.clone(), param.forget));
                     subst.insert(index as u32, var);
                 }
                 GenericParamKind::Const(declared) => match written {
@@ -9704,7 +9673,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         // Refused at the list (`reject_named_args`).
                         Some(GenericArgData::Named { .. }) | None => {}
                     }
-                    pending.push((param.name.clone(), var.clone(), param.without_forget));
+                    pending.push((param.name.clone(), var.clone(), param.forget));
                     out.push(GenericArg::Ty(var));
                 }
                 // Regions on a TYPE declaration are reserved (variance and
@@ -10281,10 +10250,10 @@ fn builtin_generics(builtin: Builtin) -> Option<Vec<GenericParamData>> {
                 outlives: Vec::new(),
                 // The heap builtins never hold a `T`: they hand out and
                 // take back POINTERS to storage. Nothing here can lose a
-                // value, so nothing here needs the `forget` bound —
+                // value, so none of them asks for `forget` —
                 // `alloc_array::<String>` is exactly as sound as
                 // `alloc_array::<usize>`.
-                without_forget: true,
+                forget: false,
             }])
         }
         Builtin::Print

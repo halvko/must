@@ -70,26 +70,35 @@ pub struct GenericParamData {
     /// Empty when the name is missing (broken code).
     pub name: String,
     pub kind: GenericParamKind,
-    /// The `T: Display + Write` bounds, syntactic and in written order —
-    /// trait names stay [`TypeRef`]s here (resolution is a per-file
+    /// The `T: Display + Write` TRAIT bounds, syntactic and in written
+    /// order — trait names stay [`TypeRef`]s here (resolution is a per-file
     /// judgement, see `crate::traits`). Always empty for const and region
-    /// params.
+    /// params. A CAPABILITY written in the same slot (`T: forget`) is not
+    /// one of these: it lands in [`Self::forget`] and never reaches trait
+    /// resolution, because a capability is not a trait and there is no
+    /// dictionary to pass for one.
     pub bounds: Vec<TypeRef>,
     /// The `@b: @a + @c` OUTLIVES bounds of a region param, as written
     /// region names (sigil included). Always empty for type and const
     /// params — a region's bounds are regions, never traits, so they get
     /// their own field rather than sharing [`Self::bounds`]'s type domain.
     pub outlives: Vec<String>,
-    /// `T without forget` — this parameter is not REQUIRED to have the
-    /// `forget` capability, the opt-out from the default bound every type
-    /// parameter otherwise carries. Not one of [`Self::bounds`] because it
-    /// subtracts: bounds say what the parameter must have, this says what
-    /// it need not.
+    /// `T: forget` — this parameter is REQUIRED to have the `forget`
+    /// capability, so the body may let a value of it go out of scope with
+    /// nothing done about it. A POSITIVE bound, and the only capability
+    /// bound there is: nothing is assumed of a parameter that does not
+    /// write it, so an unbounded one is checked RIGIDLY inside the
+    /// declaring body — the caller may hand it a linear, and a body that
+    /// discards one is refused until it says `T: forget` or consumes it.
     ///
-    /// Inside the declaring body the param is then checked RIGIDLY as a
-    /// value that must be consumed — the caller may hand it a linear, so
-    /// the body may not assume otherwise.
-    pub without_forget: bool,
+    /// Read out of the written bounds (see [`Self::bounds`]) rather than
+    /// riding a clause of its own: what a body needs of its parameter is a
+    /// requirement like any other (T22). Always `false` for const and
+    /// region params, which never denote a value.
+    ///
+    /// A `bool` because `forget` is the only capability a bound can ask
+    /// for; a second one turns this into a set, at the same place.
+    pub forget: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -816,6 +825,21 @@ fn names_forget(clause: &ast::WithoutClause) -> bool {
     clause.capabilities().any(|name| name.text() == "forget")
 }
 
+/// Whether a written bound names the `forget` CAPABILITY rather than a
+/// trait. The capability vocabulary is the language's, not a file's (see
+/// `syntax::CAPABILITIES`): a bound spelling one of its words asks for a
+/// capability wherever it is written, so no scope lookup can turn `forget`
+/// into somebody's trait.
+///
+/// A BARE path only, which is the same line `syntax::validation` draws:
+/// `forget::<usize>` is not this capability wearing arguments, it is a
+/// shape validation already refuses as "a bound is a bare trait name", and
+/// the two layers have to agree about that or one of them would silently
+/// grant a bound the other reported on.
+fn bound_is_forget(bound: &TypeRef) -> bool {
+    matches!(bound, TypeRef::Path(name) if name == "forget")
+}
+
 fn generics_from_param_list(list: Option<ast::GenericParamList>) -> Vec<GenericParamData> {
     let Some(list) = list else {
         return Vec::new();
@@ -830,19 +854,29 @@ fn generics_from_param_list(list: Option<ast::GenericParamList>) -> Vec<GenericP
                 kind: GenericParamKind::Region,
                 bounds: Vec::new(),
                 outlives: it.bounds().map(|token| token.text().to_owned()).collect(),
-                // A region names a duration; validation rejects the clause
-                // here, so the flag can never be set.
-                without_forget: false,
+                // A region names a duration, never a value, so nothing can
+                // be done with one and nothing needs saying about it.
+                forget: false,
             },
-            ast::GenericParam::TypeParam(it) => GenericParamData {
-                name: it.name().map(|n| n.text()).unwrap_or_default(),
-                kind: GenericParamKind::Type,
-                bounds: it.bounds().map(TypeRef::from_ast).collect(),
-                outlives: Vec::new(),
-                without_forget: it
-                    .without_clause()
-                    .is_some_and(|clause| names_forget(&clause)),
-            },
+            ast::GenericParam::TypeParam(it) => {
+                // The written bounds split in two: a capability is the
+                // language's own vocabulary and is answered here;
+                // everything else is a trait name for `crate::traits` to
+                // resolve per file. Splitting at the item tree means no
+                // downstream consumer can mistake `forget` for a trait it
+                // failed to find.
+                let written: Vec<TypeRef> = it.bounds().map(TypeRef::from_ast).collect();
+                GenericParamData {
+                    name: it.name().map(|n| n.text()).unwrap_or_default(),
+                    kind: GenericParamKind::Type,
+                    forget: written.iter().any(bound_is_forget),
+                    bounds: written
+                        .into_iter()
+                        .filter(|bound| !bound_is_forget(bound))
+                        .collect(),
+                    outlives: Vec::new(),
+                }
+            }
             ast::GenericParam::ConstParam(it) => GenericParamData {
                 name: it.name().map(|n| n.text()).unwrap_or_default(),
                 kind: GenericParamKind::Const(
@@ -850,9 +884,9 @@ fn generics_from_param_list(list: Option<ast::GenericParamList>) -> Vec<GenericP
                 ),
                 bounds: Vec::new(),
                 outlives: Vec::new(),
-                // Const values are plain data; validation rejects the
-                // clause here too.
-                without_forget: false,
+                // A const parameter's values are plain data — always
+                // forgettable, never in need of a bound saying so.
+                forget: false,
             },
         })
         .collect()

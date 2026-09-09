@@ -36,7 +36,7 @@ use la_arena::ArenaMap;
 use rustc_hash::FxHashMap;
 
 use crate::body::{Body, ExprData, ExprId, PatData, PatId, Stmt, body};
-use crate::capability::has_forget;
+use crate::capability::{Affine, has_forget};
 use crate::infer::{InferenceResult, infer};
 use crate::scopes::{Resolution, resolutions};
 use crate::ty::Ty;
@@ -72,12 +72,22 @@ pub enum LinearDiagnostic {
     /// `[s; 3]` where `s` is linear: the repeat form duplicates.
     Repeated { expr: ExprId },
     /// A `..` in a record pattern that would silently skip a linear field.
-    RestSkipsLinear { pat: PatId, field: String },
+    ///
+    /// `param` is the binder to blame when the field is linear only
+    /// because a rigid parameter is — carried here rather than looked up
+    /// at render time, because the type it answers for is the FIELD's and
+    /// only this walk knows which field that was.
+    RestSkipsLinear {
+        pat: PatId,
+        field: String,
+        param: Option<String>,
+    },
     /// A match-arm `_` on an OWNED linear scrutinee. The match consumed the
     /// value and the arm bound nothing, so it has nowhere to go — the
     /// match-arm twin of [`Self::RestSkipsLinear`], and of the `let _ =`
-    /// case (which is caught as an unnamed binding).
-    WildcardSkipsLinear { pat: PatId },
+    /// case (which is caught as an unnamed binding). `param` is that twin's
+    /// too, for the SCRUTINEE's type.
+    WildcardSkipsLinear { pat: PatId, param: Option<String> },
     /// A binding's liveness differs between the start and the end of a
     /// loop body — the next iteration would see a different world than the
     /// one the body was checked against.
@@ -125,7 +135,7 @@ impl LinearDiagnostic {
     pub fn pat(&self) -> Option<PatId> {
         match self {
             LinearDiagnostic::RestSkipsLinear { pat, .. }
-            | LinearDiagnostic::WildcardSkipsLinear { pat } => Some(*pat),
+            | LinearDiagnostic::WildcardSkipsLinear { pat, .. } => Some(*pat),
             _ => None,
         }
     }
@@ -143,6 +153,26 @@ impl LinearDiagnostic {
         }
     }
 
+    /// Whether this finding is about DUPLICATION (a value read twice, or
+    /// copied out of a place) rather than about a value that was lost.
+    ///
+    /// The two families ask different questions of the type, so they take
+    /// different ROOTS. Duplication is refused for anything the copy rule
+    /// refuses — a rigid parameter bounded or not, an exclusive borrow held
+    /// inside the value — while losing a value is only the parameter's
+    /// fault when the parameter is what made the value linear. Getting this
+    /// backwards would offer `T: forget` as the fix for a program the bound
+    /// does not fix.
+    pub fn about_duplication(&self) -> bool {
+        matches!(
+            self,
+            LinearDiagnostic::AlreadyConsumed { .. }
+                | LinearDiagnostic::CopiedOut { .. }
+                | LinearDiagnostic::Repeated { .. }
+                | LinearDiagnostic::LoopChangesLinear { .. }
+        )
+    }
+
     /// The expression of an EARLIER event this diagnostic refers back to
     /// (the first consumption of a double-consume).
     pub fn related_expr(&self) -> Option<ExprId> {
@@ -152,23 +182,90 @@ impl LinearDiagnostic {
         }
     }
 
-    pub fn message(&self, name: &str) -> String {
+    /// The message, given the binding's name and — when the value's type
+    /// has a root the message can name — what that root is.
+    ///
+    /// EVERY message that explains why a value could not be lost or read
+    /// again takes the hint, because inside a generic body all of them are
+    /// about the binder: nothing was declared `without forget`, so a reader
+    /// sent looking for a declaration finds none.
+    ///
+    /// Which hint, and therefore which advice, is decided by
+    /// [`Self::about_duplication`]. The LEAK arms may offer `T: forget`,
+    /// because they fire only where an unbounded parameter is the reason
+    /// the value had to be consumed, and a parameter is the only root they
+    /// can have that a declaration does not explain. The DUPLICATION arms
+    /// may not offer the bound: a bounded parameter reaches them too, and
+    /// for one of them the bound has already waived consumption — so they
+    /// say what is true of every root, which is that nothing grants
+    /// copying, and name borrowing. Their third root has no declaration
+    /// and no binder either: a value HOLDING an exclusive borrow, refused
+    /// a second read because two of them would name one place.
+    ///
+    /// Two arms ignore the `param` they are handed and use one they
+    /// carried from the walk instead. The type they answer for is neither
+    /// a binding's nor an expression's — a `..` blames the FIELD it
+    /// skipped, a match-arm `_` blames the SCRUTINEE it swallowed — so
+    /// only the walk that found them knows which type to blame. The one
+    /// arm that takes no hint at all is an ITEM's own value, which is
+    /// never inside a generic body's scope.
+    pub fn message(&self, name: &str, root: Option<&Affine>) -> String {
+        let param = match root {
+            Some(Affine::Param(param)) => Some(param.as_str()),
+            _ => None,
+        };
         match self {
-            LinearDiagnostic::NotConsumed { .. } => diag::not_consumed(name),
-            LinearDiagnostic::AlreadyConsumed { .. } => diag::already_consumed(name),
-            LinearDiagnostic::Discarded { .. } => diag::DISCARDED_LINEAR.to_owned(),
-            LinearDiagnostic::AssignOverLive { .. } => diag::assign_over_live(name),
-            LinearDiagnostic::JoinDisagrees { .. } => diag::join_disagrees(name),
-            LinearDiagnostic::CopiedOut { .. } => diag::COPIED_OUT_LINEAR.to_owned(),
-            LinearDiagnostic::Repeated { .. } => diag::REPEATED_LINEAR.to_owned(),
-            LinearDiagnostic::RestSkipsLinear { field, .. } => diag::rest_skips_linear(field),
-            LinearDiagnostic::WildcardSkipsLinear { .. } => diag::WILDCARD_SKIPS_LINEAR.to_owned(),
-            LinearDiagnostic::LoopChangesLinear { .. } => diag::loop_changes_linear(name),
+            LinearDiagnostic::NotConsumed { .. } => match param {
+                Some(param) => diag::not_consumed_param(name, param),
+                None => diag::not_consumed(name),
+            },
+            LinearDiagnostic::AlreadyConsumed { .. } => root
+                .and_then(|root| diag::already_consumed_dup(name, root))
+                .unwrap_or_else(|| diag::already_consumed(name)),
+            LinearDiagnostic::Discarded { .. } => match param {
+                Some(param) => diag::discarded_param(param),
+                None => diag::DISCARDED_LINEAR.to_owned(),
+            },
+            LinearDiagnostic::AssignOverLive { .. } => match param {
+                Some(param) => diag::assign_over_live_param(name, param),
+                None => diag::assign_over_live(name),
+            },
+            LinearDiagnostic::JoinDisagrees { .. } => match param {
+                Some(param) => diag::join_disagrees_param(name, param),
+                None => diag::join_disagrees(name),
+            },
+            LinearDiagnostic::CopiedOut { .. } => root
+                .and_then(diag::copied_out_dup)
+                .unwrap_or_else(|| diag::COPIED_OUT_LINEAR.to_owned()),
+            LinearDiagnostic::Repeated { .. } => root
+                .and_then(diag::repeated_dup)
+                .unwrap_or_else(|| diag::REPEATED_LINEAR.to_owned()),
+            LinearDiagnostic::RestSkipsLinear { field, param, .. } => match param {
+                Some(param) => diag::rest_skips_param(field, param),
+                None => diag::rest_skips_linear(field),
+            },
+            LinearDiagnostic::WildcardSkipsLinear { param, .. } => match param {
+                Some(param) => diag::wildcard_skips_param(param),
+                None => diag::WILDCARD_SKIPS_LINEAR.to_owned(),
+            },
+            LinearDiagnostic::LoopChangesLinear { .. } => root
+                .and_then(|root| diag::loop_changes_dup(name, root))
+                .unwrap_or_else(|| diag::loop_changes_linear(name)),
             LinearDiagnostic::ItemHoldsLinear { .. } => diag::ITEM_HOLDS_LINEAR.to_owned(),
-            LinearDiagnostic::ConstBlockHoldsLinear { .. } => {
-                diag::CONST_BLOCK_HOLDS_LINEAR.to_owned()
-            }
-            LinearDiagnostic::AssignOverPlace { .. } => diag::ASSIGN_OVER_PLACE.to_owned(),
+            // Reached through the ANNOTATION rather than through a
+            // runtime binding, which a const context indeed cannot read:
+            // `let x: T = const { panic("x") }` types the block from its
+            // position while a diverging body supplies the value. Leak
+            // family like its item-level twin, and the one whose hint
+            // cannot offer consumption — see [`diag::const_block_holds_param`].
+            LinearDiagnostic::ConstBlockHoldsLinear { .. } => match param {
+                Some(param) => diag::const_block_holds_param(param),
+                None => diag::CONST_BLOCK_HOLDS_LINEAR.to_owned(),
+            },
+            LinearDiagnostic::AssignOverPlace { .. } => match param {
+                Some(param) => diag::assign_over_place_param(param),
+                None => diag::ASSIGN_OVER_PLACE.to_owned(),
+            },
         }
     }
 }
@@ -184,6 +281,7 @@ pub fn linear_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<LinearDiagno
         infer: inference,
         diagnostics: Vec::new(),
         state: FxHashMap::default(),
+        owed: FxHashMap::default(),
         scopes: Vec::new(),
         loops: Vec::new(),
         error_exprs: inference
@@ -241,6 +339,45 @@ enum Flow {
     Diverges,
 }
 
+/// What a tracked binding owes. The walk carries two obligations, and they
+/// differ by exactly one diagnostic family.
+///
+/// A LINEAR value owes a consumption on every path: losing it is a leak,
+/// and duplicating it is two obligations naming one resource. A value that
+/// is merely UNDUPLICABLE owes only the second half — it may be lost, and
+/// the walk still refuses a second read of it.
+///
+/// The second obligation is the use-after-move check the copy rule needs,
+/// so it asks the copy rule's own question (`capability::is_copyable`)
+/// rather than a narrower one of its own. Two things reach it: a rigid
+/// type PARAMETER, bounded or not — `T: forget` waives the consumption and
+/// grants no copying (TR11) — and a value HOLDING an exclusive borrow,
+/// which is the same statement about the same instantiation, since a
+/// bounded `T` may be `usize.&mut`. A body that read one binding of either
+/// twice would hand out two exclusive borrows of one place.
+///
+/// A BARE borrow is the exception, by name rather than by walk, and the
+/// reason is M07's. Where a position WANTS a borrow, every mention mints a
+/// fresh reborrow, so there are no two loans to refuse; where none does —
+/// a bare `let`, a read of an affine field — the read still copies,
+/// invisibly to both layers, and M07 rules that closing THAT is a typing
+/// change rather than a checker one. So this walk leaves the bare borrow
+/// where the ruling put it, and refuses only what HOLDS one, which no
+/// reborrow reaches.
+///
+/// A memo of a fact derivable from the binding's type, kept beside
+/// [`CheckCtx::state`] rather than re-derived at each of the half-dozen
+/// sites that ask: written once when the binding is tracked, never
+/// branch-dependent, and never cloned across the arms of a join.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Owed {
+    /// Exactly once — a linear value.
+    Once,
+    /// At most once — a value that may not be duplicated, whatever its
+    /// disposal story is.
+    AtMostOnce,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Status {
     Live,
@@ -274,6 +411,8 @@ struct CheckCtx<'db> {
     infer: &'db InferenceResult,
     diagnostics: Vec<LinearDiagnostic>,
     state: State,
+    /// What each tracked binding owes — see [`Owed`].
+    owed: FxHashMap<BindingId, Owed>,
     /// One frame per open lexical scope, holding the tracked bindings it
     /// introduced. Popping a frame is where "not consumed" is found.
     scopes: Vec<Vec<BindingId>>,
@@ -309,6 +448,38 @@ impl CheckCtx<'_> {
             .is_some_and(|ty| self.is_linear(ty))
     }
 
+    /// What a value of `ty` owes, or `None` if it owes nothing and needs no
+    /// tracking. See [`Owed`]: the walk tracks two kinds of value and the
+    /// difference between them is exactly one diagnostic family.
+    fn owed_of(&self, ty: &Ty) -> Option<Owed> {
+        if self.is_linear(ty) {
+            Some(Owed::Once)
+        } else if matches!(ty, Ty::Borrow { .. }) {
+            None
+        } else if !crate::capability::is_copyable(self.db, ty) {
+            Some(Owed::AtMostOnce)
+        } else {
+            None
+        }
+    }
+
+    /// Whether a value of this expression's type may be DUPLICATED by a
+    /// plain read — the question a copy-out and an array-repeat ask, and
+    /// the one place the two obligations behave alike.
+    fn is_unduplicable_expr(&self, expr: ExprId) -> bool {
+        self.infer
+            .type_of_expr
+            .get(expr)
+            .and_then(|ty| self.owed_of(ty))
+            .is_some()
+    }
+
+    /// Whether this binding owes a consumption at the end of its scope, as
+    /// opposed to merely owing not to be duplicated.
+    fn owes_once(&self, binding: BindingId) -> bool {
+        self.owed.get(&binding) == Some(&Owed::Once)
+    }
+
     /// Whether control can leave this expression at all. `!` coerces to
     /// anything and [`InferenceResult::type_of_expr`] records the type the
     /// POSITION accepted, so a diverging expression checked against a real
@@ -342,13 +513,14 @@ impl CheckCtx<'_> {
 
     fn track_pat(&mut self, pat: PatId) {
         for (_, binding) in self.body.pat_bindings(pat) {
-            let linear = self
+            let owed = self
                 .infer
                 .type_of_binding
                 .get(binding)
-                .is_some_and(|ty| self.is_linear(ty));
-            if linear {
+                .and_then(|ty| self.owed_of(ty));
+            if let Some(owed) = owed {
                 self.state.insert(binding, Status::Live);
+                self.owed.insert(binding, owed);
                 if let Some(frame) = self.scopes.last_mut() {
                     frame.push(binding);
                 }
@@ -384,6 +556,7 @@ impl CheckCtx<'_> {
                         self.diagnostics.push(LinearDiagnostic::RestSkipsLinear {
                             pat,
                             field: name.clone(),
+                            param: crate::capability::blaming_param(self.db, field_ty),
                         });
                     }
                 }
@@ -399,7 +572,10 @@ impl CheckCtx<'_> {
     fn pop_scope(&mut self, exit: ExprId, flow: Flow) {
         let frame = self.scopes.pop().unwrap_or_default();
         for binding in frame {
-            if flow == Flow::Falls && self.state.get(&binding).is_some_and(|s| s.is_live()) {
+            if flow == Flow::Falls
+                && self.owes_once(binding)
+                && self.state.get(&binding).is_some_and(|s| s.is_live())
+            {
                 self.diagnostics
                     .push(LinearDiagnostic::NotConsumed { binding, exit });
             }
@@ -414,7 +590,7 @@ impl CheckCtx<'_> {
             .iter()
             .flatten()
             .copied()
-            .filter(|b| self.state.get(b).is_some_and(|s| s.is_live()))
+            .filter(|b| self.owes_once(*b) && self.state.get(b).is_some_and(|s| s.is_live()))
             .collect();
         for binding in live {
             self.diagnostics
@@ -522,7 +698,7 @@ impl CheckCtx<'_> {
                 // Reading a linear FIELD out of a place would copy it, and
                 // the place keeps its own copy: two obligations, one
                 // resource. Taking the whole value apart is the way in.
-                if self.is_linear_expr(expr) {
+                if self.is_unduplicable_expr(expr) {
                     self.report_copied_out(expr);
                 }
                 Flow::Falls
@@ -535,7 +711,7 @@ impl CheckCtx<'_> {
                 if self.read_value(index) == Flow::Diverges {
                     return Flow::Diverges;
                 }
-                if self.is_linear_expr(expr) {
+                if self.is_unduplicable_expr(expr) {
                     self.report_copied_out(expr);
                 }
                 Flow::Falls
@@ -646,7 +822,7 @@ impl CheckCtx<'_> {
                 if self.read_value(element) == Flow::Diverges {
                     return Flow::Diverges;
                 }
-                if self.is_linear_expr(element) {
+                if self.is_unduplicable_expr(element) {
                     self.diagnostics
                         .push(LinearDiagnostic::Repeated { expr: element });
                 }
@@ -844,7 +1020,9 @@ impl CheckCtx<'_> {
                     // Writing over a live linear loses it: the old value is
                     // gone and nothing was done about it. The new value
                     // starts a fresh obligation.
-                    if self.state.get(&binding).is_some_and(|s| s.is_live()) {
+                    if self.owes_once(binding)
+                        && self.state.get(&binding).is_some_and(|s| s.is_live())
+                    {
                         self.diagnostics
                             .push(LinearDiagnostic::AssignOverLive { binding, target });
                     }
@@ -926,7 +1104,14 @@ impl CheckCtx<'_> {
             self.scopes.push(Vec::new());
             if owned_linear && matches!(self.body.pats[arm.pat], PatData::Wildcard) {
                 self.diagnostics
-                    .push(LinearDiagnostic::WildcardSkipsLinear { pat: arm.pat });
+                    .push(LinearDiagnostic::WildcardSkipsLinear {
+                        pat: arm.pat,
+                        param: self
+                            .infer
+                            .type_of_expr
+                            .get(scrutinee)
+                            .and_then(|ty| crate::capability::blaming_param(self.db, ty)),
+                    });
             }
             self.track_pat(arm.pat);
             let flow = self.read_value(arm.body);
@@ -1029,9 +1214,15 @@ impl CheckCtx<'_> {
                     };
                 }
             }
+            // The merge above settles a disagreement on "consumed" for
+            // BOTH kinds — a later read of it must be refused either way —
+            // but only a value that owes a consumption has been wronged by
+            // the disagreement itself.
             for binding in disagreed {
-                self.diagnostics
-                    .push(LinearDiagnostic::JoinDisagrees { binding, join: at });
+                if self.owes_once(binding) {
+                    self.diagnostics
+                        .push(LinearDiagnostic::JoinDisagrees { binding, join: at });
+                }
             }
         }
         self.state = merged;

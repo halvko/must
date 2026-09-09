@@ -374,7 +374,7 @@ their own type parameters"):
 ```must
 type Box2 = struct::<T> { v: T } with {
     impl Self {
-        get = fn (b: Self) -> T { b.v };
+        get = fn (b: Self) -> T { let Box2(struct { v }) = b; v };
     }
 };
 
@@ -1155,10 +1155,10 @@ At a *call site* regions are elided entirely. A written turbofish spells the
 callee's type and const arguments, in order, and nothing else:
 
 ```must
-static get_first = fn::<@a, T>(r: T.&::<@a>) -> T { r.* };
+static get_first = fn::<@a, T>(r: T.&::<@a>) -> T.&::<@a> { r };
 
 static main = fn::<@b>(p: usize.&::<@b>) -> usize {
-    get_first::<usize>(p)
+    get_first::<usize>(p).*
 };
 ```
 
@@ -1362,8 +1362,9 @@ That is a general rule, not a member one.
 Everything else follows the generics chapter unchanged. The body is checked
 *once*, with `U` rigid — so `U` supports nothing until bounds arrive, and
 `flat_map`'s "hand it back or pass it on" shape is exactly what a rigid
-parameter admits. `U` carries the default `forget` bound like every other
-type parameter, checked where the call spends the binder. And a member's own
+parameter admits. `U` asks for nothing unless the body needs something: a
+member that DISCARDS its `U` writes `U: forget`, and that promise is
+checked where the call spends the binder. And a member's own
 name may shadow one of the owner's, last declaration winning, the same rule
 the binder's const parameters already follow. Where the two then meet, the
 mismatch says which binder position each `T` is, because both render the
@@ -1639,11 +1640,11 @@ the other side of the marker.
 
 === In generic code
 
-Every type parameter requires `forget` unless it says otherwise, so a
-container has to opt in before it can hold one:
+A type parameter says nothing about capabilities. `Box` below carries no
+clause and no bound, and it holds a value that must be consumed anyway:
 
 ```must
-type Box = enum::<T without forget> { Full(T), Empty } with {
+type Box = enum::<T> { Full(T), Empty } with {
     impl Self {
         unwrap = fn(b: Self) -> T {
             match b {
@@ -1655,16 +1656,62 @@ type Box = enum::<T without forget> { Full(T), Empty } with {
 };
 ```
 
-Without the `without forget` on `T`, `Box::Full(r)` is refused, and the
-message names the bound and the spelling that relaxes it. With it, `Box`
-inherits the obligation exactly as a struct field does: `Box::<Res>` must be
-consumed, `Box::<usize>` need not.
+`Box::<Res>` must be consumed and `Box::<usize>` need not, and containment
+is the whole of why: a `Box::<Res>` contains a `Res`, exactly as a struct
+field does. There is nothing here for a declaration to opt into and nothing
+for it to opt out of — one `Box`, both payload kinds.
 
-Inside such a body the parameter is checked as if it always had to be
+The answer is read off the *declaration*, not off the instantiated type.
+`Box` is summarized once — nothing in its own payloads has to be consumed,
+and its `T` reaches a payload — so a `Box::<X>` has to be consumed exactly
+when an `X` does. That is what makes a declaration which mentions itself
+answerable: in
+
+```must
+type Pair = struct::<T> { l: T, r: T };
+type Nest = enum::<T> { Cons(T, Nest::<Pair::<T>>), Nil };
+```
+
+`Nest::<usize>` may be dropped and `Nest::<Res>` may not, and nothing has to
+expand the `Nest::<Pair::<T>>` beside it to say either. A parameter that
+reaches no value position at all constrains nothing: every value position of
+a `type P = struct::<T> { v: P::<W::<T>> }` is another `P`, whatever `W` is,
+so a `P` never holds a `T` and no argument can make one linear.
+
+Inside a generic *body* the parameter is checked as if it always had to be
 consumed — the caller may hand it one, so the body may not assume otherwise.
 That makes `unwrap`'s shape the shape that works: hand the value back, or
-pass it on. A body that quietly drops a `T` on the floor is refused, which
-is the point.
+pass it on. A body that quietly drops a `T` on the floor is refused:
+
+```must
+static ignore = fn::<T>(t: T) -> () { };
+```
+
+answers "`t` is not consumed on this path, and `T` may be a type that must
+be consumed; consume it, or write `T: forget` to require one that can be
+discarded". The message names the *binder*, because inside a generic body
+there is no declaration to send the reader to.
+
+`T: forget` is that fix, and it is the one capability bound there is. It
+rides the ordinary bounds slot, because what a body needs of its parameter
+is a requirement like any other one it writes there. Writing it makes every
+caller supply a type whose values may be dropped, so a body that discards a
+`T` is fine and `ignore::<Res>(make(1))` is refused at the call instead.
+
+What the bound does not grant is *duplication*. `T: forget` says a value may
+be lost; whether one may be copied is a different question, and the answer
+is the same for every rigid parameter, bounded or not: no. The language
+supplies its own witness — a `T.&mut` may be forgotten freely and still may
+not be copied, so a bounded `T` instantiated with one would hand out two
+exclusive borrows of one place. A generic body therefore reads each of its
+parameters once, and a second read answers "`x` was already consumed: a
+value of `T` may not be duplicated, and no bound grants copying — borrow it
+for the second use".
+
+The rule belongs to the instantiation rather than to the binder, so it holds
+without one: a concrete value that _holds_ an exclusive borrow — a
+`struct::<T> { m: T }` at `usize.&mut` — is read once for the same reason,
+and its refusal names the borrow instead of a parameter.
 
 === Borrows of a value that must be consumed
 
