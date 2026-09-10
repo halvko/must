@@ -90,8 +90,8 @@ type String = struct {
             // back. Freeing a dangling pointer would be undefined behavior,
             // and the interpreter would say so.
             if cap > 0 {
-                unsafe { dealloc_array(ptr, cap); };
-            };
+                unsafe { dealloc_array(ptr, cap); }
+            }
         };
     }
 };
@@ -120,7 +120,7 @@ static to_owned = fn::<@a>(s: str.&::<@a>) -> String {
     let n = text.len();
     if n == 0 {
         return empty_string();
-    };
+    }
     let p = match alloc_array::<u8>(n) {
         ::Ok(p) => p,
         ::Err => panic("string_lib: out of memory"),
@@ -128,7 +128,7 @@ static to_owned = fn::<@a>(s: str.&::<@a>) -> String {
     // The bless, backwards. That `p` addresses `n` writable bytes is this
     // function's claim — it just allocated them — and that is exactly what
     // the `unsafe` marker is for.
-    unsafe { str_bytes(text, p); };
+    unsafe { str_bytes(text, p); }
     String(struct { ptr = p, len = n, cap = n })
 };
 
@@ -149,7 +149,7 @@ type Fill = enum {
 static fill = fn(at: u8.&raw mut, room: usize) -> Fill {
     if room == 0 {
         return Fill::Failed;
-    };
+    }
     let n = unsafe { read(at, room) };
     if n < 0 {
         Fill::Failed
@@ -179,12 +179,12 @@ type Reader = struct {
                     if r.*.eof {
                         if r.*.len == 0 {
                             return ::None;
-                        };
+                        }
                         r.*.line = bless(r.*.start, r.*.len);
                         r.*.len = 0;
                         r.*.start = r.*.cur;
                         return ::Some(r.*.line.&);
-                    };
+                    }
                     r.refill();
                 } else {
                     let byte = unsafe { r.*.cur.* };
@@ -201,9 +201,9 @@ type Reader = struct {
                         r.*.len = 0;
                         r.*.start = r.*.cur;
                         return ::Some(r.*.line.&);
-                    };
+                    }
                     r.*.len = r.*.len + 1;
-                };
+                }
             }
         };
 
@@ -211,8 +211,8 @@ type Reader = struct {
             let len = r.*.len;
             if len == r.*.cap {
                 panic("string_lib: no line boundary in a full buffer");
-            };
-            unsafe { copy(r.*.start, r.*.buf, len); };
+            }
+            unsafe { copy(r.*.start, r.*.buf, len); }
             r.*.start = r.*.buf;
             r.*.cur = unsafe { add(r.*.buf, len) };
             match fill(r.*.cur, r.*.cap - len) {
@@ -222,12 +222,12 @@ type Reader = struct {
                     r.*.end = r.*.cur;
                 },
                 ::Failed => panic("string_lib: reading standard input failed"),
-            };
+            }
         };
 
         drop = fn(r: Self) -> () {
             let Reader(struct { buf, cap, .. }) = r;
-            unsafe { dealloc_array(buf, cap); };
+            unsafe { dealloc_array(buf, cap); }
         };
     }
 };
@@ -282,11 +282,11 @@ static main = fn () -> () {
                     // somewhere before the new one can take its place.
                     longest.drop();
                     longest = to_owned(line);
-                };
+                }
             },
             ::None => break,
-        };
-    };
+        }
+    }
     print("lines: ");
     print_usize(lines);
     print(", longest: \"");
@@ -305,7 +305,7 @@ static print_usize = fn (n: usize) -> () {
     } else {
         print_usize(n / 10);
         print(digit(n - (n / 10) * 10));
-    };
+    }
 };
 
 static digit = fn (d: usize) -> str {

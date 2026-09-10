@@ -6,6 +6,11 @@
   as a full expression unless it is statement-only (`let`, `let mut`, assignment, empty `;`,
   an item) or ends in `;`. There is no block-like special case: `if c { } - 1` is one
   subtraction. A token sequence has one reading everywhere.
+- **G03** A block-tail ends its own statement. A statement whose expression ends in `}` needs
+  no `;`. The rule asks the token, not a list of node kinds, so any brace-ended form added
+  later self-terminates. `;` stays legal; every non-brace-ended expression still needs one;
+  value positions are untouched (`let x = if c { 1 } else { 2 };` keeps its `;`, because what
+  closed was the value).
 - **G02** `;` terminates, `,` separates (trailing comma tolerated), and a value ending in `}`
   needs no separator.
 - **G24** Evaluation order is left-to-right source order everywhere.
@@ -155,6 +160,10 @@
 - **`const { }` bounding `return` the way it bounds `break`** — reachable (a `const` block
   is a separate MIR body) but a different construct wearing the same spelling; the exit
   should leave the outer fn. **G15**
+- **Rust's block-terminates-statement rule** — it buys the same self-termination as G03; the
+  two differ only in what a following continuation token means. Refused because it is a second
+  grammar: the same tokens read differently in statement and expression position. Must's price
+  is the mirror image and lands on the rarer shape. **G01 G03**
 - **Non-nesting block comments** — the use case is commenting out code, and code containing
   its own `/* */` is what a non-nesting scanner cannot survive. **Blaming a single `/*`** —
   outermost-only points arbitrarily far from the typo; innermost-only leaves outer levels

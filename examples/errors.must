@@ -207,7 +207,7 @@ static wrong_self_position = fn (s: Scaler) -> usize { s.scaled(2) };
 static retired_prefix_raw = fn () -> () {
     let mut x: usize = 1;
     let p = &raw mut x;
-    unsafe { p.* = 2; };
+    unsafe { p.* = 2; }
 };
 
 // 22. `return` inside a `const { ... }` block: what it should mean is
@@ -217,7 +217,7 @@ static retired_prefix_raw = fn () -> () {
 //     other (reachable but wrong) reading.
 //     error: `return` inside a `const` block is not supported yet: it would have to leave the enclosing `fn` body, and a `const` block is compiled as a body of its own
 static return_in_const_block = fn () -> usize {
-    const { if true { return 1; }; 0 }
+    const { if true { return 1; } 0 }
 };
 
 // 23. A turbofish on a qualified member's OWN name, where the member has

@@ -2,9 +2,13 @@ use base_db::{RootDatabase, SourceFile};
 use expect_test::{Expect, expect};
 
 fn check_diagnostics(text: &str, expect: Expect) {
+    expect.assert_eq(&render_diagnostics(text));
+}
+
+fn render_diagnostics(text: &str) -> String {
     let db = RootDatabase::default();
     let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
-    let rendered = crate::file_diagnostics(&db, file)
+    crate::file_diagnostics(&db, file)
         .into_iter()
         .map(|d| {
             let related = d
@@ -14,32 +18,17 @@ fn check_diagnostics(text: &str, expect: Expect) {
                 .collect::<String>();
             format!("{:?}: {}{related}\n", d.range, d.message)
         })
-        .collect::<String>();
-    expect.assert_eq(&rendered);
+        .collect::<String>()
 }
 
 /// Renders every expression and binding with its inferred type,
 /// rust-analyzer style: `range 'snippet': type`.
 fn check_infer(text: &str, expect: Expect) {
-    let db = RootDatabase::default();
-    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
-    let mut lines = Vec::new();
-    for &item in crate::file_item_ids(&db, file) {
-        let (_, source_map) = crate::body_with_source_map(&db, item);
-        let result = crate::infer::infer(&db, item);
-        for (expr, ty) in result.type_of_expr.iter() {
-            if let Some(ptr) = source_map.node_for_expr(expr) {
-                lines.push((ptr.text_range(), ty.display()));
-            }
-        }
-        for (binding, ty) in result.type_of_binding.iter() {
-            if let Some(ptr) = source_map.node_for_binding(binding) {
-                lines.push((ptr.text_range(), ty.display()));
-            }
-        }
-    }
-    lines.sort_by_key(|(range, _)| (range.start(), range.end()));
-    let rendered = lines
+    expect.assert_eq(&render_infer(text));
+}
+
+fn render_infer(text: &str) -> String {
+    infer_pairs(text)
         .into_iter()
         .map(|(range, ty)| {
             let snippet: String = text[range].replace('\n', " ");
@@ -50,8 +39,37 @@ fn check_infer(text: &str, expect: Expect) {
             };
             format!("{range:?} '{snippet}': {ty}\n")
         })
-        .collect::<String>();
-    expect.assert_eq(&rendered);
+        .collect::<String>()
+}
+
+/// Every expression and binding as a (range, type) pair, sorted — the
+/// structured form [`render_infer`] renders.
+///
+/// A test that COMPARES TWO PROGRAMS must use this, never the rendered
+/// string: the rendering embeds a source snippet, so it reports a
+/// difference wherever the two texts differ at all — and, worse, hides one
+/// wherever the 17-character truncation happens to elide the difference.
+/// Comparing types at ranges asks the question the test actually means.
+fn infer_pairs(text: &str) -> Vec<(syntax::TextRange, String)> {
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let mut pairs = Vec::new();
+    for &item in crate::file_item_ids(&db, file) {
+        let (_, source_map) = crate::body_with_source_map(&db, item);
+        let result = crate::infer::infer(&db, item);
+        for (expr, ty) in result.type_of_expr.iter() {
+            if let Some(ptr) = source_map.node_for_expr(expr) {
+                pairs.push((ptr.text_range(), ty.display()));
+            }
+        }
+        for (binding, ty) in result.type_of_binding.iter() {
+            if let Some(ptr) = source_map.node_for_binding(binding) {
+                pairs.push((ptr.text_range(), ty.display()));
+            }
+        }
+    }
+    pairs.sort_by_key(|(range, _)| (range.start(), range.end()));
+    pairs
 }
 
 /// Every diagnostic's message, in order, for a program a fixture cannot
@@ -16133,4 +16151,67 @@ type Reader = struct {
             130..194: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 115..116)
         "#]],
     );
+}
+
+// ---- the block-tail carve-out ------------------------------------------
+//
+// A statement whose expression ends in `}` needs no `;`. Both spellings
+// produce the same `EXPR_STMT`, which the body lowering never records, so
+// the HIR body is identical by construction — pinned below.
+
+#[test]
+fn a_self_terminated_block_tail_statement_is_the_semicolon_form_exactly() {
+    // ZERO SEMANTIC DELTA. The `;` after a block-tail statement is a
+    // spelling, not a boundary.
+    //
+    // The STRUCTURAL argument, which outlives this fixture: both spellings
+    // produce an `EXPR_STMT`, `body.rs`'s block lowering maps every one of
+    // them through the single arm `ast::Stmt::ExprStmt(it) =>
+    // Stmt::Expr(self.lower_opt_expr(it.expr()))`, and that arm never hands
+    // the `EXPR_STMT` node to `alloc_expr` — so the node is not in the
+    // source map, does not become an `ExprId`, and cannot be observed by
+    // anything downstream. The HIR body is identical BY CONSTRUCTION, and
+    // the only thing a test can add is a demonstration that nothing else
+    // (inference, joins, diagnostics) sneaks a look at the token.
+    //
+    // `@` stands in for the two spellings so both texts are the same LENGTH
+    // and every range compared below means the same place in both.
+    let template =
+        "static f = fn (n: usize) -> () { if n == 0 { 1 } else { \"s\" }@ print(\"x\"); }";
+    let with_semicolon = template.replace('@', ";");
+    let self_terminated = template.replace('@', " ");
+    let pairs = infer_pairs(&self_terminated);
+    // Structured pairs, NOT the rendered form: the rendering carries a
+    // source snippet, and comparing snippets would compare the very
+    // characters that differ (see `infer_pairs`).
+    assert_eq!(pairs, infer_pairs(&with_semicolon));
+    assert_eq!(
+        render_diagnostics(&with_semicolon),
+        render_diagnostics(&self_terminated)
+    );
+
+    // Not vacuous, and the property is NAMED rather than merely present.
+    // The block-tail statement's value is DISCARDED: the enclosing block
+    // types as `()` — the fn's declared return — and not as whatever the
+    // `if` produced. Asserted on both spellings, since "identical" is only
+    // worth having if what they agree on is the right thing.
+    let block = syntax::TextRange::new(
+        u32::try_from(template.find("{ if n").unwrap())
+            .unwrap()
+            .into(),
+        u32::try_from(template.len()).unwrap().into(),
+    );
+    for (spelling, pairs) in [
+        (&self_terminated, &pairs),
+        (&with_semicolon, &infer_pairs(&with_semicolon)),
+    ] {
+        assert!(
+            pairs.iter().any(|(r, ty)| *r == block && ty == "()"),
+            "the enclosing block should type as `()` in {spelling:?}, got {pairs:?}"
+        );
+    }
+    // And the statement really is a JOIN in statement position — it
+    // resolves as its own (an unresolvable tie here), never leaking into
+    // the block's tail, identically in both spellings.
+    assert!(render_diagnostics(&self_terminated).contains("type mismatch"));
 }

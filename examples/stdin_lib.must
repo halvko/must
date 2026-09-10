@@ -58,7 +58,7 @@ static fill = fn(at: u8.&raw mut, room: usize) -> Fill {
     // `End` — asking it would make a full buffer look like end-of-input.
     if room == 0 {
         return Fill::Failed;
-    };
+    }
     let n = unsafe { read(at, room) };
     if n < 0 {
         Fill::Failed
@@ -120,12 +120,12 @@ type Reader = struct {
                     if r.*.eof {
                         if r.*.len == 0 {
                             return ::None;
-                        };
+                        }
                         r.*.line = bless(r.*.start, r.*.len);
                         r.*.len = 0;
                         r.*.start = r.*.cur;
                         return ::Some(r.*.line.&);
-                    };
+                    }
                     r.refill();
                 } else {
                     let byte = unsafe { r.*.cur.* };
@@ -146,13 +146,13 @@ type Reader = struct {
                         r.*.len = 0;
                         r.*.start = r.*.cur;
                         return ::Some(r.*.line.&);
-                    };
+                    }
                     // The byte is part of the line. Counting it one at a
                     // time is not a cost worth avoiding — the scan has to
                     // look at every byte anyway — and it is what gives the
                     // bless a `usize` length with nothing converted.
                     r.*.len = r.*.len + 1;
-                };
+                }
             }
         };
 
@@ -168,8 +168,8 @@ type Reader = struct {
             // produce is `cap - 1` bytes.
             if len == r.*.cap {
                 panic("stdin_lib: no line boundary in a full buffer");
-            };
-            unsafe { copy(r.*.start, r.*.buf, len); };
+            }
+            unsafe { copy(r.*.start, r.*.buf, len); }
             r.*.start = r.*.buf;
             r.*.cur = unsafe { add(r.*.buf, len) };
             match fill(r.*.cur, r.*.cap - len) {
@@ -179,7 +179,7 @@ type Reader = struct {
                     r.*.end = r.*.cur;
                 },
                 ::Failed => panic("stdin_lib: reading standard input failed"),
-            };
+            }
         };
 
         // Consuming, not borrowing: a plain field read (`r.buf`) leaves `r`
@@ -189,7 +189,7 @@ type Reader = struct {
         // anyone may forget.
         drop = fn(r: Self) -> () {
             let Reader(struct { buf, cap, .. }) = r;
-            unsafe { dealloc_array(buf, cap); };
+            unsafe { dealloc_array(buf, cap); }
         };
     }
 };
@@ -243,12 +243,12 @@ static main = fn () -> () {
                 let text = line.*;
                 if text == "" {
                     blanks = blanks + 1;
-                };
+                }
                 width = width + count_bytes(text);
             },
             ::None => break,
-        };
-    };
+        }
+    }
     print("lines: ");
     print_usize(lines);
     print(", blank: ");
@@ -280,7 +280,7 @@ static print_usize = fn (n: usize) -> () {
     } else {
         print_usize(n / 10);
         print(digit(n - (n / 10) * 10));
-    };
+    }
 };
 
 static digit = fn (d: usize) -> str {

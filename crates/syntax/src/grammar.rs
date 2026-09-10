@@ -31,6 +31,28 @@ fn at_expr_recovery(p: &Parser<'_>) -> bool {
     )
 }
 
+/// THE BRACE RULE, asked of the TOKEN: a value that already ended in `}`
+/// closes itself, so the separator that would have ended it is not demanded.
+/// `item`, `member` and `expr_stmt_or_tail` ask this one question at three
+/// levels, so every brace-ended form — `fn () { }`, `struct { a = 1 }`,
+/// `enum { A }`, `if`, `match`, `loop`, `unsafe { ... }`, a bare block —
+/// self-terminates, and any added later does so with no edit here.
+/// `match_arm` is the fourth site and spells it itself: an arm's separator
+/// is `,`, and an arm body ends in a real `}` or not at all, so it asks
+/// `R_BRACE` alone rather than this function's `SEMICOLON` half.
+///
+/// `SEMICOLON` as the previous token can only come from broken nesting (an
+/// unclosed block that swallowed one). Demanding another `;` against it is
+/// pure noise, so it answers yes too. At the statement level that half is
+/// INERT and kept for parity: `builder::error` already drops an after-prev
+/// report whose anchor token carries an error, and an unclosed block has
+/// reported "expected `}`" against that `;` first — so the answer is one
+/// rule, asked the same way, at all three levels rather than two spellings
+/// of nearly the same rule.
+fn value_closed_itself(p: &Parser<'_>) -> bool {
+    matches!(p.prev(), Some(R_BRACE | SEMICOLON))
+}
+
 pub(crate) fn source_file(p: &mut Parser<'_>) {
     let m = p.start();
     while !p.at(EOF) {
@@ -91,10 +113,7 @@ fn item(p: &mut Parser<'_>) {
             expr(p);
         }
         trailing_clauses(p);
-        // Brace rule: items whose value ends in `}` don't need a `;`.
-        // A value "ending" in `;` only happens in broken nesting (e.g. an
-        // unclosed block) — demanding another `;` there is pure noise.
-        if matches!(p.prev(), Some(R_BRACE | SEMICOLON)) {
+        if value_closed_itself(p) {
             p.eat(SEMICOLON);
         } else {
             p.expect_after_prev(SEMICOLON);
@@ -469,9 +488,7 @@ fn member(p: &mut Parser<'_>) {
     if p.eat(EQ) {
         expr(p);
     }
-    // The item brace rule, one level down: a member whose value ends in
-    // `}` doesn't need its `;` re-demanded on broken nesting.
-    if matches!(p.prev(), Some(R_BRACE | SEMICOLON)) {
+    if value_closed_itself(p) {
         p.eat(SEMICOLON);
     } else {
         p.expect_after_prev(SEMICOLON);
@@ -2102,7 +2119,27 @@ fn expr_stmt_or_tail(p: &mut Parser<'_>) {
         return;
     }
     if parsed.is_some() && !p.at(R_BRACE) && !p.at(EOF) {
-        p.error_after_prev(SEMICOLON);
+        // The brace rule, one level further in than `item`'s and `member`'s:
+        // a statement whose expression ends in `}` closes itself. The `;`
+        // stays LEGAL (it is eaten above) — this is a carve-out for the
+        // shapes that already end in a brace, not a general
+        // optional-semicolon rule, and every other expression still owes
+        // its own.
+        //
+        // What keeps the carve-out this simple is that the expression
+        // grammar above is GREEDY and stays greedy — the inverse of Rust's
+        // fiat, which declares a statement-position block-tail finished and
+        // re-reads a following `-` as the next statement's unary minus. Here
+        // `if c { } - 1` is a SUBTRACTION: `-` continues an expression, so
+        // `expr_bp` has already taken it before this line runs, `p.prev()`
+        // is `1` rather than `}`, and the `;` is owed as usual. The price is
+        // the mirror image, and was accepted: a statement that genuinely
+        // STARTS with a continuation-shaped token (`-x`, `(f)(x)`, `[a][0]`)
+        // right after a block-tail statement needs an explicit `;` between
+        // the two to force the split.
+        if !value_closed_itself(p) {
+            p.error_after_prev(SEMICOLON);
+        }
         m.complete(p, EXPR_STMT);
         return;
     }

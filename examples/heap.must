@@ -100,17 +100,17 @@ type HeapVec = struct::<T> { ptr: T.&raw mut, len: usize, cap: usize } with {
                     copy(v.ptr, fresh, v.len);
                     if v.cap != 0 {
                         dealloc_array(v.ptr, v.cap);
-                    };
-                };
+                    }
+                }
                 v.ptr = fresh;
                 v.cap = new_cap;
-            };
+            }
             // The first write into an uninitialized element IS its
             // initialization. (Assignment targets are places rooted at a
             // name, so the computed address gets a `let` first —
             // `add(...).*  = x;` is not a place.)
             let slot = unsafe { add(v.ptr, v.len) };
-            unsafe { slot.* = x; };
+            unsafe { slot.* = x; }
             v.len = v.len + 1;
             v
         };
@@ -130,8 +130,8 @@ type HeapVec = struct::<T> { ptr: T.&raw mut, len: usize, cap: usize } with {
 
         deinit = fn(v: Self) -> () {
             if v.cap != 0 {
-                unsafe { dealloc_array(v.ptr, v.cap); };
-            };
+                unsafe { dealloc_array(v.ptr, v.cap); }
+            }
         };
     }
 };
@@ -184,7 +184,7 @@ type Arena = struct::<T> { state: ArenaState::<T>.&raw mut } with {
             unsafe {
                 dealloc_array(a.state.*.base, a.state.*.cap); // the backing first
                 dealloc_array(a.state, 1); // then the state itself
-            };
+            }
         };
     }
 };
@@ -198,7 +198,7 @@ static arena_new = fn::<T>(cap: usize) -> Arena::<T> {
         AllocResult::Ok(p) => p,
         AllocResult::Err => panic("arena_new: out of memory"),
     };
-    unsafe { state.* = ArenaState::<T>(struct { base, cap, cursor = 0 }); };
+    unsafe { state.* = ArenaState::<T>(struct { base, cap, cursor = 0 }); }
     Arena::<T>(struct { state })
 };
 
@@ -216,16 +216,16 @@ static main = fn () -> () {
                 p1.* = 20;
                 let p2 = add(p, 2);
                 p2.* = 30;
-            };
+            }
             if unsafe { add(p, 2).* } == 30 {
                 print("roundtrip: wrote 3 elements through add, read them back\n");
             } else {
                 print("roundtrip: unexpected\n");
-            };
-            unsafe { dealloc_array(p, 3); };
+            }
+            unsafe { dealloc_array(p, 3); }
         }
         AllocResult::Err => print("roundtrip: out of memory\n"),
-    };
+    }
 
     // HeapVec: pushes past the initial capacity force a growth (fresh
     // buffer, copy, free old) — invisible from here, which is the point.
@@ -233,15 +233,15 @@ static main = fn () -> () {
     let mut v = heapvec_new::<usize>();
     let mut i = 0;
     loop {
-        if i == 6 { break; };
+        if i == 6 { break; }
         v = v.push(i * i);
         i = i + 1;
-    };
+    }
     if v.get(5) == 25 {
         print("heapvec: pushed 6 squares across a growth, get(5) == 25\n");
     } else {
         print("heapvec: unexpected\n");
-    };
+    }
     v.deinit();
 
     // Arena: carve 3 + 2 out of a 4-element arena — the second carve
@@ -250,15 +250,15 @@ static main = fn () -> () {
     match a.alloc(3) {
         AllocResult::Ok(p) => {
             let last = unsafe { add(p, 2) };
-            unsafe { last.* = 7; };
+            unsafe { last.* = 7; }
             print("arena: carved 3 of 4 elements\n");
         }
         AllocResult::Err => print("arena: unexpected exhaustion\n"),
-    };
+    }
     match a.alloc(2) {
         AllocResult::Ok(p) => print("arena: unexpected fit\n"),
         AllocResult::Err => print("arena: a further 2 don't fit — Err, by value\n"),
-    };
+    }
     a.deinit();
 }
 

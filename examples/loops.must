@@ -19,7 +19,7 @@ static sum_to = fn (n: usize) -> usize {
     let mut acc = 0;
     let mut i = 0;
     loop {
-        if i == n { break acc; };
+        if i == n { break acc; }
         acc = acc + i;
         i = i + 1;
     }
@@ -33,9 +33,9 @@ static sum_odds_below = fn (n: usize) -> usize {
     let mut acc = 0;
     let mut i = 0;
     loop {
-        if i == n { break acc; };
+        if i == n { break acc; }
         i = i + 1;
-        if is_even(i - 1) { continue; };
+        if is_even(i - 1) { continue; }
         acc = acc + (i - 1);
     }
 };
@@ -49,13 +49,13 @@ static sum_odds_below = fn (n: usize) -> usize {
 // expression of type `!`, which is why `if step == 0 { return 0; }` needs
 // no special casing.
 static find_even_multiple = fn (step: usize, limit: usize) -> usize {
-    if step == 0 { return 0; };
+    if step == 0 { return 0; }
     let mut i = step;
     loop {
-        if limit < i { break; };
-        if is_even(i) { return i; };
+        if limit < i { break; }
+        if is_even(i) { return i; }
         i = i + step;
-    };
+    }
     0
 };
 
@@ -67,7 +67,7 @@ static sum_to_const_fn = const fn (n: usize) -> usize {
     let mut acc = 0;
     let mut i = 0;
     loop {
-        if i == n { break acc; };
+        if i == n { break acc; }
         acc = acc + i;
         i = i + 1;
     }

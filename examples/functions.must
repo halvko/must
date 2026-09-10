@@ -92,27 +92,27 @@ static main: fn() -> () = fn() -> () {
         print("fib: fib(10) == 55\n");
     } else {
         print("fib: unexpected\n");
-    };
+    }
 
     if gcd(35, 64) == 1 {
         print("gcd: gcd(35, 64) == 1 — Euclid via a hand-derived remainder\n");
     } else {
         print("gcd: unexpected\n");
-    };
+    }
 
     if is_even(76) {
         if is_odd(76) {
             print("mutual recursion: unexpected\n");
         } else {
             print("mutual recursion: is_even(76) and not is_odd(76)\n");
-        };
+        }
     } else {
         print("mutual recursion: unexpected\n");
-    };
+    }
 
     if apply_twice(double, 5) == 20 {
         print("higher-order: apply_twice(double, 5) == 20 — a fn value passed and called\n");
     } else {
         print("higher-order: unexpected\n");
-    };
+    }
 }

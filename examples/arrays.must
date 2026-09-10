@@ -19,7 +19,7 @@ static TABLE = const {
     let mut t = [0; 5];
     let mut i = 0;
     loop {
-        if i == 5 { break t; };
+        if i == 5 { break t; }
         t[i] = i * i;
         i = i + 1;
     }
@@ -42,14 +42,14 @@ static main = fn () -> () {
         print("table: TABLE[2] + TABLE[4] == 20 — built in a const loop, frozen into a static\n");
     } else {
         print("table: unexpected\n");
-    };
+    }
 
     // Nested indexing.
     if grid[0][1] + grid[1][0] == 5 {
         print("nested: grid[0][1] + grid[1][0] == 5\n");
     } else {
         print("nested: unexpected\n");
-    };
+    }
 
     // Index-assignment needs a `mut` root, exactly like field assignment;
     // mutability is transitive through the index.
@@ -59,7 +59,7 @@ static main = fn () -> () {
         print("index-assign: a[0] = 10 through a mut binding\n");
     } else {
         print("index-assign: unexpected\n");
-    };
+    }
 
     // Construct a `Buf::<2>` and read through its array field.
     let b: Buf::<2> = Buf::<2>(struct { data = [40, 2], len = 2 });
@@ -67,7 +67,7 @@ static main = fn () -> () {
         print("generic buffer: Buf::<2> holds a [usize; 2] summing to 42\n");
     } else {
         print("generic buffer: unexpected\n");
-    };
+    }
 }
 
 // On out-of-bounds: an index the checker can compute is checked *then and

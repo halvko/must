@@ -32,5 +32,5 @@ static main = fn {
         print("read fewer lines than expected\n");
     } else {
         print("read more lines than expected\n");
-    };
+    }
 };

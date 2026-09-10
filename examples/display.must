@@ -126,9 +126,9 @@ static main = fn() -> () {
     // the `fmt` impls wrote, which is a different number from the width
     // of the rendered text: `42` is two pushes, `hello` is one, and a
     // `Point` is four (`1`, `,`, and both digits of `23`).
-    if a == 2 { print("show(42): two digits pushed\n") } else { print("unexpected\n") };
-    if b == 1 { print("show(\"hello\"): one fragment pushed\n") } else { print("unexpected\n") };
-    if c == 4 { print("show(Point): x, comma, both digits of y\n") } else { print("unexpected\n") };
-    if d.pushes == 1 { print("7.fmt: one digit pushed\n") } else { print("unexpected\n") };
-    if e.pushes == 1 { print("Display::fmt: one fragment pushed\n") } else { print("unexpected\n") };
+    if a == 2 { print("show(42): two digits pushed\n") } else { print("unexpected\n") }
+    if b == 1 { print("show(\"hello\"): one fragment pushed\n") } else { print("unexpected\n") }
+    if c == 4 { print("show(Point): x, comma, both digits of y\n") } else { print("unexpected\n") }
+    if d.pushes == 1 { print("7.fmt: one digit pushed\n") } else { print("unexpected\n") }
+    if e.pushes == 1 { print("Display::fmt: one fragment pushed\n") } else { print("unexpected\n") }
 };

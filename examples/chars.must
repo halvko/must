@@ -70,7 +70,7 @@ static print_digits = fn (n: isize) -> () {
     } else {
         print_digits(n / 10);
         print(digit(n - (n / 10) * 10));
-    };
+    }
 };
 
 static print_isize = fn (n: isize) -> () {
@@ -79,7 +79,7 @@ static print_isize = fn (n: isize) -> () {
         print_digits(0 - n);
     } else {
         print_digits(n);
-    };
+    }
 };
 
 static main = fn {
@@ -88,8 +88,8 @@ static main = fn {
         match read_line() {
             ::Line(s) => { count = balance_of(s, count); },
             ::End => break,
-        };
-    };
+        }
+    }
     print("paren balance: ");
     print_isize(count);
     print("\n");
@@ -99,7 +99,7 @@ static main = fn {
         print("closed more than it opened\n");
     } else {
         print("left something open\n");
-    };
+    }
 
     // A multi-byte character is one `char` but several bytes: "smørre" is
     // six characters and seven bytes, and `next_char` walks the six —
@@ -109,7 +109,7 @@ static main = fn {
         print("\"smørre\": six characters, seven bytes\n");
     } else {
         print("unexpected\n");
-    };
+    }
 
     // `char` has equality and nothing else — no ordering, no arithmetic.
     // Equality is all a scanner needs.
@@ -118,5 +118,5 @@ static main = fn {
         print("a multi-byte character compares equal to itself\n");
     } else {
         print("unexpected\n");
-    };
+    }
 };

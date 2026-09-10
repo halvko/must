@@ -73,8 +73,8 @@ type Map = struct {
             // declared return type. Where no enum is in view, this is an
             // error naming the qualified spelling — it is sugar that only
             // ever removes a rejection, never an inference feature.
-            if m.*.used0 == true { if m.*.k0 == key { return ::Some(m.*.v0.&mut); }; };
-            if m.*.used1 == true { if m.*.k1 == key { return ::Some(m.*.v1.&mut); }; };
+            if m.*.used0 == true { if m.*.k0 == key { return ::Some(m.*.v0.&mut); } }
+            if m.*.used1 == true { if m.*.k1 == key { return ::Some(m.*.v1.&mut); } }
             ::None
         };
 
@@ -84,7 +84,7 @@ type Map = struct {
                 m.*.v0 = val;
                 m.*.used0 = true;
                 return;
-            };
+            }
             m.*.k1 = key;
             m.*.v1 = val;
             m.*.used1 = true;

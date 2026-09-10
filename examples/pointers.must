@@ -35,12 +35,12 @@ static main = fn () -> () {
         print("static: S.&raw == S.&raw is true — one place, one address\n");
     } else {
         print("static: unexpected\n");
-    };
+    }
     if C.&raw == C.&raw {
         print("const: unexpected\n");
     } else {
         print("const: C.&raw == C.&raw is false — each mention is its own copy\n");
-    };
+    }
 
     // --- writing through a pointer, step by step ---
     // `x` is a `mut` local; `p` points at it. The write `p.* = 42;` goes
@@ -48,33 +48,33 @@ static main = fn () -> () {
     // 42. Both the write and any read are dereferences, hence `unsafe`.
     let mut x: usize = 1;
     let p = x.&raw mut;
-    unsafe { p.* = 42; };
+    unsafe { p.* = 42; }
     if x == 42 {
         print("write-through: p.* = 42 updated the local x to 42\n");
     } else {
         print("write-through: unexpected\n");
-    };
+    }
 
     // --- pointer copies alias the same place ---
     // A pointer is a plain value: copying `p` into `q` copies the *address*,
     // not the pointee, so a write through `q` is visible through `p`.
     let q = p;
-    unsafe { q.* = 9; };
+    unsafe { q.* = 9; }
     if unsafe { p.* } == 9 {
         print("aliasing: writing through the copy q is seen through p\n");
     } else {
         print("aliasing: unexpected\n");
-    };
+    }
 
     // --- a pointer to a field addresses just that element ---
     let mut r: struct { a: usize, b: usize } = struct { a = 1, b = 2 };
     let pa = r.a.&raw mut;
-    unsafe { pa.* = 10; };
+    unsafe { pa.* = 10; }
     if r.a + r.b == 12 {
         print("field pointer: r.a.&raw mut wrote only r.a\n");
     } else {
         print("field pointer: unexpected\n");
-    };
+    }
 }
 
 // On the UB philosophy — this is the honest part. A pointer holds no

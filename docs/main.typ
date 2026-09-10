@@ -75,6 +75,89 @@ forgetting both `*/`s gets two diagnostics, not a single confusing one.
 so `/** like this */` is just an ordinary comment whose first character
 happens to be `*`.
 
+== Statements and semicolons
+
+An expression statement ends with `;` — unless the expression already ends with
+`}`. `if`, `match`, `loop`, `unsafe { ... }`, `const { ... }` and a plain block
+all close themselves in statement position:
+
+```must
+static classify = fn (n: usize) -> str {
+    let mut out = "many";
+    if n == 0 {
+        out = "none";
+    } else if n == 1 {
+        out = "one";
+    }
+    out
+}
+```
+
+No `;` after that chain's last `}`. It is the same rule items already follow —
+a value ending in `}` needs no separator — reaching one level in. Writing the
+`;` anyway is still fine (`if c { };` parses, and means exactly the same
+thing); it just isn't needed. Everything that does *not* end in `}` still needs
+its `;`:
+
+```must
+static shout = fn (s: str) -> () {
+    print(s);
+    print("!")
+}
+```
+
+The rule is about the last *token*, not about a list of special forms, so
+anything ending in `}` self-terminates in statement position — the shapes
+above and whatever is added later.
+
+Two statements keep their `;` even though they end in `}`, and it's worth
+knowing which before you meet them: `let` and assignment. Their `}` closes a
+*value*, and the statement wrapped around that value still needs its terminator:
+
+```must
+static pick = fn (c: bool) -> usize {
+    let mut out = 0;
+    let first = if c { 1 } else { 2 };
+    out = if c { 10 } else { 20 };
+    first + out
+}
+```
+
+Both of those `;`s are required.
+
+One more place the `;` earns its keep: the *end* of a block. Written without it,
+a `}`-ended expression in the last position is the block's tail — its value —
+rather than a statement whose value is thrown away. The two spellings are
+interchangeable everywhere else; there, drop the `;` only when the value is `()`
+or when the tail is what you meant.
+
+=== A `}` does not stop an expression
+
+Newlines mean nothing to the parser, and an operator after a `}` continues the
+expression that `}` closed. So this is one subtraction, not a branch followed
+by a negation:
+
+```must
+static discounted = fn (bulk: bool) -> usize {
+    if bulk { 100 } else { 120 } - 1
+}
+```
+
+That is deliberate: a sequence of tokens has one reading, not one reading in
+statement position and a different one in expression position. The cost lands
+on a rare shape — a statement that genuinely *starts* with `-`, `(` or `[`,
+directly after a statement that ended in `}`, needs a `;` above it to say so:
+
+```must
+static twice = fn (n: usize) -> usize {
+    if n == 0 { print("zero") } else { print("more") };
+    (n) + n
+}
+```
+
+Drop that `;` and `(n)` stops being a new statement: it *calls* the `if` above
+it.
+
 == Variable declarations
 
 `let` is the only variable-declaration form. Possible sugars — an
@@ -179,7 +262,7 @@ local copy — mutating it is invisible to the caller:
 
 ```must
 static clamp_to_ten = fn (mut n: usize) -> usize {
-    if n > 10 { n = 10; };
+    if n > 10 { n = 10; }
     n
 };
 ```
@@ -727,7 +810,7 @@ static sum_to_ten = fn () -> usize {
     let mut acc = 0;
     let mut i = 0;
     loop {
-        if i == 10 { break acc; };
+        if i == 10 { break acc; }
         acc = acc + i;
         i = i + 1;
     }
@@ -763,7 +846,7 @@ value goes and needs no special casing anywhere:
 
 ```must
 static classify = fn (n: usize) -> str {
-    if n == 0 { return "zero"; };
+    if n == 0 { return "zero"; }
     let parity = if n == 1 { "one" } else { return "many" };
     parity
 };
@@ -928,7 +1011,7 @@ else in this chapter is about the raw flavor.
 static main = fn () -> usize {
     let mut x = 1;
     let p = x.&raw mut;
-    unsafe { p.* = 42; };
+    unsafe { p.* = 42; }
     x                       // 42
 };
 ```
@@ -1107,11 +1190,11 @@ static main = fn () -> () {
             unsafe {
                 p.* = 1;
                 q.* = 2;
-            };
-            unsafe { dealloc_array(p, 2); };
+            }
+            unsafe { dealloc_array(p, 2); }
         }
         AllocResult::Err => print("out of memory"),
-    };
+    }
 };
 ```
 
@@ -1617,7 +1700,7 @@ either way.
 ```must
 static one_arm = fn (c: bool) -> () {
     let r = make(1);
-    if c { r.drop(); } else { };
+    if c { r.drop(); } else { }
 };
 ```
 
@@ -1629,7 +1712,7 @@ fine, and so is a `return` that consumes on the way out.
 ```must
 static every_time = fn () -> () {
     let r = make(1);
-    loop { r.drop(); };
+    loop { r.drop(); }
 };
 ```
 
@@ -1651,8 +1734,8 @@ static until = fn (n: usize) -> () {
         if i > n {
             r.drop();
             break;
-        } else { };
-    };
+        } else { }
+    }
 };
 ```
 
@@ -1824,7 +1907,7 @@ static table = const {
     let mut t = [0; 5];
     let mut i = 0;
     loop {
-        if i == 5 { break t; };
+        if i == 5 { break t; }
         t[i] = i * i;
         i = i + 1;
     }
@@ -2005,8 +2088,8 @@ static main = fn {
                 print("\n");
             },
             ::End => break,
-        };
-    };
+        }
+    }
 };
 ```
 
@@ -2247,8 +2330,8 @@ type String = struct {
         drop = fn(s: Self) -> () {
             let String(struct { ptr, cap, .. }) = s;
             if cap > 0 {
-                unsafe { dealloc_array(ptr, cap); };
-            };
+                unsafe { dealloc_array(ptr, cap); }
+            }
         };
     }
 };
@@ -2260,12 +2343,12 @@ static empty_string = fn() -> String {
 static to_owned = fn::<@a>(s: str.&::<@a>) -> String {
     let text = s.*;
     let n = text.len();
-    if n == 0 { return empty_string(); };
+    if n == 0 { return empty_string(); }
     let p = match alloc_array::<u8>(n) {
         ::Ok(p) => p,
         ::Err => panic("out of memory"),
     };
-    unsafe { str_bytes(text, p); };
+    unsafe { str_bytes(text, p); }
     String(struct { ptr = p, len = n, cap = n })
 };
 ```
@@ -2301,11 +2384,11 @@ loop {
             if line.*.len() > longest.&.len() {
                 longest.drop();
                 longest = to_owned(line);
-            };
+            }
         },
         ::None => break,
-    };
-};
+    }
+}
 print(longest.&.as_str());
 longest.drop();
 ```

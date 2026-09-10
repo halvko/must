@@ -398,7 +398,7 @@ fn errors_checks_dirty_with_the_documented_count() {
             error: `return` inside a `const` block is not supported yet: it would have to leave the enclosing `fn` body, and a `const` block is compiled as a body of its own
               --> examples/errors.must:220:23
                 |
-            220 |     const { if true { return 1; }; 0 }
+            220 |     const { if true { return 1; } 0 }
                 |                       ^^^^^^^^
 
             error: `Measured::size` takes no generic arguments
