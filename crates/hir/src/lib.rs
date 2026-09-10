@@ -225,16 +225,17 @@ pub fn synthetic_decl(db: &dyn Db, item: ItemId<'_>) -> Option<&'static scopes::
 }
 
 /// Whether `item` is a HOST IMPORT —
-/// `extern static read: unsafe fn(...) -> T;`.
+/// `unsafe extern static read: unsafe fn(...) -> T;`.
 ///
-/// The fact lives on the ITEM, and it is a NARROW one. An import's *price*
-/// rides its TYPE — it is an `unsafe fn(...)`
-/// (see [`ty::FnTy`]), which is what demands the marker at every call,
-/// including the ones reached through a binding, an argument or a field.
-/// What is left to this query is the pair of questions only the DECLARATION
-/// can answer: may it run in a const context (there is no host at compile
-/// time), and can a call site NAME the import it reaches — a better message
-/// than the type-driven one, available exactly at a direct mention.
+/// The fact lives on the ITEM, and it is a NARROW one. An import's *call
+/// price* rides its TYPE (see [`ty::FnTy`]) — `unsafe fn(...)` demands the
+/// marker at every call, including the ones reached through a binding, an
+/// argument or a field, while a plain `fn(...)` demands nothing there. What
+/// is left to this query is the pair of questions only the DECLARATION can
+/// answer, and both hold regardless of the call price: may it run in a
+/// const context (there is no host at compile time), and can a call site
+/// NAME the import it reaches — a better message than the type-driven one,
+/// available exactly at a direct mention.
 ///
 /// One read of [`item_data`] — the DECLARATION, not the body. An import has
 /// no value expression to interrogate, and the RETIRED spelling

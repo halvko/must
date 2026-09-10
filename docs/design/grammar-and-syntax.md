@@ -82,9 +82,12 @@
   unknown would send the reader hunting for a spelling that is already spoken for.
 - **G16** Full keywords: `raw unsafe with impl for trait requires extern only` (`const`,
   `struct`, `enum` are contextual expression-starters). `extern` also OPENS an item, the
-  fifth after `static`/`const`/`type`/`trait` (G22). One `keywords!` table generates the
-  set — `from_keyword`, `is_keyword`, and the table itself — so the highlighter (P10) and
-  completions classify a keyword by asking, never by enumerating kinds.
+  fifth after `static`/`const`/`type`/`trait`, and `unsafe` leads `extern` there as the
+  vouch marker of a host import (G22) — the one item-position spelling of a keyword that
+  elsewhere only opens expressions (`unsafe { ... }`) or a type (`unsafe fn(...)`, G23).
+  One `keywords!` table generates the set — `from_keyword`, `is_keyword`, and the table
+  itself — so the highlighter (P10) and completions classify a keyword by asking, never by
+  enumerating kinds.
 - **G15** `return` is an expression of type `Never`, constrained through the same seam tail
   expressions use (an annotated return type blames the operand and cites the annotation; an
   inferred one is pinned by `return e` exactly as by a tail). It targets the nearest enclosing
@@ -152,17 +155,26 @@
   fn LITERAL: the value's type carries the fact, so that spelling could only sugar an
   annotation.
 - **G22** An import is a declaration:
-  `extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;`. A type in
-  annotation position, no `=`, no value, because nothing is being set to anything. `extern`
-  leads the item. Every refusal restates that the declaration is the whole contract: an
-  initializer, a bare `fn` type, a non-fn type, a missing type, a type not written in full
-  (`_` has no body to be inferred from), `extern` on anything but a `static`. A written
-  initializer means it is not an import: the value wins and the marker is dropped, since
-  keeping it would turn a visible syntax error into a run-time refusal at a boundary the
+  `unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;`. A type in
+  annotation position, no `=`, no value, because nothing is being set to anything. TWO
+  markers lead the item, one obligation each: `extern` says the name comes from outside,
+  `unsafe` VOUCHES that the signature written here is what the host really provides — a
+  claim nothing on this side can check, so a human makes it, always, on every import. Both
+  are required and in that order; `extern static ...` alone is an error with a fix that
+  inserts the vouch, and `extern unsafe static ...` (the markers reversed) is superset-parsed
+  into the same item and an error with a fix that moves it. `unsafe` on anything but an
+  `extern static` is refused the same way `extern` on anything but a `static` is. Every other
+  refusal restates that the declaration is the whole contract: an initializer, a non-fn type,
+  a missing type, a type not written in full (`_` has no body to be inferred from). A written
+  initializer means it is not an import: the value wins and the markers are dropped, since
+  keeping them would turn a visible syntax error into a run-time refusal at a boundary the
   program never crossed. An unwritten return type means `()`. Fn types may name
   their parameters, decided per parameter, with the name dropped below syntax so both
   spellings are one type. A fn type's parameters are not patterns: `mut` and destructuring
-  belong to a fn literal, whose parameters bind.
+  belong to a fn literal, whose parameters bind. CALLING is a separate question from
+  declaring, answered by the fn type's own `unsafe` alone (T19): an import declared
+  `fn(...)` is vouched for but free to call, direct or through a binding, exactly as any
+  other safe function is — an import is not "unsafe to call because it is an import".
 
 ## Discarded
 
@@ -215,6 +227,14 @@
   parses into the same node, means the same import, and answers to the same refusals — an
   annotation written on it is an import's annotation, and the initializer's own signature is
   dropped, which the message says rather than doing silently. **G22**
+- **Unvouched imports allowed / an import unsafe to call because it is an import** — the
+  conservative stopgap G22 shipped with: every import was declared `unsafe fn` regardless
+  of its real call price, because the DECLARATION-side vouch had no spelling of its own and
+  granting a safe-to-call import would have left that obligation with no home at all. The
+  vouch marker (`unsafe extern static ...`) is that home, so the stopgap is retired: the
+  TYPE alone now decides the call price, and an import declared `fn(...)` is free to call,
+  direct or through a binding — a boundary owes two obligations, and each one now has its
+  own spelling, so neither has to borrow the other's. **G22 T19**
 - **Negative literal patterns** — `-1` is an operator applied to a literal, so taking it is
   the first step toward a pattern-expression grammar; and it collides with G03/G04:
   `_ => { 1 }` newline `- 1,` already parses as one arm. **Ranges** — they ask what order a
@@ -256,8 +276,6 @@
   no postfix text means the same thing. **G08 G26**
 - **Negative integer literal patterns land** — revisit G04's arm-position fix gate, because a
   token could then begin a pattern. **G04 G19**
-- **A safe-to-call import gets a declaration-side vouch spelling** — G22's required `unsafe`
-  is conservative, blocked on that marker rather than rejected. **G22**
 - **`only` as a global keyword becomes a problem** — it cannot be an identifier anywhere,
   though the language reads it in one slot; the contextual alternative is one line, at the
   cost of a clause head that lexes as an identifier. **G21**

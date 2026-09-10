@@ -42,7 +42,7 @@ pub enum Value {
     Char(char),
     Fn(FnValue),
     /// A HOST IMPORT's value — what
-    /// `extern static name: unsafe fn(...) -> T;`
+    /// `unsafe extern static name: unsafe fn(...) -> T;`
     /// evaluates to. There is no body on this side of the boundary, so it
     /// carries what a host judges instead: the declaring item, whose name is
     /// the name the host is asked for, and the SIGNATURE it was asked with.

@@ -33,10 +33,17 @@
 //
 // It is a DECLARATION and nothing else: no `=`, because there is no value
 // here to write down. It promises that a name of this type exists, and what
-// provides it lives on the other side of the boundary. `unsafe fn` is
-// written out, not implied — an import is always unsafe to call, and the
-// type is where that is said.
-extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
+// provides it lives on the other side of the boundary.
+//
+// TWO `unsafe`s, because a boundary owes two obligations and they are not
+// the same one. The one in FRONT is the VOUCH: writing this signature down
+// asserts that the host really provides a `read` shaped like this, and if it
+// does not, the program is wrong before anything calls it — nothing on this
+// side can check that, so a human says it. The one on the TYPE is the CALL
+// price: `read` writes through the caller's raw pointer, so every call needs
+// an `unsafe { ... }`. An import that is safe to call is vouched for and
+// free at the call: `unsafe extern static now: fn() -> i64;`.
+unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
 
 // The FIRST wrapper above the boundary, and the only job it has: turn one
 // machine word into something the type system makes you handle. Everything

@@ -2162,7 +2162,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             .unwrap_or_default()
     }
 
-    /// Call a HOST IMPORT — `extern static name: unsafe fn(...) -> T;`.
+    /// Call a HOST IMPORT — `unsafe extern static name: unsafe fn(...) -> T;`.
     ///
     /// The interpreter is one particular host, and this is the whole set of
     /// primitives it provides. Dispatch is BY NAME, because the name is the
@@ -2240,6 +2240,14 @@ impl<'db, M: Mode> Machine<'db, M> {
         let [buf_ty, len_ty] = sig.params.as_slice() else {
             return Err(self.host_signature_error("read", SHAPE, loc, origin));
         };
+        // The CALL PRICE is part of the declaration this host judges, same
+        // as every parameter and the return type: `read` writes through a
+        // caller-supplied pointer, so a `fn`-typed vouch is as wrong as a
+        // read-only or non-byte buffer, and is refused with the same
+        // signature error rather than let a misdeclared price through.
+        if !sig.unsafe_to_call {
+            return Err(self.host_signature_error("read", SHAPE, loc, origin));
+        }
         // A MUTABLE raw pointer to `u8`: `read` writes bytes, so a shared
         // pointer is as wrong as a non-byte one, and a non-pointer buffer is
         // refused here rather than reaching the value check below (which
