@@ -1041,7 +1041,12 @@ Raw pointers reach places all the way down. The types are `T.&raw`
 `place.&raw mut`, and a place is now the full grammar: a variable, a chain
 of its fields and elements (`r.a`, `a[i]`, `a[i][j]`), a `static` or `const`
 item (a `const` use's own copy), or a chain rooted in a deref (`p.*.x` — a
-place reached *through* a pointer). There is no address-of a temporary. A
+place reached *through* a pointer). An operand that is *not* already a
+place is no exception: `place.&raw` materializes it exactly as the safe
+borrow does, into the same anonymous storage — see "Borrowing a
+temporary" below. A raw pointer to that storage dangles as easily as a raw
+pointer to a named local already does; `unsafe` is what prices that, at
+the deref, not the mint. A
 pointer is followed with the postfix deref `p.*`; there is **no
 auto-deref**, so `p.*` is the only way a pointer is ever read or written.
 The old prefix spelling (`&raw place` / `&raw mut place`) is retired:
@@ -1458,6 +1463,74 @@ borrow. A shared receiver never reaches a `Self.&mut` member at all, because
 shared never becomes exclusive. And a borrow receiver never reaches a member
 whose `Self` is a *value* — that would be auto-deref; write `c.*.take()`.
 
+=== Borrowing a temporary
+
+`.&` and `.&mut` borrow a *place*, and a value that has just been computed
+is not one — it has no storage to point at. Rather than refuse, the
+compiler gives it storage: an anonymous local nobody can name, born where
+the expression is written. So a freshly built value can be borrowed
+straight into the call that wants it:
+
+```must
+type Printer = struct { count: usize } with {
+    impl Self {
+        emit = fn::<@a>(s: str, p: Self.&mut::<@a>) -> () {
+            print(s);
+            p.*.count = p.*.count + 1;
+        };
+    }
+};
+type Inner = struct { label: str } with {
+    impl Self {
+        fmt = fn::<@a>(p: Printer.&mut::<@a>, i: Self) -> usize {
+            p.emit(i.label);
+            p.emit(i.label);
+            p.*.count
+        };
+    }
+};
+
+static main = fn () -> usize {
+    let inner = Inner(struct { label = "x" });
+    inner.fmt(Printer(struct { count = 0 }).&mut)    // a temporary, borrowed: 2
+};
+```
+
+The *whole* value is what gets storage, so a borrow of one of its fields
+(`get(mk().a.&)`) or elements points into the temporary itself rather than
+at a copy — a write through `mk().a.&mut` lands in the temporary. Nothing
+moves: the expression is evaluated exactly where it is written, so the
+operands around it keep their order (`add(a(), mk().&)` still runs `a()`
+first), and a temporary inside a `match` arm or a loop body is created on
+the path that runs, as often as it runs. A `const` context is no different;
+the compile-time evaluator gives the temporary storage the same way.
+
+How long it lives is one rule: to the end of the innermost enclosing block,
+always. A loop body's temporary is fresh every iteration, a `match`
+scrutinee's lasts to the end of the match, and a shorter life is spelled
+with an explicit block. There are no shape-based extension rules and no
+special case for `let` — and since nothing has a destructor, the only way
+to observe how long a temporary lives is through a borrow of it. What the
+compiler enforces today is the outer edge of that: a borrow of a temporary
+that has to outlive the body is one honest `borrowed value does not live
+long enough`, naming the temporary rather than a `let` you never wrote.
+Inside a body the block's end is not yet modelled, exactly as it is not for
+a named local (see the limits below); a loan of a loop-body temporary does
+not survive the back edge, because the next iteration's store into it is a
+write the loan checker refuses.
+
+`.&raw`/`.&raw mut` materialize a temporary exactly the same way — `mk().a.&raw
+mut` points into the temporary's own field, same storage a `.&mut` of it
+would have used. A raw pointer to that storage is exactly as dangling-prone
+as a raw pointer to a named local already is, and that case is priced at
+the deref, under `unsafe`, not refused at the mint — so the temporary is
+priced the same way, not refused. One thing stays refused, deliberately: a
+temporary of a type that *must be consumed*, under either flavor. It has no
+name, so nothing could ever consume it — the message says to bind it with
+`let` first and borrow the binding. A *name* is judged as it always was,
+whatever it resolves to: a `const` parameter is still not borrowable, a
+`static` and a `const` still refuse `.&mut`.
+
 === Members with their own type parameters
 
 A member may also bind *type* parameters of its own, beside its regions.
@@ -1635,7 +1708,14 @@ nothing about another. That is fine for what it is for.
 Its liveness notion is the FRAME, not the block, and so is the checker's:
 neither models the end of a block's storage, so a borrow of an inner-block
 local, read after its block ends, is caught by NEITHER layer. It is the one
-shape in this chapter that is neither rejected nor detected.
+shape in this chapter that is neither rejected nor detected — and a
+temporary's storage is the same shape seen from the other side: its life
+ends with its block, nothing yet enforces that end inside a body, and what
+does fence it is the region refusal when the borrow has to outlive the body.
+The one in-body case that IS refused is a loan of a loop-body temporary
+carried across the back edge, and that is the ordinary write rule at work,
+not a storage rule: the next iteration's store into the temporary is a
+write to what the loan points into.
 
 In the other direction the static rule is deliberately stricter than the
 interpreter on two points. Reading a place around a live exclusive borrow

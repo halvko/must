@@ -324,7 +324,7 @@ impl LowerCtx<'_> {
                 // The safe-borrow twins, keyed the same way: the value that
                 // cannot be produced is the borrow.
                 InferenceDiagnostic::DotThroughBorrow { expr, .. }
-                | InferenceDiagnostic::BorrowNonPlace { expr }
+                | InferenceDiagnostic::BorrowNonPlace { expr, .. }
                 | InferenceDiagnostic::MoveOutOfBorrow { expr, .. } => {
                     self.value_traps.insert(*expr, diag.message());
                 }
@@ -2898,6 +2898,37 @@ impl LowerCtx<'_> {
             if let Some(message) = self.value_traps.get(&link).cloned() {
                 return self.trap(b, link, message);
             }
+        }
+        // A MATERIALIZED TEMPORARY at the root (M12): the value is
+        // computed here, stored into its own anonymous local, and THAT
+        // local is addressed. Exactly the `const` arm below, which has
+        // always done this — a const is copied into a temp so there is
+        // something to point at — now reached by every non-place operand
+        // of a safe borrow.
+        //
+        // The value is lowered where the expression is written, so the
+        // operands around it keep their order (`add(a(), mk().&)` still
+        // runs `a()` first), and a temporary in a `match` arm or a loop
+        // body is stored when and as often as that path runs: per-path
+        // allocation with no init tracking, because the store IS the
+        // initialization. The root's own pending value trap was checked
+        // above with the chain's; the value is lowered after that check
+        // so a broken root traps where a named one would.
+        if let Some(binding) = self.body.temp_local(root) {
+            let value = self.lower_expr(b, root);
+            let local = self.alloc_binding_local(b, binding);
+            b.locals[local].addressable = true;
+            b.push_assign(local, Rvalue::Use(value), root);
+            let Some(projection) = self.lower_place_projection(b, &chain, None) else {
+                return Operand::Const(Const::Unit);
+            };
+            let dest = b.temp(self.ty(expr));
+            b.push_assign(
+                dest,
+                flavor.address_of(mutable, Place { local, projection }),
+                expr,
+            );
+            return Operand::Copy(dest.into());
         }
         let ExprData::NameRef(name) = &self.body.exprs[root] else {
             // Non-place roots were diagnosed (`AddrOfNonPlace`) and

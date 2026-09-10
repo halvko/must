@@ -4,6 +4,15 @@
 //! moves things around — that equality is what stops salsa from re-running
 //! inference of untouched items. All positions live in [`BodySourceMap`],
 //! which only the final, range-producing layers (diagnostics, IDE) read.
+//!
+//! Lowering is almost entirely a transcription of the syntax tree, with one
+//! exception that is a JUDGEMENT: a borrowed operand that is not a place
+//! gets storage of its own ([`Body::temps`]). It is decided here, at the
+//! borrow's own lowering, because the question it asks — "is this a
+//! place?" — is the one inference, the loan checker and MIR all ask of
+//! [`ExprData`], and asking it once means those three see an ordinary local
+//! instead of each re-deriving what a temporary is. It adds no expression
+//! and moves no evaluation.
 
 use base_db::Db;
 use la_arena::{Arena, ArenaMap, Idx};
@@ -30,6 +39,51 @@ pub struct Body {
     pub pats: Arena<PatData>,
     /// The item's initializer expression (usually a `fn` literal).
     pub root: Option<ExprId>,
+    /// MATERIALIZED TEMPORARIES (M12): every borrowed operand whose value
+    /// gets storage of its own so the borrow has something to point at,
+    /// mapped to the anonymous local that storage is.
+    ///
+    /// A borrow needs a PLACE, and an expression that is not one is a
+    /// value with nowhere to point. Rather than refuse it
+    /// (`inner.fmt(Printer(struct {}).&mut)` was the shape that broke), the
+    /// value is given storage: an anonymous local nobody can name, born
+    /// where the expression is written. Downstream it is an ORDINARY local
+    /// with an ordinary [`BindingId`] — inference types it, the loan
+    /// checker roots loans in it, MIR allocates it, the interpreter
+    /// addresses it. The one thing that makes it special is that no name
+    /// resolves to it, so it is mentioned EXACTLY ONCE: at the borrow that
+    /// created it.
+    ///
+    /// Keyed by the ROOT of the borrowed place, never by the borrow: the
+    /// temporary of `mk().x.&mut` is the whole `mk()` value and the borrow
+    /// points into its field. Binding `mk().x` instead would borrow a COPY
+    /// of the field, which is a different program.
+    ///
+    /// **How long it lives — one rule, recorded, not enforced.** A
+    /// temporary's storage lives to the end of the innermost enclosing
+    /// block, always: a loop body's is fresh per iteration, a `match`
+    /// scrutinee's lasts to the end of the match, and a shorter life is
+    /// spelled with an explicit block. Nothing in the compiler models
+    /// storage DEATH yet (no MIR storage markers, no loan-check storage
+    /// liveness; the interpreter's locals live for the frame), so today a
+    /// temporary effectively lives for its frame — longer than the rule,
+    /// which accepts strictly more programs and is sound exactly because
+    /// Must has no destructors: extending a value's life is observable
+    /// only through borrows. The fence for a borrow that needs the
+    /// temporary past the body is `crate::outlives`'s region refusal. With
+    /// one rule the scope is not per-binding data: the day storage death
+    /// is modelled, the enclosing block of a key here is a derivation over
+    /// [`Body::exprs`] at that pass.
+    pub temps: ArenaMap<ExprId, BindingId>,
+}
+
+impl Body {
+    /// The anonymous local an expression's value is materialized into, if
+    /// it is a materialized temporary — the one question every consumer of
+    /// [`Body::temps`] asks.
+    pub fn temp_local(&self, expr: ExprId) -> Option<BindingId> {
+        self.temps.get(expr).copied()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -567,6 +621,7 @@ pub fn body_with_source_map<'db>(db: &'db dyn Db, item: ItemId<'db>) -> (Body, B
             bindings: ctx.bindings,
             pats: ctx.pats,
             root,
+            temps: ctx.temps,
         },
         ctx.source_map,
     )
@@ -585,6 +640,7 @@ struct LowerCtx {
     bindings: Arena<BindingData>,
     pats: Arena<PatData>,
     source_map: BodySourceMap,
+    temps: ArenaMap<ExprId, BindingId>,
 }
 
 impl LowerCtx {
@@ -863,6 +919,11 @@ impl LowerCtx {
             }
             ast::Expr::AddrOfExpr(it) => {
                 let place = self.lower_opt_expr(it.expr());
+                // `.&raw` materializes a non-place operand exactly as the
+                // safe borrow does (M12): the raw pointer addresses the
+                // same anonymous local a `.&`/`.&mut` of the same operand
+                // would have gotten.
+                self.materialize_temp(place);
                 self.alloc_expr(
                     ExprData::AddrOf {
                         mutable: it.is_mut(),
@@ -881,6 +942,7 @@ impl LowerCtx {
             // it had not been written" — the G10 call-site precedent.
             ast::Expr::BorrowExpr(it) => {
                 let place = self.lower_opt_expr(it.receiver());
+                self.materialize_temp(place);
                 self.alloc_expr(
                     ExprData::Borrow {
                         mutable: it.is_mut(),
@@ -1141,6 +1203,44 @@ impl LowerCtx {
         self.alloc_expr(ExprData::Block { stmts, tail }, block.syntax())
     }
 
+    /// Give a borrowed operand that is not a place storage of its own —
+    /// the temporary rule (M12), decided at the borrow's own lowering over
+    /// the already-lowered operand.
+    ///
+    /// The whole of materialization is a MARK: the root of the borrowed
+    /// place is entered in [`Body::temps`] against a fresh anonymous
+    /// binding, and the expression stays exactly where it is written. What
+    /// changes is that its value now HAS an address. Never a synthesized
+    /// `let`: hoisting the initializer to the head of the block would
+    /// evaluate it before operands written to its left and drag a
+    /// temporary out of a `match` arm onto paths that never run. Marking
+    /// moves no evaluation, so a temporary in a branch is initialized when
+    /// (and as often as) the branch runs, with no init-tracking anywhere.
+    ///
+    /// Both borrow flavors mark, the same way: a raw pointer to a
+    /// temporary is exactly as dangling-prone as a raw pointer to a
+    /// block-local already is, and D1 priced that at the deref, with
+    /// `unsafe`. Refusing `.&raw` here bought nothing the local case did
+    /// not already allow.
+    fn materialize_temp(&mut self, place: ExprId) {
+        let Some(root) = borrowed_temp_root(&self.exprs, place) else {
+            return;
+        };
+        let binding = self.bindings.alloc(BindingData {
+            // Nameless on purpose: nothing may resolve to it, which is
+            // what makes it mentioned exactly once. No source-map entry
+            // either — no syntax node IS this binding, so `node_for_binding`
+            // is `None` and every declaration-site note falls back.
+            name: String::new(),
+            type_ref: None,
+            // A fresh local nobody else can reach — exclusivity is
+            // trivially satisfiable, so `.&mut` of a temporary is legal
+            // without a `mut` nobody could have written.
+            mutable: true,
+        });
+        self.temps.insert(root, binding);
+    }
+
     fn alloc_binding(
         &mut self,
         name: Option<ast::Name>,
@@ -1164,6 +1264,38 @@ impl LowerCtx {
         self.source_map.binding_map.insert(ptr, id);
         self.source_map.binding_map_back.insert(id, ptr);
         id
+    }
+}
+
+/// The ROOT of a borrowed place, when that root is not a place and the
+/// borrow therefore needs a temporary — `None` when the operand already
+/// names storage.
+///
+/// The walk is [`crate::infer`]'s `check_borrow_place` and
+/// `check_addr_of_place` (both flavors mark and root the same way),
+/// `crate::outlives`'s escape rooting and MIR's `place_chain`, and it has
+/// to stay all of them:
+/// a root this says is a temporary is one those must agree is a place, or
+/// the borrow is refused after being materialized (or, worse, materialized
+/// and then rooted somewhere else). One shape:
+///
+/// * a **name** is a place — including one that resolves to a `static`, a
+///   `const` or a const parameter, which lowering cannot tell apart and
+///   inference judges as it always has: the line is drawn syntactically;
+/// * a **deref** is a place, in the POINTEE's storage — `mk().*.x.&mut`
+///   borrows through the pointer `mk()` returned, so a temporary would be
+///   storage nothing points at;
+/// * **broken source** is nothing, and stays silent;
+/// * everything else is a value: it gets storage.
+fn borrowed_temp_root(exprs: &Arena<ExprData>, place: ExprId) -> Option<ExprId> {
+    let mut root = place;
+    loop {
+        match &exprs[root] {
+            ExprData::Field { receiver, .. } => root = *receiver,
+            ExprData::Index { base, .. } => root = *base,
+            ExprData::NameRef(_) | ExprData::Deref { .. } | ExprData::Missing => return None,
+            _ => return Some(root),
+        }
     }
 }
 

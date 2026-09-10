@@ -7213,3 +7213,171 @@ fn a_move_with_no_borrow_outstanding_costs_nothing_and_still_runs() {
         "#]],
     );
 }
+
+// ---- materialized temporaries (M12) --------------------------------------
+
+/// THE PLAYGROUND SHAPE, running. `inner.fmt(Printer(struct {}).&mut)`
+/// builds a value with no name, borrows it exclusively, and a member writes
+/// through the borrow — so the temporary must have real storage, and writes
+/// to it must be visible to the code holding the borrow.
+#[test]
+fn a_temporary_borrowed_exclusively_is_written_through() {
+    check_run(
+        "type Printer = struct { count: usize } with {\n\
+             impl Self {\n\
+                 emit = fn::<@a>(s: str, p: Self.&mut::<@a>) -> () {\n\
+                     print(s);\n\
+                     p.*.count = p.*.count + 1;\n\
+                 };\n\
+             }\n\
+         };\n\
+         type Inner = struct { label: str } with {\n\
+             impl Self {\n\
+                 fmt = fn::<@a>(p: Printer.&mut::<@a>, i: Self) -> usize {\n\
+                     p.emit(i.label);\n\
+                     p.emit(i.label);\n\
+                     p.*.count\n\
+                 };\n\
+             }\n\
+         };\n\
+         static f = fn() -> usize {\n\
+             let inner = Inner(struct { label = \"x\" });\n\
+             inner.fmt(Printer(struct { count = 0 }).&mut)\n\
+         };",
+        "f()",
+        expect![[r#"
+            output: "xx"
+            => 2
+        "#]],
+    );
+}
+
+/// PER-PATH ALLOCATION, which needs no machinery at all: the temporary is
+/// initialized where it is written, so a branch's temporary is created
+/// when (and only when) that branch runs, and a loop's is created afresh
+/// every iteration. Nothing tracks whether it was initialized, because the
+/// store IS the initialization.
+///
+/// The loop half is also the interpreter's aliasing tree being asked the
+/// same question three times: each iteration writes the temporary's slot,
+/// which invalidates the previous iteration's borrow of it, and the borrow
+/// minted after the write is a fresh one.
+#[test]
+fn a_temporary_in_a_branch_or_a_loop_is_created_per_path() {
+    check_run(
+        "type Cell = struct { v: usize } with {\n\
+             impl Self {\n\
+                 bump = fn::<@a>(by: usize, c: Self.&mut::<@a>) -> usize {\n\
+                     c.*.v = c.*.v + by;\n\
+                     c.*.v\n\
+                 };\n\
+             }\n\
+         };\n\
+         static pick = fn(c: bool) -> usize {\n\
+             if c { Cell(struct { v = 10 }).&mut.bump(1) }\n\
+             else { Cell(struct { v = 20 }).&mut.bump(2) }\n\
+         };\n\
+         static f = fn() -> usize {\n\
+             let mut total = 0;\n\
+             let mut i = 0;\n\
+             loop {\n\
+                 if i == 3 { break; };\n\
+                 total = total + Cell(struct { v = i }).&mut.bump(1);\n\
+                 i = i + 1;\n\
+             };\n\
+             total + pick(true) + pick(false)\n\
+         };",
+        "f()",
+        expect![[r#"
+            => 39
+        "#]],
+    );
+}
+
+/// A borrow of a temporary's FIELD points into the temporary's own
+/// storage, not at a copy of the field — which is why the whole value is
+/// what gets materialized. Written through, to make the distinction
+/// observable: a copy would report the old value back.
+#[test]
+fn a_borrow_of_a_temporarys_field_names_the_temporarys_storage() {
+    check_run(
+        "type Pair = struct { a: usize, b: usize };\n\
+         static mk = fn() -> Pair { Pair(struct { a = 3, b = 4 }) };\n\
+         static set = fn::<@a>(v: usize, r: usize.&mut::<@a>) -> usize {\n\
+             r.* = v;\n\
+             r.*\n\
+         };\n\
+         static f = fn() -> usize { set(9, mk().a.&mut) };",
+        "f()",
+        expect![[r#"
+            => 9
+        "#]],
+    );
+}
+
+/// Materialization moves NO evaluation, which is the whole reason a
+/// temporary is marked where it is written rather than hoisted to the head
+/// of its block: `a()` still runs before `mk()`, because that is the order
+/// the program is written in. Hoisting the initializer — the shape "an
+/// anonymous local declared at block scope" suggests — would print `ma`.
+#[test]
+fn materializing_a_temporary_does_not_reorder_the_operands_around_it() {
+    check_run(
+        "static a = fn() -> usize { print(\"a\"); 1 };\n\
+         static mk = fn() -> usize { print(\"m\"); 2 };\n\
+         static add = fn::<@x>(l: usize, r: usize.&::<@x>) -> usize { l + r.* };\n\
+         static f = fn() -> usize { add(a(), mk().&) };",
+        "f()",
+        expect![[r#"
+            output: "am"
+            => 3
+        "#]],
+    );
+}
+
+/// A temporary in a CONST context is an ordinary local there too: the
+/// compile-time evaluator allocates it, borrows it and reads through the
+/// borrow, in a `static`'s initializer and in a `const` block alike.
+#[test]
+fn a_temporary_can_be_borrowed_at_compile_time() {
+    check_const(
+        "static get = const fn::<@a>(r: usize.&::<@a>) -> usize { r.* };\n\
+         static mk = const fn() -> usize { 7 };\n\
+         static folded: usize = get(mk().&);\n\
+         static in_const_block = const { get(mk().&) };",
+        expect![[r#"
+            get = fn
+            mk = fn
+            folded = 7
+            in_const_block = 7
+        "#]],
+    );
+}
+
+/// The grant WIDENS to `.&raw` (owner ruling 2026-09-10): a raw pointer to
+/// a temporary is exactly as dangling-prone as one to a block-local
+/// already is, which `unsafe` at the deref already prices — so `.&raw` of
+/// a temporary materializes and runs, same storage as `.&`. `mkp().a.&raw
+/// mut` writes into the temporary's own field, not a copy of it.
+#[test]
+fn a_raw_pointer_to_a_temporary_reads_and_writes_its_storage() {
+    check_run(
+        r#"
+type Pair = struct { a: usize, b: usize };
+static mk = fn() -> usize { 7 };
+static mkp = fn() -> Pair { Pair(struct { a = 1, b = 2 }) };
+static main = fn() -> usize {
+    let p = mk().&raw;
+    let q = mkp().a.&raw mut;
+    unsafe {
+        q.* = 9;
+        p.* + q.*
+    }
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 16
+        "#]],
+    );
+}
