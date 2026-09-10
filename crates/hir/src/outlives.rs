@@ -48,6 +48,10 @@
 //! transitivity, which the MIR pass reads as "a region is live wherever a
 //! region it covers is live, and everywhere if it covers a universal".
 //! One graph definition ([`build_solver`]), read by both halves.
+//!
+//! TODO: storage death at block end (halvko/must#18). This module only
+//! refuses a borrow of body-local storage that escapes the body; one that
+//! outlives its block inside the body is not caught.
 
 use base_db::Db;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -80,6 +84,9 @@ pub enum OutlivesDiagnostic {
         expr: crate::body::ExprId,
         /// The region the borrow was forced to reach.
         region: String,
+        /// Whether the storage is a materialized temporary (M12). Only the
+        /// message reads it: there is no declaration to call "a local".
+        temporary: bool,
     },
 }
 
@@ -150,6 +157,15 @@ impl OutlivesDiagnostic {
                      to the binder"
                 )
             }
+            OutlivesDiagnostic::BorrowEscapes {
+                region,
+                temporary: true,
+                ..
+            } => format!(
+                "borrowed value does not live long enough: this borrows a temporary, \
+                 which lives no longer than the block that creates it, but the borrow \
+                 has to last for `{region}`, which outlives the body"
+            ),
             OutlivesDiagnostic::BorrowEscapes { region, .. } => format!(
                 "borrowed value does not live long enough: this borrows a local, \
                  but the borrow has to last for `{region}`, which outlives the body"
@@ -688,9 +704,9 @@ pub fn outlives_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<OutlivesDi
         let ExprData::Borrow { place, .. } = data else {
             continue;
         };
-        if !roots_in_local(body, resolutions, *place) {
+        let Some(root) = local_root(body, resolutions, *place) else {
             continue;
-        }
+        };
         let Some(crate::ty::Ty::Borrow { region, .. }) = infer.type_of_expr.get(expr) else {
             continue;
         };
@@ -703,24 +719,21 @@ pub fn outlives_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<OutlivesDi
         diagnostics.push(OutlivesDiagnostic::BorrowEscapes {
             expr,
             region: solver.universal_names[first as usize].clone(),
+            temporary: root == LocalRoot::Temporary,
         });
     }
 
     diagnostics
 }
 
-/// Whether a borrow's place bottoms out in a local BINDING of this body —
-/// the storage that dies when the body returns.
-///
-/// A deref-rooted place does not count: `r.*.field.&mut` borrows through
-/// `r`, so the storage it names belongs to whoever `r` points at, and the
-/// reborrow edge already relates the two regions. A `static` does not count
-/// either — its allocation outlives every body.
-fn roots_in_local(
+/// The body-local storage a borrow's place bottoms out in, or `None` when
+/// the storage is not this body's: a deref-rooted place borrows through
+/// its pointer, and a `static` item's storage outlives every body.
+fn local_root(
     body: &crate::body::Body,
     resolutions: &la_arena::ArenaMap<crate::body::ExprId, Resolution>,
     place: crate::body::ExprId,
-) -> bool {
+) -> Option<LocalRoot> {
     let mut root = place;
     loop {
         match &body.exprs[root] {
@@ -729,5 +742,15 @@ fn roots_in_local(
             _ => break,
         }
     }
-    matches!(resolutions.get(root), Some(Resolution::Local(_)))
+    if body.temp_local(root).is_some() {
+        return Some(LocalRoot::Temporary);
+    }
+    matches!(resolutions.get(root), Some(Resolution::Local(_))).then_some(LocalRoot::Binding)
+}
+
+/// Which body-local storage a borrow roots in. Only the message reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalRoot {
+    Binding,
+    Temporary,
 }

@@ -5092,3 +5092,194 @@ static f = fn (d: usize) -> usize {
         "#]],
     );
 }
+
+// ---- materialized temporaries (M12) --------------------------------------
+
+/// A materialized temporary lowers to one nameless local (`_2`), assigned
+/// once, and the borrow points into its own field (`& _2.1`).
+#[test]
+fn a_borrowed_temporary_lowers_to_one_addressable_local() {
+    check_mir(
+        r#"
+type Pair = struct { a: usize, b: usize };
+static mk = fn() -> Pair { Pair(struct { a = 1, b = 2 }) };
+static get = fn::<@x>(r: usize.&::<@x>) -> usize { r.* };
+static f = fn() -> usize { get(mk().b.&) };
+"#,
+        expect![[r#"
+            item Pair:
+            item mk:
+            fn b0() -> Pair {
+              _0: Pair  // return
+              _1: struct { a: usize, b: usize }
+              bb0:
+                _1 = { a: 1, b: 2 }
+                _0 = _1
+                return
+            }
+            fn b1() -> fn() -> Pair {
+              _0: fn() -> Pair  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item get:
+            fn b0(_1: usize.&) -> usize {
+              _0: usize  // return
+              _1: usize.&  // param r
+              _2: usize
+              bb0:
+                _2 = _1.*
+                _0 = _2
+                return
+            }
+            fn b1() -> fn(usize.&) -> usize {
+              _0: fn(usize.&) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item f:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: Pair
+              _2: Pair
+              _3: usize.&
+              _4: usize
+              bb0:
+                _1 = call item mk() -> bb1
+              bb1:
+                _2 = _1
+                _3 = & _2.1
+                _4 = call item get(_3) -> bb2
+              bb2:
+                _0 = _4
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+/// `.&raw` of a temporary lowers to one nameless local, assigned once,
+/// addressed by `&raw _1`.
+#[test]
+fn a_raw_address_of_a_temporary_lands_on_the_nameless_addressable_local() {
+    check_mir(
+        r#"
+static mk = fn() -> usize { 7 };
+static main = fn() -> usize { unsafe { mk().&raw.* } };
+"#,
+        expect![[r#"
+            item mk:
+            fn b0() -> usize {
+              _0: usize  // return
+              bb0:
+                _0 = 7
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item main:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: usize
+              _2: usize
+              _3: usize.&raw
+              _4: usize
+              bb0:
+                _1 = call item mk() -> bb1
+              bb1:
+                _2 = _1
+                _3 = &raw _2
+                _4 = _3.*
+                _0 = _4
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+/// A loan of a loop-body temporary cannot survive the back edge: the next
+/// iteration's store writes the loan's root while the loan (through `r`)
+/// is live. The blame names the root as "this temporary".
+#[test]
+fn a_loan_of_a_loop_body_temporary_cannot_survive_the_back_edge() {
+    check_loans(
+        r#"
+static mk = fn() -> usize { 7 };
+static keep = fn::<@a>(r: usize.&::<@a>, s: usize.&::<@a>) -> usize.&::<@a> { s };
+static f = fn() -> usize {
+    let n: usize = 1;
+    let mut r = n.&;
+    let mut i: usize = 0;
+    loop {
+        if i == 2 { break; };
+        r = keep(r, mk().&);
+        i = i + 1;
+    };
+    r.*
+};
+"#,
+        expect![[r#"
+            274..278: writing to this temporary here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
+              note at 274..280: this borrow was created here
+              note at 266..281: and it is still used here
+        "#]],
+    );
+}
+
+/// A temporary holding a borrow of `n` keeps `n` loaned until the
+/// temporary's last use: a write to `n` in between is refused, naming `n`.
+#[test]
+fn a_loan_reaching_through_a_temporary_is_still_a_loan_of_its_source() {
+    check_loans(
+        r#"
+static id = fn::<@b>(r: usize.&::<@b>) -> usize.&::<@b> { r };
+static f = fn() -> usize {
+    let mut n: usize = 1;
+    let rr = id(n.&).&;
+    n = 5;
+    rr.*.*
+};
+"#,
+        expect![[r#"
+            149..150: writing to `n` here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
+              note at 133..136: this borrow was created here
+              note at 156..160: and it is still used here
+        "#]],
+    );
+}
+
+/// A `fn` literal returning a borrow of a temporary is refused, and the
+/// message says "this temporary".
+#[test]
+fn a_nested_literal_returning_a_borrow_of_a_temporary_names_the_temporary() {
+    check_loans(
+        r#"
+static mk = fn() -> usize { 7 };
+static f = fn() -> usize {
+    let g = fn() -> usize.&::<@_> { mk().& };
+    g().*
+};
+"#,
+        expect![[r#"
+            97..103: borrowed value does not live long enough: this borrows a temporary, which lives no longer than the block that creates it, but the borrow is still live when the body returns
+        "#]],
+    );
+}

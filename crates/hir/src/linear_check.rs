@@ -60,6 +60,9 @@ pub enum LinearDiagnostic {
     },
     /// A linear value produced by a statement whose value is discarded.
     Discarded { expr: ExprId },
+    /// A linear value borrowed as a temporary: it has no name, so nothing
+    /// could consume it.
+    BorrowedTemporary { expr: ExprId },
     /// Assignment over a linear binding that still holds a live value.
     AssignOverLive { binding: BindingId, target: ExprId },
     /// A join whose branches disagree: consumed on one path, live on
@@ -117,6 +120,7 @@ impl LinearDiagnostic {
             LinearDiagnostic::NotConsumed { exit, .. } => Some(*exit),
             LinearDiagnostic::AlreadyConsumed { expr, .. }
             | LinearDiagnostic::Discarded { expr }
+            | LinearDiagnostic::BorrowedTemporary { expr }
             | LinearDiagnostic::CopiedOut { expr }
             | LinearDiagnostic::Repeated { expr }
             | LinearDiagnostic::ItemHoldsLinear { expr }
@@ -226,6 +230,12 @@ impl LinearDiagnostic {
                 Some(param) => diag::discarded_param(param),
                 None => diag::DISCARDED_LINEAR.to_owned(),
             },
+            // No `param` split: the advice is the same sentence whether the
+            // type is linear or a parameter that might be, because the
+            // problem is the borrow's operand and not the bound.
+            LinearDiagnostic::BorrowedTemporary { .. } => {
+                diag::BORROWED_LINEAR_TEMPORARY.to_owned()
+            }
             LinearDiagnostic::AssignOverLive { .. } => match param {
                 Some(param) => diag::assign_over_live_param(name, param),
                 None => diag::assign_over_live(name),
@@ -961,13 +971,18 @@ impl CheckCtx<'_> {
                 let receiver = *receiver;
                 self.read_value(receiver)
             }
-            // Not a place at all: a temporary. Its value is produced, and
-            // then only projected from — so if it is linear it is lost
-            // right here, with nothing left holding it.
+            // Not a place: a value that is only projected from, so a linear
+            // one is lost here. A linear temporary (M12) is refused outright:
+            // it cannot be named, so nothing could ever consume it.
             _ => {
                 let flow = self.read_value(expr);
                 if flow == Flow::Falls && self.is_linear_expr(expr) {
-                    self.diagnostics.push(LinearDiagnostic::Discarded { expr });
+                    self.diagnostics
+                        .push(if self.body.temp_local(expr).is_some() {
+                            LinearDiagnostic::BorrowedTemporary { expr }
+                        } else {
+                            LinearDiagnostic::Discarded { expr }
+                        });
                 }
                 flow
             }

@@ -6265,13 +6265,15 @@ fn addr_of_shared_of_items_is_fine() {
     );
 }
 
+/// A non-place `.&raw` operand materializes (M12) rather than erroring —
+/// the only diagnostic left here is unrelated, the literal's own type
+/// needing an annotation.
 #[test]
-fn addr_of_a_non_place_errors() {
+fn addr_of_a_non_place_materializes() {
     check_diagnostics(
         "static main = fn { let p = 3.&raw; };",
         expect![[r#"
             27..28: cannot infer the type of this number: it has no defining use — add a type annotation
-            27..33: `.&raw` can only take the address of a variable, a chain of its fields and elements, a `static`/`const` item, or a chain rooted in a deref
         "#]],
     );
 }
@@ -16867,7 +16869,6 @@ static f = fn () -> usize {
 "#,
         expect![[r#"
             48..49: raw borrows are spelled postfix: `x.&raw` / `x.&raw mut`
-            48..58: `.&raw` can only take the address of a variable, a chain of its fields and elements, a `static`/`const` item, or a chain rooted in a deref
             48..58: type mismatch: expected `{number}`, found `{error}.&raw` (`-` requires `{number}` operands at 63..64)
             63..64: this `-` continues the expression that ends with the `}` above, rather than starting a new statement; write `;` after that `}` to split them, or move the `-` up onto the same line (or parenthesize the whole expression) if one expression is what you meant
         "#]],
@@ -16886,10 +16887,9 @@ fn a_prefix_operand_never_reports_a_token_outside_its_own_expression() {
     // second statement.
     //
     // A nonsense accusation about a token that continues nothing — not a
-    // duplicate, which the ide layer's dedup would have swallowed. The two
-    // diagnostics below are the retired prefix spelling and its non-place
-    // operand, both pre-existing and unrelated; the assertion is that the
-    // lint says NOTHING here.
+    // duplicate, which the ide layer's dedup would have swallowed. The one
+    // diagnostic below is the retired prefix spelling, unrelated; the
+    // assertion is that the lint says NOTHING here.
     check_diagnostics(
         r#"
 static f = fn () -> () {
@@ -16900,7 +16900,6 @@ static f = fn () -> () {
 "#,
         expect![[r#"
             52..53: raw borrows are spelled postfix: `x.&raw` / `x.&raw mut`
-            52..62: `.&raw` can only take the address of a variable, a chain of its fields and elements, a `static`/`const` item, or a chain rooted in a deref
         "#]],
     );
 }
@@ -17080,5 +17079,297 @@ fn a_statement_warning_offers_no_fix_when_the_operator_cannot_begin_one() {
         diagnostic.fix.is_none(),
         "a `*` continuation has no split reading to offer, got {:?}",
         diagnostic.fix
+    );
+}
+
+// ---- materialized temporaries (M12) --------------------------------------
+
+/// Every materialized temporary in the fixture: the ROOT expression whose
+/// value got storage, as `range 'snippet'`.
+fn check_temps(text: &str, expect: Expect) {
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let mut rows: Vec<(u32, String)> = Vec::new();
+    for &item in crate::file_item_ids(&db, file) {
+        let (body, source_map) = crate::body_with_source_map(&db, item);
+        for (expr, binding) in body.temps.iter() {
+            let Some(ptr) = source_map.node_for_expr(expr) else {
+                continue;
+            };
+            let range = ptr.text_range();
+            let data = &body.bindings[*binding];
+            assert!(
+                data.name.is_empty() && data.mutable,
+                "a temporary is nameless and trivially exclusive"
+            );
+            assert!(
+                source_map.node_for_binding(*binding).is_none(),
+                "no syntax node IS a temporary's binding"
+            );
+            rows.push((
+                range.start().into(),
+                format!("{range:?} '{}'\n", &text[range]),
+            ));
+        }
+    }
+    rows.sort();
+    expect.assert_eq(&rows.into_iter().map(|(_, row)| row).collect::<String>());
+}
+
+/// `inner.fmt(Printer(struct {}).&mut)`: a freshly built value borrowed
+/// exclusively, straight into a member that writes through it, checks
+/// clean.
+#[test]
+fn the_playground_shape_borrows_a_temporary() {
+    check_diagnostics(
+        r#"
+type Printer = struct { count: usize } with {
+    impl Self {
+        emit = fn::<@a>(s: str, p: Self.&mut::<@a>) -> () {
+            p.*.count = p.*.count + 1;
+        };
+    }
+};
+type Inner = struct { label: str } with {
+    impl Self {
+        fmt = fn::<@a>(p: Printer.&mut::<@a>, i: Self) -> usize {
+            p.emit(i.label);
+            p.*.count
+        };
+    }
+};
+static main = fn() -> usize {
+    let inner = Inner(struct { label = "x" });
+    inner.fmt(Printer(struct { count = 0 }).&mut)
+};
+"#,
+        expect![""],
+    );
+}
+
+/// The mark lands on the ROOT of the borrowed place: field and element
+/// roots, a receiver-position temporary, and a nested one.
+#[test]
+fn a_borrow_reaches_into_the_temporary_it_materialized() {
+    let text = r#"
+type Pair = struct { a: usize, b: usize };
+type Cell = struct { v: usize } with {
+    impl Self {
+        bump = fn::<@a>(by: usize, c: Self.&mut::<@a>) -> usize {
+            c.*.v = c.*.v + by;
+            c.*.v
+        };
+    }
+};
+static mk = fn() -> Pair { Pair(struct { a = 3, b = 4 }) };
+static arr = fn() -> [usize; 2] { [1, 2] };
+static get = fn::<@a>(r: usize.&::<@a>) -> usize { r.* };
+static main = fn() -> usize {
+    get(mk().a.&) + get(arr()[0].&) + get(get(mk().b.&).&) + Cell(struct { v = 1 }).&mut.bump(1)
+};
+"#;
+    check_diagnostics(text, expect![""]);
+    check_temps(
+        text,
+        expect![[r#"
+            435..439 'mk()'
+            451..456 'arr()'
+            469..482 'get(mk().b.&)'
+            473..477 'mk()'
+            488..510 'Cell(struct { v = 1 })'
+        "#]],
+    );
+}
+
+/// A temporary inside a `match` arm, an `if` condition, a loop body and a
+/// `const` context checks clean.
+#[test]
+fn a_temporary_in_a_branch_a_loop_or_a_const_context_is_borrowable() {
+    check_diagnostics(
+        r#"
+static get = fn::<@a>(r: usize.&::<@a>) -> usize { r.* };
+static mk = fn() -> usize { 7 };
+static cget = const fn::<@a>(r: usize.&::<@a>) -> usize { r.* };
+static cmk = const fn() -> usize { 7 };
+static folded: usize = cget(cmk().&);
+static main = fn(n: usize) -> usize {
+    let a = match n { 0 => get(mk().&), _ => 0 };
+    let b = if get(mk().&) == 7 { 1 } else { 2 };
+    let mut i: usize = 0;
+    loop {
+        if i == get(mk().&) { break; };
+        i = i + 1;
+    };
+    a + b + i + const { cget(cmk().&) } + folded
+};
+"#,
+        expect![""],
+    );
+}
+
+/// A deref-rooted place gets no temporary: `p.*.x` names storage the
+/// pointer already points at.
+#[test]
+fn a_deref_rooted_place_is_a_place_and_gets_no_temporary() {
+    check_temps(
+        r#"
+type Pair = struct { a: usize, b: usize };
+static mk = fn::<@a>(p: Pair.&mut::<@a>) -> Pair.&mut::<@a> { p };
+static main = fn() -> usize {
+    let mut pair = Pair(struct { a = 1, b = 2 });
+    let r = mk(pair.&mut).*.a.&;
+    r.*
+};
+"#,
+        expect![""],
+    );
+}
+
+/// A body handing back a borrow of a temporary it built is refused, and
+/// the message says "temporary".
+///
+/// TODO: refuse the shapes that stay inside the body (halvko/must#18).
+#[test]
+fn a_borrow_of_a_temporary_that_outlives_the_body_is_refused() {
+    check_diagnostics(
+        r#"
+static mk = fn() -> usize { 7 };
+static leak = fn::<@a>() -> usize.&::<@a> { mk().& };
+static leak_named = fn::<@a>() -> usize.&::<@a> { let n = mk(); n.& };
+"#,
+        expect![[r#"
+            78..84: borrowed value does not live long enough: this borrows a temporary, which lives no longer than the block that creates it, but the borrow has to last for `@a`, which outlives the body
+            152..155: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
+        "#]],
+    );
+}
+
+/// A must-consume value cannot be borrowed as a temporary: a temporary
+/// has no name, so nothing could ever consume it.
+#[test]
+fn a_value_that_must_be_consumed_cannot_be_borrowed_as_a_temporary() {
+    check_linear(
+        r#"
+static peek = fn::<@a>(r: Res.&::<@a>) -> usize { r.*.id };
+static main = fn() -> usize {
+    peek(make(1).&)
+};
+"#,
+        expect![[r#"
+            435..442: this value must be consumed, so it cannot be borrowed as a temporary: a temporary has no name, and nothing could ever consume it — bind it with `let` first, then borrow the binding
+        "#]],
+    );
+}
+
+/// `.&raw` of a temporary checks clean and marks the root, so
+/// `mkp().a.&raw mut` points into the temporary's own field.
+#[test]
+fn a_temporary_is_materialized_under_raw_address_of_too() {
+    let text = r#"
+type Pair = struct { a: usize, b: usize };
+static mk = fn() -> usize { 7 };
+static mkp = fn() -> Pair { Pair(struct { a = 1, b = 2 }) };
+static main = fn() -> usize {
+    let p = mk().&raw;
+    let q = mkp().a.&raw mut;
+    unsafe { p.* + q.* }
+};
+"#;
+    check_diagnostics(text, expect![""]);
+    check_temps(
+        text,
+        expect![[r#"
+            180..184 'mk()'
+            203..208 'mkp()'
+        "#]],
+    );
+}
+
+/// `.&raw` of a must-consume temporary gets the bind-it-with-`let`-first
+/// refusal.
+#[test]
+fn an_addr_of_of_a_must_consume_temporary_is_refused_with_the_bind_first_message() {
+    check_linear(
+        r#"
+static main = fn() -> () {
+    let p = make(1).&raw;
+};
+"#,
+        expect![[r#"
+            375..382: this value must be consumed, so it cannot be borrowed as a temporary: a temporary has no name, and nothing could ever consume it — bind it with `let` first, then borrow the binding
+        "#]],
+    );
+}
+
+/// A borrowed name is never materialized, whatever it resolves to.
+/// TODO: a builtin is a function value and should borrow (halvko/must#31).
+#[test]
+fn a_name_is_never_materialized_whatever_it_resolves_to() {
+    check_diagnostics(
+        r#"
+static counter: usize = 1;
+const limit: usize = 2;
+static by_param = fn::<const N: usize>() -> usize { N.& .* };
+static by_static = fn() -> () { let p = counter.&mut; };
+static by_const = fn() -> () { let p = limit.&mut; };
+static by_builtin = fn() -> () { let p = print.&; };
+static raw_param = fn::<const N: usize>() -> () { let p = N.&raw; };
+static raw_builtin = fn() -> () { let p = print.&raw mut; };
+"#,
+        expect![[r#"
+            104..107: `.&` cannot borrow `N`: it is a const parameter, not a value with storage
+            154..161: cannot borrow a `static` as `.&mut`: `static mut` is not supported yet (`counter` is defined here at 8..15)
+            210..215: cannot borrow a `const` as `.&mut`: a `const` is copied at every mention, so there is no one place to borrow (`limit` is defined here at 34..39)
+            266..273: `.&` cannot borrow `print`: it is a builtin, not a value with storage
+            336..342: `.&raw` cannot take the address of `N`: it is a const parameter, not a value with storage
+            389..403: `.&raw` cannot take the address of `print`: it is a builtin, not a value with storage
+        "#]],
+    );
+}
+
+/// The temporary's binding is typed as the whole root value (`Pair`, not
+/// the borrowed field) and has no syntax node, so it never renders.
+#[test]
+fn a_temporarys_binding_is_typed_and_never_rendered() {
+    let text = r#"
+type Pair = struct { a: usize, b: usize };
+static mk = fn() -> Pair { Pair(struct { a = 3, b = 4 }) };
+static get = fn::<@a>(r: usize.&::<@a>) -> usize { r.* };
+static f = fn() -> usize { get(mk().a.&) };
+"#;
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let f = *crate::file_item_ids(&db, file).last().unwrap();
+    let body = crate::body::body(&db, f);
+    let infer = crate::infer::infer(&db, f);
+    let temps: Vec<_> = body.temps.iter().collect();
+    let &[(_, &binding)] = temps.as_slice() else {
+        panic!("one temporary, got {temps:?}");
+    };
+    assert_eq!(infer.type_of_binding[binding].display(), "Pair");
+    check_infer(
+        text,
+        expect![[r#"
+            56..102 'fn() -> Pair { Pa...': fn() -> Pair
+            69..102 '{ Pair(struct { a...': Pair
+            71..75 'Pair': fn(struct { a: usize, b: usize }) -> Pair
+            71..100 'Pair(struct { a =...': Pair
+            76..99 'struct { a = 3, b...': struct { a: usize, b: usize }
+            89..90 '3': usize
+            96..97 '4': usize
+            117..160 'fn::<@a>(r: usize...': fn(usize.&::<@a>) -> usize
+            126..127 'r': usize.&::<@a>
+            153..160 '{ r.* }': usize
+            155..156 'r': usize.&::<@a>
+            155..158 'r.*': usize
+            173..204 'fn() -> usize { g...': fn() -> usize
+            187..204 '{ get(mk().a.&) }': usize
+            189..192 'get': fn(usize.&) -> usize
+            189..202 'get(mk().a.&)': usize
+            193..195 'mk': fn() -> Pair
+            193..197 'mk()': Pair
+            193..199 'mk().a': usize
+            193..201 'mk().a.&': usize.&
+        "#]],
     );
 }

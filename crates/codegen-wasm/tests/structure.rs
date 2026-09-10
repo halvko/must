@@ -529,3 +529,24 @@ static main = fn () -> usize { apply(twice, 21) };
     );
     assert_eq!(priced.instances, plain.instances);
 }
+
+/// TODO: references in wasm (halvko/must#16). Until then a borrow of a
+/// temporary is refused like a borrow of a named local.
+#[test]
+fn borrowing_a_temporary_is_refused_like_any_other_safe_borrow() {
+    let db = RootDatabase::default();
+    let source = r#"
+static get = fn::<@a>(r: i64.&::<@a>) -> i64 { r.* };
+static mk = fn () -> i64 { 7 };
+static main = fn () -> i64 { get(mk().&) };
+"#;
+    let loc = harness::prepare(&db, source, "main()");
+    let Err(codegen_wasm::CompileError::Unsupported(refusal)) = codegen_wasm::compile(&db, &loc)
+    else {
+        panic!("the backend must refuse a borrow it cannot lay out");
+    };
+    assert_eq!(
+        refusal.message(),
+        "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet"
+    );
+}

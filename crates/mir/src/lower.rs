@@ -313,7 +313,7 @@ impl LowerCtx<'_> {
                 // A broken address-of: keyed on the WHOLE `.&raw` expression
                 // (the squiggle may sit on the root name inside it, but the
                 // value that cannot be produced is the pointer).
-                InferenceDiagnostic::AddrOfNonPlace { expr } => {
+                InferenceDiagnostic::AddrOfNonPlace { expr, .. } => {
                     self.value_traps.insert(*expr, diag.message());
                 }
                 InferenceDiagnostic::AddrOfMutImmutable { addr_of, .. }
@@ -324,7 +324,7 @@ impl LowerCtx<'_> {
                 // The safe-borrow twins, keyed the same way: the value that
                 // cannot be produced is the borrow.
                 InferenceDiagnostic::DotThroughBorrow { expr, .. }
-                | InferenceDiagnostic::BorrowNonPlace { expr }
+                | InferenceDiagnostic::BorrowNonPlace { expr, .. }
                 | InferenceDiagnostic::MoveOutOfBorrow { expr, .. } => {
                     self.value_traps.insert(*expr, diag.message());
                 }
@@ -2899,6 +2899,15 @@ impl LowerCtx<'_> {
                 return self.trap(b, link, message);
             }
         }
+        // A materialized temporary at the root (M12): the value is lowered
+        // where it is written and stored into its own local, which is then
+        // addressed. The store is the initialization, on whatever path runs.
+        if let Some(binding) = self.body.temp_local(root) {
+            let value = self.lower_expr(b, root);
+            let local = self.alloc_binding_local(b, binding);
+            b.push_assign(local, Rvalue::Use(value), root);
+            return self.address_of_local(b, flavor, mutable, local, &chain, expr);
+        }
         let ExprData::NameRef(name) = &self.body.exprs[root] else {
             // Non-place roots were diagnosed (`AddrOfNonPlace`) and
             // trapped by the wrapper; a missing root is a parse error.
@@ -2906,19 +2915,7 @@ impl LowerCtx<'_> {
         };
         match self.resolutions.get(root) {
             Some(Resolution::Local(binding)) => match b.local_for_binding.get(binding) {
-                Some(&local) => {
-                    b.locals[local].addressable = true;
-                    let Some(projection) = self.lower_place_projection(b, &chain, None) else {
-                        return Operand::Const(Const::Unit);
-                    };
-                    let dest = b.temp(self.ty(expr));
-                    b.push_assign(
-                        dest,
-                        flavor.address_of(mutable, Place { local, projection }),
-                        expr,
-                    );
-                    Operand::Copy(dest.into())
-                }
+                Some(&local) => self.address_of_local(b, flavor, mutable, local, &chain, expr),
                 // A local of an enclosing function: the same unsupported
                 // capture the read path reports.
                 None => {
@@ -2972,24 +2969,8 @@ impl LowerCtx<'_> {
                         // The address of THIS use's copy: materialize the
                         // (cloned) const value in a temp and point at it.
                         let copy = b.temp(self.ty(root));
-                        b.locals[copy].addressable = true;
                         b.push_assign(copy, Rvalue::Use(Operand::Const(Const::Item(loc))), root);
-                        let Some(projection) = self.lower_place_projection(b, &chain, None) else {
-                            return Operand::Const(Const::Unit);
-                        };
-                        let dest = b.temp(self.ty(expr));
-                        b.push_assign(
-                            dest,
-                            Rvalue::AddrOf {
-                                mutable,
-                                place: Place {
-                                    local: copy,
-                                    projection,
-                                },
-                            },
-                            expr,
-                        );
-                        Operand::Copy(dest.into())
+                        self.address_of_local(b, flavor, mutable, copy, &chain, expr)
                     }
                 }
             }
@@ -3008,6 +2989,30 @@ impl LowerCtx<'_> {
             // Justified by the unresolved-name diagnostic.
             None => self.trap(b, root, hir::diag::unresolved_name(name)),
         }
+    }
+
+    /// The address of `local` extended by `chain`, as the rvalue `flavor`
+    /// asks for. Marks the local addressable.
+    fn address_of_local(
+        &mut self,
+        b: &mut BodyBuilder,
+        flavor: PtrFlavor,
+        mutable: bool,
+        local: LocalId,
+        chain: &[ExprId],
+        expr: ExprId,
+    ) -> Operand {
+        b.locals[local].addressable = true;
+        let Some(projection) = self.lower_place_projection(b, chain, None) else {
+            return Operand::Const(Const::Unit);
+        };
+        let dest = b.temp(self.ty(expr));
+        b.push_assign(
+            dest,
+            flavor.address_of(mutable, Place { local, projection }),
+            expr,
+        );
+        Operand::Copy(dest.into())
     }
 
     /// Walk a place chain to its root: the field and index steps,
