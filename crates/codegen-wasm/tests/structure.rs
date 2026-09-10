@@ -529,3 +529,26 @@ static main = fn () -> usize { apply(twice, 21) };
     );
     assert_eq!(priced.instances, plain.instances);
 }
+
+/// A MATERIALIZED TEMPORARY (M12) reaches this backend as an ordinary
+/// local, so borrowing one is refused for exactly the reason borrowing a
+/// named local is: a safe borrow has no wasm shape yet. Nothing about the
+/// grant changed what this backend can lay out — and pinning it says so,
+/// rather than leaving a new source shape to be discovered as a panic
+/// later.
+#[test]
+fn borrowing_a_temporary_is_refused_like_any_other_safe_borrow() {
+    let db = RootDatabase::default();
+    let source = "static get = fn::<@a>(r: i64.&::<@a>) -> i64 { r.* };\n\
+                  static mk = fn () -> i64 { 7 };\n\
+                  static main = fn () -> i64 { get(mk().&) };";
+    let loc = harness::prepare(&db, source, "main()");
+    let Err(codegen_wasm::CompileError::Unsupported(refusal)) = codegen_wasm::compile(&db, &loc)
+    else {
+        panic!("the backend must refuse a borrow it cannot lay out");
+    };
+    assert_eq!(
+        refusal.message(),
+        "a safe borrow (`.&` / `.&mut`) is not supported by the wasm backend yet"
+    );
+}

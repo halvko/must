@@ -634,7 +634,7 @@ fn borrows_runs() {
     assert_run(
         &["run", "examples/borrows.must"],
         0,
-        expect!["13340804040403"],
+        expect!["13340804040403403"],
     );
 }
 

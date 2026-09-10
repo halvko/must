@@ -5092,3 +5092,203 @@ static f = fn (d: usize) -> usize {
         "#]],
     );
 }
+
+// ---- materialized temporaries (M12) --------------------------------------
+
+/// A MATERIALIZED TEMPORARY lowers to one local, assigned once and
+/// addressed once — `_2` below, with no name comment beside it, which is
+/// the whole of what makes it a temporary down here: a named local renders
+/// its name, and the debugger's variables panel shows only those. The
+/// borrow is an ordinary [`crate::Rvalue::Borrow`] into the temporary's own
+/// field (`& _2.1`), and the local is marked addressable exactly as a
+/// borrowed `let`'s is — which this dump does not render.
+#[test]
+fn a_borrowed_temporary_lowers_to_one_addressable_local() {
+    check_mir(
+        "type Pair = struct { a: usize, b: usize };\n\
+         static mk = fn() -> Pair { Pair(struct { a = 1, b = 2 }) };\n\
+         static get = fn::<@x>(r: usize.&::<@x>) -> usize { r.* };\n\
+         static f = fn() -> usize { get(mk().b.&) };",
+        expect![[r#"
+            item Pair:
+            item mk:
+            fn b0() -> Pair {
+              _0: Pair  // return
+              _1: struct { a: usize, b: usize }
+              bb0:
+                _1 = { a: 1, b: 2 }
+                _0 = _1
+                return
+            }
+            fn b1() -> fn() -> Pair {
+              _0: fn() -> Pair  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item get:
+            fn b0(_1: usize.&) -> usize {
+              _0: usize  // return
+              _1: usize.&  // param r
+              _2: usize
+              bb0:
+                _2 = _1.*
+                _0 = _2
+                return
+            }
+            fn b1() -> fn(usize.&) -> usize {
+              _0: fn(usize.&) -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item f:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: Pair
+              _2: Pair
+              _3: usize.&
+              _4: usize
+              bb0:
+                _1 = call item mk() -> bb1
+              bb1:
+                _2 = _1
+                _3 = & _2.1
+                _4 = call item get(_3) -> bb2
+              bb2:
+                _0 = _4
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+/// `.&raw` reaches the SAME arm as `.&`: `lower_addr_of_flavored` handles
+/// both flavors through one `body.temp_local(root)` check
+/// ([`crate::lower::LowerCtx::lower_addr_of_flavored`]), so a raw
+/// address-of a non-place operand lowers to the identical shape — one
+/// nameless addressable local, assigned once, addressed once — with only
+/// the `Rvalue` (`&raw _1` rather than `& _1`) telling the two apart.
+#[test]
+fn a_raw_address_of_a_temporary_lands_on_the_nameless_addressable_local() {
+    check_mir(
+        "static mk = fn() -> usize { 7 };\n\
+         static main = fn() -> usize { unsafe { mk().&raw.* } };",
+        expect![[r#"
+            item mk:
+            fn b0() -> usize {
+              _0: usize  // return
+              bb0:
+                _0 = 7
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item main:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: usize
+              _2: usize
+              _3: usize.&raw
+              _4: usize
+              bb0:
+                _1 = call item mk() -> bb1
+              bb1:
+                _2 = _1
+                _3 = &raw _2
+                _4 = _3.*
+                _0 = _4
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+/// A loan of a loop-body temporary cannot survive the back edge: the next
+/// iteration's store into the temporary is a write to the loan's root,
+/// and a loan carried across the back edge (through `r`) is still live
+/// there. This is the one piece of M12's block rule the checker enforces
+/// today, and it enforces it for free — no storage liveness is involved,
+/// only the ordinary write-kills-loan rule. The blame names the root as
+/// "this temporary": there is no name to quote and no second mention to
+/// disambiguate from.
+#[test]
+fn a_loan_of_a_loop_body_temporary_cannot_survive_the_back_edge() {
+    check_loans(
+        "static mk = fn() -> usize { 7 };\n\
+         static keep = fn::<@a>(r: usize.&::<@a>, s: usize.&::<@a>) -> usize.&::<@a> { s };\n\
+         static f = fn() -> usize {\n\
+             let n: usize = 1;\n\
+             let mut r = n.&;\n\
+             let mut i: usize = 0;\n\
+             loop {\n\
+                 if i == 2 { break; };\n\
+                 r = keep(r, mk().&);\n\
+                 i = i + 1;\n\
+             };\n\
+             r.*\n\
+         };",
+        expect![[r#"
+            241..245: writing to this temporary here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
+              note at 241..247: this borrow was created here
+              note at 233..248: and it is still used here
+        "#]],
+    );
+}
+
+/// A loan that reaches THROUGH a temporary is still a loan of what it came
+/// from: the temporary holds a borrow of `n`, so `n` is spoken for until
+/// the last use of the temporary, and writing to it in between is refused
+/// — named as `n`, because that is the storage the loan is of. The loan
+/// stays live across a local that no name mentions.
+#[test]
+fn a_loan_reaching_through_a_temporary_is_still_a_loan_of_its_source() {
+    check_loans(
+        "static id = fn::<@b>(r: usize.&::<@b>) -> usize.&::<@b> { r };\n\
+         static f = fn() -> usize {\n\
+             let mut n: usize = 1;\n\
+             let rr = id(n.&).&;\n\
+             n = 5;\n\
+             rr.*.*\n\
+         };",
+        expect![[r#"
+            136..137: writing to `n` here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
+              note at 124..127: this borrow was created here
+              note at 139..143: and it is still used here
+        "#]],
+    );
+}
+
+/// The nested-literal escape — a borrow still live where a `fn` literal's
+/// body returns, at `@_`, which reaches no universal of the enclosing item
+/// — names the temporary too, so the two escape fences (this one and
+/// `hir::outlives`'s universal-region one) read the same either way.
+#[test]
+fn a_nested_literal_returning_a_borrow_of_a_temporary_names_the_temporary() {
+    check_loans(
+        "static mk = fn() -> usize { 7 };\n\
+         static f = fn() -> usize {\n\
+             let g = fn() -> usize.&::<@_> { mk().& };\n\
+             g().*\n\
+         };",
+        expect![[r#"
+            92..98: borrowed value does not live long enough: this borrows a temporary, which lives no longer than the block that creates it, but the borrow is still live when the body returns
+        "#]],
+    );
+}
