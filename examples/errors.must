@@ -337,14 +337,14 @@ static retired_prefix_borrow = fn () -> () {
     let r = &x;
 };
 
-// 32. A host import called without the marker. An `extern static` declares
-//     a call OUT of the program, and what it does is written in a language
-//     this compiler never sees — so nothing on this side can establish that
-//     the call is sound, and the caller vouches with `unsafe` exactly as it
+// 32. A vouched host import called without the CALL-SITE marker its type
+//     still prices: what `host_read` does is written in a language this
+//     compiler never sees, so nothing on this side can establish that the
+//     call is sound, and the caller vouches with `unsafe` exactly as it
 //     does for a raw-pointer deref (21 above).
 //     error: calling the host import `host_read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
-extern static host_read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
-static unvouched_import = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
+unsafe extern static host_read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
+static call_outside_unsafe = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
 
 // 33. The retired INITIALIZER spelling of an import. An import sets nothing
 //     to anything, so it is written as the declaration it is; the old form
@@ -352,8 +352,8 @@ static unvouched_import = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
 //     borrow (31 above) it still parses and still means the same import —
 //     retiring a spelling must not reinterpret programs written in it — and
 //     a fix rewrites it.
-//     error: a host import is a DECLARATION, not an initializer: write `extern static retired_import: unsafe fn(...) -> T;`
-//     quick fix offered: "Rewrite as an `extern static` declaration"
+//     error: a host import is a DECLARATION, not an initializer: write `unsafe extern static retired_import: unsafe fn(...) -> T;`
+//     quick fix offered: "Rewrite as an `unsafe extern static` declaration"
 static retired_import = extern fn(n: usize) -> usize;
 
 // 34. An initializer on an `extern static`. The declaration is the whole
@@ -363,17 +363,15 @@ static retired_import = extern fn(n: usize) -> usize;
 //     is NOT an import), and the fix cuts the value, not the contract.
 //     error: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
 //     quick fix offered: "Remove the initializer"
-extern static import_with_a_value: unsafe fn(n: usize) -> usize = fn (n: usize) -> usize { n };
+unsafe extern static import_with_a_value: unsafe fn(n: usize) -> usize = fn (n: usize) -> usize { n };
 
-// 35. An import declared safe to call. Two things are unsafe about a
-//     boundary and only one of them has a spelling: DECLARING the signature
-//     is already a vouch nothing on this side can check, while CALLING is
-//     priced per function by its type. A safe-to-call import is a real
-//     shape, blocked on the declaration-side marker rather than rejected —
-//     so the `unsafe` is required for now, and the fix writes it.
-//     error: an import must be declared `unsafe fn` for now: a safe-to-call import needs the declaration-side `unsafe` marker, and that marker does not exist yet
-//     quick fix offered: "Write `unsafe fn`"
-extern static safe_import: fn() -> ();
+// 35. A host import declared without its VOUCH marker. `unsafe` is not
+//     optional on an import: the language can promise nothing about what
+//     happens if the signature written here is wrong, so there is no such
+//     thing as an unvouched import — only a missing one, named and fixed.
+//     error: declaring a host import is a VOUCH: write `unsafe extern static` — this signature is an assertion about the host, and nothing on this side can check it
+//     quick fix offered: "Write `unsafe extern`"
+extern static unvouched_import: fn() -> i64;
 
 // 36. A DATA import. The spelling admits it — an annotation is an
 //     annotation — but a function import's price rides its TYPE, and there
@@ -381,14 +379,14 @@ extern static safe_import: fn() -> ();
 //     than guessed at, so granting it later deletes a diagnostic instead of
 //     inventing a syntax.
 //     error: data imports are not supported yet — an import must have a function type
-extern static a_data_import: usize;
+unsafe extern static a_data_import: usize;
 
 // 37. A hole in an import's contract. `_` names a type the BODY
 //     determines, and an import has no body — the declaration is the whole
 //     contract, so a piece of it left unwritten is unwritten for good.
 //     Refused once per hole, wherever in the signature it stands.
 //     error: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
-extern static a_partial_contract: unsafe fn(n: _) -> i64;
+unsafe extern static a_partial_contract: unsafe fn(n: _) -> i64;
 
 // 38. A region written at a CALL SITE. Regions are elided at every call:
 //     a written turbofish spells the callee's type and const arguments

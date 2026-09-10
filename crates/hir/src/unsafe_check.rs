@@ -6,14 +6,16 @@
 //! safe (creating a pointer is harmless; the hazard is at the deref), and
 //! so is pointer comparison.
 //!
-//! CALLS are the second family, and there the question is asked of the
-//! callee's TYPE: `unsafe fn(...)` is a type of its own (see
-//! [`crate::ty::FnTy`]), and calling a value of it needs the marker. Two
-//! arms above it name what they are calling when they can — an unsafe
-//! builtin, a host import mentioned directly — purely so the message can
-//! say which; everything reached through a VALUE is judged by the type,
-//! which is the only thing that still knows. Taking such a value is free:
-//! binding, passing and returning a function run nothing.
+//! CALLS are the second family, and the question is asked of the callee's
+//! TYPE, never the declaration: `unsafe fn(...)` is a type of its own (see
+//! [`crate::ty::FnTy`]), and calling a value of it needs the marker — a
+//! `fn(...)`-typed host import is vouched for but free to call, exactly
+//! like any other safe function. One arm ahead of the type rule names what
+//! it is calling when it can — an unsafe builtin — and the type rule's own
+//! arm names a directly-called import too, purely so the message can say
+//! which; everything else reached through a VALUE is judged by the type
+//! alone, which is the only thing that still knows. Taking such a value is
+//! free: binding, passing and returning a function run nothing.
 //!
 //! The region is lexical *within a function*: an `unsafe` block covers
 //! everything written inside it, `const { ... }` blocks included (they are
@@ -47,13 +49,15 @@ pub enum UnsafeCheckDiagnostic {
     /// The squiggle (and MIR's trap) lands on the call expression: the
     /// call is the operation that must not run.
     BuiltinCallOutsideUnsafe { call: ExprId, builtin: Builtin },
-    /// A call of a host import — an `extern static` — outside any `unsafe { ...
-    /// }` block. Same rule, different reason: an import's behavior is not
-    /// written in this language, so nothing here can establish it is sound.
+    /// A call of an `unsafe fn`-typed host import, named directly, outside
+    /// any `unsafe { ... }` block. Reached only when the callee's TYPE
+    /// already demands the marker — a `fn(...)`-typed import is vouched for
+    /// but free to call, so this never fires for one of those.
     ///
-    /// The DIRECT call keeps its own variant, beside the type-driven one
-    /// below, for exactly one thing: the message can name the import.
-    /// Reaching the same import through a binding is the type's business.
+    /// The DIRECT call keeps its own variant, beside the nameless
+    /// type-driven one below, for exactly one thing: the message can name
+    /// the import. Reaching the same import through a binding is the
+    /// type's business alone.
     ExternCallOutsideUnsafe { call: ExprId, name: String },
     /// A call THROUGH A VALUE whose type is `unsafe fn(...)`, outside any
     /// `unsafe { ... }` block. The general rule, and the one that closes
@@ -116,9 +120,10 @@ pub fn unsafe_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<UnsafeCheckD
 
 struct CheckCtx<'db> {
     /// Consulted for exactly one cross-item question: does this call reach
-    /// an `extern static` declaration? ([`crate::is_host_import`].) Asked only
-    /// so the message can NAME the import — the type rule catches the call
-    /// either way, since an import's type is an `unsafe fn`.
+    /// an `extern static` declaration? ([`crate::is_host_import`].) Asked
+    /// only so the message can NAME the import when the type rule already
+    /// caught the call — never to decide whether it is owed at all, since a
+    /// `fn(...)`-typed import owes nothing.
     db: &'db dyn Db,
     body: &'db Body,
     resolutions: &'db ArenaMap<ExprId, Resolution>,
@@ -235,27 +240,38 @@ impl CheckCtx<'_> {
                                 call: expr,
                                 builtin,
                             });
-                    } else if let Some(Resolution::Item(loc)) = self.resolutions.get(callee_name)
-                        && crate::is_host_import(self.db, loc.to_id(self.db))
-                    {
-                        // A host import named DIRECTLY. Its type is an
-                        // `unsafe fn` too, so the type rule below would
-                        // catch it — this arm exists only to name the
-                        // import, which is worth a branch.
-                        self.diagnostics
-                            .push(UnsafeCheckDiagnostic::ExternCallOutsideUnsafe {
-                                call: expr,
-                                name: loc.display_name().to_owned(),
-                            });
                     } else if self.calls_an_unsafe_fn_value(*callee) {
                         // THE GENERAL RULE: the callee's TYPE says a marker
-                        // is owed. Everything the two named arms above
-                        // cannot see arrives here — a bound import, an
-                        // unsafe builtin passed as an argument, a record
-                        // field, a parameter annotated `unsafe fn(...)`.
-                        self.diagnostics.push(
-                            UnsafeCheckDiagnostic::UnsafeFnValueCallOutsideUnsafe { call: expr },
-                        );
+                        // is owed. Everything the builtin arm above cannot
+                        // see arrives here — a bound import, an unsafe
+                        // builtin passed as an argument, a record field, a
+                        // parameter annotated `unsafe fn(...)`.
+                        //
+                        // The TYPE decides, never the declaration: an import
+                        // may be declared `fn(...)` now (vouched, but safe
+                        // to call), and calling one of THOSE costs nothing —
+                        // its declarer already vouched, on the declaration,
+                        // and reading a clock breaks nothing. Naming the
+                        // import is a better message when the call reaches
+                        // one directly, so that stays a branch — but it is a
+                        // branch INSIDE the type's answer now, not a rule
+                        // beside it.
+                        let named_import = match self.resolutions.get(callee_name) {
+                            Some(Resolution::Item(loc))
+                                if crate::is_host_import(self.db, loc.to_id(self.db)) =>
+                            {
+                                Some(loc.display_name().to_owned())
+                            }
+                            _ => None,
+                        };
+                        self.diagnostics.push(match named_import {
+                            Some(name) => {
+                                UnsafeCheckDiagnostic::ExternCallOutsideUnsafe { call: expr, name }
+                            }
+                            None => {
+                                UnsafeCheckDiagnostic::UnsafeFnValueCallOutsideUnsafe { call: expr }
+                            }
+                        });
                     }
                 }
                 self.check_expr(*callee, in_unsafe);

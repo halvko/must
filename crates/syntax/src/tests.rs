@@ -1126,7 +1126,7 @@ static b = fn {};
               WHITESPACE@45..46 "\n"
             error 19..20: expected a region name after `@` (`@a`, or `@_` to infer one)
             error 21..22: unexpected character `%`
-            error 23..27: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            error 23..27: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
         "#]],
     );
 }
@@ -1964,8 +1964,8 @@ fn const_item_inside_block_still_recovers() {
               ERROR@30..31
                 SEMICOLON@30..31 ";"
             error 14..15: expected `}`
-            error 29..30: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            error 30..31: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            error 29..30: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            error 30..31: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
         "#]],
     );
 }
@@ -1999,7 +1999,7 @@ fn dangling_const_at_block_end_recovers() {
                 SEMICOLON@23..24 ";"
             error 14..15: expected `}`
             error 22..23: expected a name for the item
-            error 23..24: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            error 23..24: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
         "#]],
     );
 }
@@ -3115,9 +3115,9 @@ fn record_literal_where_block_required_in_if() {
                 SEMICOLON@27..28 ";"
             error 18..19: expected `;`
             error 19..20: expected an expression
-            error 25..26: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            error 26..27: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            error 27..28: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            error 25..26: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            error 26..27: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            error 27..28: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
         "#]],
     );
 }
@@ -4731,12 +4731,12 @@ type T = usize;
     );
     // Same for the import marker, which leads its item.
     let parse = crate::parse(
-        "static f = fn (n: usize) -> usize { match n {\n    -1 => 1\nextern static g: unsafe fn() -> usize;\n",
+        "static f = fn (n: usize) -> usize { match n {\n    -1 => 1\nunsafe extern static g: unsafe fn() -> usize;\n",
     );
     let msgs: Vec<_> = parse.errors().iter().map(|e| e.message.clone()).collect();
     assert_eq!(msgs, ["expected a pattern", "expected `}`"], "{msgs:?}");
     assert!(
-        parse.debug_dump().contains("EXTERN_KW@58..64"),
+        parse.debug_dump().contains("EXTERN_KW@65..71"),
         "the import declaration must survive the skip: {}",
         parse.debug_dump()
     );
@@ -6899,12 +6899,12 @@ fn turbofish_const_paren_escape_no_longer_parses() {
             error 21..22: expected a name, literal, or `{ ... }` block after `const`; wrap a compound expression in `const { ... }`
             error 22..23: expected `)` (only the unit type `()` is supported here)
             error 24..25: expected `;`
-            error 26..27: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            error 27..28: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            error 28..29: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            error 29..30: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            error 30..31: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            error 31..32: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            error 26..27: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            error 27..28: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            error 28..29: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            error 29..30: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            error 30..31: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            error 31..32: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
         "#]],
     );
 }
@@ -9456,12 +9456,12 @@ fn retired_lifetime_in_return_type_desyncs_the_rest_of_the_item() {
         expect![[r#"
             25..26: borrow types are spelled postfix: `T.&` / `T.&mut`
             26..27: unterminated character literal: expected a closing `'`
-            27..28: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            29..32: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            33..34: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            35..36: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            37..38: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            38..39: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            27..28: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            29..32: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            33..34: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            35..36: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            37..38: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            38..39: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
         "#]],
     );
     // Not lifetime-specific: any type token `type_` refuses desyncs the
@@ -9477,11 +9477,11 @@ fn retired_lifetime_in_return_type_desyncs_the_rest_of_the_item() {
         expect![[r#"
             23..24: expected `;`
             25..26: expected a type
-            27..30: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            31..32: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            33..34: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            35..36: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            36..37: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            27..30: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            31..32: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            33..34: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            35..36: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            36..37: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
         "#]],
     );
 }
@@ -9513,12 +9513,12 @@ fn retired_lifetime_in_struct_field_desyncs_the_rest_of_the_item() {
         expect![[r#"
             22..23: borrow types are spelled postfix: `T.&` / `T.&mut`
             23..24: unterminated character literal: expected a closing `'`
-            24..25: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            26..29: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            30..31: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            32..33: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            34..35: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            35..36: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            24..25: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            26..29: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            30..31: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            32..33: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            34..35: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            35..36: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
         "#]],
     );
     // The tail cascade is identical, and both snippets actually run the
@@ -9540,11 +9540,11 @@ fn retired_lifetime_in_struct_field_desyncs_the_rest_of_the_item() {
         expect![[r#"
             20..21: expected `}`
             22..23: expected a type
-            24..27: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            28..29: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            30..31: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            32..33: expected an item (`static`, `const`, `type`, `trait` or `extern`)
-            33..34: expected an item (`static`, `const`, `type`, `trait` or `extern`)
+            24..27: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            28..29: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            30..31: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            32..33: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
+            33..34: expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
         "#]],
     );
 }
@@ -15986,6 +15986,7 @@ fn an_import_is_a_declaration_with_no_initializer() {
                       NAME_REF@63..68
                         IDENT@63..68 "isize"
                 SEMICOLON@68..69 ";"
+            error 0..6: declaring a host import is a VOUCH: write `unsafe extern static` — this signature is an assertion about the host, and nothing on this side can check it
         "#]],
     );
 }
@@ -16067,29 +16068,160 @@ fn a_fn_type_may_name_its_parameters() {
 
 #[test]
 fn extern_static_error_forms() {
+    // `b` is the one that CHANGED with the vouch marker: a bare `fn`
+    // annotation was refused "for now" while the vouch had no spelling. It
+    // has one now, so a safe-to-call import is an ordinary, error-free
+    // declaration — see `a_vouched_import_may_be_declared_safe_to_call`, and
+    // it is dropped from this list.
     check_errors(
-        "extern static a: unsafe fn(n: i64) -> i64 = 1;\n\
-         extern static b: fn(n: i64) -> i64;\n\
-         extern static c: usize;\n\
-         extern static d;\n\
-         extern const e: unsafe fn() -> ();\n\
-         extern type F = usize;\n\
-         extern static g: unsafe fn::<T>(n: T) -> i64;\n\
-         extern static i: unsafe fn(n: _) -> _;\n\
-         extern static j: unsafe fn(n: _) -> i64 = fn(n: i64) -> i64 { n };\n\
+        "unsafe extern static a: unsafe fn(n: i64) -> i64 = 1;\n\
+         unsafe extern static c: usize;\n\
+         unsafe extern static d;\n\
+         unsafe extern const e: unsafe fn() -> ();\n\
+         unsafe extern type F = usize;\n\
+         unsafe extern static g: unsafe fn::<T>(n: T) -> i64;\n\
+         unsafe extern static i: unsafe fn(n: _) -> _;\n\
+         unsafe extern static j: unsafe fn(n: _) -> i64 = fn(n: i64) -> i64 { n };\n\
          static h: usize;\n",
         expect![[r#"
-            42..45: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
-            64..81: an import must be declared `unsafe fn` for now: a safe-to-call import needs the declaration-side `unsafe` marker, and that marker does not exist yet
-            100..105: data imports are not supported yet — an import must have a function type
-            121..122: an import must declare its type: `extern static name: unsafe fn(...) -> T;`
-            124..130: only a `static` can be `extern`: an import declares one name with one type
-            159..165: only a `static` can be `extern`: an import declares one name with one type
-            208..213: an import cannot be generic: it has exactly one machine signature, and there is nothing to monomorphize it into
-            258..259: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
-            264..265: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
-            307..332: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
-            349..350: expected `=` followed by the item's value
+            49..52: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
+            78..83: data imports are not supported yet — an import must have a function type
+            106..107: an import must declare its type: `unsafe extern static name: fn(...) -> T;`
+            116..122: only a `static` can be `extern`: an import declares one name with one type
+            151..157: only an `extern static` can be `unsafe`: the marker vouches for a host import's declared signature, and nothing else declares one
+            214..219: an import cannot be generic: it has exactly one machine signature, and there is nothing to monomorphize it into
+            271..272: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
+            277..278: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
+            327..352: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
+            369..370: expected `=` followed by the item's value
+        "#]],
+    );
+}
+
+#[test]
+fn a_vouched_import_may_be_declared_safe_to_call() {
+    // THE DISCHARGE: `extern static now: fn() -> i64;` used to be refused
+    // with a message that said "for now" — the shape was real, but
+    // accepting it would have left the DECLARATION-side vouch with no home
+    // at all: nothing written anywhere would have said that someone checked
+    // this signature against a host.
+    //
+    // The marker is that home. So the two obligations are written once
+    // each: the item vouches, the type prices the call — and reading a
+    // clock is priced at nothing.
+    for source in [
+        "unsafe extern static now: fn() -> i64;",
+        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;",
+        // An unwritten return type still means `()` — the same rule, still
+        // true of a safe import.
+        "unsafe extern static tick: fn();",
+    ] {
+        assert_eq!(
+            crate::parse(source).errors(),
+            &[],
+            "`{source}` must parse clean"
+        );
+    }
+}
+
+#[test]
+fn an_unmarked_import_names_the_vouch_and_offers_it() {
+    // The old spelling still parses into the same import and still means
+    // it, and what it gets is a message that names the marker plus a fix
+    // that writes it. Writing it in SILENTLY stays rejected — a marker the
+    // compiler supplies teaches nothing, and the vouch is precisely the
+    // thing no compiler can make.
+    let source = "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;";
+    let parse = crate::parse(source);
+    let [err] = parse.errors() else {
+        panic!("expected exactly one error, got {:?}", parse.errors());
+    };
+    assert_eq!(
+        err.message,
+        "declaring a host import is a VOUCH: write `unsafe extern static` — \
+         this signature is an assertion about the host, and nothing on this \
+         side can check it"
+    );
+    let fix = err.fix.as_ref().expect("the vouch is offered");
+    let fixed = apply_fix(source, fix);
+    assert_eq!(
+        fixed,
+        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;"
+    );
+    assert_eq!(crate::parse(&fixed).errors(), &[]);
+}
+
+#[test]
+fn the_vouch_marker_leads_the_declaration() {
+    // `extern unsafe static` — the right two markers, the wrong way round.
+    // Superset-parsed into the SAME item (it means the vouched import; an
+    // order refusal must not reinterpret what was written), so the fix is a
+    // move.
+    let source = "extern unsafe static read: unsafe fn(n: i64) -> i64;";
+    let parse = crate::parse(source);
+    let [err] = parse.errors() else {
+        panic!("expected exactly one error, got {:?}", parse.errors());
+    };
+    assert_eq!(
+        err.message,
+        "the vouch marker leads the declaration: write `unsafe extern static`"
+    );
+    let fix = err.fix.as_ref().expect("the move is offered");
+    let fixed = apply_fix(source, fix);
+    assert_eq!(
+        fixed,
+        "unsafe extern static read: unsafe fn(n: i64) -> i64;"
+    );
+    assert_eq!(crate::parse(&fixed).errors(), &[]);
+}
+
+#[test]
+fn a_doubled_vouch_marker_is_reported_once_and_removed() {
+    // `unsafe extern unsafe static` — a typo, not a second obligation. Eaten
+    // by the parser (rather than left to strand `static` behind an
+    // unconsumed second `unsafe`, which used to cascade into "expected
+    // `static` after `extern`" — untrue, `static` is right there — plus
+    // "expected `=` ..."), so this is exactly one diagnostic with a fix.
+    let source = "unsafe extern unsafe static read: fn() -> i64;";
+    let parse = crate::parse(source);
+    let [err] = parse.errors() else {
+        panic!("expected exactly one error, got {:?}", parse.errors());
+    };
+    assert_eq!(err.message, "the vouch marker is written once, not twice");
+    let fix = err.fix.as_ref().expect("the removal is offered");
+    let fixed = apply_fix(source, fix);
+    assert_eq!(fixed, "unsafe extern static read: fn() -> i64;");
+    assert_eq!(crate::parse(&fixed).errors(), &[]);
+}
+
+#[test]
+fn only_an_import_can_be_vouched_for() {
+    // The vouch asserts that a signature this program DECLARES matches a
+    // world it cannot see. A `static` that writes its own value, a `type`, a
+    // `trait` — none of them makes a claim about anybody else's world, so
+    // there is nothing for a human to be believed about.
+    check_errors(
+        "unsafe static a = 1;\n\
+         unsafe type F = usize;\n\
+         unsafe trait T = requires { };\n",
+        expect![[r#"
+            0..6: only an `extern static` can be `unsafe`: the marker vouches for a host import's declared signature, and nothing else declares one
+            21..27: only an `extern static` can be `unsafe`: the marker vouches for a host import's declared signature, and nothing else declares one
+            44..50: only an `extern static` can be `unsafe`: the marker vouches for a host import's declared signature, and nothing else declares one
+        "#]],
+    );
+}
+
+#[test]
+fn a_lone_vouch_marker_says_what_may_follow_it() {
+    // `unsafe` with no item after it: the marker leads a declaration that is
+    // not there. One thing may follow, so that is what the message says —
+    // and the rest is taken as ERROR in this item rather than reported one
+    // token at a time (the `extern fn g(...)` recovery, shared).
+    check_errors(
+        "unsafe fn g(n: i64) -> i64;\n",
+        expect![[r#"
+            7..9: expected `extern static` after `unsafe`: the marker vouches for a host import's declared signature, and only an import declares one
         "#]],
     );
 }
@@ -16101,7 +16233,7 @@ fn a_written_value_takes_an_extern_statics_annotation_out_of_the_import_rules() 
     // filled from the body written on the same line. Only the initializer
     // is refused, and none of the contract rules (which would each be a
     // sentence that is not true of this program) fire.
-    let source = "extern static j: unsafe fn(n: _) -> i64 = fn(n: i64) -> i64 { n };";
+    let source = "unsafe extern static j: unsafe fn(n: _) -> i64 = fn(n: i64) -> i64 { n };";
     let messages: Vec<_> = crate::parse(source)
         .errors()
         .iter()
@@ -16131,12 +16263,11 @@ fn the_retired_spelling_with_an_annotation_is_held_to_the_import_rules() {
          static d = extern fn(n: i64) -> i64;\n",
         expect![[r#"
             10..15: data imports are not supported yet — an import must have a function type
-            18..42: a host import is a DECLARATION, not an initializer: write `extern static a: unsafe fn(...) -> T;` — the annotation is the contract, and this signature is dropped
-            54..71: an import must be declared `unsafe fn` for now: a safe-to-call import needs the declaration-side `unsafe` marker, and that marker does not exist yet
-            74..98: a host import is a DECLARATION, not an initializer: write `extern static b: unsafe fn(...) -> T;` — the annotation is the contract, and this signature is dropped
+            18..42: a host import is a DECLARATION, not an initializer: write `unsafe extern static a: unsafe fn(...) -> T;` — the annotation is the contract, and this signature is dropped
+            74..98: a host import is a DECLARATION, not an initializer: write `unsafe extern static b: unsafe fn(...) -> T;` — the annotation is the contract, and this signature is dropped
             123..124: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
-            135..159: a host import is a DECLARATION, not an initializer: write `extern static c: unsafe fn(...) -> T;` — the annotation is the contract, and this signature is dropped
-            172..196: a host import is a DECLARATION, not an initializer: write `extern static d: unsafe fn(...) -> T;`
+            135..159: a host import is a DECLARATION, not an initializer: write `unsafe extern static c: unsafe fn(...) -> T;` — the annotation is the contract, and this signature is dropped
+            172..196: a host import is a DECLARATION, not an initializer: write `unsafe extern static d: unsafe fn(...) -> T;`
         "#]],
     );
 }
@@ -16185,7 +16316,7 @@ fn removing_an_extern_statics_initializer_keeps_the_declaration() {
     // The fix cuts the VALUE, not the contract: an import with its type
     // taken away would be a second error where there was one, and the type
     // is the whole of what the declaration says.
-    let source = "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize = f;";
+    let source = "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize = f;";
     let parse = crate::parse(source);
     let err = parse
         .errors()
@@ -16199,7 +16330,7 @@ fn removing_an_extern_statics_initializer_keeps_the_declaration() {
     let fixed = apply_fix(source, fix);
     assert_eq!(
         fixed,
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;"
+        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;"
     );
     assert_eq!(crate::parse(&fixed).errors(), &[]);
 }
@@ -16218,12 +16349,12 @@ fn the_retired_initializer_form_rewrites_to_the_declaration() {
     assert_eq!(
         err.message,
         "a host import is a DECLARATION, not an initializer: \
-         write `extern static read: unsafe fn(...) -> T;`"
+         write `unsafe extern static read: unsafe fn(...) -> T;`"
     );
     let fix = err.fix.as_ref().expect("the rewrite is offered");
     assert_eq!(
         apply_fix(source, fix),
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;"
+        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;"
     );
     // And the rewrite is the accepted form.
     assert_eq!(crate::parse(&apply_fix(source, fix)).errors(), &[]);
@@ -16266,13 +16397,13 @@ fn a_half_written_fn_modifier_prefix_is_reported_not_asserted() {
          static e = unsafe extern extern;\n\
          static f = unsafe const extern;\n",
         expect![[r#"
-            11..23: a host import is a DECLARATION, not an initializer: write `extern static a: unsafe fn(...) -> T;`
+            11..23: a host import is a DECLARATION, not an initializer: write `unsafe extern static a: unsafe fn(...) -> T;`
             23..24: expected `fn`
-            36..48: a host import is a DECLARATION, not an initializer: write `extern static b: unsafe fn(...) -> T;`
+            36..48: a host import is a DECLARATION, not an initializer: write `unsafe extern static b: unsafe fn(...) -> T;`
             48..49: expected `fn`
-            74..86: a host import is a DECLARATION, not an initializer: write `extern static name: unsafe fn(...) -> T;`
+            74..86: a host import is a DECLARATION, not an initializer: write `unsafe extern static name: unsafe fn(...) -> T;`
             87..88: expected `fn`
-            102..114: a host import is a DECLARATION, not an initializer: write `extern static name: unsafe fn(...) -> T;`
+            102..114: a host import is a DECLARATION, not an initializer: write `unsafe extern static name: unsafe fn(...) -> T;`
             114..115: expected `fn`
             133..134: expected `;`
             135..141: expected `{`: `unsafe` blocks are blocks
@@ -16371,6 +16502,7 @@ fn only_clause_misplacements_and_unknown_capabilities() {
          type E = struct {} only;\n",
         expect![[r#"
             13..17: a capability ceiling belongs on a `type` declaration; an item has whatever ceiling its type has
+            24..30: declaring a host import is a VOUCH: write `unsafe extern static` — this signature is an assertion about the host, and nothing on this side can check it
             71..75: a capability ceiling belongs on a `type` declaration; an item has whatever ceiling its type has
             104..108: a capability ceiling belongs on a `type` declaration, not on a `trait`
             139..143: unknown capability `leak`; `move` is the only ceiling that can be written

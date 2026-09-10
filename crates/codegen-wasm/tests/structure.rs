@@ -341,7 +341,7 @@ fn a_declared_host_import_becomes_a_real_wasm_import_and_is_called_through() {
     // `print`'s sibling), it lands in the import section, and the call
     // goes through it. Nothing here is `read`-specific — `read` itself
     // needs a raw pointer, which this backend refuses by name.
-    let source = "extern static host_tick: unsafe fn(n: i64) -> i64;\n\
+    let source = "unsafe extern static host_tick: unsafe fn(n: i64) -> i64;\n\
                   static main = fn () -> i64 { unsafe { host_tick(7) } };";
     let artifact = compile(source, "main()");
     let engine = wasmi::Engine::default();
@@ -379,13 +379,56 @@ fn a_declared_host_import_becomes_a_real_wasm_import_and_is_called_through() {
 }
 
 #[test]
+fn a_safe_typed_import_reaches_the_same_wasm_import_with_no_call_site_marker() {
+    // The call price rides the TYPE, not the boundary: `host_tick` declared
+    // `fn(...)` here (no `unsafe fn`, no `unsafe { ... }` at the call) reaches
+    // the same host slot the `unsafe fn`-typed test above wires up. The
+    // marker was never load-bearing for THIS — `unsafe_to_call` is a hir/mir
+    // fact this backend never inspects — but the shape only became reachable
+    // with the vouch marker's arrival, and nothing before pinned it.
+    let source = "unsafe extern static host_tick: fn(n: i64) -> i64;\n\
+                  static main = fn () -> i64 { host_tick(7) };";
+    let artifact = compile(source, "main()");
+    let engine = wasmi::Engine::default();
+    let module = wasmi::Module::new(&engine, &artifact.wasm[..]).expect("validates");
+    let imports: Vec<(String, String)> = module
+        .imports()
+        .map(|import| (import.module().to_owned(), import.name().to_owned()))
+        .collect();
+    assert_eq!(
+        imports,
+        vec![
+            ("must".to_owned(), "print".to_owned()),
+            ("must".to_owned(), "host_tick".to_owned()),
+        ],
+        "a safe-typed import joins `print` in the import section too"
+    );
+
+    let mut store = wasmi::Store::new(&engine, ());
+    let mut linker = wasmi::Linker::new(&engine);
+    linker
+        .func_wrap("must", "print", |_: i32, _: i32| {})
+        .expect("print");
+    linker
+        .func_wrap("must", "host_tick", |n: i64| n * 2)
+        .expect("host_tick");
+    let instance = linker
+        .instantiate_and_start(&mut store, &module)
+        .expect("instantiates");
+    let entry = instance
+        .get_typed_func::<(), i64>(&store, "main")
+        .expect("entry");
+    assert_eq!(entry.call(&mut store, ()).expect("runs"), 14);
+}
+
+#[test]
 fn an_import_whose_signature_has_no_wasm_shape_is_refused_by_name() {
     // The `read` primitive itself, on this backend: its buffer parameter
     // is a raw pointer, and pointers are out of scope here. The refusal
     // names the IMPORT — which boundary is unavailable is the useful half.
     let message = harness::on_budget(|| {
         let db = RootDatabase::default();
-        let source = "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        let source = "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
                       static main = fn () -> i64 {\n\
                           let mut b: u8 = 0;\n\
                           unsafe { read(b.&raw mut, 1) }\n\
@@ -418,13 +461,13 @@ fn a_bound_host_import_compiles_but_a_stored_one_is_refused_by_name() {
     // the tracker CANNOT follow — stored in a record, or merged from
     // branches that disagree — is refused BY NAME rather than miscompiled.
     let db = RootDatabase::default();
-    let bound = "extern static tick: unsafe fn(n: i64) -> i64;\n\
+    let bound = "unsafe extern static tick: unsafe fn(n: i64) -> i64;\n\
                  static main = fn () -> i64 { let f = tick; unsafe { f(1) } };";
     let loc = harness::prepare(&db, bound, "main()");
     codegen_wasm::compile(&db, &loc).expect("a bound import is still a direct call");
 
     let db = RootDatabase::default();
-    let stored = "extern static tick: unsafe fn(n: i64) -> i64;\n\
+    let stored = "unsafe extern static tick: unsafe fn(n: i64) -> i64;\n\
                   static main = fn () -> i64 { \
                       let h = struct { go = tick }; unsafe { h.go(1) } \
                   };";
@@ -453,7 +496,7 @@ fn an_import_may_not_claim_a_name_the_compiler_already_imports() {
     // call that collects the program's imports.
     let (message, named) = harness::on_budget(|| {
         let db = RootDatabase::default();
-        let source = "extern static print: unsafe fn(offset: i64, len: i64) -> ();\n\
+        let source = "unsafe extern static print: unsafe fn(offset: i64, len: i64) -> ();\n\
                       static main = fn () -> () { unsafe { print(0, 0) }; };";
         let loc = harness::prepare(&db, source, "main()");
         let Err(err) = codegen_wasm::compile(&db, &loc) else {
