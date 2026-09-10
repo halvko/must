@@ -184,7 +184,7 @@ fn a_nullary_unsafe_fn_gets_no_run_lens() {
     let mut host = AnalysisHost::new();
     let file = host.create_file(
         "test.must".to_owned(),
-        "extern static tick: unsafe fn() -> ();\n\
+        "unsafe extern static tick: unsafe fn() -> ();\n\
          static main = fn() -> () { };"
             .to_owned(),
     );
@@ -202,7 +202,7 @@ fn hover_shows_the_unsafe_marker_on_a_fn_type() {
     // The one-token difference is the whole of what a reader needs to know
     // about a value here, so hover shows it exactly where it is written.
     check_hover(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;\n\
+        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;\n\
          static main = fn { let g$0 = read; };",
         "```must\ng: unsafe fn(u8.&raw mut, usize) -> isize\n```",
     );
@@ -213,7 +213,7 @@ fn hover_on_an_import_declaration_shows_its_type() {
     // The declaration has no value expression at all, so hover must answer
     // from the DECLARATION — which is the whole contract anyway.
     check_hover(
-        "extern static read$0: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;",
+        "unsafe extern static read$0: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;",
         "```must\nread: unsafe fn(u8.&raw mut, usize) -> isize\n```",
     );
 }
@@ -517,22 +517,23 @@ fn highlights_a_fn_types_parameter_names() {
     // directly under `PARAM` here (no pattern wraps it), the one place a
     // parameter is spelled that way.
     check_highlights(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;",
+        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;",
         expect_test::expect![[r#"
-            0..6 "extern" Keyword
-            7..13 "static" Keyword
-            14..18 "read" Function.declaration.static
-            20..26 "unsafe" Keyword
-            27..29 "fn" Keyword
-            30..33 "buf" Parameter.declaration
-            35..37 "u8" Type.defaultLibrary
-            38..39 "&" Operator
-            39..42 "raw" Keyword
-            43..46 "mut" Keyword
-            48..51 "len" Parameter.declaration
-            53..58 "usize" Type.defaultLibrary
-            60..62 "->" Operator
-            63..68 "isize" Type.defaultLibrary
+            0..6 "unsafe" Keyword
+            7..13 "extern" Keyword
+            14..20 "static" Keyword
+            21..25 "read" Function.declaration.static
+            27..33 "unsafe" Keyword
+            34..36 "fn" Keyword
+            37..40 "buf" Parameter.declaration
+            42..44 "u8" Type.defaultLibrary
+            45..46 "&" Operator
+            46..49 "raw" Keyword
+            50..53 "mut" Keyword
+            55..58 "len" Parameter.declaration
+            60..65 "usize" Type.defaultLibrary
+            67..69 "->" Operator
+            70..75 "isize" Type.defaultLibrary
         "#]],
     );
 }
@@ -2000,6 +2001,7 @@ fn completions_top_level_offers_exactly_the_item_keywords() {
             static Keyword
             trait Keyword
             type Keyword
+            unsafe Keyword
         "#]],
     );
 }
@@ -2017,6 +2019,19 @@ fn completions_after_extern_offer_the_one_keyword_that_may_follow() {
 }
 
 #[test]
+fn completions_after_the_vouch_marker_offer_extern() {
+    // `unsafe` at item position is the VOUCH marker of a host import, and
+    // only `extern static` may follow it — so `extern` is the one thing
+    // offered, exactly as `static` is the one thing offered after `extern`.
+    check_completions(
+        "unsafe $0",
+        expect_test::expect![[r#"
+            extern Keyword
+        "#]],
+    );
+}
+
+#[test]
 fn completions_empty_file_top_level() {
     // Same shape as the general top-level case, exercised on a genuinely
     // empty file (no tokens at all for the speculative parse to hang off).
@@ -2028,6 +2043,7 @@ fn completions_empty_file_top_level() {
             static Keyword
             trait Keyword
             type Keyword
+            unsafe Keyword
         "#]],
     );
 }

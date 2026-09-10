@@ -534,24 +534,39 @@ impl StaticItem {
     /// Only the item's own leading keyword counts — a `const` starting the
     /// initializer (`static f = const fn ...`, `static x = const { ... }`)
     /// belongs to the fn literal / const block, not to the item. The
-    /// `extern` marker leads the keyword when it is there and is skipped
-    /// (`extern const x` parses; validation rejects it).
+    /// import markers lead the keyword when they are there and are skipped
+    /// (`unsafe extern const x` parses; validation rejects it).
     pub fn is_const(&self) -> bool {
         self.syntax
             .children_with_tokens()
             .filter_map(|it| it.into_token())
-            .find(|it| !it.kind().is_trivia() && it.kind() != EXTERN_KW)
+            .find(|it| !it.kind().is_trivia() && !matches!(it.kind(), EXTERN_KW | UNSAFE_KW))
             .is_some_and(|it| it.kind() == CONST_KW)
     }
     /// The `extern` marker of a HOST IMPORT declaration
-    /// (`extern static read: unsafe fn(...) -> isize;`) — the ITEM's own
-    /// token. An `extern` inside the initializer belongs to the RETIRED
+    /// (`unsafe extern static read: unsafe fn(...) -> isize;`) — the ITEM's
+    /// own token. An `extern` inside the initializer belongs to the RETIRED
     /// `extern fn` literal, which is a node of its own.
     pub fn extern_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, EXTERN_KW)
     }
     pub fn is_extern(&self) -> bool {
         self.extern_token().is_some()
+    }
+    /// The `unsafe` VOUCH marker of a host import — the ITEM's own token,
+    /// the human's assertion that the signature written here is the one the
+    /// host really provides. The `unsafe` of the ANNOTATION
+    /// (`: unsafe fn(...)`) is a different obligation and a different
+    /// token: it lives inside the [`FnType`] node and prices the CALL.
+    ///
+    /// Found wherever the marker was written — `unsafe extern` is the
+    /// spelling, `extern unsafe` is superset-parsed here and rejected by
+    /// validation, which needs the token to say where it went wrong.
+    pub fn unsafe_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, UNSAFE_KW)
+    }
+    pub fn is_unsafe(&self) -> bool {
+        self.unsafe_token().is_some()
     }
     /// The `=` introducing an initializer, when the item has one. An
     /// `extern static` has none: the declaration is the whole contract.

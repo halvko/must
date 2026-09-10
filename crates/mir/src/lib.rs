@@ -388,7 +388,7 @@ pub enum Const {
     /// A `fn` literal; its code is in [`MirLowered::bodies`] of the same item.
     Fn(BodyId),
     /// A HOST IMPORT — the value of
-    /// `extern static name: unsafe fn(...) -> T;`.
+    /// `unsafe extern static name: unsafe fn(...) -> T;`.
     ///
     /// There is no body to point at, so the constant carries the
     /// DECLARATION instead: the item that declares the import — whose name

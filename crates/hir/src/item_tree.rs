@@ -47,7 +47,7 @@ pub struct ItemData {
     /// Only meaningful on a `type` item; `validation` rejects the clause
     /// everywhere else, and the flag stays `false` there.
     pub only_move: bool,
-    /// `extern static read: unsafe fn(...) -> T;` — this item is a HOST
+    /// `unsafe extern static read: unsafe fn(...) -> T;` — this item is a HOST
     /// IMPORT: a DECLARATION that promises a name of this type exists and
     /// leaves providing it to whatever is on the other side of the boundary.
     ///

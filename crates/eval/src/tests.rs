@@ -6292,7 +6292,7 @@ fn the_host_read_fills_a_byte_buffer_and_answers_the_count() {
     // machine-shaped count, and no text policy anywhere — the bytes come
     // back as bytes.
     check_run_with_input(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
          static f = fn() -> i64 {\n\
              match alloc_array::<u8>(8) {\n\
                  AllocResult::Ok(p) => {\n\
@@ -6315,7 +6315,7 @@ fn the_host_read_fills_a_byte_buffer_and_answers_the_count() {
 #[test]
 fn the_host_read_reports_zero_at_end_of_input() {
     check_run(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
          static f = fn() -> i64 {\n\
              match alloc_array::<u8>(4) {\n\
                  AllocResult::Ok(p) => {\n\
@@ -6339,7 +6339,7 @@ fn an_import_this_host_does_not_provide_is_refused_by_name() {
     // provide a hook has denied the capability. Saying WHICH one is the
     // whole difference between a refusal and a crash.
     check_run(
-        "extern static launch_missiles: unsafe fn(n: i64) -> i64;\n\
+        "unsafe extern static launch_missiles: unsafe fn(n: i64) -> i64;\n\
          static f = fn() -> i64 { unsafe { launch_missiles(1) } };",
         "f()",
         expect![[r#"
@@ -6349,11 +6349,28 @@ fn an_import_this_host_does_not_provide_is_refused_by_name() {
 }
 
 #[test]
+fn a_safe_typed_import_is_called_with_no_marker_and_still_reaches_the_host() {
+    // The call price is free — no `unsafe` at the declaration's type, none
+    // at the call — but the boundary itself is exactly as real as an
+    // `unsafe fn`-typed import's: this host implements `read` and nothing
+    // else, and the refusal proves the call actually reached that check
+    // with no marker in its way.
+    check_run(
+        "unsafe extern static now: fn() -> i64;\n\
+         static f = fn() -> i64 { now() };",
+        "f()",
+        expect![[r#"
+            error[Runtime]: no host implementation for the import `now` — the interpreter provides `read` and nothing else
+        "#]],
+    );
+}
+
+#[test]
 fn the_host_read_refuses_a_buffer_shorter_than_the_request() {
     // Judged BEFORE the read runs: a read that consumed input and then
     // trapped would have eaten bytes nobody can get back.
     check_run_with_input(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
          static f = fn() -> i64 {\n\
              match alloc_array::<u8>(2) {\n\
                  AllocResult::Ok(p) => unsafe { read(p, 8) },\n\
@@ -6375,7 +6392,7 @@ fn a_zero_length_host_read_touches_nothing() {
     // can ask for "however much room is left" without a special case when
     // the answer is none. `0` here is NOT end of input.
     check_run_with_input(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
          static f = fn() -> i64 { unsafe { read(dangling::<u8>(), 0) } };",
         "f()",
         "hello",
@@ -6392,7 +6409,7 @@ fn the_host_read_invalidates_a_safe_borrow_of_the_bytes_it_writes() {
     // so reading through `m` afterwards is detected UB, exactly as it
     // would be after `p.*[3] = v`.
     check_run_with_input(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
          static f = fn() -> u8 {\n\
              let mut a: [u8; 4] = [1, 2, 3, 4];\n\
              let p = a[0].&raw mut;\n\
@@ -6414,7 +6431,7 @@ fn the_host_read_invalidates_a_safe_borrow_of_the_bytes_it_writes() {
 fn the_host_read_is_fine_with_no_live_borrow_of_the_buffer() {
     // The twin: the same write, with nothing borrowing the range.
     check_run_with_input(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
          static f = fn() -> u8 {\n\
              let mut a: [u8; 4] = [1, 2, 3, 4];\n\
              let p = a[0].&raw mut;\n\
@@ -6438,7 +6455,7 @@ fn the_host_read_judges_aliasing_before_consuming_input() {
     // requested length, before `self.mode.read`, is the one doing the
     // work.
     check_run_with_input(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
          static f = fn () -> u8 {\n\
              let mut a: [u8; 4] = [1, 2, 3, 4];\n\
              let m = a[0].&mut;\n\
@@ -6469,7 +6486,7 @@ fn the_host_read_judges_aliasing_before_consuming_input() {
 fn a_host_import_declared_with_the_wrong_signature_is_refused() {
     let program = |buf: &str, arg: &str, len: &str, ret: &str| {
         format!(
-            "extern static read: unsafe fn(buf: {buf}, len: usize) -> {ret};\n\
+            "unsafe extern static read: unsafe fn(buf: {buf}, len: usize) -> {ret};\n\
              static f = fn() -> {ret} {{\n\
                  match alloc_array::<u8>(8) {{\n\
                      ::Ok(p) => {{ unsafe {{ p.* = 0; }}; unsafe {{ read({arg}, {len}) }} }}\n\
@@ -6528,6 +6545,22 @@ fn a_host_import_declared_with_the_wrong_signature_is_refused() {
             error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
         "#]],
     );
+    // The CALL PRICE is part of the declaration too: a `fn`-typed vouch for
+    // `read` is judged and refused exactly like a wrong parameter or return
+    // type, called with no marker anywhere since the type says none is due.
+    check_run(
+        "unsafe extern static read: fn(buf: u8.&raw mut, len: usize) -> isize;\n\
+         static f = fn() -> isize {\n\
+             match alloc_array::<u8>(8) {\n\
+                 ::Ok(p) => read(p, 8),\n\
+                 ::Err => panic(\"oom\"),\n\
+             }\n\
+         };",
+        "f()",
+        expect![[r#"
+            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
+        "#]],
+    );
 }
 
 #[test]
@@ -6539,7 +6572,7 @@ fn the_host_read_answers_in_whichever_signed_word_the_declaration_asked_for() {
     for spelling in ["isize", "i64"] {
         check_run_with_input(
             &format!(
-                "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> {spelling};\n\
+                "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> {spelling};\n\
                  static f = fn() -> {spelling} {{\n\
                      match alloc_array::<u8>(8) {{\n\
                          ::Ok(p) => unsafe {{ read(p, 8) }},\n\
@@ -6564,7 +6597,7 @@ fn calling_a_host_import_through_a_binding_traps_with_the_squiggle_text() {
     // ran fine, and the CALL is what refused, because the call is the
     // operation and `g`'s type is what still knows a marker is owed.
     check_run_with_input(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;\n\
+        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;\n\
          static f = fn() -> isize {\n\
              let g = read;\n\
              match alloc_array::<u8>(8) { ::Ok(p) => g(p, 8), ::Err => 0 }\n\
@@ -6578,7 +6611,7 @@ fn calling_a_host_import_through_a_binding_traps_with_the_squiggle_text() {
     // Vouched at the CALL, it runs — first-class-ness is priced, not
     // removed, and the binding itself never needed a marker.
     check_run_with_input(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;\n\
+        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;\n\
          static f = fn() -> isize {\n\
              let g = read;\n\
              match alloc_array::<u8>(8) { ::Ok(p) => unsafe { g(p, 8) }, ::Err => 0 }\n\
@@ -6598,7 +6631,7 @@ fn an_extern_static_with_an_initializer_is_not_an_import() {
     // blames a boundary the program never crossed. The written value is
     // what runs.
     check_run(
-        "extern static bad: unsafe fn(n: i64) -> i64 = fn(n: i64) -> i64 { n + 1 };\n\
+        "unsafe extern static bad: unsafe fn(n: i64) -> i64 = fn(n: i64) -> i64 { n + 1 };\n\
          static f = fn() -> i64 { unsafe { bad(1) } };",
         "f()",
         expect![[r#"
@@ -6615,7 +6648,7 @@ fn a_data_import_is_refused_where_it_is_mentioned() {
     // alternative is a `usize` no host function can be, carried into
     // arithmetic that then blames the compiler for a program's mistake.
     check_run(
-        "extern static x: usize;\n\
+        "unsafe extern static x: usize;\n\
          static f = fn() -> usize { x + 1 };",
         "f()",
         expect![[r#"
