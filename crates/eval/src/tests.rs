@@ -7213,3 +7213,164 @@ fn a_move_with_no_borrow_outstanding_costs_nothing_and_still_runs() {
         "#]],
     );
 }
+
+// ---- materialized temporaries (M12) --------------------------------------
+
+/// A write through a `.&mut` of a temporary is visible to the code holding
+/// the borrow.
+#[test]
+fn a_temporary_borrowed_exclusively_is_written_through() {
+    check_run(
+        r#"
+type Printer = struct { count: usize } with {
+    impl Self {
+        emit = fn::<@a>(s: str, p: Self.&mut::<@a>) -> () {
+            print(s);
+            p.*.count = p.*.count + 1;
+        };
+    }
+};
+type Inner = struct { label: str } with {
+    impl Self {
+        fmt = fn::<@a>(p: Printer.&mut::<@a>, i: Self) -> usize {
+            p.emit(i.label);
+            p.emit(i.label);
+            p.*.count
+        };
+    }
+};
+static f = fn() -> usize {
+    let inner = Inner(struct { label = "x" });
+    inner.fmt(Printer(struct { count = 0 }).&mut)
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "xx"
+            => 2
+        "#]],
+    );
+}
+
+/// A branch's temporary is created only when that branch runs, and a
+/// loop's is created afresh every iteration.
+#[test]
+fn a_temporary_in_a_branch_or_a_loop_is_created_per_path() {
+    check_run(
+        r#"
+type Cell = struct { v: usize } with {
+    impl Self {
+        bump = fn::<@a>(by: usize, c: Self.&mut::<@a>) -> usize {
+            c.*.v = c.*.v + by;
+            c.*.v
+        };
+    }
+};
+static pick = fn(c: bool) -> usize {
+    if c { Cell(struct { v = 10 }).&mut.bump(1) }
+    else { Cell(struct { v = 20 }).&mut.bump(2) }
+};
+static f = fn() -> usize {
+    let mut total = 0;
+    let mut i = 0;
+    loop {
+        if i == 3 { break; };
+        total = total + Cell(struct { v = i }).&mut.bump(1);
+        i = i + 1;
+    };
+    total + pick(true) + pick(false)
+};
+"#,
+        "f()",
+        expect![[r#"
+            => 39
+        "#]],
+    );
+}
+
+/// A borrow of a temporary's FIELD is written through and read back like
+/// a borrow of the whole value.
+#[test]
+fn a_borrow_of_a_temporarys_field_names_the_temporarys_storage() {
+    check_run(
+        r#"
+type Pair = struct { a: usize, b: usize };
+static mk = fn() -> Pair { Pair(struct { a = 3, b = 4 }) };
+static set = fn::<@a>(v: usize, r: usize.&mut::<@a>) -> usize {
+    r.* = v;
+    r.*
+};
+static f = fn() -> usize { set(9, mk().a.&mut) };
+"#,
+        "f()",
+        expect![[r#"
+            => 9
+        "#]],
+    );
+}
+
+/// A temporary is evaluated where it is written: `a()` runs before
+/// `mk()`, so the program prints `am`.
+#[test]
+fn materializing_a_temporary_does_not_reorder_the_operands_around_it() {
+    check_run(
+        r#"
+static a = fn() -> usize { print("a"); 1 };
+static mk = fn() -> usize { print("m"); 2 };
+static add = fn::<@x>(l: usize, r: usize.&::<@x>) -> usize { l + r.* };
+static f = fn() -> usize { add(a(), mk().&) };
+"#,
+        "f()",
+        expect![[r#"
+            output: "am"
+            => 3
+        "#]],
+    );
+}
+
+/// A temporary in a CONST context is an ordinary local there too: the
+/// compile-time evaluator allocates it, borrows it and reads through the
+/// borrow, in a `static`'s initializer and in a `const` block alike.
+#[test]
+fn a_temporary_can_be_borrowed_at_compile_time() {
+    check_const(
+        r#"
+static get = const fn::<@a>(r: usize.&::<@a>) -> usize { r.* };
+static mk = const fn() -> usize { 7 };
+static folded: usize = get(mk().&);
+static in_const_block = const { get(mk().&) };
+"#,
+        expect![[r#"
+            get = fn
+            mk = fn
+            folded = 7
+            in_const_block = 7
+        "#]],
+    );
+}
+
+/// `.&raw` of a temporary runs against the same storage `.&` would get:
+/// `mkp().a.&raw mut` writes into the temporary's own field, not a copy
+/// of it, and the read through `p` sees the materialized value.
+#[test]
+fn a_raw_pointer_to_a_temporary_reads_and_writes_its_storage() {
+    check_run(
+        r#"
+type Pair = struct { a: usize, b: usize };
+static mk = fn() -> usize { 7 };
+static mkp = fn() -> Pair { Pair(struct { a = 1, b = 2 }) };
+static main = fn() -> usize {
+    let p = mk().&raw;
+    let q = mkp().a.&raw mut;
+    unsafe {
+        q.* = 9;
+        p.* + q.*
+    }
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 16
+        "#]],
+    );
+}

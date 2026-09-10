@@ -120,6 +120,19 @@
   unwinding has an implicit exit edge at every call, which is why such languages need
   destructors. A `break` is not a back edge; it carries its state to the loop's exit join,
   while a `continue` answers the same entry-equals-back-edge invariant a fall-through does.
+- **M12** A borrowed operand that is not a place gets a temporary: an anonymous local nobody
+  can name, born where the expression is written, living to the end of the innermost enclosing
+  block, fresh per loop iteration; a shorter life is spelled with an explicit block. The root
+  of the borrowed place is what gets storage. Sound without destructors: a longer life is
+  observable only through borrows, so strictly more programs check and no behaviour changes.
+  Linears self-exclude: a nameless value can never be consumed, so a must-consume temporary is
+  refused under both borrow flavours. A refusal that blames one says "temporary", since there
+  is no `let` to point at.
+- **M20** Address-of pins the place the address was taken of and no more, except that arrays
+  are contiguous and `add` walks them: a pointer to an element pins its whole array, a pointer
+  to a field pins only the field. Materializing a temporary's root is therefore the simple
+  correct choice; copying a field-projected prefix instead is an optimization no program can
+  observe, and belongs to a MIR pass.
 
 ### Ruled, not built
 
@@ -132,13 +145,6 @@
   any part of it, never partially — the path granularity M11 buys stops at the node boundary.
   Strictly more UB than true per-location tracking, on the stated posture; relaxing to genuine
   sub-node partitioning later is pure UB removal.
-- **M12** Temporaries live to the end of the innermost enclosing block, always: no shape-based
-  extension rules, no liveness derivation; a shorter life is spelled with an explicit block. A
-  match scrutinee lives to the end of the match; a loop condition is per iteration. Tail
-  expressions are a borrow-check question, not a storage rule, with one diagnostic
-  requirement: name where the temporary died, because this is the case where the user sees no
-  block. Once destructors exist, both directions change observable behaviour, so an ASAP
-  variant lands with them or not at all.
 - **M17** Self-referential structs are not v1, deferred on the typing rather than the move
   hook: a field pointing into its own struct needs a region naming the struct's own storage,
   which is not a parameter. Direction: moves may run code, the opposite of Rust, which made
@@ -202,6 +208,20 @@
   which the model deletes, so any cheap approximation false-positives. **M08**
 - **Binder markers in patterns (`t.&`) and binders-as-places** — patterns stay
   construction-shaped; a per-binder mode breaks construction/destruction symmetry. **M13**
+- **A `let`'s temporaries get the block, other statements' get the statement
+  (naming-as-override)** — M12 chose one rule; naming-as-override is a second rule to learn and
+  buys nothing without destructors. **M12**
+- **A synthesized `let` / hoisting a temporary's initializer to the head of its block** —
+  reorders operands (`add(a(), mk().&)` would run `mk()` first) and drags a temporary out of a
+  `match` arm onto paths that never run. A mark on the borrowed root instead: the value is
+  evaluated where it is written, so operands keep their order and a `match` arm's temporary is
+  created only on the path that runs. **M12**
+- **Materializing a name whatever it resolves to** — a `const` mention is a value, but lowering
+  runs before resolution, and the refusals it would silence (a const parameter, `.&mut` of a
+  `static`) are the ones stating a rule. **M12**
+- **Refusing `.&raw`/`.&raw mut` of a temporary** — a raw pointer to a block-local dangles
+  just as easily, checks clean, and is priced at the deref under `unsafe` (D1); refusing the
+  temporary buys no safety the local case does not already forgo. **M12**
 
 ## Re-evaluate when
 
@@ -216,7 +236,14 @@
   kills, once per access expression. Settled when precision is worth buying (below). **M14**
 - **MIR gains storage-end markers** — the checker's liveness notion is the frame, like the
   interpreter's, so a borrow of an inner-block local read after its block ends is caught by
-  neither layer. **M12 M14**
+  neither layer; a temporary's block end is the same hole, and `Body::temps` plus the block
+  rule supply its dead point when the markers exist. **M12 M14**
+- **Storage death is enforced** — today no layer enforces a temporary's block end; halvko/must
+  issue #18 builds it in parallel, and this line goes when it lands. **M12**
+- **A temporary can be mentioned twice** — today no name resolves to one, so it is mentioned
+  exactly once (at the borrow that created it) and at most one loan is ever rooted in it; a
+  second mention (a named temporary, a `let`-less reuse) revives every aliasing question the
+  once-mentioned argument answers for free. **M12**
 - **Precision is worth buying** — recorded over-refusals: every array index overlaps every
   other; and the static rule is stricter than the interpreter on foreign reads, deliberately
   (the ordinary NLL rule; the tree's freeze is operational semantics for unsafe code).
@@ -246,7 +273,10 @@
   everywhere). Who the customer is decides it. **M17**
 - **Destructors land** — they owe the match-scrutinee-temporary lint (a scrutinee with a
   destructor keeps its loans live through every arm: the deadlocking `match lock()`), drop
-  order, glue, partial moves, and the ASAP decision. **M12**
+  order, glue, partial moves, and the ASAP decision. Both directions of a temporary's life
+  become observable then, and a destruct-bearing temporary needs a decision — statement scope,
+  an ASAP variant, or the linear line (a nameless value is never consumed, so today a
+  must-consume temporary simply refuses). **M12**
 - **Data races** are out of scope for both aliasing models. Whether well-typed safe programs
   can violate the model is tested, not proven (as in Rust); it lands at the soundness review.
   **M10**

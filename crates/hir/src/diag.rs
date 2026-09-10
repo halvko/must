@@ -419,6 +419,11 @@ pub fn already_consumed_dup(name: &str, root: &Affine) -> Option<String> {
 pub const DISCARDED_LINEAR: &str = "this value must be consumed; its type has no `forget` \
      capability, so it cannot be discarded";
 
+/// A value that must be consumed, borrowed as a temporary (M12).
+pub const BORROWED_LINEAR_TEMPORARY: &str = "this value must be consumed, so it cannot be \
+     borrowed as a temporary: a temporary has no name, and nothing could ever consume it — \
+     bind it with `let` first, then borrow the binding";
+
 /// [`DISCARDED_LINEAR`] where the discarded value's type is a rigid
 /// parameter — the statement-position twin of [`not_consumed_param`].
 pub fn discarded_param(param: &str) -> String {

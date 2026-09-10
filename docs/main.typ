@@ -1041,7 +1041,8 @@ Raw pointers reach places all the way down. The types are `T.&raw`
 `place.&raw mut`, and a place is now the full grammar: a variable, a chain
 of its fields and elements (`r.a`, `a[i]`, `a[i][j]`), a `static` or `const`
 item (a `const` use's own copy), or a chain rooted in a deref (`p.*.x` — a
-place reached *through* a pointer). There is no address-of a temporary. A
+place reached *through* a pointer). An operand that is not a place is
+materialized as a temporary first (see "Borrowing a temporary" below). A
 pointer is followed with the postfix deref `p.*`; there is **no
 auto-deref**, so `p.*` is the only way a pointer is ever read or written.
 The old prefix spelling (`&raw place` / `&raw mut place`) is retired:
@@ -1458,6 +1459,37 @@ borrow. A shared receiver never reaches a `Self.&mut` member at all, because
 shared never becomes exclusive. And a borrow receiver never reaches a member
 whose `Self` is a *value* — that would be auto-deref; write `c.*.take()`.
 
+=== Borrowing a temporary
+
+`.&` and `.&mut` borrow a *place*, and a freshly computed value is not one.
+The compiler gives it storage: an anonymous local nobody can name, created
+where the expression is written.
+
+```must
+static forty = fn () -> usize { 40 };
+static get = fn::<@a>(r: usize.&::<@a>) -> usize { r.* };
+
+static main = fn () -> usize {
+    get(forty().&)    // a temporary, borrowed: 40
+};
+```
+
+The *whole* value gets the storage, so a borrow of a field or element
+(`mk().a.&mut`) points into the temporary, and a write through it lands
+there. The expression is evaluated where it is written: operands keep their
+order, and a temporary in a `match` arm or a loop body is created on the
+path that runs, each time it runs. A `const` context works the same way.
+
+A temporary lives to the end of the innermost enclosing block; a shorter
+life is spelled with an explicit block. A borrow of a temporary that has to
+outlive the body is refused as `borrowed value does not live long enough`,
+naming the temporary.
+
+`.&raw` and `.&raw mut` materialize the same storage. One thing is refused
+under every flavor: a temporary of a type that *must be consumed*. It has no
+name, so nothing could consume it; bind it with `let` first. A *name* is
+never materialized, whatever it resolves to.
+
 === Members with their own type parameters
 
 A member may also bind *type* parameters of its own, beside its regions.
@@ -1635,7 +1667,8 @@ nothing about another. That is fine for what it is for.
 Its liveness notion is the FRAME, not the block, and so is the checker's:
 neither models the end of a block's storage, so a borrow of an inner-block
 local, read after its block ends, is caught by NEITHER layer. It is the one
-shape in this chapter that is neither rejected nor detected.
+shape in this chapter that is neither rejected nor detected, and the end of
+a temporary's block is the same shape.
 
 In the other direction the static rule is deliberately stricter than the
 interpreter on two points. Reading a place around a live exclusive borrow

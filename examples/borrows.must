@@ -13,6 +13,10 @@
 // a distinguished kind — they are erased before anything is compiled, so a
 // region can reject a program and can never change what it does.
 //
+// A borrow's operand is a PLACE — a variable, a chain of its fields and
+// elements, a `static`, a place reached through a borrow — or a value that
+// has none, which is then given one: see the temporaries section below.
+//
 // Nothing is elided in a signature yet. Every region a signature binds is
 // written out by hand, deliberately, until enough code exists to say which
 // elision rule would have earned its keep. A CALL SITE is the opposite: it
@@ -132,6 +136,15 @@ static pick_flavors = fn::<@a>(x: usize.&::<@a>, m: usize.&mut::<@a>, c: bool) -
     get(if c { x } else { m })
 };
 
+// ---- borrowing a temporary ----------------------------------------------
+//
+// A value with no place is given one when borrowed: an anonymous local that
+// lives to the end of the innermost enclosing block. The whole value gets
+// the storage, so a borrow of its field points into the temporary. A value
+// that must be consumed is refused: bind it with `let` first.
+static forty = fn () -> usize { 40 };
+static one = fn () -> struct { n: usize } { struct { n = 1 } };
+
 static main = fn () -> () {
     let mut n: usize = 1;
 
@@ -173,6 +186,13 @@ static main = fn () -> () {
 
     // Two fields of one struct, borrowed at once.
     print_usize(fields());
+
+    // A temporary, borrowed: `forty()` has no place, so it is given one.
+    print_usize(get(forty().&));
+
+    // Written through a borrow of the temporary's own field: both bumps
+    // land in the temporary's storage, and the member reads back 3.
+    print_usize(bump_twice(one().n.&mut));
 };
 
 // The language has no integer formatting yet and `print` takes a `str`, so
