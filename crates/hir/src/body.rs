@@ -4,6 +4,15 @@
 //! moves things around — that equality is what stops salsa from re-running
 //! inference of untouched items. All positions live in [`BodySourceMap`],
 //! which only the final, range-producing layers (diagnostics, IDE) read.
+//!
+//! Lowering is almost entirely a transcription of the syntax tree, with one
+//! exception that is a JUDGEMENT: a borrowed operand that is not a place
+//! gets storage of its own ([`Body::temps`]). It is decided here, at the
+//! borrow's own lowering, because the question it asks — "is this a
+//! place?" — is the one inference, the loan checker and MIR all ask of
+//! [`ExprData`], and asking it once means those three see an ordinary local
+//! instead of each re-deriving what a temporary is. It adds no expression
+//! and moves no evaluation.
 
 use base_db::Db;
 use la_arena::{Arena, ArenaMap, Idx};
@@ -30,6 +39,19 @@ pub struct Body {
     pub pats: Arena<PatData>,
     /// The item's initializer expression (usually a `fn` literal).
     pub root: Option<ExprId>,
+    /// Borrowed values that are not places, keyed by the root of the
+    /// borrowed place, each mapped to the anonymous local holding it
+    /// (`docs/design/memory-and-borrows.md`, M12).
+    pub temps: ArenaMap<ExprId, BindingId>,
+}
+
+impl Body {
+    /// The anonymous local an expression's value is materialized into, if
+    /// it is a materialized temporary — the one question every consumer of
+    /// [`Body::temps`] asks.
+    pub fn temp_local(&self, expr: ExprId) -> Option<BindingId> {
+        self.temps.get(expr).copied()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -567,6 +589,7 @@ pub fn body_with_source_map<'db>(db: &'db dyn Db, item: ItemId<'db>) -> (Body, B
             bindings: ctx.bindings,
             pats: ctx.pats,
             root,
+            temps: ctx.temps,
         },
         ctx.source_map,
     )
@@ -585,6 +608,7 @@ struct LowerCtx {
     bindings: Arena<BindingData>,
     pats: Arena<PatData>,
     source_map: BodySourceMap,
+    temps: ArenaMap<ExprId, BindingId>,
 }
 
 impl LowerCtx {
@@ -862,7 +886,7 @@ impl LowerCtx {
                 self.alloc_expr(ExprData::Index { base, index }, it.syntax())
             }
             ast::Expr::AddrOfExpr(it) => {
-                let place = self.lower_opt_expr(it.expr());
+                let place = self.lower_borrowed_place(it.expr());
                 self.alloc_expr(
                     ExprData::AddrOf {
                         mutable: it.is_mut(),
@@ -880,7 +904,7 @@ impl LowerCtx {
             // delete (G11); lowering steps over it, so recovery is "as if
             // it had not been written" — the G10 call-site precedent.
             ast::Expr::BorrowExpr(it) => {
-                let place = self.lower_opt_expr(it.receiver());
+                let place = self.lower_borrowed_place(it.receiver());
                 self.alloc_expr(
                     ExprData::Borrow {
                         mutable: it.is_mut(),
@@ -1141,6 +1165,30 @@ impl LowerCtx {
         self.alloc_expr(ExprData::Block { stmts, tail }, block.syntax())
     }
 
+    /// Lower the operand of a borrow. An operand that is not a place gets
+    /// an anonymous local in [`Body::temps`] (M12); the expression itself
+    /// stays where it is written.
+    fn lower_borrowed_place(&mut self, expr: Option<ast::Expr>) -> ExprId {
+        let place = self.lower_opt_expr(expr);
+        let Some(root) = borrowed_temp_root(&self.exprs, place) else {
+            return place;
+        };
+        let binding = self.bindings.alloc(BindingData {
+            // Nameless on purpose: nothing may resolve to it, which is
+            // what makes it mentioned exactly once. No source-map entry
+            // either — no syntax node IS this binding, so `node_for_binding`
+            // is `None` and every declaration-site note falls back.
+            name: String::new(),
+            type_ref: None,
+            // A fresh local nobody else can reach — exclusivity is
+            // trivially satisfiable, so `.&mut` of a temporary is legal
+            // without a `mut` nobody could have written.
+            mutable: true,
+        });
+        self.temps.insert(root, binding);
+        place
+    }
+
     fn alloc_binding(
         &mut self,
         name: Option<ast::Name>,
@@ -1164,6 +1212,22 @@ impl LowerCtx {
         self.source_map.binding_map.insert(ptr, id);
         self.source_map.binding_map_back.insert(id, ptr);
         id
+    }
+}
+
+/// The root of a borrowed place when it is a value rather than a place:
+/// a name or a deref already has storage, broken source gets nothing.
+/// Descends exactly as the place walks in `infer`, `outlives` and MIR do,
+/// so the four agree on which root a borrow is rooted in.
+fn borrowed_temp_root(exprs: &Arena<ExprData>, place: ExprId) -> Option<ExprId> {
+    let mut root = place;
+    loop {
+        match &exprs[root] {
+            ExprData::Field { receiver, .. } => root = *receiver,
+            ExprData::Index { base, .. } => root = *base,
+            ExprData::NameRef(_) | ExprData::Deref { .. } | ExprData::Missing => return None,
+            _ => return Some(root),
+        }
     }
 }
 

@@ -13,6 +13,10 @@
 // a distinguished kind — they are erased before anything is compiled, so a
 // region can reject a program and can never change what it does.
 //
+// A borrow's operand is a PLACE — a variable, a chain of its fields and
+// elements, a `static`, a place reached through a borrow — or a value that
+// has none, which is then given one: see the temporaries section below.
+//
 // Nothing is elided in a signature yet. Every region a signature binds is
 // written out by hand, deliberately, until enough code exists to say which
 // elision rule would have earned its keep. A CALL SITE is the opposite: it
@@ -132,6 +136,25 @@ static pick_flavors = fn::<@a>(x: usize.&::<@a>, m: usize.&mut::<@a>, c: bool) -
     get(if c { x } else { m })
 };
 
+// ---- borrowing a temporary ----------------------------------------------
+//
+// A borrow needs a PLACE, and a value that was just computed is not one.
+// Rather than refuse, the compiler gives the value storage: an anonymous
+// local nobody can name, born where the expression is written and living
+// to the end of the innermost enclosing block (a loop body's is fresh per
+// iteration; a shorter life is spelled with an explicit block). So a fresh
+// value can be borrowed straight into the call that wants it. The WHOLE
+// value is what gets storage, so a borrow of one of its fields points into
+// the temporary itself, not at a copy of the field — a write through that
+// borrow lands in the temporary.
+//
+// Two things stay refused: `.&raw` of a temporary (a raw pointer carries
+// no region, so nothing would catch it outliving the storage), and a
+// temporary of a type that must be consumed (it has no name, so nothing
+// could ever consume it — bind it with `let` first).
+static forty = fn () -> usize { 40 };
+static one = fn () -> struct { n: usize } { struct { n = 1 } };
+
 static main = fn () -> () {
     let mut n: usize = 1;
 
@@ -173,6 +196,13 @@ static main = fn () -> () {
 
     // Two fields of one struct, borrowed at once.
     print_usize(fields());
+
+    // A temporary, borrowed: `forty()` has no place, so it is given one.
+    print_usize(get(forty().&));
+
+    // Written through a borrow of the temporary's own field: both bumps
+    // land in the temporary's storage, and the member reads back 3.
+    print_usize(bump_twice(one().n.&mut));
 };
 
 // The language has no integer formatting yet and `print` takes a `str`, so

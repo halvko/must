@@ -5385,3 +5385,55 @@ fn a_stale_loan_refusal_carries_its_companions() {
     assert_eq!(errors[0].related[1].message, "and it is still used here");
     assert_eq!(&src[errors[0].related[1].range], "a.*");
 }
+
+/// A MATERIALIZED TEMPORARY (M12) is a binding with no name, and the
+/// editor never sees it: the locals offered in a body that borrows one are
+/// the named locals only — no empty-labelled row, nothing to hover, nothing
+/// to jump to.
+#[test]
+fn completions_never_offer_a_materialized_temporary() {
+    check_completions(
+        r#"
+static get = fn::<@a>(r: usize.&::<@a>) -> usize { r.* };
+static mk = fn () -> usize { 7 };
+static show = fn (n: usize) -> () { };
+static main = fn () -> () {
+    let first = get(mk().&);
+    let second = get(mk().&);
+    show(fi$0);
+};
+"#,
+        expect_test::expect![[r#"
+            first Variable (usize)
+            second Variable (usize)
+            get Function (fn(usize.&::<@a>) -> usize)
+            mk Function (fn() -> usize)
+            panic Function (fn(str) -> !)
+            AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            NextChar Enum (enum { Char(char, usize), End })
+            ReadLineResult Enum (enum { Line(str), End })
+            Utf8Result Enum (enum { Ok(str), Err })
+            main Function (fn())
+            show Function (fn(usize))
+            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
+            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
+            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
+            dangling Function (fn::<T>() -> T.&raw mut)
+            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
+            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
+            print Function (fn(str))
+            read_line Function (fn() -> ReadLineResult)
+            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
+            const Keyword
+            false Keyword
+            fn Keyword
+            if Keyword
+            loop Keyword
+            match Keyword
+            struct Keyword
+            true Keyword
+            unsafe Keyword
+        "#]],
+    );
+}

@@ -60,6 +60,11 @@ pub enum LinearDiagnostic {
     },
     /// A linear value produced by a statement whose value is discarded.
     Discarded { expr: ExprId },
+    /// A linear value BORROWED as a temporary. Its own sentence rather than
+    /// [`Self::Discarded`]'s, because the reader did not discard anything:
+    /// they borrowed a value that has no name, and nothing nameless can be
+    /// consumed. The fix is always the same one — give it a name.
+    BorrowedTemporary { expr: ExprId },
     /// Assignment over a linear binding that still holds a live value.
     AssignOverLive { binding: BindingId, target: ExprId },
     /// A join whose branches disagree: consumed on one path, live on
@@ -117,6 +122,7 @@ impl LinearDiagnostic {
             LinearDiagnostic::NotConsumed { exit, .. } => Some(*exit),
             LinearDiagnostic::AlreadyConsumed { expr, .. }
             | LinearDiagnostic::Discarded { expr }
+            | LinearDiagnostic::BorrowedTemporary { expr }
             | LinearDiagnostic::CopiedOut { expr }
             | LinearDiagnostic::Repeated { expr }
             | LinearDiagnostic::ItemHoldsLinear { expr }
@@ -226,6 +232,12 @@ impl LinearDiagnostic {
                 Some(param) => diag::discarded_param(param),
                 None => diag::DISCARDED_LINEAR.to_owned(),
             },
+            // No `param` split: the advice is the same sentence whether the
+            // type is linear or a parameter that might be, because the
+            // problem is the borrow's operand and not the bound.
+            LinearDiagnostic::BorrowedTemporary { .. } => {
+                diag::BORROWED_LINEAR_TEMPORARY.to_owned()
+            }
             LinearDiagnostic::AssignOverLive { .. } => match param {
                 Some(param) => diag::assign_over_live_param(name, param),
                 None => diag::assign_over_live(name),
@@ -964,10 +976,28 @@ impl CheckCtx<'_> {
             // Not a place at all: a temporary. Its value is produced, and
             // then only projected from — so if it is linear it is lost
             // right here, with nothing left holding it.
+            //
+            // LINEARS SELF-EXCLUDE from materialization (M12), which is why
+            // giving temporaries storage needed no carve-out for them. A
+            // materialized temporary has no name, so no call can ever be
+            // written that consumes it: the borrow rule gives it storage,
+            // and this refuses it the moment its type says it must be
+            // consumed. Permanent, not interim — it is what keeps the guard
+            // problem ("hold a lock for a statement by borrowing a
+            // temporary") from arriving through linear types. `.&raw` of a
+            // linear temporary materializes exactly like `.&` now, so
+            // `body.temp_local` sees it too and this same branch reaches
+            // it with the same bind-it-with-`let`-first message — there is
+            // no separate raw path left to keep the old discard wording.
             _ => {
                 let flow = self.read_value(expr);
                 if flow == Flow::Falls && self.is_linear_expr(expr) {
-                    self.diagnostics.push(LinearDiagnostic::Discarded { expr });
+                    self.diagnostics
+                        .push(if self.body.temp_local(expr).is_some() {
+                            LinearDiagnostic::BorrowedTemporary { expr }
+                        } else {
+                            LinearDiagnostic::Discarded { expr }
+                        });
                 }
                 flow
             }

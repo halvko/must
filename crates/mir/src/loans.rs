@@ -166,7 +166,12 @@ pub enum LoanDiagnostic {
         access: ExprId,
         /// What the user did there, which is what the message names.
         kind: AccessKind,
-        /// The place the access names, rendered.
+        /// The place the access names, ALREADY RENDERED for insertion
+        /// into a sentence — quoted (`` `p.x` ``) for a named local,
+        /// phrased ("this temporary") for a materialized one, which has
+        /// no name to quote. Rendered at construction rather than in
+        /// `message` because only the analysis knows which kind of root
+        /// it had; see [`LoanChecker::render_place`].
         place: String,
         /// The loan it kills — the borrow's own mint site.
         borrow: ExprId,
@@ -175,7 +180,13 @@ pub enum LoanDiagnostic {
     },
     /// A loan of a local's own storage is still live where the body
     /// returns — the storage is gone by then.
-    Escapes { borrow: ExprId },
+    Escapes {
+        borrow: ExprId,
+        /// Whether the storage is a MATERIALIZED TEMPORARY (M12) rather
+        /// than a named local — the sentence names which, because the user
+        /// wrote no `let` for a temporary.
+        temporary: bool,
+    },
 }
 
 /// The operation that invalidated a loan, named as the user wrote it. Two
@@ -228,7 +239,7 @@ impl LoanDiagnostic {
     pub fn expr(&self) -> ExprId {
         match self {
             LoanDiagnostic::Invalidated { access, .. } => *access,
-            LoanDiagnostic::Escapes { borrow } => *borrow,
+            LoanDiagnostic::Escapes { borrow, .. } => *borrow,
         }
     }
 
@@ -269,12 +280,15 @@ impl LoanDiagnostic {
                 still_used,
                 ..
             } => {
+                // `place` arrives rendered — quoted for a name, phrased
+                // for a temporary — so these sentences read the same
+                // either way and none has to know which it got.
                 let did = match kind {
-                    AccessKind::MutBorrow => format!("using `{place}` mutably here"),
-                    AccessKind::Write => format!("writing to `{place}` here"),
-                    AccessKind::SharedBorrow => format!("borrowing `{place}` here"),
-                    AccessKind::Read => format!("reading `{place}` here"),
-                    AccessKind::Move => format!("moving `{place}` here"),
+                    AccessKind::MutBorrow => format!("using {place} mutably here"),
+                    AccessKind::Write => format!("writing to {place} here"),
+                    AccessKind::SharedBorrow => format!("borrowing {place} here"),
+                    AccessKind::Read => format!("reading {place} here"),
+                    AccessKind::Move => format!("moving {place} here"),
                 };
                 let victim = if kind.is_write() {
                     "a borrow of it"
@@ -308,6 +322,12 @@ impl LoanDiagnostic {
                 };
                 format!("{did} invalidates {victim} that is still live: {because}")
             }
+            LoanDiagnostic::Escapes {
+                temporary: true, ..
+            } => "borrowed value does not live long enough: this borrows a temporary, \
+                  which lives no longer than the block that creates it, but the borrow \
+                  is still live when the body returns"
+                .to_owned(),
             LoanDiagnostic::Escapes { .. } => "borrowed value does not live long enough: this \
                                               borrows a local, but the borrow is still live \
                                               when the body returns and the local is gone by \
@@ -1300,6 +1320,7 @@ impl<'a> BodyCheck<'a> {
                         if of_storage && !loan.reaches_universal && escaped.insert(loan.origin) {
                             diagnostics.push(LoanDiagnostic::Escapes {
                                 borrow: loan.origin,
+                                temporary: self.is_temporary(loan.place.local),
                             });
                         }
                     }
@@ -1405,15 +1426,32 @@ impl<'a> BodyCheck<'a> {
         ) && matches!(access.place.projection.last(), Some(ProjElem::Deref))
     }
 
-    /// The place as the user wrote it: `n`, `p.x`, `r.*.v`, `bb.*.*`,
-    /// `arr[_]`. For an inserted reborrow the trailing deref is dropped,
-    /// so `bump(r)` names `r`.
+    /// Whether a local is a MATERIALIZED TEMPORARY (M12): the local of a
+    /// binding hir minted for a borrowed value with no place. Asked of
+    /// `Body::temps` rather than of the local's missing name, so the
+    /// answer is the mark and not a convention about names.
+    fn is_temporary(&self, local: LocalId) -> bool {
+        self.body.locals[local]
+            .binding
+            .is_some_and(|binding| self.hir_body.temps.values().any(|&temp| temp == binding))
+    }
+
+    /// The place as the user wrote it, quoted for insertion into a
+    /// sentence: `` `n` ``, `` `p.x` ``, `` `r.*.v` ``, `` `bb.*.*` ``,
+    /// `` `arr[_]` ``. For an inserted reborrow the trailing deref is
+    /// dropped, so `bump(r)` names `r`.
+    ///
+    /// A MATERIALIZED TEMPORARY has no name, and inventing one (`_t3`) or
+    /// quoting the source snippet would both put text in the message that
+    /// is not in the program. It gets a phrase instead — and the path with
+    /// it, because "this temporary" is already as precise as the reader
+    /// can act on: there is no second mention of it to disambiguate from.
     fn render_place(&self, place: &Place, inserted_reborrow: bool) -> String {
+        if self.is_temporary(place.local) {
+            return "this temporary".to_owned();
+        }
         let data = &self.body.locals[place.local];
-        let mut out = data
-            .name
-            .clone()
-            .unwrap_or_else(|| "<temporary>".to_owned());
+        let mut out = format!("`{}", data.name.clone().unwrap_or_default());
         let mut ty = Some(data.ty.clone());
         let shown = place.projection.len() - usize::from(inserted_reborrow);
         for elem in &place.projection[..shown] {
@@ -1452,6 +1490,7 @@ impl<'a> BodyCheck<'a> {
                 }
             }
         }
+        out.push('`');
         out
     }
 

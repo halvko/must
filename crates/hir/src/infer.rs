@@ -930,11 +930,20 @@ pub enum InferenceDiagnostic {
         name: String,
         receiver_ty: Ty,
     },
-    /// `.&`/`.&mut` of something that is not a place — the safe-borrow
-    /// twin of [`Self::AddrOfNonPlace`], with the same accepted places and
-    /// the same reason (borrowing a temporary would need rvalue promotion,
-    /// which the language does not have).
-    BorrowNonPlace { expr: ExprId },
+    /// `.&`/`.&mut` of a NAME that is not a value with storage — a const
+    /// parameter, a type, a trait, a builtin. Narrower than its raw twin
+    /// [`Self::AddrOfNonPlace`]: a safe borrow of a value that is not a
+    /// place is no longer refused, the value is given storage instead
+    /// (M12, [`crate::body::Body::temps`]), so what remains here is a name
+    /// that has no value to store.
+    BorrowNonPlace {
+        expr: ExprId,
+        /// The name written at the root.
+        name: String,
+        /// What it resolved to, as the message spells it ("a const
+        /// parameter", "a type", ...).
+        what: &'static str,
+    },
     /// `.&mut` of a place whose ROOT binding is not `mut` — the safe twin
     /// of [`Self::AddrOfMutImmutable`], same transitive-mutability rule.
     BorrowMutImmutable {
@@ -984,8 +993,11 @@ pub enum InferenceDiagnostic {
     },
     /// `.&raw`/`.&raw mut` of something that is not a place — the accepted
     /// places are a variable, a chain of its fields and elements, a
-    /// `static`/`const` item, or a chain rooted in a deref (`.&raw` of a
-    /// temporary is refused outright, dodging rvalue promotion entirely).
+    /// `static`/`const` item, or a chain rooted in a deref. An rvalue
+    /// operand is not refused any more: it is materialized (M12,
+    /// [`crate::body::Body::temps`]) exactly as a safe borrow's would be.
+    /// What still fires this is a NAME that resolves to something with no
+    /// storage at all — a const parameter, a type, a trait, a builtin.
     AddrOfNonPlace {
         /// The address-of expression.
         expr: ExprId,
@@ -1567,7 +1579,7 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::MemberGenericArgCount { expr, .. }
             | InferenceDiagnostic::VariantOwnGenericArgs { expr, .. }
             | InferenceDiagnostic::AddrOfNonPlace { expr }
-            | InferenceDiagnostic::BorrowNonPlace { expr }
+            | InferenceDiagnostic::BorrowNonPlace { expr, .. }
             | InferenceDiagnostic::DotThroughBorrow { expr, .. }
             | InferenceDiagnostic::MoveOutOfBorrow { expr, .. } => *expr,
             InferenceDiagnostic::BorrowMutImmutable { root, .. }
@@ -2141,8 +2153,8 @@ impl InferenceDiagnostic {
                  there is no auto-deref; write `.*.{name}`",
                 receiver_ty.display()
             ),
-            InferenceDiagnostic::BorrowNonPlace { .. } => {
-                "`.&` can only borrow a variable, one of its fields, or a `static`".to_owned()
+            InferenceDiagnostic::BorrowNonPlace { name, what, .. } => {
+                format!("`.&` cannot borrow `{name}`: it is {what}, not a value with storage")
             }
             InferenceDiagnostic::BorrowMutImmutable { name, place, .. } => {
                 if place == name {
@@ -2864,17 +2876,26 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             });
                     }
                 }
-                Some(
-                    Resolution::ConstParam(_)
-                    | Resolution::TypeItem(_)
-                    | Resolution::TraitItem(_)
-                    | Resolution::Builtin(_),
-                ) => {
+                Some(resolution) => {
+                    let what = match resolution {
+                        Resolution::ConstParam(_) => "a const parameter",
+                        Resolution::TypeItem(_) => "a type",
+                        Resolution::TraitItem(_) => "a trait",
+                        Resolution::Builtin(_) => "a builtin",
+                        // Judged above; kept total.
+                        Resolution::Local(_) | Resolution::Item(_) => return,
+                        // Justified by the duplicate-definition diagnostic.
+                        Resolution::Ambiguous(_) => return,
+                    };
                     self.result
                         .diagnostics
-                        .push(InferenceDiagnostic::BorrowNonPlace { expr: borrow });
+                        .push(InferenceDiagnostic::BorrowNonPlace {
+                            expr: borrow,
+                            name: name.clone(),
+                            what,
+                        });
                 }
-                Some(Resolution::Ambiguous(_)) | None => {}
+                None => {}
             },
             // `r.*.field.&mut` — a reborrow through the parent named by
             // this outermost deref. A RAW parent is refused outright:
@@ -2932,11 +2953,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
             }
             ExprData::Missing => {}
-            _ => {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::BorrowNonPlace { expr: borrow });
-            }
+            _ => self.type_temp_root(root),
         }
     }
 
@@ -7225,6 +7242,24 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// `const` has no place to hand out mutably), and, for deref-rooted
     /// places, requires every step the chain travels through to grant a
     /// write permission ([`InferCtx::shared_step_governing`]).
+    /// A borrowed root that is neither a name nor a deref is a materialized
+    /// temporary (M12): give its anonymous local the root's type. The
+    /// binding is `mut` and reached through nothing, so there is no
+    /// mutability to check and no parent loan to relate; the escape check
+    /// bounds it like any body-local. Lowering marks every such root, so a
+    /// missing mark is broken source and stays silent.
+    fn type_temp_root(&mut self, root: ExprId) {
+        if let Some(binding) = self.body.temp_local(root) {
+            let ty = self
+                .result
+                .type_of_expr
+                .get(root)
+                .cloned()
+                .unwrap_or(Ty::Error);
+            self.result.type_of_binding.insert(binding, ty);
+        }
+    }
+
     fn check_addr_of_place(&mut self, addr_of: ExprId, mutable: bool, place: ExprId) {
         // The whole chain's write permission, needed only by the `mut`
         // flavor: a shared address of a shared place is what `.&raw` is
@@ -7315,11 +7350,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             }
             // Broken source: the parse error covers it.
             ExprData::Missing => {}
-            _ => {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::AddrOfNonPlace { expr: addr_of });
-            }
+            _ => self.type_temp_root(root),
         }
     }
 
