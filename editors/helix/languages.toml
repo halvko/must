@@ -1,0 +1,62 @@
+# Must support for Helix. Helix has no extension system: append this to
+# ~/.config/helix/languages.toml (or `.helix/languages.toml` in a project).
+#
+# `command` assumes `must-lsp` on PATH (`cargo install --path crates/must-lsp`).
+# To dogfood a local build instead, point both `command`s at
+# <this repo>/target/debug/must-lsp (absolute path; Helix does not expand
+# `~` or resolve relative paths against the workspace).
+#
+# What Helix gets from the server: diagnostics, hover, goto-definition,
+# completions (snippets included), code actions, and the debug adapter.
+# What it cannot get: syntax highlighting and the ▶ run lenses. Helix has
+# no LSP semantic-token or code-lens support, and Must has no tree-sitter
+# grammar, so `.must` files render uncolored. Run a file from the shell
+# instead: `must-lsp run path/to/file.must`.
+
+[language-server.must-lsp]
+command = "must-lsp"
+# Server logs (a `tracing` env-filter) go to Helix's log file (`hx --log`):
+# environment = { MUST_LSP_LOG = "must_lsp=debug" }
+
+[[language]]
+name = "must"
+scope = "source.must"
+file-types = ["must"]
+comment-tokens = ["//"]
+block-comment-tokens = { start = "/*", end = "*/" }
+language-servers = ["must-lsp"]
+indent = { tab-width = 4, unit = "    " }
+
+# The adapter is the same binary in `dap` mode (it *is* the interpreter, so
+# every session is a launch). Start one with `:debug-start` / space-g-l and
+# pick a template; breakpoints, stepping, the stack and locals all work, and
+# `print` output lands in the debug pane. `absolute-paths` matters: Helix's
+# filename completion hands over paths relative to its cwd and the adapter
+# takes `program` verbatim.
+[language.debugger]
+name = "must"
+transport = "stdio"
+command = "must-lsp"
+args = ["dap"]
+quirks = { absolute-paths = true }
+
+[[language.debugger.templates]]
+name = "run file (main())"
+request = "launch"
+completion = [{ name = "program", completion = "filename" }]
+args = { program = "{0}" }
+
+[[language.debugger.templates]]
+name = "run file with entry expression"
+request = "launch"
+completion = [
+  { name = "program", completion = "filename" },
+  { name = "entry", default = "main()" },
+]
+args = { program = "{0}", entry = "{1}" }
+
+[[language.debugger.templates]]
+name = "run file, stop on entry"
+request = "launch"
+completion = [{ name = "program", completion = "filename" }]
+args = { program = "{0}", stopOnEntry = true }
