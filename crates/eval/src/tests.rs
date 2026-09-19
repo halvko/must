@@ -693,19 +693,21 @@ fn a_borrowed_character_match_dispatches_through_the_borrow() {
     // equality test reads the POINTEE, so a `char.&` scrutinee dispatches
     // exactly as the owned value would.
     check_run(
-        "static classify = fn::<@a>(c: char.&::<@a>) -> usize {\n\
-             match c {\n\
-                 '(' => 1,\n\
-                 ')' => 2,\n\
-                 _ => 0,\n\
-             }\n\
-         };\n\
-         static f = fn() -> usize {\n\
-             let a = '(';\n\
-             let b = ')';\n\
-             let z = 'z';\n\
-             classify(a.&) + classify(b.&) * 10 + classify(z.&) * 100\n\
-         };",
+        r#"
+static classify = fn::<@a>(c: char.&::<@a>) -> usize {
+    match c {
+        '(' => 1,
+        ')' => 2,
+        _ => 0,
+    }
+};
+static f = fn() -> usize {
+    let a = '(';
+    let b = ')';
+    let z = 'z';
+    classify(a.&) + classify(b.&) * 10 + classify(z.&) * 100
+};
+"#,
         "f()",
         expect![[r#"
             => 21
@@ -719,12 +721,14 @@ fn a_borrowed_character_match_reads_through_the_borrow() {
     // a scrutinee invalidated before the `match` is caught at the `match`
     // itself — the same event the tag test is for an enum.
     check_run(
-        "static f = fn() -> usize {\n\
-             let mut c = 'a';\n\
-             let m = c.&mut;\n\
-             c = 'b';\n\
-             match m { 'a' => 1, _ => 0 }\n\
-         };",
+        r#"
+static f = fn() -> usize {
+    let mut c = 'a';
+    let m = c.&mut;
+    c = 'b';
+    match m { 'a' => 1, _ => 0 }
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
@@ -2574,16 +2578,18 @@ fn generic_record_constructs_and_projects() {
 #[test]
 fn generic_enum_matches_and_widens() {
     check_run(
-        "type Option = enum::<T> { Some(T), None };\n\
-         static unwrap_or = fn (o: Option::<usize>, d: usize) -> usize {\n\
-             match o { ::Some(x) => x, ::None => d, }\n\
-         };\n\
-         static main = fn () -> usize {\n\
-             let mut o = Option::<usize>::Some(3);\n\
-             let first = unwrap_or(o, 0);\n\
-             o = Option::<usize>::None;\n\
-             first + unwrap_or(o, 10)\n\
-         };",
+        r#"
+type Option = enum::<T> { Some(T), None };
+static unwrap_or = fn (o: Option::<usize>, d: usize) -> usize {
+    match o { ::Some(x) => x, ::None => d, }
+};
+static main = fn () -> usize {
+    let mut o = Option::<usize>::Some(3);
+    let first = unwrap_or(o, 0);
+    o = Option::<usize>::None;
+    first + unwrap_or(o, 10)
+};
+"#,
         "main()",
         expect![[r#"
             => 13
@@ -2594,8 +2600,10 @@ fn generic_enum_matches_and_widens() {
 #[test]
 fn generic_variant_value_renders() {
     check_run(
-        "type Option = enum::<T> { Some(T), None };\n\
-         static main = fn () -> Option::<usize> { Option::Some(3) };",
+        r#"
+type Option = enum::<T> { Some(T), None };
+static main = fn () -> Option::<usize> { Option::Some(3) };
+"#,
         "main()",
         expect![[r#"
             => Option::Some(3)
@@ -5165,8 +5173,10 @@ static main = fn() -> usize { outer::<usize>(4) };
 #[test]
 fn a_borrow_reads_and_writes_the_place_it_borrows() {
     check_run(
-        "static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
-         static f = fn () -> usize { let mut n: usize = 1; set(n.&mut, 9); n };",
+        r#"
+static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };
+static f = fn () -> usize { let mut n: usize = 1; set(n.&mut, 9); n };
+"#,
         "f()",
         expect![[r#"
             => 9
@@ -5180,15 +5190,17 @@ fn two_exclusive_borrows_of_one_place_is_detected_ub() {
     // parent, which disables the sibling `a`; writing through `a`
     // afterwards is the use of an invalidated borrow.
     check_run(
-        "static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
-         static f = fn () -> usize {\n\
-             let mut n: usize = 1;\n\
-             let a = n.&mut;\n\
-             let b = n.&mut;\n\
-             set(b, 2);\n\
-             set(a, 3);\n\
-             n\n\
-         };",
+        r#"
+static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };
+static f = fn () -> usize {
+    let mut n: usize = 1;
+    let a = n.&mut;
+    let b = n.&mut;
+    set(b, 2);
+    set(a, 3);
+    n
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
@@ -5205,13 +5217,15 @@ fn using_a_child_after_writing_through_its_parent_is_detected_ub() {
     // disabling is transitive, which is what makes one check cover a whole
     // subtree.
     check_run(
-        "static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
-         static f = fn::<@a>(m: usize.&mut::<@a>) -> () {\n\
-             let child = m.*.&mut;\n\
-             set(m, 5);\n\
-             set(child, 9);\n\
-         };\n\
-         static g = fn () -> usize { let mut n: usize = 1; f(n.&mut); n };",
+        r#"
+static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };
+static f = fn::<@a>(m: usize.&mut::<@a>) -> () {
+    let child = m.*.&mut;
+    set(m, 5);
+    set(child, 9);
+};
+static g = fn () -> usize { let mut n: usize = 1; f(n.&mut); n };
+"#,
         "g()",
         expect![[r#"
             error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
@@ -5227,13 +5241,15 @@ fn many_shared_borrows_of_one_place_are_fine() {
     // creation is a READ through the parent, which freezes rather than
     // disables.
     check_run(
-        "static get = fn::<@a>(r: usize.&::<@a>) -> usize { r.* };\n\
-         static f = fn () -> usize {\n\
-             let n: usize = 4;\n\
-             let a = n.&;\n\
-             let b = n.&;\n\
-             get(a) + get(b)\n\
-         };",
+        r#"
+static get = fn::<@a>(r: usize.&::<@a>) -> usize { r.* };
+static f = fn () -> usize {
+    let n: usize = 4;
+    let a = n.&;
+    let b = n.&;
+    get(a) + get(b)
+};
+"#,
         "f()",
         expect![[r#"
             => 8
@@ -5252,10 +5268,12 @@ fn a_nested_literal_frame_escape_is_caught_dynamically() {
     // too: the borrowed local's storage really is gone once the nested
     // literal's own frame returns.
     check_run(
-        "static main = fn () -> usize {\n\
-             let f = fn () -> usize.&::<@_> { let mut n = 7; n.& };\n\
-             f().*\n\
-         };",
+        r#"
+static main = fn () -> usize {
+    let f = fn () -> usize.&::<@_> { let mut n = 7; n.& };
+    f().*
+};
+"#,
         "main()",
         expect![[r#"
             error[UndefinedBehavior]: dangling pointer — the local it pointed to no longer exists (its frame has returned)
@@ -5272,12 +5290,14 @@ fn a_raw_only_program_never_touches_the_aliasing_tree() {
     // one — which is what makes this an addition rather than a
     // semantics change.
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut n: usize = 1;\n\
-             let p = n.&raw mut;\n\
-             let q = n.&raw mut;\n\
-             unsafe { p.* = 2; q.* = 3; p.* }\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut n: usize = 1;
+    let p = n.&raw mut;
+    let q = n.&raw mut;
+    unsafe { p.* = 2; q.* = 3; p.* }
+};
+"#,
         "f()",
         expect![[r#"
             => 3
@@ -5294,15 +5314,17 @@ fn disjoint_field_borrows_of_one_struct_coexist() {
     // two borrows of the SAME field (see
     // `two_exclusive_borrows_of_one_place_is_detected_ub`).
     check_run(
-        "static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
-         static f = fn () -> usize {\n\
-             let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };\n\
-             let bx = p.x.&mut;\n\
-             let by = p.y.&mut;\n\
-             set(bx, 10);\n\
-             set(by, 20);\n\
-             p.x + p.y\n\
-         };",
+        r#"
+static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };
+static f = fn () -> usize {
+    let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };
+    let bx = p.x.&mut;
+    let by = p.y.&mut;
+    set(bx, 10);
+    set(by, 20);
+    p.x + p.y
+};
+"#,
         "f()",
         expect![[r#"
             => 30
@@ -5317,13 +5339,15 @@ fn writing_a_disjoint_sibling_field_does_not_disturb_a_borrow() {
     // through the root with path `[y]`, foreign to a borrow of `[x]` only
     // because the paths are disjoint.
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };\n\
-             let bx = p.x.&mut;\n\
-             p.y = 50;\n\
-             bx.* = 9;\n\
-             p.x + p.y\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };
+    let bx = p.x.&mut;
+    p.y = 50;
+    bx.* = 9;
+    p.x + p.y
+};
+"#,
         "f()",
         expect![[r#"
             => 59
@@ -5338,19 +5362,21 @@ fn a_sibling_field_access_through_a_nested_pointer_runs_clean() {
     // the tree agrees, `bb.*.*.f` and `bb.*.*.g` being disjoint paths
     // through the same root.
     check_run(
-        "type P = struct { f: usize, g: usize };\n\
-         static f = fn::<@a, @b>(bb: P.&mut::<@a>.&mut::<@b>) -> usize {\n\
-             let x = bb.*.*.g.&mut;\n\
-             let y = bb.*.*.f;\n\
-             bb.*.*.f = 3;\n\
-             x.* = x.* + y;\n\
-             x.* + bb.*.*.f\n\
-         };\n\
-         static main = fn () -> usize {\n\
-             let mut p: P = P(struct { f = 1, g = 2 });\n\
-             let mut q = p.&mut;\n\
-             f(q.&mut)\n\
-         };",
+        r#"
+type P = struct { f: usize, g: usize };
+static f = fn::<@a, @b>(bb: P.&mut::<@a>.&mut::<@b>) -> usize {
+    let x = bb.*.*.g.&mut;
+    let y = bb.*.*.f;
+    bb.*.*.f = 3;
+    x.* = x.* + y;
+    x.* + bb.*.*.f
+};
+static main = fn () -> usize {
+    let mut p: P = P(struct { f = 1, g = 2 });
+    let mut q = p.&mut;
+    f(q.&mut)
+};
+"#,
         "main()",
         expect![[r#"
             => 6
@@ -5364,15 +5390,17 @@ fn two_exclusive_borrows_of_the_same_field_is_still_detected_ub() {
     // — `paths_overlap` says `[x]`/`[x]` overlap, so this must still be
     // the ordinary exclusivity violation.
     check_run(
-        "static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
-         static f = fn () -> usize {\n\
-             let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };\n\
-             let a = p.x.&mut;\n\
-             let b = p.x.&mut;\n\
-             set(b, 2);\n\
-             set(a, 3);\n\
-             p.x\n\
-         };",
+        r#"
+static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };
+static f = fn () -> usize {
+    let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };
+    let a = p.x.&mut;
+    let b = p.x.&mut;
+    set(b, 2);
+    set(a, 3);
+    p.x
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
@@ -5389,15 +5417,17 @@ fn a_whole_struct_borrow_still_dominates_every_field() {
     // field — `paths_overlap` treats the empty path as a prefix of
     // everything.
     check_run(
-        "static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
-         static f = fn () -> usize {\n\
-             let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };\n\
-             let whole = p.&mut;\n\
-             let field = p.x.&mut;\n\
-             set(field, 9);\n\
-             whole.* = struct { x = 0, y = 0 };\n\
-             p.x\n\
-         };",
+        r#"
+static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };
+static f = fn () -> usize {
+    let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };
+    let whole = p.&mut;
+    let field = p.x.&mut;
+    set(field, 9);
+    whole.* = struct { x = 0, y = 0 };
+    p.x
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
@@ -5410,15 +5440,17 @@ fn a_whole_struct_borrow_still_dominates_every_field() {
 #[test]
 fn disjoint_array_element_borrows_coexist() {
     check_run(
-        "static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
-         static f = fn () -> usize {\n\
-             let mut a: [usize; 2] = [1, 2];\n\
-             let b0 = a[0].&mut;\n\
-             let b1 = a[1].&mut;\n\
-             set(b0, 10);\n\
-             set(b1, 20);\n\
-             a[0] + a[1]\n\
-         };",
+        r#"
+static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };
+static f = fn () -> usize {
+    let mut a: [usize; 2] = [1, 2];
+    let b0 = a[0].&mut;
+    let b1 = a[1].&mut;
+    set(b0, 10);
+    set(b1, 20);
+    a[0] + a[1]
+};
+"#,
         "f()",
         expect![[r#"
             => 30
@@ -5435,14 +5467,16 @@ fn reading_one_field_through_a_wide_borrow_does_not_kill_a_sibling_field_child()
     // foreign to every child of `b`, however disjoint. Rust accepts the
     // equivalent (`let c = &mut b.y; let v = b.x; *c = 5;`).
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };\n\
-             let b = p.&mut;\n\
-             let c = b.*.y.&mut;\n\
-             let v = b.*.x;\n\
-             c.* = 5;\n\
-             v + p.y\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };
+    let b = p.&mut;
+    let c = b.*.y.&mut;
+    let v = b.*.x;
+    c.* = 5;
+    v + p.y
+};
+"#,
         "f()",
         expect![[r#"
             => 6
@@ -5453,14 +5487,16 @@ fn reading_one_field_through_a_wide_borrow_does_not_kill_a_sibling_field_child()
 #[test]
 fn reading_one_element_through_a_wide_borrow_does_not_kill_a_sibling_element_child() {
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut a: [usize; 2] = [1, 2];\n\
-             let b = a.&mut;\n\
-             let c = b.*[1].&mut;\n\
-             let v = b.*[0];\n\
-             c.* = 9;\n\
-             v + a[1]\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut a: [usize; 2] = [1, 2];
+    let b = a.&mut;
+    let c = b.*[1].&mut;
+    let v = b.*[0];
+    c.* = 9;
+    v + a[1]
+};
+"#,
         "f()",
         expect![[r#"
             => 10
@@ -5475,15 +5511,17 @@ fn reading_a_nested_field_through_a_wide_borrow_does_not_kill_a_sibling_child() 
     // checked with path `[y, u]` — disjoint from `[y, w]` — not `by`'s
     // own `[y]`.
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut p: struct { y: struct { u: usize, w: usize } } =\n\
-                 struct { y = struct { u = 1, w = 2 } };\n\
-             let by = p.y.&mut;\n\
-             let cw = by.*.w.&mut;\n\
-             let v = by.*.u;\n\
-             cw.* = 9;\n\
-             v + p.y.w\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut p: struct { y: struct { u: usize, w: usize } } =
+    struct { y = struct { u = 1, w = 2 } };
+    let by = p.y.&mut;
+    let cw = by.*.w.&mut;
+    let v = by.*.u;
+    cw.* = 9;
+    v + p.y.w
+};
+"#,
         "f()",
         expect![[r#"
             => 10
@@ -5500,13 +5538,15 @@ fn reading_a_sibling_field_by_name_does_not_kill_a_field_child() {
     // (`lower_place_read`), not as a copy of the whole `p` followed by a
     // field extraction. Rust accepts the equivalent.
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };\n\
-             let bx = p.x.&mut;\n\
-             let v = p.y;\n\
-             bx.* = 9;\n\
-             p.x + p.y + v\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };
+    let bx = p.x.&mut;
+    let v = p.y;
+    bx.* = 9;
+    p.x + p.y + v
+};
+"#,
         "f()",
         expect![[r#"
             => 13
@@ -5517,13 +5557,15 @@ fn reading_a_sibling_field_by_name_does_not_kill_a_field_child() {
 #[test]
 fn reading_a_sibling_element_by_name_does_not_kill_an_element_child() {
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut a: [usize; 3] = [1, 2, 3];\n\
-             let b0 = a[0].&mut;\n\
-             let v = a[1];\n\
-             b0.* = 9;\n\
-             a[0] + v\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut a: [usize; 3] = [1, 2, 3];
+    let b0 = a[0].&mut;
+    let v = a[1];
+    b0.* = 9;
+    a[0] + v
+};
+"#,
         "f()",
         expect![[r#"
             => 11
@@ -5536,14 +5578,16 @@ fn reading_a_nested_field_by_name_does_not_kill_a_sibling_child() {
     // Two steps deep, no deref anywhere: `p.x.y` must carry `[x, y]`,
     // disjoint from the borrow's `[x, z]`.
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut p: struct { x: struct { y: usize, z: usize }, w: usize } =\n\
-                 struct { x = struct { y = 1, z = 2 }, w = 3 };\n\
-             let c = p.x.z.&mut;\n\
-             let v = p.x.y;\n\
-             c.* = 5;\n\
-             v + p.x.z\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut p: struct { x: struct { y: usize, z: usize }, w: usize } =
+    struct { x = struct { y = 1, z = 2 }, w = 3 };
+    let c = p.x.z.&mut;
+    let v = p.x.y;
+    c.* = 5;
+    v + p.x.z
+};
+"#,
         "f()",
         expect![[r#"
             => 6
@@ -5556,14 +5600,16 @@ fn reading_a_disjoint_top_level_field_does_not_kill_a_deeper_child() {
     // The read is SHALLOWER than the borrow: `p.z` carries `[z]`, the
     // borrow `[a, q]`. Neither is a prefix of the other.
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut p: struct { a: struct { q: usize, r: usize }, z: usize } =\n\
-                 struct { a = struct { q = 1, r = 2 }, z = 3 };\n\
-             let c = p.a.q.&mut;\n\
-             let v = p.z;\n\
-             c.* = 9;\n\
-             v + p.a.q\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut p: struct { a: struct { q: usize, r: usize }, z: usize } =
+    struct { a = struct { q = 1, r = 2 }, z = 3 };
+    let c = p.a.q.&mut;
+    let v = p.z;
+    c.* = 9;
+    v + p.a.q
+};
+"#,
         "f()",
         expect![[r#"
             => 12
@@ -5575,14 +5621,16 @@ fn reading_a_disjoint_top_level_field_does_not_kill_a_deeper_child() {
 fn reading_a_field_of_an_element_by_name_does_not_kill_its_sibling() {
     // An index step then a field step: `a[0].x` carries `[0, x]`.
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut a: [struct { x: usize, y: usize }; 2] =\n\
-                 [struct { x = 1, y = 2 }, struct { x = 3, y = 4 }];\n\
-             let c = a[0].y.&mut;\n\
-             let v = a[0].x;\n\
-             c.* = 5;\n\
-             v + a[0].y\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut a: [struct { x: usize, y: usize }; 2] =
+    [struct { x = 1, y = 2 }, struct { x = 3, y = 4 }];
+    let c = a[0].y.&mut;
+    let v = a[0].x;
+    c.* = 5;
+    v + a[0].y
+};
+"#,
         "f()",
         expect![[r#"
             => 6
@@ -5596,15 +5644,17 @@ fn reading_two_steps_past_a_deref_narrows_to_the_field_it_touches() {
     // TWO steps long, so the path is `[x, y]` — a chain does not stop
     // narrowing one step after the deref.
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut p: struct { x: struct { y: usize, z: usize }, w: usize } =\n\
-                 struct { x = struct { y = 1, z = 2 }, w = 3 };\n\
-             let b = p.&mut;\n\
-             let c = b.*.x.z.&mut;\n\
-             let v = b.*.x.y;\n\
-             c.* = 5;\n\
-             v + p.x.z\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut p: struct { x: struct { y: usize, z: usize }, w: usize } =
+    struct { x = struct { y = 1, z = 2 }, w = 3 };
+    let b = p.&mut;
+    let c = b.*.x.z.&mut;
+    let v = b.*.x.y;
+    c.* = 5;
+    v + p.x.z
+};
+"#,
         "f()",
         expect![[r#"
             => 6
@@ -5619,13 +5669,15 @@ fn reading_the_same_field_by_name_still_suspends_an_exclusive_borrow() {
     // live exclusive borrow of it, and writing through that borrow
     // afterwards is the ordinary violation.
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };\n\
-             let bx = p.x.&mut;\n\
-             let v = p.x;\n\
-             bx.* = 9;\n\
-             p.x + v\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };
+    let bx = p.x.&mut;
+    let v = p.x;
+    bx.* = 9;
+    p.x + v
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
@@ -5642,13 +5694,15 @@ fn a_borrow_behind_a_borrow_reads_and_writes_the_root() {
     // through it lands on `n`'s own allocation as a CHILD of that node
     // rather than as a stranger to it.
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut n: usize = 1;\n\
-             let mut b = n.&mut;\n\
-             let bb = b.&mut;\n\
-             bb.*.* = 5;\n\
-             bb.*.* + n\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut n: usize = 1;
+    let mut b = n.&mut;
+    let bb = b.&mut;
+    bb.*.* = 5;
+    bb.*.* + n
+};
+"#,
         "f()",
         expect![[r#"
             => 10
@@ -5663,13 +5717,15 @@ fn a_raw_write_past_a_live_safe_borrow_is_detected_ub() {
     // inert node), so the raw write is exactly as foreign to `r` as
     // `n = 9;` would be.
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut n: usize = 1;\n\
-             let r = n.&mut;\n\
-             let p = n.&raw mut;\n\
-             unsafe { p.* = 9; }\n\
-             r.*\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut n: usize = 1;
+    let r = n.&mut;
+    let p = n.&raw mut;
+    unsafe { p.* = 9; }
+    r.*
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
@@ -5686,13 +5742,15 @@ fn a_raw_pointer_minted_before_the_safe_borrow_still_shares_its_root() {
     // creates the root. The raw write must still resolve lazily, at the
     // moment of the access, against whatever root exists then.
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut n: usize = 1;\n\
-             let p = n.&raw mut;\n\
-             let r = n.&mut;\n\
-             unsafe { p.* = 9; }\n\
-             r.*\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut n: usize = 1;
+    let p = n.&raw mut;
+    let r = n.&mut;
+    unsafe { p.* = 9; }
+    r.*
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
@@ -5709,13 +5767,15 @@ fn a_raw_reborrow_through_a_live_mut_borrow_stays_clean() {
     // root, per the `.&raw`-is-not-a-decayed-borrow rule — so it does not
     // disturb `r` at all.
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut n: usize = 1;\n\
-             let r = n.&mut;\n\
-             let p = unsafe { r.*.&raw mut };\n\
-             unsafe { p.* = 9; }\n\
-             r.*\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut n: usize = 1;
+    let r = n.&mut;
+    let p = unsafe { r.*.&raw mut };
+    unsafe { p.* = 9; }
+    r.*
+};
+"#,
         "f()",
         expect![[r#"
             => 9
@@ -5729,13 +5789,15 @@ fn copy_through_the_destination_is_foreign_to_a_live_borrow_of_an_element() {
     // safe borrow of an element the copy overwrites must be invalidated
     // exactly as `a[0] = 7;` would invalidate it.
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut src: [usize; 1] = [7];\n\
-             let mut a: [usize; 2] = [1, 2];\n\
-             let m = a[0].&mut;\n\
-             unsafe { copy(src[0].&raw, a[0].&raw mut, 1); }\n\
-             m.*\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut src: [usize; 1] = [7];
+    let mut a: [usize; 2] = [1, 2];
+    let m = a[0].&mut;
+    unsafe { copy(src[0].&raw, a[0].&raw mut, 1); }
+    m.*
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
@@ -5751,14 +5813,16 @@ fn copy_through_the_source_is_foreign_to_a_live_borrow_of_an_element() {
     // by element, so a live exclusive borrow of an element the copy reads
     // is suspended exactly as `let v = a[0];` would suspend it.
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut a: [usize; 2] = [1, 2];\n\
-             let mut dst: [usize; 1] = [0];\n\
-             let m = a[0].&mut;\n\
-             unsafe { copy(a[0].&raw, dst[0].&raw mut, 1); }\n\
-             m.* = 5;\n\
-             a[0]\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut a: [usize; 2] = [1, 2];
+    let mut dst: [usize; 1] = [0];
+    let m = a[0].&mut;
+    unsafe { copy(a[0].&raw, dst[0].&raw mut, 1); }
+    m.* = 5;
+    a[0]
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
@@ -5776,15 +5840,17 @@ fn copy_reports_a_dead_source_tag_before_a_destination_bounds_fault() {
     // at the read itself, so it is reported even though the destination
     // (one element, asked to receive two) is also out of bounds.
     check_run(
-        "static f = fn () -> u8 {\n\
-             let mut a: [u8; 2] = [1, 2];\n\
-             let mut b: [u8; 1] = [0];\n\
-             let m = a.&mut;\n\
-             let q = m.*[0].&raw;\n\
-             a[0] = 7;\n\
-             unsafe { copy(q, b[0].&raw mut, 2); }\n\
-             b[0]\n\
-         };",
+        r#"
+static f = fn () -> u8 {
+    let mut a: [u8; 2] = [1, 2];
+    let mut b: [u8; 1] = [0];
+    let m = a.&mut;
+    let q = m.*[0].&raw;
+    a[0] = 7;
+    unsafe { copy(q, b[0].&raw mut, 2); }
+    b[0]
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
@@ -5803,13 +5869,15 @@ fn a_borrow_tag_is_not_part_of_pointer_equality() {
     // `==` would turn bookkeeping into an observable program result,
     // which is exactly what an aliasing model must never do.
     check_run(
-        "static f = fn () -> bool {\n\
-             let mut n: usize = 1;\n\
-             let borrowed = n.&mut;\n\
-             let via_borrow = borrowed.*.&raw mut;\n\
-             let direct = n.&raw mut;\n\
-             via_borrow == direct\n\
-         };",
+        r#"
+static f = fn () -> bool {
+    let mut n: usize = 1;
+    let borrowed = n.&mut;
+    let via_borrow = borrowed.*.&raw mut;
+    let direct = n.&raw mut;
+    via_borrow == direct
+};
+"#,
         "f()",
         expect![[r#"
             => true
@@ -5823,12 +5891,14 @@ fn a_direct_write_to_a_borrowed_local_invalidates_the_borrow() {
     // exactly as a write through a deref-rooted place does — the most
     // ordinary exclusivity violation in the language, not a special case.
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut n: usize = 1;\n\
-             let r = n.&;\n\
-             n = 99;\n\
-             r.*\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut n: usize = 1;
+    let r = n.&;
+    n = 99;
+    r.*
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
@@ -5846,13 +5916,15 @@ fn a_direct_read_of_a_borrowed_local_freezes_an_exclusive_borrow() {
     // foreign read), not the borrow's own flavor — `m` here IS a
     // `.&mut`, so "write through a shared borrow" would be false of it.
     check_run(
-        "static f = fn () -> usize {\n\
-             let mut n: usize = 1;\n\
-             let m = n.&mut;\n\
-             let copy: usize = n;\n\
-             m.* = 5;\n\
-             copy\n\
-         };",
+        r#"
+static f = fn () -> usize {
+    let mut n: usize = 1;
+    let m = n.&mut;
+    let copy: usize = n;
+    m.* = 5;
+    copy
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
@@ -5870,14 +5942,16 @@ fn an_implicit_degradation_mints_a_real_child_node() {
     // MIR operation, so `s` and `m` mint distinct tags with a real
     // parent/child relation to violate.
     check_run(
-        "static get = fn::<@x>(r: usize.&::<@x>) -> usize { r.* };\n\
-         static f = fn () -> usize {\n\
-             let mut n: usize = 1;\n\
-             let m = n.&mut;\n\
-             let s: usize.&::<@_> = m;\n\
-             m.* = 7;\n\
-             get(s)\n\
-         };",
+        r#"
+static get = fn::<@x>(r: usize.&::<@x>) -> usize { r.* };
+static f = fn () -> usize {
+    let mut n: usize = 1;
+    let m = n.&mut;
+    let s: usize.&::<@_> = m;
+    m.* = 7;
+    get(s)
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
@@ -5893,14 +5967,16 @@ fn dynamic_ub_names_the_borrow_site_and_the_invalidating_site() {
     // fires inside a callee that has no borrow sites of its own — both
     // the borrow site and the invalidating site live in the caller here.
     check_run(
-        "static bump = fn::<@a>(m: usize.&mut::<@a>) -> () { m.* = m.* + 1; };\n\
-         static f = fn () -> () {\n\
-             let mut n: usize = 1;\n\
-             let a = n.&mut;\n\
-             let b = n.&mut;\n\
-             bump(b);\n\
-             bump(a);\n\
-         };",
+        r#"
+static bump = fn::<@a>(m: usize.&mut::<@a>) -> () { m.* = m.* + 1; };
+static f = fn () -> () {
+    let mut n: usize = 1;
+    let a = n.&mut;
+    let b = n.&mut;
+    bump(b);
+    bump(a);
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
@@ -5918,18 +5994,20 @@ fn a_read_only_borrow_loop_does_not_accumulate_scan_cost() {
     // loop must still produce the right answer with several thousand
     // live shared borrows outstanding.
     check_run(
-        "static get = fn::<@a>(r: usize.&::<@a>) -> usize { r.* };\n\
-         static f = fn () -> usize {\n\
-             let n: usize = 3;\n\
-             let mut acc: usize = 0;\n\
-             let mut i: usize = 0;\n\
-             loop {\n\
-                 acc = acc + get(n.&);\n\
-                 i = i + 1;\n\
-                 if i == 2000 { break } else { }\n\
-             };\n\
-             acc\n\
-         };",
+        r#"
+static get = fn::<@a>(r: usize.&::<@a>) -> usize { r.* };
+static f = fn () -> usize {
+    let n: usize = 3;
+    let mut acc: usize = 0;
+    let mut i: usize = 0;
+    loop {
+        acc = acc + get(n.&);
+        i = i + 1;
+        if i == 2000 { break } else { }
+    };
+    acc
+};
+"#,
         "f()",
         expect![[r#"
             => 6000
@@ -5952,15 +6030,17 @@ fn a_mut_payload_binding_aliases_the_matched_value() {
     // lands in `main`'s storage, and the owner reads it back. Any answer
     // other than 101 would mean the binding was a copy.
     check_run(
-        "type Opt = enum::<T> { Some(T), None };\n\
-         static bump = fn::<@a>(o: Opt::<usize>.&mut::<@a>) -> () {\n\
-             match o { ::Some(t) => { t.* = t.* + 100; }, ::None => {} }\n\
-         };\n\
-         static f = fn() -> usize {\n\
-             let mut o: Opt::<usize> = Opt::<usize>::Some(1);\n\
-             bump(o.&mut);\n\
-             match o { ::Some(n) => n, ::None => 0 }\n\
-         };",
+        r#"
+type Opt = enum::<T> { Some(T), None };
+static bump = fn::<@a>(o: Opt::<usize>.&mut::<@a>) -> () {
+    match o { ::Some(t) => { t.* = t.* + 100; }, ::None => {} }
+};
+static f = fn() -> usize {
+    let mut o: Opt::<usize> = Opt::<usize>::Some(1);
+    bump(o.&mut);
+    match o { ::Some(n) => n, ::None => 0 }
+};
+"#,
         "f()",
         expect![[r#"
             => 101
@@ -5975,15 +6055,17 @@ fn two_mut_payload_bindings_of_one_variant_are_independent() {
     // path-granular: minting `y` is a write at the second slot, which the
     // borrow of the first cannot see.
     check_run(
-        "type Pair = enum { Both(usize, usize), Neither };\n\
-         static go = fn::<@a>(p: Pair.&mut::<@a>) -> () {\n\
-             match p { ::Both(x, y) => { x.* = 7; y.* = 9; }, ::Neither => {} }\n\
-         };\n\
-         static f = fn() -> usize {\n\
-             let mut p: Pair = ::Both(1, 2);\n\
-             go(p.&mut);\n\
-             match p { ::Both(a, b) => a + b, ::Neither => 0 }\n\
-         };",
+        r#"
+type Pair = enum { Both(usize, usize), Neither };
+static go = fn::<@a>(p: Pair.&mut::<@a>) -> () {
+    match p { ::Both(x, y) => { x.* = 7; y.* = 9; }, ::Neither => {} }
+};
+static f = fn() -> usize {
+    let mut p: Pair = ::Both(1, 2);
+    go(p.&mut);
+    match p { ::Both(a, b) => a + b, ::Neither => 0 }
+};
+"#,
         "f()",
         expect![[r#"
             => 16
@@ -5999,15 +6081,17 @@ fn a_containing_borrow_still_conflicts_with_a_payload_borrow() {
     // contains everything, which is what keeps a write by the local's own
     // name reaching every borrow into it.)
     check_run(
-        "type Opt = enum::<T> { Some(T), None };\n\
-         static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
-         static f = fn() -> usize {\n\
-             let mut o: Opt::<usize> = Opt::<usize>::Some(1);\n\
-             let inner = match o.&mut { ::Some(t) => t, ::None => panic(\"none\") };\n\
-             o = Opt::<usize>::Some(5);\n\
-             set(inner, 9);\n\
-             0\n\
-         };",
+        r#"
+type Opt = enum::<T> { Some(T), None };
+static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };
+static f = fn() -> usize {
+    let mut o: Opt::<usize> = Opt::<usize>::Some(1);
+    let inner = match o.&mut { ::Some(t) => t, ::None => panic("none") };
+    o = Opt::<usize>::Some(5);
+    set(inner, 9);
+    0
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
@@ -6025,13 +6109,15 @@ fn the_tag_read_of_a_shared_borrowed_match_goes_through_the_tree() {
     // read as a copy of a detached value — which is what the owned path
     // does — would have let this run clean.
     check_run(
-        "type Opt = enum::<T> { Some(T), None };\n\
-         static f = fn() -> usize {\n\
-             let mut o: Opt::<usize> = Opt::<usize>::Some(1);\n\
-             let r = o.&;\n\
-             o = Opt::<usize>::None;\n\
-             match r { ::Some(_) => 1, ::None => 0 }\n\
-         };",
+        r#"
+type Opt = enum::<T> { Some(T), None };
+static f = fn() -> usize {
+    let mut o: Opt::<usize> = Opt::<usize>::Some(1);
+    let r = o.&;
+    o = Opt::<usize>::None;
+    match r { ::Some(_) => 1, ::None => 0 }
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
@@ -6053,16 +6139,18 @@ fn the_tag_read_of_an_exclusive_borrowed_match_is_a_shared_freeze() {
     // is the suspended-by-a-read case, which gets its own message. Reading
     // the tag off a detached copy would have done none of this.
     check_run(
-        "type Opt = enum::<T> { Some(T), None };\n\
-         static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
-         static f = fn() -> usize {\n\
-             let mut o: Opt::<usize> = Opt::<usize>::Some(1);\n\
-             let m = o.&mut;\n\
-             let inner = match m { ::Some(t) => t, ::None => panic(\"none\") };\n\
-             let tag = match m { ::None => 0, _ => 7 };\n\
-             set(inner, 9);\n\
-             tag\n\
-         };",
+        r#"
+type Opt = enum::<T> { Some(T), None };
+static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };
+static f = fn() -> usize {
+    let mut o: Opt::<usize> = Opt::<usize>::Some(1);
+    let m = o.&mut;
+    let inner = match m { ::Some(t) => t, ::None => panic("none") };
+    let tag = match m { ::None => 0, _ => 7 };
+    set(inner, 9);
+    tag
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
@@ -6079,16 +6167,18 @@ fn a_borrowed_match_that_dispatches_on_nothing_reads_nothing() {
     // is not an access at all. Same program, with `_` back in place of the
     // two variant arms — `inner` survives it and the write lands.
     check_run(
-        "type Opt = enum::<T> { Some(T), None };\n\
-         static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };\n\
-         static f = fn() -> usize {\n\
-             let mut o: Opt::<usize> = Opt::<usize>::Some(1);\n\
-             let m = o.&mut;\n\
-             let inner = match m { ::Some(t) => t, ::None => panic(\"none\") };\n\
-             let tag = match m { _ => 7 };\n\
-             set(inner, 9);\n\
-             tag + match o { ::Some(n) => n, ::None => 0 }\n\
-         };",
+        r#"
+type Opt = enum::<T> { Some(T), None };
+static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };
+static f = fn() -> usize {
+    let mut o: Opt::<usize> = Opt::<usize>::Some(1);
+    let m = o.&mut;
+    let inner = match m { ::Some(t) => t, ::None => panic("none") };
+    let tag = match m { _ => 7 };
+    set(inner, 9);
+    tag + match o { ::Some(n) => n, ::None => 0 }
+};
+"#,
         "f()",
         expect![[r#"
             => 16
@@ -6101,15 +6191,17 @@ fn a_variant_typed_borrowed_match_writes_through_its_payload() {
     // Tag-free at runtime — no switch, no tag read — but the payload
     // binding is a borrow of the slot just the same.
     check_run(
-        "type State = enum { Run(usize), Stop };\n\
-         static tick = fn::<@a>(s: State::Run.&mut::<@a>) -> () {\n\
-             match s { ::Run(n) => { n.* = n.* + 1; } }\n\
-         };\n\
-         static f = fn() -> usize {\n\
-             let mut s: State::Run = ::Run(41);\n\
-             tick(s.&mut);\n\
-             match s { ::Run(n) => n }\n\
-         };",
+        r#"
+type State = enum { Run(usize), Stop };
+static tick = fn::<@a>(s: State::Run.&mut::<@a>) -> () {
+    match s { ::Run(n) => { n.* = n.* + 1; } }
+};
+static f = fn() -> usize {
+    let mut s: State::Run = ::Run(41);
+    tick(s.&mut);
+    match s { ::Run(n) => n }
+};
+"#,
         "f()",
         expect![[r#"
             => 42
@@ -6122,25 +6214,27 @@ fn projecting_twice_reaches_the_inner_payload() {
     // Transitivity, running: the binding is a borrow, so matching IT
     // projects again, and the write lands two levels down in the owner.
     check_run(
-        "type Opt = enum::<T> { Some(T), None };\n\
-         static bump = fn::<@a>(o: Opt::<Opt::<usize>>.&mut::<@a>) -> () {\n\
-             match o {\n\
-                 ::Some(inner) => match inner {\n\
-                     ::Some(n) => { n.* = n.* + 1; },\n\
-                     ::None => {},\n\
-                 },\n\
-                 ::None => {},\n\
-             }\n\
-         };\n\
-         static f = fn() -> usize {\n\
-             let mut o: Opt::<Opt::<usize>> =\n\
-                 Opt::<Opt::<usize>>::Some(Opt::<usize>::Some(6));\n\
-             bump(o.&mut);\n\
-             match o {\n\
-                 ::Some(inner) => match inner { ::Some(n) => n, ::None => 0 },\n\
-                 ::None => 0,\n\
-             }\n\
-         };",
+        r#"
+type Opt = enum::<T> { Some(T), None };
+static bump = fn::<@a>(o: Opt::<Opt::<usize>>.&mut::<@a>) -> () {
+    match o {
+        ::Some(inner) => match inner {
+            ::Some(n) => { n.* = n.* + 1; },
+            ::None => {},
+        },
+        ::None => {},
+    }
+};
+static f = fn() -> usize {
+    let mut o: Opt::<Opt::<usize>> =
+    Opt::<Opt::<usize>>::Some(Opt::<usize>::Some(6));
+    bump(o.&mut);
+    match o {
+        ::Some(inner) => match inner { ::Some(n) => n, ::None => 0 },
+        ::None => 0,
+    }
+};
+"#,
         "f()",
         expect![[r#"
             => 7
@@ -6153,13 +6247,15 @@ fn an_owned_match_still_copies_its_payloads_out() {
     // The owned path, running unchanged: the binding is the VALUE, so
     // writing to a mutable copy of it cannot touch the scrutinee.
     check_run(
-        "type Opt = enum::<T> { Some(T), None };\n\
-         static f = fn() -> usize {\n\
-             let o: Opt::<usize> = Opt::<usize>::Some(1);\n\
-             let copied = match o { ::Some(t) => t, ::None => 0 };\n\
-             let again = match o { ::Some(t) => t, ::None => 0 };\n\
-             copied + again\n\
-         };",
+        r#"
+type Opt = enum::<T> { Some(T), None };
+static f = fn() -> usize {
+    let o: Opt::<usize> = Opt::<usize>::Some(1);
+    let copied = match o { ::Some(t) => t, ::None => 0 };
+    let again = match o { ::Some(t) => t, ::None => 0 };
+    copied + again
+};
+"#,
         "f()",
         expect![[r#"
             => 2
@@ -6184,16 +6280,18 @@ fn reading_the_whole_value_still_freezes_a_payload_borrow() {
     // suspended-by-a-read case. Path exactness must not have turned this
     // off — a shorter path covers more, and `[]` covers everything.
     check_run(
-        "type Opt = enum::<T> { Some(T), None };\n\
-         static set = fn::<@r>(m: usize.&mut::<@r>, v: usize) -> () { m.* = v; };\n\
-         static f = fn() -> usize {\n\
-             let mut o: Opt::<usize> = Opt::<usize>::Some(1);\n\
-             let m = o.&mut;\n\
-             let t = match m { ::Some(t) => t, ::None => panic(\"none\") };\n\
-             let whole = m.*;\n\
-             set(t, 9);\n\
-             match whole { ::Some(n) => n, ::None => 0 }\n\
-         };",
+        r#"
+type Opt = enum::<T> { Some(T), None };
+static set = fn::<@r>(m: usize.&mut::<@r>, v: usize) -> () { m.* = v; };
+static f = fn() -> usize {
+    let mut o: Opt::<usize> = Opt::<usize>::Some(1);
+    let m = o.&mut;
+    let t = match m { ::Some(t) => t, ::None => panic("none") };
+    let whole = m.*;
+    set(t, 9);
+    match whole { ::Some(n) => n, ::None => 0 }
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
@@ -6209,19 +6307,21 @@ fn reading_through_a_prefix_still_freezes_the_borrow_below_it() {
     // of `w.*.inner` — a strict PREFIX of the borrow's path, so it contains
     // it and the freeze fires. Overlap is prefix-either-way, not equality.
     check_run(
-        "type Inner = struct { a: usize, b: usize };\n\
-         type W = struct { inner: Inner, other: usize };\n\
-         static set = fn::<@r>(m: usize.&mut::<@r>, v: usize) -> () { m.* = v; };\n\
-         static f = fn::<@a>(w: W.&mut::<@a>) -> usize {\n\
-             let bb = w.*.inner.b.&mut;\n\
-             let seen = w.*.inner;\n\
-             set(bb, 3);\n\
-             seen.a\n\
-         };\n\
-         static g = fn() -> usize {\n\
-             let mut w: W = W(struct { inner = Inner(struct { a = 1, b = 2 }), other = 0 });\n\
-             f(w.&mut)\n\
-         };",
+        r#"
+type Inner = struct { a: usize, b: usize };
+type W = struct { inner: Inner, other: usize };
+static set = fn::<@r>(m: usize.&mut::<@r>, v: usize) -> () { m.* = v; };
+static f = fn::<@a>(w: W.&mut::<@a>) -> usize {
+    let bb = w.*.inner.b.&mut;
+    let seen = w.*.inner;
+    set(bb, 3);
+    seen.a
+};
+static g = fn() -> usize {
+    let mut w: W = W(struct { inner = Inner(struct { a = 1, b = 2 }), other = 0 });
+    f(w.&mut)
+};
+"#,
         "g()",
         expect![[r#"
             error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
@@ -6238,15 +6338,17 @@ fn reading_a_local_by_its_bare_name_still_reaches_every_borrow_into_it() {
     // the ordinary exclusivity bug — must still be caught, and a bare-name
     // read of a borrowed STRUCT must still reach a borrow of one field.
     check_run(
-        "type W = struct { a: usize, b: usize };\n\
-         static set = fn::<@r>(m: usize.&mut::<@r>, v: usize) -> () { m.* = v; };\n\
-         static f = fn() -> usize {\n\
-             let mut w: W = W(struct { a = 1, b = 2 });\n\
-             let bb = w.b.&mut;\n\
-             let whole = w;\n\
-             set(bb, 3);\n\
-             whole.a\n\
-         };",
+        r#"
+type W = struct { a: usize, b: usize };
+static set = fn::<@r>(m: usize.&mut::<@r>, v: usize) -> () { m.* = v; };
+static f = fn() -> usize {
+    let mut w: W = W(struct { a = 1, b = 2 });
+    let bb = w.b.&mut;
+    let whole = w;
+    set(bb, 3);
+    whole.a
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
@@ -6265,18 +6367,20 @@ fn a_raw_pointer_minted_from_a_borrow_is_path_filtered_too() {
     // borrow. Correct and consistent: the raw pointer speaks through the
     // same node, at its own location.
     check_run(
-        "type W = struct { a: usize, b: usize };\n\
-         static f = fn::<@a>(w: W.&mut::<@a>) -> usize {\n\
-             let bb = w.*.b.&mut;\n\
-             let ra = w.*.a.&raw mut;\n\
-             unsafe { ra.* = 7; };\n\
-             bb.* = 3;\n\
-             w.*.a + w.*.b\n\
-         };\n\
-         static g = fn() -> usize {\n\
-             let mut w: W = W(struct { a = 1, b = 2 });\n\
-             f(w.&mut)\n\
-         };",
+        r#"
+type W = struct { a: usize, b: usize };
+static f = fn::<@a>(w: W.&mut::<@a>) -> usize {
+    let bb = w.*.b.&mut;
+    let ra = w.*.a.&raw mut;
+    unsafe { ra.* = 7; };
+    bb.* = 3;
+    w.*.a + w.*.b
+};
+static g = fn() -> usize {
+    let mut w: W = W(struct { a = 1, b = 2 });
+    f(w.&mut)
+};
+"#,
         "g()",
         expect![[r#"
             => 10
@@ -6292,18 +6396,20 @@ fn the_host_read_fills_a_byte_buffer_and_answers_the_count() {
     // machine-shaped count, and no text policy anywhere — the bytes come
     // back as bytes.
     check_run_with_input(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
-         static f = fn() -> i64 {\n\
-             match alloc_array::<u8>(8) {\n\
-                 AllocResult::Ok(p) => {\n\
-                     let n = unsafe { read(p, 8) };\n\
-                     let first = unsafe { p.* };\n\
-                     unsafe { dealloc_array(p, 8); };\n\
-                     if first == 104 { n } else { 0 - n }\n\
-                 }\n\
-                 AllocResult::Err => 0,\n\
-             }\n\
-         };",
+        r#"
+extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;
+static f = fn() -> i64 {
+    match alloc_array::<u8>(8) {
+        AllocResult::Ok(p) => {
+            let n = unsafe { read(p, 8) };
+            let first = unsafe { p.* };
+            unsafe { dealloc_array(p, 8); };
+            if first == 104 { n } else { 0 - n }
+        }
+        AllocResult::Err => 0,
+    }
+};
+"#,
         "f()",
         "hi",
         expect![[r#"
@@ -6315,17 +6421,19 @@ fn the_host_read_fills_a_byte_buffer_and_answers_the_count() {
 #[test]
 fn the_host_read_reports_zero_at_end_of_input() {
     check_run(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
-         static f = fn() -> i64 {\n\
-             match alloc_array::<u8>(4) {\n\
-                 AllocResult::Ok(p) => {\n\
-                     let n = unsafe { read(p, 4) };\n\
-                     unsafe { dealloc_array(p, 4); };\n\
-                     n\n\
-                 }\n\
-                 AllocResult::Err => 0 - 1,\n\
-             }\n\
-         };",
+        r#"
+extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;
+static f = fn() -> i64 {
+    match alloc_array::<u8>(4) {
+        AllocResult::Ok(p) => {
+            let n = unsafe { read(p, 4) };
+            unsafe { dealloc_array(p, 4); };
+            n
+        }
+        AllocResult::Err => 0 - 1,
+    }
+};
+"#,
         "f()",
         expect![[r#"
             => 0
@@ -6339,8 +6447,10 @@ fn an_import_this_host_does_not_provide_is_refused_by_name() {
     // provide a hook has denied the capability. Saying WHICH one is the
     // whole difference between a refusal and a crash.
     check_run(
-        "extern static launch_missiles: unsafe fn(n: i64) -> i64;\n\
-         static f = fn() -> i64 { unsafe { launch_missiles(1) } };",
+        r#"
+extern static launch_missiles: unsafe fn(n: i64) -> i64;
+static f = fn() -> i64 { unsafe { launch_missiles(1) } };
+"#,
         "f()",
         expect![[r#"
             error[Runtime]: no host implementation for the import `launch_missiles` — the interpreter provides `read` and nothing else
@@ -6353,13 +6463,15 @@ fn the_host_read_refuses_a_buffer_shorter_than_the_request() {
     // Judged BEFORE the read runs: a read that consumed input and then
     // trapped would have eaten bytes nobody can get back.
     check_run_with_input(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
-         static f = fn() -> i64 {\n\
-             match alloc_array::<u8>(2) {\n\
-                 AllocResult::Ok(p) => unsafe { read(p, 8) },\n\
-                 AllocResult::Err => 0,\n\
-             }\n\
-         };",
+        r#"
+extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;
+static f = fn() -> i64 {
+    match alloc_array::<u8>(2) {
+        AllocResult::Ok(p) => unsafe { read(p, 8) },
+        AllocResult::Err => 0,
+    }
+};
+"#,
         "f()",
         "hello",
         expect![[r#"
@@ -6375,8 +6487,10 @@ fn a_zero_length_host_read_touches_nothing() {
     // can ask for "however much room is left" without a special case when
     // the answer is none. `0` here is NOT end of input.
     check_run_with_input(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
-         static f = fn() -> i64 { unsafe { read(dangling::<u8>(), 0) } };",
+        r#"
+extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;
+static f = fn() -> i64 { unsafe { read(dangling::<u8>(), 0) } };
+"#,
         "f()",
         "hello",
         expect![[r#"
@@ -6392,14 +6506,16 @@ fn the_host_read_invalidates_a_safe_borrow_of_the_bytes_it_writes() {
     // so reading through `m` afterwards is detected UB, exactly as it
     // would be after `p.*[3] = v`.
     check_run_with_input(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
-         static f = fn() -> u8 {\n\
-             let mut a: [u8; 4] = [1, 2, 3, 4];\n\
-             let p = a[0].&raw mut;\n\
-             let m = a[3].&mut;\n\
-             unsafe { read(p, 4); };\n\
-             m.*\n\
-         };",
+        r#"
+extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;
+static f = fn() -> u8 {
+    let mut a: [u8; 4] = [1, 2, 3, 4];
+    let p = a[0].&raw mut;
+    let m = a[3].&mut;
+    unsafe { read(p, 4); };
+    m.*
+};
+"#,
         "f()",
         "abcd",
         expect![[r#"
@@ -6414,13 +6530,15 @@ fn the_host_read_invalidates_a_safe_borrow_of_the_bytes_it_writes() {
 fn the_host_read_is_fine_with_no_live_borrow_of_the_buffer() {
     // The twin: the same write, with nothing borrowing the range.
     check_run_with_input(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
-         static f = fn() -> u8 {\n\
-             let mut a: [u8; 4] = [1, 2, 3, 4];\n\
-             let p = a[0].&raw mut;\n\
-             unsafe { read(p, 4); };\n\
-             unsafe { p.* }\n\
-         };",
+        r#"
+extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;
+static f = fn() -> u8 {
+    let mut a: [u8; 4] = [1, 2, 3, 4];
+    let p = a[0].&raw mut;
+    unsafe { read(p, 4); };
+    unsafe { p.* }
+};
+"#,
         "f()",
         "abcd",
         expect![[r#"
@@ -6438,13 +6556,15 @@ fn the_host_read_judges_aliasing_before_consuming_input() {
     // requested length, before `self.mode.read`, is the one doing the
     // work.
     check_run_with_input(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
-         static f = fn () -> u8 {\n\
-             let mut a: [u8; 4] = [1, 2, 3, 4];\n\
-             let m = a[0].&mut;\n\
-             unsafe { read(a[0].&raw mut, 2); };\n\
-             m.*\n\
-         };",
+        r#"
+extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;
+static f = fn () -> u8 {
+    let mut a: [u8; 4] = [1, 2, 3, 4];
+    let m = a[0].&mut;
+    unsafe { read(a[0].&raw mut, 2); };
+    m.*
+};
+"#,
         "f()",
         "",
         expect![[r#"
@@ -6564,11 +6684,13 @@ fn calling_a_host_import_through_a_binding_traps_with_the_squiggle_text() {
     // ran fine, and the CALL is what refused, because the call is the
     // operation and `g`'s type is what still knows a marker is owed.
     check_run_with_input(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;\n\
-         static f = fn() -> isize {\n\
-             let g = read;\n\
-             match alloc_array::<u8>(8) { ::Ok(p) => g(p, 8), ::Err => 0 }\n\
-         };",
+        r#"
+extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
+static f = fn() -> isize {
+    let g = read;
+    match alloc_array::<u8>(8) { ::Ok(p) => g(p, 8), ::Err => 0 }
+};
+"#,
         "f()",
         "hi",
         expect![[r#"
@@ -6578,11 +6700,13 @@ fn calling_a_host_import_through_a_binding_traps_with_the_squiggle_text() {
     // Vouched at the CALL, it runs — first-class-ness is priced, not
     // removed, and the binding itself never needed a marker.
     check_run_with_input(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;\n\
-         static f = fn() -> isize {\n\
-             let g = read;\n\
-             match alloc_array::<u8>(8) { ::Ok(p) => unsafe { g(p, 8) }, ::Err => 0 }\n\
-         };",
+        r#"
+extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
+static f = fn() -> isize {
+    let g = read;
+    match alloc_array::<u8>(8) { ::Ok(p) => unsafe { g(p, 8) }, ::Err => 0 }
+};
+"#,
         "f()",
         "hi",
         expect![[r#"
@@ -6598,8 +6722,10 @@ fn an_extern_static_with_an_initializer_is_not_an_import() {
     // blames a boundary the program never crossed. The written value is
     // what runs.
     check_run(
-        "extern static bad: unsafe fn(n: i64) -> i64 = fn(n: i64) -> i64 { n + 1 };\n\
-         static f = fn() -> i64 { unsafe { bad(1) } };",
+        r#"
+extern static bad: unsafe fn(n: i64) -> i64 = fn(n: i64) -> i64 { n + 1 };
+static f = fn() -> i64 { unsafe { bad(1) } };
+"#,
         "f()",
         expect![[r#"
             => 2
@@ -6615,8 +6741,10 @@ fn a_data_import_is_refused_where_it_is_mentioned() {
     // alternative is a `usize` no host function can be, carried into
     // arithmetic that then blames the compiler for a program's mistake.
     check_run(
-        "extern static x: usize;\n\
-         static f = fn() -> usize { x + 1 };",
+        r#"
+extern static x: usize;
+static f = fn() -> usize { x + 1 };
+"#,
         "f()",
         expect![[r#"
             error[Trap]: cannot use `x`: its type annotation has errors
@@ -6746,12 +6874,14 @@ fn a_bless_of_never_written_bytes_is_detected_ub() {
     // A bless is a value read of every byte in the range, so the uninit
     // gate fires exactly as it does for a deref.
     check_run(
-        "static f = fn() -> str {\n\
-             match alloc_array::<u8>(4) {\n\
-                 AllocResult::Ok(p) => unsafe { str_from_utf8_unchecked(p, 4) },\n\
-                 AllocResult::Err => \"oom\",\n\
-             }\n\
-         };",
+        r#"
+static f = fn() -> str {
+    match alloc_array::<u8>(4) {
+        AllocResult::Ok(p) => unsafe { str_from_utf8_unchecked(p, 4) },
+        AllocResult::Err => "oom",
+    }
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: read of uninitialized memory — this element was never written
@@ -6766,13 +6896,15 @@ fn a_bless_is_foreign_to_a_live_borrow_of_a_byte_it_reads() {
     // so a live exclusive borrow of one of them is suspended as `let v =
     // a[0];` would suspend it.
     check_run(
-        "static f = fn () -> u8 {\n\
-             let mut a: [u8; 2] = [104, 105];\n\
-             let m = a[0].&mut;\n\
-             unsafe { str_from_utf8_unchecked(a[0].&raw, 2); };\n\
-             m.* = 5;\n\
-             a[0]\n\
-         };",
+        r#"
+static f = fn () -> u8 {
+    let mut a: [u8; 2] = [104, 105];
+    let m = a[0].&mut;
+    unsafe { str_from_utf8_unchecked(a[0].&raw, 2); };
+    m.* = 5;
+    a[0]
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: write through a borrow that was suspended by a read of the same place while this borrow was live
@@ -6810,22 +6942,24 @@ fn a_borrowed_view_is_invalidated_when_the_reader_is_used_again() {
     // Nothing was added to the aliasing model for it: this is
     // reborrow-at-every-use doing its job.
     check_run(
-        "type R = struct { line: str, n: usize } with {\n\
-             impl Self {\n\
-                 next = fn::<@b>(r: Self.&mut::<@b>) -> str.&::<@b> {\n\
-                     r.*.n = r.*.n + 1;\n\
-                     r.*.line = if r.*.n == 1 { \"one\" } else { \"two\" };\n\
-                     r.*.line.&\n\
-                 };\n\
-             }\n\
-         };\n\
-         static f = fn() -> str {\n\
-             let mut r = R(struct { line = \"\", n = 0 });\n\
-             let m = r.&mut;\n\
-             let a = m.next();\n\
-             let b = m.next();\n\
-             a.*\n\
-         };",
+        r#"
+type R = struct { line: str, n: usize } with {
+    impl Self {
+        next = fn::<@b>(r: Self.&mut::<@b>) -> str.&::<@b> {
+            r.*.n = r.*.n + 1;
+            r.*.line = if r.*.n == 1 { "one" } else { "two" };
+            r.*.line.&
+        };
+    }
+};
+static f = fn() -> str {
+    let mut r = R(struct { line = "", n = 0 });
+    let m = r.&mut;
+    let a = m.next();
+    let b = m.next();
+    a.*
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
@@ -6841,22 +6975,24 @@ fn a_borrowed_view_read_before_the_reader_moves_on_is_fine() {
     // a view read before the owner moves on is an ordinary read, so the
     // discipline rejects only the program that holds one too long.
     check_run(
-        "type R = struct { line: str, n: usize } with {\n\
-             impl Self {\n\
-                 next = fn::<@b>(r: Self.&mut::<@b>) -> str.&::<@b> {\n\
-                     r.*.n = r.*.n + 1;\n\
-                     r.*.line = if r.*.n == 1 { \"one\" } else { \"two\" };\n\
-                     r.*.line.&\n\
-                 };\n\
-             }\n\
-         };\n\
-         static f = fn() -> str {\n\
-             let mut r = R(struct { line = \"\", n = 0 });\n\
-             let m = r.&mut;\n\
-             let first = m.next().*;\n\
-             let second = m.next().*;\n\
-             if first == \"one\" { second } else { \"unexpected\" }\n\
-         };",
+        r#"
+type R = struct { line: str, n: usize } with {
+    impl Self {
+        next = fn::<@b>(r: Self.&mut::<@b>) -> str.&::<@b> {
+            r.*.n = r.*.n + 1;
+            r.*.line = if r.*.n == 1 { "one" } else { "two" };
+            r.*.line.&
+        };
+    }
+};
+static f = fn() -> str {
+    let mut r = R(struct { line = "", n = 0 });
+    let m = r.&mut;
+    let first = m.next().*;
+    let second = m.next().*;
+    if first == "one" { second } else { "unexpected" }
+};
+"#,
         "f()",
         expect![[r#"
             => "two"
@@ -7015,19 +7151,21 @@ fn str_bytes_writes_the_text_and_len_counts_the_bytes_it_wrote() {
     // — so a value that went out as a `str` comes back as the same `str`
     // through storage the program owns.
     check_run(
-        "static f = fn() -> str {\n\
-             let text = \"smørre\";\n\
-             let n = text.len();\n\
-             match alloc_array::<u8>(n) {\n\
-                 AllocResult::Ok(p) => {\n\
-                     unsafe { str_bytes(text, p); };\n\
-                     let back = unsafe { str_from_utf8_unchecked(p, n) };\n\
-                     unsafe { dealloc_array(p, n); };\n\
-                     back\n\
-                 }\n\
-                 AllocResult::Err => \"oom\",\n\
-             }\n\
-         };",
+        r#"
+static f = fn() -> str {
+    let text = "smørre";
+    let n = text.len();
+    match alloc_array::<u8>(n) {
+        AllocResult::Ok(p) => {
+            unsafe { str_bytes(text, p); };
+            let back = unsafe { str_from_utf8_unchecked(p, n) };
+            unsafe { dealloc_array(p, n); };
+            back
+        }
+        AllocResult::Err => "oom",
+    }
+};
+"#,
         "f()",
         expect![[r#"
             => "smørre"
@@ -7041,8 +7179,10 @@ fn len_is_bytes_not_characters_and_is_const_legal() {
     // `next_char` threads a byte index and both blesses take a byte length.
     // Pure, so a `const` context accepts it — `next_char`'s reasoning.
     check_run(
-        "static n: usize = const { \"smørre\".len() };\n\
-         static f = fn() -> usize { n };",
+        r#"
+static n: usize = const { "smørre".len() };
+static f = fn() -> usize { n };
+"#,
         "f()",
         expect![[r#"
             => 7
@@ -7056,16 +7196,18 @@ fn str_bytes_past_the_end_of_the_destination_is_detected_ub() {
     // a bless's — and the interpreter still catches every case its typed
     // memory can see.
     check_run(
-        "static f = fn() -> usize {\n\
-             match alloc_array::<u8>(2) {\n\
-                 AllocResult::Ok(p) => {\n\
-                     unsafe { str_bytes(\"hello\", p); };\n\
-                     unsafe { dealloc_array(p, 2); };\n\
-                     0\n\
-                 }\n\
-                 AllocResult::Err => 1,\n\
-             }\n\
-         };",
+        r#"
+static f = fn() -> usize {
+    match alloc_array::<u8>(2) {
+        AllocResult::Ok(p) => {
+            unsafe { str_bytes("hello", p); };
+            unsafe { dealloc_array(p, 2); };
+            0
+        }
+        AllocResult::Err => 1,
+    }
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: `str_bytes` out of bounds — the destination names 5 element(s) from index 0, but the array has 2
@@ -7080,11 +7222,13 @@ fn str_bytes_of_the_empty_string_looks_at_no_pointer_at_all() {
     // writes nothing, so the empty `String` needs no allocation and no
     // special case beyond the one `alloc_array(0)` forces.
     check_run(
-        "static f = fn() -> usize {\n\
-             let p = unsafe { dangling::<u8>() };\n\
-             unsafe { str_bytes(\"\", p); };\n\
-             \"\".len()\n\
-         };",
+        r#"
+static f = fn() -> usize {
+    let p = unsafe { dangling::<u8>() };
+    unsafe { str_bytes("", p); };
+    "".len()
+};
+"#,
         "f()",
         expect![[r#"
             => 0
@@ -7101,11 +7245,13 @@ fn a_zero_length_str_bytes_is_legal_through_a_pointer_to_a_scalar() {
     // element 0 of a registered array and so cannot tell this apart from
     // the ordinary case on its own.
     check_run(
-        "static f = fn() -> u8 {\n\
-             let mut x: u8 = 9;\n\
-             unsafe { str_bytes(\"\", x.&raw mut); };\n\
-             x\n\
-         };",
+        r#"
+static f = fn() -> u8 {
+    let mut x: u8 = 9;
+    unsafe { str_bytes("", x.&raw mut); };
+    x
+};
+"#,
         "f()",
         expect![[r#"
             => 9
@@ -7121,12 +7267,14 @@ fn str_bytes_is_foreign_to_a_live_borrow_of_a_byte_it_writes() {
     // invalidated as `a[0] = 7;` would invalidate it. Writing bytes is not
     // a route around exclusivity.
     check_run(
-        "static f = fn () -> u8 {\n\
-             let mut a: [u8; 4] = [1, 2, 3, 4];\n\
-             let m = a[0].&mut;\n\
-             unsafe { str_bytes(\"hi\", a[0].&raw mut); };\n\
-             m.*\n\
-         };",
+        r#"
+static f = fn () -> u8 {
+    let mut a: [u8; 4] = [1, 2, 3, 4];
+    let m = a[0].&mut;
+    unsafe { str_bytes("hi", a[0].&raw mut); };
+    m.*
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
@@ -7147,17 +7295,19 @@ fn moving_a_value_invalidates_borrows_of_it_exactly_as_writing_does() {
     // twin (below) was caught, which is what made the gap a bug rather
     // than a limit.
     check_run(
-        "type Lin = struct { id: usize } only move with {\n\
-             impl Self {\n\
-                 eat = fn(s: Self) -> () { let Lin(struct { id }) = s; };\n\
-             }\n\
-         };\n\
-         static f = fn() -> usize {\n\
-             let s = Lin(struct { id = 1 });\n\
-             let b = s.&;\n\
-             s.eat();\n\
-             b.*.id\n\
-         };",
+        r#"
+type Lin = struct { id: usize } only move with {
+    impl Self {
+        eat = fn(s: Self) -> () { let Lin(struct { id }) = s; };
+    }
+};
+static f = fn() -> usize {
+    let s = Lin(struct { id = 1 });
+    let b = s.&;
+    s.eat();
+    b.*.id
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
@@ -7170,19 +7320,21 @@ fn moving_a_value_invalidates_borrows_of_it_exactly_as_writing_does() {
 #[test]
 fn the_write_shaped_twin_of_a_move_invalidation_says_the_same_thing() {
     check_run(
-        "type Lin = struct { id: usize } only move with {\n\
-             impl Self {\n\
-                 eat = fn(s: Self) -> () { let Lin(struct { id }) = s; };\n\
-             }\n\
-         };\n\
-         static f = fn() -> usize {\n\
-             let mut s = Lin(struct { id = 1 });\n\
-             let b = s.&;\n\
-             s = Lin(struct { id = 2 });\n\
-             let n = b.*.id;\n\
-             s.eat();\n\
-             n\n\
-         };",
+        r#"
+type Lin = struct { id: usize } only move with {
+    impl Self {
+        eat = fn(s: Self) -> () { let Lin(struct { id }) = s; };
+    }
+};
+static f = fn() -> usize {
+    let mut s = Lin(struct { id = 1 });
+    let b = s.&;
+    s = Lin(struct { id = 2 });
+    let n = b.*.id;
+    s.eat();
+    n
+};
+"#,
         "f()",
         expect![[r#"
             error[UndefinedBehavior]: read through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
@@ -7197,16 +7349,18 @@ fn a_move_with_no_borrow_outstanding_costs_nothing_and_still_runs() {
     // The invalidation is one map lookup on an address-taken local, so a
     // body that never borrows pays for the distinction with nothing.
     check_run(
-        "type Lin = struct { id: usize } only move with {\n\
-             impl Self {\n\
-                 into_id = fn(s: Self) -> usize { let Lin(struct { id }) = s; id };\n\
-             }\n\
-         };\n\
-         static f = fn() -> usize {\n\
-             let s = Lin(struct { id = 7 });\n\
-             let t = s;\n\
-             t.into_id()\n\
-         };",
+        r#"
+type Lin = struct { id: usize } only move with {
+    impl Self {
+        into_id = fn(s: Self) -> usize { let Lin(struct { id }) = s; id };
+    }
+};
+static f = fn() -> usize {
+    let s = Lin(struct { id = 7 });
+    let t = s;
+    t.into_id()
+};
+"#,
         "f()",
         expect![[r#"
             => 7
