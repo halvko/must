@@ -14,7 +14,8 @@ use rustc_hash::FxHashMap;
 
 use crate::{
     AggregateKind, BlockData, BlockId, BodyId, Const, LocalData, LocalId, MirBody, MirDiagnostic,
-    MirLowered, Operand, Place, Rvalue, Statement, StatementKind, Terminator, TerminatorKind,
+    MirLowered, Operand, Place, Rvalue, Scope, Statement, StatementKind, Terminator,
+    TerminatorKind,
 };
 
 pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
@@ -1103,7 +1104,14 @@ impl LowerCtx<'_> {
                 b.current = join;
                 Operand::Copy(dest.into())
             }
+            // A nested block opens a storage scope; the body's own block
+            // is the frame and opens none.
+            // TODO: unify (halvko/must#27).
             ExprData::Block { stmts, tail } => {
+                let nested = expr != b.body_expr;
+                if nested {
+                    b.scopes.push((Scope::Block, Vec::new()));
+                }
                 for stmt in stmts {
                     match stmt {
                         Stmt::Let { pat, init, .. } => {
@@ -1155,10 +1163,14 @@ impl LowerCtx<'_> {
                         }
                     }
                 }
-                match tail {
+                let mut value = match tail {
                     Some(tail) => self.lower_expr(b, *tail),
                     None => Operand::Const(Const::Unit),
+                };
+                if nested {
+                    value = self.close_scope(b, value, tail.unwrap_or(expr), expr);
                 }
+                value
             }
             // A compile-time unit of its own: the inner block lowers to a
             // separate zero-parameter body (like a `fn` literal's), and the
@@ -1531,6 +1543,7 @@ impl LowerCtx<'_> {
                     header,
                     exit,
                     result: dest,
+                    scope_depth: b.scopes.len(),
                 });
                 // The body's value is discarded: running off its end is the
                 // back edge to the header.
@@ -1549,6 +1562,9 @@ impl LowerCtx<'_> {
                 match b.loop_frames.last().copied() {
                     Some(frame) => {
                         b.push_assign(frame.result, Rvalue::Use(op), expr);
+                        // Leaving the loop ends the storage of every
+                        // scope opened inside it.
+                        b.push_storage_dead_from(frame.scope_depth, expr);
                         b.terminate(TerminatorKind::Goto { target: frame.exit }, expr);
                         // Code after a break is unreachable; keep lowering
                         // it into a predecessor-less block (CFG stays
@@ -1600,6 +1616,8 @@ impl LowerCtx<'_> {
             }
             ExprData::Continue => match b.loop_frames.last().copied() {
                 Some(frame) => {
+                    // The next iteration gets fresh storage.
+                    b.push_storage_dead_from(frame.scope_depth, expr);
                     b.terminate(
                         TerminatorKind::Goto {
                             target: frame.header,
@@ -1808,10 +1826,7 @@ impl LowerCtx<'_> {
         let join = b.new_block();
         for (arm, &block) in arms.iter().zip(&arm_blocks) {
             b.current = block;
-            self.bind_match_pattern(b, arm.pat, scrut, arm.body, lens);
-            let op = self.lower_expr(b, arm.body);
-            b.push_assign(dest, Rvalue::Use(op), arm.body);
-            b.terminate(TerminatorKind::Goto { target: join }, expr);
+            self.lower_arm(b, arm, scrut, lens, dest, join, expr);
         }
         if needs_trap {
             b.current = otherwise_block;
@@ -1922,16 +1937,11 @@ impl LowerCtx<'_> {
                         expr,
                     );
                     b.current = then_block;
-                    let op = self.lower_expr(b, arm.body);
-                    b.push_assign(dest, Rvalue::Use(op), arm.body);
-                    b.terminate(TerminatorKind::Goto { target: join }, expr);
+                    self.lower_arm(b, arm, scrut, lens, dest, join, expr);
                     b.current = else_block;
                 }
                 ArmKind::CatchAll => {
-                    self.bind_match_pattern(b, arm.pat, scrut, arm.body, lens);
-                    let op = self.lower_expr(b, arm.body);
-                    b.push_assign(dest, Rvalue::Use(op), arm.body);
-                    b.terminate(TerminatorKind::Goto { target: join }, expr);
+                    self.lower_arm(b, arm, scrut, lens, dest, join, expr);
                     covered = true;
                     break;
                 }
@@ -1964,10 +1974,7 @@ impl LowerCtx<'_> {
         orphans.extend(arms);
         for arm in orphans {
             b.current = b.new_block();
-            self.bind_match_pattern(b, arm.pat, scrut, arm.body, lens);
-            let op = self.lower_expr(b, arm.body);
-            b.push_assign(dest, Rvalue::Use(op), arm.body);
-            b.terminate(TerminatorKind::Goto { target: join }, expr);
+            self.lower_arm(b, arm, scrut, lens, dest, join, expr);
         }
         b.current = join;
         Operand::Copy(dest.into())
@@ -1990,13 +1997,7 @@ impl LowerCtx<'_> {
         let dest = b.temp(self.ty(expr));
         let join = b.new_block();
         match covering {
-            Some(covering) => {
-                let arm = &arms[covering];
-                self.bind_match_pattern(b, arm.pat, scrut, arm.body, lens);
-                let op = self.lower_expr(b, arm.body);
-                b.push_assign(dest, Rvalue::Use(op), arm.body);
-                b.terminate(TerminatorKind::Goto { target: join }, expr);
-            }
+            Some(covering) => self.lower_arm(b, &arms[covering], scrut, lens, dest, join, expr),
             None if self.value_traps.contains_key(&expr) => {
                 // A broken-pattern match: the pending value trap (planted
                 // by the `lower_expr` wrapper) is the whole story.
@@ -2025,15 +2026,53 @@ impl LowerCtx<'_> {
             if Some(index) == covering {
                 continue;
             }
-            let block = b.new_block();
-            b.current = block;
-            self.bind_match_pattern(b, arm.pat, scrut, arm.body, lens);
-            let op = self.lower_expr(b, arm.body);
-            b.push_assign(dest, Rvalue::Use(op), arm.body);
-            b.terminate(TerminatorKind::Goto { target: join }, expr);
+            b.current = b.new_block();
+            self.lower_arm(b, arm, scrut, lens, dest, join, expr);
         }
         b.current = join;
         Operand::Copy(dest.into())
+    }
+
+    /// Lower one arm of the `match` at `expr` into the current block: the
+    /// binders and the body share a storage scope, the value goes to
+    /// `dest`, then the edge to `join`.
+    fn lower_arm(
+        &mut self,
+        b: &mut BodyBuilder,
+        arm: &MatchArm,
+        scrut: &Operand,
+        lens: Option<BorrowedScrutinee>,
+        dest: LocalId,
+        join: BlockId,
+        expr: ExprId,
+    ) {
+        b.scopes.push((Scope::Arm, Vec::new()));
+        self.bind_match_pattern(b, arm.pat, scrut, arm.body, lens);
+        let value = self.lower_expr(b, arm.body);
+        let value = self.close_scope(b, value, arm.body, arm.body);
+        b.push_assign(dest, Rvalue::Use(value), arm.body);
+        b.terminate(TerminatorKind::Goto { target: join }, expr);
+    }
+
+    /// Close the innermost storage scope at `exit`. A `value` reading one
+    /// of the scope's own locals is copied out first, typed by
+    /// `value_expr`, so it is consumed after the storage ends.
+    fn close_scope(
+        &mut self,
+        b: &mut BodyBuilder,
+        mut value: Operand,
+        value_expr: ExprId,
+        exit: ExprId,
+    ) -> Operand {
+        let depth = b.scopes.len() - 1;
+        if reads_one_of(&value, &b.scopes[depth].1) {
+            let copy = b.temp(self.ty(value_expr));
+            b.push_assign(copy, Rvalue::Use(value), value_expr);
+            value = Operand::Copy(copy.into());
+        }
+        b.push_storage_dead_from(depth, exit);
+        b.scopes.pop();
+        value
     }
 
     /// How an arm participates in dispatch: a literal arm (keyed by the
@@ -2180,6 +2219,7 @@ impl LowerCtx<'_> {
             addressable: false,
         });
         b.local_for_binding.insert(binding, local);
+        b.declare(local);
         local
     }
 
@@ -2972,6 +3012,7 @@ impl LowerCtx<'_> {
                         // The address of THIS use's copy: materialize the
                         // (cloned) const value in a temp and point at it.
                         let copy = b.temp(self.ty(root));
+                        b.declare(copy);
                         b.push_assign(copy, Rvalue::Use(Operand::Const(Const::Item(loc))), root);
                         self.address_of_local(b, flavor, mutable, copy, &chain, expr)
                     }
@@ -3549,6 +3590,18 @@ enum ArmKind {
     Dead,
 }
 
+/// Whether `op` reads one of `locals`.
+fn reads_one_of(op: &Operand, locals: &[LocalId]) -> bool {
+    match op {
+        Operand::Copy(place) | Operand::Move(place) => {
+            // An index operand inside a projection is not searched.
+            debug_assert!(place.projection.is_empty());
+            locals.contains(&place.local)
+        }
+        Operand::Const(_) => false,
+    }
+}
+
 /// One live `loop` during lowering: where `continue` goes (the header),
 /// where `break` goes (the exit), and the local carrying the loop's value.
 #[derive(Clone, Copy)]
@@ -3556,6 +3609,8 @@ struct LoopFrame {
     header: BlockId,
     exit: BlockId,
     result: LocalId,
+    /// How many storage scopes were open when the loop was entered.
+    scope_depth: usize,
 }
 
 struct BodyBuilder {
@@ -3571,6 +3626,11 @@ struct BodyBuilder {
     /// (which lower to bodies of their own) reset it structurally: a
     /// `break` in them can never target a block of the enclosing body.
     loop_frames: Vec<LoopFrame>,
+    /// The expression this body was built from; its block is the frame.
+    body_expr: ExprId,
+    /// The open storage scopes, innermost last, each with the locals it
+    /// has declared so far.
+    scopes: Vec<(Scope, Vec<LocalId>)>,
     /// Origin for the placeholder terminators of fresh blocks.
     fallback_origin: ExprId,
 }
@@ -3601,7 +3661,33 @@ impl BodyBuilder {
             entry,
             current: entry,
             loop_frames: Vec::new(),
+            body_expr: origin,
+            scopes: Vec::new(),
             fallback_origin: origin,
+        }
+    }
+
+    /// Register a local with the innermost open storage scope. With none
+    /// open it belongs to the frame.
+    fn declare(&mut self, local: LocalId) {
+        if let Some((_, locals)) = self.scopes.last_mut() {
+            locals.push(local);
+        }
+    }
+
+    /// End the storage of every scope from `depth` up, innermost first, at
+    /// `origin`. The scopes stay open.
+    fn push_storage_dead_from(&mut self, depth: usize, origin: ExprId) {
+        let dying: Vec<(LocalId, Scope)> = self.scopes[depth..]
+            .iter()
+            .rev()
+            .flat_map(|(scope, locals)| locals.iter().rev().map(|local| (*local, *scope)))
+            .collect();
+        for (local, scope) in dying {
+            self.blocks[self.current].statements.push(Statement {
+                kind: StatementKind::StorageDead { local, scope },
+                origin,
+            });
         }
     }
 

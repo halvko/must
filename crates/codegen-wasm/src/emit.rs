@@ -253,7 +253,12 @@ impl<'a, 'db> Emitter<'a, 'db> {
         kind: &StatementKind,
         origin: ExprId,
     ) -> Result<(), Refusal> {
-        let StatementKind::Assign { dest, rvalue } = kind;
+        let StatementKind::Assign { dest, rvalue } = kind else {
+            // A storage end emits nothing: every local has its own wasm
+            // local for the whole function. It is the point at which a
+            // slot could be handed to another local instead.
+            return Ok(());
+        };
         let dest_ty = self.place_ty(ctx, dest, origin)?;
         let width = self.slots(ctx, &dest_ty, origin)?;
         let pushed = self.rvalue(ctx, rvalue, &dest_ty, width, origin)?;
@@ -1791,7 +1796,9 @@ fn max_of(kind: IntKind) -> i64 {
 fn local_origin(mir: &MirBody, local: LocalId, fallback: ExprId) -> ExprId {
     for (_, block) in mir.blocks.iter() {
         for statement in &block.statements {
-            let StatementKind::Assign { dest, .. } = &statement.kind;
+            let StatementKind::Assign { dest, .. } = &statement.kind else {
+                continue;
+            };
             if dest.local == local {
                 return statement.origin;
             }
