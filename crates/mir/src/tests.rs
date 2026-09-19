@@ -1440,12 +1440,15 @@ static f = fn (s: Shape) -> usize {
               _2: Shape
               _3: usize
               _4: usize  // r
+              _5: usize
               bb0:
                 _2 = _1
                 switch _2 on Shape -> [0: bb1, 1: bb2, otherwise: bb3]
               bb1:
                 _4 = _2.0
-                _3 = _4
+                _5 = _4
+                storage_dead _4
+                _3 = _5
                 goto -> bb4
               bb2:
                 _3 = 0
@@ -1486,12 +1489,15 @@ static f = fn (s: Shape) -> usize {
               _2: Shape
               _3: usize
               _4: usize  // r
+              _5: usize
               bb0:
                 _2 = _1
                 switch _2 on Shape -> [0: bb1, otherwise: bb2]
               bb1:
                 _4 = _2.0
-                _3 = _4
+                _5 = _4
+                storage_dead _4
+                _3 = _5
                 goto -> bb3
               bb2:
                 _3 = trap "this `match` does not cover `Shape::Point`" -> bb3
@@ -1538,6 +1544,7 @@ static step = fn (s: State::Running) -> usize {
                 _2 = _1
                 _4 = _2.0
                 _5 = Add(_4, 1)
+                storage_dead _4
                 _3 = _5
                 goto -> bb1
               bb1:
@@ -1584,6 +1591,7 @@ static f = fn () -> usize {
               _4: Shape
               _5: usize
               _6: usize  // r
+              _7: usize
               bb0:
                 _1 = payload(3)
                 _2 = widen _1 to Shape::Circle
@@ -1592,7 +1600,9 @@ static f = fn () -> usize {
                 switch _4 on Shape -> [0: bb1, 1: bb2, otherwise: bb3]
               bb1:
                 _6 = _4.0
-                _5 = _6
+                _7 = _6
+                storage_dead _6
+                _5 = _7
                 goto -> bb4
               bb2:
                 _5 = 0
@@ -2220,12 +2230,15 @@ fn generic_enum_match_switches_on_the_declaration() {
               _2: Option::<usize>
               _3: usize
               _4: usize  // x
+              _5: usize
               bb0:
                 _2 = _1
                 switch _2 on Option -> [0: bb1, 1: bb2, otherwise: bb3]
               bb1:
                 _4 = _2.0
-                _3 = _4
+                _5 = _4
+                storage_dead _4
+                _3 = _5
                 goto -> bb4
               bb2:
                 _3 = 0
@@ -2465,6 +2478,8 @@ static main = fn() {
                 _10 = _9
                 _11 = _5.*.0[_6]
                 _12 = _11
+                storage_dead _12
+                storage_dead _10
                 _0 = ()
                 return
             }
@@ -2562,6 +2577,7 @@ static main = fn() -> usize {
                 _9 = &raw mut _8.*.0
                 _10 = _9
                 _11 = _10.*
+                storage_dead _10
                 _0 = _11
                 return
             }
@@ -2975,6 +2991,7 @@ static f = fn::<@a>(s: Opt.&mut::<@a>) -> () {
               bb1:
                 _4 = &mut _2.*.0
                 _4.* = 1
+                storage_dead _4
                 _3 = ()
                 goto -> bb4
               bb2:
@@ -3025,6 +3042,7 @@ static f = fn::<@a>(s: Opt.&::<@a>) -> usize {
               bb1:
                 _4 = & _2.*.0
                 _5 = _4.*
+                storage_dead _4
                 _3 = _5
                 goto -> bb4
               bb2:
@@ -3072,6 +3090,7 @@ static f = fn::<@a>(s: State::Run.&mut::<@a>) -> () {
                 _2 = _1
                 _4 = &mut _2.*.0
                 _4.* = 1
+                storage_dead _4
                 _3 = ()
                 goto -> bb1
               bb1:
@@ -3110,12 +3129,15 @@ static f = fn::<@a>(s: Opt.&::<@a>) -> Opt.&::<@a> {
               _2: Opt.&
               _3: Opt.&
               _4: Opt.&  // whole
+              _5: Opt.&
               bb0:
                 _2 = _1
                 goto -> bb1
               bb1:
                 _4 = _2
-                _3 = _4
+                _5 = _4
+                storage_dead _4
+                _3 = _5
                 goto -> bb2
               bb2:
                 _0 = _3
@@ -3463,6 +3485,7 @@ static f = fn::<@a>(c: char.&::<@a>) -> usize {
                 goto -> bb1
               bb3:
                 _5 = _2
+                storage_dead _5
                 _3 = 0
                 goto -> bb1
             }
@@ -3491,10 +3514,10 @@ fn check_loans(text: &str, expect: Expect) {
     for &item in hir::file_item_ids(&db, file) {
         let (_, source_map) = hir::body_with_source_map(&db, item);
         for diag in crate::loan_check(&db, item) {
-            let Some(ptr) = source_map.node_for_expr(diag.expr()) else {
+            let Some(range) = diag.range(source_map) else {
                 continue;
             };
-            rendered.push_str(&format!("{:?}: {}\n", ptr.text_range(), diag.message()));
+            rendered.push_str(&format!("{range:?}: {}\n", diag.message()));
             for (expr, note) in diag.related() {
                 if let Some(ptr) = source_map.node_for_expr(expr) {
                     rendered.push_str(&format!("  note at {:?}: {note}\n", ptr.text_range()));
@@ -5031,6 +5054,7 @@ static f = fn::<@a>(d: usize.&::<@a>) -> usize {
                 goto -> bb1
               bb3:
                 _5 = _2
+                storage_dead _5
                 _3 = 0
                 goto -> bb1
             }
@@ -5202,6 +5226,7 @@ static main = fn() -> usize { unsafe { mk().&raw.* } };
                 _2 = _1
                 _3 = &raw _2
                 _4 = _3.*
+                storage_dead _2
                 _0 = _4
                 return
             }
@@ -5215,9 +5240,9 @@ static main = fn() -> usize { unsafe { mk().&raw.* } };
     );
 }
 
-/// A loan of a loop-body temporary cannot survive the back edge: the next
-/// iteration's store writes the loan's root while the loan (through `r`)
-/// is live. The blame names the root as "this temporary".
+/// A loan of a loop-body temporary cannot survive the back edge: its
+/// storage ends with the body block while the loan (through `r`) is live.
+/// The blame sits on the body's closing brace and says "this temporary".
 #[test]
 fn a_loan_of_a_loop_body_temporary_cannot_survive_the_back_edge() {
     check_loans(
@@ -5237,9 +5262,9 @@ static f = fn() -> usize {
 };
 "#,
         expect![[r#"
-            274..278: writing to this temporary here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
+            306..307: leaving this block ends the storage of this temporary, which invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read storage that no longer exists
               note at 274..280: this borrow was created here
-              note at 266..281: and it is still used here
+              note at 313..316: and it is still used here
         "#]],
     );
 }
@@ -5280,6 +5305,320 @@ static f = fn() -> usize {
 "#,
         expect![[r#"
             97..103: borrowed value does not live long enough: this borrows a temporary, which lives no longer than the block that creates it, but the borrow is still live when the body returns
+        "#]],
+    );
+}
+
+/// A borrow of a nested block's `let` that escapes into an outer holder
+/// is refused where the block is left: the storage of `x` ends at the
+/// closing brace, and `r` is read after it.
+#[test]
+fn a_borrow_of_a_block_local_does_not_survive_the_block() {
+    check_loans(
+        r#"
+static f = fn() -> usize {
+    let a: usize = 1;
+    let mut r = a.&;
+    {
+        let x: usize = 2;
+        r = x.&;
+    };
+    r.*
+};
+"#,
+        expect![[r#"
+            124..125: leaving this block ends the storage of `x`, which invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read storage that no longer exists
+              note at 115..118: this borrow was created here
+              note at 131..134: and it is still used here
+        "#]],
+    );
+}
+
+/// The same escape through a materialized temporary: the temporary's
+/// storage ends with the block that created it, and the blame names it
+/// as "this temporary".
+#[test]
+fn a_borrow_of_a_block_temporary_does_not_survive_the_block() {
+    check_loans(
+        r#"
+static mk = fn() -> usize { 2 };
+static f = fn() -> usize {
+    let a: usize = 1;
+    let mut r = a.&;
+    {
+        r = mk().&;
+    };
+    r.*
+};
+"#,
+        expect![[r#"
+            134..135: leaving this block ends the storage of this temporary, which invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read storage that no longer exists
+              note at 122..128: this borrow was created here
+              note at 141..144: and it is still used here
+        "#]],
+    );
+}
+
+/// A `break` is an exit of the loop body's block too: the body local's
+/// storage ends on that path, and the blame sits on the `break`.
+#[test]
+fn a_break_ends_the_storage_of_the_loop_body_on_its_path() {
+    check_loans(
+        r#"
+static f = fn() -> usize {
+    let a: usize = 1;
+    let mut r = a.&;
+    loop {
+        let x: usize = 2;
+        r = x.&;
+        break;
+    };
+    r.*
+};
+"#,
+        expect![[r#"
+            133..138: leaving this block ends the storage of `x`, which invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read storage that no longer exists
+              note at 120..123: this borrow was created here
+              note at 151..154: and it is still used here
+        "#]],
+    );
+}
+
+/// The accepting twin: the holder is reassigned inside the block and not
+/// read after it, so no loan of `x` is live where its storage ends.
+#[test]
+fn a_borrow_of_a_block_local_used_only_inside_the_block_is_accepted() {
+    check_loans(
+        r#"
+static f = fn() -> usize {
+    let a: usize = 1;
+    let mut r = a.&;
+    let mut total: usize = 0;
+    {
+        let x: usize = 2;
+        r = x.&;
+        total = r.*;
+    };
+    total
+};
+"#,
+        expect![[""]],
+    );
+}
+
+/// A loop that reads through the holder at its top and rebinds it to a
+/// body local below: the body's end kills the storage while the next
+/// iteration's read still needs it, and the message says the storage is
+/// gone rather than that the borrow was invalidated.
+#[test]
+fn a_borrow_of_a_loop_body_local_does_not_survive_to_the_next_iteration() {
+    check_loans(
+        r#"
+static f = fn() -> usize {
+    let a: usize = 1;
+    let mut r = a.&;
+    let mut total: usize = 0;
+    let mut i: usize = 0;
+    loop {
+        if i == 3 { break; };
+        total = total + r.*;
+        let x: usize = i;
+        r = x.&;
+        i = i + 1;
+    };
+    total
+};
+"#,
+        expect![[r#"
+            263..264: leaving this block ends the storage of `x`, which invalidates a borrow of it that is still live: the loop brings control back round to a use of the borrow, which would then read storage that no longer exists
+              note at 235..238: this borrow was created here
+              note at 192..195: and the loop brings control back round to this use of it
+        "#]],
+    );
+}
+
+/// A match arm's pattern binder dies with the arm: a borrow of it still
+/// live after the `match` is refused at the arm body's closing brace,
+/// not at the block around the `match`.
+#[test]
+fn a_match_binder_dies_with_its_arm() {
+    check_loans(
+        r#"
+type Opt = enum { Some(usize), None };
+static f = fn(o: Opt) -> usize {
+    let a: usize = 1;
+    let mut r = a.&;
+    match o {
+        ::Some(x) => { r = x.&; },
+        ::None => {},
+    };
+    r.*
+};
+"#,
+        expect![[r#"
+            162..163: leaving this block ends the storage of `x`, which invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read storage that no longer exists
+              note at 157..160: this borrow was created here
+              note at 198..201: and it is still used here
+        "#]],
+    );
+}
+
+/// A braceless arm has no brace to end at: the refusal sits on the last
+/// token of the arm's expression.
+#[test]
+fn a_braceless_arms_binder_dies_at_the_arm_expressions_end() {
+    check_loans(
+        r#"
+type Opt = enum { Some(usize), None };
+static f = fn(o: Opt) -> usize {
+    let a: usize = 1;
+    let r: usize.&::<@_> = match o {
+        ::Some(x) => x.&,
+        ::None => a.&,
+    };
+    r.*
+};
+"#,
+        expect![[r#"
+            155..156: leaving this block ends the storage of `x`, which invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read storage that no longer exists
+              note at 153..156: this borrow was created here
+              note at 153..156: and it is still used here
+        "#]],
+    );
+}
+
+/// A temporary a braceless arm body materializes dies with the arm too:
+/// borrowing a call's result in the arm and reading the borrow after
+/// the `match` is refused at the arm expression's end, and the blame
+/// names it as "this temporary".
+#[test]
+fn a_braceless_arms_temporary_dies_with_the_arm() {
+    check_loans(
+        r#"
+type Opt = enum { Some(usize), None };
+static mk = fn() -> usize { 2 };
+static f = fn(o: Opt) -> usize {
+    let a: usize = 1;
+    let r: usize.&::<@_> = match o {
+        ::Some(x) => mk().&,
+        ::None => a.&,
+    };
+    r.*
+};
+"#,
+        expect![[r#"
+            191..192: leaving this block ends the storage of this temporary, which invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read storage that no longer exists
+              note at 186..192: this borrow was created here
+              note at 186..192: and it is still used here
+        "#]],
+    );
+}
+
+/// A `break` from inside an arm is an exit of the arm too: the binder's
+/// storage ends on that path, and the blame sits on the `break`.
+#[test]
+fn a_break_from_inside_an_arm_ends_the_binders_storage() {
+    check_loans(
+        r#"
+type Opt = enum { Some(usize), None };
+static f = fn(o: Opt) -> usize {
+    let a: usize = 1;
+    let mut r = a.&;
+    loop {
+        match o {
+            ::Some(x) => { r = x.&; break; },
+            ::None => { break; },
+        };
+    };
+    r.*
+};
+"#,
+        expect![[r#"
+            181..186: leaving this block ends the storage of `x`, which invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read storage that no longer exists
+              note at 176..179: this borrow was created here
+              note at 247..250: and it is still used here
+        "#]],
+    );
+}
+
+/// The accepting twin: the borrow of the binder is used inside the arm
+/// and the holder is not read after the `match`.
+#[test]
+fn a_borrow_of_a_match_binder_used_only_inside_the_arm_is_accepted() {
+    check_loans(
+        r#"
+type Opt = enum { Some(usize), None };
+static f = fn(o: Opt) -> usize {
+    let a: usize = 1;
+    let mut r = a.&;
+    let mut total: usize = 0;
+    match o {
+        ::Some(x) => { r = x.&; total = r.*; },
+        ::None => {},
+    };
+    total
+};
+"#,
+        expect![[""]],
+    );
+}
+
+/// A raw pointer to a block's temporary gets no static help: the program
+/// checks clean, and the dangling deref is the interpreter's to detect.
+#[test]
+fn a_raw_pointer_to_ended_block_storage_is_not_refused() {
+    check_loans(
+        r#"
+static mk = fn() -> usize { 2 };
+static f = fn() -> usize {
+    let p = { mk().&raw };
+    unsafe { p.* }
+};
+"#,
+        expect![[""]],
+    );
+}
+
+/// The markers a nested block lowers to: its `let` dies at the block's
+/// end, after the bare-local tail has been copied out so the block's
+/// value never reads dead storage. The outer `let` is the frame's and
+/// gets no marker.
+#[test]
+fn a_nested_block_ends_the_storage_of_its_locals_after_copying_its_tail_out() {
+    check_mir(
+        r#"
+static f = fn() -> usize {
+    let a: usize = 1;
+    let b = {
+        let x: usize = a;
+        x
+    };
+    b
+};
+"#,
+        expect![[r#"
+            item f:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: usize  // a
+              _2: usize  // x
+              _3: usize
+              _4: usize  // b
+              bb0:
+                _1 = 1
+                _2 = _1
+                _3 = _2
+                storage_dead _2
+                _4 = _3
+                _0 = _4
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
         "#]],
     );
 }

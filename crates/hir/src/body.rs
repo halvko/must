@@ -11,8 +11,8 @@
 use base_db::Db;
 use la_arena::{Arena, ArenaMap, Idx};
 use rustc_hash::FxHashMap;
-use syntax::SyntaxNodePtr;
 use syntax::ast::{self, AstNode as _};
+use syntax::{SyntaxNodePtr, TextRange};
 
 use crate::ItemId;
 use crate::item_tree::{TypeRef, item_source};
@@ -555,9 +555,23 @@ pub struct BodySourceMap {
     binding_annotation_back: ArenaMap<BindingId, SyntaxNodePtr>,
     pat_map: FxHashMap<SyntaxNodePtr, PatId>,
     pat_map_back: ArenaMap<PatId, SyntaxNodePtr>,
+    /// Where an expression that opens a storage scope is left — a block's
+    /// closing brace, a match arm body's last token — the point a
+    /// diagnostic about leaving it squiggles, where the node would cover
+    /// its whole body.
+    exit_back: ArenaMap<ExprId, TextRange>,
 }
 
 impl BodySourceMap {
+    /// Where a diagnostic about leaving `expr` points: a block's closing
+    /// brace, an arm body's last token, or the expression itself when it
+    /// is the `break` or `continue` that leaves the scope.
+    pub fn exit_range_for_expr(&self, expr: ExprId) -> Option<TextRange> {
+        self.exit_back
+            .get(expr)
+            .copied()
+            .or_else(|| Some(self.node_for_expr(expr)?.text_range()))
+    }
     pub fn expr_for_node(&self, ptr: SyntaxNodePtr) -> Option<ExprId> {
         self.expr_map.get(&ptr).copied()
     }
@@ -967,6 +981,21 @@ impl LowerCtx {
                             None => self.pats.alloc(PatData::Missing),
                         };
                         let body = self.lower_opt_expr(arm.body());
+                        // The arm is left at its body's last token — the
+                        // closing brace a block body recorded already. A
+                        // body that is itself a `break`, `continue` or
+                        // `return` leaves the arm on its own and keeps its
+                        // own range.
+                        let last = match arm.body() {
+                            None
+                            | Some(ast::Expr::BreakExpr(_))
+                            | Some(ast::Expr::ContinueExpr(_))
+                            | Some(ast::Expr::ReturnExpr(_)) => None,
+                            Some(node) => node.syntax().last_token(),
+                        };
+                        if let Some(last) = last {
+                            self.source_map.exit_back.insert(body, last.text_range());
+                        }
                         MatchArm { pat, body }
                     })
                     .collect();
@@ -1196,7 +1225,11 @@ impl LowerCtx {
             })
             .collect();
         let tail = block.tail_expr().map(|e| self.lower_expr(e));
-        self.alloc_expr(ExprData::Block { stmts, tail }, block.syntax())
+        let id = self.alloc_expr(ExprData::Block { stmts, tail }, block.syntax());
+        if let Some(brace) = block.r_brace_token() {
+            self.source_map.exit_back.insert(id, brace.text_range());
+        }
+        id
     }
 
     /// Lower the operand of a borrow. An operand that is not a place gets

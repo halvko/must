@@ -185,6 +185,13 @@ pub enum StatementKind {
     /// with liveness and writability checked at the store — the misuse
     /// cases are detected UB, not silent corruption.
     Assign { dest: Place, rvalue: Rvalue },
+    /// The end of a scoped local's storage, at every exit of the nested
+    /// block or match arm that declared it (its end, each `break`, each
+    /// `continue`), so re-entry gets fresh storage. No live marker pairs
+    /// with it: the initializing assignment is where storage begins, and
+    /// a slot-reusing backend takes that def as the range's start. The
+    /// outermost block is the frame, whose end is `Return`.
+    StorageDead { local: LocalId },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

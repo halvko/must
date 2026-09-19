@@ -50,6 +50,9 @@ fn render_body(id: BodyId, body: &MirBody, out: &mut String) {
                 StatementKind::Assign { dest, rvalue } => {
                     let _ = writeln!(out, "    {} = {}", place(dest), render_rvalue(rvalue));
                 }
+                StatementKind::StorageDead { local: id } => {
+                    let _ = writeln!(out, "    storage_dead {}", local(*id));
+                }
             }
         }
         let _ = writeln!(out, "    {}", render_terminator(&data.terminator.kind));

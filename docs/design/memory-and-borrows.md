@@ -127,7 +127,10 @@
   observable only through borrows, so strictly more programs check and no behaviour changes.
   Linears self-exclude: a nameless value can never be consumed, so a must-consume temporary is
   refused under both borrow flavours. A refusal that blames one says "temporary", since there
-  is no `let` to point at.
+  is no `let` to point at. Block storage, named or temporary, ends at every exit of its block
+  (closing brace, `break`, `continue`), and a borrow still live there is refused at the exit.
+  A `match` arm is a storage scope of its own; the scrutinee's temporary belongs to the block
+  around the `match`.
 - **M20** Address-of pins the place the address was taken of and no more, except that arrays
   are contiguous and `add` walks them: a pointer to an element pins its whole array, a pointer
   to a field pins only the field. Materializing a temporary's root is therefore the simple
@@ -234,12 +237,6 @@
   tracking, Polonius-style, would date every hop); a temp with more than one definition is
   its own root and conflicts with nothing; an access reports the earliest-minted loan it
   kills, once per access expression. Settled when precision is worth buying (below). **M14**
-- **MIR gains storage-end markers** — the checker's liveness notion is the frame, like the
-  interpreter's, so a borrow of an inner-block local read after its block ends is caught by
-  neither layer; a temporary's block end is the same hole, and `Body::temps` plus the block
-  rule supply its dead point when the markers exist. **M12 M14**
-- **Storage death is enforced** — today no layer enforces a temporary's block end; halvko/must
-  issue #18 builds it in parallel, and this line goes when it lands. **M12**
 - **A temporary can be mentioned twice** — today no name resolves to one, so it is mentioned
   exactly once (at the borrow that created it) and at most one loan is ever rooted in it; a
   second mention (a named temporary, a `let`-less reuse) revives every aliasing question the

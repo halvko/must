@@ -962,6 +962,12 @@ impl BlockExpr {
     pub fn tail_expr(&self) -> Option<Expr> {
         children::<Expr>(&self.syntax).last()
     }
+    /// The block's own closing brace: statements and the tail are child
+    /// nodes, so this is the only `R_BRACE` that is a direct token child.
+    /// `None` when the parser never found one.
+    pub fn r_brace_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, R_BRACE)
+    }
 }
 
 impl ConstBlockExpr {

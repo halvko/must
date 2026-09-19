@@ -381,7 +381,9 @@ impl<'db> Mono<'db> {
             let mut changed = false;
             for (_, block) in body.blocks.iter() {
                 for statement in &block.statements {
-                    let mir::StatementKind::Assign { dest, rvalue } = &statement.kind;
+                    let mir::StatementKind::Assign { dest, rvalue } = &statement.kind else {
+                        continue;
+                    };
                     if !dest.projection.is_empty() {
                         continue;
                     }
