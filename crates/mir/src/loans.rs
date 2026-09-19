@@ -1419,12 +1419,10 @@ impl<'a> BodyCheck<'a> {
     }
 
     /// Whether a local is a materialized temporary (M12).
-    ///
-    /// TODO: a structural binding kind to ask instead (halvko/must#20).
     fn is_temporary(&self, local: LocalId) -> bool {
         self.body.locals[local]
             .binding
-            .is_some_and(|binding| self.hir_body.temps.values().any(|&temp| temp == binding))
+            .is_some_and(|binding| self.hir_body.bindings[binding].is_temporary())
     }
 
     /// The place as the user wrote it, quoted for insertion into a

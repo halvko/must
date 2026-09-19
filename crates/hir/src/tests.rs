@@ -16500,7 +16500,7 @@ static main = fn() -> () {
 };
 "#,
         expect![[r#"
-            361..385: the value bound by `_` is not consumed on this path; its type has no `forget` capability, so every path must consume it (the value bound by `_` is born here and must be consumed at 371..372)
+            361..385: the value swallowed by `_` is not consumed on this path; its type has no `forget` capability, so every path must consume it (the value swallowed by `_` is born here and must be consumed at 371..372)
         "#]],
     );
 }
@@ -17099,8 +17099,8 @@ fn check_temps(text: &str, expect: Expect) {
             let range = ptr.text_range();
             let data = &body.bindings[*binding];
             assert!(
-                data.name.is_empty() && data.mutable,
-                "a temporary is nameless and trivially exclusive"
+                data.is_temporary() && data.mutable,
+                "a temporary reports its kind and is trivially exclusive"
             );
             assert!(
                 source_map.node_for_binding(*binding).is_none(),
@@ -17114,6 +17114,42 @@ fn check_temps(text: &str, expect: Expect) {
     }
     rows.sort();
     expect.assert_eq(&rows.into_iter().map(|(_, row)| row).collect::<String>());
+}
+
+/// Each binding reports its own kind and display name; only a written name
+/// is something a scope can bind.
+#[test]
+fn every_binding_reports_its_kind_and_display_name() {
+    let db = RootDatabase::default();
+    let text = r#"
+static mk = fn() -> usize { 5 };
+static main = fn() -> () {
+    let struct { mut } = struct { x = 2 };
+    let _ = 1;
+    let p = mk().&raw;
+    unsafe { p.*; }
+};
+"#;
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let mut rows = Vec::new();
+    for &item in crate::file_item_ids(&db, file) {
+        let (body, _) = crate::body_with_source_map(&db, item);
+        for (_, data) in body.bindings.iter() {
+            rows.push(format!(
+                "{:?} shows as {:?}, written {:?}\n",
+                data.kind,
+                data.name(),
+                data.written_name()
+            ));
+        }
+    }
+    expect![[r#"
+        Missing shows as "<missing>", written None
+        Hole shows as "_", written None
+        Temporary shows as "<temporary>", written None
+        Named("p") shows as "p", written Some("p")
+    "#]]
+    .assert_eq(&rows.concat());
 }
 
 /// `inner.fmt(Printer(struct {}).&mut)`: a freshly built value borrowed
@@ -17328,7 +17364,8 @@ static raw_builtin = fn() -> () { let p = print.&raw mut; };
 }
 
 /// The temporary's binding is typed as the whole root value (`Pair`, not
-/// the borrowed field) and has no syntax node, so it never renders.
+/// the borrowed field), displays as `<temporary>`, and has no syntax node,
+/// so it never renders.
 #[test]
 fn a_temporarys_binding_is_typed_and_never_rendered() {
     let text = r#"
@@ -17347,6 +17384,7 @@ static f = fn() -> usize { get(mk().a.&) };
         panic!("one temporary, got {temps:?}");
     };
     assert_eq!(infer.type_of_binding[binding].display(), "Pair");
+    assert_eq!(body.bindings[binding].name(), "<temporary>");
     check_infer(
         text,
         expect![[r#"

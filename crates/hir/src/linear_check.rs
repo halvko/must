@@ -35,7 +35,7 @@ use base_db::Db;
 use la_arena::ArenaMap;
 use rustc_hash::FxHashMap;
 
-use crate::body::{Body, ExprData, ExprId, PatData, PatId, Stmt, body};
+use crate::body::{BindingKind, Body, ExprData, ExprId, PatData, PatId, Stmt, body};
 use crate::capability::{Affine, has_forget};
 use crate::infer::{InferenceResult, infer};
 use crate::scopes::{Resolution, resolutions};
@@ -213,19 +213,19 @@ impl LinearDiagnostic {
     /// only the walk that found them knows which type to blame. The one
     /// arm that takes no hint at all is an ITEM's own value, which is
     /// never inside a generic body's scope.
-    pub fn message(&self, name: &str, root: Option<&Affine>) -> String {
+    pub fn message(&self, subject: Option<&BindingKind>, root: Option<&Affine>) -> String {
         let param = match root {
             Some(Affine::Param(param)) => Some(param.as_str()),
             _ => None,
         };
         match self {
             LinearDiagnostic::NotConsumed { .. } => match param {
-                Some(param) => diag::not_consumed_param(name, param),
-                None => diag::not_consumed(name),
+                Some(param) => diag::not_consumed_param(subject, param),
+                None => diag::not_consumed(subject),
             },
             LinearDiagnostic::AlreadyConsumed { .. } => root
-                .and_then(|root| diag::already_consumed_dup(name, root))
-                .unwrap_or_else(|| diag::already_consumed(name)),
+                .and_then(|root| diag::already_consumed_dup(subject, root))
+                .unwrap_or_else(|| diag::already_consumed(subject)),
             LinearDiagnostic::Discarded { .. } => match param {
                 Some(param) => diag::discarded_param(param),
                 None => diag::DISCARDED_LINEAR.to_owned(),
@@ -237,12 +237,12 @@ impl LinearDiagnostic {
                 diag::BORROWED_LINEAR_TEMPORARY.to_owned()
             }
             LinearDiagnostic::AssignOverLive { .. } => match param {
-                Some(param) => diag::assign_over_live_param(name, param),
-                None => diag::assign_over_live(name),
+                Some(param) => diag::assign_over_live_param(subject, param),
+                None => diag::assign_over_live(subject),
             },
             LinearDiagnostic::JoinDisagrees { .. } => match param {
-                Some(param) => diag::join_disagrees_param(name, param),
-                None => diag::join_disagrees(name),
+                Some(param) => diag::join_disagrees_param(subject, param),
+                None => diag::join_disagrees(subject),
             },
             LinearDiagnostic::CopiedOut { .. } => root
                 .and_then(diag::copied_out_dup)
@@ -259,8 +259,8 @@ impl LinearDiagnostic {
                 None => diag::WILDCARD_SKIPS_LINEAR.to_owned(),
             },
             LinearDiagnostic::LoopChangesLinear { .. } => root
-                .and_then(|root| diag::loop_changes_dup(name, root))
-                .unwrap_or_else(|| diag::loop_changes_linear(name)),
+                .and_then(|root| diag::loop_changes_dup(subject, root))
+                .unwrap_or_else(|| diag::loop_changes_linear(subject)),
             LinearDiagnostic::ItemHoldsLinear { .. } => diag::ITEM_HOLDS_LINEAR.to_owned(),
             // Reached through the ANNOTATION rather than through a
             // runtime binding, which a const context indeed cannot read:
@@ -522,7 +522,7 @@ impl CheckCtx<'_> {
     // ---- scopes and bindings -------------------------------------------
 
     fn track_pat(&mut self, pat: PatId) {
-        for (_, binding) in self.body.pat_bindings(pat) {
+        for binding in self.body.pat_bindings(pat) {
             let owed = self
                 .infer
                 .type_of_binding

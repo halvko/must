@@ -2229,7 +2229,6 @@ fn locals_for(
     let inference = hir::infer::infer(db, item);
     bindings
         .into_iter()
-        .filter(|(name, _, _)| !name.is_empty())
         .map(|(name, binding, depth)| Local {
             mutable: body.bindings[binding].mutable,
             ty: inference.type_of_binding.get(binding).cloned(),
@@ -2281,7 +2280,7 @@ fn locals_in_block(
         let Some(pat_id) = source_map.pat_for_node(SyntaxNodePtr::new(pat.syntax())) else {
             continue;
         };
-        let bindings = body.pat_bindings(pat_id);
+        let bindings = body.pat_scope_entries(pat_id);
         // `compute_expr_scopes` allocates a scope for every `let`, even a
         // `let _ = …` with no bindings at all — so every hop bumps depth
         // here too, before the (possibly empty) bindings loop below.

@@ -738,6 +738,11 @@ impl Name {
             .unwrap_or_default()
     }
 
+    /// The identifier, or `None` when this name is the hole `_`.
+    pub fn ident(&self) -> Option<String> {
+        token(&self.syntax, IDENT).map(|it| it.text().to_owned())
+    }
+
     /// Whether this name is the hole `_` rather than an identifier. A
     /// `Name` node always wraps exactly one of `IDENT` or `HOLE` (see
     /// `grammar::pattern`), so this is the complement of having text.

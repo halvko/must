@@ -50,13 +50,54 @@ impl Body {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindingData {
-    pub name: String,
+    pub kind: BindingKind,
     pub type_ref: Option<TypeRef>,
     /// Whether the binding was introduced with `mut` (`let mut` / a `mut`
     /// parameter). A hole (`_`) is never mutable — there is no name to
     /// assign through — regardless of a written `mut` (validation flags
     /// that as pointless).
     pub mutable: bool,
+}
+
+impl BindingData {
+    /// The text to show for this binding. Display only: code that needs to
+    /// know what the binding is matches on [`BindingData::kind`].
+    pub fn name(&self) -> &str {
+        match &self.kind {
+            BindingKind::Named(name) => name,
+            BindingKind::Hole => "_",
+            BindingKind::Temporary => "<temporary>",
+            BindingKind::Missing => "<missing>",
+        }
+    }
+
+    /// The name written in the source, if one was: what a scope binds.
+    pub fn written_name(&self) -> Option<&str> {
+        match &self.kind {
+            BindingKind::Named(name) => Some(name),
+            BindingKind::Hole | BindingKind::Temporary | BindingKind::Missing => None,
+        }
+    }
+
+    /// Whether this is a materialized temporary (`Body::temps`) rather
+    /// than a source-written binding.
+    pub fn is_temporary(&self) -> bool {
+        matches!(self.kind, BindingKind::Temporary)
+    }
+}
+
+/// What a [`BindingId`] stands for. Every kind but a temporary comes from
+/// written source and keeps a source-map entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindingKind {
+    /// A written name, never empty.
+    Named(String),
+    /// `_`: binds nothing, resolves to nothing, never `mutable`.
+    Hole,
+    /// Storage minted for a borrowed value with no place of its own (M12).
+    Temporary,
+    /// A binding position whose name is missing from broken source.
+    Missing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -436,32 +477,31 @@ pub struct RecordPatField {
 }
 
 impl Body {
-    /// Every binding one pattern introduces, flattened in source order —
-    /// the `let`/parameter counterpart of a scope's entries: a `Bind` binds
-    /// itself, a `Record` its (possibly renamed) fields, a `Newtype`
-    /// whatever its inner pattern binds, and
-    /// `Wildcard`/`Missing`/`Char`/`Int`/`Variant` (match-only in binding
-    /// position; never produced there) bind nothing beyond what's already
-    /// covered by their own call sites.
-    pub fn pat_bindings(&self, pat: PatId) -> Vec<(String, BindingId)> {
+    /// Every binding a pattern introduces, holes included, in source order.
+    pub fn pat_bindings(&self, pat: PatId) -> Vec<BindingId> {
         let mut out = Vec::new();
         self.collect_pat_bindings(pat, &mut out);
         out
     }
 
-    fn collect_pat_bindings(&self, pat: PatId, out: &mut Vec<(String, BindingId)>) {
+    /// The names a pattern brings into scope: its bindings that have a
+    /// written name.
+    pub fn pat_scope_entries(&self, pat: PatId) -> Vec<(String, BindingId)> {
+        self.pat_bindings(pat)
+            .into_iter()
+            .filter_map(|b| Some((self.bindings[b].written_name()?.to_owned(), b)))
+            .collect()
+    }
+
+    fn collect_pat_bindings(&self, pat: PatId, out: &mut Vec<BindingId>) {
         match &self.pats[pat] {
             PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int(_) => {}
-            PatData::Bind(binding) => out.push((self.bindings[*binding].name.clone(), *binding)),
+            PatData::Bind(binding) => out.push(*binding),
             PatData::Variant { bindings, .. } => {
-                out.extend(bindings.iter().map(|&b| (self.bindings[b].name.clone(), b)));
+                out.extend(bindings.iter().copied());
             }
             PatData::Record { fields, .. } => {
-                out.extend(
-                    fields
-                        .iter()
-                        .map(|f| (self.bindings[f.binding].name.clone(), f.binding)),
-                );
+                out.extend(fields.iter().map(|f| f.binding));
             }
             PatData::Newtype { inner, .. } => self.collect_pat_bindings(*inner, out),
         }
@@ -1168,10 +1208,9 @@ impl LowerCtx {
             return place;
         };
         let binding = self.bindings.alloc(BindingData {
-            // TODO: a structural binding kind instead of the empty name
-            // (halvko/must#20). Nothing may resolve to a temporary, and it
-            // has no source-map entry: no syntax node is this binding.
-            name: String::new(),
+            // Nothing may resolve to a temporary, and it has no source-map
+            // entry: no syntax node is this binding.
+            kind: BindingKind::Temporary,
             type_ref: None,
             // Exclusivity is trivially satisfiable on a local nobody else
             // can reach, so `.&mut` of a temporary needs no written `mut`.
@@ -1188,14 +1227,20 @@ impl LowerCtx {
         mutable: bool,
         fallback_node: &syntax::SyntaxNode,
     ) -> BindingId {
-        // A hole binds no name, so there is nothing `mut` could ever make
-        // assignable — `mutable` stays `false` regardless of the written
-        // keyword (validation flags a written `mut` there separately).
-        let is_hole = name.as_ref().is_some_and(|n| n.is_hole());
+        // The syntax tree has three cases: no name node (broken source), a
+        // name node holding `_`, and a name node holding an identifier.
+        let kind = match name.as_ref().map(|name| name.ident()) {
+            None => BindingKind::Missing,
+            Some(None) => BindingKind::Hole,
+            Some(Some(ident)) => BindingKind::Named(ident),
+        };
+        // A hole has nothing `mut` could make assignable; validation flags
+        // a written `mut` there.
+        let mutable = mutable && kind != BindingKind::Hole;
         let id = self.bindings.alloc(BindingData {
-            name: name.as_ref().map(|n| n.text()).unwrap_or_default(),
+            kind,
             type_ref,
-            mutable: mutable && !is_hole,
+            mutable,
         });
         let ptr = match &name {
             Some(name) => SyntaxNodePtr::new(name.syntax()),
