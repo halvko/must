@@ -1,0 +1,143 @@
+==================
+Prefix borrows
+==================
+
+static f = fn (r: &usize, p: &raw mut usize) { &x; &mut x; &raw x; &raw mut x; };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_literal
+      (param_list
+        (param
+          (bind_pat
+            (param_name))
+          (borrow_type
+            (path_type
+              (identifier))))
+        (param
+          (bind_pat
+            (param_name))
+          (raw_ptr_type
+            (path_type
+              (identifier)))))
+      (block_expr
+        (expr_stmt
+          (borrow_expr
+            (path_expr
+              (identifier))))
+        (expr_stmt
+          (borrow_expr
+            (path_expr
+              (identifier))))
+        (expr_stmt
+          (addr_of_expr
+            (path_expr
+              (identifier))))
+        (expr_stmt
+          (addr_of_expr
+            (path_expr
+              (identifier))))))))
+
+==================
+Literal after a field colon
+==================
+
+static v = struct { x: 1, y: -2 };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (record_expr
+      (record_expr_field
+        (identifier)
+        (integer))
+      (record_expr_field
+        (identifier)
+        (neg_expr
+          (integer))))))
+
+==================
+Bare angle arguments in type position
+==================
+
+static f = fn (b: Boxed<usize>) { };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_literal
+      (param_list
+        (param
+          (bind_pat
+            (param_name))
+          (path_type
+            (identifier)
+            (generic_arg_list
+              (type_arg
+                (path_type
+                  (identifier)))))))
+      (block_expr))))
+
+==================
+Extern function values
+==================
+
+static a = extern fn(n: usize) -> usize;
+extern static b: unsafe fn() -> () = fn () { };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_literal
+      (param_list
+        (param
+          (bind_pat
+            (param_name))
+          (path_type
+            (identifier))))
+      (ret_type
+        (path_type
+          (identifier)))))
+  (static_item
+    (identifier)
+    (fn_type
+      (param_list)
+      (ret_type
+        (unit_type)))
+    (fn_literal
+      (param_list)
+      (block_expr))))
+
+==================
+Unqualified variant pattern
+==================
+
+static f = fn () { match s { Circle(r) => r } };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_literal
+      (param_list)
+      (block_expr
+        (expr_stmt
+          (match_expr
+            (path_expr
+              (identifier))
+            (match_arm
+              (variant_pat
+                (identifier)
+                (identifier))
+              (path_expr
+                (identifier)))))))))

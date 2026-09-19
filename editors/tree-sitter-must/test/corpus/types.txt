@@ -1,0 +1,157 @@
+==================
+Type declaration right-hand sides
+==================
+
+type Meters = usize;
+type Opt = enum::<T> { Some(T), None };
+type Pair = struct::<T> { a: T, b: Opt::<T> };
+type Only = Opt::Some;
+
+---
+
+(source_file
+  (type_item
+    (identifier)
+    (path_type
+      (identifier)))
+  (type_item
+    (identifier)
+    (enum_type
+      (generic_param_list
+        (type_param
+          (identifier)))
+      (enum_variant
+        (identifier)
+        (path_type
+          (identifier)))
+      (enum_variant
+        (identifier))))
+  (type_item
+    (identifier)
+    (record_type
+      (generic_param_list
+        (type_param
+          (identifier)))
+      (record_type_field
+        (identifier)
+        (path_type
+          (identifier)))
+      (record_type_field
+        (identifier)
+        (path_type
+          (identifier)
+          (generic_arg_list
+            (type_arg
+              (path_type
+                (identifier))))))))
+  (type_item
+    (identifier)
+    (path_type
+      (identifier)
+      (identifier))))
+
+==================
+Pointers, borrows and regions
+==================
+
+static f = fn::<@a, @b: @a, T>(x: T.&::<@a + @b>, p: T.&raw mut, q: T.&mut.&raw) -> ! { loop { } };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_literal
+      (generic_param_list
+        (region_param
+          (region))
+        (region_param
+          (region)
+          (region))
+        (type_param
+          (identifier)))
+      (param_list
+        (param
+          (bind_pat
+            (param_name))
+          (borrow_type
+            (path_type
+              (identifier))
+            (generic_arg_list
+              (region_arg
+                (region)
+                (region)))))
+        (param
+          (bind_pat
+            (param_name))
+          (raw_ptr_type
+            (path_type
+              (identifier))))
+        (param
+          (bind_pat
+            (param_name))
+          (raw_ptr_type
+            (borrow_type
+              (path_type
+                (identifier))))))
+      (ret_type
+        (never_type))
+      (block_expr
+        (expr_stmt
+          (loop_expr
+            (block_expr)))))))
+
+==================
+Arrays and function types
+==================
+
+static f = fn::<const N: usize>(a: [usize; N], b: [u8; const { 2 }], g: fn(usize, name: str) -> ()) { };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_literal
+      (generic_param_list
+        (const_param
+          (identifier)
+          (path_type
+            (identifier))))
+      (param_list
+        (param
+          (bind_pat
+            (param_name))
+          (array_type
+            (path_type
+              (identifier))
+            (const_arg
+              (path_expr
+                (identifier)))))
+        (param
+          (bind_pat
+            (param_name))
+          (array_type
+            (path_type
+              (identifier))
+            (const_arg
+              (const_block_expr
+                (block_expr
+                  (expr_stmt
+                    (integer)))))))
+        (param
+          (bind_pat
+            (param_name))
+          (fn_type
+            (param_list
+              (param
+                (path_type
+                  (identifier)))
+              (param
+                (bind_pat
+                  (param_name))
+                (path_type
+                  (identifier))))
+            (ret_type
+              (unit_type)))))
+      (block_expr))))

@@ -1,0 +1,20 @@
+{
+  "grammars": [
+    {
+      "name": "must",
+      "camelcase": "Must",
+      "scope": "source.must",
+      "path": ".",
+      "file-types": ["must"],
+      "highlights": "queries/highlights.scm"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Tree-sitter grammar for the Must language",
+    "links": {
+      "repository": "https://github.com/halvko/must-lsp-server"
+    }
+  }
+}

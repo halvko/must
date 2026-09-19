@@ -1,0 +1,198 @@
+==================
+Static and const items
+==================
+
+static greeting: str = "hi";
+const f = fn (n: usize) -> usize { n };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (path_type
+      (identifier))
+    (string
+      (string_content)))
+  (static_item
+    (identifier)
+    (fn_literal
+      (param_list
+        (param
+          (bind_pat
+            (param_name))
+          (path_type
+            (identifier))))
+      (ret_type
+        (path_type
+          (identifier)))
+      (block_expr
+        (expr_stmt
+          (path_expr
+            (identifier)))))))
+
+==================
+Host import
+==================
+
+extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_type
+      (param_list
+        (param
+          (bind_pat
+            (param_name))
+          (raw_ptr_type
+            (path_type
+              (identifier))))
+        (param
+          (bind_pat
+            (param_name))
+          (path_type
+            (identifier))))
+      (ret_type
+        (path_type
+          (identifier))))))
+
+==================
+Trait with requires and impl
+==================
+
+trait Show = requires { show: fn(s: Self) -> str; } with {
+    impl usize { show = fn(s: usize) -> str { "n" }; }
+};
+
+---
+
+(source_file
+  (trait_item
+    (identifier)
+    (requires_def
+      (member
+        (identifier)
+        (fn_type
+          (param_list
+            (param
+              (bind_pat
+                (param_name))
+              (path_type
+                (identifier))))
+          (ret_type
+            (path_type
+              (identifier))))))
+    (with_group
+      (impl_element
+        (path_type
+          (identifier))
+        (member
+          (identifier)
+          (fn_literal
+            (param_list
+              (param
+                (bind_pat
+                  (param_name))
+                (path_type
+                  (identifier))))
+            (ret_type
+              (path_type
+                (identifier)))
+            (block_expr
+              (expr_stmt
+                (string
+                  (string_content))))))))))
+
+==================
+Reserved element forms
+==================
+
+type W = struct::<T> { pub v: T, ... } with ::<U> T: Eq + Ord, U = usize {
+    impl Marker;
+    unsafe impl Send { }
+    for T { impl Eq { } }
+} only move + copy;
+trait Ord = Eq + PartialOrd;
+
+---
+
+(source_file
+  (type_item
+    (identifier)
+    (record_type
+      (generic_param_list
+        (type_param
+          (identifier)))
+      (record_type_field
+        (identifier)
+        (path_type
+          (identifier))))
+    (with_group
+      (generic_param_list
+        (type_param
+          (identifier)))
+      (with_clause
+        (identifier)
+        (path_type
+          (identifier))
+        (path_type
+          (identifier)))
+      (with_clause
+        (identifier)
+        (path_type
+          (identifier)))
+      (impl_element
+        (path_type
+          (identifier)))
+      (unsafe_element
+        (impl_element
+          (path_type
+            (identifier))))
+      (for_element
+        (path_type
+          (identifier))
+        (impl_element
+          (path_type
+            (identifier)))))
+    (only_clause
+      (identifier)
+      (identifier)))
+  (trait_item
+    (identifier)
+    (trait_alias
+      (path_type
+        (identifier))
+      (path_type
+        (identifier)))))
+
+==================
+Separators are optional
+==================
+
+static a = 1
+static f = fn () { g() h() }
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (integer))
+  (static_item
+    (identifier)
+    (fn_literal
+      (param_list)
+      (block_expr
+        (expr_stmt
+          (call_expr
+            (path_expr
+              (identifier))
+            (arg_list)))
+        (expr_stmt
+          (call_expr
+            (path_expr
+              (identifier))
+            (arg_list)))))))

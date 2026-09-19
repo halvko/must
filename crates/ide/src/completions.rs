@@ -1754,13 +1754,13 @@ fn match_template_items(
 /// correct for Zed as it stands, which is the client this repo ships: Zed's
 /// snippet insertion runs `AutoindentMode::Block`, whose shift comes from a
 /// tree-sitter `suggest_autoindents` result, and the Must extension
-/// deliberately registers NO grammar (see
+/// deliberately ships NO `indents.scm` beside its grammar (see
 /// `editors/zed/languages/must/config.toml`) — so there is no suggestion,
 /// the shift is zero, and the body lands verbatim. `insertTextMode` cannot
 /// pin this down instead: Zed reads it only on its non-snippet path.
-/// The day the extension gains a grammar this constant-shaped choice has to
-/// flip to relative; `platform-codegen-and-tooling.md` carries that as a
-/// re-evaluate-when item.
+/// The day the extension gains an indents query this constant-shaped choice
+/// has to flip to relative; `platform-codegen-and-tooling.md` carries that
+/// as a re-evaluate-when item.
 ///
 /// `snippet` picks the two spellings apart. With tab stops, a payload gets
 /// **one stop per element** (`::Pair($1, $2)`) because a pattern must name
