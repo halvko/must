@@ -120,42 +120,19 @@
   unwinding has an implicit exit edge at every call, which is why such languages need
   destructors. A `break` is not a back edge; it carries its state to the loop's exit join,
   while a `continue` answers the same entry-equals-back-edge invariant a fall-through does.
-- **M12** A borrowed operand that is not a place is given one: a temporary is an anonymous
-  local nobody can name, born where the expression is written, living to the end of the
-  innermost enclosing block, always — no shape-based extension rules, no liveness derivation;
-  a match scrutinee lives to the end of the match, a loop condition's or body's temporary is
-  fresh per iteration, and a shorter life is spelled with an explicit block. Tail expressions
-  are a borrow-check question, not a storage rule. Sound because there are no
-  destructors: extending a value's life is observable only through borrows, so strictly more
-  programs check and no behaviour changes. Built as a MARK on the borrowed root at lowering
-  (`Body::temps`), never a synthesized `let` — the value is evaluated where it is written, so
-  operands keep their order and a `match` arm's temporary is created only on the path that
-  runs; everything below hir reads an ordinary nameless local (inference types it, the loan
-  checker roots loans in it, MIR allocates one addressable local, the interpreter and the
-  const evaluator address it, the editor never sees it). The root is what is materialized, never
-  the projected field or element: safe code cannot tell a borrow into the temporary from a
-  borrow of a copy (no destructors, no identity, and struct layout is invisible), but a raw
-  pointer to `mk()[0]` must reach `mk()[1]` by `add`, which a copy of one element cannot
-  give it. That is the provenance rule: address-of pins the place the address was taken of and no
-  more, except that arrays are contiguous and `add` walks them, so a pointer to an element pins
-  its whole array while a pointer to a field pins only the field. Materializing the root is the
-  simple correct choice; copying a field-projected prefix instead is an optimization no program
-  can observe, and belongs to a MIR pass that serves named locals equally. Storage death is
-  recorded, not enforced (no MIR storage markers, no loan-check storage liveness), so the
-  fence for a temporary that does not live long enough is the region refusal, worded to name
-  the temporary — the diagnostic requirement, since this is the case where the user sees no
-  block. One in-body shape is refused for free and it is a fact about loans, not the block
-  rule: a loan of a loop-body temporary cannot survive the back edge, because the next
-  iteration's store is a write to the loan's root; a loan read after its inner block but
-  before the back edge is still caught by neither layer. Linears self-exclude, permanently: a
-  nameless value can never be consumed, so a must-consume temporary is refused with its own
-  message (bind it with `let` first), whichever flavor asks — `.&raw` reaches the same message
-  through the same mark. `.&raw`/`.&raw mut` materializes too, targeting the identical storage
-  a `.&`/`.&mut` of the same operand would have gotten: a raw pointer to a temporary is exactly
-  as dangling-prone as a raw pointer to a block-local already is, and D1 already prices that at
-  the deref, with `unsafe` — refusing the temporary bought nothing the local case did not
-  already allow. A NAME is judged as before whatever it resolves to — the line is drawn
-  syntactically at lowering, so a const parameter, a type, a builtin still refuse.
+- **M12** A borrowed operand that is not a place gets a temporary: an anonymous local nobody
+  can name, born where the expression is written, living to the end of the innermost enclosing
+  block, fresh per loop iteration; a shorter life is spelled with an explicit block. The root
+  of the borrowed place is what gets storage. Sound without destructors: a longer life is
+  observable only through borrows, so strictly more programs check and no behaviour changes.
+  Linears self-exclude: a nameless value can never be consumed, so a must-consume temporary is
+  refused under both borrow flavours. A refusal that blames one says "temporary", since there
+  is no `let` to point at.
+- **M20** Address-of pins the place the address was taken of and no more, except that arrays
+  are contiguous and `add` walks them: a pointer to an element pins its whole array, a pointer
+  to a field pins only the field. Materializing a temporary's root is therefore the simple
+  correct choice; copying a field-projected prefix instead is an optimization no program can
+  observe, and belongs to a MIR pass.
 
 ### Ruled, not built
 
@@ -236,8 +213,9 @@
   buys nothing without destructors. **M12**
 - **A synthesized `let` / hoisting a temporary's initializer to the head of its block** —
   reorders operands (`add(a(), mk().&)` would run `mk()` first) and drags a temporary out of a
-  `match` arm onto paths that never run; a mark on the borrowed root moves no evaluation and
-  gets per-path allocation with no init tracking. **M12**
+  `match` arm onto paths that never run. A mark on the borrowed root instead: the value is
+  evaluated where it is written, so operands keep their order and a `match` arm's temporary is
+  created only on the path that runs. **M12**
 - **MIR storage markers now, for temporaries** — nothing to enforce without destructors, and
   the region refusal already fences the escaping case; the block rule is a derivation over the
   arena the day storage death is modelled. **M12**
@@ -265,6 +243,8 @@
   interpreter's, so a borrow of an inner-block local read after its block ends is caught by
   neither layer; a temporary's block end is the same hole, and `Body::temps` plus the block
   rule supply its dead point when the markers exist. **M12 M14**
+- **Storage death is enforced** — today no layer enforces a temporary's block end; halvko/must
+  issue #18 builds it in parallel, and this line goes when it lands. **M12**
 - **A temporary can be mentioned twice** — today no name resolves to one, so it is mentioned
   exactly once (at the borrow that created it) and at most one loan is ever rooted in it; a
   second mention (a named temporary, a `let`-less reuse) revives every aliasing question the
