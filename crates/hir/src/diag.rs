@@ -8,6 +8,7 @@
 //! `message()`) and nowhere else. [`crate::ConstCheckDiagnostic::message`]
 //! renders by delegating to the functions below.
 
+use crate::body::BindingKind;
 use crate::capability::Affine;
 
 pub fn unresolved_name(name: &str) -> String {
@@ -292,15 +293,14 @@ pub const BORROW_REGION_KIND: &str =
 
 // ---- capabilities and must-consume checking (linear types) --------------
 
-/// How a must-consume diagnostic NAMES the thing it is about. A hole
-/// binding (`let _ = ...`) has no name to quote, and quoting the empty
-/// string reads as a compiler bug — so it gets a phrase instead, and one
-/// that says where to look.
-pub fn linear_subject(name: &str) -> String {
-    if name.is_empty() {
-        "the value bound by `_`".to_owned()
-    } else {
-        format!("`{name}`")
+/// How a must-consume diagnostic names its subject: a quoted name, or a
+/// phrase for a binding with no name to quote.
+pub fn linear_subject(subject: Option<&BindingKind>) -> String {
+    match subject {
+        Some(BindingKind::Named(name)) => format!("`{name}`"),
+        Some(BindingKind::Hole) => "the value swallowed by `_`".to_owned(),
+        Some(BindingKind::Temporary) => "this temporary".to_owned(),
+        Some(BindingKind::Missing) | None => "this value".to_owned(),
     }
 }
 
@@ -308,13 +308,16 @@ pub fn linear_subject(name: &str) -> String {
 /// value came from, and what it owes. A LINEAR value owes a consumption;
 /// one tracked only against DUPLICATION owes nothing but its own
 /// singleness, and saying "must be consumed" of it would be false.
-pub fn born_here(name: &str, linear: bool) -> String {
+pub fn born_here(subject: Option<&BindingKind>, linear: bool) -> String {
     if linear {
-        format!("{} is born here and must be consumed", linear_subject(name))
+        format!(
+            "{} is born here and must be consumed",
+            linear_subject(subject)
+        )
     } else {
         format!(
             "{} is born here, and there is only one of it",
-            linear_subject(name)
+            linear_subject(subject)
         )
     }
 }
@@ -374,11 +377,11 @@ fn duplication_of(root: &Affine) -> Option<(String, String)> {
 /// scope alive. The message names the ONE thing that discharges the
 /// obligation in general terms, because which method does it is the
 /// library's business, not the compiler's.
-pub fn not_consumed(name: &str) -> String {
+pub fn not_consumed(subject: Option<&BindingKind>) -> String {
     format!(
         "{} is not consumed on this path; its type has no `forget` capability, \
          so every path must consume it",
-        linear_subject(name)
+        linear_subject(subject)
     )
 }
 
@@ -386,18 +389,18 @@ pub fn not_consumed(name: &str) -> String {
 /// parameter with no `forget` bound. A different sentence, because the fix
 /// is a different one: nothing was declared linear here — the body is
 /// checked against every type the caller might supply.
-pub fn not_consumed_param(name: &str, param: &str) -> String {
+pub fn not_consumed_param(subject: Option<&BindingKind>, param: &str) -> String {
     format!(
         "{} is not consumed on this path, and {}",
-        linear_subject(name),
+        linear_subject(subject),
         leak_hint(param)
     )
 }
 
 /// Use-after-consume — which for a linear type is also disposal twice.
 /// Named after what the user did, with the earlier site as a related note.
-pub fn already_consumed(name: &str) -> String {
-    format!("{} was already consumed", linear_subject(name))
+pub fn already_consumed(subject: Option<&BindingKind>) -> String {
+    format!("{} was already consumed", linear_subject(subject))
 }
 
 /// Use-after-consume where the reason is a root with no declaration to
@@ -405,11 +408,11 @@ pub fn already_consumed(name: &str) -> String {
 /// Names it, because "already consumed" alone sends the reader looking for
 /// a declaration that says so and there is none. Offers BORROWING, never
 /// the bound — see [`duplication_of`].
-pub fn already_consumed_dup(name: &str, root: &Affine) -> Option<String> {
+pub fn already_consumed_dup(subject: Option<&BindingKind>, root: &Affine) -> Option<String> {
     let (_, hint) = duplication_of(root)?;
     Some(format!(
         "{} was already consumed: {hint} — borrow it for the second use",
-        linear_subject(name)
+        linear_subject(subject)
     ))
 }
 
@@ -432,20 +435,20 @@ pub fn discarded_param(param: &str) -> String {
 
 /// Writing over a live linear: the old value is gone, and nothing was done
 /// about it. The same leak as [`not_consumed`] at a different moment.
-pub fn assign_over_live(name: &str) -> String {
+pub fn assign_over_live(subject: Option<&BindingKind>) -> String {
     format!(
         "{} still holds a value that must be consumed; assigning here would lose it",
-        linear_subject(name)
+        linear_subject(subject)
     )
 }
 
 /// [`assign_over_live`] where the binder is the reason the old value had
 /// to go somewhere. A LEAK-family message, so it may offer the bound: it
 /// fires only for a parameter nobody constrained.
-pub fn assign_over_live_param(name: &str, param: &str) -> String {
+pub fn assign_over_live_param(subject: Option<&BindingKind>, param: &str) -> String {
     format!(
         "{} still holds a value that must be consumed, and {}",
-        linear_subject(name),
+        linear_subject(subject),
         leak_hint(param)
     )
 }
@@ -453,19 +456,19 @@ pub fn assign_over_live_param(name: &str, param: &str) -> String {
 /// The join case, stated as the disagreement it is. Joins resolve at
 /// statement boundaries, so the squiggle sits on the whole `if`/`match`
 /// rather than on one arm — neither arm is wrong on its own.
-pub fn join_disagrees(name: &str) -> String {
+pub fn join_disagrees(subject: Option<&BindingKind>) -> String {
     format!(
         "{} is consumed on some paths through this expression and not on others",
-        linear_subject(name)
+        linear_subject(subject)
     )
 }
 
 /// [`join_disagrees`] where the binder is the reason the paths had to
 /// agree. Leak family, so the bound is one way out.
-pub fn join_disagrees_param(name: &str, param: &str) -> String {
+pub fn join_disagrees_param(subject: Option<&BindingKind>, param: &str) -> String {
     format!(
         "{} is consumed on some paths through this expression and not on others, and {}",
-        linear_subject(name),
+        linear_subject(subject),
         leak_hint(param)
     )
 }
@@ -527,23 +530,23 @@ pub fn rest_skips_param(field: &str, param: &str) -> String {
 
 /// The loop invariant. Phrased as the next iteration's problem, because
 /// that is what makes it one — the body read on its own is fine.
-pub fn loop_changes_linear(name: &str) -> String {
+pub fn loop_changes_linear(subject: Option<&BindingKind>) -> String {
     format!(
         "{} is left in a different state than the loop found it in; \
          the next iteration would run against a world this body was not checked in",
-        linear_subject(name)
+        linear_subject(subject)
     )
 }
 
 /// [`loop_changes_linear`] where the value is merely unduplicable.
 /// Duplication family: what the next iteration would do is READ a value
 /// this one already moved, which nothing makes legal.
-pub fn loop_changes_dup(name: &str, root: &Affine) -> Option<String> {
+pub fn loop_changes_dup(subject: Option<&BindingKind>, root: &Affine) -> Option<String> {
     let (_, hint) = duplication_of(root)?;
     Some(format!(
         "{} is left in a different state than the loop found it in: {hint} — \
          the next iteration would read one this one already moved",
-        linear_subject(name)
+        linear_subject(subject)
     ))
 }
 

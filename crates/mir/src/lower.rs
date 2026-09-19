@@ -2172,7 +2172,7 @@ impl LowerCtx<'_> {
                 .get(binding)
                 .cloned()
                 .unwrap_or(Ty::Error),
-            name: (!data.name.is_empty()).then(|| data.name.clone()),
+            name: data.written_name().map(str::to_owned),
             binding: Some(binding),
             addressable: false,
         });

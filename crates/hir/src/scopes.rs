@@ -114,7 +114,7 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
                         compute_expr_scopes(body, scopes, *init, scope);
                         scope = scopes.scopes.alloc(ScopeData {
                             parent: Some(scope),
-                            entries: body.pat_bindings(*pat),
+                            entries: body.pat_scope_entries(*pat),
                         });
                     }
                     Stmt::Assign { target, value } => {
@@ -139,7 +139,7 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
                 parent: Some(scope),
                 entries: params
                     .iter()
-                    .flat_map(|p| body.pat_bindings(p.pat))
+                    .flat_map(|p| body.pat_scope_entries(p.pat))
                     .collect(),
             });
             compute_expr_scopes(body, scopes, *b, scope);
@@ -242,7 +242,7 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
                 // ordinary local.
                 let arm_scope = scopes.scopes.alloc(ScopeData {
                     parent: Some(scope),
-                    entries: body.pat_bindings(arm.pat),
+                    entries: body.pat_scope_entries(arm.pat),
                 });
                 compute_expr_scopes(body, scopes, arm.body, arm_scope);
             }

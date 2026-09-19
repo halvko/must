@@ -1100,7 +1100,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                                             message: format!(
                                                 "`{}` was inferred to have type `{}` \
                                              from its initializer",
-                                                body.bindings[*binding].name,
+                                                body.bindings[*binding].name(),
                                                 expected.display()
                                             ),
                                         })
@@ -1718,10 +1718,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let Some(range) = range else {
                 continue;
             };
-            let name = diag
-                .binding()
-                .map(|binding| body.bindings[binding].name.clone())
-                .unwrap_or_default();
+            let subject = diag.binding().map(|binding| &body.bindings[binding].kind);
             let ty = diag
                 .binding()
                 .and_then(|binding| types.type_of_binding.get(binding))
@@ -1740,7 +1737,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     file,
                     range: ptr.text_range(),
                     message: diag::born_here(
-                        &name,
+                        subject,
                         ty.is_some_and(|ty| !capability::has_forget(db, ty)),
                     ),
                 });
@@ -1771,7 +1768,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             diagnostics.push(Diagnostic {
                 range,
                 severity: Severity::Error,
-                message: diag.message(&name, root.as_ref()),
+                message: diag.message(subject, root.as_ref()),
                 fix: None,
                 related,
             });

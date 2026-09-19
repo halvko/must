@@ -2851,7 +2851,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 borrow,
                                 root,
                                 binding: *binding,
-                                name: data.name.clone(),
+                                name: data.name().to_owned(),
                                 place: place_text,
                             });
                     }
@@ -4275,8 +4275,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                             InferenceDiagnostic::AssignToImmutable {
                                                 target: *target,
                                                 binding: *binding,
-                                                name: data.name.clone(),
-                                                place: data.name.clone(),
+                                                name: data.name().to_owned(),
+                                                place: data.name().to_owned(),
                                             },
                                         );
                                     }
@@ -7173,7 +7173,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         .push(InferenceDiagnostic::AssignToImmutable {
                             target: root,
                             binding: *binding,
-                            name: data.name.clone(),
+                            name: data.name().to_owned(),
                             place,
                         });
                 }
@@ -7284,7 +7284,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     addr_of,
                                     root,
                                     binding: *binding,
-                                    name: data.name.clone(),
+                                    name: data.name().to_owned(),
                                     place: place_str,
                                 });
                         }
@@ -9218,7 +9218,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 Cover::Literal
             }
             PatData::Bind(binding) => {
-                let name = self.body.bindings[binding].name.clone();
+                let name = self.body.bindings[binding].written_name();
                 // A bare bind always binds the whole scrutinee — patterns
                 // are never reinterpreted as variants (G25: silent
                 // reinterpretation was a footgun — rename/remove a variant
@@ -9234,7 +9234,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     _ => None,
                 };
                 if let Some(loc) = &enum_loc
-                    && !name.is_empty()
+                    && let Some(name) = name
                     && let Some(variants) = enum_variants(self.db, loc.to_id(self.db)).as_ref()
                     && variants.iter().any(|(n, _)| *n == name)
                 {
@@ -9244,7 +9244,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             match_expr,
                             pat,
                             item: loc.clone(),
-                            name: name.clone(),
+                            name: name.to_owned(),
                         });
                 }
                 let ty = match scrut {
