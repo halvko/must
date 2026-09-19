@@ -8,10 +8,27 @@
 #
 # What Helix gets from the server: diagnostics, hover, goto-definition,
 # completions (snippets included), code actions, and the debug adapter.
-# What it cannot get: syntax highlighting and the ▶ run lenses. Helix has
-# no LSP semantic-token or code-lens support, and Must has no tree-sitter
-# grammar, so `.must` files render uncolored. Run a file from the shell
-# instead: `must-lsp run path/to/file.must`.
+# What it cannot get: the ▶ run lenses (Helix has no code-lens support).
+# Run a file from the shell instead: `must-lsp run path/to/file.must`.
+#
+# Highlighting comes from the tree-sitter grammar at the bottom of this
+# file; Helix has no LSP semantic tokens. It needs Helix 25.07 or later:
+# the queries rely on a later pattern winning over an earlier one on the
+# same node, and older releases resolve that the other way round. Set up:
+#
+#   hx --grammar fetch && hx --grammar build
+#   mkdir -p ~/.config/helix/runtime/queries
+#   ln -s <this repo>/editors/tree-sitter-must/queries \
+#       ~/.config/helix/runtime/queries/must
+#
+# The grammar is built from the pinned `rev`, the queries are read from the
+# checkout through that link. After a grammar change both `rev`s (here and
+# editors/zed/extension.toml) are bumped to a pushed commit and the grammar
+# is rebuilt; until then a query can name a node the built parser lacks,
+# which shows as an uncolored buffer and a query error in `hx --log`. To
+# use the checkout's grammar directly, replace the source with
+# `source = { path = "<this repo>/editors/tree-sitter-must" }` and run
+# `hx --grammar build` after every `npm run generate`.
 
 [language-server.must-lsp]
 command = "must-lsp"
@@ -60,3 +77,8 @@ name = "run file, stop on entry"
 request = "launch"
 completion = [{ name = "program", completion = "filename" }]
 args = { program = "{0}", stopOnEntry = true }
+
+# PLACEHOLDER: replace `rev` with the commit that lands the grammar.
+[[grammar]]
+name = "must"
+source = { git = "https://github.com/halvko/must-lsp-server", rev = "0000000000000000000000000000000000000000", subpath = "editors/tree-sitter-must" }

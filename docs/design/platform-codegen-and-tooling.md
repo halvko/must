@@ -84,7 +84,7 @@
   suppressed. The template lives on an explicit invoke plus a quick fix on
   the non-exhaustive-match diagnostic, not on a trigger character. Snippets
   are indented absolutely, because the editor's snippet path shifts by a
-  tree-sitter result and the extension registers no grammar.
+  tree-sitter indents-query result and the extension ships no indents query.
 - **P03** `print` emits exactly what it is given: `str` only, no newline, no formatting, no
   interpolation. The CLI runner writes to `stdout.lock()` — Rust's own line buffering, no
   per-call flush — and flushes it explicitly before a crash report and before a blocking
@@ -171,10 +171,12 @@
 - **`RunMode::read` flushes before it blocks too** — the stdin hint's ordering guarantee
   holds only on the `read_line` path today, so the note can precede a newline-less prompt
   written before a `read(buf, len)` call. **P09 P03**
-- **The editor extension gains a tree-sitter grammar** — the client then
+- **The editor extension gains an `indents.scm`** — the client then
   re-indents multi-line snippet bodies and the template's absolute indentation
   doubles. One function to fix; recorded because nobody would connect the
-  trigger to completions. **P12**
+  trigger to completions. The extension has a grammar and highlight queries
+  but no indents query, which is assumed to leave the shift at zero: check the
+  match-arm template in a live Zed once the grammar is installed. **P12**
 - **Completion layers designed, not built**: values that yield an enum one
   step deep (hierarchy and perf unresolved), and importable enums, moot
   until modules exist. Streaming is unavailable; the protocol's only

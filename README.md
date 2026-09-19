@@ -6,7 +6,8 @@ compiler with an LSP bolted on). Design notes live in `docs/main.typ`.
 
 ## Hacking on it
 
-You need stable Rust and [Zed](https://zed.dev).
+You need stable Rust, a C compiler (the workspace builds the tree-sitter
+parser in `editors/tree-sitter-must` to test it) and [Zed](https://zed.dev).
 
 ```sh
 cargo build            # builds target/debug/must-lsp
@@ -23,15 +24,21 @@ Then install the editor extension once:
    arm-less `match`, and snippets for parameterful calls, `type` RHS shells,
    payload variants, and record fields when your client supports them) come
    from your local build.
-3. For syntax highlighting and the ▶ run buttons, enable LSP semantic
-   tokens and code lenses in your Zed `settings.json` (Must has no
-   tree-sitter grammar; the server is the only coloring source — and code
-   lenses are off by default in Zed):
+3. Syntax highlighting comes from the tree-sitter grammar the extension
+   registers. For the server's semantic tokens on top of it, and for the ▶
+   run buttons, enable both in your Zed `settings.json` (code lenses are off
+   by default in Zed):
 
    ```json
-   "languages": { "Must": { "semantic_tokens": "full" } },
+   "languages": { "Must": { "semantic_tokens": "combined" } },
    "code_lens": "on"
    ```
+
+   `"combined"` layers the two: tree-sitter colors what only it classifies
+   (regions, field names, punctuation) and the server refines names through
+   resolution and inference (a callee is a function, a parameter is a
+   parameter). `"full"` shows the server's tokens alone and leaves those
+   plain; `"off"` shows tree-sitter alone.
 
 The extension finds the server by looking for `must-lsp` on PATH first, then
 falling back to `<worktree>/target/debug/must-lsp` — so opening this repo
@@ -55,9 +62,60 @@ on PATH, or edit both `command`s to an absolute path to
 `target/debug/must-lsp`) and check `hx --health must`. Diagnostics, hover,
 goto-definition, completions, code actions, and the debugger
 (`:debug-start`, same templates as `.zed/debug.json`) all work. What
-doesn't: highlighting and the ▶ run lenses — Helix has neither LSP
-semantic tokens nor code lenses, and Must has no tree-sitter grammar, so
-buffers are uncolored until one exists. Run files from the shell meanwhile.
+doesn't: the ▶ run lenses, since Helix has no code lenses. Run files from
+the shell instead.
+
+Highlighting comes from the tree-sitter grammar (Helix has no LSP semantic
+tokens) and needs **Helix 25.07 or later**: the queries rely on a later
+pattern winning over an earlier one on the same node, and older releases
+resolve that the other way round. Build the grammar and link the queries:
+
+```sh
+hx --grammar fetch && hx --grammar build
+mkdir -p ~/.config/helix/runtime/queries
+ln -s "$PWD/editors/tree-sitter-must/queries" ~/.config/helix/runtime/queries/must
+```
+
+### The tree-sitter grammar
+
+`editors/tree-sitter-must/` holds `grammar.js`, the generated parser in
+`src/` (committed: both editors compile that C), and the canonical
+`queries/highlights.scm`, written in Helix's scope names. Zed's copy,
+`editors/zed/languages/must/highlights.scm`, is generated from it.
+`crates/tree-sitter-agreement` runs under `cargo test` and fails when the
+grammar cannot parse `examples/`, when a token is highlighted differently by
+the query and by the server, when a keyword or a query pattern is missing
+from the test corpus, when `grammar.js` was edited without regenerating, or
+when Zed's copy has drifted.
+
+After editing `grammar.js` (node and npm needed, only here):
+
+```sh
+cd editors/tree-sitter-must
+npm install          # once: a local tree-sitter CLI
+npm run generate     # rewrites src/, runs test/corpus, records grammar.js's hash
+```
+
+The hash is recorded only when `test/corpus/` passes; after an intended
+change of tree shape, `npx tree-sitter test --update` and review the diff.
+
+`src/scanner.c` is hand-written (nested block comments), not generated.
+After editing `queries/highlights.scm`, regenerate Zed's copy with
+`UPDATE_EXPECT=1 cargo test -p tree-sitter-agreement`.
+
+Both editors build the grammar from a pinned commit (`rev` in
+`editors/zed/extension.toml` and `editors/helix/languages.toml`) but read
+the queries from the checkout. A commit cannot name itself, so a grammar
+change lands in two steps: push the change, then bump both `rev`s to it and
+rebuild (`hx --grammar fetch && hx --grammar build`; reinstall the Zed dev
+extension). In between, a query may name a node the pinned parser lacks;
+the symptom is an uncolored buffer and a query error in `hx --log` or the
+Zed log, and `cargo test` cannot see it. When working on the grammar, build
+from the checkout instead: in Helix
+`source = { path = "/abs/path/editors/tree-sitter-must" }`, in Zed
+`repository = "file:///abs/path/to/this/repo"` with `rev` a local commit.
+Either way the editor rebuilds only when asked: `hx --grammar build`, or
+reinstall the dev extension, after every `npm run generate`.
 
 ## Running programs
 
@@ -170,7 +228,10 @@ crates/
   ide/          editor-agnostic analysis API (diagnostics, hover, goto-def)
   codegen-wasm/ the WebAssembly backend: monomorphization + code emission
   must-lsp/     the LSP binary: transport + main loop, plus `run`, `compile` and the runner
+  tree-sitter-agreement/ test-only: the tree-sitter grammar checked against syntax + ide
 editors/zed/ Zed extension (separate workspace; compiled to wasm by Zed)
+editors/helix/ Helix configuration (languages.toml)
+editors/tree-sitter-must/ tree-sitter grammar + highlight queries, for both editors
 tools/       run a compiled `.wasm` module: wasm-run.mjs (Node CLI), playground.html (browser)
 ```
 

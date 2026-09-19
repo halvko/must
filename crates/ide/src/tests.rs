@@ -4720,6 +4720,72 @@ type Box = struct::<T> { v: T } with {
     );
 }
 
+/// A const parameter named as an array length in a signature is a generic
+/// parameter there, as it is in the body.
+#[test]
+fn highlights_const_param_in_a_signature_array_length() {
+    check_highlights(
+        r#"
+static rep = const fn::<const N: usize>(v: usize) -> [usize; N] { [v; N] };
+"#,
+        expect_test::expect![[r#"
+            1..7 "static" Keyword
+            8..11 "rep" Function.declaration.static
+            12..13 "=" Operator
+            14..19 "const" Keyword
+            20..22 "fn" Keyword
+            24..25 "<" Operator
+            25..30 "const" Keyword
+            31..32 "N" TypeParameter.declaration
+            34..39 "usize" Type.defaultLibrary
+            39..40 ">" Operator
+            41..42 "v" Parameter.declaration
+            44..49 "usize" Type.defaultLibrary
+            51..53 "->" Operator
+            55..60 "usize" Type.defaultLibrary
+            62..63 "N" TypeParameter
+            68..69 "v" Parameter
+            71..72 "N" TypeParameter
+        "#]],
+    );
+}
+
+/// A renamed record-pattern field's first name is left plain in a
+/// parameter, as it is in a `let`; only the rename is a binding.
+#[test]
+fn highlights_leave_a_renamed_pattern_field_name_plain() {
+    check_highlights(
+        r#"
+static f = fn (struct { y as z }: struct { y: usize }) -> usize {
+    let struct { y as w } = struct { y = z };
+    w
+};
+"#,
+        expect_test::expect![[r#"
+            1..7 "static" Keyword
+            8..9 "f" Function.declaration.static
+            10..11 "=" Operator
+            12..14 "fn" Keyword
+            16..22 "struct" Keyword
+            27..29 "as" Keyword
+            30..31 "z" Parameter.declaration
+            35..41 "struct" Keyword
+            47..52 "usize" Type.defaultLibrary
+            56..58 "->" Operator
+            59..64 "usize" Type.defaultLibrary
+            71..74 "let" Keyword
+            75..81 "struct" Keyword
+            86..88 "as" Keyword
+            89..90 "w" Variable.declaration
+            93..94 "=" Operator
+            95..101 "struct" Keyword
+            106..107 "=" Operator
+            108..109 "z" Parameter
+            117..118 "w" Variable
+        "#]],
+    );
+}
+
 #[test]
 fn qualified_member_paths_highlight_as_functions() {
     // A qualified member path shares the `Name::name` shape with a variant

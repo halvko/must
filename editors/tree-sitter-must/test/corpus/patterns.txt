@@ -1,0 +1,126 @@
+==================
+Binding patterns
+==================
+
+static f = fn (Meters(struct { x, mut y as z, .. }): Meters, _: usize) { let Wrap(Inner(v)) = w; };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_literal
+      (param_list
+        (param
+          (newtype_pat
+            (identifier)
+            (record_pat
+              (record_pat_field
+                (param_name))
+              (record_pat_field
+                (identifier)
+                (param_name))
+              (rest_pat)))
+          (path_type
+            (identifier)))
+        (param
+          (bind_pat)
+          (path_type
+            (identifier))))
+      (block_expr
+        (let_stmt
+          (newtype_pat
+            (identifier)
+            (newtype_pat
+              (identifier)
+              (bind_pat
+                (identifier))))
+          (path_expr
+            (identifier)))))))
+
+==================
+Parameter names at any pattern depth
+==================
+
+static f = fn (C(B(A(struct { x as y, z }))): C, mut w) { };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_literal
+      (param_list
+        (param
+          (newtype_pat
+            (identifier)
+            (newtype_pat
+              (identifier)
+              (newtype_pat
+                (identifier)
+                (record_pat
+                  (record_pat_field
+                    (identifier)
+                    (param_name))
+                  (record_pat_field
+                    (param_name))))))
+          (path_type
+            (identifier)))
+        (param
+          (bind_pat
+            (param_name))))
+      (block_expr))))
+
+==================
+Match patterns
+==================
+
+static f = fn () { match s { Shape::Circle(r, _) => r, ::Pair(a, ..) => a, 0 => 1, 'x' => 2, true => 3, _ => 4, other => other } };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_literal
+      (param_list)
+      (block_expr
+        (expr_stmt
+          (match_expr
+            (path_expr
+              (identifier))
+            (match_arm
+              (variant_pat
+                (identifier)
+                (identifier)
+                (identifier))
+              (path_expr
+                (identifier)))
+            (match_arm
+              (variant_pat
+                (identifier)
+                (identifier)
+                (rest_pat))
+              (path_expr
+                (identifier)))
+            (match_arm
+              (literal_pat
+                (integer))
+              (integer))
+            (match_arm
+              (literal_pat
+                (char
+                  (char_content)))
+              (integer))
+            (match_arm
+              (literal_pat
+                (boolean))
+              (integer))
+            (match_arm
+              (wildcard_pat)
+              (integer))
+            (match_arm
+              (bind_pat
+                (identifier))
+              (path_expr
+                (identifier)))))))))
