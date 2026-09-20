@@ -47,6 +47,18 @@ cargo install --path crates/must-lsp
 (Remember to re-run that after pulling changes — PATH wins over the worktree
 fallback.)
 
+### Helix
+
+Helix has no extension system; `editors/helix/languages.toml` is the whole
+integration. Append it to `~/.config/helix/languages.toml` (with `must-lsp`
+on PATH, or edit both `command`s to an absolute path to
+`target/debug/must-lsp`) and check `hx --health must`. Diagnostics, hover,
+goto-definition, completions, code actions, and the debugger
+(`:debug-start`, same templates as `.zed/debug.json`) all work. What
+doesn't: highlighting and the ▶ run lenses — Helix has neither LSP
+semantic tokens nor code lenses, and Must has no tree-sitter grammar, so
+buffers are uncolored until one exists. Run files from the shell meanwhile.
+
 ## Running programs
 
 With code lenses enabled, every zero-parameter function gets a `▶ run`
