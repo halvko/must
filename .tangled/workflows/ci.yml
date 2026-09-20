@@ -1,0 +1,47 @@
+# CI on Tangled's spindle: formatting, clippy and the full test suite.
+when:
+  - event: ["push", "manual"]
+    branch: ["main"]
+  - event: ["pull_request"]
+    branch: ["main"]
+
+engine: nixery
+
+dependencies:
+  nixpkgs:
+    - gcc
+  github:nix-community/fenix/68b310d17eadf75cefc0aa3c16783f3dfb1791f9:
+    # One package: fenix's separate component packages collide in a profile.
+    - stable.defaultToolchain
+
+# Build output and the crate registry, rotated by the lockfile and this file.
+cache:
+  - key: cargo
+    hash:
+      - Cargo.lock
+      - .tangled/workflows/ci.yml
+    paths:
+      - target
+      - .cargo-home/registry
+
+environment:
+  CARGO_HOME: "/tangled/workspace/.cargo-home"
+  # Quiet the clone step: no default-branch hint, no detached-HEAD advice.
+  GIT_CONFIG_COUNT: "2"
+  GIT_CONFIG_KEY_0: "init.defaultBranch"
+  GIT_CONFIG_VALUE_0: "main"
+  GIT_CONFIG_KEY_1: "advice.detachedHead"
+  GIT_CONFIG_VALUE_1: "false"
+  CARGO_TERM_COLOR: "never"
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+steps:
+  - name: fmt
+    command: cargo fmt --all -- --check
+  # TODO: deny warnings once clippy is clean (halvko/must#39).
+  - name: clippy
+    command: cargo clippy --workspace --all-targets --locked
+  - name: test
+    command: cargo test --workspace --locked
