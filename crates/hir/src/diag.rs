@@ -411,7 +411,7 @@ pub fn already_consumed(subject: Option<&BindingKind>) -> String {
 pub fn already_consumed_dup(subject: Option<&BindingKind>, root: &Affine) -> Option<String> {
     let (_, hint) = duplication_of(root)?;
     Some(format!(
-        "{} was already consumed: {hint} — borrow it for the second use",
+        "{} was already consumed: {hint} — borrow it at the first use",
         linear_subject(subject)
     ))
 }

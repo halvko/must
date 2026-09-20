@@ -15639,7 +15639,7 @@ static discards = fn::<T: forget>(x: T) -> usize { 1 };
         expect![[r#"
             91..94: cannot move out of a borrow: `T` cannot be copied
             170..173: cannot move out of a borrow: `Opt::<T>` cannot be copied
-            260..261: `x` was already consumed: a value of `T` may not be duplicated, and no bound grants copying — borrow it for the second use (`x` is born here, and there is only one of it at 207..208) (first consumed here at 253..254)
+            260..261: `x` was already consumed: a value of `T` may not be duplicated, and no bound grants copying — borrow it at the first use (`x` is born here, and there is only one of it at 207..208) (first consumed here at 253..254)
         "#]],
     );
 }
@@ -15996,8 +15996,8 @@ static wrapped = fn::<@a>(o: Opt::<usize.&mut::<@a>>) -> usize { let a = o; let 
 static bare = fn::<@a>(q: usize.&mut::<@a>) -> usize { let x = q; let y = q; 0 };
 "#,
         expect![[r#"
-            145..146: `w` was already consumed: an exclusive borrow may not be duplicated: the two would name one place — borrow it for the second use (`w` is born here, and there is only one of it at 89..90) (first consumed here at 134..135)
-            237..238: `o` was already consumed: an exclusive borrow may not be duplicated: the two would name one place — borrow it for the second use (`o` is born here, and there is only one of it at 179..180) (first consumed here at 226..227)
+            145..146: `w` was already consumed: an exclusive borrow may not be duplicated: the two would name one place — borrow it at the first use (`w` is born here, and there is only one of it at 89..90) (first consumed here at 134..135)
+            237..238: `o` was already consumed: an exclusive borrow may not be duplicated: the two would name one place — borrow it at the first use (`o` is born here, and there is only one of it at 179..180) (first consumed here at 226..227)
         "#]],
     );
 }
@@ -16106,7 +16106,7 @@ static discards = fn::<T>(t: T) -> usize { t; 1 };
         expect![[r#"
             72..113: `b` is not consumed on this path, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded (`b` is born here and must be consumed at 78..79)
             149..168: `y` is not consumed on this path, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded (`y` is born here and must be consumed at 155..156)
-            165..166: `x` was already consumed: a value of `T` may not be duplicated, and no bound grants copying — borrow it for the second use (`x` is born here and must be consumed at 138..139) (first consumed here at 162..163)
+            165..166: `x` was already consumed: a value of `T` may not be duplicated, and no bound grants copying — borrow it at the first use (`x` is born here and must be consumed at 138..139) (first consumed here at 162..163)
             216..223: `b` is not consumed on this path, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded (`b` is born here and must be consumed at 198..199)
             218..221: cannot copy a value of `T` out of a place: a value of `T` may not be duplicated, and no bound grants copying — borrow the place, or move the whole value
             268..269: this value is discarded here, and `T` may be a type that must be consumed; consume it, or write `T: forget` to require one that can be discarded
