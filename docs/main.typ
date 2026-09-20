@@ -1947,7 +1947,7 @@ not be copied, so a bounded `T` instantiated with one would hand out two
 exclusive borrows of one place. A generic body therefore reads each of its
 parameters once, and a second read answers "`x` was already consumed: a
 value of `T` may not be duplicated, and no bound grants copying — borrow it
-for the second use".
+at the first use".
 
 The rule belongs to the instantiation rather than to the binder, so it holds
 without one: a concrete value that _holds_ an exclusive borrow — a
