@@ -230,7 +230,7 @@ pub enum ExprData {
     Unsafe {
         body: ExprId,
     },
-    /// The value of `extern static read: unsafe fn(...) -> T;` — the HOST
+    /// The value of `unsafe extern static read: unsafe fn(...) -> T;` — the HOST
     /// IMPORT itself.
     ///
     /// SYNTHESIZED, and the only expression in the language that is: the

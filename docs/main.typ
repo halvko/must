@@ -2265,7 +2265,7 @@ program can also declare a host import of its own, and the compiler learns
 nothing at all about what it does:
 
 ```must
-extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
+unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
 ```
 
 Read that as what it is: a DECLARATION. There is no `=` and no value,
@@ -2283,45 +2283,56 @@ with no body to write it. Everything refused is that same sentence from
 another side — an `extern static` may not have an initializer, may not be a
 `const`/`type`/`trait`, and must declare a function type, written in full.
 
-The `unsafe` is written, not implied — `extern static read: fn(...)` is
-refused. Two different things are unsafe about a boundary, and only one of
-them has a spelling today. DECLARING a signature is already a vouch: if the
-symbol out there is not shaped the way you said, the program is wrong before
-anything calls it, and nothing on this side can check that for you. CALLING
-is priced per function: `read` writes through your raw pointer, so it really
-is `unsafe fn`, while a correctly declared `now: fn() -> i64` would be
-perfectly safe to call. Must has no way to write the first vouch down yet, so
-for now every import is declared `unsafe fn` — that way the reader sees at
-least one sign that a boundary is being crossed. The safe-to-call import is a
-real shape waiting on that marker, not a rejected one.
+Two markers lead the declaration, and they are two different obligations.
+`extern` says the name comes from outside. `unsafe` is the VOUCH: it asserts
+that the signature written here is what the host really provides — a claim
+nothing on this side can check, so a human makes it. Both are required, in
+that order (`unsafe extern static ...`); `extern static ...` alone is an
+error with a fix that inserts the vouch, and `extern unsafe static ...` is
+an error with a fix that moves it in front.
 
-A DATA import (`extern static x: usize`) is a shape this spelling admits and
-the language does not support yet — it is refused rather than guessed at.
+CALLING is a separate question, and it is answered by the TYPE alone —
+`unsafe fn(...)` needs an `unsafe { ... }` block at the call, `fn(...)`
+needs none, wherever the call happens:
+
+```must
+unsafe extern static now: fn() -> i64;
+static safe = fn () -> i64 { now() };
+
+static f = fn (p: u8.&raw mut) -> isize { unsafe { read(p, 8) } };
+static g = fn (p: u8.&raw mut) -> isize { let h = read; unsafe { h(p, 8) } };
+```
+
+`read` writes through the caller's raw pointer, so it is declared
+`unsafe fn` and every call needs the marker, direct or through a binding. A
+correctly declared `now: fn() -> i64` is perfectly safe to call — reading a
+clock cannot break anything — and it is called with no marker at all,
+because the declarer already vouched, on the declaration, that this is what
+`now` really does. An import is no longer unsafe to call *because it is an
+import*; it is unsafe to call exactly when its type says so, the same rule
+every other function value is judged by.
+
+A DATA import (`unsafe extern static x: usize`) is a shape this spelling
+admits and the language does not support yet — it is refused rather than
+guessed at.
 
 The old spelling, `static read = extern fn(...) -> isize;`, is retired: it
 put an `=` in front of something that is not a value. It still parses and
 still means the same import, with a fix that rewrites it.
 
-An import's TYPE is `unsafe fn(...)`, so calling one requires `unsafe` —
-wherever the call happens:
-
-```must
-static f = fn (p: u8.&raw mut) -> isize { unsafe { read(p, 8) } };
-static g = fn (p: u8.&raw mut) -> isize { let h = read; unsafe { h(p, 8) } };
-```
-
-The reason is the boundary itself. A raw-pointer deref needs the marker
-because misusing it is undefined behavior; an import needs it because what
-it does is written in a language this compiler never sees, so nothing on
-this side can establish that calling it is sound. You vouch, which is what
-the marker has always meant.
+Calling an `unsafe fn`-typed import needs the marker for the same reason a
+raw-pointer deref does: misusing it is undefined behavior, and here that is
+because what the function does is written in a language this compiler never
+sees, so nothing on this side can establish that calling it is sound. You
+vouch at the call, which is what the marker has always meant, exactly when
+the type says the vouch is owed.
 
 The type is what carries that from the declaration to the call. An import is
 an ordinary function value — bind it, pass it, return it, put it in a record
 — and every one of those is free, because none of them runs anything. The
-call is where you say so, and the call always knows, because the obligation
-came along in the value's type — see "Unsafety is part of a function's
-type" under "Raw pointers and unsafe".
+call is where the price is paid, and the call always knows, because the
+obligation came along in the value's type — see "Unsafety is part of a
+function's type" under "Raw pointers and unsafe".
 
 Calling one in a const context is an error for the same reason `print` is:
 there is no host at compile time.
@@ -2368,7 +2379,7 @@ The host provides one primitive, POSIX's `read`, declared by the program
 itself:
 
 ```must
-extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
+unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
 ```
 
 Fill a caller-owned buffer with at most `len` bytes; answer how many, `0` at

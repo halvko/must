@@ -9,6 +9,13 @@ use crate::parser::{CompletedMarker, Parser};
 
 /// Tokens an expression parser must not consume on error: the enclosing
 /// construct knows what to do with them.
+///
+/// `UNSAFE_KW` is deliberately absent, unlike the other item-keyword
+/// recovery sets in this file: `unsafe` also opens an expression
+/// (`unsafe { ... }`, and — superset-parsed — `unsafe fn(...) { ... }`), so
+/// a caller here (a `fn` body, an `if`/`unsafe` branch) must still be able
+/// to take it as one via the `expr(p)` fallback rather than bail with
+/// "expected `{`".
 fn at_expr_recovery(p: &Parser<'_>) -> bool {
     matches!(
         p.current(),
@@ -57,10 +64,13 @@ pub(crate) fn source_file(p: &mut Parser<'_>) {
     let m = p.start();
     while !p.at(EOF) {
         match p.current() {
-            STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW | EXTERN_KW => item(p),
-            _ => {
-                p.err_and_bump("expected an item (`static`, `const`, `type`, `trait` or `extern`)")
-            }
+            // `unsafe` opens an item too — it is the VOUCH marker of a host
+            // import (`unsafe extern static ...`), and nothing else at file
+            // scope starts with it.
+            STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW | EXTERN_KW | UNSAFE_KW => item(p),
+            _ => p.err_and_bump(
+                "expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)",
+            ),
         }
     }
     m.complete(p, SOURCE_FILE);
@@ -68,12 +78,33 @@ pub(crate) fn source_file(p: &mut Parser<'_>) {
 
 fn item(p: &mut Parser<'_>) {
     let m = p.start();
-    // `extern static read: unsafe fn(...) -> T;` — a HOST IMPORT. The
-    // marker leads the whole item (it is the item that is declared, not a
-    // value that is written), and it rides the item's own token slot:
-    // superset here on every item keyword, validation rejects it anywhere
-    // but a `static`.
+    // `unsafe extern static read: unsafe fn(...) -> T;` — a HOST IMPORT.
+    // TWO markers lead the whole item (it is the item that is declared, not
+    // a value that is written), because a boundary owes two obligations:
+    // `unsafe` is the VOUCH — the human asserts that the signature written
+    // here is the one the host really provides, which nothing on this side
+    // can check — and `extern` says the name comes from outside. Both ride
+    // the item's own token slot: superset here on every item keyword AND in
+    // either order, validation rejects every arrangement but
+    // `unsafe extern static`.
+    let leading_unsafe = p.eat(UNSAFE_KW);
     let is_extern = p.eat(EXTERN_KW);
+    // `extern unsafe static` — the markers written the other way round.
+    // Superset-parsed into the same item (it MEANS the vouched import, and
+    // refusing an order must not reinterpret what was written); validation
+    // moves it back with a fix.
+    let mut is_unsafe = leading_unsafe || (is_extern && p.eat(UNSAFE_KW));
+    // `unsafe extern unsafe static x: T;` — the vouch written twice. A typo,
+    // not a second obligation: eaten here (as a further `UNSAFE_KW` child of
+    // this same item) so the declaration still reads as the one thing it
+    // is, rather than stopping at "expected `static` after `extern`" — an
+    // untrue sentence, since `static` is right there. Validation reports
+    // the repeat with its own message.
+    if is_extern {
+        while p.eat(UNSAFE_KW) {
+            is_unsafe = true;
+        }
+    }
     // `type Foo = expr;` shares the whole item shape with `static`/`const`
     // (superset parsing: a `: Type` annotation on a `type` item parses too;
     // validation rejects it with a removal fix). Only the node kind — and
@@ -83,16 +114,23 @@ fn item(p: &mut Parser<'_>) {
         TRAIT_KW => TRAIT_ITEM,
         _ => STATIC_ITEM,
     };
-    if !is_extern || matches!(p.current(), STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW) {
+    if !(is_extern || is_unsafe) || matches!(p.current(), STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW)
+    {
         p.bump_any(); // STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW
     } else {
-        // `extern` with no item keyword after it — `extern fn g(...)`, the
-        // C spelling, above all. Nothing that follows can be the item this
-        // marker leads, so the declaration is unreadable as a whole: say
-        // the one thing that is wrong and take the rest of it as ERROR, in
-        // this item. Reading on instead cost one message PER TOKEN, all of
-        // them consequences of this one.
-        p.error("expected `static` after `extern`: an import declares one name with one type");
+        // A marker with no item keyword after it — `extern fn g(...)`, the
+        // C spelling, above all, or a lone `unsafe` with nothing importable
+        // after it. Nothing that follows can be the item this marker leads,
+        // so the declaration is unreadable as a whole: say the one thing
+        // that is wrong and take the rest of it as ERROR, in this item.
+        // Reading on instead cost one message PER TOKEN, all of them
+        // consequences of this one.
+        p.error(if is_extern {
+            "expected `static` after `extern`: an import declares one name with one type"
+        } else {
+            "expected `extern static` after `unsafe`: the marker vouches for a host \
+             import's declared signature, and only an import declares one"
+        });
         let e = p.start();
         while !p.at(EOF) && !p.at(SEMICOLON) && !at_item_recovery(p) {
             p.bump_any();
@@ -333,11 +371,17 @@ fn element_block(p: &mut Parser<'_>) {
 /// element-shaped and nothing expression-shaped starts with an item
 /// keyword, so a copy of this list is only a chance for two copies to
 /// disagree.
+///
+/// `unsafe` joins the set only through the two-token shape that can mean
+/// nothing else — `unsafe extern`, a host import's lead. A BARE `unsafe`
+/// is not in this set: inside a `with`-group element block it is the
+/// `unsafe impl`/`unsafe for` modifier ([`element`]), a construct this
+/// function's own callers must still be allowed to read.
 fn at_item_recovery(p: &Parser<'_>) -> bool {
     matches!(
         p.current(),
         STATIC_KW | TYPE_KW | TRAIT_KW | LET_KW | CONST_KW | EXTERN_KW
-    )
+    ) || (p.at(UNSAFE_KW) && p.nth(1) == EXTERN_KW)
 }
 
 /// The member-loop recovery set: like [`at_item_recovery`] minus the
@@ -940,8 +984,13 @@ fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
         while !p.at(R_BRACE) && !p.at(EOF) {
             // Recover at the enclosing item, same as block statements:
             // an item keyword inside an arm list means the `}` is missing.
-            if matches!(p.current(), STATIC_KW | TYPE_KW | TRAIT_KW | EXTERN_KW)
-                || (p.at(CONST_KW) && !matches!(p.nth(1), FN_KW | L_BRACE))
+            // `unsafe` joins bare — no pattern ever starts with it, so
+            // seeing one here always means recovery, whether it leads a
+            // host import or stands alone.
+            if matches!(
+                p.current(),
+                STATIC_KW | TYPE_KW | TRAIT_KW | EXTERN_KW | UNSAFE_KW
+            ) || (p.at(CONST_KW) && !matches!(p.nth(1), FN_KW | L_BRACE))
             {
                 break;
             }
@@ -2081,6 +2130,11 @@ fn block_expr(p: &mut Parser<'_>) -> CompletedMarker {
             // RETIRED `extern fn` initializer is an expression here.
             EXTERN_KW if !at_fn_literal(p) => break,
             CONST_KW if !at_fn_literal(p) && p.nth(1) != L_BRACE => break,
+            // `unsafe extern` opens an ITEM (the vouch marker leading a host
+            // import); every other `unsafe` here is an expression —
+            // `unsafe { ... }`, or (superset) an `unsafe fn` literal — so
+            // only THIS two-token shape bails.
+            UNSAFE_KW if p.nth(1) == EXTERN_KW => break,
             SEMICOLON => p.bump_any(),
             _ => {
                 let before = p.pos();

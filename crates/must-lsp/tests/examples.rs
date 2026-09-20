@@ -467,70 +467,70 @@ fn errors_checks_dirty_with_the_documented_count() {
                = help: Rewrite as postfix
 
             error: calling the host import `host_read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
-              --> examples/errors.must:347:58
+              --> examples/errors.must:347:61
                 |
-            347 | static unvouched_import = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
-                |                                                          ^^^^^^^^^^^^^^^
+            347 | static call_outside_unsafe = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
+                |                                                             ^^^^^^^^^^^^^^^
 
-            error: a host import is a DECLARATION, not an initializer: write `extern static retired_import: unsafe fn(...) -> T;`
+            error: a host import is a DECLARATION, not an initializer: write `unsafe extern static retired_import: unsafe fn(...) -> T;`
               --> examples/errors.must:357:25
                 |
             357 | static retired_import = extern fn(n: usize) -> usize;
                 |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-               = help: Rewrite as an `extern static` declaration
+               = help: Rewrite as an `unsafe extern static` declaration
 
             error: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
-              --> examples/errors.must:366:65
+              --> examples/errors.must:366:72
                 |
-            366 | extern static import_with_a_value: unsafe fn(n: usize) -> usize = fn (n: usize) -> usize { n };
-                |                                                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            366 | unsafe extern static import_with_a_value: unsafe fn(n: usize) -> usize = fn (n: usize) -> usize { n };
+                |                                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                = help: Remove the initializer
 
-            error: an import must be declared `unsafe fn` for now: a safe-to-call import needs the declaration-side `unsafe` marker, and that marker does not exist yet
-              --> examples/errors.must:376:28
+            error: declaring a host import is a VOUCH: write `unsafe extern static` — this signature is an assertion about the host, and nothing on this side can check it
+              --> examples/errors.must:374:1
                 |
-            376 | extern static safe_import: fn() -> ();
-                |                            ^^^^^^^^^^
-               = help: Write `unsafe fn`
+            374 | extern static unvouched_import: fn() -> i64;
+                | ^^^^^^
+               = help: Write `unsafe extern`
 
             error: data imports are not supported yet — an import must have a function type
-              --> examples/errors.must:384:30
+              --> examples/errors.must:382:37
                 |
-            384 | extern static a_data_import: usize;
-                |                              ^^^^^
+            382 | unsafe extern static a_data_import: usize;
+                |                                     ^^^^^
 
             error: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
-              --> examples/errors.must:391:48
+              --> examples/errors.must:389:55
                 |
-            391 | extern static a_partial_contract: unsafe fn(n: _) -> i64;
-                |                                                ^
+            389 | unsafe extern static a_partial_contract: unsafe fn(n: _) -> i64;
+                |                                                       ^
 
             error: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
-              --> examples/errors.must:402:73
+              --> examples/errors.must:400:73
                 |
-            402 | static region_at_a_call = fn::<@b>(p: usize.&::<@b>) -> usize { first::<@b, usize>(p).* };
+            400 | static region_at_a_call = fn::<@b>(p: usize.&::<@b>) -> usize { first::<@b, usize>(p).* };
                 |                                                                         ^^
 
             error: region parameters come first in a binder; move `@a` before `T`
-              --> examples/errors.must:410:36
+              --> examples/errors.must:408:36
                 |
-            410 | static misordered_binder = fn::<T, @a>(r: T.&::<@a>) -> T.&::<@a> { r };
+            408 | static misordered_binder = fn::<T, @a>(r: T.&::<@a>) -> T.&::<@a> { r };
                 |                                    ^^
 
             error: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&::<@a> = x.&;`)
-              --> examples/errors.must:419:80
+              --> examples/errors.must:417:80
                 |
-            419 | static region_at_a_borrow = fn::<@c>(p: usize.&::<@c>) -> usize { let q = p.*.&::<@c>; q.* };
+            417 | static region_at_a_borrow = fn::<@c>(p: usize.&::<@c>) -> usize { let q = p.*.&::<@c>; q.* };
                 |                                                                                ^^^^^^
                = help: Drop the region argument
 
             error: cannot borrow `x` as `.&mut`: it is not declared `mut`
-              --> examples/errors.must:430:13
+              --> examples/errors.must:428:13
                 |
-            430 |     let m = x.&mut;
+            428 |     let m = x.&mut;
                 |             ^
                = help: Make `x` mutable
-               = note: `x` is declared without `mut` here (examples/errors.must:428:9)
+               = note: `x` is declared without `mut` here (examples/errors.must:426:9)
 
             found 41 errors and 1 warning
         "#]],
