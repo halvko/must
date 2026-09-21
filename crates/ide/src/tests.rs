@@ -5463,7 +5463,8 @@ fn a_stale_loan_refusal_carries_its_companions() {
     assert_eq!(&src[errors[0].related[0].range], "n.&mut");
     assert!(errors[0].related[0].range.start() < errors[0].range.start());
     assert_eq!(errors[0].related[1].message, "and it is still used here");
-    assert_eq!(&src[errors[0].related[1].range], "a.*");
+    // The holder's use is its own read, in `a.*`.
+    assert_eq!(&src[errors[0].related[1].range], "a");
 }
 
 /// Completions in a body that borrows a temporary offer the named locals

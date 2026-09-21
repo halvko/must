@@ -52,9 +52,9 @@
 //!    ([`crate::paths_overlap`]), of a flavour the access is foreign to.
 //!    Blamed at the access, with the loan's mint and the next use of a
 //!    live holder as companions, in the interpreter's own vocabulary. One
-//!    report per access expression and loan: the two MIR points of
-//!    `a = a + 1` share an origin and report once, while a call that
-//!    reads two borrowed locals reports each loan it kills.
+//!    report per access expression and loan: the payload borrows of one
+//!    match arm share an origin and report once, while `a = a + 1` reads
+//!    at `a`, writes at the assignment, and reports both.
 //!
 //! One hop is dated rather than taken everywhere. Region liveness above is
 //! location-insensitive about containment: a loan whose region covers a
@@ -81,24 +81,32 @@
 //!
 //! # Places
 //!
-//! MIR only ever leads a projection with a deref, so a nested pointer place
-//! (`bb.*.*`, `p.q.*`) is spelled as a copy of the inner place into a temp
-//! followed by a deref of the temp. For loans and accesses that temp IS the
-//! place it copied: a compiler temp defined once by a `Use(Copy(place))`
-//! and projected through is resolved back to `place` with the rest of the
-//! projection appended, so the loan `bb.*.*.&mut` is rooted at `bb` and a
-//! later write through `bb` finds it. The read that defines such a temp
-//! is NO access: the access through the temp is the one operation the
-//! user wrote, and it subsumes the read — a loan overlapping the prefix
-//! `bb.*` either is a prefix of the longer path too, or extends below the
-//! deref where only a genuinely disjoint sibling (`bb.*.*.g` beside
-//! `bb.*.*.f`) fails to overlap, and that sibling must be accepted.
+//! MIR only ever leads a projection with a deref, and a deref goes through
+//! a temp: a pointer place (`p.*`, `bb.*.*`, `p.q.*`) is spelled as a copy
+//! of the place holding the pointer into a temp followed by a deref of the
+//! temp. For loans and accesses that temp IS the place it copied: a
+//! compiler temp defined once by a `Use(Copy(place))` and projected
+//! through, itself or by way of a temp copying it whole (a single-exit
+//! join: `loop { break bb; }.*`), is resolved back to `place` with the
+//! rest of the projection appended, so the loan `bb.*.*.&mut` is rooted
+//! at `bb` and a later write through `bb` finds it. The read that
+//! defines such a temp is NO access: the access through it is the one
+//! operation the user wrote, and it subsumes the read — a loan
+//! overlapping the prefix `bb.*` either is a prefix of the longer path
+//! too, or extends below the deref where only a genuinely disjoint
+//! sibling (`bb.*.*.g` beside `bb.*.*.f`) fails to overlap, and that
+//! sibling must be accepted.
 //! Counting the read would refuse it. A temp only ever read whole — the
 //! operand of a tail `r.*`, the return slot — holds a value, not a place:
 //! its defining read is the access, and copying it on is none. A temp with
 //! more than one definition (a joined value dereferenced in place) is left
 //! as its own root, and a loan rooted there conflicts with nothing — a
-//! known accepting gap, not a shape the language produces today.
+//! known accepting gap, not a shape the language produces today. The
+//! alias is flow-insensitive: an index operand that reassigns the pointer
+//! (`p.*[{ p = q; 0 }]`) runs between the copy and the access, which is
+//! then judged against the new `p.*`, a second accepting gap.
+//! TODO: judge the access against the pointer it goes through
+//! (halvko/must#43).
 //!
 //! An ASSIGNMENT is shallow: `p = q` overwrites the pointer and touches
 //! nothing it points at, so it does not conflict with a loan through
@@ -124,12 +132,10 @@
 //!
 //! # Coarse, and known
 //!
-//! * Blame sits at a statement's origin. A bare-name operand has no
-//!   expression of its own, so `take(a)` squiggles the call and an
-//!   assignment squiggles its value — where the interpreter's "invalidated
-//!   here" note lands too; a projected argument (`take(p.*.f)`) is read
-//!   into a temp at the read's own expression and squiggles the read. A
-//!   place is rendered as the user
+//! * Blame sits at a statement's origin. A read is a statement of its
+//!   own, so `take(a)` and `take(p.*.f)` squiggle the argument, while an
+//!   assignment squiggles its value — where the interpreter's
+//!   "invalidated here" note lands too. A place is rendered as the user
 //!   wrote it, except that an inserted reborrow names the holder the user
 //!   mentioned (`bump(r)` is "using `r`", not `r.*`).
 //!
@@ -395,7 +401,7 @@ struct Point {
 }
 
 /// One loan: what a [`Rvalue::Borrow`] minted, with its place resolved
-/// through any temp that stands for a nested place.
+/// through any temp that stands for a place.
 #[derive(Debug, Clone)]
 struct Loan {
     origin: ExprId,
@@ -599,39 +605,46 @@ impl<'a> BodyCheck<'a> {
         defs
     }
 
-    /// The temps standing for a nested place: unbound, defined once by a
-    /// copy of a place, and projected through somewhere. The last part is
-    /// what makes a temp a PLACE rather than a value: a temp holding a
-    /// copied value — the return slot, the operand of a tail `r.*` — is
-    /// only ever read whole, and no loan is rooted in it. The copy that
-    /// defines a place temp performs no access of its own; every access
-    /// through the temp resolves to the place it stands for.
+    /// The place an unbound temp is defined once as a copy of.
+    fn copied_place(&self, local: LocalId) -> Option<&Place> {
+        if self.body.locals[local].binding.is_some() {
+            return None;
+        }
+        let defs = self.defs_of(local);
+        let [(point, _)] = defs.as_slice() else {
+            return None;
+        };
+        let stmt = self.body.blocks[point.block].statements.get(point.index)?;
+        match &stmt.kind {
+            StatementKind::Assign {
+                rvalue: Rvalue::Use(Operand::Copy(place)),
+                ..
+            } => Some(place),
+            _ => None,
+        }
+    }
+
+    /// The temps standing for a place: a copy of a place that is projected
+    /// through, itself or as the whole source of a temp that is. A temp
+    /// only ever read whole holds a value, and no loan is rooted in it.
+    /// The copy that defines a place temp is no access; every access
+    /// through the temp resolves to its place.
     fn compute_aliases(&self) -> Vec<Option<Place>> {
-        let mut projected_through = BitSet::new(self.body.locals.len());
+        let mut seen = BitSet::new(self.body.locals.len());
+        let mut projected_through = Vec::new();
         self.for_each_place(&mut |place| {
-            if !place.projection.is_empty() {
-                projected_through.insert(Self::local_index(place.local));
+            if !place.projection.is_empty() && seen.insert(Self::local_index(place.local)) {
+                projected_through.push(place.local);
             }
         });
         let mut aliases: Vec<Option<Place>> = vec![None; self.body.locals.len()];
-        for (local, data) in self.body.locals.iter() {
-            if data.binding.is_some() || !projected_through.contains(Self::local_index(local)) {
+        while let Some(local) = projected_through.pop() {
+            let Some(place) = self.copied_place(local) else {
                 continue;
+            };
+            if place.projection.is_empty() && seen.insert(Self::local_index(place.local)) {
+                projected_through.push(place.local);
             }
-            let defs = self.defs_of(local);
-            let [(point, _)] = defs.as_slice() else {
-                continue;
-            };
-            let Some(stmt) = self.body.blocks[point.block].statements.get(point.index) else {
-                continue;
-            };
-            let StatementKind::Assign {
-                rvalue: Rvalue::Use(Operand::Copy(place)),
-                ..
-            } = &stmt.kind
-            else {
-                continue;
-            };
             aliases[Self::local_index(local)] = Some(place.clone());
         }
         // Resolve chains once, so lookups are one step. A temp copies a
@@ -674,7 +687,7 @@ impl<'a> BodyCheck<'a> {
         }
     }
 
-    /// Whether `local` is a temp standing for a nested place.
+    /// Whether `local` is a temp standing for a place.
     fn is_place_temp(&self, local: LocalId) -> bool {
         self.aliases[Self::local_index(local)].is_some()
     }
@@ -1154,8 +1167,8 @@ impl<'a> BodyCheck<'a> {
                 ..
             }) => {
                 match rvalue {
-                    // The copy that defines a temp standing for a nested
-                    // place is no access (module doc, "Places"): the
+                    // The copy that defines a temp standing for a place is
+                    // no access (module doc, "Places"): the
                     // access through the temp is the one the user wrote.
                     // Its index operands still read.
                     Rvalue::Use(Operand::Copy(place))
@@ -1208,7 +1221,7 @@ impl<'a> BodyCheck<'a> {
                     Rvalue::AddrOfStatic { .. } => {}
                 }
                 self.index_accesses(dest, &mut out);
-                // The temp a nested place is copied into is written as
+                // The temp a place is copied into is written as
                 // itself; a write THROUGH such a temp is a write to the
                 // place it stands for.
                 let place = if dest.projection.is_empty() {
