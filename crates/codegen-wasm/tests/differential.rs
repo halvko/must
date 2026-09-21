@@ -1760,3 +1760,27 @@ static go = fn() -> usize { app0(square::<7>) + app0(square::<9>) };
         "go()",
     );
 }
+
+/// G24: a name is read where it stands, before a later operand writes it.
+#[test]
+fn operands_are_read_left_to_right() {
+    const PROGRAM: &str = r#"
+static pack = fn(a: usize, b: usize) -> usize { a * 10 + b };
+static binop = fn() -> usize {
+    let mut x: usize = 1;
+    x + { x = 5; 1 }
+};
+static call = fn() -> usize {
+    let mut x: usize = 1;
+    pack(x, { x = 5; 2 })
+};
+static array = fn() -> usize {
+    let mut x: usize = 1;
+    let arr = [x, { x = 5; 2 }];
+    arr[0] * 10 + arr[1]
+};
+"#;
+    for entry in ["binop()", "call()", "array()"] {
+        check(PROGRAM, entry);
+    }
+}

@@ -614,7 +614,7 @@ impl LowerCtx<'_> {
         }
         // G14's auto-ref exception, materialized: a safe borrow of `x.*`,
         // never of `x` itself, and never raw.
-        let local = self.operand_root_local(b, op, expr);
+        let local = self.operand_local(b, op, expr);
         let dest = b.temp(self.ty(expr));
         b.push_assign(
             dest,
@@ -1138,8 +1138,7 @@ impl LowerCtx<'_> {
                                 // project from, exactly like a record
                                 // literal's fields need one to assemble.
                                 PatData::Record { .. } | PatData::Newtype { .. } => {
-                                    let local = b.temp(self.ty(*init));
-                                    b.push_assign(local, Rvalue::Use(init_op), *init);
+                                    let local = self.operand_local(b, init_op, *init);
                                     self.bind_binding_pattern(
                                         b,
                                         *pat,
@@ -1163,12 +1162,12 @@ impl LowerCtx<'_> {
                         }
                     }
                 }
-                let mut value = match tail {
+                let value = match tail {
                     Some(tail) => self.lower_expr(b, *tail),
                     None => Operand::Const(Const::Unit),
                 };
                 if nested {
-                    value = self.close_scope(b, value, tail.unwrap_or(expr), expr);
+                    b.close_scope(expr);
                 }
                 value
             }
@@ -1463,7 +1462,7 @@ impl LowerCtx<'_> {
                     // (and, until it is complete, the interpreter's
                     // aliasing tree) for a safe one.
                     Ty::RawPtr { .. } | Ty::Borrow { .. } => {
-                        let root = self.operand_root_local(b, op, *receiver);
+                        let root = self.operand_local(b, op, *receiver);
                         let dest = b.temp(self.ty(expr));
                         b.push_assign(
                             dest,
@@ -1654,8 +1653,7 @@ impl LowerCtx<'_> {
         // Pin the scrutinee in a temp: the switch reads it and every
         // payload extraction re-reads it. Through a borrow the temp holds
         // the POINTER, and every read/borrow below goes through its deref.
-        let scrut_local = b.temp(self.ty(scrutinee));
-        b.push_assign(scrut_local, Rvalue::Use(scrut_op), scrutinee);
+        let scrut_local = self.operand_local(b, scrut_op, scrutinee);
         let scrut = Operand::Copy(scrut_local.into());
 
         // MATCH PROJECTS THROUGH BORROWS: dispatch on the type BEHIND the
@@ -2049,30 +2047,9 @@ impl LowerCtx<'_> {
         b.scopes.push((Scope::Arm, Vec::new()));
         self.bind_match_pattern(b, arm.pat, scrut, arm.body, lens);
         let value = self.lower_expr(b, arm.body);
-        let value = self.close_scope(b, value, arm.body, arm.body);
+        b.close_scope(arm.body);
         b.push_assign(dest, Rvalue::Use(value), arm.body);
         b.terminate(TerminatorKind::Goto { target: join }, expr);
-    }
-
-    /// Close the innermost storage scope at `exit`. A `value` reading one
-    /// of the scope's own locals is copied out first, typed by
-    /// `value_expr`, so it is consumed after the storage ends.
-    fn close_scope(
-        &mut self,
-        b: &mut BodyBuilder,
-        mut value: Operand,
-        value_expr: ExprId,
-        exit: ExprId,
-    ) -> Operand {
-        let depth = b.scopes.len() - 1;
-        if reads_one_of(&value, &b.scopes[depth].1) {
-            let copy = b.temp(self.ty(value_expr));
-            b.push_assign(copy, Rvalue::Use(value), value_expr);
-            value = Operand::Copy(copy.into());
-        }
-        b.push_storage_dead_from(depth, exit);
-        b.scopes.pop();
-        value
     }
 
     /// How an arm participates in dispatch: a literal arm (keyed by the
@@ -2345,18 +2322,8 @@ impl LowerCtx<'_> {
 
     fn lower_name_ref(&mut self, b: &mut BodyBuilder, expr: ExprId, name: &str) -> Operand {
         match self.resolutions.get(expr) {
-            Some(Resolution::Local(binding)) => match b.local_for_binding.get(binding) {
-                // Reading a local of a type with no `forget` capability is
-                // a MOVE, and it is the one read that can be told apart
-                // from a copy without consulting the checker: a linear
-                // value cannot be duplicated, so a read of one is always
-                // the last read. The distinction exists for the ALIASING
-                // model alone (see `Operand::Move`) — every other consumer
-                // treats the two the same.
-                Some(&local) if !hir::capability::has_forget(self.db, &self.ty(expr)) => {
-                    Operand::Move(local.into())
-                }
-                Some(&local) => Operand::Copy(local.into()),
+            Some(Resolution::Local(_)) => match self.lower_place_read(b, expr) {
+                Some(op) => op,
                 // A local of an enclosing function: a capture. The MIR
                 // diagnostic *is* the upstream diagnostic the trap borrows.
                 None => {
@@ -2777,7 +2744,7 @@ impl LowerCtx<'_> {
         }
     }
 
-    /// Read a PLACE-shaped chain (`p.x`, `p.a.b`, `a[i]`, `b.*.x`,
+    /// Read a PLACE-shaped chain (`p`, `p.x`, `p.a.b`, `a[i]`, `b.*.x`,
     /// `b.*.a.q`) through one [`Place`] projection instead of
     /// materializing the receiver and extracting from the copy. Built out
     /// of the same three pieces the write side
@@ -2839,7 +2806,8 @@ impl LowerCtx<'_> {
         // `expr`'s own trap is excluded — it is the wrapper's
         // ([`Self::lower_expr_traps`]) to fire, and it must fire instead
         // of the read, not after it.
-        for &link in std::iter::once(&root).chain(chain[1..].iter().rev()) {
+        let inner = std::iter::once(&root).chain(chain.iter().rev());
+        for &link in inner.filter(|&&link| link != expr) {
             if let Some(message) = self.value_traps.get(&link).cloned() {
                 return Some(self.trap(b, link, message));
             }
@@ -2857,12 +2825,19 @@ impl LowerCtx<'_> {
         // The read happens HERE, not wherever the operand is consumed:
         // its effects (bounds checks, deref liveness, the aliasing check)
         // belong at this point in the CFG.
-        let dest = b.temp(self.ty(expr));
-        b.push_assign(
-            dest,
-            Rvalue::Use(Operand::Copy(Place { local, projection })),
-            expr,
-        );
+        let ty = self.ty(expr);
+        // A whole local of a type with no `forget` capability cannot be
+        // duplicated, so its read is the last one: a MOVE (see
+        // `Operand::Move`).
+        let moved = projection.is_empty() && !hir::capability::has_forget(self.db, &ty);
+        let place = Place { local, projection };
+        let dest = b.temp(ty);
+        let read = if moved {
+            Operand::Move(place)
+        } else {
+            Operand::Copy(place)
+        };
+        b.push_assign(dest, Rvalue::Use(read), expr);
         Some(Operand::Copy(dest.into()))
     }
 
@@ -3115,7 +3090,7 @@ impl LowerCtx<'_> {
         if !matches!(self.ty(receiver), Ty::RawPtr { .. } | Ty::Borrow { .. }) {
             return DerefRoot::Silent;
         }
-        DerefRoot::Local(self.operand_root_local(b, ptr_op, receiver))
+        DerefRoot::Local(self.operand_local(b, ptr_op, receiver))
     }
 
     /// Resolve a place chain's links (outermost first, as the target/place
@@ -3229,14 +3204,10 @@ impl LowerCtx<'_> {
         })
     }
 
-    /// The local a place-rooted operation (a deref read, a deref-rooted
-    /// write or address-of) uses as its root: the operand's own local when
-    /// it already is a bare local read, otherwise a fresh temp (typed as
-    /// `expr`'s type) holding the operand's value.
-    fn operand_root_local(&mut self, b: &mut BodyBuilder, op: Operand, expr: ExprId) -> LocalId {
-        // Either read flavor: a place-rooted operation's root is the same
-        // local whichever way the value came out of it.
-        if let Operand::Copy(place) | Operand::Move(place) = &op
+    /// The local holding `op`'s value, to project from: the temp it
+    /// names, else a fresh one typed as `expr`.
+    fn operand_local(&mut self, b: &mut BodyBuilder, op: Operand, expr: ExprId) -> LocalId {
+        if let Operand::Copy(place) = &op
             && place.projection.is_empty()
         {
             return place.local;
@@ -3590,18 +3561,6 @@ enum ArmKind {
     Dead,
 }
 
-/// Whether `op` reads one of `locals`.
-fn reads_one_of(op: &Operand, locals: &[LocalId]) -> bool {
-    match op {
-        Operand::Copy(place) | Operand::Move(place) => {
-            // An index operand inside a projection is not searched.
-            debug_assert!(place.projection.is_empty());
-            locals.contains(&place.local)
-        }
-        Operand::Const(_) => false,
-    }
-}
-
 /// One live `loop` during lowering: where `continue` goes (the header),
 /// where `break` goes (the exit), and the local carrying the loop's value.
 #[derive(Clone, Copy)]
@@ -3689,6 +3648,12 @@ impl BodyBuilder {
                 origin,
             });
         }
+    }
+
+    /// End the innermost scope's storage at `exit` and close it.
+    fn close_scope(&mut self, exit: ExprId) {
+        self.push_storage_dead_from(self.scopes.len() - 1, exit);
+        self.scopes.pop();
     }
 
     fn new_block(&mut self) -> BlockId {

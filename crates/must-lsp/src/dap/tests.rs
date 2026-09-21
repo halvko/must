@@ -468,8 +468,8 @@ fn breakpoint_columns_are_utf16_code_units() {
         "static f = fn (n: usize) -> usize { n + 1 }\nstatic main = fn {\n    let s = \"λ😀\"; print(s); f(2);\n};\n",
     );
     // Line 3 columns in UTF-16: 13 = the string literal (the let-init's
-    // origin), 20 = `print`, 30 = `f(2)`. In bytes those last two would
-    // be 23 and 33.
+    // origin), 20 = `print`, 26 = the read of `s`, 30 = `f(2)`. In bytes
+    // those last three would be 23, 29 and 33.
     let messages = run_session(&[
         ("initialize", json!({})),
         ("launch", json!({ "program": program.to_str().unwrap() })),
@@ -488,7 +488,8 @@ fn breakpoint_columns_are_utf16_code_units() {
     let locations = &responses_for(&messages, "breakpointLocations")[0]["body"]["breakpoints"];
     assert_eq!(locations[0], json!({ "line": 3, "column": 13 }));
     assert_eq!(locations[1], json!({ "line": 3, "column": 20 }));
-    assert_eq!(locations[2], json!({ "line": 3, "column": 30 }));
+    assert_eq!(locations[2], json!({ "line": 3, "column": 26 }));
+    assert_eq!(locations[3], json!({ "line": 3, "column": 30 }));
 
     // A column echoed from the picker verifies: the client's UTF-16
     // column is matched against UTF-16 positions.

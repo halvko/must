@@ -86,21 +86,25 @@ static classify = fn (n: usize) -> str {
             fn b0(_1: usize) -> str {
               _0: str  // return
               _1: usize  // param n
-              _2: bool
-              _3: str
-              _4: str  // label
+              _2: usize
+              _3: bool
+              _4: str
+              _5: str  // label
+              _6: str
               bb0:
-                _2 = Lt(_1, 10)
-                if _2 -> [then: bb1, else: bb2]
+                _2 = _1
+                _3 = Lt(_2, 10)
+                if _3 -> [then: bb1, else: bb2]
               bb1:
-                _3 = "small"
+                _4 = "small"
                 goto -> bb3
               bb2:
-                _3 = "big"
+                _4 = "big"
                 goto -> bb3
               bb3:
-                _4 = _3
-                _0 = _4
+                _5 = _4
+                _6 = _5
+                _0 = _6
                 return
             }
             fn b1() -> fn(usize) -> str {
@@ -122,20 +126,22 @@ fn if_without_else_produces_unit_on_the_false_edge() {
             fn b0(_1: bool) -> () {
               _0: ()  // return
               _1: bool  // param c
-              _2: ()
+              _2: bool
               _3: ()
+              _4: ()
               bb0:
-                if _1 -> [then: bb1, else: bb2]
+                _2 = _1
+                if _2 -> [then: bb1, else: bb2]
               bb1:
-                _3 = call builtin print("y") -> bb3
+                _4 = call builtin print("y") -> bb3
               bb2:
-                _2 = ()
+                _3 = ()
                 goto -> bb4
               bb3:
-                _2 = _3
+                _3 = _4
                 goto -> bb4
               bb4:
-                _0 = _2
+                _0 = _3
                 return
             }
             fn b1() -> fn(bool) {
@@ -158,12 +164,16 @@ fn let_shadowing_gets_distinct_locals() {
               _0: usize  // return
               _1: usize  // x
               _2: usize
-              _3: usize  // x
+              _3: usize
+              _4: usize  // x
+              _5: usize
               bb0:
                 _1 = 1
-                _2 = Add(_1, 1)
-                _3 = _2
-                _0 = _3
+                _2 = _1
+                _3 = Add(_2, 1)
+                _4 = _3
+                _5 = _4
+                _0 = _5
                 return
             }
             fn b1() -> fn() -> usize {
@@ -212,22 +222,26 @@ fn diverging_call_in_if_branch_leaves_a_dead_continuation() {
             fn b0(_1: bool) -> usize {
               _0: usize  // return
               _1: bool  // param c
-              _2: usize
-              _3: !
-              _4: usize  // v
+              _2: bool
+              _3: usize
+              _4: !
+              _5: usize  // v
+              _6: usize
               bb0:
-                if _1 -> [then: bb1, else: bb2]
+                _2 = _1
+                if _2 -> [then: bb1, else: bb2]
               bb1:
-                _3 = call builtin panic("x") -> !
+                _4 = call builtin panic("x") -> !
               bb2:
-                _2 = 1
+                _3 = 1
                 goto -> bb4
               bb3:
-                _2 = _3
+                _3 = _4
                 goto -> bb4
               bb4:
-                _4 = _2
-                _0 = _4
+                _5 = _3
+                _6 = _5
+                _0 = _6
                 return
             }
             fn b1() -> fn(bool) -> usize {
@@ -359,8 +373,10 @@ static main = fn { f(1, 2); };
             fn b0(_1: usize) -> usize {
               _0: usize  // return
               _1: usize  // param n
+              _2: usize
               bb0:
-                _0 = _1
+                _2 = _1
+                _0 = _2
                 return
             }
             fn b1() -> fn(usize) -> usize {
@@ -433,13 +449,15 @@ fn capture_is_diagnosed_and_trapped() {
               _0: usize  // return
               _1: usize  // a
               _2: fn() -> usize  // g
-              _3: usize
+              _3: fn() -> usize
+              _4: usize
               bb0:
                 _1 = 1
                 _2 = fn b0
-                _3 = call _2() -> bb1
+                _3 = _2
+                _4 = call _3() -> bb1
               bb1:
-                _0 = _3
+                _0 = _4
                 return
             }
             fn b2() -> fn() -> usize {
@@ -531,9 +549,11 @@ static main = fn { double(2); };
               _0: usize  // return
               _1: usize  // param n
               _2: usize
+              _3: usize
               bb0:
-                _2 = Mul(_1, 2)
-                _0 = _2
+                _2 = _1
+                _3 = Mul(_2, 2)
+                _0 = _3
                 return
             }
             fn b1() -> fn(usize) -> usize {
@@ -576,8 +596,10 @@ static main = fn { let f = id; };
             fn b0(_1: _) -> _ {
               _0: _  // return
               _1: _  // param x
+              _2: _
               bb0:
-                _0 = _1
+                _2 = _1
+                _0 = _2
                 return
             }
             fn b1() -> fn(_) -> _ {
@@ -692,9 +714,11 @@ static apply = const fn (f: fn() -> usize) -> usize { f() };
               _0: usize  // return
               _1: usize  // param n
               _2: usize
+              _3: usize
               bb0:
-                _2 = Mul(_1, 2)
-                _0 = _2
+                _2 = _1
+                _3 = Mul(_2, 2)
+                _0 = _3
                 return
             }
             fn b1() -> fn(usize) -> usize {
@@ -719,11 +743,13 @@ static apply = const fn (f: fn() -> usize) -> usize { f() };
             fn b0(_1: fn() -> usize) -> usize {
               _0: usize  // return
               _1: fn() -> usize  // param f
-              _2: usize
+              _2: fn() -> usize
+              _3: usize
               bb0:
-                _2 = trap "cannot call a value in a const context; whether it is a `const fn` is not known from its type" -> bb1
+                _2 = _1
+                _3 = trap "cannot call a value in a const context; whether it is a `const fn` is not known from its type" -> bb1
               bb1:
-                _0 = _2
+                _0 = _3
                 return
             }
             fn b1() -> fn(fn() -> usize) -> usize {
@@ -747,10 +773,12 @@ fn assignment_reuses_the_lets_local() {
             fn b0() -> usize {
               _0: usize  // return
               _1: usize  // x
+              _2: usize
               bb0:
                 _1 = 1
                 _1 = 2
-                _0 = _1
+                _2 = _1
+                _0 = _2
                 return
             }
             fn b1() -> fn() -> usize {
@@ -784,13 +812,15 @@ fn assignment_to_a_captured_local_is_diagnosed_and_trapped() {
               _0: usize  // return
               _1: usize  // a
               _2: fn() -> usize  // g
-              _3: usize
+              _3: fn() -> usize
+              _4: usize
               bb0:
                 _1 = 1
                 _2 = fn b0
-                _3 = call _2() -> bb1
+                _3 = _2
+                _4 = call _3() -> bb1
               bb1:
-                _0 = _3
+                _0 = _4
                 return
             }
             fn b2() -> fn() -> usize {
@@ -816,11 +846,13 @@ fn assignment_to_an_immutable_binding_traps_with_the_diagnostic_message() {
               _0: usize  // return
               _1: usize  // x
               _2: usize
+              _3: usize
               bb0:
                 _1 = 1
                 _2 = trap "cannot assign to `x`: it is not declared `mut`" -> bb1
               bb1:
-                _0 = _1
+                _3 = _1
+                _0 = _3
                 return
             }
             fn b1() -> fn() -> usize {
@@ -1040,11 +1072,13 @@ fn assignment_to_a_non_variable_traps_with_the_validation_message() {
               _0: usize  // return
               _1: usize  // x
               _2: usize
+              _3: usize
               bb0:
                 _1 = 1
                 _2 = trap "can only assign to a variable or its fields" -> bb1
               bb1:
-                _0 = _1
+                _3 = _1
+                _0 = _3
                 return
             }
             fn b1() -> fn() -> usize {
@@ -1196,25 +1230,27 @@ static f = fn (a: bool) -> Shape {
             fn b0(_1: bool) -> Shape {
               _0: Shape  // return
               _1: bool  // param a
-              _2: Shape
-              _3: Shape::Circle
-              _4: Shape
-              _5: Shape::Point
-              _6: Shape
+              _2: bool
+              _3: Shape
+              _4: Shape::Circle
+              _5: Shape
+              _6: Shape::Point
+              _7: Shape
               bb0:
-                if _1 -> [then: bb1, else: bb2]
+                _2 = _1
+                if _2 -> [then: bb1, else: bb2]
               bb1:
-                _3 = payload(1)
-                _4 = widen _3 to Shape::Circle
-                _2 = _4
+                _4 = payload(1)
+                _5 = widen _4 to Shape::Circle
+                _3 = _5
                 goto -> bb3
               bb2:
-                _5 = payload()
-                _6 = widen _5 to Shape::Point
-                _2 = _6
+                _6 = payload()
+                _7 = widen _6 to Shape::Point
+                _3 = _7
                 goto -> bb3
               bb3:
-                _0 = _2
+                _0 = _3
                 return
             }
             fn b1() -> fn(bool) -> Shape {
@@ -1242,21 +1278,23 @@ static f = fn (a: bool) {
             fn b0(_1: bool) -> Shape::Point {
               _0: Shape::Point  // return
               _1: bool  // param a
-              _2: Shape::Point
+              _2: bool
               _3: Shape::Point
               _4: Shape::Point
+              _5: Shape::Point
               bb0:
-                if _1 -> [then: bb1, else: bb2]
+                _2 = _1
+                if _2 -> [then: bb1, else: bb2]
               bb1:
-                _3 = payload()
-                _2 = _3
+                _4 = payload()
+                _3 = _4
                 goto -> bb3
               bb2:
-                _4 = payload()
-                _2 = _4
+                _5 = payload()
+                _3 = _5
                 goto -> bb3
               bb3:
-                _0 = _2
+                _0 = _3
                 return
             }
             fn b1() -> fn(bool) -> Shape::Point {
@@ -1292,12 +1330,14 @@ static f = fn {
             fn b1() -> Shape::Circle {
               _0: Shape::Circle  // return
               _1: fn(usize) -> Shape::Circle  // make
-              _2: Shape::Circle
+              _2: fn(usize) -> Shape::Circle
+              _3: Shape::Circle
               bb0:
                 _1 = fn b0
-                _2 = call _1(3) -> bb1
+                _2 = _1
+                _3 = call _2(3) -> bb1
               bb1:
-                _0 = _2
+                _0 = _3
                 return
             }
             fn b2() -> fn() -> Shape::Circle {
@@ -1380,10 +1420,12 @@ static s = fn(n: usize) -> usize { Counted::step::<3>(n) };
               _0: usize  // return
               _1: usize  // param n
               _2: usize
+              _3: usize
               bb0:
-                _2 = trap "`Counted::step` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)" -> bb1
+                _2 = _1
+                _3 = trap "`Counted::step` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)" -> bb1
               bb1:
-                _0 = _2
+                _0 = _3
                 return
             }
             fn b1() -> fn(usize) -> usize {
@@ -1540,12 +1582,14 @@ static step = fn (s: State::Running) -> usize {
               _3: usize
               _4: usize  // n
               _5: usize
+              _6: usize
               bb0:
                 _2 = _1
                 _4 = _2.0
-                _5 = Add(_4, 1)
+                _5 = _4
+                _6 = Add(_5, 1)
                 storage_dead _4
-                _3 = _5
+                _3 = _6
                 goto -> bb1
               bb1:
                 _0 = _3
@@ -1647,34 +1691,44 @@ static sum = fn () -> usize {
               _1: usize  // acc
               _2: usize  // i
               _3: usize
-              _4: bool
-              _5: ()
-              _6: usize
+              _4: usize
+              _5: bool
+              _6: ()
               _7: usize
+              _8: usize
+              _9: usize
+              _10: usize
+              _11: usize
+              _12: usize
               bb0:
                 _1 = 0
                 _2 = 0
                 goto -> bb1
               bb1:
-                _4 = Eq(_2, 10)
-                if _4 -> [then: bb3, else: bb4]
+                _4 = _2
+                _5 = Eq(_4, 10)
+                if _5 -> [then: bb3, else: bb4]
               bb2:
                 _0 = _3
                 return
               bb3:
-                _3 = _1
+                _7 = _1
+                _3 = _7
                 goto -> bb2
               bb4:
-                _5 = ()
+                _6 = ()
                 goto -> bb6
               bb5:
-                _5 = ()
+                _6 = ()
                 goto -> bb6
               bb6:
-                _6 = Add(_1, _2)
-                _1 = _6
-                _7 = Add(_2, 1)
-                _2 = _7
+                _8 = _1
+                _9 = _2
+                _10 = Add(_8, _9)
+                _1 = _10
+                _11 = _2
+                _12 = Add(_11, 1)
+                _2 = _12
                 goto -> bb1
             }
             fn b1() -> fn() -> usize {
@@ -1764,21 +1818,23 @@ static f = fn (skip: bool) -> usize {
               _0: usize  // return
               _1: bool  // param skip
               _2: usize
-              _3: ()
+              _3: bool
+              _4: ()
               bb0:
                 goto -> bb1
               bb1:
-                if _1 -> [then: bb3, else: bb4]
+                _3 = _1
+                if _3 -> [then: bb3, else: bb4]
               bb2:
                 _0 = _2
                 return
               bb3:
                 goto -> bb1
               bb4:
-                _3 = ()
+                _4 = ()
                 goto -> bb6
               bb5:
-                _3 = ()
+                _4 = ()
                 goto -> bb6
               bb6:
                 _2 = 1
@@ -1841,17 +1897,19 @@ static f = fn (c: bool) -> usize {
             fn b0(_1: bool) -> usize {
               _0: usize  // return
               _1: bool  // param c
-              _2: ()
+              _2: bool
+              _3: ()
               bb0:
-                if _1 -> [then: bb1, else: bb2]
+                _2 = _1
+                if _2 -> [then: bb1, else: bb2]
               bb1:
                 _0 = 1
                 return
               bb2:
-                _2 = ()
+                _3 = ()
                 goto -> bb4
               bb3:
-                _2 = ()
+                _3 = ()
                 goto -> bb4
               bb4:
                 _0 = 2
@@ -1876,17 +1934,19 @@ fn bare_return_returns_unit() {
             fn b0(_1: bool) -> () {
               _0: ()  // return
               _1: bool  // param c
-              _2: ()
+              _2: bool
+              _3: ()
               bb0:
-                if _1 -> [then: bb1, else: bb2]
+                _2 = _1
+                if _2 -> [then: bb1, else: bb2]
               bb1:
                 _0 = ()
                 return
               bb2:
-                _2 = ()
+                _3 = ()
                 goto -> bb4
               bb3:
-                _2 = ()
+                _3 = ()
                 goto -> bb4
               bb4:
                 _0 = ()
@@ -1920,13 +1980,15 @@ static f = fn (n: usize) -> usize {
               _0: usize  // return
               _1: usize  // param n
               _2: usize
-              _3: bool
-              _4: ()
+              _3: usize
+              _4: bool
+              _5: ()
               bb0:
                 goto -> bb1
               bb1:
-                _3 = Eq(_1, 0)
-                if _3 -> [then: bb3, else: bb4]
+                _3 = _1
+                _4 = Eq(_3, 0)
+                if _4 -> [then: bb3, else: bb4]
               bb2:
                 _0 = _2
                 return
@@ -1934,10 +1996,10 @@ static f = fn (n: usize) -> usize {
                 _0 = 7
                 return
               bb4:
-                _4 = ()
+                _5 = ()
                 goto -> bb6
               bb5:
-                _4 = ()
+                _5 = ()
                 goto -> bb6
               bb6:
                 goto -> bb1
@@ -1977,12 +2039,14 @@ static f = fn () -> usize {
             fn b1() -> usize {
               _0: usize  // return
               _1: fn() -> usize  // inner
-              _2: usize
+              _2: fn() -> usize
+              _3: usize
               bb0:
                 _1 = fn b0
-                _2 = call _1() -> bb1
+                _2 = _1
+                _3 = call _2() -> bb1
               bb1:
-                _0 = _2
+                _0 = _3
                 return
             }
             fn b2() -> fn() -> usize {
@@ -2130,8 +2194,10 @@ fn type_only_generic_mention_lowers_to_the_plain_item_value() {
             fn b0(_1: T) -> T {
               _0: T  // return
               _1: T  // param x
+              _2: T
               bb0:
-                _0 = move _1
+                _2 = move _1
+                _0 = _2
                 return
             }
             fn b1() -> fn(T) -> T {
@@ -2174,9 +2240,11 @@ fn forwarded_const_param_lowers_to_a_const_param_body() {
               _0: usize  // return
               _1: usize  // param x
               _2: usize
+              _3: usize
               bb0:
-                _2 = Mul(_1, const param 0)
-                _0 = _2
+                _2 = _1
+                _3 = Mul(_2, const param 0)
+                _0 = _3
                 return
             }
             fn b1() -> fn(usize) -> usize {
@@ -2197,11 +2265,13 @@ fn forwarded_const_param_lowers_to_a_const_param_body() {
               _1: usize  // param x
               _2: fn(usize) -> usize
               _3: usize
+              _4: usize
               bb0:
                 _2 = instantiate rep(const b0)
-                _3 = call _2(_1) -> bb1
+                _3 = _1
+                _4 = call _2(_3) -> bb1
               bb1:
-                _0 = _3
+                _0 = _4
                 return
             }
             fn b2() -> fn(usize) -> usize {
@@ -2318,20 +2388,26 @@ static main = fn() -> usize {
               _3: usize.&raw mut  // p
               _4: usize.&raw
               _5: usize.&raw  // q
-              _6: usize
-              _7: usize
+              _6: usize.&raw mut
+              _7: usize.&raw mut
               _8: usize
+              _9: usize.&raw
+              _10: usize
+              _11: usize
               bb0:
                 _1 = 1
                 _2 = &raw mut _1
                 _3 = _2
                 _4 = &raw static s
                 _5 = _4
-                _3.* = 2
-                _6 = _3.*
-                _7 = _5.*
-                _8 = Add(_6, _7)
-                _0 = _8
+                _6 = _3
+                _6.* = 2
+                _7 = _3
+                _8 = _7.*
+                _9 = _5
+                _10 = _9.*
+                _11 = Add(_8, _10)
+                _0 = _11
                 return
             }
             fn b1() -> fn() -> usize {
@@ -2361,14 +2437,16 @@ static main = fn() -> usize {
               _1: usize  // x
               _2: usize.&raw mut
               _3: usize.&raw mut  // p
-              _4: usize
+              _4: usize.&raw mut
+              _5: usize
               bb0:
                 _1 = 1
                 _2 = &raw mut _1
                 _3 = _2
-                _4 = trap "dereferencing a raw pointer requires an `unsafe { ... }` block" -> bb1
+                _4 = _3
+                _5 = trap "dereferencing a raw pointer requires an `unsafe { ... }` block" -> bb1
               bb1:
-                _0 = _4
+                _0 = _5
                 return
             }
             fn b1() -> fn() -> usize {
@@ -2405,6 +2483,9 @@ static main = fn() {
               _4: struct { buf: [usize; 2], x: usize }.&raw mut
               _5: struct { buf: [usize; 2], x: usize }.&raw mut  // p
               _6: usize  // i
+              _7: struct { buf: [usize; 2], x: usize }.&raw mut
+              _8: struct { buf: [usize; 2], x: usize }.&raw mut
+              _9: usize
               bb0:
                 _1 = [1, 2]
                 _2 = { buf: _1, x: 1 }
@@ -2412,8 +2493,11 @@ static main = fn() {
                 _4 = &raw mut _3
                 _5 = _4
                 _6 = 1
-                _5.*.1 = 2
-                _5.*.0[_6] = 3
+                _7 = _5
+                _7.*.1 = 2
+                _8 = _5
+                _9 = _6
+                _8.*.0[_9] = 3
                 _0 = ()
                 return
             }
@@ -2460,11 +2544,15 @@ static main = fn() {
               _5: struct { buf: [usize; 2], x: usize }.&raw mut  // p
               _6: usize  // i
               _7: usize
-              _8: usize  // a
-              _9: usize
-              _10: usize  // b
+              _8: usize
+              _9: usize  // a
+              _10: struct { buf: [usize; 2], x: usize }.&raw mut
               _11: usize
-              _12: usize  // c
+              _12: usize  // b
+              _13: struct { buf: [usize; 2], x: usize }.&raw mut
+              _14: usize
+              _15: usize
+              _16: usize  // c
               bb0:
                 _1 = [1, 2]
                 _2 = { buf: _1, x: 1 }
@@ -2472,14 +2560,18 @@ static main = fn() {
                 _4 = &raw mut _3
                 _5 = _4
                 _6 = 1
-                _7 = _3.0[_6]
-                _8 = _7
-                _9 = _5.*.1
-                _10 = _9
-                _11 = _5.*.0[_6]
+                _7 = _6
+                _8 = _3.0[_7]
+                _9 = _8
+                _10 = _5
+                _11 = _10.*.1
                 _12 = _11
+                _13 = _5
+                _14 = _6
+                _15 = _13.*.0[_14]
+                _16 = _15
+                storage_dead _16
                 storage_dead _12
-                storage_dead _10
                 _0 = ()
                 return
             }
@@ -2513,15 +2605,17 @@ static main = fn() {
               _3: usize.&raw mut  // p
               _4: usize.&raw mut.&raw mut
               _5: usize.&raw mut.&raw mut  // pp
-              _6: usize.&raw mut
+              _6: usize.&raw mut.&raw mut
+              _7: usize.&raw mut
               bb0:
                 _1 = 1
                 _2 = &raw mut _1
                 _3 = _2
                 _4 = &raw mut _3
                 _5 = _4
-                _6 = _5.*
-                _6.* = 7
+                _6 = _5
+                _7 = _6.*
+                _7.* = 7
                 _0 = ()
                 return
             }
@@ -2562,9 +2656,11 @@ static main = fn() -> usize {
               _6: struct { x: usize }  // r
               _7: struct { x: usize }.&raw mut
               _8: struct { x: usize }.&raw mut  // p
-              _9: usize.&raw mut
-              _10: usize.&raw mut  // q
-              _11: usize
+              _9: struct { x: usize }.&raw mut
+              _10: usize.&raw mut
+              _11: usize.&raw mut  // q
+              _12: usize.&raw mut
+              _13: usize
               bb0:
                 _1 = [1, 2]
                 _2 = _1
@@ -2574,11 +2670,13 @@ static main = fn() -> usize {
                 _6 = _5
                 _7 = &raw mut _6
                 _8 = _7
-                _9 = &raw mut _8.*.0
-                _10 = _9
-                _11 = _10.*
-                storage_dead _10
-                _0 = _11
+                _9 = _8
+                _10 = &raw mut _9.*.0
+                _11 = _10
+                _12 = _11
+                _13 = _12.*
+                storage_dead _11
+                _0 = _13
                 return
             }
             fn b1() -> fn() -> usize {
@@ -2611,12 +2709,14 @@ static f = fn {
               _2: [usize; 3]  // a
               _3: usize
               _4: usize  // x
+              _5: usize
               bb0:
                 _1 = [1, 2, 3]
                 _2 = _1
                 _3 = _2[1]
                 _4 = _3
-                _2[2] = _4
+                _5 = _4
+                _2[2] = _5
                 _0 = ()
                 return
             }
@@ -2713,9 +2813,11 @@ static f = fn (p: usize.&raw mut) -> () {
             fn b0(_1: usize.&raw mut) -> () {
               _0: ()  // return
               _1: usize.&raw mut  // param p
-              _2: ()
+              _2: usize.&raw mut
+              _3: ()
               bb0:
-                _2 = call builtin dealloc_array(_1, 1) -> bb1
+                _2 = _1
+                _3 = call builtin dealloc_array(_2, 1) -> bb1
               bb1:
                 _0 = ()
                 return
@@ -2745,9 +2847,11 @@ static f = fn (p: usize.&raw mut) -> () {
             fn b0(_1: usize.&raw mut) -> () {
               _0: ()  // return
               _1: usize.&raw mut  // param p
-              _2: ()
+              _2: usize.&raw mut
+              _3: ()
               bb0:
-                _2 = trap "calling `dealloc_array` requires an `unsafe { ... }` block" -> bb1
+                _2 = _1
+                _3 = trap "calling `dealloc_array` requires an `unsafe { ... }` block" -> bb1
               bb1:
                 _0 = ()
                 return
@@ -2798,21 +2902,27 @@ fn unary_minus_on_a_literal_folds_and_on_a_value_lowers_to_a_neg() {
             fn b0(_1: i8) -> i8 {
               _0: i8  // return
               _1: i8  // param n
-              _2: bool
-              _3: i8
+              _2: i8
+              _3: bool
               _4: i8
+              _5: i8
+              _6: i8
+              _7: i8
               bb0:
-                _2 = Eq(_1, -128)
-                if _2 -> [then: bb1, else: bb2]
+                _2 = _1
+                _3 = Eq(_2, -128)
+                if _3 -> [then: bb1, else: bb2]
               bb1:
-                _4 = Neg(_1)
-                _3 = _4
+                _5 = _1
+                _6 = Neg(_5)
+                _4 = _6
                 goto -> bb3
               bb2:
-                _3 = _1
+                _7 = _1
+                _4 = _7
                 goto -> bb3
               bb3:
-                _0 = _3
+                _0 = _4
                 return
             }
             fn b1() -> fn(i8) -> i8 {
@@ -2842,10 +2952,12 @@ fn mir_is_region_erased() {
             fn b0(_1: usize.&) -> usize {
               _0: usize  // return
               _1: usize.&  // param r
-              _2: usize
+              _2: usize.&
+              _3: usize
               bb0:
-                _2 = _1.*
-                _0 = _2
+                _2 = _1
+                _3 = _2.*
+                _0 = _3
                 return
             }
             fn b1() -> fn(usize.&) -> usize {
@@ -2858,10 +2970,12 @@ fn mir_is_region_erased() {
             fn b0(_1: usize.&) -> usize {
               _0: usize  // return
               _1: usize.&  // param r
-              _2: usize
+              _2: usize.&
+              _3: usize
               bb0:
-                _2 = _1.*
-                _0 = _2
+                _2 = _1
+                _3 = _2.*
+                _0 = _3
                 return
             }
             fn b1() -> fn(usize.&) -> usize {
@@ -2932,14 +3046,18 @@ fn a_reborrow_through_a_borrow_stays_a_borrow() {
               _0: ()  // return
               _1: usize.&mut  // param m
               _2: usize.&mut
-              _3: usize.&mut  // child
-              _4: usize.&raw mut
-              _5: usize.&raw mut  // r
+              _3: usize.&mut
+              _4: usize.&mut  // child
+              _5: usize.&mut
+              _6: usize.&raw mut
+              _7: usize.&raw mut  // r
               bb0:
-                _2 = &mut _1.*
-                _3 = _2
-                _4 = &raw mut _1.*
-                _5 = _4
+                _2 = _1
+                _3 = &mut _2.*
+                _4 = _3
+                _5 = _1
+                _6 = &raw mut _5.*
+                _7 = _6
                 _0 = ()
                 return
             }
@@ -2985,12 +3103,14 @@ static f = fn::<@a>(s: Opt.&mut::<@a>) -> () {
               _2: Opt.&mut
               _3: ()
               _4: usize.&mut  // t
+              _5: usize.&mut
               bb0:
                 _2 = _1
                 switch _2.* on Opt -> [0: bb1, 1: bb2, otherwise: bb3]
               bb1:
                 _4 = &mut _2.*.0
-                _4.* = 1
+                _5 = _4
+                _5.* = 1
                 storage_dead _4
                 _3 = ()
                 goto -> bb4
@@ -3035,15 +3155,17 @@ static f = fn::<@a>(s: Opt.&::<@a>) -> usize {
               _2: Opt.&
               _3: usize
               _4: usize.&  // t
-              _5: usize
+              _5: usize.&
+              _6: usize
               bb0:
                 _2 = _1
                 switch _2.* on Opt -> [0: bb1, 1: bb2, otherwise: bb3]
               bb1:
                 _4 = & _2.*.0
-                _5 = _4.*
+                _5 = _4
+                _6 = _5.*
                 storage_dead _4
-                _3 = _5
+                _3 = _6
                 goto -> bb4
               bb2:
                 _3 = 0
@@ -3086,10 +3208,12 @@ static f = fn::<@a>(s: State::Run.&mut::<@a>) -> () {
               _2: State::Run.&mut
               _3: ()
               _4: usize.&mut  // n
+              _5: usize.&mut
               bb0:
                 _2 = _1
                 _4 = &mut _2.*.0
-                _4.* = 1
+                _5 = _4
+                _5.* = 1
                 storage_dead _4
                 _3 = ()
                 goto -> bb1
@@ -3691,7 +3815,7 @@ static main = fn() -> usize {
 };
 "#,
         expect![[r#"
-            1049..1059: moving `r` here invalidates a borrow of it that is still live: the borrow points into storage this move takes away, and it is used after this point
+            1049..1050: moving `r` here invalidates a borrow of it that is still live: the borrow points into storage this move takes away, and it is used after this point
               note at 1009..1015: this borrow was created here
               note at 1071..1073: and it is still used here
         "#]],
@@ -3716,7 +3840,7 @@ static f = fn() -> usize {
         expect![[r#"
             156..162: using `n` mutably here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
               note at 136..142: this borrow was created here
-              note at 181..184: and it is still used here
+              note at 181..182: and it is still used here
         "#]],
     );
 }
@@ -3863,7 +3987,7 @@ static contains = fn() -> usize {
         expect![[r#"
             386..392: using `p` mutably here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
               note at 360..368: this borrow was created here
-              note at 424..427: and it is still used here
+              note at 424..425: and it is still used here
         "#]],
     );
 }
@@ -4094,10 +4218,10 @@ static conditional = fn(f: bool) -> usize {
     );
 }
 
-/// One report per access expression and loan. `a = a + 1` is two MIR
-/// points (the read into a temp, the write from it) with one origin, and
-/// reports once; a call that reads two borrowed locals kills two loans
-/// at one point, and reports both.
+/// One report per access expression and loan. The two payload borrows of
+/// one match arm share the arm's origin and report once; `a = a + 1`
+/// reads at `a` and writes at the assignment, and reports both; a call
+/// that reads two borrowed locals reports each at its own name.
 #[test]
 fn one_report_per_access_expression_and_loan() {
     check_loans(
@@ -4117,17 +4241,29 @@ static two_loans_one_call = fn() -> usize {
     let s = take2(x, y);
     p.* + q.* + s
 };
+type E = enum { A(usize, usize), B };
+static two_payloads_one_arm = fn::<@a>(e: E.&mut::<@a>) -> usize {
+    let s = e.*.&;
+    let v: usize = match e { ::A(x, y) => x.* + y.*, ::B => 2 };
+    match s { ::A(a, b) => v + a.*, ::B => v }
+};
 "#,
         expect![[r#"
-            149..154: reading `a` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
+            149..150: reading `a` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
               note at 133..139: this borrow was created here
-              note at 160..163: and it is still used here
-            301..312: reading `x` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
+              note at 160..161: and it is still used here
+            149..154: writing to `a` here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
+              note at 133..139: this borrow was created here
+              note at 160..161: and it is still used here
+            307..308: reading `x` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
               note at 261..267: this borrow was created here
-              note at 318..321: and it is still used here
-            301..312: reading `y` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
+              note at 318..319: and it is still used here
+            310..311: reading `y` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
               note at 281..287: this borrow was created here
-              note at 324..327: and it is still used here
+              note at 324..325: and it is still used here
+            501..510: using `e.*.0` mutably here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
+              note at 452..457: this borrow was created here
+              note at 534..535: and it is still used here
         "#]],
     );
 }
@@ -4190,10 +4326,10 @@ static through_a_place = fn() -> usize {
         expect![[r#"
             128..130: writing to `n` here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
               note at 115..118: this borrow was created here
-              note at 136..139: and it is still used here
+              note at 136..137: and it is still used here
             260..261: writing to `p.x` here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
               note at 240..248: this borrow was created here
-              note at 267..270: and it is still used here
+              note at 267..268: and it is still used here
         "#]],
     );
 }
@@ -4308,12 +4444,10 @@ static hoisted_arg = fn::<@a>(c: Cell.&mut::<@a>) -> usize {
 };
 "#,
         expect![[r#"
-            216..217: using `c` mutably here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
+            216..217: using `c` mutably here invalidates a borrow of it that is still live: the borrow is still needed by this very operation
               note at 223..233: this borrow was created here
-              note at 216..234: and it is still used here
-            327..328: using `c` mutably here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
+            327..328: using `c` mutably here invalidates a borrow of it that is still live: the borrow is still needed by this very operation
               note at 311..321: this borrow was created here
-              note at 327..336: and it is still used here
         "#]],
     );
 }
@@ -4383,16 +4517,16 @@ static field_form = fn() -> usize {
         expect![[r#"
             152..154: writing to `n` here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
               note at 114..120: this borrow was created here
-              note at 160..163: and it is still used here
+              note at 160..161: and it is still used here
             301..303: writing to `n` here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
               note at 241..247: this borrow was created here
-              note at 309..312: and it is still used here
+              note at 309..310: and it is still used here
             425..427: writing to `n` here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
               note at 393..396: this borrow was created here
-              note at 433..436: and it is still used here
+              note at 433..434: and it is still used here
             574..576: writing to `p.a` here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
               note at 532..538: this borrow was created here
-              note at 582..585: and it is still used here
+              note at 582..583: and it is still used here
         "#]],
     );
 }
@@ -4413,7 +4547,7 @@ static f = fn::<@a, @b>(bb: usize.&mut::<@a>.&mut::<@b>) -> usize {
         expect![[r#"
             106..117: using `bb.*.*` mutably here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
               note at 81..92: this borrow was created here
-              note at 123..126: and it is still used here
+              note at 123..124: and it is still used here
         "#]],
     );
 }
@@ -4447,13 +4581,13 @@ static under_outer = fn::<@a, @b>(mut bb: P.&mut::<@a>.&mut::<@b>) -> usize { le
         expect![[r#"
             146..154: reading `bb.*.*.f` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
               note at 123..136: this borrow was created here
-              note at 162..163: and it is still used here
+              note at 156..157: and it is still used here
             271..279: reading `bb.*.*.f` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
               note at 252..261: this borrow was created here
-              note at 281..284: and it is still used here
+              note at 281..282: and it is still used here
             402..410: reading `bb.*.*.f` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
               note at 385..392: this borrow was created here
-              note at 412..415: and it is still used here
+              note at 412..413: and it is still used here
         "#]],
     );
 }
@@ -4480,7 +4614,7 @@ static f = fn::<@a, @b>(bb: P.&mut::<@a>.&mut::<@b>, mut v: P) -> usize {
         expect![[r#"
             150..151: reading `v` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
               note at 127..135: this borrow was created here
-              note at 163..164: and it is still used here
+              note at 157..158: and it is still used here
         "#]],
     );
 }
@@ -4505,16 +4639,15 @@ static f = fn::<@a>(p: E.&mut::<@a>) -> usize {
         expect![[r#"
             120..121: reading `p.*` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
               note at 85..93: this borrow was created here
-              note at 156..159: and it is still used here
+              note at 150..151: and it is still used here
         "#]],
     );
 }
 
-/// Where the blame sits. A bare-name argument is an operand of the call
-/// with no expression of its own, so the call is squiggled; a projected
-/// argument is read into a temp at its own expression, and the read is.
+/// Where the blame sits: an argument is read into a temp at its own
+/// expression, projected or bare, and the read is squiggled.
 #[test]
-fn a_projected_argument_blames_the_read_and_a_bare_name_the_call() {
+fn an_argument_blames_its_own_read() {
     check_loans(
         r#"
 type P = struct { f: usize, g: usize };
@@ -4525,10 +4658,10 @@ static bare = fn() -> usize { let mut a: usize = 1; let x = a.&mut; let n = take
         expect![[r#"
             173..178: reading `p.*.f` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
               note at 148..158: this borrow was created here
-              note at 187..188: and it is still used here
-            271..278: reading `a` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
+              note at 181..182: and it is still used here
+            276..277: reading `a` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
               note at 255..261: this borrow was created here
-              note at 286..287: and it is still used here
+              note at 280..281: and it is still used here
         "#]],
     );
 }
@@ -4917,7 +5050,7 @@ static finished = fn() -> usize {
         expect![[r#"
             157..175: writing to `o` here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
               note at 121..127: this borrow was created here
-              note at 177..180: and it is still used here
+              note at 177..178: and it is still used here
         "#]],
     );
 }
@@ -5013,7 +5146,7 @@ static f = fn::<@a>(key: usize, val: usize, map: Map.&mut::<@a>, slot: usize.&mu
         expect![[r#"
             711..714: using `map` mutably here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
               note at 643..646: this borrow was created here
-              note at 747..750: and it is still used here
+              note at 747..748: and it is still used here
         "#]],
     );
 }
@@ -5151,10 +5284,12 @@ static f = fn() -> usize { get(mk().b.&) };
             fn b0(_1: usize.&) -> usize {
               _0: usize  // return
               _1: usize.&  // param r
-              _2: usize
+              _2: usize.&
+              _3: usize
               bb0:
-                _2 = _1.*
-                _0 = _2
+                _2 = _1
+                _3 = _2.*
+                _0 = _3
                 return
             }
             fn b1() -> fn(usize.&) -> usize {
@@ -5264,7 +5399,7 @@ static f = fn() -> usize {
         expect![[r#"
             306..307: leaving this block ends the storage of this temporary, which invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read storage that no longer exists
               note at 274..280: this borrow was created here
-              note at 313..316: and it is still used here
+              note at 313..314: and it is still used here
         "#]],
     );
 }
@@ -5286,7 +5421,7 @@ static f = fn() -> usize {
         expect![[r#"
             149..150: writing to `n` here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
               note at 133..136: this borrow was created here
-              note at 156..160: and it is still used here
+              note at 156..158: and it is still used here
         "#]],
     );
 }
@@ -5329,7 +5464,7 @@ static f = fn() -> usize {
         expect![[r#"
             124..125: leaving this block ends the storage of `x`, which invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read storage that no longer exists
               note at 115..118: this borrow was created here
-              note at 131..134: and it is still used here
+              note at 131..132: and it is still used here
         "#]],
     );
 }
@@ -5354,7 +5489,7 @@ static f = fn() -> usize {
         expect![[r#"
             134..135: leaving this block ends the storage of this temporary, which invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read storage that no longer exists
               note at 122..128: this borrow was created here
-              note at 141..144: and it is still used here
+              note at 141..142: and it is still used here
         "#]],
     );
 }
@@ -5379,7 +5514,7 @@ static f = fn() -> usize {
         expect![[r#"
             133..138: leaving this block ends the storage of `x`, which invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read storage that no longer exists
               note at 120..123: this borrow was created here
-              note at 151..154: and it is still used here
+              note at 151..152: and it is still used here
         "#]],
     );
 }
@@ -5432,7 +5567,7 @@ static f = fn() -> usize {
         expect![[r#"
             263..264: leaving this block ends the storage of `x`, which invalidates a borrow of it that is still live: the loop brings control back round to a use of the borrow, which would then read storage that no longer exists
               note at 235..238: this borrow was created here
-              note at 192..195: and the loop brings control back round to this use of it
+              note at 192..193: and the loop brings control back round to this use of it
         "#]],
     );
 }
@@ -5458,7 +5593,7 @@ static f = fn(o: Opt) -> usize {
         expect![[r#"
             162..163: leaving this arm ends the storage of `x`, which invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read storage that no longer exists
               note at 157..160: this borrow was created here
-              note at 198..201: and it is still used here
+              note at 198..199: and it is still used here
         "#]],
     );
 }
@@ -5536,7 +5671,7 @@ static f = fn(o: Opt) -> usize {
         expect![[r#"
             181..186: leaving this arm ends the storage of `x`, which invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read storage that no longer exists
               note at 176..179: this borrow was created here
-              note at 247..250: and it is still used here
+              note at 247..248: and it is still used here
         "#]],
     );
 }
@@ -5580,11 +5715,11 @@ static f = fn() -> usize {
 }
 
 /// The markers a nested block lowers to: its `let` dies at the block's
-/// end, after the bare-local tail has been copied out so the block's
+/// end, after the tail has been read where it stands, so the block's
 /// value never reads dead storage. The outer `let` is the frame's and
 /// gets no marker.
 #[test]
-fn a_nested_block_ends_the_storage_of_its_locals_after_copying_its_tail_out() {
+fn a_nested_block_ends_the_storage_of_its_locals_after_reading_its_tail() {
     check_mir(
         r#"
 static f = fn() -> usize {
@@ -5601,16 +5736,20 @@ static f = fn() -> usize {
             fn b0() -> usize {
               _0: usize  // return
               _1: usize  // a
-              _2: usize  // x
-              _3: usize
-              _4: usize  // b
+              _2: usize
+              _3: usize  // x
+              _4: usize
+              _5: usize  // b
+              _6: usize
               bb0:
                 _1 = 1
                 _2 = _1
                 _3 = _2
-                storage_dead _2
                 _4 = _3
-                _0 = _4
+                storage_dead _3
+                _5 = _4
+                _6 = _5
+                _0 = _6
                 return
             }
             fn b1() -> fn() -> usize {
@@ -5620,5 +5759,212 @@ static f = fn() -> usize {
                 return
             }
         "#]],
+    );
+}
+
+/// G24: a name is read where it stands, so the read of `x` comes before
+/// the write the right operand makes.
+#[test]
+fn a_name_is_read_before_a_later_operand_writes_it() {
+    check_mir(
+        r#"
+static f = fn() -> usize {
+    let mut x: usize = 1;
+    let y = x + { x = 5; 1 };
+    y
+};
+"#,
+        expect![[r#"
+            item f:
+            fn b0() -> usize {
+              _0: usize  // return
+              _1: usize  // x
+              _2: usize
+              _3: usize
+              _4: usize  // y
+              _5: usize
+              bb0:
+                _1 = 1
+                _2 = _1
+                _1 = 5
+                _3 = Add(_2, 1)
+                _4 = _3
+                _5 = _4
+                _0 = _5
+                return
+            }
+            fn b1() -> fn() -> usize {
+              _0: fn() -> usize  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+/// A deref goes through the temp that read the pointer's name, and the
+/// temp stands for the name: the loan and the access both root in `p`.
+#[test]
+fn a_name_temp_does_not_hide_a_loan() {
+    check_loans(
+        r#"
+type P = struct { f: usize, g: usize };
+static read = fn::<@a>(p: P.&mut::<@a>) -> usize { let x = p.*.f.&mut; let y = p.*.f; x.* = 1; y };
+static write = fn::<@a>(p: P.&mut::<@a>) -> usize { let x = p.*.f.&mut; p.*.f = 3; x.* = 1; x.* };
+static whole = fn() -> usize { let mut n: usize = 1; let x = n.&mut; let y = n; x.* = 2; y };
+"#,
+        expect![[r#"
+            120..125: reading `p.*.f` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
+              note at 100..110: this borrow was created here
+              note at 127..128: and it is still used here
+            221..222: writing to `p.*.f` here invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read through an invalidated borrow
+              note at 201..211: this borrow was created here
+              note at 224..225: and it is still used here
+            317..318: reading `n` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
+              note at 301..307: this borrow was created here
+              note at 320..321: and it is still used here
+        "#]],
+    );
+}
+
+#[test]
+fn a_name_temp_does_not_invent_a_loan() {
+    check_loans(
+        r#"
+type P = struct { f: usize, g: usize };
+static set = fn::<@a>(v: usize, m: usize.&mut::<@a>) -> () { m.* = v; };
+static sibling = fn::<@a>(p: P.&mut::<@a>) -> usize { let x = p.*.g.&mut; let y = p.*.f; x.* = 1; y };
+static copied = fn() -> usize { let mut x: usize = 1; let y = x; x = 2; x + y };
+static beside = fn() -> usize { let a: usize = 1; let mut b: usize = 2; set(a, b.&mut); a + b };
+"#,
+        expect![[""]],
+    );
+}
+
+/// A join with one exit copies the name temp whole, and a deref through
+/// the join still roots in the name.
+#[test]
+fn a_single_exit_join_under_a_deref_roots_in_the_name() {
+    check_loans(
+        r#"
+static looped = fn::<@a, @b>(bb: usize.&mut::<@a>.&mut::<@b>) -> usize {
+    let x = loop { break bb; }.*.*.&mut;
+    let y = bb.*.*;
+    x.* = 1;
+    y
+};
+static matched = fn::<@a, @b>(bb: usize.&mut::<@a>.&mut::<@b>, k: usize) -> usize {
+    let x = match k { _ => bb }.*.*.&mut;
+    let y = bb.*.*;
+    x.* = 1;
+    y
+};
+static nested = fn::<@a, @b>(bb: usize.&mut::<@a>.&mut::<@b>) -> usize {
+    let x = bb.*.*.&mut;
+    let y = loop { break loop { break bb; }; }.*.*;
+    x.* = 1;
+    y
+};
+"#,
+        expect![[r#"
+            127..133: reading `bb.*.*` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
+              note at 86..113: this borrow was created here
+              note at 139..140: and it is still used here
+            295..301: reading `bb.*.*` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
+              note at 253..281: this borrow was created here
+              note at 307..308: and it is still used here
+            435..473: reading `bb.*.*` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
+              note at 410..421: this borrow was created here
+              note at 479..480: and it is still used here
+        "#]],
+    );
+}
+
+/// The read of `x` stands between the mint of `r` and its use in the
+/// next argument, and is refused at the name.
+#[test]
+fn an_argument_read_under_a_loan_a_later_argument_uses_is_refused() {
+    check_loans(
+        r#"
+static pack = fn(a: usize, b: usize) -> usize { a * 10 + b };
+static f = fn() -> usize {
+    let mut x: usize = 1;
+    let r = x.&mut;
+    pack(x, { r.* = 5; 1 })
+};
+"#,
+        expect![[r#"
+            145..146: reading `x` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
+              note at 128..134: this borrow was created here
+              note at 150..151: and it is still used here
+        "#]],
+    );
+}
+
+/// A borrow of a local that was moved out, in a later argument or a later
+/// statement.
+/// TODO: refuse a borrow of a moved-out local (halvko/must#42)
+#[test]
+fn a_borrow_of_a_moved_out_local_is_accepted() {
+    check_loans(
+        r#"
+type Tok = struct { n: usize } only move with {
+    impl Self {
+        done = fn(t: Self) -> usize { let Tok(struct { n }) = t; n };
+    }
+};
+static take = fn::<@a>(v: Tok, r: Tok.&::<@a>) -> usize { let k = r.*.n; v.done() + k };
+static argument = fn() -> usize { let v = Tok(struct { n = 3 }); take(v, v.&) };
+static statement = fn() -> usize { let v = Tok(struct { n = 3 }); let w = v; let r = v.&; take(w, r) };
+static pair = fn::<@a, T>(v: T, r: T.&::<@a>) -> T { v };
+static generic_argument = fn::<T>(m: T) -> T { pair(m, m.&) };
+static generic_statement = fn::<T>(m: T) -> T { let w = m; let r = m.&; pair(w, r) };
+"#,
+        expect![[""]],
+    );
+}
+
+/// An index operand that reassigns the pointer runs after the pointer was
+/// read, and the access is judged against the new `p.*`: the read, the
+/// write target and the address-of walks are all accepted.
+/// TODO: judge the access against the pointer it goes through (halvko/must#43)
+#[test]
+fn an_access_through_a_pointer_its_index_reassigns_is_accepted() {
+    check_loans(
+        r#"
+static read = fn() -> usize {
+    let mut a: [usize; 2] = [1, 2];
+    let mut b: [usize; 2] = [3, 4];
+    let mut p = a.&mut;
+    let x = p.*[0].&mut;
+    let q = b.&mut;
+    let y = p.*[{ p = q; 0 }];
+    x.* = 7;
+    y
+};
+static write = fn() -> usize {
+    let mut a: [usize; 2] = [1, 2];
+    let mut b: [usize; 2] = [3, 4];
+    let mut p = a.&mut;
+    let x = p.*[0].&mut;
+    let q = b.&mut;
+    p.*[{ p = q; 0 }] = 9;
+    x.* = 7;
+    x.*
+};
+static address = fn() -> usize {
+    let mut a: [usize; 2] = [1, 2];
+    let mut b: [usize; 2] = [3, 4];
+    let mut p = a.&mut;
+    let x = p.*[0].&mut;
+    let q = b.&mut;
+    let z = p.*[{ p = q; 0 }].&mut;
+    z.* = 9;
+    x.* = 7;
+    x.*
+};
+"#,
+        expect![[""]],
     );
 }
