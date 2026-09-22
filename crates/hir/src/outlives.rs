@@ -49,9 +49,13 @@
 //! region it covers is live, and everywhere if it covers a universal".
 //! One graph definition ([`build_solver`]), read by both halves.
 //!
-//! TODO: storage death at block end (halvko/must#18). This module only
-//! refuses a borrow of body-local storage that escapes the body; one that
-//! outlives its block inside the body is not caught.
+//! Storage death inside the body is MIR's: a block end is a `StorageDead`,
+//! and `mir::loans` refuses a borrow still live there. This module refuses
+//! escape from the body as a whole, and `mir::loans` leaves a loan that
+//! reaches a universal to it.
+//!
+//! TODO: the frame exit as a storage death like any other, replacing the
+//! escape check here (halvko/must#27).
 
 use base_db::Db;
 use rustc_hash::{FxHashMap, FxHashSet};

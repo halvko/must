@@ -115,11 +115,22 @@
 //! * Every array index overlaps every other — `arr[i]` is not a static
 //!   fact — where the tree carries the resolved index.
 //!
+//! # Storage death
+//!
+//! A nested block's locals — its `let`s, the temporaries materialized in
+//! it — die at every exit of the block: lowering marks each with a
+//! [`StatementKind::StorageDead`] at the block's end and at each `break`
+//! and `continue` leaving it. A match arm is a scope of the same kind,
+//! holding its pattern's binders. The marker is the last shallow write
+//! of the whole local ([`AccessKind::StorageEnd`]): a loan of the local's
+//! own storage that is still live there is refused, blamed at the exit,
+//! and a loan THROUGH the local (of what it points at) passes. A loop
+//! body is a nested block, so its storage ends before every path back to
+//! the header. The body's outermost block is the frame, and its end is
+//! the return below.
+//!
 //! # Coarse, and known
 //!
-//! * Storage liveness is the FRAME: MIR has no storage-end marker, so a
-//!   borrow of an inner-block local read after its block ends is caught by
-//!   neither layer.
 //! * Blame sits at a statement's origin. A bare-name operand has no
 //!   expression of its own, so `take(a)` squiggles the call and an
 //!   assignment squiggles its value — where the interpreter's "invalidated
@@ -146,6 +157,7 @@ use hir::outlives::RegionCover;
 use hir::ty::{GenericArg, Region};
 use hir::{BindingId, ExprId, ItemId, RegionConstraint, Ty};
 use rustc_hash::{FxHashMap, FxHashSet};
+use syntax::TextRange;
 
 use crate::{
     BlockId, LocalId, MirBody, Operand, Place, ProjElem, Rvalue, Statement, StatementKind,
@@ -200,13 +212,17 @@ pub enum AccessKind {
     /// A whole-local move — including the by-name read of a value that
     /// cannot be duplicated. A write through the root.
     Move,
+    /// The end of the local's storage at its block's exit
+    /// ([`StatementKind::StorageDead`]): the last write to the whole
+    /// local, foreign to every loan of its storage.
+    StorageEnd,
 }
 
 impl AccessKind {
     fn is_write(self) -> bool {
         matches!(
             self,
-            AccessKind::MutBorrow | AccessKind::Write | AccessKind::Move
+            AccessKind::MutBorrow | AccessKind::Write | AccessKind::Move | AccessKind::StorageEnd
         )
     }
 }
@@ -234,6 +250,21 @@ impl LoanDiagnostic {
             LoanDiagnostic::Invalidated { access, .. } => *access,
             LoanDiagnostic::Escapes { borrow, .. } => *borrow,
         }
+    }
+
+    /// Where the squiggle goes: the blamed expression's node, except that
+    /// a storage end sits where the block is left — its closing brace, or
+    /// the `break`/`continue` that exits it — not on the whole block.
+    pub fn range(&self, source_map: &hir::BodySourceMap) -> Option<TextRange> {
+        let expr = self.expr();
+        if let LoanDiagnostic::Invalidated {
+            kind: AccessKind::StorageEnd,
+            ..
+        } = self
+        {
+            return source_map.exit_range_for_expr(expr);
+        }
+        Some(source_map.node_for_expr(expr)?.text_range())
     }
 
     /// The companion sites, with the note each carries. The vocabulary is
@@ -281,6 +312,9 @@ impl LoanDiagnostic {
                     AccessKind::SharedBorrow => format!("borrowing {place} here"),
                     AccessKind::Read => format!("reading {place} here"),
                     AccessKind::Move => format!("moving {place} here"),
+                    AccessKind::StorageEnd => {
+                        format!("leaving this block ends the storage of {place}, which")
+                    }
                 };
                 let victim = if kind.is_write() {
                     "a borrow of it"
@@ -291,6 +325,10 @@ impl LoanDiagnostic {
                     (StillUsed::HandedBack, _) => {
                         "the borrow is handed back to the caller, and this invalidates it \
                          before the caller can read it"
+                    }
+                    (StillUsed::NextIteration(_), AccessKind::StorageEnd) => {
+                        "the loop brings control back round to a use of the borrow, which \
+                         would then read storage that no longer exists"
                     }
                     (StillUsed::NextIteration(_), _) => {
                         "the loop brings control back round to a use of the borrow, which \
@@ -306,6 +344,10 @@ impl LoanDiagnostic {
                     (StillUsed::Later(_), AccessKind::Move) => {
                         "the borrow points into storage this move takes away, and it is \
                          used after this point"
+                    }
+                    (StillUsed::Later(_), AccessKind::StorageEnd) => {
+                        "the borrow is used after this point, and reading through it then \
+                         would read storage that no longer exists"
                     }
                     (StillUsed::Later(_), _) => {
                         "the borrow is used after this point, and reading through it then \
@@ -532,7 +574,9 @@ impl<'a> BodyCheck<'a> {
         let mut defs = Vec::new();
         for (block, data) in self.body.blocks.iter() {
             for (index, stmt) in data.statements.iter().enumerate() {
-                let StatementKind::Assign { dest, .. } = &stmt.kind;
+                let StatementKind::Assign { dest, .. } = &stmt.kind else {
+                    continue;
+                };
                 if dest.local == local && dest.projection.is_empty() {
                     defs.push((Point { block, index }, stmt.origin));
                 }
@@ -640,7 +684,9 @@ impl<'a> BodyCheck<'a> {
     fn for_each_place(&self, f: &mut impl FnMut(&Place)) {
         for (_, data) in self.body.blocks.iter() {
             for stmt in &data.statements {
-                let StatementKind::Assign { dest, rvalue } = &stmt.kind;
+                let StatementKind::Assign { dest, rvalue } = &stmt.kind else {
+                    continue;
+                };
                 rvalue_places(rvalue, f);
                 place_places(dest, f);
             }
@@ -725,7 +771,9 @@ impl<'a> BodyCheck<'a> {
         if let Some(region) = self.infer.loan_regions.get(stmt.origin) {
             return Some(region.clone());
         }
-        let StatementKind::Assign { dest, .. } = &stmt.kind;
+        let StatementKind::Assign { dest, .. } = &stmt.kind else {
+            return None;
+        };
         if !dest.projection.is_empty() {
             return None;
         }
@@ -916,13 +964,17 @@ impl<'a> BodyCheck<'a> {
             }
         };
         match data.statements.get(point.index) {
-            Some(stmt) => {
-                let StatementKind::Assign { dest, rvalue } = &stmt.kind;
-                rvalue_uses(rvalue, &mut uses);
-                if !dest.projection.is_empty() {
-                    place_uses(dest, &mut uses);
+            Some(stmt) => match &stmt.kind {
+                StatementKind::Assign { dest, rvalue } => {
+                    rvalue_uses(rvalue, &mut uses);
+                    if !dest.projection.is_empty() {
+                        place_uses(dest, &mut uses);
+                    }
                 }
-            }
+                // Neither a use nor a def: counting it as a use would keep
+                // every holder live up to its own storage end.
+                StatementKind::StorageDead { .. } => {}
+            },
             None => match &data.terminator.kind {
                 TerminatorKind::SwitchBool { discr, .. }
                 | TerminatorKind::SwitchVariant { discr, .. } => operand_uses(discr, &mut uses),
@@ -945,10 +997,12 @@ impl<'a> BodyCheck<'a> {
     fn def_at(&self, point: Point) -> Option<LocalId> {
         let data = &self.body.blocks[point.block];
         match data.statements.get(point.index) {
-            Some(stmt) => {
-                let StatementKind::Assign { dest, .. } = &stmt.kind;
-                dest.projection.is_empty().then_some(dest.local)
-            }
+            Some(stmt) => match &stmt.kind {
+                StatementKind::Assign { dest, .. } => {
+                    dest.projection.is_empty().then_some(dest.local)
+                }
+                StatementKind::StorageDead { .. } => None,
+            },
             None => match &data.terminator.kind {
                 TerminatorKind::Call { dest, .. } | TerminatorKind::Trap { dest, .. } => {
                     Some(*dest)
@@ -1086,8 +1140,22 @@ impl<'a> BodyCheck<'a> {
         let data = &self.body.blocks[point.block];
         let mut out = Vec::new();
         match data.statements.get(point.index) {
-            Some(stmt) => {
-                let StatementKind::Assign { dest, rvalue } = &stmt.kind;
+            // The last shallow write of the whole local: a loan of its
+            // storage conflicts, a loan through it (of the pointee's
+            // storage) does not, and `step` retires every loan of it
+            // afterwards, so no later use reports the same loan again.
+            Some(Statement {
+                kind: StatementKind::StorageDead { local },
+                ..
+            }) => out.push(Access {
+                kind: AccessKind::StorageEnd,
+                place: (*local).into(),
+                shallow: true,
+            }),
+            Some(Statement {
+                kind: StatementKind::Assign { dest, rvalue },
+                ..
+            }) => {
                 match rvalue {
                     // The copy that defines a temp standing for a nested
                     // place is no access (module doc, "Places"): the
@@ -1280,9 +1348,14 @@ impl<'a> BodyCheck<'a> {
             let mut scope = scope_in[Self::block_index(block)].clone();
             for point in self.points_of(block) {
                 self.step(point, &mut scope, |access, scope| {
-                    let victim = scope
-                        .iter()
-                        .find(|&index| self.conflicts(access, &self.loans[index]));
+                    // A loan of dying storage that reaches a universal is
+                    // `hir::outlives`' escape finding already, as it is
+                    // at the return below.
+                    let victim = scope.iter().find(|&index| {
+                        let loan = &self.loans[index];
+                        self.conflicts(access, loan)
+                            && !(access.kind == AccessKind::StorageEnd && loan.reaches_universal)
+                    });
                     let Some(index) = victim else {
                         return;
                     };

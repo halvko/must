@@ -9,7 +9,7 @@
 use std::io::{IsTerminal, Write};
 
 use base_db::{RootDatabase, SourceFile};
-use eval::{EvalErrorKind, Machine, RunMode, Value};
+use eval::{EvalErrorKind, Machine, NoteAnchor, RunMode, Value};
 use line_index::{LineIndex, WideEncoding};
 use syntax::ast::AstNode;
 
@@ -316,14 +316,23 @@ pub fn evaluate(
                 EvalErrorKind::Uninstantiated => "error",
             };
             let mut rendered = format!("{prefix}: {}", err.message);
-            if let Some(location) = locate(&db, file, path, original_len, err.origin) {
+            if let Some(location) =
+                locate(&db, file, path, original_len, err.origin, NoteAnchor::Expr)
+            {
                 rendered.push_str(&format!("\n  --> {location}"));
             }
             // Secondary provenance ("allocated here" on a double free):
             // one located line per note.
             for note in &err.notes {
                 rendered.push_str(&format!("\n  note: {}", note.message));
-                if let Some(location) = locate(&db, file, path, original_len, note.origin.clone()) {
+                if let Some(location) = locate(
+                    &db,
+                    file,
+                    path,
+                    original_len,
+                    note.origin.clone(),
+                    note.anchor,
+                ) {
                     rendered.push_str(&format!("\n  --> {location}"));
                 }
             }
@@ -338,12 +347,16 @@ fn locate(
     path: &str,
     original_len: usize,
     origin: Option<(hir::ItemLoc, hir::ExprId)>,
+    anchor: NoteAnchor,
 ) -> Option<String> {
     let (loc, expr) = origin?;
     // Single-file world: the origin's file is the one we run.
     let item = loc.to_id(db);
     let (_, source_map) = hir::body_with_source_map(db, item);
-    let range = source_map.node_for_expr(expr)?.text_range();
+    let range = match anchor {
+        NoteAnchor::Expr => source_map.node_for_expr(expr)?.text_range(),
+        NoteAnchor::Exit => source_map.exit_range_for_expr(expr)?,
+    };
     // The synthetic entry line isn't part of the user's file; a location
     // there would point past its end.
     if usize::from(range.start()) > original_len {
@@ -658,6 +671,82 @@ static main = fn () -> () {
                   --> test.must:8:14
                   note: allocated here
                   --> test.must:3:19
+            "#]],
+        );
+    }
+
+    #[test]
+    fn a_dangling_pointer_to_block_storage_is_located_at_the_closing_brace() {
+        // The note lands where the checker's refusal of the safe twin
+        // squiggles: the block's `}`, not its opening line.
+        check(
+            r#"
+static f = fn() -> usize {
+    let p = {
+        let x: usize = 2;
+        let y: usize = 3;
+        x.&raw
+    };
+    unsafe { p.* }
+};
+"#,
+            "f()",
+            expect_test::expect![[r#"
+                undefined behavior: dangling pointer — the local it pointed to no longer exists (its block has ended)
+                  --> test.must:8:14
+                  note: its storage ended here, when its block was left
+                  --> test.must:7:5
+            "#]],
+        );
+    }
+
+    #[test]
+    fn a_dangling_pointer_to_storage_ended_by_a_break_is_located_at_the_break() {
+        check(
+            r#"
+static f = fn() -> usize {
+    let z: usize = 0;
+    let mut p = z.&raw;
+    loop {
+        let x: usize = 2;
+        p = x.&raw;
+        break;
+    };
+    unsafe { p.* }
+};
+"#,
+            "f()",
+            expect_test::expect![[r#"
+                undefined behavior: dangling pointer — the local it pointed to no longer exists (its block has ended)
+                  --> test.must:10:14
+                  note: its storage ended here, when its block was left
+                  --> test.must:8:9
+            "#]],
+        );
+    }
+
+    #[test]
+    fn a_dangling_pointer_to_a_match_binder_is_located_at_the_arms_end() {
+        // A braceless arm ends at its expression's last token, so the
+        // note lands there rather than on the block around the `match`.
+        check(
+            r#"
+type Opt = enum { Some(usize), None };
+static f = fn(o: Opt) -> usize {
+    let a: usize = 1;
+    let p: usize.&raw = match o {
+        ::Some(x) => x.&raw,
+        ::None => a.&raw,
+    };
+    unsafe { p.* }
+};
+"#,
+            "f(Opt::Some(2))",
+            expect_test::expect![[r#"
+                undefined behavior: dangling pointer — the local it pointed to no longer exists (its block has ended)
+                  --> test.must:9:14
+                  note: its storage ended here, when its block was left
+                  --> test.must:6:25
             "#]],
         );
     }

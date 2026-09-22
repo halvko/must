@@ -445,6 +445,18 @@ pub struct EvalError {
 pub struct EvalNote {
     pub message: String,
     pub origin: Option<(ItemLoc, ExprId)>,
+    pub anchor: NoteAnchor,
+}
+
+/// Which point of a note's origin expression the note is about, so the
+/// driver can place it the same way the static checker places its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoteAnchor {
+    /// The expression itself.
+    Expr,
+    /// The point the expression is left: a block's closing brace, or the
+    /// `break`/`continue` that leaves it.
+    Exit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

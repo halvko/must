@@ -187,10 +187,9 @@ impl Analysis {
             // refusal and the dynamic detection read as one story told at
             // two different times.
             for diag in loans {
-                let Some(ptr) = source_map.node_for_expr(diag.expr()) else {
+                let Some(range) = diag.range(source_map) else {
                     continue;
                 };
-                let range = ptr.text_range();
                 let related = diag
                     .related()
                     .into_iter()
