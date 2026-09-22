@@ -38,3 +38,11 @@ here; they live in `docs/design/`.
 - The program and its expectation stay together in the test (expect-test).
   A program lives in a `.must` file only when it ships in `examples/` and
   the test includes that file to check the shipped copy.
+
+## Fast path
+
+- Work that only a diagnostic needs is done where the diagnostic is
+  produced, not on the path correct code takes. Carrying a value the
+  fast path already has is fine; a lookup, an allocation or a side
+  table kept for the error path's sake is not. Existing violations are
+  swept in halvko/must#45.
