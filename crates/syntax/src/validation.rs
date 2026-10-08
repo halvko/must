@@ -1905,7 +1905,22 @@ fn validate_import_annotation(ty: &ast::Type, errors: &mut Vec<SyntaxError>) {
                     fix: None,
                 });
             }
-            // A plain `fn` type is allowed: calls to it need no `unsafe` block.
+            if fn_type.ret_type().is_none() {
+                let end = fn_type.syntax().text_range().end();
+                errors.push(SyntaxError {
+                    message: "an import's return type must be written: there is no body \
+                              to infer it from"
+                        .to_owned(),
+                    range: fn_type.syntax().text_range(),
+                    fix: Some(Fix {
+                        label: "Write `-> ()`".to_owned(),
+                        edits: vec![TextEdit {
+                            range: TextRange::empty(end),
+                            insert: " -> ()".to_owned(),
+                        }],
+                    }),
+                });
+            }
             if let Some(binder) = fn_type.generic_param_list() {
                 errors.push(SyntaxError {
                     message: "an import cannot be generic: it has exactly one machine \

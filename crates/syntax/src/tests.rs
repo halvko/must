@@ -16099,8 +16099,7 @@ fn a_vouched_import_may_be_declared_safe_to_call() {
     for source in [
         "unsafe extern static now: fn() -> i64;",
         "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;",
-        // An omitted return type is `()`.
-        "unsafe extern static tick: fn();",
+        "unsafe extern static tick: fn() -> ();",
     ] {
         assert_eq!(
             crate::parse(source).errors(),
@@ -16151,6 +16150,19 @@ fn the_vouch_marker_leads_the_declaration() {
         fixed,
         "unsafe extern static read: unsafe fn(n: i64) -> i64;"
     );
+    assert_eq!(crate::parse(&fixed).errors(), &[]);
+}
+
+#[test]
+fn an_extern_return_type_must_be_written() {
+    let source = "unsafe extern static tick: fn();";
+    let parse = crate::parse(source);
+    let [err] = parse.errors() else {
+        panic!("expected exactly one error, got {:?}", parse.errors());
+    };
+    let fix = err.fix.as_ref().expect("`-> ()` is offered");
+    let fixed = apply_fix(source, fix);
+    assert_eq!(fixed, "unsafe extern static tick: fn() -> ();");
     assert_eq!(crate::parse(&fixed).errors(), &[]);
 }
 
