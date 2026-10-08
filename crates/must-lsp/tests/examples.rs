@@ -486,7 +486,7 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |                                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                = help: Remove the initializer
 
-            error: declaring a host import is a VOUCH: write `unsafe extern static` — this signature is an assertion about the host, and nothing on this side can check it
+            error: declaring a host import is a VOUCH: write `unsafe extern static`
               --> examples/errors.must:367:1
                 |
             367 | extern static unvouched_import: fn() -> i64;

@@ -15986,7 +15986,7 @@ fn an_import_is_a_declaration_with_no_initializer() {
                       NAME_REF@63..68
                         IDENT@63..68 "isize"
                 SEMICOLON@68..69 ";"
-            error 0..6: declaring a host import is a VOUCH: write `unsafe extern static` — this signature is an assertion about the host, and nothing on this side can check it
+            error 0..6: declaring a host import is a VOUCH: write `unsafe extern static`
         "#]],
     );
 }
@@ -16119,9 +16119,7 @@ fn an_unmarked_import_names_the_vouch_and_offers_it() {
     };
     assert_eq!(
         err.message,
-        "declaring a host import is a VOUCH: write `unsafe extern static` — \
-         this signature is an assertion about the host, and nothing on this \
-         side can check it"
+        "declaring a host import is a VOUCH: write `unsafe extern static`"
     );
     let fix = err.fix.as_ref().expect("the vouch is offered");
     let fixed = apply_fix(source, fix);
@@ -16496,7 +16494,7 @@ fn only_clause_misplacements_and_unknown_capabilities() {
          type E = struct {} only;\n",
         expect![[r#"
             13..17: a capability ceiling belongs on a `type` declaration; an item has whatever ceiling its type has
-            24..30: declaring a host import is a VOUCH: write `unsafe extern static` — this signature is an assertion about the host, and nothing on this side can check it
+            24..30: declaring a host import is a VOUCH: write `unsafe extern static`
             71..75: a capability ceiling belongs on a `type` declaration; an item has whatever ceiling its type has
             104..108: a capability ceiling belongs on a `type` declaration, not on a `trait`
             139..143: unknown capability `leak`; `move` is the only ceiling that can be written

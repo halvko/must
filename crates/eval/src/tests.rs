@@ -6468,7 +6468,7 @@ static f = fn() -> i64 { print("Hello"); example(); 0 };
         "f()",
         expect![[r#"
             output: "Hello"
-            error[Trap]: declaring a host import is a VOUCH: write `unsafe extern static` — this signature is an assertion about the host, and nothing on this side can check it
+            error[Trap]: declaring a host import is a VOUCH: write `unsafe extern static`
         "#]],
     );
 }

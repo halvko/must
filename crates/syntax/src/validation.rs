@@ -1794,14 +1794,9 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
         });
         return;
     }
-    // The signature is a claim about code this side cannot check, so declaring
-    // it needs `unsafe`.
     match &vouch {
         None => errors.push(SyntaxError {
-            message: "declaring a host import is a VOUCH: write \
-                      `unsafe extern static` — this signature is an assertion \
-                      about the host, and nothing on this side can check it"
-                .to_owned(),
+            message: "declaring a host import is a VOUCH: write `unsafe extern static`".to_owned(),
             range: marker.text_range(),
             fix: Some(Fix {
                 label: "Write `unsafe extern`".to_owned(),

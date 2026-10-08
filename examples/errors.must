@@ -362,7 +362,7 @@ static retired_import = extern fn(n: usize) -> usize;
 unsafe extern static import_with_a_value: unsafe fn(n: usize) -> usize = fn (n: usize) -> usize { n };
 
 // 35. An `extern static` without `unsafe`.
-//     error: declaring a host import is a VOUCH: write `unsafe extern static` — this signature is an assertion about the host, and nothing on this side can check it
+//     error: declaring a host import is a VOUCH: write `unsafe extern static`
 //     quick fix offered: "Write `unsafe extern`"
 extern static unvouched_import: fn() -> i64;
 

@@ -463,7 +463,7 @@ static main = fn { example() }
 "#,
             "main()",
             expect_test::expect![[r#"
-                error: declaring a host import is a VOUCH: write `unsafe extern static` — this signature is an assertion about the host, and nothing on this side can check it
+                error: declaring a host import is a VOUCH: write `unsafe extern static`
                   --> test.must:2:15
             "#]],
         );
