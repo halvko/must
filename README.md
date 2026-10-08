@@ -64,6 +64,18 @@ setting overrides both. After rebuilding the server, run `Must: Restart
 Server`. VS Code started from the Dock on macOS does not inherit your shell's
 PATH: launch it from a shell, or set `must.serverPath`.
 
+### Helix
+
+Helix has no extension system; `editors/helix/languages.toml` is the whole
+integration. Append it to `~/.config/helix/languages.toml` (with `must-lsp`
+on PATH, or edit both `command`s to an absolute path to
+`target/debug/must-lsp`) and check `hx --health must`. Diagnostics, hover,
+goto-definition, completions, code actions, and the debugger
+(`:debug-start`, same templates as `.zed/debug.json`) all work. What
+doesn't: highlighting and the ▶ run lenses — Helix has neither LSP
+semantic tokens nor code lenses, and Must has no tree-sitter grammar, so
+buffers are uncolored until one exists. Run files from the shell meanwhile.
+
 ## Running programs
 
 With code lenses enabled, every zero-parameter function gets a `▶ run`
