@@ -745,7 +745,7 @@ fn match_awaiting_arms(
 }
 
 /// Whether an item node carries the keyword that says which item it is —
-/// absent only while an import's markers (`unsafe`, `extern`) are written
+/// absent only while an item's markers (`unsafe`, `extern`) are written
 /// and the rest is not.
 fn has_item_keyword(item: &ast::StaticItem) -> bool {
     item.syntax()
@@ -767,16 +767,7 @@ fn has_item_keyword(item: &ast::StaticItem) -> bool {
 /// binding name, the enum segment of a qualified variant pattern before its
 /// `::`, …) — there's nothing sound to complete there.
 fn classify(parent: &SyntaxNode) -> Option<Context> {
-    // `unsafe ⟨caret⟩` / `extern ⟨caret⟩`: a marker is written and the item
-    // keyword that must follow it is not, so whatever the caret sits in
-    // belongs to an item the parser could not read. One keyword may follow,
-    // so that is the answer wherever in the wreckage the caret is. Told
-    // apart from typing an import's actual NAME (`unsafe extern static
-    // rea⟨caret⟩`) by the keyword the item does not have yet.
-    //
-    // The markers are answered in the order they are written, so each
-    // completion is the ONE token that may come next: `extern` after a lone
-    // vouch, `static` once `extern` is there.
+    // `unsafe ⟨caret⟩` offers `extern`; `extern ⟨caret⟩` offers `static`.
     if let Some(item) = parent
         .ancestors()
         .find_map(ast::StaticItem::cast)

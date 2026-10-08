@@ -1720,13 +1720,6 @@ fn validate_extern_fn(fn_literal: &ast::FnLiteral, errors: &mut Vec<SyntaxError>
 }
 
 /// `unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;`
-/// — a HOST IMPORT declaration (G22; the vouch marker's own home, split from
-/// the call-price `unsafe` T19 owns, is this same ruling).
-///
-/// Everything refused here is refused because the DECLARATION IS THE WHOLE
-/// CONTRACT: the item's name is the import's field name, the annotation is
-/// the one machine signature the host must provide, and there is nothing
-/// else — no value, no body, no second place for the truth to live.
 fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>) {
     let vouch = item.unsafe_token();
     if vouch.is_none() && item.extern_token().is_none() {
@@ -1788,13 +1781,6 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
         });
         return;
     };
-    // `extern const x` — `const` is copied per mention and an import is one
-    // identity, so `extern` is the one thing wrong here regardless of
-    // whether `unsafe` rides along in the right order or the wrong one: the
-    // message names `extern` and nothing else, one diagnostic per mistake
-    // (the same invariant a stray marker on a `type`/`trait` item keeps in
-    // `reject_extern_marker`, by reporting whichever marker leads there —
-    // `const` has no "leads" question since neither ever belongs).
     if item.is_const() {
         errors.push(SyntaxError {
             message: EXTERN_ONLY_ON_STATIC.to_owned(),

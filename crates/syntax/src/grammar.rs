@@ -9,14 +9,8 @@ use crate::parser::{CompletedMarker, Parser};
 
 /// Tokens an expression parser must not consume on error: the enclosing
 /// construct knows what to do with them.
-///
-/// `UNSAFE_KW` is deliberately absent, unlike the other item-keyword
-/// recovery sets in this file: `unsafe` also opens an expression
-/// (`unsafe { ... }`, and — superset-parsed — `unsafe fn(...) { ... }`), so
-/// a caller here (a `fn` body, an `if`/`unsafe` branch) must still be able
-/// to take it as one via the `expr(p)` fallback rather than bail with
-/// "expected `{`".
 fn at_expr_recovery(p: &Parser<'_>) -> bool {
+    // Not `UNSAFE_KW`: `unsafe { ... }` is also an expression.
     matches!(
         p.current(),
         EOF | R_BRACE
@@ -64,9 +58,6 @@ pub(crate) fn source_file(p: &mut Parser<'_>) {
     let m = p.start();
     while !p.at(EOF) {
         match p.current() {
-            // `unsafe` opens an item too — it is the VOUCH marker of a host
-            // import (`unsafe extern static ...`), and nothing else at file
-            // scope starts with it.
             STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW | EXTERN_KW | UNSAFE_KW => item(p),
             _ => p.err_and_bump(
                 "expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)",

@@ -553,15 +553,8 @@ impl StaticItem {
     pub fn is_extern(&self) -> bool {
         self.extern_token().is_some()
     }
-    /// The `unsafe` VOUCH marker of a host import — the ITEM's own token,
-    /// the human's assertion that the signature written here is the one the
-    /// host really provides. The `unsafe` of the ANNOTATION
-    /// (`: unsafe fn(...)`) is a different obligation and a different
-    /// token: it lives inside the [`FnType`] node and prices the CALL.
-    ///
-    /// Found wherever the marker was written — `unsafe extern` is the
-    /// spelling, `extern unsafe` is superset-parsed here and rejected by
-    /// validation, which needs the token to say where it went wrong.
+    /// The item's own `unsafe` marker, not the one in a `: unsafe fn(...)`
+    /// annotation.
     pub fn unsafe_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, UNSAFE_KW)
     }

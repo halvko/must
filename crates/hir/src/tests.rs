@@ -14493,7 +14493,7 @@ fn a_vouched_safe_import_is_called_with_no_marker_at_all() {
 fn a_safe_import_still_has_no_host_at_compile_time() {
     // The call price is free, but the HOST is not available at compile
     // time regardless of the callee's type — the const-context refusal is
-    // judged before constness, on `is_host_import` alone, exactly as it is
+    // judged before constness, on `is_extern` alone, exactly as it is
     // for an `unsafe fn`-typed import.
     check_diagnostics(
         "unsafe extern static now: fn() -> i64;\n\
