@@ -1762,10 +1762,22 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
         return;
     };
     if item.is_const() {
+        let fix = item
+            .syntax()
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .find(|t| t.kind() == SyntaxKind::CONST_KW)
+            .map(|keyword| Fix {
+                label: "Change `const` to `static`".to_owned(),
+                edits: vec![TextEdit {
+                    range: keyword.text_range(),
+                    insert: "static".to_owned(),
+                }],
+            });
         errors.push(SyntaxError {
             message: EXTERN_ONLY_ON_STATIC.to_owned(),
             range: marker.text_range(),
-            fix: None,
+            fix,
         });
         return;
     }

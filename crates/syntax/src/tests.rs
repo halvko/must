@@ -16155,6 +16155,19 @@ fn the_vouch_marker_leads_the_declaration() {
 }
 
 #[test]
+fn an_extern_const_is_fixed_to_an_extern_static() {
+    let source = "unsafe extern const now: fn() -> i64;";
+    let parse = crate::parse(source);
+    let [err] = parse.errors() else {
+        panic!("expected exactly one error, got {:?}", parse.errors());
+    };
+    let fix = err.fix.as_ref().expect("the rewrite is offered");
+    let fixed = apply_fix(source, fix);
+    assert_eq!(fixed, "unsafe extern static now: fn() -> i64;");
+    assert_eq!(crate::parse(&fixed).errors(), &[]);
+}
+
+#[test]
 fn a_doubled_vouch_marker_is_reported_once_and_removed() {
     // A duplicate `unsafe` is one diagnostic with a fix.
     let source = "unsafe extern unsafe static read: fn() -> i64;";
