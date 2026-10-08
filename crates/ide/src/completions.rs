@@ -765,25 +765,17 @@ fn has_item_keyword(item: &ast::StaticItem) -> bool {
 /// binding name, the enum segment of a qualified variant pattern before its
 /// `::`, …) — there's nothing sound to complete there.
 fn classify(parent: &SyntaxNode) -> Option<Context> {
-    // `unsafe ⟨caret⟩` offers `extern`; `extern ⟨caret⟩` offers `static`.
-    if let Some(item) = parent
-        .ancestors()
-        .find_map(ast::StaticItem::cast)
-        .filter(|item| !has_item_keyword(item))
-    {
+    if parent.kind() == SyntaxKind::ERROR {
+        let grandparent = parent.parent()?;
+        if grandparent.kind() == SyntaxKind::SOURCE_FILE {
+            return Some(Context::ItemKeyword);
+        }
+        // `unsafe ⟨caret⟩` offers `extern`; `extern ⟨caret⟩` offers `static`.
+        let item = ast::StaticItem::cast(grandparent).filter(|item| !has_item_keyword(item))?;
         if item.extern_token().is_some() {
             return Some(Context::ItemKeywordAfterExtern);
         }
-        if item.unsafe_token().is_some() {
-            return Some(Context::ExternAfterUnsafe);
-        }
-    }
-
-    if parent.kind() == SyntaxKind::ERROR {
-        return parent
-            .parent()
-            .is_some_and(|gp| gp.kind() == SyntaxKind::SOURCE_FILE)
-            .then_some(Context::ItemKeyword);
+        return item.unsafe_token().map(|_| Context::ExternAfterUnsafe);
     }
 
     // A bare pattern name: `BIND_PAT` wrapping a declaration `Name` (never
