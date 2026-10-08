@@ -33,6 +33,8 @@ pub struct Body {
     pub pats: Arena<PatData>,
     /// The item's initializer expression (usually a `fn` literal).
     pub root: Option<ExprId>,
+    /// An error in the item's declaration; its value traps with it.
+    pub declaration_error: Option<String>,
     /// Borrowed values that are not places, keyed by the root of the
     /// borrowed place, each mapped to the anonymous local holding it
     /// (`docs/design/memory-and-borrows.md`, M12).
@@ -579,6 +581,7 @@ pub fn body_with_source_map<'db>(db: &'db dyn Db, item: ItemId<'db>) -> (Body, B
     // body is its defining fn literal (the BODY side of the name-keyed
     // signature/body split: editing it dirties only this member's own
     // checks).
+    let mut declaration_error = None;
     let root = if item.member(db).is_some() {
         crate::item_tree::member_source(db, item)
             .and_then(|member| member.value())
@@ -597,10 +600,17 @@ pub fn body_with_source_map<'db>(db: &'db dyn Db, item: ItemId<'db>) -> (Body, B
             // expression. Claiming one — the annotation, say — would put an
             // expression id on a TYPE, and every "what is at this cursor?"
             // walk would be free to believe it.
-            Some(syntax::ast::Item::StaticItem(it)) if it.declares_host_import() => {
-                Some(ctx.exprs.alloc(ExprData::ExternImport))
+            Some(syntax::ast::Item::StaticItem(it)) => {
+                declaration_error = syntax::static_item_errors(&it)
+                    .into_iter()
+                    .next()
+                    .map(|err| err.message);
+                if it.declares_host_import() {
+                    Some(ctx.exprs.alloc(ExprData::ExternImport))
+                } else {
+                    it.body().map(|expr| ctx.lower_expr(expr))
+                }
             }
-            Some(syntax::ast::Item::StaticItem(it)) => it.body().map(|expr| ctx.lower_expr(expr)),
             // A `trait` item's RHS is a declaration too — read by
             // `trait_requirements`, never lowered as a value.
             Some(syntax::ast::Item::TypeItem(_) | syntax::ast::Item::TraitItem(_)) | None => None,
@@ -612,6 +622,7 @@ pub fn body_with_source_map<'db>(db: &'db dyn Db, item: ItemId<'db>) -> (Body, B
             bindings: ctx.bindings,
             pats: ctx.pats,
             root,
+            declaration_error,
             temps: ctx.temps,
         },
         ctx.source_map,

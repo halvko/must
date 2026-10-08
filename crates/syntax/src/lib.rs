@@ -19,7 +19,7 @@ pub use rowan::{TextRange, TextSize};
 pub use syntax_kind::{KEYWORDS, SyntaxKind};
 pub use validation::{
     CAN_ONLY_ASSIGN_TO_A_VARIABLE, CAPABILITIES, Capability, MemberContext, capability_named,
-    impl_element_bare_head, semantic_member_context,
+    impl_element_bare_head, semantic_member_context, static_item_errors,
 };
 
 /// The brace rule's wording. The grammar's recovery error and validation's

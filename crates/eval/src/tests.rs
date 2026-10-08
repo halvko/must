@@ -6459,6 +6459,49 @@ static f = fn() -> i64 { unsafe { launch_missiles(1) } };
 }
 
 #[test]
+fn an_extern_item_without_its_vouch_traps_with_the_declaration_error() {
+    check_run(
+        r#"
+extern static example: fn() -> ();
+static f = fn() -> i64 { print("Hello"); example(); 0 };
+"#,
+        "f()",
+        expect![[r#"
+            output: "Hello"
+            error[Trap]: declaring a host import is a VOUCH: write `unsafe extern static` — this signature is an assertion about the host, and nothing on this side can check it
+        "#]],
+    );
+}
+
+#[test]
+fn a_misplaced_vouch_traps_with_the_declaration_error() {
+    check_run(
+        r#"
+extern unsafe static example: fn() -> i64;
+static f = fn() -> i64 { example() };
+"#,
+        "f()",
+        expect![[r#"
+            error[Trap]: the vouch marker leads the declaration: write `unsafe extern static`
+        "#]],
+    );
+}
+
+#[test]
+fn an_unsafe_non_extern_static_traps_when_read() {
+    check_run(
+        r#"
+unsafe static x: i64 = 1;
+static f = fn() -> i64 { x };
+"#,
+        "f()",
+        expect![[r#"
+            error[Trap]: only an `extern static` can be `unsafe`: the marker vouches for a host import's declared signature, and nothing else declares one
+        "#]],
+    );
+}
+
+#[test]
 fn a_safe_typed_import_is_called_with_no_marker_and_still_reaches_the_host() {
     // A `fn`-typed extern item is callable without `unsafe` and still reaches the
     // host's name check.
@@ -6744,11 +6787,7 @@ static f = fn() -> isize {
 }
 
 #[test]
-fn an_extern_static_with_an_initializer_is_not_an_import() {
-    // The syntax error stands on its own; what must NOT happen is the item
-    // becoming an import anyway and refusing by name at run time, which
-    // blames a boundary the program never crossed. The written value is
-    // what runs.
+fn an_extern_static_with_an_initializer_traps_with_the_declaration_error() {
     check_run(
         r#"
 unsafe extern static bad: unsafe fn(n: i64) -> i64 = fn(n: i64) -> i64 { n + 1 };
@@ -6756,7 +6795,7 @@ static f = fn() -> i64 { unsafe { bad(1) } };
 "#,
         "f()",
         expect![[r#"
-            => 2
+            error[Trap]: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
         "#]],
     );
 }
