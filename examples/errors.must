@@ -337,11 +337,7 @@ static retired_prefix_borrow = fn () -> () {
     let r = &x;
 };
 
-// 32. A vouched host import called without the CALL-SITE marker its type
-//     still prices: what `host_read` does is written in a language this
-//     compiler never sees, so nothing on this side can establish that the
-//     call is sound, and the caller vouches with `unsafe` exactly as it
-//     does for a raw-pointer deref (21 above).
+// 32. Calling an `unsafe fn`-typed extern item outside an `unsafe` block.
 //     error: calling the host import `host_read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
 unsafe extern static host_read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
 static call_outside_unsafe = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
@@ -365,10 +361,7 @@ static retired_import = extern fn(n: usize) -> usize;
 //     quick fix offered: "Remove the initializer"
 unsafe extern static import_with_a_value: unsafe fn(n: usize) -> usize = fn (n: usize) -> usize { n };
 
-// 35. A host import declared without its VOUCH marker. `unsafe` is not
-//     optional on an import: the language can promise nothing about what
-//     happens if the signature written here is wrong, so there is no such
-//     thing as an unvouched import — only a missing one, named and fixed.
+// 35. An `extern static` without `unsafe`.
 //     error: declaring a host import is a VOUCH: write `unsafe extern static` — this signature is an assertion about the host, and nothing on this side can check it
 //     quick fix offered: "Write `unsafe extern`"
 extern static unvouched_import: fn() -> i64;

@@ -16068,11 +16068,6 @@ fn a_fn_type_may_name_its_parameters() {
 
 #[test]
 fn extern_static_error_forms() {
-    // `b` is the one that CHANGED with the vouch marker: a bare `fn`
-    // annotation was refused "for now" while the vouch had no spelling. It
-    // has one now, so a safe-to-call import is an ordinary, error-free
-    // declaration — see `a_vouched_import_may_be_declared_safe_to_call`, and
-    // it is dropped from this list.
     check_errors(
         "unsafe extern static a: unsafe fn(n: i64) -> i64 = 1;\n\
          unsafe extern static c: usize;\n\
@@ -16100,20 +16095,11 @@ fn extern_static_error_forms() {
 
 #[test]
 fn a_vouched_import_may_be_declared_safe_to_call() {
-    // THE DISCHARGE: `extern static now: fn() -> i64;` used to be refused
-    // with a message that said "for now" — the shape was real, but
-    // accepting it would have left the DECLARATION-side vouch with no home
-    // at all: nothing written anywhere would have said that someone checked
-    // this signature against a host.
-    //
-    // The marker is that home. So the two obligations are written once
-    // each: the item vouches, the type prices the call — and reading a
-    // clock is priced at nothing.
+    // A plain `fn` type is accepted: the item vouches, the type says calls are safe.
     for source in [
         "unsafe extern static now: fn() -> i64;",
         "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;",
-        // An unwritten return type still means `()` — the same rule, still
-        // true of a safe import.
+        // An omitted return type is `()`.
         "unsafe extern static tick: fn();",
     ] {
         assert_eq!(
@@ -16126,11 +16112,7 @@ fn a_vouched_import_may_be_declared_safe_to_call() {
 
 #[test]
 fn an_unmarked_import_names_the_vouch_and_offers_it() {
-    // The old spelling still parses into the same import and still means
-    // it, and what it gets is a message that names the marker plus a fix
-    // that writes it. Writing it in SILENTLY stays rejected — a marker the
-    // compiler supplies teaches nothing, and the vouch is precisely the
-    // thing no compiler can make.
+    // Missing `unsafe` is reported with a fix, never inserted silently.
     let source = "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;";
     let parse = crate::parse(source);
     let [err] = parse.errors() else {
@@ -16153,10 +16135,7 @@ fn an_unmarked_import_names_the_vouch_and_offers_it() {
 
 #[test]
 fn the_vouch_marker_leads_the_declaration() {
-    // `extern unsafe static` — the right two markers, the wrong way round.
-    // Superset-parsed into the SAME item (it means the vouched import; an
-    // order refusal must not reinterpret what was written), so the fix is a
-    // move.
+    // `extern unsafe static` parses as the same item; the fix swaps the markers.
     let source = "extern unsafe static read: unsafe fn(n: i64) -> i64;";
     let parse = crate::parse(source);
     let [err] = parse.errors() else {
@@ -16177,11 +16156,7 @@ fn the_vouch_marker_leads_the_declaration() {
 
 #[test]
 fn a_doubled_vouch_marker_is_reported_once_and_removed() {
-    // `unsafe extern unsafe static` — a typo, not a second obligation. Eaten
-    // by the parser (rather than left to strand `static` behind an
-    // unconsumed second `unsafe`, which used to cascade into "expected
-    // `static` after `extern`" — untrue, `static` is right there — plus
-    // "expected `=` ..."), so this is exactly one diagnostic with a fix.
+    // A duplicate `unsafe` is one diagnostic with a fix.
     let source = "unsafe extern unsafe static read: fn() -> i64;";
     let parse = crate::parse(source);
     let [err] = parse.errors() else {
@@ -16196,10 +16171,7 @@ fn a_doubled_vouch_marker_is_reported_once_and_removed() {
 
 #[test]
 fn only_an_import_can_be_vouched_for() {
-    // The vouch asserts that a signature this program DECLARES matches a
-    // world it cannot see. A `static` that writes its own value, a `type`, a
-    // `trait` — none of them makes a claim about anybody else's world, so
-    // there is nothing for a human to be believed about.
+    // `unsafe` is only allowed on `extern static`.
     check_errors(
         "unsafe static a = 1;\n\
          unsafe type F = usize;\n\
@@ -16214,10 +16186,7 @@ fn only_an_import_can_be_vouched_for() {
 
 #[test]
 fn a_lone_vouch_marker_says_what_may_follow_it() {
-    // `unsafe` with no item after it: the marker leads a declaration that is
-    // not there. One thing may follow, so that is what the message says —
-    // and the rest is taken as ERROR in this item rather than reported one
-    // token at a time (the `extern fn g(...)` recovery, shared).
+    // A lone `unsafe` reports once and takes the rest as `ERROR`.
     check_errors(
         "unsafe fn g(n: i64) -> i64;\n",
         expect![[r#"

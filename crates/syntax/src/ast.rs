@@ -531,11 +531,8 @@ impl StaticItem {
         children(&self.syntax)
     }
     /// Whether the item is introduced by `const` (as opposed to `static`).
-    /// Only the item's own leading keyword counts — a `const` starting the
-    /// initializer (`static f = const fn ...`, `static x = const { ... }`)
-    /// belongs to the fn literal / const block, not to the item. The
-    /// import markers lead the keyword when they are there and are skipped
-    /// (`unsafe extern const x` parses; validation rejects it).
+    /// Only the item's own keyword counts, not a `const` in the initializer;
+    /// leading `unsafe`/`extern` markers are skipped.
     pub fn is_const(&self) -> bool {
         self.syntax
             .children_with_tokens()
@@ -543,18 +540,16 @@ impl StaticItem {
             .find(|it| !it.kind().is_trivia() && !matches!(it.kind(), EXTERN_KW | UNSAFE_KW))
             .is_some_and(|it| it.kind() == CONST_KW)
     }
-    /// The `extern` marker of a HOST IMPORT declaration
-    /// (`unsafe extern static read: unsafe fn(...) -> isize;`) — the ITEM's
-    /// own token. An `extern` inside the initializer belongs to the RETIRED
-    /// `extern fn` literal, which is a node of its own.
+    /// The item's own `extern` marker, not the one in a retired `extern fn`
+    /// initializer.
     pub fn extern_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, EXTERN_KW)
     }
     pub fn is_extern(&self) -> bool {
         self.extern_token().is_some()
     }
-    /// The item's own `unsafe` marker, not the one in a `: unsafe fn(...)`
-    /// annotation.
+    /// The `unsafe` vouch of the item, unrelated to the safety of the underlying
+    /// implementation.
     pub fn unsafe_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, UNSAFE_KW)
     }

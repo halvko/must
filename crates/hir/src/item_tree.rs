@@ -47,22 +47,8 @@ pub struct ItemData {
     /// Only meaningful on a `type` item; `validation` rejects the clause
     /// everywhere else, and the flag stays `false` there.
     pub only_move: bool,
-    /// `unsafe extern static read: unsafe fn(...) -> T;` — this item is a HOST
-    /// IMPORT: a DECLARATION that promises a name of this type exists and
-    /// leaves providing it to whatever is on the other side of the boundary.
-    ///
-    /// A name-level fact, and the ITEM's own: the declaration is the whole
-    /// contract, so nothing about an import is read out of a value. True for
-    /// the RETIRED spelling too (`static read = extern fn(...);`, a bodyless
-    /// `extern fn` literal) — retiring a spelling must not reinterpret the
-    /// programs written in it, so both spellings answer this one bit and
-    /// nothing below hir can tell them apart.
-    ///
-    /// Set only where the declaration is well formed — a written value means
-    /// the item is not an import (the value wins, exactly as a written body
-    /// did under the old spelling), so a visible syntax error is never
-    /// laundered into a run-time refusal naming a boundary the program never
-    /// crossed.
+    /// Declared `extern` (`unsafe extern static name: T;`, or the retired
+    /// `static name = extern fn(...);`). False when the item writes a value.
     pub is_extern: bool,
 }
 

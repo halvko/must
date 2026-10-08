@@ -380,12 +380,8 @@ fn a_declared_host_import_becomes_a_real_wasm_import_and_is_called_through() {
 
 #[test]
 fn a_safe_typed_import_reaches_the_same_wasm_import_with_no_call_site_marker() {
-    // The call price rides the TYPE, not the boundary: `host_tick` declared
-    // `fn(...)` here (no `unsafe fn`, no `unsafe { ... }` at the call) reaches
-    // the same host slot the `unsafe fn`-typed test above wires up. The
-    // marker was never load-bearing for THIS — `unsafe_to_call` is a hir/mir
-    // fact this backend never inspects — but the shape only became reachable
-    // with the vouch marker's arrival, and nothing before pinned it.
+    // An extern function is callable in a safe context unless it has an
+    // `unsafe fn` type.
     let source = "unsafe extern static host_tick: fn(n: i64) -> i64;\n\
                   static main = fn () -> i64 { host_tick(7) };";
     let artifact = compile(source, "main()");

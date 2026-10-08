@@ -2162,19 +2162,8 @@ impl<'db, M: Mode> Machine<'db, M> {
             .unwrap_or_default()
     }
 
-    /// Call a HOST IMPORT — `unsafe extern static name: unsafe fn(...) -> T;`.
-    ///
-    /// The interpreter is one particular host, and this is the whole set of
-    /// primitives it provides. Dispatch is BY NAME, because the name is the
-    /// contract (there is no symbol-override surface), and a name this host
-    /// does not implement is refused BY NAME at the call — the P01 layer-1
-    /// property stated at runtime: a host that does not provide a hook has
-    /// denied the capability, and the honest answer is to say which one.
-    ///
-    /// The declared SIGNATURE is checked here too, at the call rather than at
-    /// the declaration, and deliberately: a compiler that validated import
-    /// signatures would have to know every host, which is exactly the
-    /// coupling `extern` exists to avoid.
+    /// Calls an `extern` function. This interpreter provides `read` only; any
+    /// other name, or a signature it does not match, is a runtime error.
     fn extern_call(
         &mut self,
         name: &str,
@@ -2240,11 +2229,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         let [buf_ty, len_ty] = sig.params.as_slice() else {
             return Err(self.host_signature_error("read", SHAPE, loc, origin));
         };
-        // The CALL PRICE is part of the declaration this host judges, same
-        // as every parameter and the return type: `read` writes through a
-        // caller-supplied pointer, so a `fn`-typed vouch is as wrong as a
-        // read-only or non-byte buffer, and is refused with the same
-        // signature error rather than let a misdeclared price through.
+        // `read` writes through its pointer, so it must be declared `unsafe fn`.
         if !sig.unsafe_to_call {
             return Err(self.host_signature_error("read", SHAPE, loc, origin));
         }

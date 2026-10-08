@@ -101,12 +101,8 @@ pub enum StaticVal {
     Unknown,
     Fn(FnRef),
     Builtin(Builtin),
-    /// A HOST IMPORT — `unsafe extern static name: unsafe fn(...) -> T;`. Statically
-    /// known by construction: an import is a declaration, and the
-    /// declaration is the whole value, so it resolves through data and
-    /// branches like any constant. The DECLARED signature rides along (an
-    /// import is never generic, so it is ground): the wasm signature is
-    /// built from it, not re-derived from what a call site happened to pass.
+    /// The value of an `extern` item, with its declared signature; the wasm
+    /// import is built from that, not from a call site.
     ExternFn {
         decl: ItemLoc,
         sig: hir::FnTy,

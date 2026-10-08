@@ -38,9 +38,8 @@ pub enum UnsafeCheckDiagnostic {
     /// The squiggle (and MIR's trap) lands on the call expression: the
     /// call is the operation that must not run.
     BuiltinCallOutsideUnsafe { call: ExprId, builtin: Builtin },
-    /// A direct call of an `unsafe fn`-typed `extern` item outside any
-    /// `unsafe { ... }` block. Split from the general case below only so the
-    /// message can name the item.
+    /// A direct call of an `unsafe fn`-typed `extern` item outside `unsafe`;
+    /// separate from the case below so the message can name the item.
     ExternCallOutsideUnsafe { call: ExprId, name: String },
     /// A call THROUGH A VALUE whose type is `unsafe fn(...)`, outside any
     /// `unsafe { ... }` block. The general rule, and the one that closes

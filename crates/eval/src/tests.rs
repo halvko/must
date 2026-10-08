@@ -6460,11 +6460,8 @@ static f = fn() -> i64 { unsafe { launch_missiles(1) } };
 
 #[test]
 fn a_safe_typed_import_is_called_with_no_marker_and_still_reaches_the_host() {
-    // The call price is free — no `unsafe` at the declaration's type, none
-    // at the call — but the boundary itself is exactly as real as an
-    // `unsafe fn`-typed import's: this host implements `read` and nothing
-    // else, and the refusal proves the call actually reached that check
-    // with no marker in its way.
+    // A `fn`-typed extern item is callable without `unsafe` and still reaches the
+    // host's name check.
     check_run(
         "unsafe extern static now: fn() -> i64;\n\
          static f = fn() -> i64 { now() };",
@@ -6665,9 +6662,7 @@ fn a_host_import_declared_with_the_wrong_signature_is_refused() {
             error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
         "#]],
     );
-    // The CALL PRICE is part of the declaration too: a `fn`-typed vouch for
-    // `read` is judged and refused exactly like a wrong parameter or return
-    // type, called with no marker anywhere since the type says none is due.
+    // Declaring `read` as a safe `fn` is a signature error.
     check_run(
         "unsafe extern static read: fn(buf: u8.&raw mut, len: usize) -> isize;\n\
          static f = fn() -> isize {\n\

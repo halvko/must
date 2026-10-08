@@ -1627,16 +1627,8 @@ fn reject_stray_type_binder(
     });
 }
 
-/// The RETIRED initializer form of a host import,
-/// `static name = extern fn(...) -> T;`. Superset-parsed into the same
-/// `FN_LITERAL` it always produced (never a silent reinterpretation — the
-/// postfix-borrow migration precedent), and refused here with the rewrite.
-///
-/// Why it is retired: an import **sets nothing to anything**. There is no
-/// value on the right-hand side to write down — the declaration promises
-/// that a name of this type exists and the host (or the linker, or the
-/// environment) is what provides it. That is a DECLARATION, so it is spelled
-/// like one: `unsafe extern static read: unsafe fn(...) -> T;`.
+/// The retired `static name = extern fn(...) -> T;` form, refused with a fix
+/// that rewrites it as an `unsafe extern static` declaration.
 fn validate_extern_fn(fn_literal: &ast::FnLiteral, errors: &mut Vec<SyntaxError>) {
     let item = fn_literal.syntax().parent().and_then(ast::StaticItem::cast);
     let name = item
@@ -1675,9 +1667,7 @@ fn validate_extern_fn(fn_literal: &ast::FnLiteral, errors: &mut Vec<SyntaxError>
             edits: vec![
                 TextEdit {
                     range: TextRange::empty(item.syntax().text_range().start()),
-                    // The VOUCH marker comes along: a migration fix must
-                    // land on a legal program, and every import declaration
-                    // owes the vouch.
+                    // The fix adds `unsafe` too, so it lands on a legal item.
                     insert: "unsafe extern ".to_owned(),
                 },
                 // ` = extern` becomes `: unsafe`: the annotation slot takes
@@ -1725,10 +1715,7 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
     if vouch.is_none() && item.extern_token().is_none() {
         return;
     }
-    // An item the parser could not read at all (`extern fn g(...)`, the C
-    // spelling, or a lone `unsafe`: it recovers by taking the rest as one
-    // `ERROR`). Its message names the one thing that is wrong; ours would be
-    // a consequence.
+    // The parser has already reported an unreadable item; don't pile on.
     if item
         .syntax()
         .children()
@@ -1736,11 +1723,7 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
     {
         return;
     }
-    // `unsafe extern unsafe static x: T;` — the vouch written twice. A typo,
-    // not a second obligation: the vouch is made once, so every `unsafe`
-    // past the first is reported and offered a removal, and the rest of
-    // this function reasons about the item as if only the first were there
-    // (`unsafe_token()`/`extern_token()` already return the leading one).
+    // Every `unsafe` after the first is a duplicate.
     for extra in item
         .syntax()
         .children_with_tokens()
@@ -1748,8 +1731,7 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
         .filter(|t| t.kind() == SyntaxKind::UNSAFE_KW)
         .skip(1)
     {
-        // Take the trailing whitespace with it, or the fix leaves a doubled
-        // space behind (`extern  static`).
+        // Remove the following space too, or the fix leaves two.
         let remove = match extra.next_sibling_or_token() {
             Some(next) if next.kind() == SyntaxKind::WHITESPACE => {
                 TextRange::new(extra.text_range().start(), next.text_range().end())
@@ -1769,9 +1751,7 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
         });
     }
     let Some(marker) = item.extern_token() else {
-        // `unsafe static x = 1;` — the vouch marker with nothing to vouch
-        // for. A `static` that writes its own value declares nothing about
-        // anybody else's world, so there is no assertion to make about it.
+        // `unsafe static x = 1;`: there is no extern signature to vouch for.
         errors.push(SyntaxError {
             message: UNSAFE_ONLY_ON_EXTERN.to_owned(),
             range: vouch
@@ -1789,11 +1769,8 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
         });
         return;
     }
-    // DECLARING IS VOUCHING. Writing this signature down asserts that the
-    // thing on the other side of the boundary really has this shape — and
-    // if it does not, the program is undefined *before anything calls it*.
-    // Nothing on this side can check that assertion, so a human says so, in
-    // the one place the assertion is made.
+    // The signature is a claim about code this side cannot check, so declaring
+    // it needs `unsafe`.
     match &vouch {
         None => errors.push(SyntaxError {
             message: "declaring a host import is a VOUCH: write \
@@ -1809,10 +1786,7 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
                 }],
             }),
         }),
-        // `extern unsafe static` — the right two markers, the wrong way
-        // round. The vouch is about the DECLARATION, so it leads it; put it
-        // after `extern` and it reads like part of what is being imported.
-        // Superset-parsed, so the fix just moves the token.
+        // `extern unsafe static`: the markers in the wrong order.
         Some(vouch) if vouch.text_range().start() > marker.text_range().start() => {
             errors.push(SyntaxError {
                 message: "the vouch marker leads the declaration: write \
@@ -1919,18 +1893,7 @@ fn validate_import_annotation(ty: &ast::Type, errors: &mut Vec<SyntaxError>) {
                     fix: None,
                 });
             }
-            // A BARE `fn` annotation is legal here. The two obligations G22
-            // splits have one spelling each: the ITEM's `unsafe` carries the
-            // vouch, which every import owes; the TYPE's `unsafe` prices the
-            // CALL, which only some do. `unsafe extern static now: fn() ->
-            // i64;` is a real import, callable with no marker at the call
-            // site, and it says exactly what is true of it: someone checked
-            // the signature, and reading a clock cannot break anything.
-            //
-            // An import has exactly ONE machine signature, so there is
-            // nothing for a binder to range over and nothing to
-            // monomorphize it into. (The old spelling's refusal, restored
-            // at the shape the respell moved it to.)
+            // A plain `fn` type is allowed: calls to it need no `unsafe` block.
             if let Some(binder) = fn_type.generic_param_list() {
                 errors.push(SyntaxError {
                     message: "an import cannot be generic: it has exactly one machine \
@@ -1960,9 +1923,6 @@ fn validate_import_annotation(ty: &ast::Type, errors: &mut Vec<SyntaxError>) {
 const EXTERN_ONLY_ON_STATIC: &str =
     "only a `static` can be `extern`: an import declares one name with one type";
 
-/// The one sentence every misplaced VOUCH marker gets: `unsafe` on an item
-/// asserts that a signature this program declares matches a world it cannot
-/// see, and an import is the only declaration that makes such a claim.
 const UNSAFE_ONLY_ON_EXTERN: &str = "only an `extern static` can be `unsafe`: the marker vouches for a host import's \
      declared signature, and nothing else declares one";
 
@@ -2015,15 +1975,8 @@ fn validate_fn_type(fn_type: &ast::FnType, errors: &mut Vec<SyntaxError>) {
     }
 }
 
-/// A stray import marker on a `type`/`trait` item — superset-parsed by
-/// `grammar::item` so the rest of the declaration still reads. Neither
-/// marker belongs here, but one item trips exactly one diagnostic: report
-/// whichever marker LEADS (`children_with_tokens` yields source order) and
-/// say nothing about a second one trailing it, same as `unsafe extern
-/// static` itself only ever reports one thing wrong at a time.
-///
-/// A trait's own reserved `unsafe` (`trait T = unsafe requires { ... }`)
-/// lives inside its `REQUIRES_DEF` and is never a child token here.
+/// Rejects `unsafe` or `extern` on a `type` or `trait` item, reporting only the
+/// first marker. A trait's `unsafe requires` is inside `REQUIRES_DEF`, not here.
 fn reject_extern_marker(node: &SyntaxNode, errors: &mut Vec<SyntaxError>) {
     let Some(token) = node
         .children_with_tokens()

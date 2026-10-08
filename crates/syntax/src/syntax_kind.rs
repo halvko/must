@@ -213,6 +213,14 @@ macro_rules! keywords {
                 }
             }
 
+            /// The text of a keyword kind.
+            pub fn keyword_text(self) -> Option<&'static str> {
+                match self {
+                    $($kind => Some($text),)*
+                    _ => None,
+                }
+            }
+
             /// Whether this kind is one of the language's keyword tokens.
             /// Consumers (highlighting, completions, editor affordances) ask
             /// this rather than matching a list of their own, so a new

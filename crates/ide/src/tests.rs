@@ -2020,9 +2020,7 @@ fn completions_after_extern_offer_the_one_keyword_that_may_follow() {
 
 #[test]
 fn completions_after_the_vouch_marker_offer_extern() {
-    // `unsafe` at item position is the VOUCH marker of a host import, and
-    // only `extern static` may follow it — so `extern` is the one thing
-    // offered, exactly as `static` is the one thing offered after `extern`.
+    // After `unsafe` at item position, only `extern` is offered.
     check_completions(
         "unsafe $0",
         expect_test::expect![[r#"

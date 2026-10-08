@@ -271,19 +271,8 @@ pub enum ExprData {
     Unsafe {
         body: ExprId,
     },
-    /// The value of `unsafe extern static read: unsafe fn(...) -> T;` — the HOST
-    /// IMPORT itself.
-    ///
-    /// SYNTHESIZED, and the only expression in the language that is: the
-    /// declaration writes no value (an import sets nothing to anything), but
-    /// everything below hir wants a root to lower, type and evaluate, and a
-    /// node to blame. It stands where the declaration's TYPE is written,
-    /// which is the whole of what an import is.
-    ///
-    /// No sub-expressions and no fields: the type is the contract, and the
-    /// item's own name is what the host is asked for — both already live on
-    /// the item, and copying either here would be a second place for the
-    /// truth to live.
+    /// The value of an `extern` item. Synthesized, since the declaration writes
+    /// none; the type and name live on the item.
     ExternImport,
     FnLiteral {
         /// Whether the literal was written `const fn`. Orthogonal to the

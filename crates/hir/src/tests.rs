@@ -14476,11 +14476,7 @@ fn a_data_imports_use_site_is_told_the_truth() {
 
 #[test]
 fn a_vouched_safe_import_is_called_with_no_marker_at_all() {
-    // The type decides the call price, never the declaration. A
-    // `fn(...)`-typed import is vouched for on the item (the declaration
-    // owes that, always) but its CALL is free — bound or direct — because
-    // the declarer already checked the signature and reading a clock breaks
-    // nothing.
+    // A `fn`-typed extern item needs no `unsafe` at the call, direct or bound.
     check_diagnostics(
         "unsafe extern static now: fn() -> i64;\n\
          static direct = fn() -> i64 { now() };\n\
@@ -14491,10 +14487,7 @@ fn a_vouched_safe_import_is_called_with_no_marker_at_all() {
 
 #[test]
 fn a_safe_import_still_has_no_host_at_compile_time() {
-    // The call price is free, but the HOST is not available at compile
-    // time regardless of the callee's type — the const-context refusal is
-    // judged before constness, on `is_extern` alone, exactly as it is
-    // for an `unsafe fn`-typed import.
+    // Even with a safe type, an extern item cannot be called in a const context.
     check_diagnostics(
         "unsafe extern static now: fn() -> i64;\n\
          static f = const fn() -> i64 { now() };",

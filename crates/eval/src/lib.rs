@@ -41,17 +41,8 @@ pub enum Value {
     /// like every other scalar's.
     Char(char),
     Fn(FnValue),
-    /// A HOST IMPORT's value — what
-    /// `unsafe extern static name: unsafe fn(...) -> T;`
-    /// evaluates to. There is no body on this side of the boundary, so it
-    /// carries what a host judges instead: the declaring item, whose name is
-    /// the name the host is asked for, and the SIGNATURE it was asked with.
-    /// Callable exactly like [`Value::Fn`] and [`Value::Builtin`], and like
-    /// them it is opaque to display.
-    ///
-    /// The signature travels WITH the value rather than being read off the
-    /// call site, so a host's judgement is the same whether the import is
-    /// called by name or through a binding.
+    /// The value of an `extern` item: the declaring item, whose name is what the
+    /// host is asked for, and the declared signature, which the host checks.
     ExternFn {
         decl: ItemLoc,
         sig: hir::FnTy,
