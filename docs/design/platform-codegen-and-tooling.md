@@ -18,13 +18,18 @@
 - **P05** Host imports: the declaration is the whole contract (G22). The item's name is the
   import's field name, the module is `must` (`print`'s sibling), and the annotation is the one
   machine signature the host must provide. There is no symbol-override surface: config here
-  would be a second place for the truth to live. Calling an import requires `unsafe` wherever
-  the call is, for the same reason a raw deref does — what it does is written in a language
-  this compiler never sees. Taking one is free; a call through a binding is gated by the
-  value's type (T19). The compiler validates no import signature, since a compiler that did
-  would have to know every host, which is the coupling `extern` exists to avoid; each host
-  judges the full declaration at the call and refuses by name. The constant carries the
-  declared signature rather than a host re-deriving it from argument values, because no
+  would be a second place for the truth to live. Calling an `unsafe fn`-typed import requires
+  `unsafe` wherever the call is, for the same reason a raw deref does — what it does is
+  written in a language this compiler never sees; a `fn`-typed import costs nothing at the
+  call, vouched for on the declaration instead. Taking one is free either way; a call through
+  a binding is gated by the value's type exactly like a direct one, since the price rides the
+  type, never the declaration (T19). The compiler validates no import signature, since a
+  compiler that did would have to know every host, which is the coupling `extern` exists to
+  avoid; each host judges the full declaration at the call and refuses by name — the call
+  price included, exactly like a parameter or return type, so a `fn`-typed vouch for a host
+  primitive that only makes sense as `unsafe fn` is refused the same way any other mismatched
+  signature is. The constant carries the declared signature rather than a host re-deriving it
+  from argument values, because no
   argument value can carry a pointee type: a value-inspecting host would fill a boolean array
   with bytes and mint values the type system says cannot exist. Names the compiler already
   imports are reserved, and the reserved set is the module's own import list, so a new builtin

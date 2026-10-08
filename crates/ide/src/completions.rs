@@ -392,10 +392,10 @@ enum Context {
     /// The nearest classifiable ancestor is a broken item directly under
     /// `SOURCE_FILE` — a bare identifier at the top level.
     ItemKeyword,
-    /// `extern ⟨caret⟩` — the import marker is written and the item keyword
-    /// that must follow it is not. Only one keyword may, so the list is one
-    /// entry long.
+    /// `extern ⟨caret⟩`: only `static` may follow.
     ItemKeywordAfterExtern,
+    /// `unsafe ⟨caret⟩`: only `extern` may follow.
+    ExternAfterUnsafe,
     /// The first segment of a `PathType`.
     TypePosition,
     /// The first segment of a single-segment `PathExpr`.
@@ -519,7 +519,10 @@ pub(crate) fn completions(
 
     let mut items = match classify(&parent) {
         Some(Context::ItemKeyword) => keyword_items(ITEM_KEYWORDS, edit_range),
-        Some(Context::ItemKeywordAfterExtern) => keyword_items(&["static"], edit_range),
+        Some(Context::ItemKeywordAfterExtern) => {
+            keyword_items(&[SyntaxKind::STATIC_KW], edit_range)
+        }
+        Some(Context::ExternAfterUnsafe) => keyword_items(&[SyntaxKind::EXTERN_KW], edit_range),
         Some(Context::TypePosition) => {
             let mut items = type_scope_items(db, file, edit_range);
             items.extend(builtin_type_items(edit_range));
@@ -740,8 +743,8 @@ fn match_awaiting_arms(
         })
 }
 
-/// Whether an item node carries the keyword that says which item it is —
-/// absent only while `extern` is written and the rest is not.
+/// Whether the item has its keyword (`static`, `const`, ...); it lacks one
+/// while only its markers are typed.
 fn has_item_keyword(item: &ast::StaticItem) -> bool {
     item.syntax()
         .children_with_tokens()
@@ -762,25 +765,17 @@ fn has_item_keyword(item: &ast::StaticItem) -> bool {
 /// binding name, the enum segment of a qualified variant pattern before its
 /// `::`, …) — there's nothing sound to complete there.
 fn classify(parent: &SyntaxNode) -> Option<Context> {
-    // `extern ⟨caret⟩`: the marker is written and the item keyword that must
-    // follow it is not, so whatever the caret sits in belongs to an item the
-    // parser could not read. One keyword may follow, so that is the answer
-    // wherever in the wreckage the caret is. Told apart from typing an
-    // import's actual NAME (`extern static rea⟨caret⟩`) by the keyword the
-    // item does not have yet.
-    if parent
-        .ancestors()
-        .find_map(ast::StaticItem::cast)
-        .is_some_and(|item| item.extern_token().is_some() && !has_item_keyword(&item))
-    {
-        return Some(Context::ItemKeywordAfterExtern);
-    }
-
     if parent.kind() == SyntaxKind::ERROR {
-        return parent
-            .parent()
-            .is_some_and(|gp| gp.kind() == SyntaxKind::SOURCE_FILE)
-            .then_some(Context::ItemKeyword);
+        let grandparent = parent.parent()?;
+        if grandparent.kind() == SyntaxKind::SOURCE_FILE {
+            return Some(Context::ItemKeyword);
+        }
+        // `unsafe ⟨caret⟩` offers `extern`; `extern ⟨caret⟩` offers `static`.
+        let item = ast::StaticItem::cast(grandparent).filter(|item| !has_item_keyword(item))?;
+        if item.extern_token().is_some() {
+            return Some(Context::ItemKeywordAfterExtern);
+        }
+        return item.unsafe_token().map(|_| Context::ExternAfterUnsafe);
     }
 
     // A bare pattern name: `BIND_PAT` wrapping a declaration `Name` (never
@@ -956,21 +951,32 @@ fn prefix_range(text: &str, offset: TextSize) -> TextRange {
 /// `tests::item_keywords_match_the_grammar` checks it in both directions.
 /// The type- and expression-position lists below have no equivalent single
 /// grammar rule to check against and stay a judgement call.
-const ITEM_KEYWORDS: &[&str] = &["static", "const", "type", "trait", "extern"];
+const ITEM_KEYWORDS: &[SyntaxKind] = &[
+    SyntaxKind::STATIC_KW,
+    SyntaxKind::CONST_KW,
+    SyntaxKind::TYPE_KW,
+    SyntaxKind::TRAIT_KW,
+    SyntaxKind::EXTERN_KW,
+    SyntaxKind::UNSAFE_KW,
+];
 
 /// The keywords that spell a TYPE where a type is expected: an `fn` type,
 /// its `unsafe fn` head, and a structural record. `enum` is deliberately
 /// absent — an enum literal declares a type, so it is spellable only on a
 /// `type` item's right-hand side ([`type_item_rhs_items`]), never in an
 /// annotation.
-const TYPE_KEYWORDS: &[&str] = &["fn", "struct", "unsafe"];
+const TYPE_KEYWORDS: &[SyntaxKind] = &[
+    SyntaxKind::FN_KW,
+    SyntaxKind::STRUCT_KW,
+    SyntaxKind::UNSAFE_KW,
+];
 
-fn keyword_items(words: &[&str], edit_range: TextRange) -> Vec<CompletionItem> {
+fn keyword_items(words: &[SyntaxKind], edit_range: TextRange) -> Vec<CompletionItem> {
     words
         .iter()
         .map(|w| {
             completion_item(
-                *w,
+                w.keyword_text().expect("keyword_items takes keyword kinds"),
                 CompletionItemKind::Keyword,
                 Provenance::Keyword,
                 TYPE_TIER_NONE,
@@ -1254,15 +1260,23 @@ fn expression_position_items(
 ) -> Vec<CompletionItem> {
     let mut items = file_value_and_type_items(db, file, edit_range, expected, scrutinee_slot);
     items.extend(builtin_fn_items(file, edit_range, expected));
-    let mut words: Vec<&str> = vec![
-        "if", "match", "loop", "fn", "true", "false", "struct", "const", "unsafe",
+    let mut words = vec![
+        SyntaxKind::IF_KW,
+        SyntaxKind::MATCH_KW,
+        SyntaxKind::LOOP_KW,
+        SyntaxKind::FN_KW,
+        SyntaxKind::TRUE_KW,
+        SyntaxKind::FALSE_KW,
+        SyntaxKind::STRUCT_KW,
+        SyntaxKind::CONST_KW,
+        SyntaxKind::UNSAFE_KW,
     ];
     if statement_start {
-        words.push("let");
+        words.push(SyntaxKind::LET_KW);
     }
     if in_loop {
-        words.push("break");
-        words.push("continue");
+        words.push(SyntaxKind::BREAK_KW);
+        words.push(SyntaxKind::CONTINUE_KW);
     }
     items.extend(keyword_items(&words, edit_range));
     items.extend(
@@ -2321,10 +2335,10 @@ mod tests {
         // Both directions: nothing the grammar accepts may be missing (the
         // drift that lost `trait`), and nothing we offer may be a keyword
         // the parser would reject on the spot.
-        for (text, _) in syntax::KEYWORDS {
+        for (text, kind) in syntax::KEYWORDS {
             assert_eq!(
                 opens_an_item(text),
-                ITEM_KEYWORDS.contains(text),
+                ITEM_KEYWORDS.contains(kind),
                 "`{text}`: the grammar and the item-position completion list disagree"
             );
         }

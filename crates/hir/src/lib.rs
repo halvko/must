@@ -224,27 +224,11 @@ pub fn synthetic_decl(db: &dyn Db, item: ItemId<'_>) -> Option<&'static scopes::
     scopes::synthetic_decl_named(item.name(db))
 }
 
-/// Whether `item` is a HOST IMPORT —
-/// `extern static read: unsafe fn(...) -> T;`.
-///
-/// The fact lives on the ITEM, and it is a NARROW one. An import's *price*
-/// rides its TYPE — it is an `unsafe fn(...)`
-/// (see [`ty::FnTy`]), which is what demands the marker at every call,
-/// including the ones reached through a binding, an argument or a field.
-/// What is left to this query is the pair of questions only the DECLARATION
-/// can answer: may it run in a const context (there is no host at compile
-/// time), and can a call site NAME the import it reaches — a better message
-/// than the type-driven one, available exactly at a direct mention.
-///
-/// One read of [`item_data`] — the DECLARATION, not the body. An import has
-/// no value expression to interrogate, and the RETIRED spelling
-/// (`static read = extern fn(...);`) sets the same flag off its bodyless
-/// literal, because retiring a form must not reinterpret programs written
-/// in it. Tracked rather than inlined at the two call sites: `item_data`
-/// churns on any edit to the declaration, this bit almost never does, so
-/// callers get the early cutoff.
+/// Whether `item` is declared `extern`.
 #[salsa::tracked]
-pub fn is_host_import<'db>(db: &'db dyn Db, item: ItemId<'db>) -> bool {
+pub fn is_extern<'db>(db: &'db dyn Db, item: ItemId<'db>) -> bool {
+    // Tracked rather than inlined: `item_data` changes on any edit to the
+    // declaration, this bit almost never does, so callers get early cutoff.
     item_data(db, item)
         .as_ref()
         .is_some_and(|data| data.is_extern)

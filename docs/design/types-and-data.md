@@ -135,8 +135,10 @@
   the LUB wherever it has a check site or a consuming call to convert at; an unannotated,
   unconsumed mixed-safety join has neither, so it is a branch disagreement asking for an
   annotation. One population gets the type without writing it: every builtin that requires the
-  marker and has a first-class fn type (`dealloc_array`, `str_bytes`). An import writes it —
-  the declaration is the whole contract, and `unsafe` is part of what it says (G22).
+  marker and has a first-class fn type (`dealloc_array`, `str_bytes`). An import writes it
+  when its signature calls for one — the declaration is the whole contract, and the type says
+  exactly what is true of it, `unsafe` included only where the call really costs something
+  (G22).
 - **T20** The `only move` ceiling. A capability names something you can do with a value; a
   declaration states its ceiling, the most that can be done on the ladders the clause names.
   One ladder exists, disposal, with rungs `access` < `move` < `forget`; `forget` is the top
