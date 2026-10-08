@@ -265,8 +265,7 @@ pub fn source_position(
     origin: &(hir::ItemLoc, hir::ExprId),
 ) -> Option<(u32, u32)> {
     let (loc, expr) = origin;
-    let (_, source_map) = hir::body_with_source_map(db, loc.to_id(db));
-    let range = source_map.node_for_expr(*expr)?.text_range();
+    let range = expr_range(db, loc.to_id(db), *expr)?;
     if usize::from(range.start()) > original_len {
         return None;
     }
@@ -341,9 +340,7 @@ fn locate(
 ) -> Option<String> {
     let (loc, expr) = origin?;
     // Single-file world: the origin's file is the one we run.
-    let item = loc.to_id(db);
-    let (_, source_map) = hir::body_with_source_map(db, item);
-    let range = source_map.node_for_expr(expr)?.text_range();
+    let range = expr_range(db, loc.to_id(db), expr)?;
     // The synthetic entry line isn't part of the user's file; a location
     // there would point past its end.
     if usize::from(range.start()) > original_len {
@@ -351,6 +348,26 @@ fn locate(
     }
     let line_col = LineIndex::new(file.text(db)).line_col(range.start());
     Some(format!("{path}:{}:{}", line_col.line + 1, line_col.col + 1))
+}
+
+/// Where `expr` was written. An `extern` item's value was not written, so
+/// it is located at the item's name.
+fn expr_range(
+    db: &RootDatabase,
+    item: hir::ItemId<'_>,
+    expr: hir::ExprId,
+) -> Option<syntax::TextRange> {
+    let (body, source_map) = hir::body_with_source_map(db, item);
+    if let Some(node) = source_map.node_for_expr(expr) {
+        return Some(node.text_range());
+    }
+    if body.root != Some(expr) {
+        return None;
+    }
+    match hir::item_tree::item_source(db, item)? {
+        syntax::ast::Item::StaticItem(it) => Some(it.name()?.syntax().text_range()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -433,6 +450,21 @@ static fib = fn (n: usize) -> usize {
             "fib(10)",
             expect_test::expect![[r#"
                 => 55
+            "#]],
+        );
+    }
+
+    #[test]
+    fn a_trapping_extern_item_is_located_at_its_name() {
+        check(
+            r#"
+extern static example: fn() -> ();
+static main = fn { example() }
+"#,
+            "main()",
+            expect_test::expect![[r#"
+                error: declaring a host import is a VOUCH: write `unsafe extern static`
+                  --> test.must:2:15
             "#]],
         );
     }

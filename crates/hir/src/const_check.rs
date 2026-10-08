@@ -371,7 +371,7 @@ impl CheckCtx<'_> {
                 // never `const fn` (validation rejects the combination), so
                 // `NonConstFnCall`'s "marking it `const fn` would allow
                 // this" would be advice that cannot be taken.
-                if crate::is_host_import(self.db, loc.to_id(self.db)) {
+                if crate::is_extern(self.db, loc.to_id(self.db)) {
                     self.diagnostics.push(ConstCheckDiagnostic::ExternCall {
                         callee,
                         item: loc.clone(),

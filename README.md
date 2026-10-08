@@ -47,6 +47,23 @@ cargo install --path crates/must-lsp
 (Remember to re-run that after pulling changes — PATH wins over the worktree
 fallback.)
 
+### VS Code
+
+`editors/vscode/` is a VS Code extension that starts the server for `.must`
+files: semantic highlighting (the server is the only coloring source),
+diagnostics, hover, and completions. You need [Node.js](https://nodejs.org).
+
+```sh
+cd editors/vscode && npm ci && npx @vscode/vsce package
+code --install-extension must-*.vsix
+```
+
+The extension finds the server like the Zed one does: `must-lsp` on PATH,
+then `<workspace folder>/target/debug/must-lsp`; the `must.serverPath`
+setting overrides both. After rebuilding the server, run `Must: Restart
+Server`. VS Code started from the Dock on macOS does not inherit your shell's
+PATH: launch it from a shell, or set `must.serverPath`.
+
 ### Helix
 
 Helix has no extension system; `editors/helix/languages.toml` is the whole

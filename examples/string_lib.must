@@ -139,7 +139,7 @@ static to_owned = fn::<@a>(s: str.&::<@a>) -> String {
 // `Reader` is `only move` here too, same as it is there, and `drop`
 // takes it apart the same way: the two copies agree.
 
-extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
+unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
 
 type Fill = enum {
     More(u8.&raw mut),

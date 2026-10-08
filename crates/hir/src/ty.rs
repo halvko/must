@@ -1998,7 +1998,7 @@ pub fn signature_needs_annotation<'db>(db: &'db dyn Db, item: ItemId<'db>) -> bo
     // annotation to its definition" is advice that cannot be taken. What is
     // wrong with the contract — a `_` left in it, a type that is not a
     // function — is refused where it is written.
-    if crate::is_host_import(db, item) {
+    if crate::is_extern(db, item) {
         return false;
     }
     if let Some(data) = crate::item_data(db, item).as_ref() {

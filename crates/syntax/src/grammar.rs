@@ -10,6 +10,7 @@ use crate::parser::{CompletedMarker, Parser};
 /// Tokens an expression parser must not consume on error: the enclosing
 /// construct knows what to do with them.
 fn at_expr_recovery(p: &Parser<'_>) -> bool {
+    // Not `UNSAFE_KW`: `unsafe { ... }` is also an expression.
     matches!(
         p.current(),
         EOF | R_BRACE
@@ -57,10 +58,10 @@ pub(crate) fn source_file(p: &mut Parser<'_>) {
     let m = p.start();
     while !p.at(EOF) {
         match p.current() {
-            STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW | EXTERN_KW => item(p),
-            _ => {
-                p.err_and_bump("expected an item (`static`, `const`, `type`, `trait` or `extern`)")
-            }
+            STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW | EXTERN_KW | UNSAFE_KW => item(p),
+            _ => p.err_and_bump(
+                "expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)",
+            ),
         }
     }
     m.complete(p, SOURCE_FILE);
@@ -68,12 +69,17 @@ pub(crate) fn source_file(p: &mut Parser<'_>) {
 
 fn item(p: &mut Parser<'_>) {
     let m = p.start();
-    // `extern static read: unsafe fn(...) -> T;` — a HOST IMPORT. The
-    // marker leads the whole item (it is the item that is declared, not a
-    // value that is written), and it rides the item's own token slot:
-    // superset here on every item keyword, validation rejects it anywhere
-    // but a `static`.
+    // `unsafe extern static ...`. Both markers are parsed before any item keyword
+    // and in either order; validation rejects every other arrangement.
+    let leading_unsafe = p.eat(UNSAFE_KW);
     let is_extern = p.eat(EXTERN_KW);
+    let mut is_unsafe = leading_unsafe || (is_extern && p.eat(UNSAFE_KW));
+    // Eat duplicate `unsafe`s so the item still parses; validation reports them.
+    if is_extern {
+        while p.eat(UNSAFE_KW) {
+            is_unsafe = true;
+        }
+    }
     // `type Foo = expr;` shares the whole item shape with `static`/`const`
     // (superset parsing: a `: Type` annotation on a `type` item parses too;
     // validation rejects it with a removal fix). Only the node kind — and
@@ -83,16 +89,18 @@ fn item(p: &mut Parser<'_>) {
         TRAIT_KW => TRAIT_ITEM,
         _ => STATIC_ITEM,
     };
-    if !is_extern || matches!(p.current(), STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW) {
+    if !(is_extern || is_unsafe) || matches!(p.current(), STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW)
+    {
         p.bump_any(); // STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW
     } else {
-        // `extern` with no item keyword after it — `extern fn g(...)`, the
-        // C spelling, above all. Nothing that follows can be the item this
-        // marker leads, so the declaration is unreadable as a whole: say
-        // the one thing that is wrong and take the rest of it as ERROR, in
-        // this item. Reading on instead cost one message PER TOKEN, all of
-        // them consequences of this one.
-        p.error("expected `static` after `extern`: an import declares one name with one type");
+        // A marker with no item keyword after it (`extern fn g(...)`, a lone
+        // `unsafe`): report once and take the rest of the item as `ERROR`.
+        p.error(if is_extern {
+            "expected `static` after `extern`: an import declares one name with one type"
+        } else {
+            "expected `extern static` after `unsafe`: the marker vouches for a host \
+             import's declared signature, and only an import declares one"
+        });
         let e = p.start();
         while !p.at(EOF) && !p.at(SEMICOLON) && !at_item_recovery(p) {
             p.bump_any();
@@ -333,11 +341,14 @@ fn element_block(p: &mut Parser<'_>) {
 /// element-shaped and nothing expression-shaped starts with an item
 /// keyword, so a copy of this list is only a chance for two copies to
 /// disagree.
+///
+/// `unsafe` counts only as `unsafe extern`: a bare `unsafe` in a `with` group
+/// is the `unsafe impl`/`unsafe for` modifier ([`element`]).
 fn at_item_recovery(p: &Parser<'_>) -> bool {
     matches!(
         p.current(),
         STATIC_KW | TYPE_KW | TRAIT_KW | LET_KW | CONST_KW | EXTERN_KW
-    )
+    ) || (p.at(UNSAFE_KW) && p.nth(1) == EXTERN_KW)
 }
 
 /// The member-loop recovery set: like [`at_item_recovery`] minus the
@@ -940,8 +951,11 @@ fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
         while !p.at(R_BRACE) && !p.at(EOF) {
             // Recover at the enclosing item, same as block statements:
             // an item keyword inside an arm list means the `}` is missing.
-            if matches!(p.current(), STATIC_KW | TYPE_KW | TRAIT_KW | EXTERN_KW)
-                || (p.at(CONST_KW) && !matches!(p.nth(1), FN_KW | L_BRACE))
+            // `unsafe` too: no pattern starts with it.
+            if matches!(
+                p.current(),
+                STATIC_KW | TYPE_KW | TRAIT_KW | EXTERN_KW | UNSAFE_KW
+            ) || (p.at(CONST_KW) && !matches!(p.nth(1), FN_KW | L_BRACE))
             {
                 break;
             }
@@ -2081,6 +2095,8 @@ fn block_expr(p: &mut Parser<'_>) -> CompletedMarker {
             // RETIRED `extern fn` initializer is an expression here.
             EXTERN_KW if !at_fn_literal(p) => break,
             CONST_KW if !at_fn_literal(p) && p.nth(1) != L_BRACE => break,
+            // `unsafe extern` starts an item; any other `unsafe` is an expression.
+            UNSAFE_KW if p.nth(1) == EXTERN_KW => break,
             SEMICOLON => p.bump_any(),
             _ => {
                 let before = p.pos();

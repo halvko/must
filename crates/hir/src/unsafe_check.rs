@@ -6,15 +6,6 @@
 //! safe (creating a pointer is harmless; the hazard is at the deref), and
 //! so is pointer comparison.
 //!
-//! CALLS are the second family, and there the question is asked of the
-//! callee's TYPE: `unsafe fn(...)` is a type of its own (see
-//! [`crate::ty::FnTy`]), and calling a value of it needs the marker. Two
-//! arms above it name what they are calling when they can — an unsafe
-//! builtin, a host import mentioned directly — purely so the message can
-//! say which; everything reached through a VALUE is judged by the type,
-//! which is the only thing that still knows. Taking such a value is free:
-//! binding, passing and returning a function run nothing.
-//!
 //! The region is lexical *within a function*: an `unsafe` block covers
 //! everything written inside it, `const { ... }` blocks included (they are
 //! separate compile-time bodies, but the checker judges source regions, and
@@ -47,13 +38,8 @@ pub enum UnsafeCheckDiagnostic {
     /// The squiggle (and MIR's trap) lands on the call expression: the
     /// call is the operation that must not run.
     BuiltinCallOutsideUnsafe { call: ExprId, builtin: Builtin },
-    /// A call of a host import — an `extern static` — outside any `unsafe { ...
-    /// }` block. Same rule, different reason: an import's behavior is not
-    /// written in this language, so nothing here can establish it is sound.
-    ///
-    /// The DIRECT call keeps its own variant, beside the type-driven one
-    /// below, for exactly one thing: the message can name the import.
-    /// Reaching the same import through a binding is the type's business.
+    /// A direct call of an `unsafe fn`-typed `extern` item outside `unsafe`;
+    /// separate from the case below so the message can name the item.
     ExternCallOutsideUnsafe { call: ExprId, name: String },
     /// A call THROUGH A VALUE whose type is `unsafe fn(...)`, outside any
     /// `unsafe { ... }` block. The general rule, and the one that closes
@@ -115,10 +101,6 @@ pub fn unsafe_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<UnsafeCheckD
 }
 
 struct CheckCtx<'db> {
-    /// Consulted for exactly one cross-item question: does this call reach
-    /// an `extern static` declaration? ([`crate::is_host_import`].) Asked only
-    /// so the message can NAME the import — the type rule catches the call
-    /// either way, since an import's type is an `unsafe fn`.
     db: &'db dyn Db,
     body: &'db Body,
     resolutions: &'db ArenaMap<ExprId, Resolution>,
@@ -235,27 +217,25 @@ impl CheckCtx<'_> {
                                 call: expr,
                                 builtin,
                             });
-                    } else if let Some(Resolution::Item(loc)) = self.resolutions.get(callee_name)
-                        && crate::is_host_import(self.db, loc.to_id(self.db))
-                    {
-                        // A host import named DIRECTLY. Its type is an
-                        // `unsafe fn` too, so the type rule below would
-                        // catch it — this arm exists only to name the
-                        // import, which is worth a branch.
-                        self.diagnostics
-                            .push(UnsafeCheckDiagnostic::ExternCallOutsideUnsafe {
-                                call: expr,
-                                name: loc.display_name().to_owned(),
-                            });
                     } else if self.calls_an_unsafe_fn_value(*callee) {
-                        // THE GENERAL RULE: the callee's TYPE says a marker
-                        // is owed. Everything the two named arms above
-                        // cannot see arrives here — a bound import, an
-                        // unsafe builtin passed as an argument, a record
-                        // field, a parameter annotated `unsafe fn(...)`.
-                        self.diagnostics.push(
-                            UnsafeCheckDiagnostic::UnsafeFnValueCallOutsideUnsafe { call: expr },
-                        );
+                        // The callee's type decides; naming a directly
+                        // called `extern` item only improves the message.
+                        let named_import = match self.resolutions.get(callee_name) {
+                            Some(Resolution::Item(loc))
+                                if crate::is_extern(self.db, loc.to_id(self.db)) =>
+                            {
+                                Some(loc.display_name().to_owned())
+                            }
+                            _ => None,
+                        };
+                        self.diagnostics.push(match named_import {
+                            Some(name) => {
+                                UnsafeCheckDiagnostic::ExternCallOutsideUnsafe { call: expr, name }
+                            }
+                            None => {
+                                UnsafeCheckDiagnostic::UnsafeFnValueCallOutsideUnsafe { call: expr }
+                            }
+                        });
                     }
                 }
                 self.check_expr(*callee, in_unsafe);

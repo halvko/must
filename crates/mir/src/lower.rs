@@ -128,6 +128,9 @@ struct LowerCtx<'db> {
 
 impl LowerCtx<'_> {
     fn seed_traps(&mut self) {
+        if let (Some(root), Some(message)) = (self.body.root, &self.body.declaration_error) {
+            self.value_traps.insert(root, message.clone());
+        }
         for diag in &self.infer.diagnostics {
             match diag {
                 InferenceDiagnostic::TypeMismatch { expr, .. }
