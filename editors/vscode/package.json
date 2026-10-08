@@ -1,0 +1,66 @@
+{
+  "name": "must",
+  "displayName": "Must",
+  "description": "Must language support: the must-lsp language server and its semantic highlighting",
+  "version": "0.0.1",
+  "publisher": "halvko",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/halvko/must-lsp-server"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:must"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "must",
+        "aliases": [
+          "Must"
+        ],
+        "extensions": [
+          ".must"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "configuration": {
+      "title": "Must",
+      "properties": {
+        "must.serverPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the `must-lsp` binary. When empty, `must-lsp` on `PATH` is used, then `target/debug/must-lsp` in a workspace folder."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "must.restartServer",
+        "title": "Restart Server",
+        "category": "Must"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "vscode:prepublish": "npm run compile",
+    "test": "tsc -p ./ && node --test test/serial.test.mjs"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/vscode": "~1.90.0",
+    "typescript": "^7.0.2"
+  }
+}
