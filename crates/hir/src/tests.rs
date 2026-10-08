@@ -17271,7 +17271,8 @@ static main = fn() -> usize {
 /// A body handing back a borrow of a temporary it built is refused, and
 /// the message says "temporary".
 ///
-/// TODO: refuse the shapes that stay inside the body (halvko/must#18).
+/// The shapes that stay inside the body are `mir::loans`' refusals, at
+/// the exit of the block that ends the temporary's storage.
 #[test]
 fn a_borrow_of_a_temporary_that_outlives_the_body_is_refused() {
     check_diagnostics(
