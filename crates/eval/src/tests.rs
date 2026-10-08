@@ -6488,6 +6488,20 @@ static f = fn() -> i64 { example() };
 }
 
 #[test]
+fn the_retired_extern_fn_spelling_traps_with_its_error() {
+    check_run(
+        r#"
+static g = extern fn(n: usize) -> usize;
+static f = fn() -> usize { unsafe { g(1) } };
+"#,
+        "f()",
+        expect![[r#"
+            error[Trap]: a host import is a DECLARATION, not an initializer: write `unsafe extern static g: unsafe fn(...) -> T;`
+        "#]],
+    );
+}
+
+#[test]
 fn an_unsafe_non_extern_static_traps_when_read() {
     check_run(
         r#"

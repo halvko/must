@@ -241,10 +241,15 @@ pub enum MemberContext {
 /// impls, requirement bodies — a requirement member is not an impl
 /// member).
 /// The errors validation reports on a `static` item's own declaration: its
-/// markers and, for an `extern` item, its signature.
+/// markers, its retired `extern fn` initializer, and an `extern` signature.
 pub fn static_item_errors(item: &ast::StaticItem) -> Vec<SyntaxError> {
     let mut errors = Vec::new();
     validate_extern_static(item, &mut errors);
+    if let Some(ast::Expr::FnLiteral(fn_literal)) = item.body()
+        && fn_literal.is_extern()
+    {
+        validate_extern_fn(&fn_literal, &mut errors);
+    }
     errors
 }
 
