@@ -1,0 +1,14 @@
+{
+  "name": "tree-sitter-must",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for the Must language",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "generate": "tree-sitter generate --abi 14 && tree-sitter test && node -e \"const fs=require('fs');fs.writeFileSync('src/grammar.js.sha256',require('crypto').createHash('sha256').update(fs.readFileSync('grammar.js')).digest('hex')+'\\n')\"",
+    "test": "tree-sitter test"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "0.25.10"
+  }
+}

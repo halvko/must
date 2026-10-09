@@ -1,0 +1,219 @@
+==================
+Postfix chains
+==================
+
+static f = fn () { p.*.next.&raw mut.*.n; x.&mut; a[0][1].len::<usize>(); };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_literal
+      (param_list)
+      (block_expr
+        (expr_stmt
+          (field_expr
+            (deref_expr
+              (addr_of_expr
+                (field_expr
+                  (deref_expr
+                    (path_expr
+                      (identifier)))
+                  (identifier))))
+            (identifier)))
+        (expr_stmt
+          (borrow_expr
+            (path_expr
+              (identifier))))
+        (expr_stmt
+          (call_expr
+            (field_expr
+              (index_expr
+                (index_expr
+                  (path_expr
+                    (identifier))
+                  (integer))
+                (integer))
+              (identifier)
+              (member_generic_args
+                (generic_arg_list
+                  (type_arg
+                    (path_type
+                      (identifier))))))
+            (arg_list)))))))
+
+==================
+Precedence
+==================
+
+static v = -a.b + c * d == e;
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (bin_expr
+      (bin_expr
+        (neg_expr
+          (field_expr
+            (path_expr
+              (identifier))
+            (identifier)))
+        (bin_expr
+          (path_expr
+            (identifier))
+          (path_expr
+            (identifier))))
+      (path_expr
+        (identifier)))))
+
+==================
+Greedy continuation after a block
+==================
+
+static f = fn () { if c { } - 1; if c { }; -1 };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_literal
+      (param_list)
+      (block_expr
+        (expr_stmt
+          (bin_expr
+            (if_expr
+              (path_expr
+                (identifier))
+              (block_expr))
+            (integer)))
+        (expr_stmt
+          (if_expr
+            (path_expr
+              (identifier))
+            (block_expr)))
+        (expr_stmt
+          (neg_expr
+            (integer)))))))
+
+==================
+Paths and turbofish
+==================
+
+static v = Option::<usize>::Some(id::<const N, 3>(::None, Show::<Self = usize>::show));
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (call_expr
+      (path_expr
+        (identifier)
+        (generic_arg_list
+          (type_arg
+            (path_type
+              (identifier))))
+        (identifier))
+      (arg_list
+        (call_expr
+          (path_expr
+            (identifier)
+            (generic_arg_list
+              (const_arg
+                (path_expr
+                  (identifier)))
+              (const_arg
+                (integer))))
+          (arg_list
+            (elided_variant_expr
+              (identifier))
+            (path_expr
+              (identifier)
+              (generic_arg_list
+                (named_arg
+                  (identifier)
+                  (path_type
+                    (identifier))))
+              (identifier))))))))
+
+==================
+Records, arrays and blocks
+==================
+
+static v = struct { a = [0; 4], b = [1, 2,], c = const { 1 }, d = unsafe { q.* } };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (record_expr
+      (record_expr_field
+        (identifier)
+        (array_expr
+          (integer)
+          (integer)))
+      (record_expr_field
+        (identifier)
+        (array_expr
+          (integer)
+          (integer)))
+      (record_expr_field
+        (identifier)
+        (const_block_expr
+          (block_expr
+            (expr_stmt
+              (integer)))))
+      (record_expr_field
+        (identifier)
+        (unsafe_block_expr
+          (block_expr
+            (expr_stmt
+              (deref_expr
+                (path_expr
+                  (identifier))))))))))
+
+==================
+Control flow
+==================
+
+static f = fn () { let mut i = 0; loop { if i > 3 { break i } else if done { return; } continue; } };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_literal
+      (param_list)
+      (block_expr
+        (let_stmt
+          (bind_pat
+            (identifier))
+          (integer))
+        (expr_stmt
+          (loop_expr
+            (block_expr
+              (expr_stmt
+                (if_expr
+                  (bin_expr
+                    (path_expr
+                      (identifier))
+                    (integer))
+                  (block_expr
+                    (expr_stmt
+                      (break_expr
+                        (path_expr
+                          (identifier)))))
+                  (if_expr
+                    (path_expr
+                      (identifier))
+                    (block_expr
+                      (expr_stmt
+                        (return_expr))))))
+              (expr_stmt
+                (continue_expr)))))))))
