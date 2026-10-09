@@ -6504,7 +6504,21 @@ static f = fn() -> i64 { example() };
 "#,
         "f()",
         expect![[r#"
-            error[Trap]: the vouch marker leads the declaration: write `unsafe extern static`
+            error[Trap]: the markers come first, `unsafe` before `extern`: write `unsafe extern static`
+        "#]],
+    );
+}
+
+#[test]
+fn a_doubled_marker_traps_with_the_declaration_error() {
+    check_run(
+        r#"
+unsafe unsafe extern static example: fn() -> i64;
+static f = fn() -> i64 { example() };
+"#,
+        "f()",
+        expect![[r#"
+            error[Trap]: `unsafe` is written once, not twice
         "#]],
     );
 }

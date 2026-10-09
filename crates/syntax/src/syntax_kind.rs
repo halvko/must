@@ -84,6 +84,7 @@ pub enum SyntaxKind {
     // Nodes
     SOURCE_FILE,
     STATIC_ITEM,
+    ITEM_HEAD,
     TYPE_ITEM,
     NAME,
     NAME_REF,

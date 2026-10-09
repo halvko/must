@@ -161,9 +161,10 @@
   `unsafe` VOUCHES that the signature written here is what the host really provides — a
   claim nothing on this side can check, so a human makes it, always, on every `extern` item. Both
   are required and in that order; `extern static ...` alone is an error with a fix that
-  inserts the vouch, and `extern unsafe static ...` (the markers reversed) is superset-parsed
-  into the same item and an error with a fix that moves it. `unsafe` on anything but an
-  `extern static` is refused the same way `extern` on anything but a `static` is. Every other
+  inserts the vouch, and any other arrangement (`extern unsafe static ...`, `static unsafe
+  extern ...`) is superset-parsed into the same item and an error with a fix that rewrites it
+  as `unsafe extern static ...`. `unsafe` on anything but an `extern static` is refused the
+  same way `extern` on anything but a `static` is. Every other
   refusal restates that the declaration is the whole contract: an initializer, a non-fn type,
   a missing type, a type not written in full (`_` has no body to be inferred from). A written
   initializer means it is not an `extern` item: the value wins and the markers are dropped, since

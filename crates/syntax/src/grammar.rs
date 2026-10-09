@@ -69,33 +69,20 @@ pub(crate) fn source_file(p: &mut Parser<'_>) {
 
 fn item(p: &mut Parser<'_>) {
     let m = p.start();
-    // `unsafe extern static ...`. Both markers are parsed before any item keyword
-    // and in either order; validation rejects every other arrangement.
-    let leading_unsafe = p.eat(UNSAFE_KW);
-    let is_extern = p.eat(EXTERN_KW);
-    let mut is_unsafe = leading_unsafe || (is_extern && p.eat(UNSAFE_KW));
-    // Eat duplicate `unsafe`s so the item still parses; validation reports them.
-    if is_extern {
-        while p.eat(UNSAFE_KW) {
-            is_unsafe = true;
-        }
-    }
+    let head = item_head(p);
     // `type Foo = expr;` shares the whole item shape with `static`/`const`
     // (superset parsing: a `: Type` annotation on a `type` item parses too;
     // validation rejects it with a removal fix). Only the node kind — and
     // for `trait` items the RHS grammar — differs.
-    let kind = match p.current() {
-        TYPE_KW => TYPE_ITEM,
-        TRAIT_KW => TRAIT_ITEM,
+    let node = match head.kind {
+        Some(TYPE_KW) => TYPE_ITEM,
+        Some(TRAIT_KW) => TRAIT_ITEM,
         _ => STATIC_ITEM,
     };
-    if !(is_extern || is_unsafe) || matches!(p.current(), STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW)
-    {
-        p.bump_any(); // STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW
-    } else {
+    if head.kind.is_none() {
         // A marker with no item keyword after it (`extern fn g(...)`, a lone
         // `unsafe`): report once and take the rest of the item as `ERROR`.
-        p.error(if is_extern {
+        p.error(if head.is_extern {
             "expected `static` after `extern`: an `extern` item declares one name with one type"
         } else {
             "expected `extern static` after `unsafe`: the marker vouches for an \
@@ -107,15 +94,16 @@ fn item(p: &mut Parser<'_>) {
         }
         e.complete(p, ERROR);
         p.eat(SEMICOLON);
-        m.complete(p, kind);
+        m.complete(p, node);
         return;
     }
+    let is_extern = head.is_extern;
     pattern(p, "expected a name for the item");
     if p.eat(COLON) {
         type_(p);
     }
     if p.eat(EQ) {
-        if kind == TRAIT_ITEM {
+        if node == TRAIT_ITEM {
             trait_rhs(p);
         } else {
             expr(p);
@@ -140,7 +128,7 @@ fn item(p: &mut Parser<'_>) {
         p.error("expected `=` followed by the item's value");
         p.eat(SEMICOLON);
     }
-    m.complete(p, kind);
+    m.complete(p, node);
 }
 
 /// The clauses that trail an item's head: attachment `with`-chains
@@ -333,6 +321,39 @@ fn element_block(p: &mut Parser<'_>) {
         }
     }
     p.expect_after_prev(R_BRACE);
+}
+
+/// What [`item_head`] read: the parser's summary of the `ITEM_HEAD` it built.
+struct ParsedHead {
+    /// The first `static`, `const`, `type` or `trait`, which picks the
+    /// item's kind; `None` when only markers were written.
+    kind: Option<SyntaxKind>,
+    is_extern: bool,
+}
+
+/// `unsafe extern static`: the markers and the item keyword, as one
+/// `ITEM_HEAD`. Markers and keywords parse in any order and any number, so
+/// the tree always reads; the first keyword picks the item's kind, and
+/// validation judges the head.
+fn item_head(p: &mut Parser<'_>) -> ParsedHead {
+    let m = p.start();
+    let mut head = ParsedHead {
+        kind: None,
+        is_extern: false,
+    };
+    loop {
+        match p.current() {
+            UNSAFE_KW => {}
+            EXTERN_KW => head.is_extern = true,
+            STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW => {
+                head.kind.get_or_insert(p.current());
+            }
+            _ => break,
+        }
+        p.bump_any();
+    }
+    m.complete(p, ITEM_HEAD);
+    head
 }
 
 /// Whether the current token can only mean an enclosing item continues.
