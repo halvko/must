@@ -598,11 +598,9 @@ pub fn body_with_source_map<'db>(db: &'db dyn Db, item: ItemId<'db>) -> (Body, B
     } else {
         match item_source(db, item) {
             // A HOST IMPORT declares no value, so its root is synthesized:
-            // one [`ExprData::ExternImport`]. Both spellings land here — the
-            // live declaration and the retired bodyless `extern fn` literal
-            // — so hir keeps ONE shape for one thing and nothing below can
-            // tell them apart. A written value means the item is not an
-            // import (`item_tree` reads the same predicate for its flag).
+            // one [`ExprData::ExternImport`]. A written value means the item
+            // is not an import (`item_tree` reads the same predicate for its
+            // flag).
             //
             // Allocated WITHOUT a source-map entry, the [`ExprData::Missing`]
             // precedent: no expression was written, so no syntax node IS this
@@ -1026,18 +1024,9 @@ impl LowerCtx {
                 let ret_type = it
                     .ret_type()
                     .map(|rt| rt.ty().map(TypeRef::from_ast).unwrap_or(TypeRef::Error));
-                // Every literal that reaches here has a body. A HOST IMPORT
-                // — in either spelling — is intercepted by the static item's
-                // own root lowering and becomes [`ExprData::ExternImport`],
-                // so the one fn literal with nothing to check, lower or run
-                // never arrives as a literal at all. A misplaced `extern fn`
-                // (one that declares nothing, or that writes a body anyway)
-                // is a plain literal like any other: the superset rule keeps
-                // what the user wrote, and a missing body lowers to
-                // `Missing`. Lowering such a thing as an import would launder
-                // a visible syntax error into a host refusal at run time
-                // ("no host implementation for `bad`"), which blames the
-                // wrong side of a boundary the program never crossed.
+                // A missing body lowers to `Missing`. A HOST IMPORT is not a
+                // literal at all: the static item's own root lowering makes
+                // it an [`ExprData::ExternImport`].
                 let body = self.lower_opt_expr(it.body());
                 self.alloc_expr(
                     ExprData::FnLiteral {

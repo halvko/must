@@ -6510,20 +6510,6 @@ static f = fn() -> i64 { example() };
 }
 
 #[test]
-fn the_retired_extern_fn_spelling_traps_with_its_error() {
-    check_run(
-        r#"
-static g = extern fn(n: usize) -> usize;
-static f = fn() -> usize { unsafe { g(1) } };
-"#,
-        "f()",
-        expect![[r#"
-            error[Trap]: a host import is a DECLARATION, not an initializer: write `unsafe extern static g: unsafe fn(...) -> T;`
-        "#]],
-    );
-}
-
-#[test]
 fn an_unsafe_non_extern_static_traps_when_read() {
     check_run(
         r#"
@@ -6851,21 +6837,6 @@ static f = fn() -> usize { x + 1 };
         "f()",
         expect![[r#"
             error[Trap]: cannot use `x`: its type annotation has errors
-        "#]],
-    );
-}
-
-#[test]
-fn a_misplaced_extern_fn_is_not_an_import() {
-    // The other half of a well-formed declaration: no name of its own, so
-    // no import. Refusing here under the enclosing item's name would blame
-    // a boundary the program never declared — this is the same "missing
-    // expression" a bodyless plain `fn` gives.
-    check_run(
-        "static f = fn() -> i64 { let g = extern fn(n: i64) -> i64; unsafe { g(1) } };",
-        "f()",
-        expect![[r#"
-            error[Trap]: syntax error: missing expression
         "#]],
     );
 }

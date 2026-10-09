@@ -14321,43 +14321,6 @@ fn taking_an_import_as_a_value_is_free_and_its_call_is_gated() {
 }
 
 #[test]
-fn the_retired_form_still_means_what_it_meant() {
-    // Retiring a spelling does not reinterpret programs written in it. The
-    // retired form still lowers to the same import, so it must still get the
-    // IMPORT's messages — above all the const one, whose whole point is
-    // that "marking it `const fn` would allow this" is advice that cannot
-    // be taken here. (The migration diagnostic rides along, as it should.)
-    check_diagnostics(
-        "static read = extern fn(buf: u8.&raw mut, len: usize) -> i64;\n\
-         static direct = fn(p: u8.&raw mut) -> i64 { read(p, 1) };\n\
-         static at_compile_time = const fn(p: u8.&raw mut) -> i64 { unsafe { read(p, 1) } };",
-        expect![[r#"
-            14..60: a host import is a DECLARATION, not an initializer: write `unsafe extern static read: unsafe fn(...) -> T;`
-            106..116: calling the host import `read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
-            188..192: cannot call the host import `read` in a const context; there is no host at compile time (this `const fn` is always a const context at 145..150)
-        "#]],
-    );
-}
-
-#[test]
-fn the_retired_form_with_no_written_return_is_still_unit() {
-    // The retired spelling gets the unwritten-return rule too — it MEANS
-    // the same import, and an import's elided return is `()`. Nothing here
-    // may fall back to inference: the item's own contract is what every
-    // mention reads, and a free variable there would be a type no one wrote.
-    check_infer(
-        "static tick = extern fn(n: i64);\n\
-         static held = fn() -> () { let f = tick; };",
-        expect![[r#"
-            47..75 'fn() -> () { let ...': fn()
-            58..75 '{ let f = tick; }': ()
-            64..65 'f': unsafe fn(i64)
-            68..72 'tick': unsafe fn(i64)
-        "#]],
-    );
-}
-
-#[test]
 fn one_signature_two_spellings_is_one_type() {
     // The declaration names its parameters (a contract a reader must be
     // able to read); a fn TYPE elsewhere usually does not. The names stop
@@ -14379,40 +14342,13 @@ fn an_extern_static_with_an_initializer_is_not_a_host_import() {
     // declaration is whole, so the const context refuses this call with the
     // ORDINARY message (advice that can be taken — mark it `const fn`)
     // rather than the import one (advice that cannot).
-    // The retired spelling in the initializer slot changes nothing: it wrote
-    // no marker on the ITEM, so an item carrying both is not it — two
-    // visible mistakes, still not an import.
     check_diagnostics(
         "unsafe extern static bad: unsafe fn(n: i64) -> i64 = fn(n: i64) -> i64 { n };\n\
          static f = fn() -> i64 { unsafe { bad(1) } };\n\
-         static g = const fn() -> i64 { unsafe { bad(1) } };\n\
-         unsafe extern static worse: unsafe fn(n: i64) -> i64 = extern fn(n: i64) -> i64;\n\
-         static h = const fn() -> i64 { unsafe { worse(1) } };",
+         static g = const fn() -> i64 { unsafe { bad(1) } };",
         expect![[r#"
             51..76: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
             164..167: cannot call `bad` in a const context; marking it `const fn` would allow this (`bad` is defined here at 21..24) (this `const fn` is always a const context at 135..140)
-            229..255: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
-            231..255: a host import is a DECLARATION, not an initializer: write `unsafe extern static worse: unsafe fn(...) -> T;`
-            297..302: cannot call `worse` in a const context; marking it `const fn` would allow this (`worse` is defined here at 197..202) (this `const fn` is always a const context at 268..273)
-        "#]],
-    );
-}
-
-#[test]
-fn a_misplaced_extern_fn_is_not_a_host_import() {
-    // The other half of a well-formed declaration: an import's name IS its
-    // item's name, so a retired `extern fn` that is not a plain `static`'s
-    // initializer has no name to import under. Lowering it as an import
-    // anyway would refuse at run time under the ENCLOSING item's name. It
-    // lowers as an ordinary fn literal with a missing body instead —
-    // exactly what dropping `extern` would give. Only the retirement
-    // message fires; nothing here is an import.
-    check_diagnostics(
-        "static outer = fn() -> i64 { let f = extern fn(n: i64) -> i64; f(1) };\n\
-         const copied = extern fn(n: i64) -> i64;",
-        expect![[r#"
-            37..61: a host import is a DECLARATION, not an initializer: write `unsafe extern static name: unsafe fn(...) -> T;`
-            86..110: a host import is a DECLARATION, not an initializer: write `unsafe extern static copied: unsafe fn(...) -> T;`
         "#]],
     );
 }
@@ -14444,18 +14380,13 @@ fn a_data_import_publishes_no_type_at_all() {
     // program that runs to an internal error.
     check_infer(
         "unsafe extern static x: usize;\n\
-         static g = fn() -> usize { let y = x; y };\n\
-         static r: usize = extern fn(n: i64) -> i64;\n\
-         static h = fn() -> usize { r };",
+         static g = fn() -> usize { let y = x; y };",
         expect![[r#"
             42..72 'fn() -> usize { l...': fn() -> usize
             56..72 '{ let y = x; y }': {error}
             62..63 'y': {error}
             66..67 'x': {error}
             69..70 'y': {error}
-            129..148 'fn() -> usize { r }': fn() -> usize
-            143..148 '{ r }': {error}
-            145..146 'r': {error}
         "#]],
     );
 }

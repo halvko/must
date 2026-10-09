@@ -725,13 +725,6 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
             return Some(const_block_expr(p));
         }
     }
-    // `extern` starts an expression only as `extern fn` — the RETIRED
-    // host-import initializer, superset-parsed so validation can rewrite it
-    // (`extern static name: unsafe fn(...)` is the live spelling). A bare
-    // `extern` opens an ITEM, so it falls through to the catch-all here.
-    if p.at(EXTERN_KW) && at_fn_literal(p) {
-        return Some(fn_literal(p));
-    }
     // `struct` only starts an expression when immediately followed by `{` (a
     // record literal). Unlike `const`, a dangling `struct` has no second life
     // as an item keyword, so when `{` doesn't follow we deliberately let it
@@ -859,16 +852,11 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
     Some(m)
 }
 
-/// Whether the parser is at a `fn` literal, counting the `const`/`extern`
-/// modifier prefix in either order. A prefix is claimed as soon as it is
-/// unambiguous, before the `fn` arrives: half-written `const extern` is the
-/// literal the user is typing, not a misplaced item, and `fn_literal`
-/// reports the missing keyword itself.
+/// Whether the parser is at a `fn` literal, counting the `const` modifier.
 fn at_fn_literal(p: &Parser<'_>) -> bool {
     match p.current() {
         FN_KW => true,
-        CONST_KW => matches!(p.nth(1), FN_KW | EXTERN_KW),
-        EXTERN_KW => matches!(p.nth(1), FN_KW | CONST_KW),
+        CONST_KW => p.nth(1) == FN_KW,
         _ => false,
     }
 }
@@ -876,20 +864,7 @@ fn at_fn_literal(p: &Parser<'_>) -> bool {
 fn fn_literal(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.eat(CONST_KW); // optional `const` marker; the caller has checked `at_fn_literal`
-    // `extern` rides the same modifier slot `const` does — one `FN_LITERAL`
-    // node with one more token child, not a wrapper — so every consumer that
-    // casts an item's body to `ast::FnLiteral` keeps working and only has a
-    // new fact to ask about. Both orders parse (validation rejects the
-    // combination itself, so `const extern fn` never depends on which one the
-    // user wrote first).
-    let is_extern = p.eat(EXTERN_KW);
-    if is_extern {
-        p.eat(CONST_KW);
-    }
-    // Not `bump`: `at_fn_literal` claims a modifier prefix before the `fn` is
-    // typed, so `const extern` with nothing after it reaches here and gets a
-    // diagnostic rather than an assertion.
-    p.expect(FN_KW, "`fn`");
+    p.bump(FN_KW);
     // `fn::<T, const V: usize>(...)` — the generic binder list. Gated on the
     // unambiguous two-token `COLON2 L_ANGLE` lookahead: nothing else legally
     // follows `fn` with a `::`.
@@ -905,12 +880,7 @@ fn fn_literal(p: &mut Parser<'_>) -> CompletedMarker {
         ret_type(p);
     }
     if p.at(L_BRACE) {
-        // Superset for the `extern` case: an `extern fn` has no body, but a
-        // written one parses into its real tree shape so validation can
-        // reject it where the user wrote it.
         block_expr(p);
-    } else if is_extern {
-        // The declaration ends here — `item` takes the `;`.
     } else if at_expr_recovery(p) {
         p.error(&format!("expected `{{`: {BRACE_RULE}"));
     } else {
@@ -1299,7 +1269,7 @@ fn unsafe_block_expr(p: &mut Parser<'_>) -> CompletedMarker {
 }
 
 /// Whether the current token can start an expression — the dispatch set of
-/// `primary_expr`, including its lookahead `const`/`extern`/`struct`/`enum`
+/// `primary_expr`, including its lookahead `const`/`struct`/`enum`
 /// cases. Used where an expression is *optional* (a `break` value).
 fn at_expr_start(p: &Parser<'_>) -> bool {
     match p.current() {
@@ -1311,7 +1281,6 @@ fn at_expr_start(p: &Parser<'_>) -> bool {
         | COLON2
         | MINUS => true,
         CONST_KW => at_fn_literal(p) || p.nth(1) == L_BRACE,
-        EXTERN_KW => at_fn_literal(p),
         STRUCT_KW | ENUM_KW => at_type_literal_body(p),
         // `&raw ...` and the retired prefix borrows `&x` / `&mut x` both
         // start an expression now — see `primary_expr`'s AMP arms.
@@ -2090,10 +2059,7 @@ fn block_expr(p: &mut Parser<'_>) -> CompletedMarker {
             // here when the lookahead rules those out. `type`
             // and `trait` never start an expression, so they always mean
             // an item.
-            STATIC_KW | TYPE_KW | TRAIT_KW => break,
-            // A bare `extern` opens an ITEM (`extern static ...`); only the
-            // RETIRED `extern fn` initializer is an expression here.
-            EXTERN_KW if !at_fn_literal(p) => break,
+            STATIC_KW | TYPE_KW | TRAIT_KW | EXTERN_KW => break,
             CONST_KW if !at_fn_literal(p) && p.nth(1) != L_BRACE => break,
             // `unsafe extern` starts an item; any other `unsafe` is an expression.
             UNSAFE_KW if p.nth(1) == EXTERN_KW => break,

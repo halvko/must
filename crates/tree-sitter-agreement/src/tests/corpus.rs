@@ -238,10 +238,8 @@ static old = fn (b: Boxed<usize>) -> usize { b.value };
 "#,
     ),
     (
-        "retired extern spellings",
+        "malformed extern statics",
         r#"
-static old = extern fn(n: usize) -> usize;
-static older = const extern fn();
 extern static valued: unsafe fn(n: usize) -> usize = fn (n: usize) -> usize { n };
 extern static live: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
 "#,

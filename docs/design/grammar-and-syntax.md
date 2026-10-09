@@ -223,10 +223,8 @@
   dies in a parse cascade with no reserved-word hint. **G16**
 - **Silent reinterpretation of a bare pattern name as a variant** — footgun. **G25**
 - **`static read = extern fn(...)`** — `=` followed by something that is not a value, so the
-  reader had to un-learn what `=` means. Retired with a rewriting fix; the old form still
-  parses into the same node, means the same import, and answers to the same refusals — an
-  annotation written on it is an import's annotation, and the initializer's own signature is
-  dropped, which the message says rather than doing silently. **G22**
+  reader had to un-learn what `=` means. Removed: `extern` marks items only, so `extern fn`
+  in an initializer is an ordinary parse error. **G22**
 - **Unvouched imports allowed / an import unsafe to call because it is an import** — the
   conservative stopgap G22 shipped with: every import was declared `unsafe fn` regardless
   of its real call price, because the DECLARATION-side vouch had no spelling of its own and

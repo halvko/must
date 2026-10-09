@@ -2328,10 +2328,6 @@ A DATA import (`unsafe extern static x: usize`) is a shape this spelling
 admits and the language does not support yet — it is refused rather than
 guessed at.
 
-The old spelling, `static read = extern fn(...) -> isize;`, is retired: it
-put an `=` in front of something that is not a value. It still parses and
-still means the same import, with a fix that rewrites it.
-
 Calling an `unsafe fn`-typed import needs the marker for the same reason a
 raw-pointer deref does: misusing it is undefined behavior, and here that is
 because what the function does is written in a language this compiler never

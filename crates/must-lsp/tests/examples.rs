@@ -472,67 +472,60 @@ fn errors_checks_dirty_with_the_documented_count() {
             343 | static call_outside_unsafe = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
                 |                                                             ^^^^^^^^^^^^^^^
 
-            error: a host import is a DECLARATION, not an initializer: write `unsafe extern static retired_import: unsafe fn(...) -> T;`
-              --> examples/errors.must:353:25
-                |
-            353 | static retired_import = extern fn(n: usize) -> usize;
-                |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-               = help: Rewrite as an `unsafe extern static` declaration
-
             error: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
-              --> examples/errors.must:362:72
+              --> examples/errors.must:352:72
                 |
-            362 | unsafe extern static import_with_a_value: unsafe fn(n: usize) -> usize = fn (n: usize) -> usize { n };
+            352 | unsafe extern static import_with_a_value: unsafe fn(n: usize) -> usize = fn (n: usize) -> usize { n };
                 |                                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                = help: Remove the initializer
 
             error: declaring a host import is a VOUCH: write `unsafe extern static`
-              --> examples/errors.must:367:1
+              --> examples/errors.must:357:1
                 |
-            367 | extern static unvouched_import: fn() -> i64;
+            357 | extern static unvouched_import: fn() -> i64;
                 | ^^^^^^
                = help: Write `unsafe extern`
 
             error: data imports are not supported yet — an import must have a function type
-              --> examples/errors.must:375:37
+              --> examples/errors.must:365:37
                 |
-            375 | unsafe extern static a_data_import: usize;
+            365 | unsafe extern static a_data_import: usize;
                 |                                     ^^^^^
 
             error: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
-              --> examples/errors.must:382:55
+              --> examples/errors.must:372:55
                 |
-            382 | unsafe extern static a_partial_contract: unsafe fn(n: _) -> i64;
+            372 | unsafe extern static a_partial_contract: unsafe fn(n: _) -> i64;
                 |                                                       ^
 
             error: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
-              --> examples/errors.must:393:73
+              --> examples/errors.must:383:73
                 |
-            393 | static region_at_a_call = fn::<@b>(p: usize.&::<@b>) -> usize { first::<@b, usize>(p).* };
+            383 | static region_at_a_call = fn::<@b>(p: usize.&::<@b>) -> usize { first::<@b, usize>(p).* };
                 |                                                                         ^^
 
             error: region parameters come first in a binder; move `@a` before `T`
-              --> examples/errors.must:401:36
+              --> examples/errors.must:391:36
                 |
-            401 | static misordered_binder = fn::<T, @a>(r: T.&::<@a>) -> T.&::<@a> { r };
+            391 | static misordered_binder = fn::<T, @a>(r: T.&::<@a>) -> T.&::<@a> { r };
                 |                                    ^^
 
             error: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&::<@a> = x.&;`)
-              --> examples/errors.must:410:80
+              --> examples/errors.must:400:80
                 |
-            410 | static region_at_a_borrow = fn::<@c>(p: usize.&::<@c>) -> usize { let q = p.*.&::<@c>; q.* };
+            400 | static region_at_a_borrow = fn::<@c>(p: usize.&::<@c>) -> usize { let q = p.*.&::<@c>; q.* };
                 |                                                                                ^^^^^^
                = help: Drop the region argument
 
             error: cannot borrow `x` as `.&mut`: it is not declared `mut`
-              --> examples/errors.must:421:13
+              --> examples/errors.must:411:13
                 |
-            421 |     let m = x.&mut;
+            411 |     let m = x.&mut;
                 |             ^
                = help: Make `x` mutable
-               = note: `x` is declared without `mut` here (examples/errors.must:419:9)
+               = note: `x` is declared without `mut` here (examples/errors.must:409:9)
 
-            found 41 errors and 1 warning
+            found 40 errors and 1 warning
         "#]],
     );
 }

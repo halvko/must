@@ -12,9 +12,7 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
     let mut errors = Vec::new();
     for node in root.descendants() {
         if let Some(fn_literal) = ast::FnLiteral::cast(node.clone()) {
-            if fn_literal.is_extern() {
-                validate_extern_fn(&fn_literal, &mut errors);
-            } else if let Some(body) = fn_literal.body() {
+            if let Some(body) = fn_literal.body() {
                 // The parser reports "expected `{`" itself when the body is
                 // absent entirely.
                 require_block(&body, BRACE_RULE, &mut errors);
@@ -241,15 +239,10 @@ pub enum MemberContext {
 /// impls, requirement bodies — a requirement member is not an impl
 /// member).
 /// The errors validation reports on a `static` item's own declaration: its
-/// markers, its retired `extern fn` initializer, and an `extern` signature.
+/// markers and an `extern` signature.
 pub fn static_item_errors(item: &ast::StaticItem) -> Vec<SyntaxError> {
     let mut errors = Vec::new();
     validate_extern_static(item, &mut errors);
-    if let Some(ast::Expr::FnLiteral(fn_literal)) = item.body()
-        && fn_literal.is_extern()
-    {
-        validate_extern_fn(&fn_literal, &mut errors);
-    }
     errors
 }
 
@@ -1640,88 +1633,6 @@ fn reject_stray_type_binder(
     });
 }
 
-/// The retired `static name = extern fn(...) -> T;` form, refused with a fix
-/// that rewrites it as an `unsafe extern static` declaration.
-fn validate_extern_fn(fn_literal: &ast::FnLiteral, errors: &mut Vec<SyntaxError>) {
-    let item = fn_literal.syntax().parent().and_then(ast::StaticItem::cast);
-    let name = item
-        .as_ref()
-        .and_then(|it| it.name())
-        .map(|n| n.text())
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| "name".to_owned());
-    // The rewrite is offered only for the shape it can rewrite CORRECTLY:
-    // a bodyless, non-`const`, non-generic literal initializing a plain
-    // `static`. The shapes the old spelling rejected (a body, `const extern fn`, a
-    // binder) keep the message alone — a fix that produced a second broken
-    // item would be worse than none.
-    let fix = item
-        .as_ref()
-        .filter(|item| {
-            !item.is_const()
-                && item.extern_token().is_none()
-                && item.unsafe_token().is_none()
-                && item.ty().is_none()
-        })
-        .filter(|_| {
-            fn_literal.body().is_none()
-                && fn_literal.const_token().is_none()
-                && fn_literal.generic_param_list().is_none()
-        })
-        .and_then(|item| {
-            Some((
-                item,
-                item.name()?.syntax().text_range().end(),
-                fn_literal.extern_token()?,
-            ))
-        })
-        .map(|(item, name_end, extern_token)| Fix {
-            label: "Rewrite as an `unsafe extern static` declaration".to_owned(),
-            edits: vec![
-                TextEdit {
-                    range: TextRange::empty(item.syntax().text_range().start()),
-                    // The fix adds `unsafe` too, so it lands on a legal item.
-                    insert: "unsafe extern ".to_owned(),
-                },
-                // ` = extern` becomes `: unsafe`: the annotation slot takes
-                // the signature the initializer used to hold, and the
-                // import's price moves onto the TYPE where T19 put it.
-                TextEdit {
-                    range: TextRange::new(name_end, extern_token.text_range().end()),
-                    insert: ": unsafe".to_owned(),
-                },
-            ],
-        });
-    // The retired spelling with an ANNOTATION writes the signature TWICE.
-    // The annotation is the home hir keeps (the respelling has nowhere else
-    // to put it), so the message says so — an initializer signature that
-    // disagrees with it is dropped, and a migration never drops something
-    // silently.
-    let annotation = item
-        .as_ref()
-        .filter(|item| item.declares_host_import())
-        .and_then(|item| item.ty());
-    let twice = if annotation.is_some() {
-        " — the annotation is the contract, and this signature is dropped"
-    } else {
-        ""
-    };
-    errors.push(SyntaxError {
-        message: format!(
-            "a host import is a DECLARATION, not an initializer: write \
-             `unsafe extern static {name}: unsafe fn(...) -> T;`{twice}"
-        ),
-        range: fn_literal.syntax().text_range(),
-        fix,
-    });
-    // ... and that annotation is an IMPORT's annotation, held to the same
-    // rules the live spelling's is. Retiring a spelling must not relax what
-    // the programs written in it are held to.
-    if let Some(ty) = annotation {
-        validate_import_annotation(&ty, errors);
-    }
-}
-
 /// `unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;`
 fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>) {
     let vouch = item.unsafe_token();
@@ -1887,10 +1798,7 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
     }
 }
 
-/// The rules an import's ANNOTATION answers to — one home for them, because
-/// both spellings put the contract in the same place once the retired one
-/// writes an annotation at all (`static r: unsafe fn(...) -> T = extern
-/// fn(...);` is an import whose annotation is an import's annotation).
+/// The rules an import's ANNOTATION answers to.
 fn validate_import_annotation(ty: &ast::Type, errors: &mut Vec<SyntaxError>) {
     match ty {
         ast::Type::FnType(fn_type) => {

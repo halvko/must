@@ -16242,29 +16242,6 @@ fn a_written_value_takes_an_extern_statics_annotation_out_of_the_import_rules() 
 }
 
 #[test]
-fn the_retired_spelling_with_an_annotation_is_held_to_the_import_rules() {
-    // The retired form IS an import, so an annotation written on it is an
-    // IMPORT's annotation — retiring a spelling must not relax what the
-    // programs written in it are held to. And the annotation is the home
-    // the respelling keeps, so the migration message says outright that the
-    // initializer's own signature is dropped.
-    check_errors(
-        "static a: usize = extern fn(n: i64) -> i64;\n\
-         static b: fn(n: i64) -> i64 = extern fn(n: i64) -> i64;\n\
-         static c: unsafe fn(n: _) -> i64 = extern fn(n: i64) -> i64;\n\
-         static d = extern fn(n: i64) -> i64;\n",
-        expect![[r#"
-            10..15: data imports are not supported yet — an import must have a function type
-            18..42: a host import is a DECLARATION, not an initializer: write `unsafe extern static a: unsafe fn(...) -> T;` — the annotation is the contract, and this signature is dropped
-            74..98: a host import is a DECLARATION, not an initializer: write `unsafe extern static b: unsafe fn(...) -> T;` — the annotation is the contract, and this signature is dropped
-            123..124: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
-            135..159: a host import is a DECLARATION, not an initializer: write `unsafe extern static c: unsafe fn(...) -> T;` — the annotation is the contract, and this signature is dropped
-            172..196: a host import is a DECLARATION, not an initializer: write `unsafe extern static d: unsafe fn(...) -> T;`
-        "#]],
-    );
-}
-
-#[test]
 fn a_fn_types_parameters_are_named_or_bare_at_every_index() {
     // Decided PER PARAMETER, not per list: neither position changes what
     // the other means, so all four mixtures are the same type written four
@@ -16328,82 +16305,18 @@ fn removing_an_extern_statics_initializer_keeps_the_declaration() {
 }
 
 #[test]
-fn the_retired_initializer_form_rewrites_to_the_declaration() {
-    // `static read = extern fn(...);` is RETIRED (G22):
-    // an import sets nothing to anything, so it is spelled as the
-    // declaration it is. Superset-parsed into the same FN_LITERAL it always
-    // produced — never a silent reinterpretation — and rewritten by a fix.
-    let source = "static read = extern fn(buf: u8.&raw mut, len: usize) -> isize;";
-    let parse = crate::parse(source);
-    let [err] = parse.errors() else {
-        panic!("expected exactly one error, got {:?}", parse.errors());
-    };
-    assert_eq!(
-        err.message,
-        "a host import is a DECLARATION, not an initializer: \
-         write `unsafe extern static read: unsafe fn(...) -> T;`"
-    );
-    let fix = err.fix.as_ref().expect("the rewrite is offered");
-    assert_eq!(
-        apply_fix(source, fix),
-        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;"
-    );
-    // And the rewrite is the accepted form.
-    assert_eq!(crate::parse(&apply_fix(source, fix)).errors(), &[]);
-}
-
-#[test]
-fn the_retired_form_offers_no_rewrite_it_cannot_make_correctly() {
-    // A body, `const extern fn`, a binder, a `const` item: each was its own
-    // refusal under the old spelling, and each is now covered by the one
-    // retirement message —
-    // but a fix that produced a second broken item would be worse than
-    // none, so those shapes get the message alone.
-    for source in [
-        "static a = extern fn(n: i64) -> i64 { n };",
-        "static b = extern fn::<T>(n: T) -> i64;",
-        "static c = const extern fn(n: i64) -> i64;",
-        "const d = extern fn(n: i64) -> i64;",
-    ] {
-        let parse = crate::parse(source);
-        let err = parse
-            .errors()
-            .iter()
-            .find(|e| e.message.starts_with("a host import is a DECLARATION"))
-            .unwrap_or_else(|| panic!("no retirement error for `{source}`"));
-        assert!(err.fix.is_none(), "`{source}` must offer no rewrite");
-    }
-}
-
-#[test]
-fn a_half_written_fn_modifier_prefix_is_reported_not_asserted() {
-    // The dispatch guards claim `const extern` / `extern const` as a fn
-    // literal's prefix before the `fn` arrives — that pair is what a user
-    // has on screen mid-keystroke — so the absent keyword is a diagnostic,
-    // not an assertion. Every position a fn literal can start in.
+fn extern_fn_in_an_initializer_is_an_ordinary_parse_error() {
+    // `extern` marks an item, not a fn literal: the old `static g = extern
+    // fn(...);` spelling gets the parser's own errors, with `extern` opening
+    // the next item.
+    let source = "static g = extern fn(n: usize) -> usize;";
     check_errors(
-        "static a = const extern;\n\
-         static b = extern const;\n\
-         static c = fn() -> () { const extern };\n\
-         static d = [extern const];\n\
-         static e = unsafe extern extern;\n\
-         static f = unsafe const extern;\n",
+        source,
         expect![[r#"
-            11..23: a host import is a DECLARATION, not an initializer: write `unsafe extern static a: unsafe fn(...) -> T;`
-            23..24: expected `fn`
-            36..48: a host import is a DECLARATION, not an initializer: write `unsafe extern static b: unsafe fn(...) -> T;`
-            48..49: expected `fn`
-            74..86: a host import is a DECLARATION, not an initializer: write `unsafe extern static name: unsafe fn(...) -> T;`
-            87..88: expected `fn`
-            102..114: a host import is a DECLARATION, not an initializer: write `unsafe extern static name: unsafe fn(...) -> T;`
-            114..115: expected `fn`
-            133..134: expected `;`
-            135..141: expected `{`: `unsafe` blocks are blocks
-            142..148: expected `static` after `extern`: an import declares one name with one type
-            148..149: expected `static` after `extern`: an import declares one name with one type
-            168..180: an `unsafe fn` literal is not supported yet; the `unsafe fn(...)` type is live, so annotate the value and write a plain `fn`
-            180..181: expected `fn`
-        "#]],
+        9..10: expected `;`
+        11..17: expected an expression
+        18..20: expected `static` after `extern`: an import declares one name with one type
+    "#]],
     );
 }
 
