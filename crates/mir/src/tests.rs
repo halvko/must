@@ -5487,6 +5487,49 @@ static f = fn(o: Opt) -> usize {
     );
 }
 
+/// An unannotated assignment whose arms both yield borrows reaches the
+/// checker (#26): the join's result is already the place's borrow type,
+/// and re-binding it to its own resolution used to trip the region-safety
+/// assertion on `adopt` instead of reporting the arm's dead binder.
+#[test]
+fn an_unannotated_match_of_borrows_into_a_borrow_place() {
+    check_loans(
+        r#"
+type Opt = enum { Some(usize), None };
+static f = fn(v: Opt) -> usize {
+    let a: usize = 1;
+    let mut r = a.&;
+    r = match v { ::Some(x) => x.&, ::None => a.& };
+    r.*
+};
+"#,
+        expect![[r#"
+            147..150: leaving this arm ends the storage of `x`, which invalidates a borrow of it that is still live: the borrow is used after this point, and reading through it then would read storage that no longer exists
+              note at 147..150: this borrow was created here
+              note at 147..150: and it is still used here
+        "#]],
+    );
+}
+
+/// The same join with arms borrowing locals that outlive the `match` is
+/// accepted.
+#[test]
+fn an_unannotated_match_of_live_borrows_is_accepted() {
+    check_loans(
+        r#"
+type Opt = enum { Some(usize), None };
+static f = fn(v: Opt) -> usize {
+    let a: usize = 1;
+    let b: usize = 2;
+    let mut r = a.&;
+    r = match v { ::Some(x) => b.&, ::None => a.& };
+    r.*
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
 /// A temporary a braceless arm body materializes dies with the arm too:
 /// borrowing a call's result in the arm and reading the borrow after
 /// the `match` is refused at the arm's expression, and the blame names it
