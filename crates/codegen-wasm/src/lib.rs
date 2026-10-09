@@ -172,11 +172,11 @@ impl Traps {
     }
 }
 
-/// Declare one wasm import per HOST IMPORT the program actually calls, and
+/// Declare one wasm import per `extern` ITEM the program actually calls, and
 /// answer the name -> function-index map the emitter calls through.
 ///
 /// Reachability is monomorphization's answer, not a scan of the file: an
-/// import nothing calls costs the module nothing, which is the same
+/// `extern` item nothing calls costs the module nothing, which is the same
 /// dead-code rule every other item follows. The module name is `must` and
 /// the field name is the declaring `static`'s own name — the declaration is
 /// the whole contract, and there is no override surface to disagree with it.
@@ -221,7 +221,7 @@ fn collect_extern_imports(
                 if module.imports_func(IMPORT_MODULE, name) {
                     return Err(CompileError::Rejected {
                         message: format!(
-                            "an import may not be named `{name}`: this backend already \
+                            "an `extern` item may not be named `{name}`: this backend already \
                              imports `{IMPORT_MODULE}.{name}` for the builtin of that name, \
                              and a module cannot import one name twice"
                         ),
@@ -306,13 +306,13 @@ pub fn compile(db: &dyn Db, entry: &ItemLoc) -> Result<Artifact, CompileError> {
     let mut module = Module::new();
     let print_ty = module.func_type(vec![ValType::I32, ValType::I32], Vec::new());
     let print = module.import_func(IMPORT_MODULE, "print", print_ty);
-    // Host imports, declared BEFORE any defined function: imports own the
-    // low function-index space, so the whole set has to be known here. It
-    // is — monomorphization has already walked every reachable body and
+    // The `extern` items' imports, declared BEFORE any defined function:
+    // imports own the low function-index space, so the whole set has to be
+    // known here. It is — monomorphization has already walked every reachable body and
     // resolved each call site, signature included.
     //
     // `print` stays hand-written above — where `collect_extern_imports`
-    // sees it, and so reserves its name — rather than becoming an import
+    // sees it, and so reserves its name — rather than becoming an `extern`
     // declaration in every program: it is a builtin, and `str`'s (offset,
     // length) pair is a platform ABI this backend decided by accident (see
     // `platform-codegen-and-tooling.md`) — not something a user-written

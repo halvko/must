@@ -443,7 +443,7 @@ impl LowerCtx<'_> {
                 // the operation that must not execute, so it traps like
                 // any broken call (arguments still evaluated for effects).
                 hir::UnsafeCheckDiagnostic::BuiltinCallOutsideUnsafe { call, .. }
-                // A host-import call lands the same way, for the same
+                // An `extern`-item call lands the same way, for the same
                 // reason: the call is the operation that must not run.
                 | hir::UnsafeCheckDiagnostic::ExternCallOutsideUnsafe { call, .. }
                 // And so does a call through a VALUE of `unsafe fn` type,
@@ -1484,10 +1484,10 @@ impl LowerCtx<'_> {
             // same runtime code (unlike a `const` block, which is a
             // compile-time body of its own).
             ExprData::Unsafe { body: inner } => self.lower_expr(b, *inner),
-            // A host import is exactly a signature, so there is nothing to
+            // An `extern` item is exactly a signature, so there is nothing to
             // lower. The declaring item's name is what a backend imports
             // under and what the interpreter asks its host for.
-            ExprData::ExternImport => {
+            ExprData::ExternItem => {
                 let sig = match self.ty(expr) {
                     Ty::Fn(f) => f.as_ref().clone(),
                     // Broken source; the declaration carries its own error.

@@ -96,10 +96,10 @@ fn item(p: &mut Parser<'_>) {
         // A marker with no item keyword after it (`extern fn g(...)`, a lone
         // `unsafe`): report once and take the rest of the item as `ERROR`.
         p.error(if is_extern {
-            "expected `static` after `extern`: an import declares one name with one type"
+            "expected `static` after `extern`: an `extern` item declares one name with one type"
         } else {
-            "expected `extern static` after `unsafe`: the marker vouches for a host \
-             import's declared signature, and only an import declares one"
+            "expected `extern static` after `unsafe`: the marker vouches for an \
+             `extern` item's declared signature, and only an `extern` item declares one"
         });
         let e = p.start();
         while !p.at(EOF) && !p.at(SEMICOLON) && !at_item_recovery(p) {
@@ -127,11 +127,11 @@ fn item(p: &mut Parser<'_>) {
             p.expect_after_prev(SEMICOLON);
         }
     } else if is_extern {
-        // THE DECLARATION IS THE WHOLE CONTRACT: an import sets nothing to
+        // THE DECLARATION IS THE WHOLE CONTRACT: an `extern` item sets nothing to
         // anything — it promises that a name of this type exists, and the
         // linker (or the host, or the environment) is what provides it. So
         // there is no `=` to demand, and the `;` closes the item. The
-        // trailing clauses still parse here: an import is the fifth item
+        // trailing clauses still parse here: an `extern` item is the fifth item
         // head, and a clause written on one earns the same one-sentence
         // refusal the other four give instead of a parse cascade.
         trailing_clauses(p);
@@ -151,7 +151,7 @@ fn item(p: &mut Parser<'_>) {
 /// the grammar.
 ///
 /// Superset on every item head, `extern` included: validation rejects a
-/// clause wherever it is not at home, in that head's own words. An import
+/// clause wherever it is not at home, in that head's own words. An `extern` item
 /// is why this is a function and not a loop written once — it has no
 /// `= rhs` for a clause to trail, so it needs the same call from its own
 /// arm.
@@ -2209,7 +2209,7 @@ fn borrow_op_generic_args(p: &mut Parser<'_>) {
 /// read off the token.
 ///
 /// Parameters may be NAMED (`unsafe fn(buf: u8.&raw mut, len: usize) ->
-/// isize`), which is how a host import's declaration spells its contract —
+/// isize`), which is how an `extern` item's declaration spells its contract —
 /// a signature a reader must be able to read. The names are documentation:
 /// no call passes arguments by name, and hir keeps only the types.
 fn anon_fn_type(p: &mut Parser<'_>) -> CompletedMarker {

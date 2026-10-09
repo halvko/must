@@ -306,7 +306,7 @@ impl Value {
             // everywhere a bare `a` would read as a name.
             Value::Char(c) => format!("{c:?}"),
             Value::Fn(_) => "fn".to_owned(),
-            Value::ExternFn { decl, .. } => format!("host import {}", decl.display_name()),
+            Value::ExternFn { decl, .. } => format!("extern {}", decl.display_name()),
             Value::Builtin(b) => format!("builtin {}", b.name()),
             Value::Record { fields } => {
                 if fields.is_empty() {

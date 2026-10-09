@@ -64,7 +64,7 @@ pub struct Emitter<'a, 'db> {
     pub panic_len: u32,
     /// Function index per registered instance, by registration order.
     pub func_indices: &'a [u32],
-    /// Function index per HOST IMPORT, keyed by the name the module imports
+    /// Function index per `extern` ITEM, keyed by the name the module imports
     /// under — the declaring `static`'s own name. Declared before any
     /// defined function (imports own the low index space), so this map is
     /// complete before the first body is written.
@@ -810,7 +810,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
     ) -> Result<Vec<i64>, Refusal> {
         match konst {
             // A callee is a compile-time identity, not data: zero slots.
-            // An import is one too — its name is resolved at link time, so
+            // An `extern` item is one too — its name is resolved at link time, so
             // there is nothing to lay out here either.
             Const::Unit | Const::Fn(_) | Const::ExternFn { .. } | Const::Builtin(_) => {
                 Ok(Vec::new())
@@ -1450,7 +1450,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
                             "a function",
                         )?;
                     }
-                    // A host import: ordinary arguments, ordinary `call`,
+                    // An `extern` item: ordinary arguments, ordinary `call`,
                     // ordinary results — the whole difference from a
                     // defined function is which index space the callee
                     // lives in.
@@ -1462,12 +1462,12 @@ impl<'a, 'db> Emitter<'a, 'db> {
                     }) => {
                         let Some(&index) = self.extern_imports.get(&name) else {
                             return Err(Refusal::new(
-                                format!("the host import `{name}` (it was never declared)"),
+                                format!("the `extern` item `{name}` (it was never declared)"),
                                 &ctx.loc,
                                 origin,
                             ));
                         };
-                        let what = format!("the host import `{name}`");
+                        let what = format!("the `extern` item `{name}`");
                         self.direct_call(
                             ctx,
                             args,
@@ -1536,7 +1536,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
 
     /// Emit one direct `call`: push the arguments, guard the arity, call
     /// `index`, and reconcile the callee's result count with the
-    /// destination's width. A defined function and a host import differ
+    /// destination's width. A defined function and an `extern` item differ
     /// only in which index space `index` came from, so they share this.
     ///
     /// The arity guard is defense in depth. Under the dispatch-loop shape

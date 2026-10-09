@@ -15,28 +15,28 @@
   errors cross a registered boundary and never unwind host frames; no raw pointers cross the
   boundary; no ambient authority. Items 1 and 3 rule out tracing GC and pervasive refcounting;
   item 4 is why traps map to a panic hook.
-- **P05** Host imports: the declaration is the whole contract (G22). The item's name is the
-  import's field name, the module is `must` (`print`'s sibling), and the annotation is the one
-  machine signature the host must provide. There is no symbol-override surface: config here
-  would be a second place for the truth to live. Calling an `unsafe fn`-typed import requires
-  `unsafe` wherever the call is, for the same reason a raw deref does — what it does is
-  written in a language this compiler never sees; a `fn`-typed import costs nothing at the
-  call, vouched for on the declaration instead. Taking one is free either way; a call through
-  a binding is gated by the value's type exactly like a direct one, since the price rides the
-  type, never the declaration (T19). The compiler validates no import signature, since a
-  compiler that did would have to know every host, which is the coupling `extern` exists to
-  avoid; each host judges the full declaration at the call and refuses by name — the call
-  price included, exactly like a parameter or return type, so a `fn`-typed vouch for a host
-  primitive that only makes sense as `unsafe fn` is refused the same way any other mismatched
-  signature is. The constant carries the declared signature rather than a host re-deriving it
-  from argument values, because no
-  argument value can carry a pointee type: a value-inspecting host would fill a boolean array
-  with bytes and mint values the type system says cannot exist. Names the compiler already
-  imports are reserved, and the reserved set is the module's own import list, so a new builtin
-  import reserves itself. Claiming a reserved name is rejected, not "unsupported": two imports
-  of one (module, field) is a module an engine resolves twice, a silent-wrong-answer class.
+- **P05** `extern` items: the declaration is the whole contract (G22). The item's name is the
+  wasm import's field name, the module is `must` (`print`'s sibling), and the annotation is
+  the one machine signature the host must provide. There is no symbol-override surface: config
+  here would be a second place for the truth to live. Calling an `unsafe fn`-typed `extern`
+  item requires `unsafe` wherever the call is, for the same reason a raw deref does — what it
+  does is written in a language this compiler never sees; a `fn`-typed `extern` item costs
+  nothing at the call, vouched for on the declaration instead. Taking one is free either way;
+  a call through a binding is gated by the value's type exactly like a direct one, since the
+  price rides the type, never the declaration (T19). The compiler validates no `extern`
+  signature, since a compiler that did would have to know every host, which is the coupling
+  `extern` exists to avoid; each host judges the full declaration at the call and refuses by
+  name — the call price included, exactly like a parameter or return type, so a `fn`-typed
+  vouch for a host primitive that only makes sense as `unsafe fn` is refused the same way any
+  other mismatched signature is. The constant carries the declared signature rather than a
+  host re-deriving it from argument values, because no argument value can carry a pointee
+  type: a value-inspecting host would fill a boolean array with bytes and mint values the type
+  system says cannot exist. Names the compiler already imports are reserved, and the reserved
+  set is the module's own import list, so a new builtin import reserves itself. Claiming a
+  reserved name is rejected, not "unsupported": two imports of one (module, field) is a module
+  an engine resolves twice, a silent-wrong-answer class.
 - **P06** The wasm backend. A compiled module's entire host dependency is one builtin import,
-  plus the imports the program itself declares (P05): no allocator, no GC, no unwinder, no
+  plus one per `extern` item the program itself declares (P05): no allocator, no GC, no unwinder, no
   scheduler, no support library, no start function, no runtime initialization; statics are
   const-evaluated at compile time and baked in. The encoder is hand-rolled with no runtime
   dependencies. Monomorphization happens at codegen, licensed by X11, and a differential
@@ -98,7 +98,7 @@
   waiting for a newline that may never come would withhold output indefinitely.
 - **P04** stdin is a library. Buffering, line boundaries, CRLF stripping, blank-line versus
   end-of-input, compacting a partial line, and handing a line out without copying are ordinary
-  Must code over one byte-moving import (P05) plus the blesses (T17) and the heap builtins —
+  Must code over one byte-moving `extern` item (P05) plus the blesses (T17) and the heap builtins —
   see `examples/stdin_lib.must`; the `read_line` builtin is the convenience, not the
   mechanism. Short reads are real and are not end of input; an I/O error rides the return
   value so a lifting wrapper's error arm is reachable; the destination range is judged before
@@ -149,7 +149,7 @@
   cannot represent heap allocations. **P11**
 - **`{` as a completion trigger character** — fired the template at the least wanted moment;
   replaced by the quick fix on the non-exhaustive-match diagnostic. **P12**
-- **`print` as an ordinary declared import** — `str`'s (offset, length) pair is a platform ABI
+- **`print` as an ordinary `extern` item** — `str`'s (offset, length) pair is a platform ABI
   this backend decided by accident, and no user-written signature can spell it today.
   **P03 P05**
 - **A `Mode`-level terminal hook** — eval's `Mode` stays terminal-ignorant across all of its
@@ -168,7 +168,7 @@
   that the refusal keeps naming both traits and their spellings. **P15**
 - **An LIR is built** — the wasm backend's re-derived type arguments get fixed there, and
   guaranteed optimizations live there instead of being hoped for. **P08**
-- **FFI is designed** — it owns the `extern` surface (data imports are reserved there), symbol
+- **FFI is designed** — it owns the `extern` surface (`extern` data is reserved there), symbol
   mangling, export units, and whether Must can claim no-alias equivalents on a native backend.
   **P05**
 - **The `str` platform ABI gets a second customer** — decide it on purpose before anything

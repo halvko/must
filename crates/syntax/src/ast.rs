@@ -560,11 +560,11 @@ impl StaticItem {
     pub fn eq_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, EQ)
     }
-    /// Whether this item DECLARES a host import: the `extern` marker, not
+    /// Whether this item DECLARES an `extern` item: the `extern` marker, not
     /// `const`, and no initializer. A written value wins: `extern static x:
-    /// T = v;` is an ordinary item with a diagnostic, not an import whose
+    /// T = v;` is an ordinary item with a diagnostic, not an `extern` item whose
     /// initializer was discarded.
-    pub fn declares_host_import(&self) -> bool {
+    pub fn declares_extern(&self) -> bool {
         self.is_extern() && !self.is_const() && self.body().is_none()
     }
 }

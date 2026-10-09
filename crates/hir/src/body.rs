@@ -275,7 +275,7 @@ pub enum ExprData {
     },
     /// The value of an `extern` item. Synthesized, since the declaration writes
     /// none; the type and name live on the item.
-    ExternImport,
+    ExternItem,
     FnLiteral {
         /// Whether the literal was written `const fn`. Orthogonal to the
         /// enclosing item's own `static`/`const`; read by the separate
@@ -597,10 +597,10 @@ pub fn body_with_source_map<'db>(db: &'db dyn Db, item: ItemId<'db>) -> (Body, B
             .map(|expr| ctx.lower_expr(expr))
     } else {
         match item_source(db, item) {
-            // A HOST IMPORT declares no value, so its root is synthesized:
-            // one [`ExprData::ExternImport`]. A written value means the item
-            // is not an import (`item_tree` reads the same predicate for its
-            // flag).
+            // An `extern` ITEM declares no value, so its root is synthesized:
+            // one [`ExprData::ExternItem`]. A written value means the item
+            // is not an `extern` item (`item_tree` reads the same predicate
+            // for its flag).
             //
             // Allocated WITHOUT a source-map entry, the [`ExprData::Missing`]
             // precedent: no expression was written, so no syntax node IS this
@@ -612,8 +612,8 @@ pub fn body_with_source_map<'db>(db: &'db dyn Db, item: ItemId<'db>) -> (Body, B
                     .into_iter()
                     .next()
                     .map(|err| err.message);
-                if it.declares_host_import() {
-                    Some(ctx.exprs.alloc(ExprData::ExternImport))
+                if it.declares_extern() {
+                    Some(ctx.exprs.alloc(ExprData::ExternItem))
                 } else {
                     it.body().map(|expr| ctx.lower_expr(expr))
                 }
@@ -1024,9 +1024,9 @@ impl LowerCtx {
                 let ret_type = it
                     .ret_type()
                     .map(|rt| rt.ty().map(TypeRef::from_ast).unwrap_or(TypeRef::Error));
-                // A missing body lowers to `Missing`. A HOST IMPORT is not a
+                // A missing body lowers to `Missing`. An `extern` ITEM is not a
                 // literal at all: the static item's own root lowering makes
-                // it an [`ExprData::ExternImport`].
+                // it an [`ExprData::ExternItem`].
                 let body = self.lower_opt_expr(it.body());
                 self.alloc_expr(
                     ExprData::FnLiteral {

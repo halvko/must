@@ -1707,7 +1707,8 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
     }
     match &vouch {
         None => errors.push(SyntaxError {
-            message: "declaring a host import is a VOUCH: write `unsafe extern static`".to_owned(),
+            message: "declaring an `extern` item is a VOUCH: write `unsafe extern static`"
+                .to_owned(),
             range: marker.text_range(),
             fix: Some(Fix {
                 label: "Write `unsafe extern`".to_owned(),
@@ -1752,7 +1753,7 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
         let range = TextRange::new(eq.text_range().start(), end);
         errors.push(SyntaxError {
             message: "an `extern static` has no initializer: the declaration is the \
-                      whole contract, and an import sets nothing to anything"
+                      whole contract, and an `extern` item sets nothing to anything"
                 .to_owned(),
             range,
             fix: Some(Fix {
@@ -1775,18 +1776,18 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
         });
     }
     // Everything below is about the CONTRACT, and only an item that
-    // actually declares an import has one: `extern static x: T = v;` is an
+    // actually is `extern` has one: `extern static x: T = v;` is an
     // ordinary item with a written value (the value wins, the marker is
     // dropped), so refusing its annotation for having a `_` the body fills
     // — or for not being a function type — would be a sentence that is not
     // true of the program it is printed on.
-    if !item.declares_host_import() {
+    if !item.declares_extern() {
         return;
     }
     match item.ty() {
-        Some(ty) => validate_import_annotation(&ty, errors),
+        Some(ty) => validate_extern_annotation(&ty, errors),
         None => errors.push(SyntaxError {
-            message: "an import must declare its type: \
+            message: "an `extern` item must declare its type: \
                       `unsafe extern static name: fn(...) -> T;`"
                 .to_owned(),
             range: item
@@ -1798,13 +1799,13 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
     }
 }
 
-/// The rules an import's ANNOTATION answers to.
-fn validate_import_annotation(ty: &ast::Type, errors: &mut Vec<SyntaxError>) {
+/// The rules an `extern` item's ANNOTATION answers to.
+fn validate_extern_annotation(ty: &ast::Type, errors: &mut Vec<SyntaxError>) {
     match ty {
         ast::Type::FnType(fn_type) => {
             // NOTHING in the contract may be left to inference. A `_` in an
             // ordinary annotation names a type the body determines; an
-            // import has no body, and this type is what the host is judged
+            // `extern` item has no body, and this type is what the host is judged
             // against and what the backend emits — so an unwritten piece of
             // it is unwritten for good.
             for hole in fn_type
@@ -1813,7 +1814,7 @@ fn validate_import_annotation(ty: &ast::Type, errors: &mut Vec<SyntaxError>) {
                 .filter(|node| node.kind() == SyntaxKind::HOLE_TYPE)
             {
                 errors.push(SyntaxError {
-                    message: "an import's type must be written in full: the declaration \
+                    message: "an `extern` item's type must be written in full: the declaration \
                               is the whole contract, and there is no body for `_` to be \
                               inferred from"
                         .to_owned(),
@@ -1824,7 +1825,7 @@ fn validate_import_annotation(ty: &ast::Type, errors: &mut Vec<SyntaxError>) {
             if fn_type.ret_type().is_none() {
                 let end = fn_type.syntax().text_range().end();
                 errors.push(SyntaxError {
-                    message: "an import's return type must be written: there is no body \
+                    message: "an `extern` item's return type must be written: there is no body \
                               to infer it from"
                         .to_owned(),
                     range: fn_type.syntax().text_range(),
@@ -1839,7 +1840,7 @@ fn validate_import_annotation(ty: &ast::Type, errors: &mut Vec<SyntaxError>) {
             }
             if let Some(binder) = fn_type.generic_param_list() {
                 errors.push(SyntaxError {
-                    message: "an import cannot be generic: it has exactly one machine \
+                    message: "an `extern` item cannot be generic: it has exactly one machine \
                               signature, and there is nothing to monomorphize it into"
                         .to_owned(),
                     range: binder.syntax().text_range(),
@@ -1847,12 +1848,12 @@ fn validate_import_annotation(ty: &ast::Type, errors: &mut Vec<SyntaxError>) {
                 });
             }
         }
-        // A DATA import is newly expressible and is RESERVED (G22) —
+        // `extern` DATA is newly expressible and is RESERVED (G22) —
         // parse-and-reserve, so granting it later deletes a diagnostic
         // instead of inventing a syntax.
         other => errors.push(SyntaxError {
-            message: "data imports are not supported yet — an import must have \
-                      a function type"
+            message: "`extern` data is not supported yet — an `extern` item must \
+                      have a function type"
                 .to_owned(),
             range: other.syntax().text_range(),
             fix: None,
@@ -1864,12 +1865,12 @@ fn validate_import_annotation(ty: &ast::Type, errors: &mut Vec<SyntaxError>) {
 /// declares a NAME the host provides a value for, and only a `static`
 /// declares one of those.
 const EXTERN_ONLY_ON_STATIC: &str =
-    "only a `static` can be `extern`: an import declares one name with one type";
+    "only a `static` can be `extern`: an `extern` item declares one name with one type";
 
-const UNSAFE_ONLY_ON_EXTERN: &str = "only an `extern static` can be `unsafe`: the marker vouches for a host import's \
-     declared signature, and nothing else declares one";
+const UNSAFE_ONLY_ON_EXTERN: &str = "only an `extern static` can be `unsafe`: the marker vouches for an `extern` \
+     item's declared signature, and nothing else declares one";
 
-/// Rules that hold of EVERY fn type, wherever it is written — an import's
+/// Rules that hold of EVERY fn type, wherever it is written — an `extern` item's
 /// annotation is one fn type among many and gets no parameter grammar of
 /// its own (its extra refusals are in [`validate_extern_static`]).
 ///
@@ -1882,15 +1883,15 @@ fn validate_fn_type(fn_type: &ast::FnType, errors: &mut Vec<SyntaxError>) {
         return;
     }
     // A generic function is declared by an ITEM; a type mentions instances
-    // of one. (An import's own version of this refusal says more and fires
+    // of one. (An `extern` item's own version of this refusal says more and fires
     // instead — see `validate_extern_static`.)
-    let is_import_annotation = fn_type
+    let is_extern_annotation = fn_type
         .syntax()
         .parent()
         .and_then(ast::StaticItem::cast)
         .is_some_and(|item| item.is_extern());
     if let Some(binder) = fn_type.generic_param_list()
-        && !is_import_annotation
+        && !is_extern_annotation
     {
         errors.push(SyntaxError {
             message: "a function type has no generic binder: a generic function is \

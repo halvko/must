@@ -135,7 +135,7 @@
   the LUB wherever it has a check site or a consuming call to convert at; an unannotated,
   unconsumed mixed-safety join has neither, so it is a branch disagreement asking for an
   annotation. One population gets the type without writing it: every builtin that requires the
-  marker and has a first-class fn type (`dealloc_array`, `str_bytes`). An import writes it
+  marker and has a first-class fn type (`dealloc_array`, `str_bytes`). An `extern` item writes it
   when its signature calls for one — the declaration is the whole contract, and the type says
   exactly what is true of it, `unsafe` included only where the call really costs something
   (G22).
@@ -144,7 +144,7 @@
   One ladder exists, disposal, with rungs `access` < `move` < `forget`; `forget` is the top
   and the default, so a forgettable type writes nothing. An `only` clause belongs to a `type`
   declaration: it is superset-parsed and refused, in one sentence, on `static`, `const` and
-  `trait` items — imports included, which have no `= rhs` for it to trail — as on every
+  `trait` items — `extern` items included, which have no `= rhs` for it to trail — as on every
   generic parameter (G21). A type capped at `move` is linear: every path consumes a value of
   it exactly once. There is no destructor, no drop glue and no unwinding; the checker is the
   whole mechanism, and codegen never learns the type is linear (identical output bytes with
@@ -217,11 +217,11 @@
   alias hands back arithmetic and ordering, which is how a non-character gets built. **T16**
 - **A borrowed `str` representation, today** — needs a byte-range path element the aliasing
   model deliberately lacks (M11), and every `str` consumer would learn a second shape. **T17**
-- **Value-position pricing for host imports** — a mention outside `unsafe` was an error, on
-  the reasoning that a bound import cannot be named at the call. The reasoning survives; the
+- **Value-position pricing for `extern` items** — a mention outside `unsafe` was an error, on
+  the reasoning that a bound `extern` item cannot be named at the call. The reasoning survives; the
   mechanism priced the wrong event (taking a function runs nothing), named the wrong site, and
   could not reach a function handed to a body that never mentions it. **A distinguished
-  "import type"** — one type constructor serves imports, unsafe builtins and user code, which
+  "extern type"** — one type constructor serves `extern` items, unsafe builtins and user code, which
   makes the call gate a single rule. **T19**
 
 ## Re-evaluate when

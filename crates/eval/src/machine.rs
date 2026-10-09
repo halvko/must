@@ -36,7 +36,7 @@ pub trait Mode {
     /// every host obeys one rule instead of re-deriving it.
     fn read_line(&mut self) -> Result<Option<String>, EvalError>;
 
-    /// The host primitive behind the `read(buf, len) -> isize` import — the
+    /// The host primitive behind the `read(buf, len) -> isize` `extern` item — the
     /// machine-shaped byte read, and the layer `read_line` would be built on
     /// if it were library code.
     ///
@@ -2255,7 +2255,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                     body: *body,
                     const_args: self.current_const_args(),
                 }),
-                // A host import carries only its declaration — there is no
+                // An `extern` item carries only its declaration — there is no
                 // body, and nothing to capture.
                 Const::ExternFn { decl, sig } => Value::ExternFn {
                     decl: decl.clone(),
@@ -2297,7 +2297,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             .unwrap_or_default()
     }
 
-    /// Calls an `extern` function. This interpreter provides `read` only; any
+    /// Calls an `extern` item. This interpreter provides `read` only; any
     /// other name, or a signature it does not match, is a runtime error.
     fn extern_call(
         &mut self,
@@ -2323,7 +2323,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             _ => Err(EvalError {
                 kind: EvalErrorKind::Runtime,
                 message: format!(
-                    "no host implementation for the import `{name}` — \
+                    "no host implementation for the `extern` item `{name}` — \
                      the interpreter provides `read` and nothing else"
                 ),
                 origin: Some((loc.clone(), origin)),
@@ -2450,7 +2450,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         EvalError {
             kind: EvalErrorKind::Runtime,
             message: format!(
-                "the host import `{name}` was declared with a signature this host \
+                "the `extern` item `{name}` was declared with a signature this host \
                  does not provide; it provides `{expected}`"
             ),
             origin: Some((loc.clone(), origin)),

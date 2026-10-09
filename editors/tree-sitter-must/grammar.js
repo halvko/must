@@ -85,7 +85,7 @@ module.exports = grammar({
 
     _item: $ => choice($.static_item, $.type_item, $.trait_item),
 
-    // `unsafe extern static` is a host import. As in the server's parser,
+    // `unsafe extern static` declares an `extern` item. As in the server's parser,
     // the markers parse in any order the server accepts (a missing,
     // reversed or doubled `unsafe` is a validation error, not a syntax one).
     static_item: $ => seq(

@@ -177,7 +177,7 @@ fn hover_item_name_shows_inferred_fn_type() {
 
 #[test]
 fn a_nullary_unsafe_fn_gets_no_run_lens() {
-    // ▶ on a nullary host import has exactly one possible outcome — the
+    // ▶ on a nullary `extern` item has exactly one possible outcome — the
     // unsafe-block refusal — so the button is not offered. Its safe
     // neighbour still is, which is what keeps this a filter rather than a
     // retreat.
@@ -209,7 +209,7 @@ fn hover_shows_the_unsafe_marker_on_a_fn_type() {
 }
 
 #[test]
-fn hover_on_an_import_declaration_shows_its_type() {
+fn hover_on_an_extern_declaration_shows_its_type() {
     // The declaration has no value expression at all, so hover must answer
     // from the DECLARATION — which is the whole contract anyway.
     check_hover(

@@ -335,8 +335,8 @@ fn a_generic_cycle_at_the_caps_is_refused_by_name() {
 }
 
 #[test]
-fn a_declared_host_import_becomes_a_real_wasm_import_and_is_called_through() {
-    // The host-import mechanism, end to end at the module level: the
+fn a_declared_extern_item_becomes_a_real_wasm_import_and_is_called_through() {
+    // The `extern`-item mechanism, end to end at the module level: the
     // declaration's own name is the import's field name (module `must`,
     // `print`'s sibling), it lands in the import section, and the call
     // goes through it. Nothing here is `read`-specific — `read` itself
@@ -356,7 +356,7 @@ fn a_declared_host_import_becomes_a_real_wasm_import_and_is_called_through() {
             ("must".to_owned(), "print".to_owned()),
             ("must".to_owned(), "host_tick".to_owned()),
         ],
-        "a declared import joins `print` in the import section, under its own name"
+        "a declared `extern` item joins `print` in the import section, under its own name"
     );
 
     // And it really is wired: a host that doubles gets 7 and the module
@@ -379,7 +379,7 @@ fn a_declared_host_import_becomes_a_real_wasm_import_and_is_called_through() {
 }
 
 #[test]
-fn a_safe_typed_import_reaches_the_same_wasm_import_with_no_call_site_marker() {
+fn a_safe_typed_extern_item_reaches_the_same_wasm_import_with_no_call_site_marker() {
     // An extern function is callable in a safe context unless it has an
     // `unsafe fn` type.
     let source = "unsafe extern static host_tick: fn(n: i64) -> i64;\n\
@@ -397,7 +397,7 @@ fn a_safe_typed_import_reaches_the_same_wasm_import_with_no_call_site_marker() {
             ("must".to_owned(), "print".to_owned()),
             ("must".to_owned(), "host_tick".to_owned()),
         ],
-        "a safe-typed import joins `print` in the import section too"
+        "a safe-typed `extern` item joins `print` in the import section too"
     );
 
     let mut store = wasmi::Store::new(&engine, ());
@@ -418,10 +418,10 @@ fn a_safe_typed_import_reaches_the_same_wasm_import_with_no_call_site_marker() {
 }
 
 #[test]
-fn an_import_whose_signature_has_no_wasm_shape_is_refused_by_name() {
+fn an_extern_item_whose_signature_has_no_wasm_shape_is_refused_by_name() {
     // The `read` primitive itself, on this backend: its buffer parameter
     // is a raw pointer, and pointers are out of scope here. The refusal
-    // names the IMPORT — which boundary is unavailable is the useful half.
+    // names the ITEM — which boundary is unavailable is the useful half.
     let message = harness::on_budget(|| {
         let db = RootDatabase::default();
         let source = "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
@@ -433,19 +433,19 @@ fn an_import_whose_signature_has_no_wasm_shape_is_refused_by_name() {
         let Err(codegen_wasm::CompileError::Unsupported(refusal)) =
             codegen_wasm::compile(&db, &loc)
         else {
-            panic!("the backend must refuse an import it cannot lay out");
+            panic!("the backend must refuse an `extern` item it cannot lay out");
         };
         refusal.message()
     });
     assert_eq!(
         message,
         "a raw pointer (heap and pointer primitives are out of scope for this backend) \
-         in the host import `read`'s signature is not supported by the wasm backend yet"
+         in the `extern` item `read`'s signature is not supported by the wasm backend yet"
     );
 }
 
 #[test]
-fn a_bound_host_import_compiles_but_a_stored_one_is_refused_by_name() {
+fn a_bound_extern_item_compiles_but_a_stored_one_is_refused_by_name() {
     // `let f = read;` is ORDINARY source since unsafety moved into the
     // type — it used to need an `unsafe` marker — so what the backend does
     // with a function value became a question people can reach by writing
@@ -453,14 +453,14 @@ fn a_bound_host_import_compiles_but_a_stored_one_is_refused_by_name() {
     // statement is a pair and not a slogan:
     //
     // a binding compiles (the static-value tracker follows it to the one
-    // import it can only be, and the call is a direct call), and a value
+    // `extern` item it can only be, and the call is a direct call), and a value
     // the tracker CANNOT follow — stored in a record, or merged from
     // branches that disagree — is refused BY NAME rather than miscompiled.
     let db = RootDatabase::default();
     let bound = "unsafe extern static tick: unsafe fn(n: i64) -> i64;\n\
                  static main = fn () -> i64 { let f = tick; unsafe { f(1) } };";
     let loc = harness::prepare(&db, bound, "main()");
-    codegen_wasm::compile(&db, &loc).expect("a bound import is still a direct call");
+    codegen_wasm::compile(&db, &loc).expect("a bound `extern` item is still a direct call");
 
     let db = RootDatabase::default();
     let stored = "unsafe extern static tick: unsafe fn(n: i64) -> i64;\n\
@@ -481,7 +481,7 @@ fn a_bound_host_import_compiles_but_a_stored_one_is_refused_by_name() {
 }
 
 #[test]
-fn an_import_may_not_claim_a_name_the_compiler_already_imports() {
+fn an_extern_item_may_not_claim_a_name_the_compiler_already_imports() {
     // Two imports of one `(module, field)` is a module with two answers to
     // the same question — an engine resolves BOTH, so the program runs with
     // whichever the host happened to bind, silently. That is a wrong-answer
@@ -496,14 +496,14 @@ fn an_import_may_not_claim_a_name_the_compiler_already_imports() {
                       static main = fn () -> () { unsafe { print(0, 0) }; };";
         let loc = harness::prepare(&db, source, "main()");
         let Err(err) = codegen_wasm::compile(&db, &loc) else {
-            panic!("the backend must reject an import that collides with `must.print`");
+            panic!("the backend must reject an `extern` item that collides with `must.print`");
         };
         let (item, _) = err.origin().expect("the rejection carries a caret");
         (err.message(), item.display_name().to_owned())
     });
     assert_eq!(
         message,
-        "an import may not be named `print`: this backend already imports \
+        "an `extern` item may not be named `print`: this backend already imports \
          `must.print` for the builtin of that name, and a module cannot import \
          one name twice"
     );

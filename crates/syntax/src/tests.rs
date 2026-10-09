@@ -4729,7 +4729,7 @@ type T = usize;
         "the trait declaration must survive the skip: {}",
         parse.debug_dump()
     );
-    // Same for the import marker, which leads its item.
+    // Same for the `extern` marker, which leads its item.
     let parse = crate::parse(
         "static f = fn (n: usize) -> usize { match n {\n    -1 => 1\nunsafe extern static g: unsafe fn() -> usize;\n",
     );
@@ -4737,7 +4737,7 @@ type T = usize;
     assert_eq!(msgs, ["expected a pattern", "expected `}`"], "{msgs:?}");
     assert!(
         parse.debug_dump().contains("EXTERN_KW@65..71"),
-        "the import declaration must survive the skip: {}",
+        "the `extern` declaration must survive the skip: {}",
         parse.debug_dump()
     );
 }
@@ -15927,10 +15927,10 @@ fn outlives_clauses_ride_the_with_clause_grammar() {
     );
 }
 
-// ---- `extern static` — host import declarations -------------------------
+// ---- `extern static` — `extern` item declarations -----------------------
 
 #[test]
-fn an_import_is_a_declaration_with_no_initializer() {
+fn an_extern_item_is_a_declaration_with_no_initializer() {
     // `extern static name: TYPE;` — the marker leads the ITEM, the item has
     // no `=` at all, and the signature is an ordinary `unsafe fn` TYPE in
     // annotation position (named parameters and all).
@@ -15986,7 +15986,7 @@ fn an_import_is_a_declaration_with_no_initializer() {
                       NAME_REF@63..68
                         IDENT@63..68 "isize"
                 SEMICOLON@68..69 ";"
-            error 0..6: declaring a host import is a VOUCH: write `unsafe extern static`
+            error 0..6: declaring an `extern` item is a VOUCH: write `unsafe extern static`
         "#]],
     );
 }
@@ -16079,22 +16079,22 @@ fn extern_static_error_forms() {
          unsafe extern static j: unsafe fn(n: _) -> i64 = fn(n: i64) -> i64 { n };\n\
          static h: usize;\n",
         expect![[r#"
-            49..52: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
-            78..83: data imports are not supported yet — an import must have a function type
-            106..107: an import must declare its type: `unsafe extern static name: fn(...) -> T;`
-            116..122: only a `static` can be `extern`: an import declares one name with one type
-            151..157: only an `extern static` can be `unsafe`: the marker vouches for a host import's declared signature, and nothing else declares one
-            214..219: an import cannot be generic: it has exactly one machine signature, and there is nothing to monomorphize it into
-            271..272: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
-            277..278: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
-            327..352: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
+            49..52: an `extern static` has no initializer: the declaration is the whole contract, and an `extern` item sets nothing to anything
+            78..83: `extern` data is not supported yet — an `extern` item must have a function type
+            106..107: an `extern` item must declare its type: `unsafe extern static name: fn(...) -> T;`
+            116..122: only a `static` can be `extern`: an `extern` item declares one name with one type
+            151..157: only an `extern static` can be `unsafe`: the marker vouches for an `extern` item's declared signature, and nothing else declares one
+            214..219: an `extern` item cannot be generic: it has exactly one machine signature, and there is nothing to monomorphize it into
+            271..272: an `extern` item's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
+            277..278: an `extern` item's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
+            327..352: an `extern static` has no initializer: the declaration is the whole contract, and an `extern` item sets nothing to anything
             369..370: expected `=` followed by the item's value
         "#]],
     );
 }
 
 #[test]
-fn a_vouched_import_may_be_declared_safe_to_call() {
+fn a_vouched_extern_item_may_be_declared_safe_to_call() {
     // A plain `fn` type is accepted: the item vouches, the type says calls are safe.
     for source in [
         "unsafe extern static now: fn() -> i64;",
@@ -16110,7 +16110,7 @@ fn a_vouched_import_may_be_declared_safe_to_call() {
 }
 
 #[test]
-fn an_unmarked_import_names_the_vouch_and_offers_it() {
+fn an_unmarked_extern_item_names_the_vouch_and_offers_it() {
     // Missing `unsafe` is reported with a fix, never inserted silently.
     let source = "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;";
     let parse = crate::parse(source);
@@ -16119,7 +16119,7 @@ fn an_unmarked_import_names_the_vouch_and_offers_it() {
     };
     assert_eq!(
         err.message,
-        "declaring a host import is a VOUCH: write `unsafe extern static`"
+        "declaring an `extern` item is a VOUCH: write `unsafe extern static`"
     );
     let fix = err.fix.as_ref().expect("the vouch is offered");
     let fixed = apply_fix(source, fix);
@@ -16193,16 +16193,16 @@ fn a_doubled_vouch_marker_is_reported_once_and_removed() {
 }
 
 #[test]
-fn only_an_import_can_be_vouched_for() {
+fn only_an_extern_item_can_be_vouched_for() {
     // `unsafe` is only allowed on `extern static`.
     check_errors(
         "unsafe static a = 1;\n\
          unsafe type F = usize;\n\
          unsafe trait T = requires { };\n",
         expect![[r#"
-            0..6: only an `extern static` can be `unsafe`: the marker vouches for a host import's declared signature, and nothing else declares one
-            21..27: only an `extern static` can be `unsafe`: the marker vouches for a host import's declared signature, and nothing else declares one
-            44..50: only an `extern static` can be `unsafe`: the marker vouches for a host import's declared signature, and nothing else declares one
+            0..6: only an `extern static` can be `unsafe`: the marker vouches for an `extern` item's declared signature, and nothing else declares one
+            21..27: only an `extern static` can be `unsafe`: the marker vouches for an `extern` item's declared signature, and nothing else declares one
+            44..50: only an `extern static` can be `unsafe`: the marker vouches for an `extern` item's declared signature, and nothing else declares one
         "#]],
     );
 }
@@ -16213,15 +16213,15 @@ fn a_lone_vouch_marker_says_what_may_follow_it() {
     check_errors(
         "unsafe fn g(n: i64) -> i64;\n",
         expect![[r#"
-            7..9: expected `extern static` after `unsafe`: the marker vouches for a host import's declared signature, and only an import declares one
+            7..9: expected `extern static` after `unsafe`: the marker vouches for an `extern` item's declared signature, and only an `extern` item declares one
         "#]],
     );
 }
 
 #[test]
-fn a_written_value_takes_an_extern_statics_annotation_out_of_the_import_rules() {
+fn a_written_value_takes_an_extern_statics_annotation_out_of_the_extern_rules() {
     // `j` in `extern_static_error_forms`: the value wins, so the item is
-    // not an import and its annotation is an ordinary one — the `_` is
+    // not an `extern` item and its annotation is an ordinary one — the `_` is
     // filled from the body written on the same line. Only the initializer
     // is refused, and none of the contract rules (which would each be a
     // sentence that is not true of this program) fire.
@@ -16235,7 +16235,7 @@ fn a_written_value_takes_an_extern_statics_annotation_out_of_the_import_rules() 
         messages,
         vec![
             "an `extern static` has no initializer: the declaration is the whole \
-             contract, and an import sets nothing to anything"
+             contract, and an `extern` item sets nothing to anything"
                 .to_owned()
         ]
     );
@@ -16282,7 +16282,7 @@ fn a_fn_type_admits_no_patterns() {
 
 #[test]
 fn removing_an_extern_statics_initializer_keeps_the_declaration() {
-    // The fix cuts the VALUE, not the contract: an import with its type
+    // The fix cuts the VALUE, not the contract: an `extern` item with its type
     // taken away would be a second error where there was one, and the type
     // is the whole of what the declaration says.
     let source = "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize = f;";
@@ -16313,10 +16313,10 @@ fn extern_fn_in_an_initializer_is_an_ordinary_parse_error() {
     check_errors(
         source,
         expect![[r#"
-        9..10: expected `;`
-        11..17: expected an expression
-        18..20: expected `static` after `extern`: an import declares one name with one type
-    "#]],
+            9..10: expected `;`
+            11..17: expected an expression
+            18..20: expected `static` after `extern`: an `extern` item declares one name with one type
+        "#]],
     );
 }
 
@@ -16394,7 +16394,7 @@ fn only_and_with_compose_in_either_order() {
 #[test]
 fn only_clause_misplacements_and_unknown_capabilities() {
     // Every item head parses the clause and refuses it in its own words —
-    // an import (`extern static`) included, so a ceiling written on one
+    // an `extern` item (`extern static`) included, so a ceiling written on one
     // is one sentence rather than a parse cascade.
     check_errors(
         "static x = 5 only move;\n\
@@ -16407,7 +16407,7 @@ fn only_clause_misplacements_and_unknown_capabilities() {
          type E = struct {} only;\n",
         expect![[r#"
             13..17: a capability ceiling belongs on a `type` declaration; an item has whatever ceiling its type has
-            24..30: declaring a host import is a VOUCH: write `unsafe extern static`
+            24..30: declaring an `extern` item is a VOUCH: write `unsafe extern static`
             71..75: a capability ceiling belongs on a `type` declaration; an item has whatever ceiling its type has
             104..108: a capability ceiling belongs on a `type` declaration, not on a `trait`
             139..143: unknown capability `leak`; `move` is the only ceiling that can be written

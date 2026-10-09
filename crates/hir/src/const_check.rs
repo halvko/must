@@ -42,7 +42,7 @@ pub enum ConstCheckDiagnostic {
     /// A call to a side-effecting builtin (`print`, `read_line`). `panic`
     /// is the one side effect const contexts allow, so it never lands here.
     SideEffectCall { callee: ExprId, builtin: Builtin },
-    /// A call to a host import — an `extern static` — in a const context. The
+    /// A call to an `extern` item — an `extern static` — in a const context. The
     /// same judgment as [`ConstCheckDiagnostic::SideEffectCall`] at a
     /// different boundary, and its own variant because the *reason* differs:
     /// not "this would have an effect" but "there is nobody there".
@@ -147,10 +147,10 @@ impl CheckCtx<'_> {
             ExprData::Missing
             | ExprData::Literal(_)
             | ExprData::NameRef(_)
-            // A host import as a VALUE is const-legal — it is the CALL
+            // An `extern` item as a VALUE is const-legal — it is the CALL
             // that has no host at compile time, and the call site is
             // where that is said (see the `Call` arm).
-            | ExprData::ExternImport
+            | ExprData::ExternItem
             | ExprData::ElidedVariant { .. } => {}
             // A variant path is a name (or a pure constructor value) —
             // nothing to reject; its base is a bare `NameRef`.
@@ -367,8 +367,8 @@ impl CheckCtx<'_> {
     fn check_named_callee(&mut self, callee: ExprId, name_expr: ExprId) {
         match self.resolutions.get(name_expr) {
             Some(Resolution::Item(loc)) => {
-                // A host import, judged BEFORE constness: an import is
-                // never `const fn` (validation rejects the combination), so
+                // An `extern` item, judged BEFORE constness: an `extern`
+                // item is never `const fn` (validation rejects the combination), so
                 // `NonConstFnCall`'s "marking it `const fn` would allow
                 // this" would be advice that cannot be taken.
                 if crate::is_extern(self.db, loc.to_id(self.db)) {

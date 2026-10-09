@@ -260,13 +260,13 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
         // An elided variant names nothing scopes can resolve: its one
         // segment is the VARIANT, resolved type-directed during
         // inference, exactly like a variant path's second segment.
-        // A host import declares no names of its own either: the parameter
+        // An `extern` item declares no names of its own either: the parameter
         // names in `unsafe fn(buf: ..., len: ...)` are a signature's
         // spelling, and there is no body for them to be visible in.
         ExprData::Missing
         | ExprData::Literal(_)
         | ExprData::NameRef(_)
-        | ExprData::ExternImport
+        | ExprData::ExternItem
         | ExprData::ElidedVariant { .. }
         | ExprData::Continue => {}
     }

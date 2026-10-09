@@ -401,7 +401,7 @@ impl Analysis {
             if !f.params.is_empty() {
                 continue;
             }
-            // An `unsafe fn` item — a nullary host import, say — has
+            // An `unsafe fn` item — a nullary `extern` item, say — has
             // exactly one possible answer to ▶, the unsafe-block refusal.
             // Offering a button whose only outcome is a diagnostic is worse
             // than offering none.

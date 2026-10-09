@@ -14232,11 +14232,11 @@ fn a_bind_shadowing_a_variant_warns_through_a_borrow_too() {
     );
 }
 
-// ---- `extern static` — host imports ------------------------------------
+// ---- `extern static` — `extern` items ----------------------------------
 
 #[test]
-fn an_import_declaration_has_an_unsafe_fn_type() {
-    // The import's type carries its price: `unsafe fn(...)`. Still a
+fn an_extern_items_declared_type_carries_its_price() {
+    // The `extern` item's type carries its price: `unsafe fn(...)`. Still a
     // first-class function value — annotatable, bindable, passable — but
     // one whose CALLS need the marker wherever they happen, which is what
     // the declaration alone could never say once the value escaped.
@@ -14257,7 +14257,7 @@ fn an_import_declaration_has_an_unsafe_fn_type() {
 }
 
 #[test]
-fn an_imports_unwritten_return_type_is_unit() {
+fn an_extern_items_unwritten_return_type_is_unit() {
     // G22's rule: there is no body for anything
     // to infer from and no call site may decide it, so the one thing a
     // missing return can mean here is "nothing comes back". (Every other fn
@@ -14275,39 +14275,39 @@ fn an_imports_unwritten_return_type_is_unit() {
 }
 
 #[test]
-fn calling_an_import_outside_unsafe_is_rejected() {
+fn calling_an_extern_item_outside_unsafe_is_rejected() {
     check_diagnostics(
         "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
          static f = fn(p: u8.&raw mut) -> i64 { read(p, 1) };",
         expect![[r#"
-            114..124: calling the host import `read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
+            114..124: calling the `extern` item `read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
         "#]],
     );
 }
 
 #[test]
-fn calling_an_import_in_a_const_context_is_rejected() {
+fn calling_an_extern_item_in_a_const_context_is_rejected() {
     // Not `NonConstFnCall`: "marking it `const fn` would allow this" is
-    // advice that cannot be taken — an import is a DECLARATION, and there
+    // advice that cannot be taken — an `extern` item is a DECLARATION, and there
     // is no const spelling of one to reach for. The honest refusal names
     // the missing host.
     check_diagnostics(
         "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
          static f = const fn(p: u8.&raw mut) -> i64 { unsafe { read(p, 1) } };",
         expect![[r#"
-            129..133: cannot call the host import `read` in a const context; there is no host at compile time (this `const fn` is always a const context at 86..91)
+            129..133: cannot call the `extern` item `read` in a const context; there is no host at compile time (this `const fn` is always a const context at 86..91)
         "#]],
     );
 }
 
 #[test]
-fn taking_an_import_as_a_value_is_free_and_its_call_is_gated() {
+fn taking_an_extern_item_as_a_value_is_free_and_its_call_is_gated() {
     // The old stopgap priced the MENTION (`let f = unsafe { read };`)
     // because the call site could not name what it was calling. Unsafety in
     // the TYPE removes the need: `f` is an `unsafe fn`, so the call is
     // where the marker is demanded — which is both the honest place and the
     // one a reader of the call can act on. Binding, passing and returning
-    // an import are now ordinary things to do.
+    // an `extern` item are now ordinary things to do.
     check_diagnostics(
         "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;\n\
          static bound = fn() -> () { let f = read; };\n\
@@ -14334,28 +14334,28 @@ fn one_signature_two_spellings_is_one_type() {
 }
 
 #[test]
-fn an_extern_static_with_an_initializer_is_not_a_host_import() {
+fn an_extern_static_with_an_initializer_is_an_ordinary_item() {
     // The syntax error stands (see `syntax`'s own test); what must not
-    // happen is the item becoming an import ANYWAY, which would turn a
+    // happen is the item becoming `extern` ANYWAY, which would turn a
     // written value into a run-time refusal naming a boundary the program
-    // never crossed. The VALUE wins: an import exists only where the
+    // never crossed. The VALUE wins: an `extern` item exists only where the
     // declaration is whole, so the const context refuses this call with the
     // ORDINARY message (advice that can be taken — mark it `const fn`)
-    // rather than the import one (advice that cannot).
+    // rather than the `extern` one (advice that cannot).
     check_diagnostics(
         "unsafe extern static bad: unsafe fn(n: i64) -> i64 = fn(n: i64) -> i64 { n };\n\
          static f = fn() -> i64 { unsafe { bad(1) } };\n\
          static g = const fn() -> i64 { unsafe { bad(1) } };",
         expect![[r#"
-            51..76: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
+            51..76: an `extern static` has no initializer: the declaration is the whole contract, and an `extern` item sets nothing to anything
             164..167: cannot call `bad` in a const context; marking it `const fn` would allow this (`bad` is defined here at 21..24) (this `const fn` is always a const context at 135..140)
         "#]],
     );
 }
 
 #[test]
-fn an_imports_contract_admits_no_holes() {
-    // `_` names a type the BODY determines, and an import has no body: the
+fn an_extern_items_contract_admits_no_holes() {
+    // `_` names a type the BODY determines, and an `extern` item has no body: the
     // annotation is the whole contract, so a hole in it is unwritten for
     // good. Refused where it is written (once per hole), and typed as an
     // error here — otherwise the mention would read a free variable and the
@@ -14364,14 +14364,14 @@ fn an_imports_contract_admits_no_holes() {
         "unsafe extern static f: unsafe fn(n: _) -> i64;\n\
          static g = fn() -> i64 { unsafe { f(1) } };",
         expect![[r#"
-            37..38: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
+            37..38: an `extern` item's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
         "#]],
     );
 }
 
 #[test]
-fn a_data_import_publishes_no_type_at_all() {
-    // A DATA import is reserved (G22), and reserved all the way down. The
+fn extern_data_publishes_no_type_at_all() {
+    // `extern` DATA is reserved (G22), and reserved all the way down. The
     // item's value is a host FUNCTION and nothing else, so a contract that
     // is not a function type is no contract: recorded as an error in the
     // item tree, so the root and every mention agree by construction.
@@ -14392,7 +14392,7 @@ fn a_data_import_publishes_no_type_at_all() {
 }
 
 #[test]
-fn a_data_imports_use_site_is_told_the_truth() {
+fn a_use_of_extern_data_is_told_the_truth() {
     // The reservation is refused where it is written, and the use site says
     // what is wrong with the name it is using. "Add a type annotation" would
     // be advice that cannot be taken on an item that IS an annotation.
@@ -14400,13 +14400,13 @@ fn a_data_imports_use_site_is_told_the_truth() {
         "unsafe extern static x: usize;\n\
          static g = fn() -> usize { x };",
         expect![[r#"
-            24..29: data imports are not supported yet — an import must have a function type
+            24..29: `extern` data is not supported yet — an `extern` item must have a function type
         "#]],
     );
 }
 
 #[test]
-fn a_vouched_safe_import_is_called_with_no_marker_at_all() {
+fn a_safe_typed_extern_item_is_called_with_no_marker_at_all() {
     // A `fn`-typed extern item needs no `unsafe` at the call, direct or bound.
     check_diagnostics(
         "unsafe extern static now: fn() -> i64;\n\
@@ -14417,20 +14417,20 @@ fn a_vouched_safe_import_is_called_with_no_marker_at_all() {
 }
 
 #[test]
-fn a_safe_import_still_has_no_host_at_compile_time() {
+fn a_safe_typed_extern_item_still_has_no_host_at_compile_time() {
     // Even with a safe type, an extern item cannot be called in a const context.
     check_diagnostics(
         "unsafe extern static now: fn() -> i64;\n\
          static f = const fn() -> i64 { now() };",
         expect![[r#"
-            70..73: cannot call the host import `now` in a const context; there is no host at compile time (this `const fn` is always a const context at 50..55)
+            70..73: cannot call the `extern` item `now` in a const context; there is no host at compile time (this `const fn` is always a const context at 50..55)
         "#]],
     );
 }
 
 // ---- `unsafe fn` — unsafety lives in the function type ------------------
 
-/// A safe function, a host import (`unsafe fn`), and a higher-order
+/// A safe function, an `extern` item (`unsafe fn`), and a higher-order
 /// function that takes either — the shapes every test below draws from.
 const UNSAFE_FN_PRELUDE: &str = "\
 unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
@@ -14530,9 +14530,9 @@ fn calling_an_unsafe_fn_out_of_a_record_field_needs_the_marker() {
 }
 
 #[test]
-fn passing_an_import_to_a_higher_order_function_carries_the_price() {
+fn passing_an_unsafe_fn_to_a_higher_order_function_carries_the_price() {
     // THE HOLE the declaration-side rule could not see: `apply(read, ...)`
-    // hands the import to a body that never mentions it. The body's own
+    // hands the `extern` item to a body that never mentions it. The body's own
     // parameter type is now what demands the marker — so the price arrives
     // with the value instead of being left behind at the mention.
     check_unsafe_fn(
@@ -14582,7 +14582,7 @@ fn the_conversion_is_shallow_but_a_literal_is_checked_per_part() {
 }
 
 #[test]
-fn a_safe_fn_parameter_refuses_an_import() {
+fn a_safe_fn_parameter_refuses_an_unsafe_fn() {
     // The other half of the hole, and the reason the coercion is one-way:
     // a body that promised to call its argument WITHOUT a marker may not be
     // handed something that owes one. The refusal lands at the argument.
@@ -14704,7 +14704,7 @@ fn an_unsafe_fn_value_is_forgettable_like_any_signature() {
 }
 
 #[test]
-fn a_join_of_imports_is_an_unsafe_fn_and_its_call_is_gated() {
+fn a_join_of_unsafe_fns_is_an_unsafe_fn_and_its_call_is_gated() {
     // THE MINT-FROM-UNKNOWN. The call runs before the join solves, so it is
     // the call that has to commit `g`'s variable to a function shape — and
     // a call has no business naming a safety. Guessing safe here refused a
@@ -14757,7 +14757,7 @@ fn a_match_join_and_a_loop_break_join_mint_the_same_way() {
 }
 
 #[test]
-fn a_join_mixing_a_safe_fn_and_an_import_settles_on_the_unsafe_one() {
+fn a_join_mixing_a_safe_fn_and_an_unsafe_fn_settles_on_the_unsafe_one() {
     // The least upper bound under the one-way conversion: safe converts up,
     // nothing converts back, so a join with one unsafe leaf can only be an
     // `unsafe fn` — and the safe leaf converts INTO the join, at the join.
@@ -14869,7 +14869,7 @@ fn a_join_converts_a_safe_branch_at_an_unsafe_fn_annotation() {
 }
 
 #[test]
-fn a_join_still_refuses_an_import_where_a_safe_fn_is_demanded() {
+fn a_join_still_refuses_an_unsafe_fn_where_a_safe_fn_is_demanded() {
     // The conversion stayed one-way inside the join too: the branch that
     // owes a marker is the culprit, named on its own, and the safe branch
     // is not dragged in with it.
