@@ -81,8 +81,20 @@ jobs:
             the author. No praise, no restating the diff, no style nits your brief
             does not ask for. If you find nothing, say so in one line.
 
+            Before judging, read the discussion the PR already has: comments and
+            reviews (`gh pr view --comments`) and inline review threads, with
+            exactly `gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments --paginate`
+            (flags after the path; use `--jq`, not a pipe). A point the author
+            or a maintainer has already settled in a reply there (asked for,
+            accepted, or declined with a reason) is not a finding, unless the
+            code has changed since in a way that reopens it. Do not repeat a
+            finding an earlier review round already posted; if it is still
+            unaddressed, list it once in your summary as still open, with no new
+            inline comment.
+
             Post each finding as an inline comment on the line it concerns, with
-            mcp__github_inline_comment__create_inline_comment, opening with
+            mcp__github_inline_comment__create_inline_comment and
+            `confirmed: true`, opening with
             `**${{ matrix.role }}:**`. Then post one summary comment with
             `gh pr comment`, headed `### ${{ matrix.role }} review`, listing the
             findings in a sentence each (or saying there are none).
@@ -92,7 +104,7 @@ jobs:
             ${{ steps.brief.outputs.text }}
           claude_args: |
             ${{ steps.brief.outputs.model_arg }}
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*)"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*)"
 
   # Takes the `review` label off once the round ends, so adding it again asks for another.
   unlabel:
