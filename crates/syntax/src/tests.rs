@@ -28,7 +28,8 @@ static main: fn() -> () = fn() -> () {
             SOURCE_FILE@0..102
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..101
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..12
                   IDENT@8..12 "main"
@@ -141,7 +142,8 @@ static main = fn {
             SOURCE_FILE@0..68
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..67
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..12
                   IDENT@8..12 "main"
@@ -214,7 +216,8 @@ static main = fn {
             SOURCE_FILE@0..68
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..67
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..12
                   IDENT@8..12 "main"
@@ -290,7 +293,8 @@ static main = fn {
             SOURCE_FILE@0..107
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..56
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..15
                   IDENT@8..15 "example"
@@ -338,7 +342,8 @@ static main = fn {
                     R_BRACE@55..56 "}"
               WHITESPACE@56..58 "\n\n"
               STATIC_ITEM@58..106
-                STATIC_KW@58..64 "static"
+                ITEM_HEAD@58..64
+                  STATIC_KW@58..64 "static"
                 WHITESPACE@64..65 " "
                 NAME@65..69
                   IDENT@65..69 "main"
@@ -388,7 +393,8 @@ fn binary_expr_precedence() {
         expect![[r#"
             SOURCE_FILE@0..28
               STATIC_ITEM@0..28
-                CONST_KW@0..5 "const"
+                ITEM_HEAD@0..5
+                  CONST_KW@0..5 "const"
                 WHITESPACE@5..6 " "
                 NAME@6..7
                   IDENT@6..7 "x"
@@ -437,7 +443,8 @@ static b = fn { a() };
             SOURCE_FILE@0..46
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..22
-                CONST_KW@1..6 "const"
+                ITEM_HEAD@1..6
+                  CONST_KW@1..6 "const"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "a"
@@ -462,7 +469,8 @@ static b = fn { a() };
                 SEMICOLON@21..22 ";"
               WHITESPACE@22..23 "\n"
               STATIC_ITEM@23..45
-                STATIC_KW@23..29 "static"
+                ITEM_HEAD@23..29
+                  STATIC_KW@23..29 "static"
                 WHITESPACE@29..30 " "
                 NAME@30..31
                   IDENT@30..31 "b"
@@ -497,7 +505,8 @@ fn never_type_annotation() {
         expect![[r#"
             SOURCE_FILE@0..58
               STATIC_ITEM@0..58
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..15
                   IDENT@7..15 "diverges"
@@ -573,7 +582,8 @@ static y = 2;
             SOURCE_FILE@0..49
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..13
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..9
                   IDENT@8..9 "x"
@@ -584,7 +594,8 @@ static y = 2;
                   INT_NUMBER@12..13 "1"
               WHITESPACE@13..14 "\n"
               STATIC_ITEM@14..34
-                STATIC_KW@14..20 "static"
+                ITEM_HEAD@14..20
+                  STATIC_KW@14..20 "static"
                 WHITESPACE@20..21 " "
                 NAME@21..25
                   IDENT@21..25 "main"
@@ -600,7 +611,8 @@ static y = 2;
                     R_BRACE@33..34 "}"
               WHITESPACE@34..35 "\n"
               STATIC_ITEM@35..48
-                STATIC_KW@35..41 "static"
+                ITEM_HEAD@35..41
+                  STATIC_KW@35..41 "static"
                 WHITESPACE@41..42 " "
                 NAME@42..43
                   IDENT@42..43 "y"
@@ -626,7 +638,8 @@ fn an_unsafe_fn_type_parses_into_the_fn_type_node() {
         expect![[r#"
             SOURCE_FILE@0..40
               STATIC_ITEM@0..40
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -672,7 +685,8 @@ fn unsafe_in_type_position_without_fn_says_so() {
         expect![[r#"
             SOURCE_FILE@0..27
               STATIC_ITEM@0..27
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -702,7 +716,8 @@ fn fn_type_requires_parens() {
         expect![[r#"
             SOURCE_FILE@0..44
               STATIC_ITEM@0..44
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -753,12 +768,13 @@ fn bare_static_reports_one_error() {
     check(
         "static ",
         expect![[r#"
-        SOURCE_FILE@0..7
-          STATIC_ITEM@0..6
-            STATIC_KW@0..6 "static"
-          WHITESPACE@6..7 " "
-        error 7..7: expected a name for the item
-    "#]],
+            SOURCE_FILE@0..7
+              STATIC_ITEM@0..6
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+              WHITESPACE@6..7 " "
+            error 7..7: expected a name for the item
+        "#]],
     );
 }
 
@@ -775,7 +791,8 @@ static name = fn {
             SOURCE_FILE@0..52
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..51
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..12
                   IDENT@8..12 "name"
@@ -835,7 +852,8 @@ static name = fn {
             SOURCE_FILE@0..20
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..19
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..12
                   IDENT@8..12 "name"
@@ -860,7 +878,8 @@ fn item_missing_name_and_body() {
         expect![[r#"
             SOURCE_FILE@0..13
               STATIC_ITEM@0..13
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 EQ@7..8 "="
                 WHITESPACE@8..9 " "
@@ -882,7 +901,8 @@ fn unterminated_string() {
         expect![[r#"
             SOURCE_FILE@0..18
               STATIC_ITEM@0..18
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "s"
@@ -911,7 +931,8 @@ static name = fn {
             SOURCE_FILE@0..47
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..46
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..12
                   IDENT@8..12 "name"
@@ -952,7 +973,8 @@ fn escaped_quote_does_not_end_the_string() {
         expect![[r#"
             SOURCE_FILE@0..18
               STATIC_ITEM@0..18
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "s"
@@ -982,7 +1004,8 @@ fn unknown_escape_is_an_error_at_the_escape() {
         expect![[r#"
             SOURCE_FILE@0..18
               STATIC_ITEM@0..18
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "s"
@@ -1049,7 +1072,8 @@ fn trailing_lone_backslash_is_an_error() {
         expect![[r#"
             SOURCE_FILE@0..16
               STATIC_ITEM@0..16
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "s"
@@ -1084,7 +1108,8 @@ static b = fn {};
             SOURCE_FILE@0..46
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..18
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..9
                   IDENT@8..9 "a"
@@ -1109,7 +1134,8 @@ static b = fn {};
                 IDENT@23..27 "what"
               WHITESPACE@27..28 "\n"
               STATIC_ITEM@28..45
-                STATIC_KW@28..34 "static"
+                ITEM_HEAD@28..34
+                  STATIC_KW@28..34 "static"
                 WHITESPACE@34..35 " "
                 NAME@35..36
                   IDENT@35..36 "b"
@@ -1145,7 +1171,8 @@ static main = fn {
             SOURCE_FILE@0..71
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..70
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..12
                   IDENT@8..12 "main"
@@ -1211,7 +1238,8 @@ static b = fn {};
             SOURCE_FILE@0..52
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..33
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..9
                   IDENT@8..9 "a"
@@ -1238,7 +1266,8 @@ static b = fn {};
                       SEMICOLON@32..33 ";"
               WHITESPACE@33..34 "\n"
               STATIC_ITEM@34..51
-                STATIC_KW@34..40 "static"
+                ITEM_HEAD@34..40
+                  STATIC_KW@34..40 "static"
                 WHITESPACE@40..41 " "
                 NAME@41..42
                   IDENT@41..42 "b"
@@ -1271,7 +1300,8 @@ static main = fn {
             SOURCE_FILE@0..50
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..49
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..12
                   IDENT@8..12 "main"
@@ -1329,7 +1359,8 @@ static empty_params = fn () { 1 }
             SOURCE_FILE@0..104
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..34
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..19
                   IDENT@8..19 "takes_param"
@@ -1357,7 +1388,8 @@ static empty_params = fn () { 1 }
                     R_BRACE@33..34 "}"
               WHITESPACE@34..35 "\n"
               STATIC_ITEM@35..69
-                STATIC_KW@35..41 "static"
+                ITEM_HEAD@35..41
+                  STATIC_KW@35..41 "static"
                 WHITESPACE@41..42 " "
                 NAME@42..60
                   IDENT@42..60 "shorthand_is_error"
@@ -1372,7 +1404,8 @@ static empty_params = fn () { 1 }
                 SEMICOLON@68..69 ";"
               WHITESPACE@69..70 "\n"
               STATIC_ITEM@70..103
-                STATIC_KW@70..76 "static"
+                ITEM_HEAD@70..76
+                  STATIC_KW@70..76 "static"
                 WHITESPACE@76..77 " "
                 NAME@77..89
                   IDENT@77..89 "empty_params"
@@ -1405,7 +1438,8 @@ fn fn_body_recovery_semicolon() {
         expect![[r#"
             SOURCE_FILE@0..14
               STATIC_ITEM@0..14
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -1427,7 +1461,8 @@ fn if_else_chain() {
         expect![[r#"
             SOURCE_FILE@0..49
               STATIC_ITEM@0..49
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -1485,37 +1520,38 @@ fn comparisons_bind_looser_than_arithmetic() {
     check(
         "static x = 1 + 2 == 3 * 4;",
         expect![[r#"
-        SOURCE_FILE@0..26
-          STATIC_ITEM@0..26
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "x"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            BIN_EXPR@11..25
-              BIN_EXPR@11..16
-                LITERAL@11..12
-                  INT_NUMBER@11..12 "1"
-                WHITESPACE@12..13 " "
-                PLUS@13..14 "+"
-                WHITESPACE@14..15 " "
-                LITERAL@15..16
-                  INT_NUMBER@15..16 "2"
-              WHITESPACE@16..17 " "
-              EQ2@17..19 "=="
-              WHITESPACE@19..20 " "
-              BIN_EXPR@20..25
-                LITERAL@20..21
-                  INT_NUMBER@20..21 "3"
-                WHITESPACE@21..22 " "
-                STAR@22..23 "*"
-                WHITESPACE@23..24 " "
-                LITERAL@24..25
-                  INT_NUMBER@24..25 "4"
-            SEMICOLON@25..26 ";"
-    "#]],
+            SOURCE_FILE@0..26
+              STATIC_ITEM@0..26
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                BIN_EXPR@11..25
+                  BIN_EXPR@11..16
+                    LITERAL@11..12
+                      INT_NUMBER@11..12 "1"
+                    WHITESPACE@12..13 " "
+                    PLUS@13..14 "+"
+                    WHITESPACE@14..15 " "
+                    LITERAL@15..16
+                      INT_NUMBER@15..16 "2"
+                  WHITESPACE@16..17 " "
+                  EQ2@17..19 "=="
+                  WHITESPACE@19..20 " "
+                  BIN_EXPR@20..25
+                    LITERAL@20..21
+                      INT_NUMBER@20..21 "3"
+                    WHITESPACE@21..22 " "
+                    STAR@22..23 "*"
+                    WHITESPACE@23..24 " "
+                    LITERAL@24..25
+                      INT_NUMBER@24..25 "4"
+                SEMICOLON@25..26 ";"
+        "#]],
     );
 }
 
@@ -1524,31 +1560,33 @@ fn bool_literals() {
     check(
         "static x = true; static y = false;",
         expect![[r#"
-        SOURCE_FILE@0..34
-          STATIC_ITEM@0..16
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "x"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            LITERAL@11..15
-              TRUE_KW@11..15 "true"
-            SEMICOLON@15..16 ";"
-          WHITESPACE@16..17 " "
-          STATIC_ITEM@17..34
-            STATIC_KW@17..23 "static"
-            WHITESPACE@23..24 " "
-            NAME@24..25
-              IDENT@24..25 "y"
-            WHITESPACE@25..26 " "
-            EQ@26..27 "="
-            WHITESPACE@27..28 " "
-            LITERAL@28..33
-              FALSE_KW@28..33 "false"
-            SEMICOLON@33..34 ";"
-    "#]],
+            SOURCE_FILE@0..34
+              STATIC_ITEM@0..16
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                LITERAL@11..15
+                  TRUE_KW@11..15 "true"
+                SEMICOLON@15..16 ";"
+              WHITESPACE@16..17 " "
+              STATIC_ITEM@17..34
+                ITEM_HEAD@17..23
+                  STATIC_KW@17..23 "static"
+                WHITESPACE@23..24 " "
+                NAME@24..25
+                  IDENT@24..25 "y"
+                WHITESPACE@25..26 " "
+                EQ@26..27 "="
+                WHITESPACE@27..28 " "
+                LITERAL@28..33
+                  FALSE_KW@28..33 "false"
+                SEMICOLON@33..34 ";"
+        "#]],
     );
 }
 
@@ -1557,33 +1595,34 @@ fn if_branches_require_blocks_with_wrap_fix() {
     check(
         "static x = if c 1 else 2;",
         expect![[r#"
-        SOURCE_FILE@0..25
-          STATIC_ITEM@0..25
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "x"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            IF_EXPR@11..24
-              IF_KW@11..13 "if"
-              WHITESPACE@13..14 " "
-              PATH_EXPR@14..15
-                NAME_REF@14..15
-                  IDENT@14..15 "c"
-              WHITESPACE@15..16 " "
-              LITERAL@16..17
-                INT_NUMBER@16..17 "1"
-              WHITESPACE@17..18 " "
-              ELSE_KW@18..22 "else"
-              WHITESPACE@22..23 " "
-              LITERAL@23..24
-                INT_NUMBER@23..24 "2"
-            SEMICOLON@24..25 ";"
-        error 16..17: `if` branches are blocks; wrap this expression in `{ }`
-        error 23..24: `else` branches are blocks; wrap this expression in `{ }`
-    "#]],
+            SOURCE_FILE@0..25
+              STATIC_ITEM@0..25
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                IF_EXPR@11..24
+                  IF_KW@11..13 "if"
+                  WHITESPACE@13..14 " "
+                  PATH_EXPR@14..15
+                    NAME_REF@14..15
+                      IDENT@14..15 "c"
+                  WHITESPACE@15..16 " "
+                  LITERAL@16..17
+                    INT_NUMBER@16..17 "1"
+                  WHITESPACE@17..18 " "
+                  ELSE_KW@18..22 "else"
+                  WHITESPACE@22..23 " "
+                  LITERAL@23..24
+                    INT_NUMBER@23..24 "2"
+                SEMICOLON@24..25 ";"
+            error 16..17: `if` branches are blocks; wrap this expression in `{ }`
+            error 23..24: `else` branches are blocks; wrap this expression in `{ }`
+        "#]],
     );
 }
 
@@ -1592,34 +1631,35 @@ fn if_with_missing_then_block_before_else_recovers() {
     check(
         "static x = if c else { 2 };",
         expect![[r#"
-        SOURCE_FILE@0..27
-          STATIC_ITEM@0..27
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "x"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            IF_EXPR@11..26
-              IF_KW@11..13 "if"
-              WHITESPACE@13..14 " "
-              PATH_EXPR@14..15
-                NAME_REF@14..15
-                  IDENT@14..15 "c"
-              WHITESPACE@15..16 " "
-              ELSE_KW@16..20 "else"
-              WHITESPACE@20..21 " "
-              BLOCK_EXPR@21..26
-                L_BRACE@21..22 "{"
-                WHITESPACE@22..23 " "
-                LITERAL@23..24
-                  INT_NUMBER@23..24 "2"
-                WHITESPACE@24..25 " "
-                R_BRACE@25..26 "}"
-            SEMICOLON@26..27 ";"
-        error 16..20: expected `{`: `if` branches are blocks
-    "#]],
+            SOURCE_FILE@0..27
+              STATIC_ITEM@0..27
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                IF_EXPR@11..26
+                  IF_KW@11..13 "if"
+                  WHITESPACE@13..14 " "
+                  PATH_EXPR@14..15
+                    NAME_REF@14..15
+                      IDENT@14..15 "c"
+                  WHITESPACE@15..16 " "
+                  ELSE_KW@16..20 "else"
+                  WHITESPACE@20..21 " "
+                  BLOCK_EXPR@21..26
+                    L_BRACE@21..22 "{"
+                    WHITESPACE@22..23 " "
+                    LITERAL@23..24
+                      INT_NUMBER@23..24 "2"
+                    WHITESPACE@24..25 " "
+                    R_BRACE@25..26 "}"
+                SEMICOLON@26..27 ";"
+            error 16..20: expected `{`: `if` branches are blocks
+        "#]],
     );
 }
 
@@ -1630,7 +1670,8 @@ fn let_hole_pattern() {
         expect![[r#"
             SOURCE_FILE@0..29
               STATIC_ITEM@0..29
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -1669,7 +1710,8 @@ fn param_hole_pattern() {
         expect![[r#"
             SOURCE_FILE@0..29
               STATIC_ITEM@0..29
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -1708,7 +1750,8 @@ fn const_fn_literal_with_params_and_ret_type() {
         expect![[r#"
             SOURCE_FILE@0..46
               STATIC_ITEM@0..46
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -1758,29 +1801,30 @@ fn const_item_with_bare_const_fn() {
     check(
         "const g = const fn { 1 };",
         expect![[r#"
-        SOURCE_FILE@0..25
-          STATIC_ITEM@0..25
-            CONST_KW@0..5 "const"
-            WHITESPACE@5..6 " "
-            NAME@6..7
-              IDENT@6..7 "g"
-            WHITESPACE@7..8 " "
-            EQ@8..9 "="
-            WHITESPACE@9..10 " "
-            FN_LITERAL@10..24
-              CONST_KW@10..15 "const"
-              WHITESPACE@15..16 " "
-              FN_KW@16..18 "fn"
-              WHITESPACE@18..19 " "
-              BLOCK_EXPR@19..24
-                L_BRACE@19..20 "{"
-                WHITESPACE@20..21 " "
-                LITERAL@21..22
-                  INT_NUMBER@21..22 "1"
-                WHITESPACE@22..23 " "
-                R_BRACE@23..24 "}"
-            SEMICOLON@24..25 ";"
-    "#]],
+            SOURCE_FILE@0..25
+              STATIC_ITEM@0..25
+                ITEM_HEAD@0..5
+                  CONST_KW@0..5 "const"
+                WHITESPACE@5..6 " "
+                NAME@6..7
+                  IDENT@6..7 "g"
+                WHITESPACE@7..8 " "
+                EQ@8..9 "="
+                WHITESPACE@9..10 " "
+                FN_LITERAL@10..24
+                  CONST_KW@10..15 "const"
+                  WHITESPACE@15..16 " "
+                  FN_KW@16..18 "fn"
+                  WHITESPACE@18..19 " "
+                  BLOCK_EXPR@19..24
+                    L_BRACE@19..20 "{"
+                    WHITESPACE@20..21 " "
+                    LITERAL@21..22
+                      INT_NUMBER@21..22 "1"
+                    WHITESPACE@22..23 " "
+                    R_BRACE@23..24 "}"
+                SEMICOLON@24..25 ";"
+        "#]],
     );
 }
 
@@ -1789,33 +1833,34 @@ fn const_block_as_initializer() {
     check(
         "static x = const { 1 + 2 };",
         expect![[r#"
-        SOURCE_FILE@0..27
-          STATIC_ITEM@0..27
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "x"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            CONST_BLOCK_EXPR@11..26
-              CONST_KW@11..16 "const"
-              WHITESPACE@16..17 " "
-              BLOCK_EXPR@17..26
-                L_BRACE@17..18 "{"
-                WHITESPACE@18..19 " "
-                BIN_EXPR@19..24
-                  LITERAL@19..20
-                    INT_NUMBER@19..20 "1"
-                  WHITESPACE@20..21 " "
-                  PLUS@21..22 "+"
-                  WHITESPACE@22..23 " "
-                  LITERAL@23..24
-                    INT_NUMBER@23..24 "2"
-                WHITESPACE@24..25 " "
-                R_BRACE@25..26 "}"
-            SEMICOLON@26..27 ";"
-    "#]],
+            SOURCE_FILE@0..27
+              STATIC_ITEM@0..27
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                CONST_BLOCK_EXPR@11..26
+                  CONST_KW@11..16 "const"
+                  WHITESPACE@16..17 " "
+                  BLOCK_EXPR@17..26
+                    L_BRACE@17..18 "{"
+                    WHITESPACE@18..19 " "
+                    BIN_EXPR@19..24
+                      LITERAL@19..20
+                        INT_NUMBER@19..20 "1"
+                      WHITESPACE@20..21 " "
+                      PLUS@21..22 "+"
+                      WHITESPACE@22..23 " "
+                      LITERAL@23..24
+                        INT_NUMBER@23..24 "2"
+                    WHITESPACE@24..25 " "
+                    R_BRACE@25..26 "}"
+                SEMICOLON@26..27 ";"
+        "#]],
     );
 }
 
@@ -1826,7 +1871,8 @@ fn const_block_nested_in_fn_body() {
         expect![[r#"
             SOURCE_FILE@0..41
               STATIC_ITEM@0..41
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -1877,7 +1923,8 @@ fn const_fn_as_expression_inside_block() {
         expect![[r#"
             SOURCE_FILE@0..46
               STATIC_ITEM@0..46
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -1934,7 +1981,8 @@ fn const_item_inside_block_still_recovers() {
         expect![[r#"
             SOURCE_FILE@0..31
               STATIC_ITEM@0..15
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -1948,7 +1996,8 @@ fn const_item_inside_block_still_recovers() {
                     L_BRACE@14..15 "{"
               WHITESPACE@15..16 " "
               STATIC_ITEM@16..28
-                CONST_KW@16..21 "const"
+                ITEM_HEAD@16..21
+                  CONST_KW@16..21 "const"
                 WHITESPACE@21..22 " "
                 NAME@22..23
                   IDENT@22..23 "x"
@@ -1977,7 +2026,8 @@ fn dangling_const_at_block_end_recovers() {
         expect![[r#"
             SOURCE_FILE@0..24
               STATIC_ITEM@0..15
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -1991,7 +2041,8 @@ fn dangling_const_at_block_end_recovers() {
                     L_BRACE@14..15 "{"
               WHITESPACE@15..16 " "
               STATIC_ITEM@16..21
-                CONST_KW@16..21 "const"
+                ITEM_HEAD@16..21
+                  CONST_KW@16..21 "const"
               WHITESPACE@21..22 " "
               ERROR@22..23
                 R_BRACE@22..23 "}"
@@ -2011,7 +2062,8 @@ fn let_mut() {
         expect![[r#"
             SOURCE_FILE@0..33
               STATIC_ITEM@0..33
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -2052,7 +2104,8 @@ fn mut_param() {
         expect![[r#"
             SOURCE_FILE@0..33
               STATIC_ITEM@0..33
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -2093,7 +2146,8 @@ fn simple_assignment() {
         expect![[r#"
             SOURCE_FILE@0..40
               STATIC_ITEM@0..40
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -2145,7 +2199,8 @@ fn assignment_with_complex_rhs() {
         expect![[r#"
             SOURCE_FILE@0..65
               STATIC_ITEM@0..65
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -2225,7 +2280,8 @@ fn assignment_to_non_name_is_rejected() {
         expect![[r#"
             SOURCE_FILE@0..44
               STATIC_ITEM@0..44
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -2284,7 +2340,8 @@ fn chained_assignment_is_rejected() {
         expect![[r#"
             SOURCE_FILE@0..74
               STATIC_ITEM@0..74
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -2377,7 +2434,8 @@ fn let_mut_hole_pattern_is_rejected() {
         expect![[r#"
             SOURCE_FILE@0..33
               STATIC_ITEM@0..33
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -2419,7 +2477,8 @@ fn mut_hole_param_is_rejected() {
         expect![[r#"
             SOURCE_FILE@0..33
               STATIC_ITEM@0..33
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -2462,7 +2521,8 @@ fn equality_comparison_is_still_an_expr_stmt() {
         expect![[r#"
             SOURCE_FILE@0..37
               STATIC_ITEM@0..37
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -2513,7 +2573,8 @@ fn record_type_annotation() {
         expect![[r#"
             SOURCE_FILE@0..44
               STATIC_ITEM@0..44
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "p"
@@ -2561,7 +2622,8 @@ fn record_expr_mixed_explicit_and_shorthand_trailing_comma() {
         expect![[r#"
             SOURCE_FILE@0..32
               STATIC_ITEM@0..32
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "p"
@@ -2601,7 +2663,8 @@ fn nested_record_literal() {
         expect![[r#"
             SOURCE_FILE@0..47
               STATIC_ITEM@0..47
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "p"
@@ -2646,25 +2709,26 @@ fn single_ident_brace_stays_block() {
     check(
         "static p = { x };",
         expect![[r#"
-        SOURCE_FILE@0..17
-          STATIC_ITEM@0..17
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "p"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            BLOCK_EXPR@11..16
-              L_BRACE@11..12 "{"
-              WHITESPACE@12..13 " "
-              PATH_EXPR@13..14
-                NAME_REF@13..14
-                  IDENT@13..14 "x"
-              WHITESPACE@14..15 " "
-              R_BRACE@15..16 "}"
-            SEMICOLON@16..17 ";"
-    "#]],
+            SOURCE_FILE@0..17
+              STATIC_ITEM@0..17
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "p"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                BLOCK_EXPR@11..16
+                  L_BRACE@11..12 "{"
+                  WHITESPACE@12..13 " "
+                  PATH_EXPR@13..14
+                    NAME_REF@13..14
+                      IDENT@13..14 "x"
+                  WHITESPACE@14..15 " "
+                  R_BRACE@15..16 "}"
+                SEMICOLON@16..17 ";"
+        "#]],
     );
 }
 
@@ -2673,20 +2737,21 @@ fn empty_brace_stays_block() {
     check(
         "static p = {};",
         expect![[r#"
-        SOURCE_FILE@0..14
-          STATIC_ITEM@0..14
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "p"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            BLOCK_EXPR@11..13
-              L_BRACE@11..12 "{"
-              R_BRACE@12..13 "}"
-            SEMICOLON@13..14 ";"
-    "#]],
+            SOURCE_FILE@0..14
+              STATIC_ITEM@0..14
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "p"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                BLOCK_EXPR@11..13
+                  L_BRACE@11..12 "{"
+                  R_BRACE@12..13 "}"
+                SEMICOLON@13..14 ";"
+        "#]],
     );
 }
 
@@ -2700,7 +2765,8 @@ fn two_idents_comma_separated_stays_block() {
         expect![[r#"
             SOURCE_FILE@0..20
               STATIC_ITEM@0..20
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "p"
@@ -2738,7 +2804,8 @@ fn single_ident_trailing_comma_stays_block() {
         expect![[r#"
             SOURCE_FILE@0..18
               STATIC_ITEM@0..18
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "p"
@@ -2768,28 +2835,29 @@ fn field_access_chain() {
     check(
         "static p = a.x.y;",
         expect![[r#"
-        SOURCE_FILE@0..17
-          STATIC_ITEM@0..17
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "p"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FIELD_EXPR@11..16
-              FIELD_EXPR@11..14
-                PATH_EXPR@11..12
-                  NAME_REF@11..12
-                    IDENT@11..12 "a"
-                DOT@12..13 "."
-                NAME_REF@13..14
-                  IDENT@13..14 "x"
-              DOT@14..15 "."
-              NAME_REF@15..16
-                IDENT@15..16 "y"
-            SEMICOLON@16..17 ";"
-    "#]],
+            SOURCE_FILE@0..17
+              STATIC_ITEM@0..17
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "p"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FIELD_EXPR@11..16
+                  FIELD_EXPR@11..14
+                    PATH_EXPR@11..12
+                      NAME_REF@11..12
+                        IDENT@11..12 "a"
+                    DOT@12..13 "."
+                    NAME_REF@13..14
+                      IDENT@13..14 "x"
+                  DOT@14..15 "."
+                  NAME_REF@15..16
+                    IDENT@15..16 "y"
+                SEMICOLON@16..17 ";"
+        "#]],
     );
 }
 
@@ -2798,28 +2866,29 @@ fn field_access_on_call_result() {
     check(
         "static p = f().x;",
         expect![[r#"
-        SOURCE_FILE@0..17
-          STATIC_ITEM@0..17
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "p"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FIELD_EXPR@11..16
-              CALL_EXPR@11..14
-                PATH_EXPR@11..12
-                  NAME_REF@11..12
-                    IDENT@11..12 "f"
-                ARG_LIST@12..14
-                  L_PAREN@12..13 "("
-                  R_PAREN@13..14 ")"
-              DOT@14..15 "."
-              NAME_REF@15..16
-                IDENT@15..16 "x"
-            SEMICOLON@16..17 ";"
-    "#]],
+            SOURCE_FILE@0..17
+              STATIC_ITEM@0..17
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "p"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FIELD_EXPR@11..16
+                  CALL_EXPR@11..14
+                    PATH_EXPR@11..12
+                      NAME_REF@11..12
+                        IDENT@11..12 "f"
+                    ARG_LIST@12..14
+                      L_PAREN@12..13 "("
+                      R_PAREN@13..14 ")"
+                  DOT@14..15 "."
+                  NAME_REF@15..16
+                    IDENT@15..16 "x"
+                SEMICOLON@16..17 ";"
+        "#]],
     );
 }
 
@@ -2830,7 +2899,8 @@ fn record_literal_as_call_argument() {
         expect![[r#"
             SOURCE_FILE@0..31
               STATIC_ITEM@0..31
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "p"
@@ -2871,7 +2941,8 @@ fn duplicate_field_in_record_type() {
         expect![[r#"
             SOURCE_FILE@0..44
               STATIC_ITEM@0..44
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "p"
@@ -2920,7 +2991,8 @@ fn duplicate_field_in_record_literal() {
         expect![[r#"
             SOURCE_FILE@0..35
               STATIC_ITEM@0..35
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "p"
@@ -2965,7 +3037,8 @@ fn open_record_type_is_rejected() {
         expect![[r#"
             SOURCE_FILE@0..39
               STATIC_ITEM@0..39
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "p"
@@ -3007,7 +3080,8 @@ fn open_record_literal_is_rejected() {
         expect![[r#"
             SOURCE_FILE@0..33
               STATIC_ITEM@0..33
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "p"
@@ -3043,31 +3117,32 @@ fn semicolon_after_ident_stays_block() {
     check(
         "static p = { x; y };",
         expect![[r#"
-        SOURCE_FILE@0..20
-          STATIC_ITEM@0..20
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "p"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            BLOCK_EXPR@11..19
-              L_BRACE@11..12 "{"
-              WHITESPACE@12..13 " "
-              EXPR_STMT@13..15
-                PATH_EXPR@13..14
-                  NAME_REF@13..14
-                    IDENT@13..14 "x"
-                SEMICOLON@14..15 ";"
-              WHITESPACE@15..16 " "
-              PATH_EXPR@16..17
-                NAME_REF@16..17
-                  IDENT@16..17 "y"
-              WHITESPACE@17..18 " "
-              R_BRACE@18..19 "}"
-            SEMICOLON@19..20 ";"
-    "#]],
+            SOURCE_FILE@0..20
+              STATIC_ITEM@0..20
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "p"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                BLOCK_EXPR@11..19
+                  L_BRACE@11..12 "{"
+                  WHITESPACE@12..13 " "
+                  EXPR_STMT@13..15
+                    PATH_EXPR@13..14
+                      NAME_REF@13..14
+                        IDENT@13..14 "x"
+                    SEMICOLON@14..15 ";"
+                  WHITESPACE@15..16 " "
+                  PATH_EXPR@16..17
+                    NAME_REF@16..17
+                      IDENT@16..17 "y"
+                  WHITESPACE@17..18 " "
+                  R_BRACE@18..19 "}"
+                SEMICOLON@19..20 ";"
+        "#]],
     );
 }
 
@@ -3078,7 +3153,8 @@ fn record_literal_where_block_required_in_if() {
         expect![[r#"
             SOURCE_FILE@0..28
               STATIC_ITEM@0..24
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "p"
@@ -3132,7 +3208,8 @@ fn bare_brace_with_colon_is_block_with_error() {
         expect![[r#"
             SOURCE_FILE@0..20
               STATIC_ITEM@0..20
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "p"
@@ -3170,7 +3247,8 @@ fn struct_without_brace_errors_gracefully() {
         expect![[r#"
             SOURCE_FILE@0..18
               STATIC_ITEM@0..18
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "p"
@@ -3194,7 +3272,8 @@ fn struct_literal_as_statement() {
         expect![[r#"
             SOURCE_FILE@0..36
               STATIC_ITEM@0..36
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -3242,7 +3321,8 @@ fn if_condition_with_struct_literal_before_branch() {
         expect![[r#"
             SOURCE_FILE@0..39
               STATIC_ITEM@0..39
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "c"
@@ -3290,7 +3370,8 @@ fn type_item() {
         expect![[r#"
             SOURCE_FILE@0..31
               TYPE_ITEM@0..31
-                TYPE_KW@0..4 "type"
+                ITEM_HEAD@0..4
+                  TYPE_KW@0..4 "type"
                 WHITESPACE@4..5 " "
                 NAME@5..8
                   IDENT@5..8 "Foo"
@@ -3326,7 +3407,8 @@ fn type_item_with_non_struct_rhs_parses() {
         expect![[r#"
             SOURCE_FILE@0..13
               TYPE_ITEM@0..13
-                TYPE_KW@0..4 "type"
+                ITEM_HEAD@0..4
+                  TYPE_KW@0..4 "type"
                 WHITESPACE@4..5 " "
                 NAME@5..8
                   IDENT@5..8 "Foo"
@@ -3349,7 +3431,8 @@ fn type_item_inside_block_recovers() {
         expect![[r#"
             SOURCE_FILE@0..47
               STATIC_ITEM@0..15
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -3363,7 +3446,8 @@ fn type_item_inside_block_recovers() {
                     L_BRACE@14..15 "{"
               WHITESPACE@15..16 "\n"
               TYPE_ITEM@16..47
-                TYPE_KW@16..20 "type"
+                ITEM_HEAD@16..20
+                  TYPE_KW@16..20 "type"
                 WHITESPACE@20..21 " "
                 NAME@21..24
                   IDENT@21..24 "Foo"
@@ -3400,7 +3484,8 @@ fn type_item_annotation_rejected() {
         expect![[r#"
             SOURCE_FILE@0..38
               TYPE_ITEM@0..38
-                TYPE_KW@0..4 "type"
+                ITEM_HEAD@0..4
+                  TYPE_KW@0..4 "type"
                 WHITESPACE@4..5 " "
                 NAME@5..8
                   IDENT@5..8 "Foo"
@@ -3440,7 +3525,8 @@ fn enum_type_declaration() {
         expect![[r#"
             SOURCE_FILE@0..61
               TYPE_ITEM@0..61
-                TYPE_KW@0..4 "type"
+                ITEM_HEAD@0..4
+                  TYPE_KW@0..4 "type"
                 WHITESPACE@4..5 " "
                 NAME@5..10
                   IDENT@5..10 "Shape"
@@ -3492,28 +3578,29 @@ fn enum_literal_outside_type_declaration_is_rejected() {
     check(
         "static x = enum { A };",
         expect![[r#"
-        SOURCE_FILE@0..22
-          STATIC_ITEM@0..22
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "x"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            ENUM_EXPR@11..21
-              ENUM_KW@11..15 "enum"
-              WHITESPACE@15..16 " "
-              L_BRACE@16..17 "{"
-              WHITESPACE@17..18 " "
-              ENUM_VARIANT@18..19
-                NAME@18..19
-                  IDENT@18..19 "A"
-              WHITESPACE@19..20 " "
-              R_BRACE@20..21 "}"
-            SEMICOLON@21..22 ";"
-        error 11..21: an `enum` literal can only appear as a `type` declaration's value
-    "#]],
+            SOURCE_FILE@0..22
+              STATIC_ITEM@0..22
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                ENUM_EXPR@11..21
+                  ENUM_KW@11..15 "enum"
+                  WHITESPACE@15..16 " "
+                  L_BRACE@16..17 "{"
+                  WHITESPACE@17..18 " "
+                  ENUM_VARIANT@18..19
+                    NAME@18..19
+                      IDENT@18..19 "A"
+                  WHITESPACE@19..20 " "
+                  R_BRACE@20..21 "}"
+                SEMICOLON@21..22 ";"
+            error 11..21: an `enum` literal can only appear as a `type` declaration's value
+        "#]],
     );
 }
 
@@ -3522,33 +3609,34 @@ fn duplicate_enum_variants_are_rejected() {
     check(
         "type Shape = enum { A, A };",
         expect![[r#"
-        SOURCE_FILE@0..27
-          TYPE_ITEM@0..27
-            TYPE_KW@0..4 "type"
-            WHITESPACE@4..5 " "
-            NAME@5..10
-              IDENT@5..10 "Shape"
-            WHITESPACE@10..11 " "
-            EQ@11..12 "="
-            WHITESPACE@12..13 " "
-            ENUM_EXPR@13..26
-              ENUM_KW@13..17 "enum"
-              WHITESPACE@17..18 " "
-              L_BRACE@18..19 "{"
-              WHITESPACE@19..20 " "
-              ENUM_VARIANT@20..21
-                NAME@20..21
-                  IDENT@20..21 "A"
-              COMMA@21..22 ","
-              WHITESPACE@22..23 " "
-              ENUM_VARIANT@23..24
-                NAME@23..24
-                  IDENT@23..24 "A"
-              WHITESPACE@24..25 " "
-              R_BRACE@25..26 "}"
-            SEMICOLON@26..27 ";"
-        error 23..24: duplicate variant `A`
-    "#]],
+            SOURCE_FILE@0..27
+              TYPE_ITEM@0..27
+                ITEM_HEAD@0..4
+                  TYPE_KW@0..4 "type"
+                WHITESPACE@4..5 " "
+                NAME@5..10
+                  IDENT@5..10 "Shape"
+                WHITESPACE@10..11 " "
+                EQ@11..12 "="
+                WHITESPACE@12..13 " "
+                ENUM_EXPR@13..26
+                  ENUM_KW@13..17 "enum"
+                  WHITESPACE@17..18 " "
+                  L_BRACE@18..19 "{"
+                  WHITESPACE@19..20 " "
+                  ENUM_VARIANT@20..21
+                    NAME@20..21
+                      IDENT@20..21 "A"
+                  COMMA@21..22 ","
+                  WHITESPACE@22..23 " "
+                  ENUM_VARIANT@23..24
+                    NAME@23..24
+                      IDENT@23..24 "A"
+                  WHITESPACE@24..25 " "
+                  R_BRACE@25..26 "}"
+                SEMICOLON@26..27 ";"
+            error 23..24: duplicate variant `A`
+        "#]],
     );
 }
 
@@ -3557,29 +3645,30 @@ fn variant_path_expression() {
     check(
         "static s = Shape::Circle(3);",
         expect![[r#"
-        SOURCE_FILE@0..28
-          STATIC_ITEM@0..28
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "s"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            CALL_EXPR@11..27
-              PATH_EXPR@11..24
-                NAME_REF@11..16
-                  IDENT@11..16 "Shape"
-                COLON2@16..18 "::"
-                NAME_REF@18..24
-                  IDENT@18..24 "Circle"
-              ARG_LIST@24..27
-                L_PAREN@24..25 "("
-                LITERAL@25..26
-                  INT_NUMBER@25..26 "3"
-                R_PAREN@26..27 ")"
-            SEMICOLON@27..28 ";"
-    "#]],
+            SOURCE_FILE@0..28
+              STATIC_ITEM@0..28
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "s"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                CALL_EXPR@11..27
+                  PATH_EXPR@11..24
+                    NAME_REF@11..16
+                      IDENT@11..16 "Shape"
+                    COLON2@16..18 "::"
+                    NAME_REF@18..24
+                      IDENT@18..24 "Circle"
+                  ARG_LIST@24..27
+                    L_PAREN@24..25 "("
+                    LITERAL@25..26
+                      INT_NUMBER@25..26 "3"
+                    R_PAREN@26..27 ")"
+                SEMICOLON@27..28 ";"
+        "#]],
     );
 }
 
@@ -3593,7 +3682,8 @@ fn elided_variant_expression() {
         expect![[r#"
             SOURCE_FILE@0..26
               STATIC_ITEM@0..26
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "s"
@@ -3624,7 +3714,8 @@ fn elided_variant_expression_with_payload() {
         expect![[r#"
             SOURCE_FILE@0..30
               STATIC_ITEM@0..30
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "s"
@@ -3661,7 +3752,8 @@ fn elided_variant_expression_after_return() {
         expect![[r#"
             SOURCE_FILE@0..45
               STATIC_ITEM@0..45
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -3707,7 +3799,8 @@ fn elided_variant_expression_missing_name() {
         expect![[r#"
             SOURCE_FILE@0..21
               STATIC_ITEM@0..21
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "s"
@@ -3740,7 +3833,8 @@ fn inherent_member_region_binder_parses_without_reservation() {
         expect![[r#"
             SOURCE_FILE@0..107
               TYPE_ITEM@0..107
-                TYPE_KW@0..4 "type"
+                ITEM_HEAD@0..4
+                  TYPE_KW@0..4 "type"
                 WHITESPACE@4..5 " "
                 NAME@5..9
                   IDENT@5..9 "Cell"
@@ -3850,28 +3944,29 @@ fn variant_path_type_annotation() {
     check(
         "static s: Shape::Circle = c;",
         expect![[r#"
-        SOURCE_FILE@0..28
-          STATIC_ITEM@0..28
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "s"
-            COLON@8..9 ":"
-            WHITESPACE@9..10 " "
-            PATH_TYPE@10..23
-              NAME_REF@10..15
-                IDENT@10..15 "Shape"
-              COLON2@15..17 "::"
-              NAME_REF@17..23
-                IDENT@17..23 "Circle"
-            WHITESPACE@23..24 " "
-            EQ@24..25 "="
-            WHITESPACE@25..26 " "
-            PATH_EXPR@26..27
-              NAME_REF@26..27
-                IDENT@26..27 "c"
-            SEMICOLON@27..28 ";"
-    "#]],
+            SOURCE_FILE@0..28
+              STATIC_ITEM@0..28
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "s"
+                COLON@8..9 ":"
+                WHITESPACE@9..10 " "
+                PATH_TYPE@10..23
+                  NAME_REF@10..15
+                    IDENT@10..15 "Shape"
+                  COLON2@15..17 "::"
+                  NAME_REF@17..23
+                    IDENT@17..23 "Circle"
+                WHITESPACE@23..24 " "
+                EQ@24..25 "="
+                WHITESPACE@25..26 " "
+                PATH_EXPR@26..27
+                  NAME_REF@26..27
+                    IDENT@26..27 "c"
+                SEMICOLON@27..28 ";"
+        "#]],
     );
 }
 
@@ -3880,22 +3975,23 @@ fn variant_path_missing_second_segment() {
     check(
         "static s = Shape::;",
         expect![[r#"
-        SOURCE_FILE@0..19
-          STATIC_ITEM@0..19
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "s"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            PATH_EXPR@11..18
-              NAME_REF@11..16
-                IDENT@11..16 "Shape"
-              COLON2@16..18 "::"
-            SEMICOLON@18..19 ";"
-        error 18..19: expected a variant name after `::`
-    "#]],
+            SOURCE_FILE@0..19
+              STATIC_ITEM@0..19
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "s"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                PATH_EXPR@11..18
+                  NAME_REF@11..16
+                    IDENT@11..16 "Shape"
+                  COLON2@16..18 "::"
+                SEMICOLON@18..19 ";"
+            error 18..19: expected a variant name after `::`
+        "#]],
     );
 }
 
@@ -3917,7 +4013,8 @@ static f = fn (s: Shape) -> usize {
             SOURCE_FILE@0..173
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..172
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..9
                   IDENT@8..9 "f"
@@ -4056,7 +4153,8 @@ static f = fn (s: Shape) -> usize {
             SOURCE_FILE@0..98
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..97
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..9
                   IDENT@8..9 "f"
@@ -4146,7 +4244,8 @@ static f = fn (s: Shape) -> usize {
             SOURCE_FILE@0..106
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..105
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..9
                   IDENT@8..9 "f"
@@ -4248,7 +4347,8 @@ static f = fn (s: Shape) -> usize {
             SOURCE_FILE@0..99
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..98
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..9
                   IDENT@8..9 "f"
@@ -4367,7 +4467,8 @@ static f = fn (s: Shape) -> usize {
             SOURCE_FILE@0..92
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..91
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..9
                   IDENT@8..9 "f"
@@ -4458,7 +4559,8 @@ static f = fn (n: usize) -> usize {
             SOURCE_FILE@0..92
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..91
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..9
                   IDENT@8..9 "f"
@@ -4549,7 +4651,8 @@ static f = fn (n: usize) -> usize {
             SOURCE_FILE@0..96
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..95
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..9
                   IDENT@8..9 "f"
@@ -4648,7 +4751,8 @@ type T = usize;
             SOURCE_FILE@0..75
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..58
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..9
                   IDENT@8..9 "f"
@@ -4701,7 +4805,8 @@ type T = usize;
                             INT_NUMBER@57..58 "1"
               WHITESPACE@58..59 "\n"
               TYPE_ITEM@59..74
-                TYPE_KW@59..63 "type"
+                ITEM_HEAD@59..63
+                  TYPE_KW@59..63 "type"
                 WHITESPACE@63..64 " "
                 NAME@64..65
                   IDENT@64..65 "T"
@@ -4749,7 +4854,8 @@ fn match_recovery_missing_arm_list() {
         expect![[r#"
             SOURCE_FILE@0..45
               STATIC_ITEM@0..45
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -4808,7 +4914,8 @@ static g = 1;
             SOURCE_FILE@0..52
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..37
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..9
                   IDENT@8..9 "f"
@@ -4845,7 +4952,8 @@ static g = 1;
                         L_BRACE@36..37 "{"
               WHITESPACE@37..38 "\n"
               STATIC_ITEM@38..51
-                STATIC_KW@38..44 "static"
+                ITEM_HEAD@38..44
+                  STATIC_KW@38..44 "static"
                 WHITESPACE@44..45 " "
                 NAME@45..46
                   IDENT@45..46 "g"
@@ -4876,7 +4984,8 @@ static f = fn {
             SOURCE_FILE@0..82
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..81
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..9
                   IDENT@8..9 "f"
@@ -4934,7 +5043,8 @@ fn break_with_value_parses() {
         expect![[r#"
             SOURCE_FILE@0..39
               STATIC_ITEM@0..39
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -4983,7 +5093,8 @@ fn break_loop_pathology_parses() {
         expect![[r#"
             SOURCE_FILE@0..51
               STATIC_ITEM@0..51
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -5037,22 +5148,23 @@ fn dangling_break_at_top_level_parses() {
     check(
         "static x = break 1;",
         expect![[r#"
-        SOURCE_FILE@0..19
-          STATIC_ITEM@0..19
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "x"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            BREAK_EXPR@11..18
-              BREAK_KW@11..16 "break"
-              WHITESPACE@16..17 " "
-              LITERAL@17..18
-                INT_NUMBER@17..18 "1"
-            SEMICOLON@18..19 ";"
-    "#]],
+            SOURCE_FILE@0..19
+              STATIC_ITEM@0..19
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                BREAK_EXPR@11..18
+                  BREAK_KW@11..16 "break"
+                  WHITESPACE@16..17 " "
+                  LITERAL@17..18
+                    INT_NUMBER@17..18 "1"
+                SEMICOLON@18..19 ";"
+        "#]],
     );
 }
 
@@ -5067,7 +5179,8 @@ fn bare_return_statement_parses() {
         expect![[r#"
             SOURCE_FILE@0..25
               STATIC_ITEM@0..25
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -5097,7 +5210,8 @@ fn return_with_a_value_parses() {
         expect![[r#"
             SOURCE_FILE@0..31
               STATIC_ITEM@0..31
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -5138,7 +5252,8 @@ fn return_as_a_block_tail_parses() {
         expect![[r#"
             SOURCE_FILE@0..26
               STATIC_ITEM@0..26
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -5177,7 +5292,8 @@ static f = fn (s: Shape) -> usize {
             SOURCE_FILE@0..144
               WHITESPACE@0..1 "\n"
               STATIC_ITEM@1..143
-                STATIC_KW@1..7 "static"
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
                 WHITESPACE@7..8 " "
                 NAME@8..9
                   IDENT@8..9 "f"
@@ -5294,7 +5410,8 @@ fn return_in_expression_position_parses() {
         expect![[r#"
             SOURCE_FILE@0..76
               STATIC_ITEM@0..76
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -5383,7 +5500,8 @@ fn dangling_return_at_top_level_parses() {
         expect![[r#"
             SOURCE_FILE@0..20
               STATIC_ITEM@0..20
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -5407,30 +5525,31 @@ fn loop_body_must_be_a_block() {
     check(
         "static f = fn { loop 5 }",
         expect![[r#"
-        SOURCE_FILE@0..24
-          STATIC_ITEM@0..24
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "f"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FN_LITERAL@11..24
-              FN_KW@11..13 "fn"
-              WHITESPACE@13..14 " "
-              BLOCK_EXPR@14..24
-                L_BRACE@14..15 "{"
-                WHITESPACE@15..16 " "
-                LOOP_EXPR@16..22
-                  LOOP_KW@16..20 "loop"
-                  WHITESPACE@20..21 " "
-                  LITERAL@21..22
-                    INT_NUMBER@21..22 "5"
-                WHITESPACE@22..23 " "
-                R_BRACE@23..24 "}"
-        error 21..22: `loop` bodies are blocks; wrap this expression in `{ }`
-    "#]],
+            SOURCE_FILE@0..24
+              STATIC_ITEM@0..24
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..24
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..24
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LOOP_EXPR@16..22
+                      LOOP_KW@16..20 "loop"
+                      WHITESPACE@20..21 " "
+                      LITERAL@21..22
+                        INT_NUMBER@21..22 "5"
+                    WHITESPACE@22..23 " "
+                    R_BRACE@23..24 "}"
+            error 21..22: `loop` bodies are blocks; wrap this expression in `{ }`
+        "#]],
     );
 }
 
@@ -5443,7 +5562,8 @@ fn let_record_destructure() {
         expect![[r#"
             SOURCE_FILE@0..43
               STATIC_ITEM@0..43
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -5495,7 +5615,8 @@ fn let_record_destructure_rename() {
         expect![[r#"
             SOURCE_FILE@0..48
               STATIC_ITEM@0..48
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -5552,7 +5673,8 @@ fn let_record_destructure_rest() {
         expect![[r#"
             SOURCE_FILE@0..44
               STATIC_ITEM@0..44
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -5603,7 +5725,8 @@ fn let_record_destructure_per_binding_mut() {
         expect![[r#"
             SOURCE_FILE@0..47
               STATIC_ITEM@0..47
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -5657,7 +5780,8 @@ fn let_mut_on_destructuring_pattern_is_rejected() {
         expect![[r#"
             SOURCE_FILE@0..44
               STATIC_ITEM@0..44
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -5707,7 +5831,8 @@ fn param_record_destructure() {
         expect![[r#"
             SOURCE_FILE@0..67
               STATIC_ITEM@0..67
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -5780,7 +5905,8 @@ fn let_newtype_destructure() {
         expect![[r#"
             SOURCE_FILE@0..48
               STATIC_ITEM@0..48
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -5837,7 +5963,8 @@ fn param_newtype_destructure() {
         expect![[r#"
             SOURCE_FILE@0..41
               STATIC_ITEM@0..41
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -5888,7 +6015,8 @@ fn newtype_destructure_bare_bind_inner() {
         expect![[r#"
             SOURCE_FILE@0..38
               STATIC_ITEM@0..38
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -5933,7 +6061,8 @@ fn pub_reserved_on_record_type_field() {
         expect![[r#"
             SOURCE_FILE@0..38
               STATIC_ITEM@0..38
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -5975,7 +6104,8 @@ fn pub_reserved_on_type_decl_field() {
         expect![[r#"
             SOURCE_FILE@0..37
               TYPE_ITEM@0..37
-                TYPE_KW@0..4 "type"
+                ITEM_HEAD@0..4
+                  TYPE_KW@0..4 "type"
                 WHITESPACE@4..5 " "
                 NAME@5..8
                   IDENT@5..8 "Foo"
@@ -6012,7 +6142,8 @@ fn pub_rejected_on_record_literal_field() {
         expect![[r#"
             SOURCE_FILE@0..32
               STATIC_ITEM@0..32
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -6052,7 +6183,8 @@ fn field_assignment_is_a_legal_target() {
         expect![[r#"
             SOURCE_FILE@0..52
               STATIC_ITEM@0..52
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -6120,7 +6252,8 @@ fn nested_field_assignment_parses_as_a_field_chain_target() {
         expect![[r#"
             SOURCE_FILE@0..29
               STATIC_ITEM@0..29
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -6168,7 +6301,8 @@ fn field_chain_rooted_at_a_call_is_rejected() {
         expect![[r#"
             SOURCE_FILE@0..29
               STATIC_ITEM@0..29
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "g"
@@ -6216,7 +6350,8 @@ fn generic_fn_binder_type_params_only() {
         expect![[r#"
             SOURCE_FILE@0..37
               STATIC_ITEM@0..37
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..9
                   IDENT@7..9 "id"
@@ -6272,7 +6407,8 @@ fn generic_fn_binder_const_param_only() {
         expect![[r#"
             SOURCE_FILE@0..52
               STATIC_ITEM@0..52
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..11
                   IDENT@7..11 "make"
@@ -6326,7 +6462,8 @@ fn generic_fn_binder_mixed_with_trailing_comma() {
         expect![[r#"
             SOURCE_FILE@0..53
               STATIC_ITEM@0..53
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -6395,7 +6532,8 @@ fn generic_fn_binder_on_const_fn() {
         expect![[r#"
             SOURCE_FILE@0..55
               STATIC_ITEM@0..55
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -6451,7 +6589,8 @@ fn generic_fn_binder_unclosed_angle_recovers() {
         expect![[r#"
             SOURCE_FILE@0..34
               STATIC_ITEM@0..34
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -6493,7 +6632,8 @@ fn generic_fn_binder_missing_param_name_recovers() {
         expect![[r#"
             SOURCE_FILE@0..51
               STATIC_ITEM@0..51
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -6550,7 +6690,8 @@ fn generic_fn_binder_const_param_without_type_recovers() {
         expect![[r#"
             SOURCE_FILE@0..42
               STATIC_ITEM@0..42
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -6602,7 +6743,8 @@ fn turbofish_call_expr() {
         expect![[r#"
             SOURCE_FILE@0..28
               STATIC_ITEM@0..28
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -6641,7 +6783,8 @@ fn turbofish_hole_arg() {
         expect![[r#"
             SOURCE_FILE@0..20
               STATIC_ITEM@0..20
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -6674,7 +6817,8 @@ fn turbofish_const_prefixed_arg() {
         expect![[r#"
             SOURCE_FILE@0..28
               STATIC_ITEM@0..28
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -6712,7 +6856,8 @@ fn turbofish_bare_braced_arg_no_longer_parses() {
         expect![[r#"
             SOURCE_FILE@0..28
               STATIC_ITEM@0..28
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -6759,7 +6904,8 @@ fn turbofish_const_braced_arg() {
         expect![[r#"
             SOURCE_FILE@0..34
               STATIC_ITEM@0..34
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -6810,7 +6956,8 @@ fn turbofish_const_additive_arg_no_longer_parses() {
         expect![[r#"
             SOURCE_FILE@0..30
               STATIC_ITEM@0..30
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -6858,7 +7005,8 @@ fn turbofish_const_paren_escape_no_longer_parses() {
         expect![[r#"
             SOURCE_FILE@0..32
               STATIC_ITEM@0..25
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -6919,7 +7067,8 @@ fn named_self_qualified_member_path() {
         expect![[r#"
             SOURCE_FILE@0..35
               STATIC_ITEM@0..35
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -6966,7 +7115,8 @@ fn named_arg_composes_with_positional_args() {
         expect![[r#"
             SOURCE_FILE@0..41
               STATIC_ITEM@0..41
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -7019,7 +7169,8 @@ fn qualified_member_path_with_type_args() {
         expect![[r#"
             SOURCE_FILE@0..35
               STATIC_ITEM@0..35
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -7059,7 +7210,8 @@ fn turbofish_in_type_position() {
         expect![[r#"
             SOURCE_FILE@0..28
               STATIC_ITEM@0..28
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -7094,7 +7246,8 @@ fn turbofish_with_spaces() {
         expect![[r#"
             SOURCE_FILE@0..27
               STATIC_ITEM@0..27
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -7133,7 +7286,8 @@ fn comparison_operator_still_parses_after_generics() {
         expect![[r#"
             SOURCE_FILE@0..17
               STATIC_ITEM@0..17
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "b"
@@ -7164,7 +7318,8 @@ fn variant_path_still_parses_after_generics() {
         expect![[r#"
             SOURCE_FILE@0..25
               STATIC_ITEM@0..25
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "s"
@@ -7202,7 +7357,8 @@ fn member_own_turbofish_parses_as_the_segments_own_list() {
         expect![[r#"
             SOURCE_FILE@0..43
               STATIC_ITEM@0..43
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "s"
@@ -7258,7 +7414,8 @@ fn variant_own_turbofish_parses_the_same_shape() {
         expect![[r#"
             SOURCE_FILE@0..34
               STATIC_ITEM@0..34
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "s"
@@ -7298,7 +7455,8 @@ fn owner_and_member_turbofish_are_separate_nodes() {
         expect![[r#"
             SOURCE_FILE@0..37
               STATIC_ITEM@0..37
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "s"
@@ -7342,7 +7500,8 @@ fn named_self_path_carries_a_member_turbofish_too() {
         expect![[r#"
             SOURCE_FILE@0..44
               STATIC_ITEM@0..44
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -7477,7 +7636,8 @@ fn member_turbofish_on_a_dot_call() {
         expect![[r#"
             SOURCE_FILE@0..51
               STATIC_ITEM@0..51
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "s"
@@ -7584,46 +7744,47 @@ fn bare_angle_return_type_parses_as_a_turbofish() {
     check(
         "static f = fn () -> Option<usize> { 0 };",
         expect![[r#"
-        SOURCE_FILE@0..40
-          STATIC_ITEM@0..40
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "f"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FN_LITERAL@11..39
-              FN_KW@11..13 "fn"
-              WHITESPACE@13..14 " "
-              PARAM_LIST@14..16
-                L_PAREN@14..15 "("
-                R_PAREN@15..16 ")"
-              WHITESPACE@16..17 " "
-              RET_TYPE@17..33
-                THIN_ARROW@17..19 "->"
-                WHITESPACE@19..20 " "
-                PATH_TYPE@20..33
-                  NAME_REF@20..26
-                    IDENT@20..26 "Option"
-                  GENERIC_ARG_LIST@26..33
-                    L_ANGLE@26..27 "<"
-                    TYPE_ARG@27..32
-                      PATH_TYPE@27..32
-                        NAME_REF@27..32
-                          IDENT@27..32 "usize"
-                    R_ANGLE@32..33 ">"
-              WHITESPACE@33..34 " "
-              BLOCK_EXPR@34..39
-                L_BRACE@34..35 "{"
-                WHITESPACE@35..36 " "
-                LITERAL@36..37
-                  INT_NUMBER@36..37 "0"
-                WHITESPACE@37..38 " "
-                R_BRACE@38..39 "}"
-            SEMICOLON@39..40 ";"
-        error 20..33: generic arguments use the turbofish: write `Option::<...>`
-    "#]],
+            SOURCE_FILE@0..40
+              STATIC_ITEM@0..40
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..39
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  PARAM_LIST@14..16
+                    L_PAREN@14..15 "("
+                    R_PAREN@15..16 ")"
+                  WHITESPACE@16..17 " "
+                  RET_TYPE@17..33
+                    THIN_ARROW@17..19 "->"
+                    WHITESPACE@19..20 " "
+                    PATH_TYPE@20..33
+                      NAME_REF@20..26
+                        IDENT@20..26 "Option"
+                      GENERIC_ARG_LIST@26..33
+                        L_ANGLE@26..27 "<"
+                        TYPE_ARG@27..32
+                          PATH_TYPE@27..32
+                            NAME_REF@27..32
+                              IDENT@27..32 "usize"
+                        R_ANGLE@32..33 ">"
+                  WHITESPACE@33..34 " "
+                  BLOCK_EXPR@34..39
+                    L_BRACE@34..35 "{"
+                    WHITESPACE@35..36 " "
+                    LITERAL@36..37
+                      INT_NUMBER@36..37 "0"
+                    WHITESPACE@37..38 " "
+                    R_BRACE@38..39 "}"
+                SEMICOLON@39..40 ";"
+            error 20..33: generic arguments use the turbofish: write `Option::<...>`
+        "#]],
     );
 }
 
@@ -7681,41 +7842,42 @@ fn bare_angle_nested_generics_two_independent_hints() {
     check(
         "static x: Vec<Vec<T>> = y;",
         expect![[r#"
-        SOURCE_FILE@0..26
-          STATIC_ITEM@0..26
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "x"
-            COLON@8..9 ":"
-            WHITESPACE@9..10 " "
-            PATH_TYPE@10..21
-              NAME_REF@10..13
-                IDENT@10..13 "Vec"
-              GENERIC_ARG_LIST@13..21
-                L_ANGLE@13..14 "<"
-                TYPE_ARG@14..20
-                  PATH_TYPE@14..20
-                    NAME_REF@14..17
-                      IDENT@14..17 "Vec"
-                    GENERIC_ARG_LIST@17..20
-                      L_ANGLE@17..18 "<"
-                      TYPE_ARG@18..19
-                        PATH_TYPE@18..19
-                          NAME_REF@18..19
-                            IDENT@18..19 "T"
-                      R_ANGLE@19..20 ">"
-                R_ANGLE@20..21 ">"
-            WHITESPACE@21..22 " "
-            EQ@22..23 "="
-            WHITESPACE@23..24 " "
-            PATH_EXPR@24..25
-              NAME_REF@24..25
-                IDENT@24..25 "y"
-            SEMICOLON@25..26 ";"
-        error 10..21: generic arguments use the turbofish: write `Vec::<...>`
-        error 14..20: generic arguments use the turbofish: write `Vec::<...>`
-    "#]],
+            SOURCE_FILE@0..26
+              STATIC_ITEM@0..26
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                COLON@8..9 ":"
+                WHITESPACE@9..10 " "
+                PATH_TYPE@10..21
+                  NAME_REF@10..13
+                    IDENT@10..13 "Vec"
+                  GENERIC_ARG_LIST@13..21
+                    L_ANGLE@13..14 "<"
+                    TYPE_ARG@14..20
+                      PATH_TYPE@14..20
+                        NAME_REF@14..17
+                          IDENT@14..17 "Vec"
+                        GENERIC_ARG_LIST@17..20
+                          L_ANGLE@17..18 "<"
+                          TYPE_ARG@18..19
+                            PATH_TYPE@18..19
+                              NAME_REF@18..19
+                                IDENT@18..19 "T"
+                          R_ANGLE@19..20 ">"
+                    R_ANGLE@20..21 ">"
+                WHITESPACE@21..22 " "
+                EQ@22..23 "="
+                WHITESPACE@23..24 " "
+                PATH_EXPR@24..25
+                  NAME_REF@24..25
+                    IDENT@24..25 "y"
+                SEMICOLON@25..26 ";"
+            error 10..21: generic arguments use the turbofish: write `Vec::<...>`
+            error 14..20: generic arguments use the turbofish: write `Vec::<...>`
+        "#]],
     );
 }
 
@@ -7727,34 +7889,35 @@ fn bare_angle_expr_call_heuristic_fires() {
     check(
         "static x = f<usize>(3);",
         expect![[r#"
-        SOURCE_FILE@0..23
-          STATIC_ITEM@0..23
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "x"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            CALL_EXPR@11..22
-              PATH_EXPR@11..19
-                NAME_REF@11..12
-                  IDENT@11..12 "f"
-                GENERIC_ARG_LIST@12..19
-                  L_ANGLE@12..13 "<"
-                  TYPE_ARG@13..18
-                    PATH_TYPE@13..18
-                      NAME_REF@13..18
-                        IDENT@13..18 "usize"
-                  R_ANGLE@18..19 ">"
-              ARG_LIST@19..22
-                L_PAREN@19..20 "("
-                LITERAL@20..21
-                  INT_NUMBER@20..21 "3"
-                R_PAREN@21..22 ")"
-            SEMICOLON@22..23 ";"
-        error 11..19: generic arguments use the turbofish: write `f::<...>`
-    "#]],
+            SOURCE_FILE@0..23
+              STATIC_ITEM@0..23
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                CALL_EXPR@11..22
+                  PATH_EXPR@11..19
+                    NAME_REF@11..12
+                      IDENT@11..12 "f"
+                    GENERIC_ARG_LIST@12..19
+                      L_ANGLE@12..13 "<"
+                      TYPE_ARG@13..18
+                        PATH_TYPE@13..18
+                          NAME_REF@13..18
+                            IDENT@13..18 "usize"
+                      R_ANGLE@18..19 ">"
+                  ARG_LIST@19..22
+                    L_PAREN@19..20 "("
+                    LITERAL@20..21
+                      INT_NUMBER@20..21 "3"
+                    R_PAREN@21..22 ")"
+                SEMICOLON@22..23 ";"
+            error 11..19: generic arguments use the turbofish: write `f::<...>`
+        "#]],
     );
 }
 
@@ -7767,31 +7930,32 @@ fn bare_angle_expr_assoc_heuristic_keeps_the_segment() {
     check(
         "static x = f<usize>::assoc;",
         expect![[r#"
-        SOURCE_FILE@0..27
-          STATIC_ITEM@0..27
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "x"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            PATH_EXPR@11..26
-              NAME_REF@11..12
-                IDENT@11..12 "f"
-              GENERIC_ARG_LIST@12..19
-                L_ANGLE@12..13 "<"
-                TYPE_ARG@13..18
-                  PATH_TYPE@13..18
-                    NAME_REF@13..18
-                      IDENT@13..18 "usize"
-                R_ANGLE@18..19 ">"
-              COLON2@19..21 "::"
-              NAME_REF@21..26
-                IDENT@21..26 "assoc"
-            SEMICOLON@26..27 ";"
-        error 11..19: generic arguments use the turbofish: write `f::<...>`
-    "#]],
+            SOURCE_FILE@0..27
+              STATIC_ITEM@0..27
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                PATH_EXPR@11..26
+                  NAME_REF@11..12
+                    IDENT@11..12 "f"
+                  GENERIC_ARG_LIST@12..19
+                    L_ANGLE@12..13 "<"
+                    TYPE_ARG@13..18
+                      PATH_TYPE@13..18
+                        NAME_REF@13..18
+                          IDENT@13..18 "usize"
+                    R_ANGLE@18..19 ">"
+                  COLON2@19..21 "::"
+                  NAME_REF@21..26
+                    IDENT@21..26 "assoc"
+                SEMICOLON@26..27 ";"
+            error 11..19: generic arguments use the turbofish: write `f::<...>`
+        "#]],
     );
 }
 
@@ -7803,49 +7967,50 @@ fn bare_angle_comparison_untouched() {
     check(
         "static x = fn { let y = a < b; y };",
         expect![[r#"
-        SOURCE_FILE@0..35
-          STATIC_ITEM@0..35
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "x"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FN_LITERAL@11..34
-              FN_KW@11..13 "fn"
-              WHITESPACE@13..14 " "
-              BLOCK_EXPR@14..34
-                L_BRACE@14..15 "{"
-                WHITESPACE@15..16 " "
-                LET_STMT@16..30
-                  LET_KW@16..19 "let"
-                  WHITESPACE@19..20 " "
-                  BIND_PAT@20..21
-                    NAME@20..21
-                      IDENT@20..21 "y"
-                  WHITESPACE@21..22 " "
-                  EQ@22..23 "="
-                  WHITESPACE@23..24 " "
-                  BIN_EXPR@24..29
-                    PATH_EXPR@24..25
-                      NAME_REF@24..25
-                        IDENT@24..25 "a"
-                    WHITESPACE@25..26 " "
-                    L_ANGLE@26..27 "<"
-                    WHITESPACE@27..28 " "
-                    PATH_EXPR@28..29
-                      NAME_REF@28..29
-                        IDENT@28..29 "b"
-                  SEMICOLON@29..30 ";"
-                WHITESPACE@30..31 " "
-                PATH_EXPR@31..32
-                  NAME_REF@31..32
-                    IDENT@31..32 "y"
-                WHITESPACE@32..33 " "
-                R_BRACE@33..34 "}"
-            SEMICOLON@34..35 ";"
-    "#]],
+            SOURCE_FILE@0..35
+              STATIC_ITEM@0..35
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..34
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..34
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..30
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      BIND_PAT@20..21
+                        NAME@20..21
+                          IDENT@20..21 "y"
+                      WHITESPACE@21..22 " "
+                      EQ@22..23 "="
+                      WHITESPACE@23..24 " "
+                      BIN_EXPR@24..29
+                        PATH_EXPR@24..25
+                          NAME_REF@24..25
+                            IDENT@24..25 "a"
+                        WHITESPACE@25..26 " "
+                        L_ANGLE@26..27 "<"
+                        WHITESPACE@27..28 " "
+                        PATH_EXPR@28..29
+                          NAME_REF@28..29
+                            IDENT@28..29 "b"
+                      SEMICOLON@29..30 ";"
+                    WHITESPACE@30..31 " "
+                    PATH_EXPR@31..32
+                      NAME_REF@31..32
+                        IDENT@31..32 "y"
+                    WHITESPACE@32..33 " "
+                    R_BRACE@33..34 "}"
+                SEMICOLON@34..35 ";"
+        "#]],
     );
 }
 
@@ -7857,63 +8022,64 @@ fn bare_angle_call_comparison_untouched() {
     check(
         "static x = fn { let z = f(x) < g(y); z };",
         expect![[r#"
-        SOURCE_FILE@0..41
-          STATIC_ITEM@0..41
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "x"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FN_LITERAL@11..40
-              FN_KW@11..13 "fn"
-              WHITESPACE@13..14 " "
-              BLOCK_EXPR@14..40
-                L_BRACE@14..15 "{"
-                WHITESPACE@15..16 " "
-                LET_STMT@16..36
-                  LET_KW@16..19 "let"
-                  WHITESPACE@19..20 " "
-                  BIND_PAT@20..21
-                    NAME@20..21
-                      IDENT@20..21 "z"
-                  WHITESPACE@21..22 " "
-                  EQ@22..23 "="
-                  WHITESPACE@23..24 " "
-                  BIN_EXPR@24..35
-                    CALL_EXPR@24..28
-                      PATH_EXPR@24..25
-                        NAME_REF@24..25
-                          IDENT@24..25 "f"
-                      ARG_LIST@25..28
-                        L_PAREN@25..26 "("
-                        PATH_EXPR@26..27
-                          NAME_REF@26..27
-                            IDENT@26..27 "x"
-                        R_PAREN@27..28 ")"
-                    WHITESPACE@28..29 " "
-                    L_ANGLE@29..30 "<"
-                    WHITESPACE@30..31 " "
-                    CALL_EXPR@31..35
-                      PATH_EXPR@31..32
-                        NAME_REF@31..32
-                          IDENT@31..32 "g"
-                      ARG_LIST@32..35
-                        L_PAREN@32..33 "("
-                        PATH_EXPR@33..34
-                          NAME_REF@33..34
-                            IDENT@33..34 "y"
-                        R_PAREN@34..35 ")"
-                  SEMICOLON@35..36 ";"
-                WHITESPACE@36..37 " "
-                PATH_EXPR@37..38
-                  NAME_REF@37..38
-                    IDENT@37..38 "z"
-                WHITESPACE@38..39 " "
-                R_BRACE@39..40 "}"
-            SEMICOLON@40..41 ";"
-    "#]],
+            SOURCE_FILE@0..41
+              STATIC_ITEM@0..41
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..40
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..40
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..36
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      BIND_PAT@20..21
+                        NAME@20..21
+                          IDENT@20..21 "z"
+                      WHITESPACE@21..22 " "
+                      EQ@22..23 "="
+                      WHITESPACE@23..24 " "
+                      BIN_EXPR@24..35
+                        CALL_EXPR@24..28
+                          PATH_EXPR@24..25
+                            NAME_REF@24..25
+                              IDENT@24..25 "f"
+                          ARG_LIST@25..28
+                            L_PAREN@25..26 "("
+                            PATH_EXPR@26..27
+                              NAME_REF@26..27
+                                IDENT@26..27 "x"
+                            R_PAREN@27..28 ")"
+                        WHITESPACE@28..29 " "
+                        L_ANGLE@29..30 "<"
+                        WHITESPACE@30..31 " "
+                        CALL_EXPR@31..35
+                          PATH_EXPR@31..32
+                            NAME_REF@31..32
+                              IDENT@31..32 "g"
+                          ARG_LIST@32..35
+                            L_PAREN@32..33 "("
+                            PATH_EXPR@33..34
+                              NAME_REF@33..34
+                                IDENT@33..34 "y"
+                            R_PAREN@34..35 ")"
+                      SEMICOLON@35..36 ";"
+                    WHITESPACE@36..37 " "
+                    PATH_EXPR@37..38
+                      NAME_REF@37..38
+                        IDENT@37..38 "z"
+                    WHITESPACE@38..39 " "
+                    R_BRACE@39..40 "}"
+                SEMICOLON@40..41 ";"
+        "#]],
     );
 }
 
@@ -7926,66 +8092,67 @@ fn bare_angle_comparison_chain_untouched() {
     check(
         "static x = fn { let z = a < b == c > (d); z };",
         expect![[r#"
-        SOURCE_FILE@0..46
-          STATIC_ITEM@0..46
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "x"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FN_LITERAL@11..45
-              FN_KW@11..13 "fn"
-              WHITESPACE@13..14 " "
-              BLOCK_EXPR@14..45
-                L_BRACE@14..15 "{"
-                WHITESPACE@15..16 " "
-                LET_STMT@16..41
-                  LET_KW@16..19 "let"
-                  WHITESPACE@19..20 " "
-                  BIND_PAT@20..21
-                    NAME@20..21
-                      IDENT@20..21 "z"
-                  WHITESPACE@21..22 " "
-                  EQ@22..23 "="
-                  WHITESPACE@23..24 " "
-                  BIN_EXPR@24..40
-                    BIN_EXPR@24..34
-                      BIN_EXPR@24..29
-                        PATH_EXPR@24..25
-                          NAME_REF@24..25
-                            IDENT@24..25 "a"
-                        WHITESPACE@25..26 " "
-                        L_ANGLE@26..27 "<"
-                        WHITESPACE@27..28 " "
-                        PATH_EXPR@28..29
-                          NAME_REF@28..29
-                            IDENT@28..29 "b"
-                      WHITESPACE@29..30 " "
-                      EQ2@30..32 "=="
-                      WHITESPACE@32..33 " "
-                      PATH_EXPR@33..34
-                        NAME_REF@33..34
-                          IDENT@33..34 "c"
-                    WHITESPACE@34..35 " "
-                    R_ANGLE@35..36 ">"
-                    WHITESPACE@36..37 " "
-                    PAREN_EXPR@37..40
-                      L_PAREN@37..38 "("
-                      PATH_EXPR@38..39
-                        NAME_REF@38..39
-                          IDENT@38..39 "d"
-                      R_PAREN@39..40 ")"
-                  SEMICOLON@40..41 ";"
-                WHITESPACE@41..42 " "
-                PATH_EXPR@42..43
-                  NAME_REF@42..43
-                    IDENT@42..43 "z"
-                WHITESPACE@43..44 " "
-                R_BRACE@44..45 "}"
-            SEMICOLON@45..46 ";"
-    "#]],
+            SOURCE_FILE@0..46
+              STATIC_ITEM@0..46
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..45
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..45
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..41
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      BIND_PAT@20..21
+                        NAME@20..21
+                          IDENT@20..21 "z"
+                      WHITESPACE@21..22 " "
+                      EQ@22..23 "="
+                      WHITESPACE@23..24 " "
+                      BIN_EXPR@24..40
+                        BIN_EXPR@24..34
+                          BIN_EXPR@24..29
+                            PATH_EXPR@24..25
+                              NAME_REF@24..25
+                                IDENT@24..25 "a"
+                            WHITESPACE@25..26 " "
+                            L_ANGLE@26..27 "<"
+                            WHITESPACE@27..28 " "
+                            PATH_EXPR@28..29
+                              NAME_REF@28..29
+                                IDENT@28..29 "b"
+                          WHITESPACE@29..30 " "
+                          EQ2@30..32 "=="
+                          WHITESPACE@32..33 " "
+                          PATH_EXPR@33..34
+                            NAME_REF@33..34
+                              IDENT@33..34 "c"
+                        WHITESPACE@34..35 " "
+                        R_ANGLE@35..36 ">"
+                        WHITESPACE@36..37 " "
+                        PAREN_EXPR@37..40
+                          L_PAREN@37..38 "("
+                          PATH_EXPR@38..39
+                            NAME_REF@38..39
+                              IDENT@38..39 "d"
+                          R_PAREN@39..40 ")"
+                      SEMICOLON@40..41 ";"
+                    WHITESPACE@41..42 " "
+                    PATH_EXPR@42..43
+                      NAME_REF@42..43
+                        IDENT@42..43 "z"
+                    WHITESPACE@43..44 " "
+                    R_BRACE@44..45 "}"
+                SEMICOLON@45..46 ";"
+        "#]],
     );
 }
 
@@ -8190,7 +8357,8 @@ fn generic_binder_on_struct_literal() {
         expect![[r#"
             SOURCE_FILE@0..39
               TYPE_ITEM@0..39
-                TYPE_KW@0..4 "type"
+                ITEM_HEAD@0..4
+                  TYPE_KW@0..4 "type"
                 WHITESPACE@4..5 " "
                 NAME@5..9
                   IDENT@5..9 "Pair"
@@ -8241,7 +8409,8 @@ fn generic_binder_on_enum_literal() {
         expect![[r#"
             SOURCE_FILE@0..42
               TYPE_ITEM@0..42
-                TYPE_KW@0..4 "type"
+                ITEM_HEAD@0..4
+                  TYPE_KW@0..4 "type"
                 WHITESPACE@4..5 " "
                 NAME@5..11
                   IDENT@5..11 "Option"
@@ -8287,7 +8456,8 @@ fn generic_binder_with_const_param_on_struct_literal() {
         expect![[r#"
             SOURCE_FILE@0..48
               TYPE_ITEM@0..48
-                TYPE_KW@0..4 "type"
+                ITEM_HEAD@0..4
+                  TYPE_KW@0..4 "type"
                 WHITESPACE@4..5 " "
                 NAME@5..8
                   IDENT@5..8 "Buf"
@@ -8340,7 +8510,8 @@ fn generic_enum_variant_path_expr() {
         expect![[r#"
             SOURCE_FILE@0..36
               STATIC_ITEM@0..36
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -8379,7 +8550,8 @@ fn construction_turbofish_expr() {
         expect![[r#"
             SOURCE_FILE@0..50
               STATIC_ITEM@0..50
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "p"
@@ -8438,7 +8610,8 @@ fn raw_pointer_types_parse() {
         expect![[r#"
             SOURCE_FILE@0..72
               STATIC_ITEM@0..72
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -8512,39 +8685,40 @@ fn raw_pointer_type_in_generic_argument_parses() {
     check(
         "static x: Pair::<usize.&raw mut> = y;",
         expect![[r#"
-        SOURCE_FILE@0..37
-          STATIC_ITEM@0..37
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "x"
-            COLON@8..9 ":"
-            WHITESPACE@9..10 " "
-            PATH_TYPE@10..32
-              NAME_REF@10..14
-                IDENT@10..14 "Pair"
-              COLON2@14..16 "::"
-              GENERIC_ARG_LIST@16..32
-                L_ANGLE@16..17 "<"
-                TYPE_ARG@17..31
-                  RAW_PTR_TYPE@17..31
-                    PATH_TYPE@17..22
-                      NAME_REF@17..22
-                        IDENT@17..22 "usize"
-                    DOT@22..23 "."
-                    AMP@23..24 "&"
-                    RAW_KW@24..27 "raw"
-                    WHITESPACE@27..28 " "
-                    MUT_KW@28..31 "mut"
-                R_ANGLE@31..32 ">"
-            WHITESPACE@32..33 " "
-            EQ@33..34 "="
-            WHITESPACE@34..35 " "
-            PATH_EXPR@35..36
-              NAME_REF@35..36
-                IDENT@35..36 "y"
-            SEMICOLON@36..37 ";"
-    "#]],
+            SOURCE_FILE@0..37
+              STATIC_ITEM@0..37
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                COLON@8..9 ":"
+                WHITESPACE@9..10 " "
+                PATH_TYPE@10..32
+                  NAME_REF@10..14
+                    IDENT@10..14 "Pair"
+                  COLON2@14..16 "::"
+                  GENERIC_ARG_LIST@16..32
+                    L_ANGLE@16..17 "<"
+                    TYPE_ARG@17..31
+                      RAW_PTR_TYPE@17..31
+                        PATH_TYPE@17..22
+                          NAME_REF@17..22
+                            IDENT@17..22 "usize"
+                        DOT@22..23 "."
+                        AMP@23..24 "&"
+                        RAW_KW@24..27 "raw"
+                        WHITESPACE@27..28 " "
+                        MUT_KW@28..31 "mut"
+                    R_ANGLE@31..32 ">"
+                WHITESPACE@32..33 " "
+                EQ@33..34 "="
+                WHITESPACE@34..35 " "
+                PATH_EXPR@35..36
+                  NAME_REF@35..36
+                    IDENT@35..36 "y"
+                SEMICOLON@36..37 ";"
+        "#]],
     );
 }
 
@@ -8553,39 +8727,40 @@ fn raw_pointer_type_in_array_element_parses() {
     check(
         "static x: [usize.&raw mut; 2] = y;",
         expect![[r#"
-        SOURCE_FILE@0..34
-          STATIC_ITEM@0..34
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "x"
-            COLON@8..9 ":"
-            WHITESPACE@9..10 " "
-            ARRAY_TYPE@10..29
-              L_BRACKET@10..11 "["
-              RAW_PTR_TYPE@11..25
-                PATH_TYPE@11..16
-                  NAME_REF@11..16
-                    IDENT@11..16 "usize"
-                DOT@16..17 "."
-                AMP@17..18 "&"
-                RAW_KW@18..21 "raw"
-                WHITESPACE@21..22 " "
-                MUT_KW@22..25 "mut"
-              SEMICOLON@25..26 ";"
-              WHITESPACE@26..27 " "
-              CONST_ARG@27..28
-                LITERAL@27..28
-                  INT_NUMBER@27..28 "2"
-              R_BRACKET@28..29 "]"
-            WHITESPACE@29..30 " "
-            EQ@30..31 "="
-            WHITESPACE@31..32 " "
-            PATH_EXPR@32..33
-              NAME_REF@32..33
-                IDENT@32..33 "y"
-            SEMICOLON@33..34 ";"
-    "#]],
+            SOURCE_FILE@0..34
+              STATIC_ITEM@0..34
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                COLON@8..9 ":"
+                WHITESPACE@9..10 " "
+                ARRAY_TYPE@10..29
+                  L_BRACKET@10..11 "["
+                  RAW_PTR_TYPE@11..25
+                    PATH_TYPE@11..16
+                      NAME_REF@11..16
+                        IDENT@11..16 "usize"
+                    DOT@16..17 "."
+                    AMP@17..18 "&"
+                    RAW_KW@18..21 "raw"
+                    WHITESPACE@21..22 " "
+                    MUT_KW@22..25 "mut"
+                  SEMICOLON@25..26 ";"
+                  WHITESPACE@26..27 " "
+                  CONST_ARG@27..28
+                    LITERAL@27..28
+                      INT_NUMBER@27..28 "2"
+                  R_BRACKET@28..29 "]"
+                WHITESPACE@29..30 " "
+                EQ@30..31 "="
+                WHITESPACE@31..32 " "
+                PATH_EXPR@32..33
+                  NAME_REF@32..33
+                    IDENT@32..33 "y"
+                SEMICOLON@33..34 ";"
+        "#]],
     );
 }
 
@@ -8596,7 +8771,8 @@ fn addr_of_both_flavors_parse() {
         expect![[r#"
             SOURCE_FILE@0..56
               STATIC_ITEM@0..56
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -8664,7 +8840,8 @@ fn addr_of_binds_tighter_than_comparison() {
         expect![[r#"
             SOURCE_FILE@0..35
               STATIC_ITEM@0..35
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -8709,7 +8886,8 @@ fn postfix_deref_chains_in_larger_expressions() {
         expect![[r#"
             SOURCE_FILE@0..36
               STATIC_ITEM@0..36
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -8763,7 +8941,8 @@ fn deref_write_target_parses() {
         expect![[r#"
             SOURCE_FILE@0..27
               STATIC_ITEM@0..27
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -8803,7 +8982,8 @@ fn deref_projected_write_target_parses() {
         expect![[r#"
             SOURCE_FILE@0..29
               STATIC_ITEM@0..29
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -8847,7 +9027,8 @@ fn addr_of_element_and_through_deref_places_parse() {
         expect![[r#"
             SOURCE_FILE@0..50
               STATIC_ITEM@0..50
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -8917,7 +9098,8 @@ fn postfix_raw_borrow_chains_through_deref() {
         expect![[r#"
             SOURCE_FILE@0..49
               STATIC_ITEM@0..49
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -8978,34 +9160,35 @@ fn postfix_raw_borrow_precedence_vs_unary_minus() {
     check(
         "static f = fn { -x.&raw };",
         expect![[r#"
-        SOURCE_FILE@0..26
-          STATIC_ITEM@0..26
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "f"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FN_LITERAL@11..25
-              FN_KW@11..13 "fn"
-              WHITESPACE@13..14 " "
-              BLOCK_EXPR@14..25
-                L_BRACE@14..15 "{"
-                WHITESPACE@15..16 " "
-                NEG_EXPR@16..23
-                  MINUS@16..17 "-"
-                  ADDR_OF_EXPR@17..23
-                    PATH_EXPR@17..18
-                      NAME_REF@17..18
-                        IDENT@17..18 "x"
-                    DOT@18..19 "."
-                    AMP@19..20 "&"
-                    RAW_KW@20..23 "raw"
-                WHITESPACE@23..24 " "
-                R_BRACE@24..25 "}"
-            SEMICOLON@25..26 ";"
-    "#]],
+            SOURCE_FILE@0..26
+              STATIC_ITEM@0..26
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..25
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..25
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    NEG_EXPR@16..23
+                      MINUS@16..17 "-"
+                      ADDR_OF_EXPR@17..23
+                        PATH_EXPR@17..18
+                          NAME_REF@17..18
+                            IDENT@17..18 "x"
+                        DOT@18..19 "."
+                        AMP@19..20 "&"
+                        RAW_KW@20..23 "raw"
+                    WHITESPACE@23..24 " "
+                    R_BRACE@24..25 "}"
+                SEMICOLON@25..26 ";"
+        "#]],
     );
 }
 
@@ -9018,7 +9201,8 @@ fn retired_prefix_raw_borrow_expr_migration() {
         expect![[r#"
             SOURCE_FILE@0..56
               STATIC_ITEM@0..56
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -9088,7 +9272,8 @@ fn retired_prefix_raw_ptr_type_migration() {
         expect![[r#"
             SOURCE_FILE@0..43
               STATIC_ITEM@0..43
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -9144,7 +9329,8 @@ fn retired_prefix_borrow_expr_migration() {
         expect![[r#"
             SOURCE_FILE@0..46
               STATIC_ITEM@0..46
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -9234,7 +9420,8 @@ fn retired_prefix_borrow_type_migration() {
         expect![[r#"
             SOURCE_FILE@0..46
               STATIC_ITEM@0..46
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -9566,7 +9753,8 @@ fn bare_amp_between_expressions_is_not_a_binary_operator() {
         expect![[r#"
             SOURCE_FILE@0..25
               STATIC_ITEM@0..25
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -9616,7 +9804,8 @@ fn a_bare_quote_is_an_unterminated_character_literal() {
         expect![[r#"
             SOURCE_FILE@0..22
               STATIC_ITEM@0..22
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -9675,7 +9864,8 @@ fn character_literals_lex_as_one_token_each() {
         expect![[r#"
             SOURCE_FILE@0..73
               STATIC_ITEM@0..73
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -9768,7 +9958,8 @@ fn a_character_literal_is_a_match_pattern() {
         expect![[r#"
             SOURCE_FILE@0..52
               STATIC_ITEM@0..52
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -9948,7 +10139,8 @@ fn safe_borrow_expr() {
         expect![[r#"
             SOURCE_FILE@0..47
               STATIC_ITEM@0..47
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -10009,7 +10201,8 @@ fn safe_borrow_type() {
         expect![[r#"
             SOURCE_FILE@0..63
               STATIC_ITEM@0..63
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -10084,7 +10277,8 @@ fn unsafe_block_parses() {
         expect![[r#"
             SOURCE_FILE@0..33
               STATIC_ITEM@0..33
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -10125,7 +10319,8 @@ fn unsafe_fn_is_reserved() {
         expect![[r#"
             SOURCE_FILE@0..26
               STATIC_ITEM@0..26
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -10334,7 +10529,8 @@ fn a_block_comment_does_not_start_inside_a_string() {
         expect![[r#"
             SOURCE_FILE@0..16
               STATIC_ITEM@0..16
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -10355,7 +10551,8 @@ fn a_block_comment_between_tokens_is_trivia() {
         expect![[r#"
             SOURCE_FILE@0..42
               STATIC_ITEM@0..42
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -10400,7 +10597,8 @@ fn a_block_comment_inside_an_expression_is_trivia() {
         expect![[r#"
             SOURCE_FILE@0..35
               STATIC_ITEM@0..35
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -10439,7 +10637,8 @@ fn array_type_positions() {
         expect![[r#"
             SOURCE_FILE@0..25
               STATIC_ITEM@0..25
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -10474,7 +10673,8 @@ fn array_type_nested() {
         expect![[r#"
             SOURCE_FILE@0..30
               STATIC_ITEM@0..30
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "m"
@@ -10517,7 +10717,8 @@ fn array_type_const_param_length() {
         expect![[r#"
             SOURCE_FILE@0..62
               STATIC_ITEM@0..62
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -10589,7 +10790,8 @@ fn array_type_const_block_length_parses() {
         expect![[r#"
             SOURCE_FILE@0..35
               STATIC_ITEM@0..35
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -10632,7 +10834,8 @@ fn array_type_missing_semicolon() {
         expect![[r#"
             SOURCE_FILE@0..22
               STATIC_ITEM@0..22
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -10663,7 +10866,8 @@ fn array_literal_and_repeat() {
         expect![[r#"
             SOURCE_FILE@0..65
               STATIC_ITEM@0..65
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -10747,7 +10951,8 @@ fn array_literal_trailing_comma() {
         expect![[r#"
             SOURCE_FILE@0..19
               STATIC_ITEM@0..19
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "a"
@@ -10776,7 +10981,8 @@ fn index_chains() {
         expect![[r#"
             SOURCE_FILE@0..39
               STATIC_ITEM@0..39
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -10837,7 +11043,8 @@ fn index_assign_statement() {
         expect![[r#"
             SOURCE_FILE@0..41
               STATIC_ITEM@0..41
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -10900,7 +11107,8 @@ fn unary_minus_parses_as_a_neg_expr() {
         expect![[r#"
             SOURCE_FILE@0..19
               STATIC_ITEM@0..19
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -10931,7 +11139,8 @@ fn unary_minus_binds_tighter_than_binary_operators_but_looser_than_postfix() {
         expect![[r#"
             SOURCE_FILE@0..25
               STATIC_ITEM@0..25
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -10971,7 +11180,8 @@ fn unary_minus_can_carry_a_break_value() {
         expect![[r#"
             SOURCE_FILE@0..35
               STATIC_ITEM@0..35
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -11021,7 +11231,8 @@ type Point = struct { x: usize, y: usize } with {
             SOURCE_FILE@0..120
               WHITESPACE@0..1 "\n"
               TYPE_ITEM@1..119
-                TYPE_KW@1..5 "type"
+                ITEM_HEAD@1..5
+                  TYPE_KW@1..5 "type"
                 WHITESPACE@5..6 " "
                 NAME@6..11
                   IDENT@6..11 "Point"
@@ -11133,7 +11344,8 @@ type Pair = struct::<T> { a: T, b: T } with {
             SOURCE_FILE@0..113
               WHITESPACE@0..1 "\n"
               TYPE_ITEM@1..112
-                TYPE_KW@1..5 "type"
+                ITEM_HEAD@1..5
+                  TYPE_KW@1..5 "type"
                 WHITESPACE@5..6 " "
                 NAME@6..10
                   IDENT@6..10 "Pair"
@@ -11244,7 +11456,8 @@ fn with_chain_semicolon_optional_after_group_brace() {
         expect![[r#"
             SOURCE_FILE@0..101
               TYPE_ITEM@0..87
-                TYPE_KW@0..4 "type"
+                ITEM_HEAD@0..4
+                  TYPE_KW@0..4 "type"
                 WHITESPACE@4..5 " "
                 NAME@5..6
                   IDENT@5..6 "A"
@@ -11328,7 +11541,8 @@ fn with_chain_semicolon_optional_after_group_brace() {
                   R_BRACE@86..87 "}"
               WHITESPACE@87..88 "\n"
               STATIC_ITEM@88..101
-                STATIC_KW@88..94 "static"
+                ITEM_HEAD@88..94
+                  STATIC_KW@88..94 "static"
                 WHITESPACE@94..95 " "
                 NAME@95..96
                   IDENT@95..96 "n"
@@ -11357,7 +11571,8 @@ type Range = struct { at: usize } with {
             SOURCE_FILE@0..144
               WHITESPACE@0..1 "\n"
               TYPE_ITEM@1..143
-                TYPE_KW@1..5 "type"
+                ITEM_HEAD@1..5
+                  TYPE_KW@1..5 "type"
                 WHITESPACE@5..6 " "
                 NAME@6..11
                   IDENT@6..11 "Range"
@@ -11473,7 +11688,8 @@ type A = struct { x: usize } with {
             SOURCE_FILE@0..97
               WHITESPACE@0..1 "\n"
               TYPE_ITEM@1..96
-                TYPE_KW@1..5 "type"
+                ITEM_HEAD@1..5
+                  TYPE_KW@1..5 "type"
                 WHITESPACE@5..6 " "
                 NAME@6..7
                   IDENT@6..7 "A"
@@ -11564,7 +11780,8 @@ type A = struct { x: usize } with {
             SOURCE_FILE@0..148
               WHITESPACE@0..1 "\n"
               TYPE_ITEM@1..147
-                TYPE_KW@1..5 "type"
+                ITEM_HEAD@1..5
+                  TYPE_KW@1..5 "type"
                 WHITESPACE@5..6 " "
                 NAME@6..7
                   IDENT@6..7 "A"
@@ -11703,7 +11920,8 @@ type A = struct { x: usize } with {
             SOURCE_FILE@0..99
               WHITESPACE@0..1 "\n"
               TYPE_ITEM@1..98
-                TYPE_KW@1..5 "type"
+                ITEM_HEAD@1..5
+                  TYPE_KW@1..5 "type"
                 WHITESPACE@5..6 " "
                 NAME@6..7
                   IDENT@6..7 "A"
@@ -11790,7 +12008,8 @@ type A = struct { x: usize } with {
             SOURCE_FILE@0..259
               WHITESPACE@0..1 "\n"
               TYPE_ITEM@1..258
-                TYPE_KW@1..5 "type"
+                ITEM_HEAD@1..5
+                  TYPE_KW@1..5 "type"
                 WHITESPACE@5..6 " "
                 NAME@6..7
                   IDENT@6..7 "A"
@@ -12024,7 +12243,8 @@ with::<U> T: From::<U> {
             SOURCE_FILE@0..271
               WHITESPACE@0..1 "\n"
               TYPE_ITEM@1..270
-                TYPE_KW@1..5 "type"
+                ITEM_HEAD@1..5
+                  TYPE_KW@1..5 "type"
                 WHITESPACE@5..6 " "
                 NAME@6..10
                   IDENT@6..10 "Pool"
@@ -12303,7 +12523,8 @@ fn with_chain_on_static_rejected() {
         expect![[r#"
             SOURCE_FILE@0..68
               STATIC_ITEM@0..68
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "x"
@@ -12380,7 +12601,8 @@ fn impl_self_requires_body() {
         expect![[r#"
             SOURCE_FILE@0..49
               TYPE_ITEM@0..49
-                TYPE_KW@0..4 "type"
+                ITEM_HEAD@0..4
+                  TYPE_KW@0..4 "type"
                 WHITESPACE@4..5 " "
                 NAME@5..6
                   IDENT@5..6 "A"
@@ -12444,7 +12666,8 @@ static after = 3;
             SOURCE_FILE@0..254
               WHITESPACE@0..1 "\n"
               TYPE_ITEM@1..235
-                TYPE_KW@1..5 "type"
+                ITEM_HEAD@1..5
+                  TYPE_KW@1..5 "type"
                 WHITESPACE@5..6 " "
                 NAME@6..7
                   IDENT@6..7 "A"
@@ -12657,7 +12880,8 @@ static after = 3;
                   R_BRACE@234..235 "}"
               WHITESPACE@235..236 "\n"
               STATIC_ITEM@236..253
-                STATIC_KW@236..242 "static"
+                ITEM_HEAD@236..242
+                  STATIC_KW@236..242 "static"
                 WHITESPACE@242..243 " "
                 NAME@243..248
                   IDENT@243..248 "after"
@@ -12685,7 +12909,8 @@ static next = 1;
             SOURCE_FILE@0..112
               WHITESPACE@0..1 "\n"
               TYPE_ITEM@1..94
-                TYPE_KW@1..5 "type"
+                ITEM_HEAD@1..5
+                  TYPE_KW@1..5 "type"
                 WHITESPACE@5..6 " "
                 NAME@6..7
                   IDENT@6..7 "A"
@@ -12765,7 +12990,8 @@ static next = 1;
                       SEMICOLON@93..94 ";"
               WHITESPACE@94..95 "\n"
               STATIC_ITEM@95..111
-                STATIC_KW@95..101 "static"
+                ITEM_HEAD@95..101
+                  STATIC_KW@95..101 "static"
                 WHITESPACE@101..102 " "
                 NAME@102..106
                   IDENT@102..106 "next"
@@ -12790,7 +13016,8 @@ fn record_field_equals_defines() {
         expect![[r#"
             SOURCE_FILE@0..45
               STATIC_ITEM@0..45
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "p"
@@ -12844,7 +13071,8 @@ fn record_field_old_colon_value_is_a_targeted_parse_error() {
         expect![[r#"
             SOURCE_FILE@0..27
               STATIC_ITEM@0..27
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "p"
@@ -12885,7 +13113,8 @@ trait Write = requires {
             SOURCE_FILE@0..68
               WHITESPACE@0..1 "\n"
               TRAIT_ITEM@1..67
-                TRAIT_KW@1..6 "trait"
+                ITEM_HEAD@1..6
+                  TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
                 NAME@7..12
                   IDENT@7..12 "Write"
@@ -12955,7 +13184,8 @@ trait Display = requires {
             SOURCE_FILE@0..76
               WHITESPACE@0..1 "\n"
               TRAIT_ITEM@1..75
-                TRAIT_KW@1..6 "trait"
+                ITEM_HEAD@1..6
+                  TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
                 NAME@7..14
                   IDENT@7..14 "Display"
@@ -13032,7 +13262,8 @@ fn trait_alias_parses_and_is_reserved() {
         expect![[r#"
             SOURCE_FILE@0..28
               TRAIT_ITEM@0..28
-                TRAIT_KW@0..5 "trait"
+                ITEM_HEAD@0..5
+                  TRAIT_KW@0..5 "trait"
                 WHITESPACE@5..6 " "
                 NAME@6..9
                   IDENT@6..9 "Ord"
@@ -13068,7 +13299,8 @@ trait TrustedLen = unsafe requires Self: Iterator { };
             SOURCE_FILE@0..128
               WHITESPACE@0..1 "\n"
               TRAIT_ITEM@1..72
-                TRAIT_KW@1..6 "trait"
+                ITEM_HEAD@1..6
+                  TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
                 NAME@7..12
                   IDENT@7..12 "Alloc"
@@ -13130,7 +13362,8 @@ trait TrustedLen = unsafe requires Self: Iterator { };
                 SEMICOLON@71..72 ";"
               WHITESPACE@72..73 "\n"
               TRAIT_ITEM@73..127
-                TRAIT_KW@73..78 "trait"
+                ITEM_HEAD@73..78
+                  TRAIT_KW@73..78 "trait"
                 WHITESPACE@78..79 " "
                 NAME@79..89
                   IDENT@79..89 "TrustedLen"
@@ -13181,7 +13414,8 @@ trait T = requires {
             SOURCE_FILE@0..140
               WHITESPACE@0..1 "\n"
               TRAIT_ITEM@1..139
-                TRAIT_KW@1..6 "trait"
+                ITEM_HEAD@1..6
+                  TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "T"
@@ -13305,7 +13539,8 @@ fn trait_requirement_param_is_not_mut() {
         expect![[r#"
             SOURCE_FILE@0..53
               TRAIT_ITEM@0..53
-                TRAIT_KW@0..5 "trait"
+                ITEM_HEAD@0..5
+                  TRAIT_KW@0..5 "trait"
                 WHITESPACE@5..6 " "
                 NAME@6..7
                   IDENT@6..7 "T"
@@ -13363,7 +13598,8 @@ fn trait_requirement_param_is_not_a_pattern() {
         expect![[r#"
             SOURCE_FILE@0..56
               TRAIT_ITEM@0..56
-                TRAIT_KW@0..5 "trait"
+                ITEM_HEAD@0..5
+                  TRAIT_KW@0..5 "trait"
                 WHITESPACE@5..6 " "
                 NAME@6..7
                   IDENT@6..7 "T"
@@ -13442,7 +13678,8 @@ fn fn_binder_bounds_parse() {
         expect![[r#"
             SOURCE_FILE@0..53
               STATIC_ITEM@0..53
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -13509,7 +13746,8 @@ fn type_decl_binder_bounds_reserved() {
         expect![[r#"
             SOURCE_FILE@0..39
               TYPE_ITEM@0..39
-                TYPE_KW@0..4 "type"
+                ITEM_HEAD@0..4
+                  TYPE_KW@0..4 "type"
                 WHITESPACE@4..5 " "
                 NAME@5..6
                   IDENT@5..6 "V"
@@ -13558,7 +13796,8 @@ fn bound_shape_rules() {
         expect![[r#"
             SOURCE_FILE@0..74
               STATIC_ITEM@0..74
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -13655,7 +13894,8 @@ type P = struct { a: usize } with {
             SOURCE_FILE@0..158
               WHITESPACE@0..1 "\n"
               TRAIT_ITEM@1..53
-                TRAIT_KW@1..6 "trait"
+                ITEM_HEAD@1..6
+                  TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
                 NAME@7..11
                   IDENT@7..11 "Show"
@@ -13699,7 +13939,8 @@ type P = struct { a: usize } with {
                 SEMICOLON@52..53 ";"
               WHITESPACE@53..54 "\n"
               TYPE_ITEM@54..157
-                TYPE_KW@54..58 "type"
+                ITEM_HEAD@54..58
+                  TYPE_KW@54..58 "type"
                 WHITESPACE@58..59 " "
                 NAME@59..60
                   IDENT@59..60 "P"
@@ -13796,7 +14037,8 @@ trait Show = requires { show: fn(x: Self) -> str; } with {
             SOURCE_FILE@0..130
               WHITESPACE@0..1 "\n"
               TRAIT_ITEM@1..129
-                TRAIT_KW@1..6 "trait"
+                ITEM_HEAD@1..6
+                  TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
                 NAME@7..11
                   IDENT@7..11 "Show"
@@ -13914,7 +14156,8 @@ type P = struct { a: usize } with {
             SOURCE_FILE@0..122
               WHITESPACE@0..1 "\n"
               TRAIT_ITEM@1..67
-                TRAIT_KW@1..6 "trait"
+                ITEM_HEAD@1..6
+                  TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "M"
@@ -13957,7 +14200,8 @@ type P = struct { a: usize } with {
                 SEMICOLON@66..67 ";"
               WHITESPACE@67..68 "\n"
               TYPE_ITEM@68..121
-                TYPE_KW@68..72 "type"
+                ITEM_HEAD@68..72
+                  TYPE_KW@68..72 "type"
                 WHITESPACE@72..73 " "
                 NAME@73..74
                   IDENT@73..74 "P"
@@ -14018,7 +14262,8 @@ type V = struct::<T> { a: T } with {
             SOURCE_FILE@0..159
               WHITESPACE@0..1 "\n"
               TRAIT_ITEM@1..53
-                TRAIT_KW@1..6 "trait"
+                ITEM_HEAD@1..6
+                  TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
                 NAME@7..11
                   IDENT@7..11 "Show"
@@ -14062,7 +14307,8 @@ type V = struct::<T> { a: T } with {
                 SEMICOLON@52..53 ";"
               WHITESPACE@53..54 "\n"
               TYPE_ITEM@54..158
-                TYPE_KW@54..58 "type"
+                ITEM_HEAD@54..58
+                  TYPE_KW@54..58 "type"
                 WHITESPACE@58..59 " "
                 NAME@59..60
                   IDENT@59..60 "V"
@@ -14168,7 +14414,8 @@ type P = struct { a: usize } with {
             SOURCE_FILE@0..166
               WHITESPACE@0..1 "\n"
               TRAIT_ITEM@1..58
-                TRAIT_KW@1..6 "trait"
+                ITEM_HEAD@1..6
+                  TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "D"
@@ -14230,7 +14477,8 @@ type P = struct { a: usize } with {
                 SEMICOLON@57..58 ";"
               WHITESPACE@58..59 "\n"
               TYPE_ITEM@59..165
-                TYPE_KW@59..63 "type"
+                ITEM_HEAD@59..63
+                  TYPE_KW@59..63 "type"
                 WHITESPACE@63..64 " "
                 NAME@64..65
                   IDENT@64..65 "P"
@@ -14347,7 +14595,8 @@ type P = struct { a: usize } with {
             SOURCE_FILE@0..141
               WHITESPACE@0..1 "\n"
               TRAIT_ITEM@1..49
-                TRAIT_KW@1..6 "trait"
+                ITEM_HEAD@1..6
+                  TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "D"
@@ -14391,7 +14640,8 @@ type P = struct { a: usize } with {
                 SEMICOLON@48..49 ";"
               WHITESPACE@49..50 "\n"
               TYPE_ITEM@50..140
-                TYPE_KW@50..54 "type"
+                ITEM_HEAD@50..54
+                  TYPE_KW@50..54 "type"
                 WHITESPACE@54..55 " "
                 NAME@55..56
                   IDENT@55..56 "P"
@@ -14478,7 +14728,8 @@ fn statement_position_block_minus_operator_is_one_bin_expr() {
         expect![[r#"
             SOURCE_FILE@0..46
               STATIC_ITEM@0..46
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -14540,7 +14791,8 @@ fn else_if_chain_as_a_statement_needs_no_semicolon() {
         expect![[r#"
             SOURCE_FILE@0..78
               STATIC_ITEM@0..78
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -14650,7 +14902,8 @@ fn every_block_shaped_statement_self_terminates() {
         expect![[r#"
             SOURCE_FILE@0..69
               STATIC_ITEM@0..69
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -14738,7 +14991,8 @@ fn the_rule_is_asked_of_the_token_not_of_a_list_of_kinds() {
         expect![[r#"
             SOURCE_FILE@0..61
               STATIC_ITEM@0..61
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -14821,40 +15075,42 @@ fn a_block_tail_statement_before_an_item_keyword_recovers_on_the_brace() {
     check(
         "static f = fn { { } static g = 1;",
         expect![[r#"
-        SOURCE_FILE@0..33
-          STATIC_ITEM@0..19
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "f"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FN_LITERAL@11..19
-              FN_KW@11..13 "fn"
-              WHITESPACE@13..14 " "
-              BLOCK_EXPR@14..19
-                L_BRACE@14..15 "{"
-                WHITESPACE@15..16 " "
-                EXPR_STMT@16..19
-                  BLOCK_EXPR@16..19
-                    L_BRACE@16..17 "{"
-                    WHITESPACE@17..18 " "
-                    R_BRACE@18..19 "}"
-          WHITESPACE@19..20 " "
-          STATIC_ITEM@20..33
-            STATIC_KW@20..26 "static"
-            WHITESPACE@26..27 " "
-            NAME@27..28
-              IDENT@27..28 "g"
-            WHITESPACE@28..29 " "
-            EQ@29..30 "="
-            WHITESPACE@30..31 " "
-            LITERAL@31..32
-              INT_NUMBER@31..32 "1"
-            SEMICOLON@32..33 ";"
-        error 18..19: expected `}`
-    "#]],
+            SOURCE_FILE@0..33
+              STATIC_ITEM@0..19
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..19
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..19
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    EXPR_STMT@16..19
+                      BLOCK_EXPR@16..19
+                        L_BRACE@16..17 "{"
+                        WHITESPACE@17..18 " "
+                        R_BRACE@18..19 "}"
+              WHITESPACE@19..20 " "
+              STATIC_ITEM@20..33
+                ITEM_HEAD@20..26
+                  STATIC_KW@20..26 "static"
+                WHITESPACE@26..27 " "
+                NAME@27..28
+                  IDENT@27..28 "g"
+                WHITESPACE@28..29 " "
+                EQ@29..30 "="
+                WHITESPACE@30..31 " "
+                LITERAL@31..32
+                  INT_NUMBER@31..32 "1"
+                SEMICOLON@32..33 ";"
+            error 18..19: expected `}`
+        "#]],
     );
 }
 
@@ -14867,48 +15123,50 @@ fn broken_nesting_that_swallowed_a_semicolon_reports_the_brace_once() {
     check(
         "static f = fn { { g(); static h = 1;",
         expect![[r#"
-        SOURCE_FILE@0..36
-          STATIC_ITEM@0..22
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "f"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FN_LITERAL@11..22
-              FN_KW@11..13 "fn"
-              WHITESPACE@13..14 " "
-              BLOCK_EXPR@14..22
-                L_BRACE@14..15 "{"
-                WHITESPACE@15..16 " "
-                EXPR_STMT@16..22
-                  BLOCK_EXPR@16..22
-                    L_BRACE@16..17 "{"
-                    WHITESPACE@17..18 " "
-                    EXPR_STMT@18..22
-                      CALL_EXPR@18..21
-                        PATH_EXPR@18..19
-                          NAME_REF@18..19
-                            IDENT@18..19 "g"
-                        ARG_LIST@19..21
-                          L_PAREN@19..20 "("
-                          R_PAREN@20..21 ")"
-                      SEMICOLON@21..22 ";"
-          WHITESPACE@22..23 " "
-          STATIC_ITEM@23..36
-            STATIC_KW@23..29 "static"
-            WHITESPACE@29..30 " "
-            NAME@30..31
-              IDENT@30..31 "h"
-            WHITESPACE@31..32 " "
-            EQ@32..33 "="
-            WHITESPACE@33..34 " "
-            LITERAL@34..35
-              INT_NUMBER@34..35 "1"
-            SEMICOLON@35..36 ";"
-        error 21..22: expected `}`
-    "#]],
+            SOURCE_FILE@0..36
+              STATIC_ITEM@0..22
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..22
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..22
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    EXPR_STMT@16..22
+                      BLOCK_EXPR@16..22
+                        L_BRACE@16..17 "{"
+                        WHITESPACE@17..18 " "
+                        EXPR_STMT@18..22
+                          CALL_EXPR@18..21
+                            PATH_EXPR@18..19
+                              NAME_REF@18..19
+                                IDENT@18..19 "g"
+                            ARG_LIST@19..21
+                              L_PAREN@19..20 "("
+                              R_PAREN@20..21 ")"
+                          SEMICOLON@21..22 ";"
+              WHITESPACE@22..23 " "
+              STATIC_ITEM@23..36
+                ITEM_HEAD@23..29
+                  STATIC_KW@23..29 "static"
+                WHITESPACE@29..30 " "
+                NAME@30..31
+                  IDENT@30..31 "h"
+                WHITESPACE@31..32 " "
+                EQ@32..33 "="
+                WHITESPACE@33..34 " "
+                LITERAL@34..35
+                  INT_NUMBER@34..35 "1"
+                SEMICOLON@35..36 ";"
+            error 21..22: expected `}`
+        "#]],
     );
 }
 
@@ -14919,48 +15177,49 @@ fn semicolon_after_a_block_tail_statement_stays_legal() {
     check(
         "static f = fn { if c { }; g(); };",
         expect![[r#"
-        SOURCE_FILE@0..33
-          STATIC_ITEM@0..33
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "f"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FN_LITERAL@11..32
-              FN_KW@11..13 "fn"
-              WHITESPACE@13..14 " "
-              BLOCK_EXPR@14..32
-                L_BRACE@14..15 "{"
-                WHITESPACE@15..16 " "
-                EXPR_STMT@16..25
-                  IF_EXPR@16..24
-                    IF_KW@16..18 "if"
-                    WHITESPACE@18..19 " "
-                    PATH_EXPR@19..20
-                      NAME_REF@19..20
-                        IDENT@19..20 "c"
-                    WHITESPACE@20..21 " "
-                    BLOCK_EXPR@21..24
-                      L_BRACE@21..22 "{"
-                      WHITESPACE@22..23 " "
-                      R_BRACE@23..24 "}"
-                  SEMICOLON@24..25 ";"
-                WHITESPACE@25..26 " "
-                EXPR_STMT@26..30
-                  CALL_EXPR@26..29
-                    PATH_EXPR@26..27
-                      NAME_REF@26..27
-                        IDENT@26..27 "g"
-                    ARG_LIST@27..29
-                      L_PAREN@27..28 "("
-                      R_PAREN@28..29 ")"
-                  SEMICOLON@29..30 ";"
-                WHITESPACE@30..31 " "
-                R_BRACE@31..32 "}"
-            SEMICOLON@32..33 ";"
-    "#]],
+            SOURCE_FILE@0..33
+              STATIC_ITEM@0..33
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..32
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..32
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    EXPR_STMT@16..25
+                      IF_EXPR@16..24
+                        IF_KW@16..18 "if"
+                        WHITESPACE@18..19 " "
+                        PATH_EXPR@19..20
+                          NAME_REF@19..20
+                            IDENT@19..20 "c"
+                        WHITESPACE@20..21 " "
+                        BLOCK_EXPR@21..24
+                          L_BRACE@21..22 "{"
+                          WHITESPACE@22..23 " "
+                          R_BRACE@23..24 "}"
+                      SEMICOLON@24..25 ";"
+                    WHITESPACE@25..26 " "
+                    EXPR_STMT@26..30
+                      CALL_EXPR@26..29
+                        PATH_EXPR@26..27
+                          NAME_REF@26..27
+                            IDENT@26..27 "g"
+                        ARG_LIST@27..29
+                          L_PAREN@27..28 "("
+                          R_PAREN@28..29 ")"
+                      SEMICOLON@29..30 ";"
+                    WHITESPACE@30..31 " "
+                    R_BRACE@31..32 "}"
+                SEMICOLON@32..33 ";"
+        "#]],
     );
 }
 
@@ -14973,54 +15232,55 @@ fn a_continuation_token_after_a_block_tail_statement_keeps_the_expression() {
     check(
         "static f = fn { if c { } - 1; g(); };",
         expect![[r#"
-        SOURCE_FILE@0..37
-          STATIC_ITEM@0..37
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "f"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FN_LITERAL@11..36
-              FN_KW@11..13 "fn"
-              WHITESPACE@13..14 " "
-              BLOCK_EXPR@14..36
-                L_BRACE@14..15 "{"
-                WHITESPACE@15..16 " "
-                EXPR_STMT@16..29
-                  BIN_EXPR@16..28
-                    IF_EXPR@16..24
-                      IF_KW@16..18 "if"
-                      WHITESPACE@18..19 " "
-                      PATH_EXPR@19..20
-                        NAME_REF@19..20
-                          IDENT@19..20 "c"
-                      WHITESPACE@20..21 " "
-                      BLOCK_EXPR@21..24
-                        L_BRACE@21..22 "{"
-                        WHITESPACE@22..23 " "
-                        R_BRACE@23..24 "}"
-                    WHITESPACE@24..25 " "
-                    MINUS@25..26 "-"
-                    WHITESPACE@26..27 " "
-                    LITERAL@27..28
-                      INT_NUMBER@27..28 "1"
-                  SEMICOLON@28..29 ";"
-                WHITESPACE@29..30 " "
-                EXPR_STMT@30..34
-                  CALL_EXPR@30..33
-                    PATH_EXPR@30..31
-                      NAME_REF@30..31
-                        IDENT@30..31 "g"
-                    ARG_LIST@31..33
-                      L_PAREN@31..32 "("
-                      R_PAREN@32..33 ")"
-                  SEMICOLON@33..34 ";"
-                WHITESPACE@34..35 " "
-                R_BRACE@35..36 "}"
-            SEMICOLON@36..37 ";"
-    "#]],
+            SOURCE_FILE@0..37
+              STATIC_ITEM@0..37
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..36
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..36
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    EXPR_STMT@16..29
+                      BIN_EXPR@16..28
+                        IF_EXPR@16..24
+                          IF_KW@16..18 "if"
+                          WHITESPACE@18..19 " "
+                          PATH_EXPR@19..20
+                            NAME_REF@19..20
+                              IDENT@19..20 "c"
+                          WHITESPACE@20..21 " "
+                          BLOCK_EXPR@21..24
+                            L_BRACE@21..22 "{"
+                            WHITESPACE@22..23 " "
+                            R_BRACE@23..24 "}"
+                        WHITESPACE@24..25 " "
+                        MINUS@25..26 "-"
+                        WHITESPACE@26..27 " "
+                        LITERAL@27..28
+                          INT_NUMBER@27..28 "1"
+                      SEMICOLON@28..29 ";"
+                    WHITESPACE@29..30 " "
+                    EXPR_STMT@30..34
+                      CALL_EXPR@30..33
+                        PATH_EXPR@30..31
+                          NAME_REF@30..31
+                            IDENT@30..31 "g"
+                        ARG_LIST@31..33
+                          L_PAREN@31..32 "("
+                          R_PAREN@32..33 ")"
+                      SEMICOLON@33..34 ";"
+                    WHITESPACE@34..35 " "
+                    R_BRACE@35..36 "}"
+                SEMICOLON@36..37 ";"
+        "#]],
     );
 }
 
@@ -15032,45 +15292,46 @@ fn an_explicit_semicolon_splits_a_block_tail_from_a_continuation_shaped_statemen
     check(
         "static f = fn { if c { }; -1; };",
         expect![[r#"
-        SOURCE_FILE@0..32
-          STATIC_ITEM@0..32
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "f"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FN_LITERAL@11..31
-              FN_KW@11..13 "fn"
-              WHITESPACE@13..14 " "
-              BLOCK_EXPR@14..31
-                L_BRACE@14..15 "{"
-                WHITESPACE@15..16 " "
-                EXPR_STMT@16..25
-                  IF_EXPR@16..24
-                    IF_KW@16..18 "if"
-                    WHITESPACE@18..19 " "
-                    PATH_EXPR@19..20
-                      NAME_REF@19..20
-                        IDENT@19..20 "c"
-                    WHITESPACE@20..21 " "
-                    BLOCK_EXPR@21..24
-                      L_BRACE@21..22 "{"
-                      WHITESPACE@22..23 " "
-                      R_BRACE@23..24 "}"
-                  SEMICOLON@24..25 ";"
-                WHITESPACE@25..26 " "
-                EXPR_STMT@26..29
-                  NEG_EXPR@26..28
-                    MINUS@26..27 "-"
-                    LITERAL@27..28
-                      INT_NUMBER@27..28 "1"
-                  SEMICOLON@28..29 ";"
-                WHITESPACE@29..30 " "
-                R_BRACE@30..31 "}"
-            SEMICOLON@31..32 ";"
-    "#]],
+            SOURCE_FILE@0..32
+              STATIC_ITEM@0..32
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..31
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..31
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    EXPR_STMT@16..25
+                      IF_EXPR@16..24
+                        IF_KW@16..18 "if"
+                        WHITESPACE@18..19 " "
+                        PATH_EXPR@19..20
+                          NAME_REF@19..20
+                            IDENT@19..20 "c"
+                        WHITESPACE@20..21 " "
+                        BLOCK_EXPR@21..24
+                          L_BRACE@21..22 "{"
+                          WHITESPACE@22..23 " "
+                          R_BRACE@23..24 "}"
+                      SEMICOLON@24..25 ";"
+                    WHITESPACE@25..26 " "
+                    EXPR_STMT@26..29
+                      NEG_EXPR@26..28
+                        MINUS@26..27 "-"
+                        LITERAL@27..28
+                          INT_NUMBER@27..28 "1"
+                      SEMICOLON@28..29 ";"
+                    WHITESPACE@29..30 " "
+                    R_BRACE@30..31 "}"
+                SEMICOLON@31..32 ";"
+        "#]],
     );
 }
 
@@ -15080,44 +15341,45 @@ fn a_non_block_expression_statement_still_owes_its_semicolon() {
     check(
         "static f = fn { g() h(); };",
         expect![[r#"
-        SOURCE_FILE@0..27
-          STATIC_ITEM@0..27
-            STATIC_KW@0..6 "static"
-            WHITESPACE@6..7 " "
-            NAME@7..8
-              IDENT@7..8 "f"
-            WHITESPACE@8..9 " "
-            EQ@9..10 "="
-            WHITESPACE@10..11 " "
-            FN_LITERAL@11..26
-              FN_KW@11..13 "fn"
-              WHITESPACE@13..14 " "
-              BLOCK_EXPR@14..26
-                L_BRACE@14..15 "{"
-                WHITESPACE@15..16 " "
-                EXPR_STMT@16..19
-                  CALL_EXPR@16..19
-                    PATH_EXPR@16..17
-                      NAME_REF@16..17
-                        IDENT@16..17 "g"
-                    ARG_LIST@17..19
-                      L_PAREN@17..18 "("
-                      R_PAREN@18..19 ")"
-                WHITESPACE@19..20 " "
-                EXPR_STMT@20..24
-                  CALL_EXPR@20..23
-                    PATH_EXPR@20..21
-                      NAME_REF@20..21
-                        IDENT@20..21 "h"
-                    ARG_LIST@21..23
-                      L_PAREN@21..22 "("
-                      R_PAREN@22..23 ")"
-                  SEMICOLON@23..24 ";"
-                WHITESPACE@24..25 " "
-                R_BRACE@25..26 "}"
-            SEMICOLON@26..27 ";"
-        error 18..19: expected `;`
-    "#]],
+            SOURCE_FILE@0..27
+              STATIC_ITEM@0..27
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..26
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..26
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    EXPR_STMT@16..19
+                      CALL_EXPR@16..19
+                        PATH_EXPR@16..17
+                          NAME_REF@16..17
+                            IDENT@16..17 "g"
+                        ARG_LIST@17..19
+                          L_PAREN@17..18 "("
+                          R_PAREN@18..19 ")"
+                    WHITESPACE@19..20 " "
+                    EXPR_STMT@20..24
+                      CALL_EXPR@20..23
+                        PATH_EXPR@20..21
+                          NAME_REF@20..21
+                            IDENT@20..21 "h"
+                        ARG_LIST@21..23
+                          L_PAREN@21..22 "("
+                          R_PAREN@22..23 ")"
+                      SEMICOLON@23..24 ";"
+                    WHITESPACE@24..25 " "
+                    R_BRACE@25..26 "}"
+                SEMICOLON@26..27 ";"
+            error 18..19: expected `;`
+        "#]],
     );
 }
 
@@ -15130,7 +15392,8 @@ fn a_block_tail_in_value_position_still_owes_its_semicolon() {
         expect![[r#"
             SOURCE_FILE@0..53
               STATIC_ITEM@0..53
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -15208,7 +15471,8 @@ trait Gen = requires::<T> { get: fn(x: Self) -> usize; } with {
             SOURCE_FILE@0..122
               WHITESPACE@0..1 "\n"
               TRAIT_ITEM@1..121
-                TRAIT_KW@1..6 "trait"
+                ITEM_HEAD@1..6
+                  TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
                 NAME@7..10
                   IDENT@7..10 "Gen"
@@ -15399,7 +15663,8 @@ fn region_binders_are_a_third_kind_in_one_list() {
         expect![[r#"
             SOURCE_FILE@0..56
               STATIC_ITEM@0..56
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -15473,7 +15738,8 @@ fn region_params_carry_outlives_bounds() {
         expect![[r#"
             SOURCE_FILE@0..48
               STATIC_ITEM@0..48
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -15529,7 +15795,8 @@ fn the_region_wildcard_and_the_join() {
         expect![[r#"
             SOURCE_FILE@0..83
               STATIC_ITEM@0..83
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -15625,7 +15892,8 @@ fn a_bare_at_sign_is_an_error_that_names_the_spelling() {
         expect![[r#"
             SOURCE_FILE@0..30
               STATIC_ITEM@0..30
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -15708,7 +15976,8 @@ fn a_borrow_expressions_turbofish_parses_and_is_refused() {
         expect![[r#"
             SOURCE_FILE@0..62
               STATIC_ITEM@0..62
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -15865,7 +16134,8 @@ fn outlives_clauses_ride_the_with_clause_grammar() {
         expect![[r#"
             SOURCE_FILE@0..71
               TYPE_ITEM@0..71
-                TYPE_KW@0..4 "type"
+                ITEM_HEAD@0..4
+                  TYPE_KW@0..4 "type"
                 WHITESPACE@4..5 " "
                 NAME@5..10
                   IDENT@5..10 "Slice"
@@ -15939,9 +16209,10 @@ fn an_extern_item_is_a_declaration_with_no_initializer() {
         expect![[r#"
             SOURCE_FILE@0..69
               STATIC_ITEM@0..69
-                EXTERN_KW@0..6 "extern"
-                WHITESPACE@6..7 " "
-                STATIC_KW@7..13 "static"
+                ITEM_HEAD@0..13
+                  EXTERN_KW@0..6 "extern"
+                  WHITESPACE@6..7 " "
+                  STATIC_KW@7..13 "static"
                 WHITESPACE@13..14 " "
                 NAME@14..18
                   IDENT@14..18 "read"
@@ -16002,7 +16273,8 @@ fn a_fn_type_may_name_its_parameters() {
         expect![[r#"
             SOURCE_FILE@0..62
               STATIC_ITEM@0..62
-                STATIC_KW@0..6 "static"
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
                 WHITESPACE@6..7 " "
                 NAME@7..8
                   IDENT@7..8 "f"
@@ -16131,24 +16403,32 @@ fn an_unmarked_extern_item_names_the_vouch_and_offers_it() {
 }
 
 #[test]
-fn the_vouch_marker_leads_the_declaration() {
-    // `extern unsafe static` parses as the same item; the fix swaps the markers.
-    let source = "extern unsafe static read: unsafe fn(n: i64) -> i64;";
-    let parse = crate::parse(source);
-    let [err] = parse.errors() else {
-        panic!("expected exactly one error, got {:?}", parse.errors());
-    };
-    assert_eq!(
-        err.message,
-        "the vouch marker leads the declaration: write `unsafe extern static`"
-    );
-    let fix = err.fix.as_ref().expect("the move is offered");
-    let fixed = apply_fix(source, fix);
-    assert_eq!(
-        fixed,
-        "unsafe extern static read: unsafe fn(n: i64) -> i64;"
-    );
-    assert_eq!(crate::parse(&fixed).errors(), &[]);
+fn the_markers_come_first_unsafe_before_extern() {
+    // A head in any other order parses as the same item; the fix rewrites it.
+    for source in [
+        "extern unsafe static read: unsafe fn(n: i64) -> i64;",
+        "static unsafe extern read: unsafe fn(n: i64) -> i64;",
+        "unsafe static extern read: unsafe fn(n: i64) -> i64;",
+    ] {
+        let parse = crate::parse(source);
+        let [err] = parse.errors() else {
+            panic!(
+                "expected exactly one error for `{source}`, got {:?}",
+                parse.errors()
+            );
+        };
+        assert_eq!(
+            err.message,
+            "the markers come first, `unsafe` before `extern`: write `unsafe extern static`"
+        );
+        let fix = err.fix.as_ref().expect("the rewrite is offered");
+        let fixed = apply_fix(source, fix);
+        assert_eq!(
+            fixed,
+            "unsafe extern static read: unsafe fn(n: i64) -> i64;"
+        );
+        assert_eq!(crate::parse(&fixed).errors(), &[]);
+    }
 }
 
 #[test]
@@ -16185,7 +16465,7 @@ fn a_doubled_vouch_marker_is_reported_once_and_removed() {
     let [err] = parse.errors() else {
         panic!("expected exactly one error, got {:?}", parse.errors());
     };
-    assert_eq!(err.message, "the vouch marker is written once, not twice");
+    assert_eq!(err.message, "`unsafe` is written once, not twice");
     let fix = err.fix.as_ref().expect("the removal is offered");
     let fixed = apply_fix(source, fix);
     assert_eq!(fixed, "unsafe extern static read: fn() -> i64;");
@@ -16193,16 +16473,92 @@ fn a_doubled_vouch_marker_is_reported_once_and_removed() {
 }
 
 #[test]
+fn every_marker_and_keyword_arrangement_parses_into_the_head() {
+    // The head takes markers and keywords in any order and any number, so
+    // the item reads; validation names what is wrong with one fix per
+    // mistake.
+    for (source, fixed) in [
+        (
+            "unsafe extern static static read: fn() -> i64;",
+            "unsafe extern static read: fn() -> i64;",
+        ),
+        ("static static x: i64 = 1;", "static x: i64 = 1;"),
+        ("static const x: i64 = 1;", "static x: i64 = 1;"),
+        ("type type T = i64;", "type T = i64;"),
+        ("trait trait T = requires { };", "trait T = requires { };"),
+        (
+            "unsafe unsafe extern static read: fn() -> i64;",
+            "unsafe extern static read: fn() -> i64;",
+        ),
+        (
+            "unsafe extern extern static read: fn() -> i64;",
+            "unsafe extern static read: fn() -> i64;",
+        ),
+    ] {
+        let parse = crate::parse(source);
+        let [err] = parse.errors() else {
+            panic!(
+                "expected exactly one error for `{source}`, got {:?}",
+                parse.errors()
+            );
+        };
+        let fix = err.fix.as_ref().expect("the removal is offered");
+        assert_eq!(apply_fix(source, fix), fixed);
+    }
+    check(
+        "extern unsafe extern static read: fn() -> i64;",
+        expect![[r#"
+            SOURCE_FILE@0..46
+              STATIC_ITEM@0..46
+                ITEM_HEAD@0..27
+                  EXTERN_KW@0..6 "extern"
+                  WHITESPACE@6..7 " "
+                  UNSAFE_KW@7..13 "unsafe"
+                  WHITESPACE@13..14 " "
+                  EXTERN_KW@14..20 "extern"
+                  WHITESPACE@20..21 " "
+                  STATIC_KW@21..27 "static"
+                WHITESPACE@27..28 " "
+                NAME@28..32
+                  IDENT@28..32 "read"
+                COLON@32..33 ":"
+                WHITESPACE@33..34 " "
+                FN_TYPE@34..45
+                  FN_KW@34..36 "fn"
+                  PARAM_LIST@36..38
+                    L_PAREN@36..37 "("
+                    R_PAREN@37..38 ")"
+                  WHITESPACE@38..39 " "
+                  RET_TYPE@39..45
+                    THIN_ARROW@39..41 "->"
+                    WHITESPACE@41..42 " "
+                    PATH_TYPE@42..45
+                      NAME_REF@42..45
+                        IDENT@42..45 "i64"
+                SEMICOLON@45..46 ";"
+            error 0..27: the markers come first, `unsafe` before `extern`: write `unsafe extern static`
+            error 14..20: `extern` is written once, not twice
+        "#]],
+    );
+}
+
+#[test]
 fn only_an_extern_item_can_be_vouched_for() {
     // `unsafe` is only allowed on `extern static`.
     check_errors(
-        "unsafe static a = 1;\n\
-         unsafe type F = usize;\n\
-         unsafe trait T = requires { };\n",
+        r#"
+unsafe static a = 1;
+unsafe type F = usize;
+unsafe trait T = requires { };
+static unsafe b = 1;
+type unsafe G = usize;
+"#,
         expect![[r#"
-            0..6: only an `extern static` can be `unsafe`: the marker vouches for an `extern` item's declared signature, and nothing else declares one
-            21..27: only an `extern static` can be `unsafe`: the marker vouches for an `extern` item's declared signature, and nothing else declares one
-            44..50: only an `extern static` can be `unsafe`: the marker vouches for an `extern` item's declared signature, and nothing else declares one
+            1..7: only an `extern static` can be `unsafe`: the marker vouches for an `extern` item's declared signature, and nothing else declares one
+            22..28: only an `extern static` can be `unsafe`: the marker vouches for an `extern` item's declared signature, and nothing else declares one
+            45..51: only an `extern static` can be `unsafe`: the marker vouches for an `extern` item's declared signature, and nothing else declares one
+            83..89: only an `extern static` can be `unsafe`: the marker vouches for an `extern` item's declared signature, and nothing else declares one
+            102..108: only an `extern static` can be `unsafe`: the marker vouches for an `extern` item's declared signature, and nothing else declares one
         "#]],
     );
 }
@@ -16331,7 +16687,8 @@ fn only_move_trails_a_type_declaration() {
         expect![[r#"
             SOURCE_FILE@0..39
               TYPE_ITEM@0..39
-                TYPE_KW@0..4 "type"
+                ITEM_HEAD@0..4
+                  TYPE_KW@0..4 "type"
                 WHITESPACE@4..5 " "
                 NAME@5..6
                   IDENT@5..6 "S"

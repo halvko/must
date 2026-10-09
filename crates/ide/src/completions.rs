@@ -743,23 +743,6 @@ fn match_awaiting_arms(
         })
 }
 
-/// Whether the item has its keyword (`static`, `const`, ...); it lacks one
-/// while only its markers are typed.
-fn has_item_keyword(item: &ast::StaticItem) -> bool {
-    item.syntax()
-        .children_with_tokens()
-        .filter_map(|it| it.into_token())
-        .any(|it| {
-            matches!(
-                it.kind(),
-                SyntaxKind::STATIC_KW
-                    | SyntaxKind::CONST_KW
-                    | SyntaxKind::TYPE_KW
-                    | SyntaxKind::TRAIT_KW
-            )
-        })
-}
-
 /// Classify the marker's parent node (in the speculative tree) into one of
 /// the contexts above. `None` for anything else (a brand-new `let`/param
 /// binding name, the enum segment of a qualified variant pattern before its
@@ -771,7 +754,7 @@ fn classify(parent: &SyntaxNode) -> Option<Context> {
             return Some(Context::ItemKeyword);
         }
         // `unsafe ⟨caret⟩` offers `extern`; `extern ⟨caret⟩` offers `static`.
-        let item = ast::StaticItem::cast(grandparent).filter(|item| !has_item_keyword(item))?;
+        let item = ast::StaticItem::cast(grandparent).filter(|item| item.kind().is_none())?;
         if item.extern_token().is_some() {
             return Some(Context::ItemKeywordAfterExtern);
         }

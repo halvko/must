@@ -5,7 +5,9 @@
 //! exactly the information a quick fix needs.
 
 use crate::ast::{self, AstNode};
-use crate::{BRACE_RULE, Fix, SyntaxError, SyntaxKind, SyntaxNode, SyntaxToken, TextEdit};
+use crate::{
+    BRACE_RULE, Fix, SyntaxElement, SyntaxError, SyntaxKind, SyntaxNode, SyntaxToken, TextEdit,
+};
 use text_size::TextRange;
 
 pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
@@ -88,13 +90,15 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             }
         } else if let Some(fn_type) = ast::FnType::cast(node.clone()) {
             validate_fn_type(&fn_type, &mut errors);
+        } else if let Some(head) = ast::ItemHead::cast(node.clone()) {
+            validate_item_head(&head, &mut errors);
         } else if let Some(static_item) = ast::StaticItem::cast(node.clone()) {
             validate_extern_static(&static_item, &mut errors);
         } else if let Some(type_item) = ast::TypeItem::cast(node.clone()) {
-            reject_extern_marker(&node, &mut errors);
+            reject_markers(type_item.head(), &mut errors);
             reject_type_item_annotation(&type_item, &mut errors);
         } else if let Some(trait_item) = ast::TraitItem::cast(node.clone()) {
-            reject_extern_marker(&node, &mut errors);
+            reject_markers(trait_item.head(), &mut errors);
             validate_trait_item(&trait_item, &mut errors);
         } else if let Some(type_param) = ast::TypeParam::cast(node.clone()) {
             validate_type_param_bounds(&type_param, &mut errors);
@@ -242,6 +246,9 @@ pub enum MemberContext {
 /// markers and an `extern` signature.
 pub fn static_item_errors(item: &ast::StaticItem) -> Vec<SyntaxError> {
     let mut errors = Vec::new();
+    if let Some(head) = item.head() {
+        validate_item_head(&head, &mut errors);
+    }
     validate_extern_static(item, &mut errors);
     errors
 }
@@ -1635,8 +1642,11 @@ fn reject_stray_type_binder(
 
 /// `unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;`
 fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>) {
-    let vouch = item.unsafe_token();
-    if vouch.is_none() && item.extern_token().is_none() {
+    let Some(head) = item.head() else {
+        return;
+    };
+    let vouch = head.unsafe_token();
+    if vouch.is_none() && head.extern_token().is_none() {
         return;
     }
     // The parser has already reported an unreadable item; don't pile on.
@@ -1647,34 +1657,7 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
     {
         return;
     }
-    // Every `unsafe` after the first is a duplicate.
-    for extra in item
-        .syntax()
-        .children_with_tokens()
-        .filter_map(|it| it.into_token())
-        .filter(|t| t.kind() == SyntaxKind::UNSAFE_KW)
-        .skip(1)
-    {
-        // Remove the following space too, or the fix leaves two.
-        let remove = match extra.next_sibling_or_token() {
-            Some(next) if next.kind() == SyntaxKind::WHITESPACE => {
-                TextRange::new(extra.text_range().start(), next.text_range().end())
-            }
-            _ => extra.text_range(),
-        };
-        errors.push(SyntaxError {
-            message: "the vouch marker is written once, not twice".to_owned(),
-            range: extra.text_range(),
-            fix: Some(Fix {
-                label: "Remove the duplicate `unsafe`".to_owned(),
-                edits: vec![TextEdit {
-                    range: remove,
-                    insert: String::new(),
-                }],
-            }),
-        });
-    }
-    let Some(marker) = item.extern_token() else {
+    let Some(marker) = head.extern_token() else {
         // `unsafe static x = 1;`: there is no extern signature to vouch for.
         errors.push(SyntaxError {
             message: UNSAFE_ONLY_ON_EXTERN.to_owned(),
@@ -1686,18 +1669,13 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
         return;
     };
     if item.is_const() {
-        let fix = item
-            .syntax()
-            .children_with_tokens()
-            .filter_map(|it| it.into_token())
-            .find(|t| t.kind() == SyntaxKind::CONST_KW)
-            .map(|keyword| Fix {
-                label: "Change `const` to `static`".to_owned(),
-                edits: vec![TextEdit {
-                    range: keyword.text_range(),
-                    insert: "static".to_owned(),
-                }],
-            });
+        let fix = head.kind().map(|keyword| Fix {
+            label: "Change `const` to `static`".to_owned(),
+            edits: vec![TextEdit {
+                range: keyword.text_range(),
+                insert: "static".to_owned(),
+            }],
+        });
         errors.push(SyntaxError {
             message: EXTERN_ONLY_ON_STATIC.to_owned(),
             range: marker.text_range(),
@@ -1705,8 +1683,8 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
         });
         return;
     }
-    match &vouch {
-        None => errors.push(SyntaxError {
+    if vouch.is_none() {
+        errors.push(SyntaxError {
             message: "declaring an `extern` item is a VOUCH: write `unsafe extern static`"
                 .to_owned(),
             range: marker.text_range(),
@@ -1717,34 +1695,9 @@ fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>)
                     insert: "unsafe ".to_owned(),
                 }],
             }),
-        }),
-        // `extern unsafe static`: the markers in the wrong order.
-        Some(vouch) if vouch.text_range().start() > marker.text_range().start() => {
-            errors.push(SyntaxError {
-                message: "the vouch marker leads the declaration: write \
-                          `unsafe extern static`"
-                    .to_owned(),
-                range: vouch.text_range(),
-                fix: Some(Fix {
-                    label: "Move `unsafe` in front of `extern`".to_owned(),
-                    edits: vec![
-                        TextEdit {
-                            range: TextRange::empty(marker.text_range().start()),
-                            insert: "unsafe ".to_owned(),
-                        },
-                        TextEdit {
-                            range: TextRange::new(
-                                marker.text_range().end(),
-                                vouch.text_range().end(),
-                            ),
-                            insert: String::new(),
-                        },
-                    ],
-                }),
-            });
-        }
-        Some(_) => {}
+        });
     }
+    reject_misordered_head(&head, &marker, vouch.as_ref(), errors);
     if let Some(eq) = item.eq_token() {
         let end = item
             .body()
@@ -1919,20 +1872,100 @@ fn validate_fn_type(fn_type: &ast::FnType, errors: &mut Vec<SyntaxError>) {
     }
 }
 
+/// `unsafe unsafe extern static`, `static const`: each marker and keyword
+/// is written once, and an item has one keyword. One error per extra token,
+/// its fix removing it.
+fn validate_item_head(head: &ast::ItemHead, errors: &mut Vec<SyntaxError>) {
+    let is_keyword =
+        |t: &SyntaxToken| !matches!(t.kind(), SyntaxKind::UNSAFE_KW | SyntaxKind::EXTERN_KW);
+    for (i, token) in head.tokens().enumerate() {
+        let earlier = || head.tokens().take(i);
+        let message = if earlier().any(|t| t.kind() == token.kind()) {
+            format!("`{}` is written once, not twice", token.text())
+        } else if let Some(keyword) = earlier().find(is_keyword).filter(|_| is_keyword(&token)) {
+            format!(
+                "`{}` after `{}`: an item has one keyword",
+                token.text(),
+                keyword.text()
+            )
+        } else {
+            continue;
+        };
+        // Remove a space next to it too, or the fix leaves two. The last
+        // token of the head has its space outside the head, so take the one
+        // before it.
+        let space = |it: Option<SyntaxElement>| it.filter(|it| it.kind() == SyntaxKind::WHITESPACE);
+        let remove = match (
+            space(token.next_sibling_or_token()),
+            space(token.prev_sibling_or_token()),
+        ) {
+            (Some(next), _) => TextRange::new(token.text_range().start(), next.text_range().end()),
+            (None, Some(prev)) => {
+                TextRange::new(prev.text_range().start(), token.text_range().end())
+            }
+            (None, None) => token.text_range(),
+        };
+        errors.push(SyntaxError {
+            message,
+            range: token.text_range(),
+            fix: Some(Fix {
+                label: format!("Remove `{}`", token.text()),
+                edits: vec![TextEdit {
+                    range: remove,
+                    insert: String::new(),
+                }],
+            }),
+        });
+    }
+}
+
+/// `extern unsafe static`, `static unsafe extern`: the head reads in one
+/// order, the markers before the keyword and `unsafe` first. One error for
+/// the whole head, its fix rewriting the head in that order.
+fn reject_misordered_head(
+    head: &ast::ItemHead,
+    marker: &SyntaxToken,
+    vouch: Option<&SyntaxToken>,
+    errors: &mut Vec<SyntaxError>,
+) {
+    let Some(keyword) = head.kind() else {
+        return;
+    };
+    let start = |token: &SyntaxToken| token.text_range().start();
+    let in_order =
+        start(marker) < start(&keyword) && vouch.is_none_or(|vouch| start(vouch) < start(marker));
+    if in_order {
+        return;
+    }
+    let ordered = match vouch {
+        Some(_) => format!("unsafe extern {}", keyword.text()),
+        None => format!("extern {}", keyword.text()),
+    };
+    errors.push(SyntaxError {
+        message: format!(
+            "the markers come first, `unsafe` before `extern`: write `unsafe extern {}`",
+            keyword.text()
+        ),
+        range: head.syntax().text_range(),
+        fix: Some(Fix {
+            label: format!("Write `{ordered}`"),
+            edits: vec![TextEdit {
+                range: head.syntax().text_range(),
+                insert: ordered,
+            }],
+        }),
+    });
+}
+
 /// Rejects `unsafe` or `extern` on a `type` or `trait` item, reporting only the
 /// first marker. A trait's `unsafe requires` is inside `REQUIRES_DEF`, not here.
-fn reject_extern_marker(node: &SyntaxNode, errors: &mut Vec<SyntaxError>) {
-    let Some(token) = node
-        .children_with_tokens()
-        .filter_map(|it| it.into_token())
-        .find(|token| matches!(token.kind(), SyntaxKind::EXTERN_KW | SyntaxKind::UNSAFE_KW))
-    else {
+fn reject_markers(head: Option<ast::ItemHead>, errors: &mut Vec<SyntaxError>) {
+    let Some(token) = head.and_then(|head| head.markers().next()) else {
         return;
     };
     let message = match token.kind() {
         SyntaxKind::EXTERN_KW => EXTERN_ONLY_ON_STATIC,
-        SyntaxKind::UNSAFE_KW => UNSAFE_ONLY_ON_EXTERN,
-        _ => unreachable!("filtered to EXTERN_KW/UNSAFE_KW above"),
+        _ => UNSAFE_ONLY_ON_EXTERN,
     };
     errors.push(SyntaxError {
         message: message.to_owned(),

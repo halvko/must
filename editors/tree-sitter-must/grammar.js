@@ -85,13 +85,15 @@ module.exports = grammar({
 
     _item: $ => choice($.static_item, $.type_item, $.trait_item),
 
-    // `unsafe extern static` declares an `extern` item. As in the server's parser,
-    // the markers parse in any order the server accepts (a missing,
-    // reversed or doubled `unsafe` is a validation error, not a syntax one).
+    // `unsafe extern static` declares an `extern` item. Markers go on either
+    // side of the first keyword, which fixes the item's kind; markers and
+    // that kind's keywords repeat freely (validation judges them).
+    _item_markers: $ => repeat1(choice('unsafe', 'extern')),
+
     static_item: $ => seq(
-      optional('unsafe'),
-      optional(seq('extern', repeat('unsafe'))),
+      optional($._item_markers),
       choice('static', 'const'),
+      repeat(choice('unsafe', 'extern', 'static', 'const')),
       field('name', $._name),
       optional(seq(':', field('type', $._type))),
       optional(seq('=', field('value', $._expr))),
@@ -100,7 +102,9 @@ module.exports = grammar({
     ),
 
     type_item: $ => seq(
+      optional($._item_markers),
       'type',
+      repeat(choice('unsafe', 'extern', 'type')),
       field('name', $._name),
       '=',
       field('value', choice($.enum_type, $._type)),
@@ -109,7 +113,9 @@ module.exports = grammar({
     ),
 
     trait_item: $ => seq(
+      optional($._item_markers),
       'trait',
+      repeat(choice('unsafe', 'extern', 'trait')),
       field('name', $._name),
       '=',
       field('value', choice($.requires_def, $.trait_alias)),

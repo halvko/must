@@ -2299,9 +2299,10 @@ Two markers lead the declaration, and they are two different obligations.
 `extern` says the name comes from outside. `unsafe` is the VOUCH: it asserts
 that the signature written here is what the host really provides — a claim
 nothing on this side can check, so a human makes it. Both are required, in
-that order (`unsafe extern static ...`); `extern static ...` alone is an
-error with a fix that inserts the vouch, and `extern unsafe static ...` is
-an error with a fix that moves it in front.
+that order, before the keyword (`unsafe extern static ...`); `extern static
+...` alone is an error with a fix that inserts the vouch, and any other
+arrangement (`extern unsafe static ...`, `static unsafe extern ...`) is an
+error with a fix that rewrites it as `unsafe extern static ...`.
 
 CALLING is a separate question, and it is answered by the TYPE alone —
 `unsafe fn(...)` needs an `unsafe { ... }` block at the call, `fn(...)`

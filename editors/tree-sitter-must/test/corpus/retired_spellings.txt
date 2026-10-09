@@ -117,11 +117,32 @@ Misplaced vouch markers
 extern static a: fn() -> ();
 extern unsafe static b: fn() -> ();
 unsafe extern unsafe static c: fn() -> ();
+unsafe unsafe extern extern static e: fn() -> ();
+static unsafe extern f: fn() -> ();
+unsafe extern static static g: fn() -> ();
 unsafe static d: usize = 1;
 
 ---
 
 (source_file
+  (static_item
+    (identifier)
+    (fn_type
+      (param_list)
+      (ret_type
+        (unit_type))))
+  (static_item
+    (identifier)
+    (fn_type
+      (param_list)
+      (ret_type
+        (unit_type))))
+  (static_item
+    (identifier)
+    (fn_type
+      (param_list)
+      (ret_type
+        (unit_type))))
   (static_item
     (identifier)
     (fn_type

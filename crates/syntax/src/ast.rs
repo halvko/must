@@ -83,6 +83,10 @@ ast_node!(
     /// literal with a diagnostic (keeping the parse resilient).
     TypeItem: TYPE_ITEM
 );
+ast_node!(
+    /// `unsafe extern static`: an item's markers and its keyword.
+    ItemHead: ITEM_HEAD
+);
 ast_node!(Name: NAME);
 ast_node!(NameRef: NAME_REF);
 ast_node!(FnLiteral: FN_LITERAL);
@@ -514,7 +518,40 @@ impl OnlyClause {
     }
 }
 
+impl ItemHead {
+    /// The first of `static`, `const`, `type` or `trait`, which picks the
+    /// item's kind; `None` while only the markers are written.
+    pub fn kind(&self) -> Option<SyntaxToken> {
+        self.tokens()
+            .find(|it| !matches!(it.kind(), EXTERN_KW | UNSAFE_KW))
+    }
+    /// The first `extern` marker.
+    pub fn extern_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, EXTERN_KW)
+    }
+    /// The first `unsafe` marker: the vouch for an `extern` item's declared
+    /// signature, unrelated to the safety of the underlying implementation.
+    pub fn unsafe_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, UNSAFE_KW)
+    }
+    /// Every marker, in source order, duplicates included.
+    pub fn markers(&self) -> impl Iterator<Item = SyntaxToken> + use<> {
+        self.tokens()
+            .filter(|it| matches!(it.kind(), EXTERN_KW | UNSAFE_KW))
+    }
+    /// Every marker and keyword, in source order.
+    pub fn tokens(&self) -> impl Iterator<Item = SyntaxToken> + use<> {
+        self.syntax
+            .children_with_tokens()
+            .filter_map(|it| it.into_token())
+            .filter(|it| !it.kind().is_trivia())
+    }
+}
+
 impl StaticItem {
+    pub fn head(&self) -> Option<ItemHead> {
+        child(&self.syntax)
+    }
     pub fn name(&self) -> Option<Name> {
         child(&self.syntax)
     }
@@ -530,27 +567,25 @@ impl StaticItem {
     pub fn only_clauses(&self) -> impl Iterator<Item = OnlyClause> + use<> {
         children(&self.syntax)
     }
+    /// The `static` or `const` that makes this a static item (see
+    /// [`ItemHead::kind`]); missing while only its markers are typed.
+    pub fn kind(&self) -> Option<SyntaxToken> {
+        self.head()?.kind()
+    }
     /// Whether the item is introduced by `const` (as opposed to `static`).
-    /// Only the item's own keyword counts, not a `const` in the initializer;
-    /// leading `unsafe`/`extern` markers are skipped.
     pub fn is_const(&self) -> bool {
-        self.syntax
-            .children_with_tokens()
-            .filter_map(|it| it.into_token())
-            .find(|it| !it.kind().is_trivia() && !matches!(it.kind(), EXTERN_KW | UNSAFE_KW))
-            .is_some_and(|it| it.kind() == CONST_KW)
+        self.kind().is_some_and(|it| it.kind() == CONST_KW)
     }
     /// The item's `extern` marker.
     pub fn extern_token(&self) -> Option<SyntaxToken> {
-        token(&self.syntax, EXTERN_KW)
+        self.head()?.extern_token()
     }
     pub fn is_extern(&self) -> bool {
         self.extern_token().is_some()
     }
-    /// The `unsafe` vouch of the item, unrelated to the safety of the underlying
-    /// implementation.
+    /// The item's `unsafe` vouch (see [`ItemHead::unsafe_token`]).
     pub fn unsafe_token(&self) -> Option<SyntaxToken> {
-        token(&self.syntax, UNSAFE_KW)
+        self.head()?.unsafe_token()
     }
     pub fn is_unsafe(&self) -> bool {
         self.unsafe_token().is_some()
@@ -689,6 +724,9 @@ impl Member {
 }
 
 impl TypeItem {
+    pub fn head(&self) -> Option<ItemHead> {
+        child(&self.syntax)
+    }
     pub fn name(&self) -> Option<Name> {
         child(&self.syntax)
     }
@@ -813,6 +851,9 @@ impl TypeParam {
 }
 
 impl TraitItem {
+    pub fn head(&self) -> Option<ItemHead> {
+        child(&self.syntax)
+    }
     pub fn name(&self) -> Option<Name> {
         child(&self.syntax)
     }
