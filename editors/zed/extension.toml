@@ -13,11 +13,9 @@ repository = "https://github.com/halvko/must-lsp-server"
 # and a query error in the Zed log. To try an unpushed grammar, point
 # `repository` at a local checkout (`file:///abs/path/to/must`)
 # and `rev` at a commit in it, then reinstall the dev extension.
-#
-# PLACEHOLDER: replace `rev` with the commit that lands the grammar.
 [grammars.must]
 repository = "https://github.com/halvko/must"
-rev = "0000000000000000000000000000000000000000"
+rev = "dc73d9496fe57d1487ace30cadf05d179f80e4c2"
 path = "editors/tree-sitter-must"
 
 [language_servers.must-lsp]
