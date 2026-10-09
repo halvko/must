@@ -479,7 +479,7 @@ static main = fn { example() }
 "#,
             "main()",
             expect_test::expect![[r#"
-                error: declaring a host import is a VOUCH: write `unsafe extern static`
+                error: declaring an `extern` item is a VOUCH: write `unsafe extern static`
                   --> test.must:2:15
             "#]],
         );

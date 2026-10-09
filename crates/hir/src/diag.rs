@@ -48,20 +48,20 @@ pub fn builtin_call_requires_unsafe(name: &str) -> String {
     format!("calling `{name}` requires an `unsafe {{ ... }}` block")
 }
 
-/// A call of a host import outside any `unsafe { ... }` block. The same rule
+/// A call of an `extern` item outside any `unsafe { ... }` block. The same rule
 /// as [`DEREF_REQUIRES_UNSAFE`], and the reason is the boundary itself: what
-/// an import does is written in a language this compiler never sees, so
+/// an `extern` item does is written in a language this compiler never sees, so
 /// nothing on this side can establish that calling it is sound. The caller
 /// vouches, which is exactly what the marker means.
 pub fn extern_call_requires_unsafe(name: &str) -> String {
     format!(
-        "calling the host import `{name}` requires an `unsafe {{ ... }}` block; \
+        "calling the `extern` item `{name}` requires an `unsafe {{ ... }}` block; \
          nothing on this side of the boundary can check what it does"
     )
 }
 
 /// A call THROUGH A VALUE whose type is `unsafe fn(...)`, outside any
-/// `unsafe { ... }` block — a bound host import, an unsafe builtin passed
+/// `unsafe { ... }` block — a bound `extern` item, an unsafe builtin passed
 /// as an argument, a record field holding either, a parameter declared
 /// `unsafe fn(...)`.
 ///
@@ -72,12 +72,12 @@ pub fn extern_call_requires_unsafe(name: &str) -> String {
 pub const UNSAFE_FN_VALUE_CALL_REQUIRES_UNSAFE: &str =
     "calling a value of `unsafe fn` type requires an `unsafe { ... }` block";
 
-/// A host-import call in a const context — [`side_effect_call_in_const`]'s
+/// An `extern`-item call in a const context — [`side_effect_call_in_const`]'s
 /// judgment at a different boundary, stated in its own words because "side
 /// effect" is the wrong noun for "there is nobody there".
 pub fn extern_call_in_const(name: &str) -> String {
     format!(
-        "cannot call the host import `{name}` in a const context; \
+        "cannot call the `extern` item `{name}` in a const context; \
          there is no host at compile time"
     )
 }

@@ -6,7 +6,7 @@
 //
 // What is a language feature here, and what is not:
 //
-//   * a language feature: `extern static` (the import declaration), `read`
+//   * a language feature: `extern static` (the `extern` declaration), `read`
 //     (the host's byte move), `str_from_utf8` (the validity claim), the heap
 //     builtins, the borrow rules, and the `forget` capability (`Reader` is
 //     declared `only move`, so a path that never calls `drop` is refused);

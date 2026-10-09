@@ -1161,7 +1161,7 @@ full — which means the two lines it shows differ by exactly the one token
 that is the whole story.
 
 Two kinds of function have an `unsafe fn` type without anyone writing one:
-a host import (the "Host imports" chapter), and the builtins that both
+an `extern` item (the "Extern items" chapter), and the builtins that both
 require the marker and have a function type at all — `dealloc_array` and
 `str_bytes`. (`copy`, `add`, `offset` and the two blesses are polymorphic
 in a pointer's flavor, so they have no single `fn` type to carry anything;
@@ -2268,12 +2268,12 @@ terminal). Neither hangs waiting for input that can never arrive.
 
 `read_line` is the convenience, not the mechanism: "Standard input, as a
 library" below builds the same line-reading behavior out of ordinary Must
-code over one byte-moving host import.
+code over one byte-moving `extern` item.
 
-== Host imports
+== Extern items
 
 `print` and `read_line` are builtins: the compiler knows their names. A
-program can also declare a host import of its own, and the compiler learns
+program can also declare an `extern` item of its own, and the compiler learns
 nothing at all about what it does:
 
 ```must
@@ -2281,7 +2281,7 @@ unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
 ```
 
 Read that as what it is: a DECLARATION. There is no `=` and no value,
-because an import does not set anything to anything — it promises that
+because an `extern` item does not set anything to anything — it promises that
 something with this name and this type exists, and whatever provides it is
 on the other side of the boundary.
 
@@ -2320,23 +2320,23 @@ static g = fn (p: u8.&raw mut) -> isize { let h = read; unsafe { h(p, 8) } };
 correctly declared `now: fn() -> i64` is perfectly safe to call — reading a
 clock cannot break anything — and it is called with no marker at all,
 because the declarer already vouched, on the declaration, that this is what
-`now` really does. An import is no longer unsafe to call *because it is an
-import*; it is unsafe to call exactly when its type says so, the same rule
+`now` really does. An `extern` item is no longer unsafe to call *because it
+is `extern`*; it is unsafe to call exactly when its type says so, the same rule
 every other function value is judged by.
 
-A DATA import (`unsafe extern static x: usize`) is a shape this spelling
+`extern` DATA (`unsafe extern static x: usize`) is a shape this spelling
 admits and the language does not support yet — it is refused rather than
 guessed at.
 
-Calling an `unsafe fn`-typed import needs the marker for the same reason a
+Calling an `unsafe fn`-typed `extern` item needs the marker for the same reason a
 raw-pointer deref does: misusing it is undefined behavior, and here that is
 because what the function does is written in a language this compiler never
 sees, so nothing on this side can establish that calling it is sound. You
 vouch at the call, which is what the marker has always meant, exactly when
 the type says the vouch is owed.
 
-The type is what carries that from the declaration to the call. An import is
-an ordinary function value — bind it, pass it, return it, put it in a record
+The type is what carries that from the declaration to the call. An `extern`
+item is an ordinary function value — bind it, pass it, return it, put it in a record
 — and every one of those is free, because none of them runs anything. The
 call is where the price is paid, and the call always knows, because the
 obligation came along in the value's type — see "Unsafety is part of a
@@ -2345,7 +2345,7 @@ function's type" under "Raw pointers and unsafe".
 Calling one in a const context is an error for the same reason `print` is:
 there is no host at compile time.
 
-The *compiler* checks no import's signature against any host — one that did
+The *compiler* checks no `extern` item's signature against any host — one that did
 would have to know every host, which is the coupling `extern` exists to
 avoid. What happens instead is that each host answers for itself, and does it
 thoroughly. The interpreter provides exactly one primitive, `read`, the
@@ -2361,16 +2361,16 @@ host does have. That check is the declaration's, not the arguments': a buffer
 of eight fresh `bool`s and a buffer of eight fresh bytes are indistinguishable
 at run time, so only the type you wrote can say which one you meant.
 
-An import the interpreter does not provide is refused by name when it is
+An `extern` item the interpreter does not provide is refused by name when it is
 called, rather than silently doing nothing:
 
 ```
-runtime error: no host implementation for the import `launch_missiles`
+runtime error: no host implementation for the `extern` item `launch_missiles`
   — the interpreter provides `read` and nothing else
 ```
 
 A compiled module has its own reservation: `must.print` is already imported
-for the builtin `print`, so an import may not claim that name — a module
+for the builtin `print`, so an `extern` item may not claim that name — a module
 cannot import one name twice.
 
 Turning `read`'s bare count into something a Must program can match on is
@@ -2551,8 +2551,8 @@ function, `main` (the entry expression compiled in, chosen with `must-lsp
 compile -e <expression>`, default `main()`). Two tools in `tools/` run one:
 `wasm-run.mjs` from the command line, `playground.html` by opening it in a
 browser and dropping the file on it — `file://` works, no server needed.
-Both wire the builtin import and nothing else, so a program with imports of
-its own needs a host that knows them. Neither is a WASI runtime: a
+Both wire the builtin import and nothing else, so a program with `extern`
+items of its own needs a host that knows them. Neither is a WASI runtime: a
 general-purpose engine such as wasmtime or wasmer will not run these
 modules as-is.
 

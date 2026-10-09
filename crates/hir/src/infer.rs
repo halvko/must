@@ -3713,22 +3713,22 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let sink = self.witness_sink.take();
         let ty = match &self.body.exprs[expr] {
             ExprData::Missing => Ty::Error,
-            // A HOST IMPORT *is* its declared type. There is no value here
+            // An `extern` ITEM *is* its declared type. There is no value here
             // to infer from and nothing to check an annotation against, so
             // the item's own contract is the answer, whole.
             //
             // What a BROKEN declaration types as is decided once, in
-            // `item_tree::import_contract`: a data import (reserved) and a
+            // `item_tree::extern_contract`: `extern` data (reserved) and a
             // hole in the contract both arrive here already erased, so the
             // root and every mention — which read `ty::signature` off that
             // same contract — cannot disagree about them.
             //
             // The `Ty::Fn` guard is the local half of the same rule, for
-            // the one shape the contract rule cannot erase: an import with
+            // the one shape the contract rule cannot erase: an `extern` item with
             // no annotation at all arrives as a free variable, and NO CALL
-            // SITE MAY DECIDE an import's type. Group inference erases that
+            // SITE MAY DECIDE an `extern` item's type. Group inference erases that
             // leftover too, so this is a belt, not the only strap.
-            ExprData::ExternImport => match self.resolve_shallow(expected) {
+            ExprData::ExternItem => match self.resolve_shallow(expected) {
                 ty @ Ty::Fn(_) => ty,
                 _ => Ty::Error,
             },
@@ -5294,7 +5294,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // that can still be holding the value, and its witnesses
                 // know. Anything else (a mutually-recursive item signature,
                 // the usual case here) is safe, and can only be safe: an
-                // inferred signature is never an import's.
+                // inferred signature is never an `extern` item's.
                 let unsafe_to_call = self
                     .constraints
                     .pending_join_mints_unsafe_fn(self.table, var);

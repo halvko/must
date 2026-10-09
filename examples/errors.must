@@ -338,7 +338,7 @@ static retired_prefix_borrow = fn () -> () {
 };
 
 // 32. Calling an `unsafe fn`-typed extern item outside an `unsafe` block.
-//     error: calling the host import `host_read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
+//     error: calling the `extern` item `host_read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
 unsafe extern static host_read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
 static call_outside_unsafe = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
 
@@ -346,29 +346,29 @@ static call_outside_unsafe = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
 //     contract — the item's name is the name the host is asked for and the
 //     annotation is the one machine signature it must provide — so there is
 //     nothing left to set. The value wins where one is written (this item
-//     is NOT an import), and the fix cuts the value, not the contract.
-//     error: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
+//     is NOT `extern`), and the fix cuts the value, not the contract.
+//     error: an `extern static` has no initializer: the declaration is the whole contract, and an `extern` item sets nothing to anything
 //     quick fix offered: "Remove the initializer"
-unsafe extern static import_with_a_value: unsafe fn(n: usize) -> usize = fn (n: usize) -> usize { n };
+unsafe extern static extern_with_a_value: unsafe fn(n: usize) -> usize = fn (n: usize) -> usize { n };
 
 // 34. An `extern static` without `unsafe`.
-//     error: declaring a host import is a VOUCH: write `unsafe extern static`
+//     error: declaring an `extern` item is a VOUCH: write `unsafe extern static`
 //     quick fix offered: "Write `unsafe extern`"
-extern static unvouched_import: fn() -> i64;
+extern static unvouched_extern: fn() -> i64;
 
-// 35. A DATA import. The spelling admits it — an annotation is an
-//     annotation — but a function import's price rides its TYPE, and there
-//     is no `unsafe usize` for a data import's to ride. Reserved rather
+// 35. `extern` DATA. The spelling admits it — an annotation is an
+//     annotation — but an `extern` item's price rides its TYPE, and
+//     there is no `unsafe usize` for `extern` data's to ride. Reserved rather
 //     than guessed at, so granting it later deletes a diagnostic instead of
 //     inventing a syntax.
-//     error: data imports are not supported yet — an import must have a function type
-unsafe extern static a_data_import: usize;
+//     error: `extern` data is not supported yet — an `extern` item must have a function type
+unsafe extern static extern_data: usize;
 
-// 36. A hole in an import's contract. `_` names a type the BODY
-//     determines, and an import has no body — the declaration is the whole
+// 36. A hole in an `extern` item's contract. `_` names a type the BODY
+//     determines, and an `extern` item has no body — the declaration is the whole
 //     contract, so a piece of it left unwritten is unwritten for good.
 //     Refused once per hole, wherever in the signature it stands.
-//     error: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
+//     error: an `extern` item's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
 unsafe extern static a_partial_contract: unsafe fn(n: _) -> i64;
 
 // 37. A region written at a CALL SITE. Regions are elided at every call:

@@ -44,7 +44,7 @@ pub enum UnsafeCheckDiagnostic {
     /// A call THROUGH A VALUE whose type is `unsafe fn(...)`, outside any
     /// `unsafe { ... }` block. The general rule, and the one that closes
     /// the hole none of the three above can see: `let f = read; f(buf, 8)`,
-    /// `apply(dealloc_array, p, n)`, a record field holding an import.
+    /// `apply(dealloc_array, p, n)`, a record field holding an `extern` item.
     /// Once the function is a value, its TYPE is the only thing that still
     /// knows a marker is owed — so the type is what gets asked.
     ///
@@ -168,9 +168,9 @@ impl CheckCtx<'_> {
             ExprData::NameRef(_)
             | ExprData::Missing
             | ExprData::Literal(_)
-            // The import DECLARATION itself: naming a host function runs
+            // The `extern` DECLARATION itself: naming a host function runs
             // nothing, so it is free exactly as a mention of one is.
-            | ExprData::ExternImport
+            | ExprData::ExternItem
             | ExprData::ElidedVariant { .. } => {}
             // Both lists a path can carry — the owner's turbofish and a
             // second segment's own — hold ordinary const-arg expressions,
@@ -220,7 +220,7 @@ impl CheckCtx<'_> {
                     } else if self.calls_an_unsafe_fn_value(*callee) {
                         // The callee's type decides; naming a directly
                         // called `extern` item only improves the message.
-                        let named_import = match self.resolutions.get(callee_name) {
+                        let named_extern = match self.resolutions.get(callee_name) {
                             Some(Resolution::Item(loc))
                                 if crate::is_extern(self.db, loc.to_id(self.db)) =>
                             {
@@ -228,7 +228,7 @@ impl CheckCtx<'_> {
                             }
                             _ => None,
                         };
-                        self.diagnostics.push(match named_import {
+                        self.diagnostics.push(match named_extern {
                             Some(name) => {
                                 UnsafeCheckDiagnostic::ExternCallOutsideUnsafe { call: expr, name }
                             }

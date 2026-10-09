@@ -182,7 +182,7 @@ arrays (`arrays.must`), raw pointers (`pointers.must`), the heap built on
 top of them (`heap.must`), safe borrows (`borrows.must`), members that
 borrow `Self` (`reborrow.must`), matching through a borrow
 (`match_projection.must`), reading standard input (`stdin.must`) and the
-same thing written as a library over a declared host import
+same thing written as a library over a declared `extern` item
 (`stdin_lib.must`), an owned, heap-backed string built the same way, over
 the `forget` capability (`string_lib.must`), walking text character by
 character (`chars.must`), and a generic `Option` with the member shapes

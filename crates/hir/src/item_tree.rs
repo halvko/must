@@ -296,7 +296,7 @@ impl TypeRef {
             ast::Type::UnitType(_) => TypeRef::Unit,
             ast::Type::NeverType(_) => TypeRef::Never,
             // Either parameter spelling — bare types (`fn(usize, str)`) or
-            // the NAMED list a host import's declaration writes
+            // the NAMED list an `extern` item's declaration writes
             // (`unsafe fn(buf: u8.&raw mut, len: usize)`). The names are
             // documentation and stop at the syntax layer: no call passes an
             // argument by name, so two spellings of one signature must
@@ -578,8 +578,8 @@ pub(crate) fn const_arg_ref_from_ast(arg: &ast::ConstArg) -> ConstArgRef {
     }
 }
 
-/// What an import's written type MEANS as a contract (G22) — the one
-/// place hir reads an import's type from, because there is no value to
+/// What an `extern` item's written type MEANS as a contract (G22) — the one
+/// place hir reads an `extern` item's type from, because there is no value to
 /// read one off.
 ///
 /// An UNWRITTEN return type means `()`, not an inference variable: there is
@@ -589,16 +589,16 @@ pub(crate) fn const_arg_ref_from_ast(arg: &ast::ConstArg) -> ConstArgRef {
 ///
 /// Anything else the declaration might say is NOT A CONTRACT, and is
 /// recorded as [`TypeRef::Error`] rather than published to mentions as a
-/// type the item's value does not have: a data import (a non-fn type) is
+/// type the item's value does not have: `extern` data (a non-fn type) is
 /// reserved, and a `_` anywhere inside leaves part of the contract to an
 /// inference with nothing to run on. Both are refused where they are
 /// written; this is what keeps the refusal from also being a lie to every
-/// use site — an import's value is a host function and nothing else, so a
+/// use site — an `extern` item's value is a host function and nothing else, so a
 /// signature no host function can have is no signature at all.
 ///
-/// Import-specific on purpose. Every other fn type's elided return is
+/// `extern`-specific on purpose. Every other fn type's elided return is
 /// inference's business, and nothing here touches that.
-fn import_contract(type_ref: TypeRef) -> TypeRef {
+fn extern_contract(type_ref: TypeRef) -> TypeRef {
     if type_ref.contains_hole() {
         return TypeRef::Error;
     }
@@ -624,12 +624,12 @@ pub fn item_tree(db: &dyn Db, file: SourceFile) -> ItemTree {
         .map(|item| match &item {
             ast::Item::StaticItem(it) => {
                 let generics = generics_from_fn_literal(it.body());
-                let is_extern = it.declares_host_import();
+                let is_extern = it.declares_extern();
                 let type_ref = if generics.is_empty() {
                     TypeRef::from_opt_ast(it.ty())
                         .map(|type_ref| {
                             if is_extern {
-                                import_contract(type_ref)
+                                extern_contract(type_ref)
                             } else {
                                 type_ref
                             }
@@ -656,7 +656,7 @@ pub fn item_tree(db: &dyn Db, file: SourceFile) -> ItemTree {
                     // value item's ceiling is its type's.
                     only_move: false,
                     // Never where a value is written (see
-                    // `ast::StaticItem::declares_host_import`).
+                    // `ast::StaticItem::declares_extern`).
                     is_extern,
                 }
             }

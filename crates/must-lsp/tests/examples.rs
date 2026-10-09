@@ -466,33 +466,33 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |             ^^
                = help: Rewrite as postfix
 
-            error: calling the host import `host_read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
+            error: calling the `extern` item `host_read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
               --> examples/errors.must:343:61
                 |
             343 | static call_outside_unsafe = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
                 |                                                             ^^^^^^^^^^^^^^^
 
-            error: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
+            error: an `extern static` has no initializer: the declaration is the whole contract, and an `extern` item sets nothing to anything
               --> examples/errors.must:352:72
                 |
-            352 | unsafe extern static import_with_a_value: unsafe fn(n: usize) -> usize = fn (n: usize) -> usize { n };
+            352 | unsafe extern static extern_with_a_value: unsafe fn(n: usize) -> usize = fn (n: usize) -> usize { n };
                 |                                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                = help: Remove the initializer
 
-            error: declaring a host import is a VOUCH: write `unsafe extern static`
+            error: declaring an `extern` item is a VOUCH: write `unsafe extern static`
               --> examples/errors.must:357:1
                 |
-            357 | extern static unvouched_import: fn() -> i64;
+            357 | extern static unvouched_extern: fn() -> i64;
                 | ^^^^^^
                = help: Write `unsafe extern`
 
-            error: data imports are not supported yet — an import must have a function type
-              --> examples/errors.must:365:37
+            error: `extern` data is not supported yet — an `extern` item must have a function type
+              --> examples/errors.must:365:35
                 |
-            365 | unsafe extern static a_data_import: usize;
-                |                                     ^^^^^
+            365 | unsafe extern static extern_data: usize;
+                |                                   ^^^^^
 
-            error: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
+            error: an `extern` item's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
               --> examples/errors.must:372:55
                 |
             372 | unsafe extern static a_partial_contract: unsafe fn(n: _) -> i64;

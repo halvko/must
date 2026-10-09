@@ -365,7 +365,7 @@ fn loop_hover(
 /// value is fully described by its signature, and a failed evaluation has
 /// its own diagnostic.
 ///
-/// A HOST IMPORT is the same case for a sharper reason: the declaration sets
+/// An `extern` ITEM is the same case for a sharper reason: the declaration sets
 /// nothing to anything, so hover must not answer with a `= …` the source
 /// does not have. Its signature is the whole of what is known about it.
 fn const_display(db: &RootDatabase, item: hir::ItemId<'_>) -> Option<String> {

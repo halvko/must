@@ -66,15 +66,15 @@ impl Refusal {
     }
 }
 
-/// A host import whose signature has no wasm representation, refused BY THE
-/// IMPORT'S NAME with the layout rule as the parenthetical. Which boundary is
+/// An `extern` item whose signature has no wasm representation, refused BY
+/// THE ITEM'S NAME with the layout rule as the parenthetical. Which boundary is
 /// unavailable is the useful half; which layout rule objected is the detail.
 ///
 /// It points at the DECLARATION, not at the call that reached it: the
 /// signature is the declaration's, and that is where the fix goes.
 fn extern_refusal(name: &str, at: &(ItemLoc, ExprId), err: Unsupported) -> CallTarget {
     CallTarget::Refused(Refusal::new(
-        format!("{} in the host import `{name}`'s signature", err.0),
+        format!("{} in the `extern` item `{name}`'s signature", err.0),
         &at.0,
         at.1,
     ))
@@ -136,7 +136,7 @@ pub enum CallTarget {
     Instance(InstanceKey),
     Print,
     Panic,
-    /// A call of a host import, resolved to the name the module imports
+    /// A call of an `extern` item, resolved to the name the module imports
     /// under and the wasm signature it imports with. The signature is
     /// computed HERE, where the instance's concrete types are in hand, so
     /// `compile` can declare every import before the first defined function
@@ -145,7 +145,7 @@ pub enum CallTarget {
         name: String,
         params: Vec<ValType>,
         results: Vec<ValType>,
-        /// Where the import is DECLARED — the caret for a refusal raised
+        /// Where the `extern` item is DECLARED — the caret for a refusal raised
         /// while the import section is being built, long after this. A
         /// declaration is what such a refusal asks the user to change, so
         /// the call that reached it is not the useful site (and stands in
@@ -614,18 +614,18 @@ impl<'db> Mono<'db> {
                     origin,
                 ));
             }
-            // A host import: the module grows an import entry and the call
+            // An `extern` item: the module grows an import entry and the call
             // becomes an ordinary `call` of it. The signature is the
             // DECLARATION's — the constant recorded it (`Const::ExternFn`)
             // precisely so no host, and no backend, has to re-derive it from
-            // what a call site passed, and an import is never generic, so it
+            // what a call site passed, and an `extern` item is never generic, so it
             // is ground here. If any part of it has no wasm representation
-            // the refusal names the IMPORT rather than the type: a reader
+            // the refusal names the ITEM rather than the type: a reader
             // needs to know which boundary is unavailable, not which layout
             // rule said so.
             StaticVal::ExternFn { decl, sig } => {
                 let name = decl.display_name().to_owned();
-                // Every diagnostic about an import belongs on its
+                // Every diagnostic about an `extern` item belongs on its
                 // declaration, so resolve that site once here. An item with
                 // no initializer expression is broken and already carries
                 // its own error; fall back to the call rather than pair an
@@ -742,7 +742,7 @@ impl<'db> Mono<'db> {
         match op {
             Operand::Const(Const::ExternFn { .. }) => {
                 return Err(Unsupported::new(
-                    "a host import used as a value (imports are callable, not data)",
+                    "an `extern` item used as a value (they are callable, not data)",
                 ));
             }
             // A MOVE is a copy plus an ALIASING fact, and this backend has
@@ -894,7 +894,7 @@ impl<'db> Mono<'db> {
             match target {
                 CallTarget::Instance(callee) => targets.push(callee.clone()),
                 CallTarget::Refused(refusal) => return Err(refusal.clone()),
-                // An import declares no instance to register — the module
+                // An `extern` item declares no instance to register — the module
                 // grows an import entry for it in `compile` instead.
                 CallTarget::Print | CallTarget::Panic | CallTarget::Extern { .. } => {}
             }

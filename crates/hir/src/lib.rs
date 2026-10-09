@@ -284,7 +284,7 @@ pub fn item_data<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<item_tree::I
             // A member is a value item; only a `type` declaration writes a
             // ceiling.
             only_move: false,
-            // A member is DEFINED where it is declared; an import is the
+            // A member is DEFINED where it is declared; an `extern` item is the
             // one value in the language that is not.
             is_extern: false,
         });
@@ -1605,7 +1605,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 
         // Unsafe-check findings: the two operation families that need an
         // `unsafe { ... }` block — a raw-pointer deref, and a CALL whose
-        // callee is an unsafe builtin, a host import, or any value of
+        // callee is an unsafe builtin, an `extern` item, or any value of
         // `unsafe fn` type. Messages render in
         // `UnsafeCheckDiagnostic::message` (shared with MIR's traps).
         for diag in unsafe_check::unsafe_check(db, item) {

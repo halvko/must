@@ -691,7 +691,7 @@ impl Ty {
     }
 
     /// A function type whose safety is not a constant at the construction
-    /// site: a written type reference, a host import's inferred signature,
+    /// site: a written type reference, an `extern` item's inferred signature,
     /// a join's minted callee shape.
     pub fn fn_type_with(unsafe_to_call: bool, params: Vec<Ty>, ret: Ty) -> Ty {
         Ty::Fn(Arc::new(FnTy {
@@ -1994,7 +1994,7 @@ pub fn signature_needs_annotation<'db>(db: &'db dyn Db, item: ItemId<'db>) -> bo
     if item.member(db).is_some() {
         return false;
     }
-    // A HOST IMPORT is nothing BUT its annotation, so "add a type
+    // An `extern` ITEM is nothing BUT its annotation, so "add a type
     // annotation to its definition" is advice that cannot be taken. What is
     // wrong with the contract — a `_` left in it, a type that is not a
     // function — is refused where it is written.

@@ -83,7 +83,7 @@
 - **G16** Full keywords: `raw unsafe with impl for trait requires extern only` (`const`,
   `struct`, `enum` are contextual expression-starters). `extern` also OPENS an item, the
   fifth after `static`/`const`/`type`/`trait`, and `unsafe` leads `extern` there as the
-  vouch marker of a host import (G22) — the one item-position spelling of a keyword that
+  vouch marker of an `extern` item (G22) — the one item-position spelling of a keyword that
   elsewhere only opens expressions (`unsafe { ... }`) or a type (`unsafe fn(...)`, G23).
   One `keywords!` table generates the set — `from_keyword`, `is_keyword`, and the table
   itself — so the highlighter (P10) and completions classify a keyword by asking, never by
@@ -122,13 +122,13 @@
   ```
   item        := ('static'|'const'|'type'|'trait') pattern (':' type)?
                  '=' rhs (with-group | only-clause)* ';'
-  import      := 'extern' 'static' pattern ':' type
+  extern-item := 'extern' 'static' pattern ':' type
                  (with-group | only-clause)* ';'
   only-clause := 'only' name-ref ('+' name-ref)*
   ```
 
   `with` attaches and `only` caps; they share the trailing slot in either order, parsed by one
-  loop, on every item head — an import, which has no `= rhs` to trail, reads them too, so a
+  loop, on every item head — an `extern` item, which has no `= rhs` to trail, reads them too, so a
   ceiling written on one is a refusal rather than a parse cascade. Capability names are
   ordinary name refs composed with `+`, and `+` here names one ceiling per ladder, so two
   rungs of one ladder contradict rather than accumulate. A ceiling is written once per
@@ -154,27 +154,27 @@
   colon-declared member signature's own `unsafe` stays reserved, and so does the marker on a
   fn LITERAL: the value's type carries the fact, so that spelling could only sugar an
   annotation.
-- **G22** An import is a declaration:
+- **G22** An `extern` item is a declaration:
   `unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;`. A type in
   annotation position, no `=`, no value, because nothing is being set to anything. TWO
   markers lead the item, one obligation each: `extern` says the name comes from outside,
   `unsafe` VOUCHES that the signature written here is what the host really provides — a
-  claim nothing on this side can check, so a human makes it, always, on every import. Both
+  claim nothing on this side can check, so a human makes it, always, on every `extern` item. Both
   are required and in that order; `extern static ...` alone is an error with a fix that
   inserts the vouch, and `extern unsafe static ...` (the markers reversed) is superset-parsed
   into the same item and an error with a fix that moves it. `unsafe` on anything but an
   `extern static` is refused the same way `extern` on anything but a `static` is. Every other
   refusal restates that the declaration is the whole contract: an initializer, a non-fn type,
   a missing type, a type not written in full (`_` has no body to be inferred from). A written
-  initializer means it is not an import: the value wins and the markers are dropped, since
+  initializer means it is not an `extern` item: the value wins and the markers are dropped, since
   keeping them would turn a visible syntax error into a run-time refusal at a boundary the
   program never crossed. An unwritten return type means `()`. Fn types may name
   their parameters, decided per parameter, with the name dropped below syntax so both
   spellings are one type. A fn type's parameters are not patterns: `mut` and destructuring
   belong to a fn literal, whose parameters bind. CALLING is a separate question from
-  declaring, answered by the fn type's own `unsafe` alone (T19): an import declared
+  declaring, answered by the fn type's own `unsafe` alone (T19): an `extern` item declared
   `fn(...)` is vouched for but free to call, direct or through a binding, exactly as any
-  other safe function is — an import is not "unsafe to call because it is an import".
+  other safe function is — an `extern` item is not "unsafe to call because it is `extern`".
 
 ## Discarded
 
@@ -225,14 +225,15 @@
 - **`static read = extern fn(...)`** — `=` followed by something that is not a value, so the
   reader had to un-learn what `=` means. Removed: `extern` marks items only, so `extern fn`
   in an initializer is an ordinary parse error. **G22**
-- **Unvouched imports allowed / an import unsafe to call because it is an import** — the
-  conservative stopgap G22 shipped with: every import was declared `unsafe fn` regardless
-  of its real call price, because the DECLARATION-side vouch had no spelling of its own and
-  granting a safe-to-call import would have left that obligation with no home at all. The
-  vouch marker (`unsafe extern static ...`) is that home, so the stopgap is retired: the
-  TYPE alone now decides the call price, and an import declared `fn(...)` is free to call,
-  direct or through a binding — a boundary owes two obligations, and each one now has its
-  own spelling, so neither has to borrow the other's. **G22 T19**
+- **Unvouched `extern` items allowed / an `extern` item unsafe to call because it is
+  `extern`** — the conservative stopgap G22 shipped with: every `extern` item was declared
+  `unsafe fn` regardless of its real call price, because the DECLARATION-side vouch had no
+  spelling of its own and granting a safe-to-call `extern` item would have left that
+  obligation with no home at all. The vouch marker (`unsafe extern static ...`) is that home,
+  so the stopgap is retired: the TYPE alone now decides the call price, and an `extern` item
+  declared `fn(...)` is free to call, direct or through a binding — a boundary owes two
+  obligations, and each one now has its own spelling, so neither has to borrow the other's.
+  **G22 T19**
 - **Negative literal patterns** — `-1` is an operator applied to a literal, so taking it is
   the first step toward a pattern-expression grammar; and it collides with G03/G04:
   `_ => { 1 }` newline `- 1,` already parses as one arm. **Ranges** — they ask what order a

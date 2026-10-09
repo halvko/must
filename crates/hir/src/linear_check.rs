@@ -685,7 +685,7 @@ impl CheckCtx<'_> {
             | ExprData::Literal(_)
             // A signature and nothing else: no value is produced from a
             // linear one and none is consumed.
-            | ExprData::ExternImport
+            | ExprData::ExternItem
             | ExprData::ElidedVariant { .. }
             | ExprData::VariantPath { .. }
             | ExprData::GenericApp { .. } => Flow::Falls,

@@ -40,7 +40,7 @@ fn check_run(text: &str, entry: &str, expect: Expect) {
 /// `print` output: this is the injection side. The builtin `read_line`
 /// consumes it line-by-line (a final line with no trailing `\n` still
 /// reads, as the last `Line`, then `End` on the call after); a program
-/// that declares its own `read` host import instead consumes it
+/// that declares its own `read` `extern` item instead consumes it
 /// byte-wise, exactly as a real `read(2)` would.
 fn check_run_with_input(text: &str, entry: &str, input: &str, expect: Expect) {
     check_run_with_bytes(text, entry, input.as_bytes(), expect);
@@ -6410,7 +6410,7 @@ static g = fn() -> usize {
     );
 }
 
-// ---- the `read` import — the host byte read -----------------------------
+// ---- the `read` `extern` item — the host byte read ----------------------
 
 #[test]
 fn the_host_read_fills_a_byte_buffer_and_answers_the_count() {
@@ -6464,7 +6464,7 @@ static f = fn() -> i64 {
 }
 
 #[test]
-fn an_import_this_host_does_not_provide_is_refused_by_name() {
+fn an_extern_item_this_host_does_not_provide_is_refused_by_name() {
     // The P01 layer-1 property, stated at run time: a host that does not
     // provide a hook has denied the capability. Saying WHICH one is the
     // whole difference between a refusal and a crash.
@@ -6475,7 +6475,7 @@ static f = fn() -> i64 { unsafe { launch_missiles(1) } };
 "#,
         "f()",
         expect![[r#"
-            error[Runtime]: no host implementation for the import `launch_missiles` — the interpreter provides `read` and nothing else
+            error[Runtime]: no host implementation for the `extern` item `launch_missiles` — the interpreter provides `read` and nothing else
         "#]],
     );
 }
@@ -6490,7 +6490,7 @@ static f = fn() -> i64 { print("Hello"); example(); 0 };
         "f()",
         expect![[r#"
             output: "Hello"
-            error[Trap]: declaring a host import is a VOUCH: write `unsafe extern static`
+            error[Trap]: declaring an `extern` item is a VOUCH: write `unsafe extern static`
         "#]],
     );
 }
@@ -6518,13 +6518,13 @@ static f = fn() -> i64 { x };
 "#,
         "f()",
         expect![[r#"
-            error[Trap]: only an `extern static` can be `unsafe`: the marker vouches for a host import's declared signature, and nothing else declares one
+            error[Trap]: only an `extern static` can be `unsafe`: the marker vouches for an `extern` item's declared signature, and nothing else declares one
         "#]],
     );
 }
 
 #[test]
-fn a_safe_typed_import_is_called_with_no_marker_and_still_reaches_the_host() {
+fn a_safe_typed_extern_item_is_called_with_no_marker_and_still_reaches_the_host() {
     // A `fn`-typed extern item is callable without `unsafe` and still reaches the
     // host's name check.
     check_run(
@@ -6532,7 +6532,7 @@ fn a_safe_typed_import_is_called_with_no_marker_and_still_reaches_the_host() {
          static f = fn() -> i64 { now() };",
         "f()",
         expect![[r#"
-            error[Runtime]: no host implementation for the import `now` — the interpreter provides `read` and nothing else
+            error[Runtime]: no host implementation for the `extern` item `now` — the interpreter provides `read` and nothing else
         "#]],
     );
 }
@@ -6665,7 +6665,7 @@ static f = fn () -> u8 {
 /// with bytes mints values the type system says cannot exist — discovered
 /// much later, as an internal error blaming the compiler.
 #[test]
-fn a_host_import_declared_with_the_wrong_signature_is_refused() {
+fn an_extern_item_declared_with_the_wrong_signature_is_refused() {
     let program = |buf: &str, arg: &str, len: &str, ret: &str| {
         format!(
             "unsafe extern static read: unsafe fn(buf: {buf}, len: usize) -> {ret};\n\
@@ -6683,7 +6683,7 @@ fn a_host_import_declared_with_the_wrong_signature_is_refused() {
         &program("bool.&raw mut", "dangling::<bool>()", "8", "isize"),
         "f()",
         expect![[r#"
-            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
+            error[Runtime]: the `extern` item `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
         "#]],
     );
     // A SHARED pointer: `read` writes, so read-only is as wrong as non-byte.
@@ -6691,7 +6691,7 @@ fn a_host_import_declared_with_the_wrong_signature_is_refused() {
         &program("u8.&raw", "p.*.&raw", "8", "isize"),
         "f()",
         expect![[r#"
-            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
+            error[Runtime]: the `extern` item `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
         "#]],
     );
     // Not a pointer at all. These used to blame the compiler ("internal
@@ -6700,14 +6700,14 @@ fn a_host_import_declared_with_the_wrong_signature_is_refused() {
         &program("i64", "1", "8", "isize"),
         "f()",
         expect![[r#"
-            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
+            error[Runtime]: the `extern` item `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
         "#]],
     );
     check_run(
         &program("str", "\"x\"", "8", "isize"),
         "f()",
         expect![[r#"
-            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
+            error[Runtime]: the `extern` item `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
         "#]],
     );
     // A zero-length request touches no buffer, and is judged all the same:
@@ -6716,7 +6716,7 @@ fn a_host_import_declared_with_the_wrong_signature_is_refused() {
         &program("i64", "1", "0", "isize"),
         "f()",
         expect![[r#"
-            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
+            error[Runtime]: the `extern` item `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
         "#]],
     );
     // A return type that is not a signed machine word.
@@ -6724,7 +6724,7 @@ fn a_host_import_declared_with_the_wrong_signature_is_refused() {
         &program("u8.&raw mut", "p", "8", "bool"),
         "f()",
         expect![[r#"
-            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
+            error[Runtime]: the `extern` item `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
         "#]],
     );
     // Declaring `read` as a safe `fn` is a signature error.
@@ -6738,7 +6738,7 @@ fn a_host_import_declared_with_the_wrong_signature_is_refused() {
          };",
         "f()",
         expect![[r#"
-            error[Runtime]: the host import `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
+            error[Runtime]: the `extern` item `read` was declared with a signature this host does not provide; it provides `unsafe fn(buf: u8.&raw mut, len: usize) -> isize`
         "#]],
     );
 }
@@ -6770,7 +6770,7 @@ fn the_host_read_answers_in_whichever_signed_word_the_declaration_asked_for() {
 }
 
 #[test]
-fn calling_a_host_import_through_a_binding_traps_with_the_squiggle_text() {
+fn calling_an_extern_item_through_a_binding_traps_with_the_squiggle_text() {
     // The check-time diagnostic and the trap are the same sentence — the
     // house rule — so a program that reaches the host through a binding
     // cannot execute it unvouched. Note WHERE the trap is: taking the value
@@ -6817,14 +6817,14 @@ static f = fn() -> i64 { unsafe { bad(1) } };
 "#,
         "f()",
         expect![[r#"
-            error[Trap]: an `extern static` has no initializer: the declaration is the whole contract, and an import sets nothing to anything
+            error[Trap]: an `extern static` has no initializer: the declaration is the whole contract, and an `extern` item sets nothing to anything
         "#]],
     );
 }
 
 #[test]
-fn a_data_import_is_refused_where_it_is_mentioned() {
-    // A data import is reserved (G22), so there is no value for the
+fn extern_data_is_refused_where_it_is_mentioned() {
+    // `extern` data is reserved (G22), so there is no value for the
     // interpreter to produce and no host to ask for one. The mention is
     // what refuses, naming the item and what is wrong with it — the
     // alternative is a `usize` no host function can be, carried into
