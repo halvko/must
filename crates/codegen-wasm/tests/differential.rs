@@ -1434,10 +1434,10 @@ type Pair = struct::<T> { a: T, b: T };
 type Option = enum::<T> { Some(T), None };
 
 // nested generics: Pair<Pair<u8>>
-static mk = fn::<T>(x: T) -> Pair::<T> { Pair::<T>(struct { a = x, b = x }) };
+static mk = fn::<T>(a: T, b: T) -> Pair::<T> { Pair::<T>(struct { a, b }) };
 static nested = fn(v: u8) -> u8 {
-    let inner = mk(v);
-    let outer = mk(inner);
+    let inner = mk(v, v);
+    let outer = mk(inner, inner);
     outer.b.a
 };
 

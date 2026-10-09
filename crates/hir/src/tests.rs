@@ -15107,6 +15107,80 @@ static main = fn() -> () {
     );
 }
 
+/// Every mention of a consumed binding but a whole assignment is a use
+/// after move: a borrow, a raw borrow, a field read, a field write.
+#[test]
+fn a_place_use_of_a_consumed_linear_is_the_use_after_move_error() {
+    check_linear(
+        r#"
+static borrow = fn() -> usize {
+    let r = make(1);
+    r.drop();
+    let b = r.&;
+    b.*.id
+};
+static raw_borrow = fn() -> () {
+    let r = make(1);
+    r.drop();
+    let p = r.&raw;
+};
+static field = fn() -> usize {
+    let r = make(1);
+    r.drop();
+    r.id
+};
+static field_write = fn() -> () {
+    let mut r = make(1);
+    r.drop();
+    r.id = 2;
+};
+"#,
+        expect![[r#"
+            415..416: `r` was already consumed (`r` is born here and must be consumed at 376..377) (first consumed here at 393..394)
+            514..515: `r` was already consumed (`r` is born here and must be consumed at 475..476) (first consumed here at 492..493)
+            595..596: `r` was already consumed (`r` is born here and must be consumed at 564..565) (first consumed here at 581..582)
+            680..681: `r` was already consumed (`r` is born here and must be consumed at 649..650) (first consumed here at 666..667)
+        "#]],
+    );
+}
+
+/// A whole assignment gives a consumed binding its value back, so a
+/// borrow after it is clean.
+#[test]
+fn a_consumed_linear_assigned_whole_can_be_borrowed_again() {
+    check_linear(
+        r#"
+static main = fn() -> usize {
+    let mut r = make(1);
+    r.drop();
+    r = make(2);
+    let id = r.&.*.id;
+    r.drop();
+    id
+};
+"#,
+        expect![""],
+    );
+}
+
+/// A place use of a moved rigid parameter is refused like a by-value one.
+#[test]
+fn a_place_use_of_a_moved_type_parameter_is_the_use_after_move_error() {
+    check_diagnostics(
+        r#"
+static pair = fn::<@a, T>(v: T, r: T.&::<@a>) -> T { v };
+static f = fn::<T: forget>(m: T) -> T {
+    let w = m;
+    let r = m.&;
+    pair(w, r)
+};
+"#,
+        expect![[r#"
+            126..127: `m` was already consumed: a value of `T` may not be duplicated, and no bound grants copying — borrow it at the first use (`m` is born here, and there is only one of it at 86..87) (first consumed here at 111..112)
+        "#]],
+    );
+}
+
 #[test]
 fn a_linear_consumed_in_one_arm_only_fails_at_the_join() {
     check_linear(

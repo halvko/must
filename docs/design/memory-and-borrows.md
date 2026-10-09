@@ -136,6 +136,19 @@
   to a field pins only the field. Materializing a temporary's root is therefore the simple
   correct choice; copying a field-projected prefix instead is an optimization no program can
   observe, and belongs to a MIR pass.
+- **M21** A move leaves its storage uninitialized: the allocation stays, so a pointer into it
+  is not dangling, but nothing may be read there until a whole write gives it a value again.
+  Statically that is M16's one fact per binding consulted at every mention, not only at a
+  by-value read: once a binding is consumed, a borrow of it, a raw borrow, a field read and a
+  field write are all the use-after-move, and only a whole assignment is allowed. Dynamically
+  the interpreter marks a moved local uninitialized, so a read through a pointer taken before
+  the move is detected UB with the move as its note. A bare `.&mut` read into a bare `let`
+  still copies (M07) and moves nothing.
+- **M22** A place is pinned while it is evaluated. A deref-rooted place reads its pointer
+  before its index operands run, and the access goes through that pointer; so from the read
+  to the access, assigning the pointer's place or a prefix of it, or moving its root, is
+  refused at that write. This is what lets the loan pass judge the access at the place the
+  user wrote. The same pin as Rust's shallow borrow of an index or a match guard.
 
 ### Ruled, not built
 
@@ -225,6 +238,13 @@
 - **Refusing `.&raw`/`.&raw mut` of a temporary** — a raw pointer to a block-local dangles
   just as easily, checks clean, and is priced at the deref under `unsafe` (D1); refusing the
   temporary buys no safety the local case does not already forgo. **M12**
+- **A maybe-moved dataflow in the loan pass, for M21 alone** — a second owner of
+  use-after-move beside M16's walk, and the two would report one mistake twice at joins and
+  loops; the walk moves to MIR whole (halvko/must#28) or not at all. **Allowing `.&raw` of a
+  consumed binding** — the pointer would address storage nothing may read, and refusing it
+  keeps the static rule one sentence. **A flow-sensitive alias for place temps** — judging
+  the access against the pointer it goes through needs the pointer's own loans at the copy, a
+  second alias rule; the pin keeps one. **M21 M22**
 
 ## Re-evaluate when
 

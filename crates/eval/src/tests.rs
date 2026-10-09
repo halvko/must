@@ -7471,6 +7471,122 @@ static f = fn() -> usize {
     );
 }
 
+/// A raw read of a local whose value was moved out reads uninitialized
+/// storage: detected UB, with the move as the note.
+#[test]
+fn a_raw_read_of_moved_out_storage_is_detected() {
+    check_run(
+        r#"
+type Tok = struct { n: usize } only move with {
+    impl Self {
+        done = fn(t: Self) -> usize { let Tok(struct { n }) = t; n };
+    }
+};
+static f = fn() -> usize {
+    let v = Tok(struct { n = 3 });
+    let p = v.&raw;
+    let w = v;
+    let k = w.done();
+    k + unsafe { p.*.n }
+};
+"#,
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: read of uninitialized memory — the local's value was moved out
+              note: its value was moved out here
+        "#]],
+    );
+}
+
+/// A borrow taken after the move, which the checker refuses, reads the
+/// same uninitialized storage when the program runs anyway.
+#[test]
+fn a_borrow_of_moved_out_storage_is_detected_when_it_is_read() {
+    check_run(
+        r#"
+type Tok = struct { n: usize } only move with {
+    impl Self {
+        done = fn(t: Self) -> usize { let Tok(struct { n }) = t; n };
+    }
+};
+static f = fn() -> usize {
+    let v = Tok(struct { n = 3 });
+    let w = v;
+    let r = v.&;
+    let k = w.done();
+    k + r.*.n
+};
+"#,
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: read of uninitialized memory — the local's value was moved out
+              note: its value was moved out here
+        "#]],
+    );
+}
+
+/// A whole write gives moved-out storage a value again, by name or
+/// through a pointer to the whole local.
+#[test]
+fn a_whole_write_gives_moved_out_storage_its_value_back() {
+    check_run(
+        r#"
+type Tok = struct { n: usize } only move with {
+    impl Self {
+        done = fn(t: Self) -> usize { let Tok(struct { n }) = t; n };
+    }
+};
+static by_name = fn() -> usize {
+    let mut v = Tok(struct { n = 3 });
+    let p = v.&raw;
+    let k = v.done();
+    v = Tok(struct { n = 4 });
+    let j = unsafe { p.*.n };
+    k + j + v.done()
+};
+static through = fn() -> usize {
+    let mut v = Tok(struct { n = 3 });
+    let p = v.&raw mut;
+    let k = v.done();
+    unsafe { p.* = Tok(struct { n = 5 }); };
+    k + unsafe { p.*.n }
+};
+static both = fn() -> usize { by_name() * 100 + through() };
+"#,
+        "both()",
+        expect![[r#"
+            => 1108
+        "#]],
+    );
+}
+
+/// A write into part of moved-out storage has no whole value to land in:
+/// detected UB.
+#[test]
+fn a_field_write_into_moved_out_storage_is_detected() {
+    check_run(
+        r#"
+type Tok = struct { n: usize } only move with {
+    impl Self {
+        done = fn(t: Self) -> usize { let Tok(struct { n }) = t; n };
+    }
+};
+static f = fn() -> usize {
+    let mut v = Tok(struct { n = 3 });
+    let p = v.&raw mut;
+    let k = v.done();
+    unsafe { p.*.n = 5; };
+    k
+};
+"#,
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: read of uninitialized memory — the local's value was moved out
+              note: its value was moved out here
+        "#]],
+    );
+}
+
 // ---- materialized temporaries (M12) --------------------------------------
 
 /// A write through a `.&mut` of a temporary is visible to the code holding

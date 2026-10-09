@@ -5946,10 +5946,9 @@ static f = fn() -> usize {
 }
 
 /// A borrow of a local that was moved out, in a later argument or a later
-/// statement.
-/// TODO: refuse a borrow of a moved-out local (halvko/must#42)
+/// statement, is refused as a use of the consumed binding.
 #[test]
-fn a_borrow_of_a_moved_out_local_is_accepted() {
+fn a_borrow_of_a_moved_out_local_is_refused() {
     check_loans(
         r#"
 type Tok = struct { n: usize } only move with {
@@ -5964,16 +5963,49 @@ static pair = fn::<@a, T>(v: T, r: T.&::<@a>) -> T { v };
 static generic_argument = fn::<T>(m: T) -> T { pair(m, m.&) };
 static generic_statement = fn::<T>(m: T) -> T { let w = m; let r = m.&; pair(w, r) };
 "#,
+        expect![[r#"
+            306..307: `v` was already consumed
+            399..400: `v` was already consumed
+            531..532: `m` was already consumed: a value of `T` may not be duplicated, and no bound grants copying — borrow it at the first use
+            606..607: `m` was already consumed: a value of `T` may not be duplicated, and no bound grants copying — borrow it at the first use
+        "#]],
+    );
+}
+
+/// An index operand that writes through the pointer, or beside it, leaves
+/// the pointer the place was read through in place, and is accepted.
+#[test]
+fn an_index_operand_that_leaves_the_pointer_in_place_is_accepted() {
+    check_loans(
+        r#"
+static through = fn() -> usize {
+    let mut a: [usize; 2] = [1, 2];
+    let mut p = a.&mut;
+    p.*[{ p.*[1] = 5; 0 }]
+};
+static beside = fn() -> usize {
+    let mut a: [usize; 2] = [1, 2];
+    let mut s = struct { p = a.&mut, q: usize = 0 };
+    s.p.*[{ s.q = 1; 0 }]
+};
+static after = fn() -> usize {
+    let mut a: [usize; 2] = [1, 2];
+    let mut b: [usize; 2] = [3, 4];
+    let mut p = a.&mut;
+    let x = p.*[0];
+    p = b.&mut;
+    x + p.*[0]
+};
+"#,
         expect![[""]],
     );
 }
 
 /// An index operand that reassigns the pointer runs after the pointer was
-/// read, and the access is judged against the new `p.*`: the read, the
-/// write target and the address-of walks are all accepted.
-/// TODO: judge the access against the pointer it goes through (halvko/must#43)
+/// read, so the reassignment is refused, in the read, the write target and
+/// the address-of walks, and one deref deeper.
 #[test]
-fn an_access_through_a_pointer_its_index_reassigns_is_accepted() {
+fn an_access_through_a_pointer_its_index_reassigns_is_refused() {
     check_loans(
         r#"
 static read = fn() -> usize {
@@ -6007,7 +6039,26 @@ static address = fn() -> usize {
     x.* = 7;
     x.*
 };
+static double = fn() -> usize {
+    let mut a: [usize; 2] = [1, 2];
+    let mut c: [usize; 2] = [3, 4];
+    let mut p = a.&mut;
+    let mut bb = p.&mut;
+    let r = bb.*.*.&mut;
+    let v = bb.*.*[{ bb.* = c.&mut; 0 }];
+    r.*[0] = 9;
+    v
+};
 "#,
-        expect![[""]],
+        expect![[r#"
+            194..195: writing to `p` here replaces a pointer the place around it has already been read through: the access that place makes afterwards would go through the old pointer
+              note at 184..201: the place is accessed here, through the old pointer
+            411..412: writing to `p` here replaces a pointer the place around it has already been read through: the access that place makes afterwards would go through the old pointer
+              note at 421..422: the place is accessed here, through the old pointer
+            644..645: writing to `p` here replaces a pointer the place around it has already been read through: the access that place makes afterwards would go through the old pointer
+              note at 634..656: the place is accessed here, through the old pointer
+            901..907: writing to `bb.*` here replaces a pointer the place around it has already been read through: the access that place makes afterwards would go through the old pointer
+              note at 885..913: the place is accessed here, through the old pointer
+        "#]],
     );
 }

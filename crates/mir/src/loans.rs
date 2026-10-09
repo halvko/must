@@ -102,11 +102,12 @@
 //! more than one definition (a joined value dereferenced in place) is left
 //! as its own root, and a loan rooted there conflicts with nothing — a
 //! known accepting gap, not a shape the language produces today. The
-//! alias is flow-insensitive: an index operand that reassigns the pointer
-//! (`p.*[{ p = q; 0 }]`) runs between the copy and the access, which is
-//! then judged against the new `p.*`, a second accepting gap.
-//! TODO: judge the access against the pointer it goes through
-//! (halvko/must#43).
+//! alias is exact because the place is PINNED from the copy to the temp's
+//! last use: an assignment to it or a prefix of it, or a move of its root,
+//! is refused there ([`LoanDiagnostic::Repointed`]). Without the pin an
+//! index operand that reassigns the pointer (`p.*[{ p = q; 0 }]`) would
+//! run between the copy and the access, and the access would be judged
+//! against the new `p.*` while it goes through the old one.
 //!
 //! An ASSIGNMENT is shallow: `p = q` overwrites the pointer and touches
 //! nothing it points at, so it does not conflict with a loan through
@@ -184,6 +185,19 @@ pub enum LoanDiagnostic {
         /// Where that loan is still needed.
         still_used: StillUsed,
     },
+    /// An assignment or a move replaced a pointer that the place
+    /// expression around it was already read through: the access the
+    /// place then makes goes through the old pointer, not the one its
+    /// place names (module doc, "Places").
+    Repointed {
+        /// The assignment or move (a statement's origin).
+        access: ExprId,
+        kind: AccessKind,
+        /// The pointer's place, rendered for diagnostics.
+        place: String,
+        /// The access that still goes through the old pointer.
+        used: ExprId,
+    },
     /// A loan of a local's own storage is still live where the body
     /// returns — the storage is gone by then.
     Escapes {
@@ -249,7 +263,8 @@ pub enum StillUsed {
 impl LoanDiagnostic {
     pub fn expr(&self) -> ExprId {
         match self {
-            LoanDiagnostic::Invalidated { access, .. } => *access,
+            LoanDiagnostic::Invalidated { access, .. }
+            | LoanDiagnostic::Repointed { access, .. } => *access,
             LoanDiagnostic::Escapes { borrow, .. } => *borrow,
         }
     }
@@ -288,6 +303,9 @@ impl LoanDiagnostic {
                     StillUsed::AtTheAccess | StillUsed::HandedBack => {}
                 }
                 notes
+            }
+            LoanDiagnostic::Repointed { used, .. } => {
+                vec![(*used, "the place is accessed here, through the old pointer")]
             }
             LoanDiagnostic::Escapes { .. } => Vec::new(),
         }
@@ -360,6 +378,17 @@ impl LoanDiagnostic {
                     }
                 };
                 format!("{did} invalidates {victim} that is still live: {because}")
+            }
+            LoanDiagnostic::Repointed { kind, place, .. } => {
+                let did = match kind {
+                    AccessKind::Move => format!("moving {place} here"),
+                    _ => format!("writing to {place} here"),
+                };
+                format!(
+                    "{did} replaces a pointer the place around it has already been read \
+                     through: the access that place makes afterwards would go through the \
+                     old pointer"
+                )
             }
             LoanDiagnostic::Escapes {
                 temporary: true, ..
@@ -489,6 +518,8 @@ struct BodyCheck<'a> {
     /// Per local: the place it stands for, when it is a compiler temp
     /// holding one copy of a place (see the module doc, "Places").
     aliases: Vec<Option<Place>>,
+    /// The locals that have an alias, in arena order.
+    place_temps: Vec<LocalId>,
     /// Per local: the region graph nodes its value's type mentions, sorted.
     local_regions: Vec<Vec<u32>>,
     /// Per local: whether a plain read of it duplicates the value. A read
@@ -523,6 +554,7 @@ impl<'a> BodyCheck<'a> {
             infer,
             cover,
             aliases: Vec::new(),
+            place_temps: Vec::new(),
             local_regions: Vec::new(),
             local_copyable: Vec::new(),
             loans: Vec::new(),
@@ -532,6 +564,13 @@ impl<'a> BodyCheck<'a> {
             live_loans: Vec::new(),
         };
         check.aliases = check.compute_aliases();
+        check.place_temps = check
+            .body
+            .locals
+            .iter()
+            .map(|(local, _)| local)
+            .filter(|&local| check.is_place_temp(local))
+            .collect();
         let (regions, copyable) = check.compute_local_types();
         check.local_regions = regions;
         check.local_copyable = copyable;
@@ -1354,10 +1393,27 @@ impl<'a> BodyCheck<'a> {
         // One report per (access expression, loan): the earliest-minted
         // loan each access kills, and never twice for one origin.
         let mut reported: FxHashSet<(ExprId, usize)> = FxHashSet::default();
+        let mut repointed: FxHashSet<ExprId> = FxHashSet::default();
         for (block, data) in self.body.blocks.iter() {
             let mut scope = scope_in[Self::block_index(block)].clone();
             for point in self.points_of(block) {
                 self.step(point, &mut scope, |access, scope| {
+                    if let Some(temp) = self.pinned_by(point, access) {
+                        let origin = self.origin_at(point);
+                        let used = self
+                            .nearest_after(point, |at| self.uses_at(at).contains(&temp))
+                            .map(|at| self.origin_at(at));
+                        if let Some(used) = used
+                            && repointed.insert(origin)
+                        {
+                            diagnostics.push(LoanDiagnostic::Repointed {
+                                access: origin,
+                                kind: access.kind,
+                                place: self.render_place(&access.place, false),
+                                used,
+                            });
+                        }
+                    }
                     // A loan of dying storage that reaches a universal is
                     // `hir::outlives`' escape finding already, as it is
                     // at the return below.
@@ -1406,6 +1462,51 @@ impl<'a> BodyCheck<'a> {
         }
     }
 
+    /// The place temp, live past `point`, whose pointer `access` replaces:
+    /// an assignment to the temp's place or a prefix of it, or a move of
+    /// its root. Between the copy that defines a place temp and its last
+    /// use, its place is pinned, which is what makes the alias exact.
+    fn pinned_by(&self, point: Point, access: &Access) -> Option<LocalId> {
+        let replaces = match access.kind {
+            AccessKind::Write => access.shallow,
+            AccessKind::Move => true,
+            _ => false,
+        };
+        if !replaces {
+            return None;
+        }
+        let live = self.live_after(point);
+        self.place_temps.iter().copied().find(|&temp| {
+            let alias = self.aliases[Self::local_index(temp)]
+                .as_ref()
+                .expect("a place temp has an alias");
+            live.contains(Self::local_index(temp))
+                && alias.local == access.place.local
+                && access.place.projection.len() <= alias.projection.len()
+                && paths_overlap(&access.place.projection, &alias.projection)
+        })
+    }
+
+    /// The locals live just after `point`.
+    fn live_after(&self, point: Point) -> BitSet {
+        if point.index < self.body.blocks[point.block].statements.len() {
+            return self
+                .live_at(Point {
+                    block: point.block,
+                    index: point.index + 1,
+                })
+                .clone();
+        }
+        let mut live = BitSet::new(self.body.locals.len());
+        for succ in self.successors(point.block) {
+            live.union_with(self.live_at(Point {
+                block: succ,
+                index: 0,
+            }));
+        }
+        live
+    }
+
     fn origin_at(&self, point: Point) -> ExprId {
         let data = &self.body.blocks[point.block];
         match data.statements.get(point.index) {
@@ -1440,7 +1541,21 @@ impl<'a> BodyCheck<'a> {
         if uses_holder(from) {
             return StillUsed::AtTheAccess;
         }
-        // Breadth-first over points, so the nearest use is the one named.
+        let Some(point) = self.nearest_after(from, uses_holder) else {
+            return StillUsed::HandedBack;
+        };
+        let at = self.origin_at(point);
+        let access = self.origin_at(from);
+        if u32::from(at.into_raw()) < u32::from(access.into_raw()) {
+            StillUsed::NextIteration(at)
+        } else {
+            StillUsed::Later(at)
+        }
+    }
+
+    /// The nearest point after `from`, breadth-first over the CFG, that
+    /// satisfies `hit`.
+    fn nearest_after(&self, from: Point, hit: impl Fn(Point) -> bool) -> Option<Point> {
         let mut visited: FxHashSet<BlockId> = FxHashSet::default();
         let mut queue: std::collections::VecDeque<Point> = std::collections::VecDeque::new();
         let enqueue_rest = |start: Point, queue: &mut std::collections::VecDeque<Point>| {
@@ -1471,14 +1586,8 @@ impl<'a> BodyCheck<'a> {
             }
         }
         while let Some(point) = queue.pop_front() {
-            if uses_holder(point) {
-                let at = self.origin_at(point);
-                let access = self.origin_at(from);
-                return if u32::from(at.into_raw()) < u32::from(access.into_raw()) {
-                    StillUsed::NextIteration(at)
-                } else {
-                    StillUsed::Later(at)
-                };
+            if hit(point) {
+                return Some(point);
             }
             if point.index == self.body.blocks[point.block].statements.len() {
                 for succ in self.successors(point.block) {
@@ -1486,7 +1595,7 @@ impl<'a> BodyCheck<'a> {
                 }
             }
         }
-        StillUsed::HandedBack
+        None
     }
 
     /// Whether an access is a reborrow lowering inserted for a mention of
