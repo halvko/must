@@ -1670,8 +1670,11 @@ fn adoption_is_region_safe(table: &mut InPlaceUnificationTable<TyVar>, a: &Ty, b
     // Identical types have nothing to relate: every pairing would be a
     // region with itself, and `@r ⊇ @r` is vacuous. This is the shape the
     // join solver's closing line has, where the result is re-bound to the
-    // very type it was already resolved to.
-    if ra == rb {
+    // very type it was already resolved to. Compared FULLY resolved, as
+    // that line resolves it: a shallow resolution leaves inner variables
+    // in place, so a borrow whose referent is a bound variable would not
+    // equal its own resolution (#26).
+    if ra == rb || resolve_fully(table, a) == resolve_fully(table, b) {
         return true;
     }
     adopts(&ra) || adopts(&rb) || !ra.contains_borrow() || !rb.contains_borrow()
