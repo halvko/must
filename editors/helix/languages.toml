@@ -78,7 +78,6 @@ request = "launch"
 completion = [{ name = "program", completion = "filename" }]
 args = { program = "{0}", stopOnEntry = true }
 
-# PLACEHOLDER: replace `rev` with the commit that lands the grammar.
 [[grammar]]
 name = "must"
-source = { git = "https://github.com/halvko/must", rev = "0000000000000000000000000000000000000000", subpath = "editors/tree-sitter-must" }
+source = { git = "https://github.com/halvko/must", rev = "dc73d9496fe57d1487ace30cadf05d179f80e4c2", subpath = "editors/tree-sitter-must" }
