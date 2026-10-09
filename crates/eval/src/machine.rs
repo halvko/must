@@ -213,6 +213,10 @@ const CONST_FUEL: u64 = 1_000_000;
 /// never-written structure.
 const UNINIT_READ: &str = "read of uninitialized memory — this element was never written";
 
+/// The tracked-uninit read message for a local whose value was moved out:
+/// its storage stays allocated and holds nothing until a whole write.
+const MOVED_READ: &str = "read of uninitialized memory — the local's value was moved out";
+
 /// One Must call frame.
 pub struct Frame {
     pub loc: ItemLoc,
@@ -282,6 +286,10 @@ struct Allocation {
     /// killed it and the kind of scope it left. `None` for every other
     /// allocation, and for a local that died with its frame.
     ended: Option<(ItemLoc, ExprId, Scope)>,
+    /// Where a local's value was moved out, while its storage stays
+    /// uninitialized: a whole write gives it a value again. `None` for
+    /// every other allocation.
+    moved: Option<(ItemLoc, ExprId)>,
 }
 
 impl Allocation {
@@ -1051,16 +1059,15 @@ impl<'db, M: Mode> Machine<'db, M> {
         origin: ExprId,
     ) -> Result<Value, EvalError> {
         let frame = self.frames.last();
+        // The allocation the walk is in: the root's when it is promoted,
+        // then each deref's. `None` while it is in the frame's plain map.
+        let mut storage = frame.and_then(|frame| frame.promoted.get(&local).copied());
         // The promoted tier first (empty in pointer-free bodies): an
         // address-taken local's current value lives in its allocation.
-        let root = frame.and_then(|frame| {
-            if !frame.promoted.is_empty()
-                && let Some(alloc) = frame.promoted.get(&local)
-            {
-                return self.memory.get(alloc).map(|allocation| &allocation.value);
-            }
-            frame.locals.get(local)
-        });
+        let root = match storage {
+            Some(alloc) => self.memory.get(&alloc).map(|allocation| &allocation.value),
+            None => frame.and_then(|frame| frame.locals.get(local)),
+        };
         let Some(mut current) = root else {
             return Err(self.internal_error(
                 format!("read of uninitialized {}", local_name(body, local)),
@@ -1106,7 +1113,8 @@ impl<'db, M: Mode> Machine<'db, M> {
             // Projecting into tracked-uninit: the structure was never
             // written — detected UB (same judgement as `project_path`).
             if matches!(current, Value::Uninit) {
-                return Err(self.uninit_read(loc, origin));
+                let error = self.uninit_read_in(storage, loc, origin);
+                return self.fail_after_reads(reads, error, loc, origin);
             }
             current = match elem {
                 ResolvedProj::Field(index) => {
@@ -1115,7 +1123,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                     }
                     match field_step(current, *index) {
                         Ok(next) => next,
-                        Err(error) => return Err(self.ptr_path_error(error, loc, origin)),
+                        Err(error) => return Err(self.ptr_path_error(error, storage, loc, origin)),
                     }
                 }
                 ResolvedProj::Index(index) => {
@@ -1158,8 +1166,12 @@ impl<'db, M: Mode> Machine<'db, M> {
                     // above) — `p.*.y` only touches `y`.
                     reads.push((*tag, *alloc, path.clone()));
                     after_deref = true;
+                    storage = Some(*alloc);
                     let allocation = self.allocation_for_deref(*alloc, loc, origin)?;
-                    self.follow_ptr_path(&allocation.value, path, loc, origin)?
+                    match self.follow_ptr_path(*alloc, &allocation.value, path, loc, origin) {
+                        Ok(next) => next,
+                        Err(error) => return self.fail_after_reads(reads, error, loc, origin),
+                    }
                 }
             };
         }
@@ -1170,13 +1182,30 @@ impl<'db, M: Mode> Machine<'db, M> {
         // `print`, and every other consumer only ever see values that
         // passed through here.
         if current.contains_uninit() {
-            return Err(self.uninit_read(loc, origin));
+            let error = self.uninit_read_in(storage, loc, origin);
+            return self.fail_after_reads(reads, error, loc, origin);
         }
         let value = current.clone();
         for (tag, alloc, path) in reads {
             self.aliasing_access(tag, alloc, &path, Access::Read, loc, origin)?;
         }
         Ok(value)
+    }
+
+    /// A read's verdict on what it found, once the aliasing checks of the
+    /// derefs it stepped through have passed: reading through an
+    /// invalidated borrow is the error, whatever the pointee holds.
+    fn fail_after_reads(
+        &mut self,
+        reads: Vec<(Provenance, AllocId, Vec<PathElem>)>,
+        error: EvalError,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<Value, EvalError> {
+        for (tag, alloc, path) in reads {
+            self.aliasing_access(tag, alloc, &path, Access::Read, loc, origin)?;
+        }
+        Err(error)
     }
 
     /// Resolve a place to an abstract-memory location `(allocation,
@@ -1236,9 +1265,9 @@ impl<'db, M: Mode> Machine<'db, M> {
                         // the way — both UB judgements).
                         let allocation = self.allocation_for_deref(alloc, loc, origin)?;
                         let current =
-                            self.follow_ptr_path(&allocation.value, &path, loc, origin)?;
+                            self.follow_ptr_path(alloc, &allocation.value, &path, loc, origin)?;
                         if matches!(current, Value::Uninit) {
-                            return Err(self.uninit_read(loc, origin));
+                            return Err(self.uninit_read_in(Some(alloc), loc, origin));
                         }
                         let Value::Array(values) = current else {
                             return Err(self.ill_typed("an array value", current, loc, origin));
@@ -1265,9 +1294,10 @@ impl<'db, M: Mode> Machine<'db, M> {
                 }
                 ResolvedProj::Deref => {
                     let allocation = self.allocation_for_deref(alloc, loc, origin)?;
-                    let current = self.follow_ptr_path(&allocation.value, &path, loc, origin)?;
+                    let current =
+                        self.follow_ptr_path(alloc, &allocation.value, &path, loc, origin)?;
                     if matches!(current, Value::Uninit) {
-                        return Err(self.uninit_read(loc, origin));
+                        return Err(self.uninit_read_in(Some(alloc), loc, origin));
                     }
                     let Value::Ptr {
                         alloc: next_alloc,
@@ -1314,12 +1344,15 @@ impl<'db, M: Mode> Machine<'db, M> {
         // shapes before they run.
         self.aliasing_access(provenance, alloc, &path, Access::Write, loc, origin)?;
         let allocation = self.writable_allocation(alloc, loc, origin)?;
+        if path.is_empty() {
+            allocation.moved = None;
+        }
         match project_path_mut(&mut allocation.value, &path) {
             Ok(slot) => {
                 *slot = value;
                 Ok(())
             }
-            Err(error) => Err(self.ptr_path_error(error, loc, origin)),
+            Err(error) => Err(self.ptr_path_error(error, Some(alloc), loc, origin)),
         }
     }
 
@@ -1369,17 +1402,25 @@ impl<'db, M: Mode> Machine<'db, M> {
     /// judged), shape mismatches are internal errors.
     fn follow_ptr_path<'v>(
         &self,
+        alloc: AllocId,
         value: &'v Value,
         path: &[PathElem],
         loc: &ItemLoc,
         origin: ExprId,
     ) -> Result<&'v Value, EvalError> {
-        project_path(value, path).map_err(|error| self.ptr_path_error(error, loc, origin))
+        project_path(value, path)
+            .map_err(|error| self.ptr_path_error(error, Some(alloc), loc, origin))
     }
 
     /// The UB/internal split for failures along a pointer's STORED path —
     /// deterministic, like every detected-UB message.
-    fn ptr_path_error(&self, error: ProjectError, loc: &ItemLoc, origin: ExprId) -> EvalError {
+    fn ptr_path_error(
+        &self,
+        error: ProjectError,
+        storage: Option<AllocId>,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> EvalError {
         match error {
             ProjectError::OutOfBounds { len, index } => EvalError {
                 kind: EvalErrorKind::UndefinedBehavior,
@@ -1390,7 +1431,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 origin: Some((loc.clone(), origin)),
                 notes: Vec::new(),
             },
-            ProjectError::Uninit => self.uninit_read(loc, origin),
+            ProjectError::Uninit => self.uninit_read_in(storage, loc, origin),
             ProjectError::Shape(detail) => self.internal_error(detail, Some((loc.clone(), origin))),
         }
     }
@@ -1403,6 +1444,32 @@ impl<'db, M: Mode> Machine<'db, M> {
             message: UNINIT_READ.to_owned(),
             origin: Some((loc.clone(), origin)),
             notes: Vec::new(),
+        }
+    }
+
+    /// The gate's error for uninitialized storage in `storage`, or in the
+    /// frame's plain map when `None`, where only a move leaves a local
+    /// uninitialized. A moved-out local's error says so, at the move.
+    fn uninit_read_in(&self, storage: Option<AllocId>, loc: &ItemLoc, origin: ExprId) -> EvalError {
+        let moved = match storage {
+            None => None,
+            Some(alloc) => match self.memory.get(&alloc).and_then(|a| a.moved.clone()) {
+                Some(at) => Some(at),
+                None => return self.uninit_read(loc, origin),
+            },
+        };
+        EvalError {
+            kind: EvalErrorKind::UndefinedBehavior,
+            message: MOVED_READ.to_owned(),
+            origin: Some((loc.clone(), origin)),
+            notes: moved
+                .map(|at| EvalNote {
+                    message: "its value was moved out here".to_owned(),
+                    origin: Some(at),
+                    anchor: NoteAnchor::Expr,
+                })
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -1425,14 +1492,14 @@ impl<'db, M: Mode> Machine<'db, M> {
         value: Value,
         origin: ExprId,
     ) -> Result<(), EvalError> {
-        let project_error = |this: &Self, error: ProjectError| match error {
+        let project_error = |this: &Self, error: ProjectError, storage| match error {
             ProjectError::OutOfBounds { len, index } => EvalError {
                 kind: EvalErrorKind::Runtime,
                 message: hir::diag::index_out_of_bounds(len, index),
                 origin: Some((loc.clone(), origin)),
                 notes: Vec::new(),
             },
-            ProjectError::Uninit => this.uninit_read(loc, origin),
+            ProjectError::Uninit => this.uninit_read_in(storage, loc, origin),
             ProjectError::Shape(detail) => this.internal_error(detail, Some((loc.clone(), origin))),
         };
         // A promoted (address-taken) local lives in memory, not in the
@@ -1468,8 +1535,8 @@ impl<'db, M: Mode> Machine<'db, M> {
                     origin,
                 )?;
             }
-            let slot = match self.memory.get_mut(&alloc) {
-                Some(allocation) => &mut allocation.value,
+            let allocation = match self.memory.get_mut(&alloc) {
+                Some(allocation) => allocation,
                 None => {
                     return Err(self.internal_error(
                         "a promoted local's allocation is missing".to_owned(),
@@ -1478,15 +1545,16 @@ impl<'db, M: Mode> Machine<'db, M> {
                 }
             };
             if projection.is_empty() {
-                *slot = value;
+                allocation.value = value;
+                allocation.moved = None;
                 return Ok(());
             }
-            return match project_mut(slot, projection) {
+            return match project_mut(&mut allocation.value, projection) {
                 Ok(field) => {
                     *field = value;
                     Ok(())
                 }
-                Err(error) => Err(project_error(self, error)),
+                Err(error) => Err(project_error(self, error, Some(alloc))),
             };
         }
         let frame = self.frames.last_mut().expect("frame still live");
@@ -1504,7 +1572,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                     *field = value;
                     Ok(())
                 }
-                Err(error) => Err(project_error(self, error)),
+                Err(error) => Err(project_error(self, error, None)),
             },
         }
     }
@@ -1759,6 +1827,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                             kind: AllocKind::Static,
                             origin: None,
                             ended: None,
+                            moved: None,
                         });
                         self.static_allocs.insert(item.clone(), alloc);
                         alloc
@@ -1832,6 +1901,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             kind: AllocKind::Local,
             origin: None,
             ended: None,
+            moved: None,
         });
         let frame = self.frames.last_mut().expect("frame still live");
         frame.promoted.insert(local, alloc);
@@ -2065,6 +2135,29 @@ impl<'db, M: Mode> Machine<'db, M> {
         )
     }
 
+    /// The storage half of a move: the local holds nothing until a whole
+    /// write. An addressable local is promoted here if it was not yet, so
+    /// a later borrow of it finds the allocation that remembers the move.
+    fn vacate_moved_local(
+        &mut self,
+        local: LocalId,
+        body: &MirBody,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> Result<(), EvalError> {
+        if !body.locals[local].addressable {
+            let frame = self.frames.last_mut().expect("frame still live");
+            frame.locals.insert(local, Value::Uninit);
+            return Ok(());
+        }
+        let alloc = self.promote_local(local, body, loc, origin)?;
+        if let Some(allocation) = self.memory.get_mut(&alloc) {
+            allocation.value = Value::Uninit;
+            allocation.moved = Some((loc.clone(), origin));
+        }
+        Ok(())
+    }
+
     fn eval_operand(
         &mut self,
         loc: &ItemLoc,
@@ -2095,7 +2188,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                     // promoted local's storage is real memory, so `copy`
                     // can have planted poison in it.
                     if allocation.value.contains_uninit() {
-                        return Err(self.uninit_read(loc, origin));
+                        return Err(self.uninit_read_in(Some(alloc), loc, origin));
                     }
                     let value = allocation.value.clone();
                     // Reading a local BY ITS OWN NAME is a read through the
@@ -2116,15 +2209,14 @@ impl<'db, M: Mode> Machine<'db, M> {
                     }
                     return Ok(value);
                 }
-                frame
-                    .and_then(|frame| frame.locals.get(place.local))
-                    .cloned()
-                    .ok_or_else(|| {
-                        self.internal_error(
-                            format!("read of uninitialized {}", local_name(body, place.local)),
-                            Some((loc.clone(), origin)),
-                        )
-                    })
+                match frame.and_then(|frame| frame.locals.get(place.local)) {
+                    Some(Value::Uninit) => Err(self.uninit_read_in(None, loc, origin)),
+                    Some(value) => Ok(value.clone()),
+                    None => Err(self.internal_error(
+                        format!("read of uninitialized {}", local_name(body, place.local)),
+                        Some((loc.clone(), origin)),
+                    )),
+                }
             }
             // A MOVE reads exactly what a copy reads, and then says so to
             // the aliasing model: the place no longer owns the value, so
@@ -2132,14 +2224,16 @@ impl<'db, M: Mode> Machine<'db, M> {
             // is the same event a write is (`s = mk(2);` already disabled
             // them), which is why it reuses the same access — the only
             // difference is that this one destroys by leaving rather than
-            // by overwriting.
+            // by overwriting. The storage stays, uninitialized until a
+            // whole write.
             Operand::Move(place) => {
                 let value = self.eval_operand(loc, body, &Operand::Copy(place.clone()), origin)?;
                 // Only a whole-local move ends the local's ownership. A
-                // projected move (never produced today) would end only the
+                // projected move (never produced) would end only the
                 // sub-place's, which needs the path rather than the root.
                 if place.projection.is_empty() {
                     self.invalidate_moved_local(place.local, loc, origin)?;
+                    self.vacate_moved_local(place.local, body, loc, origin)?;
                 }
                 Ok(value)
             }
@@ -2672,6 +2766,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             // The birth site: the blame the heap-UB notes point back at.
             origin: Some((loc.clone(), origin)),
             ended: None,
+            moved: None,
         });
         // The head pointer: element 0 of the allocation.
         Ok(builtin_variant(
@@ -3075,7 +3170,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             });
         };
         let parent = &path[..path.len() - 1];
-        let value = self.follow_ptr_path(&allocation.value, parent, loc, origin)?;
+        let value = self.follow_ptr_path(*alloc, &allocation.value, parent, loc, origin)?;
         let Value::Array(values) = value else {
             return Err(self.ill_typed("an array value", value, loc, origin));
         };
@@ -3196,7 +3291,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             .expect("judge_write_range judged liveness");
         let slot = match project_path_mut(&mut allocation.value, parent) {
             Ok(slot) => slot,
-            Err(error) => return Err(self.ptr_path_error(error, loc, origin)),
+            Err(error) => return Err(self.ptr_path_error(error, Some(*alloc), loc, origin)),
         };
         let Value::Array(values) = slot else {
             unreachable!("judge_write_range verified the array shape");
@@ -3224,6 +3319,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                     kind: AllocKind::Dangling,
                     origin: None,
                     ended: None,
+                    moved: None,
                 });
                 self.dangling_alloc = Some(alloc);
                 alloc

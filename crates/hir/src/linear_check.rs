@@ -29,7 +29,9 @@
 //!   anyone may forget.
 //!
 //! Everything else — borrowing it, reading one of its non-linear fields —
-//! leaves the obligation where it was.
+//! leaves the obligation where it was. Every mention but a whole
+//! assignment needs the value still there, so any of them after a
+//! consumption is the same use-after-move.
 
 use base_db::Db;
 use la_arena::ArenaMap;
@@ -951,11 +953,24 @@ impl CheckCtx<'_> {
     }
 
     /// `expr` names a PLACE whose root is not read out: the operand of a
-    /// borrow, the target of an assignment, the receiver of a field access.
-    /// Nothing here consumes.
+    /// borrow, the target of a projected assignment, the receiver of a
+    /// field access. Nothing here consumes, but the root must still hold
+    /// its value: a consumed binding's storage holds nothing until it is
+    /// assigned whole.
     fn walk_place(&mut self, expr: ExprId) -> Flow {
         match &self.body.exprs[expr] {
-            ExprData::NameRef(_) => Flow::Falls,
+            ExprData::NameRef(_) => {
+                if let Some(Resolution::Local(binding)) = self.resolutions.get(expr).cloned()
+                    && let Some(Status::Consumed { at: first }) = self.state.get(&binding).copied()
+                {
+                    self.diagnostics.push(LinearDiagnostic::AlreadyConsumed {
+                        binding,
+                        expr,
+                        first,
+                    });
+                }
+                Flow::Falls
+            }
             ExprData::Field { receiver, .. } => {
                 let receiver = *receiver;
                 self.walk_place(receiver)
@@ -1028,10 +1043,15 @@ impl CheckCtx<'_> {
                 if flow == Flow::Diverges {
                     return flow;
                 }
-                if self.walk_place(target) == Flow::Diverges {
+                // A whole binding as the target is no place use: the
+                // write is what gives a consumed one its value back.
+                let whole = self.resolutions.get(target).cloned();
+                if !matches!(whole, Some(Resolution::Local(_)))
+                    && self.walk_place(target) == Flow::Diverges
+                {
                     return Flow::Diverges;
                 }
-                if let Some(Resolution::Local(binding)) = self.resolutions.get(target).cloned() {
+                if let Some(Resolution::Local(binding)) = whole {
                     // Writing over a live linear loses it: the old value is
                     // gone and nothing was done about it. The new value
                     // starts a fresh obligation.
