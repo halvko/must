@@ -47,8 +47,8 @@ pub struct ItemData {
     /// Only meaningful on a `type` item; `validation` rejects the clause
     /// everywhere else, and the flag stays `false` there.
     pub only_move: bool,
-    /// Declared `extern` (`unsafe extern static name: T;`, or the retired
-    /// `static name = extern fn(...);`). False when the item writes a value.
+    /// Declared `extern` (`unsafe extern static name: T;`). False when the
+    /// item writes a value.
     pub is_extern: bool,
 }
 
@@ -655,8 +655,8 @@ pub fn item_tree(db: &dyn Db, file: SourceFile) -> ItemTree {
                     // Superset-parsed here (validation rejects it); a
                     // value item's ceiling is its type's.
                     only_move: false,
-                    // Both spellings, one bit — and never where a value
-                    // is written (see `ast::StaticItem::declares_host_import`).
+                    // Never where a value is written (see
+                    // `ast::StaticItem::declares_host_import`).
                     is_extern,
                 }
             }
@@ -890,16 +890,6 @@ fn generics_from_param_list(list: Option<ast::GenericParamList>) -> Vec<GenericP
 /// type-param names inside stay syntactic (`TypeRef::Path("T")`) and are
 /// bound to rigid [`crate::ty::Ty::Param`]s only during lowering, against
 /// [`ItemData::generics`].
-///
-/// A HOST IMPORT's synthesized type is `unsafe fn(...)`: what an import does
-/// is written in a language this compiler never sees, so a value of it may
-/// only be called under an `unsafe { ... }` marker — and now that the marker
-/// is demanded by the TYPE, the fact travels with the value instead of being
-/// re-derived from the declaration at every mention. The question is asked
-/// through [`ast::FnLiteral::declares_host_import`], the same predicate
-/// `body::lower` uses to decide there is no body at all — one home, so the
-/// annotation-derived type and the inferred one cannot disagree about which
-/// literal is an import.
 fn type_ref_from_fn_literal(body: Option<ast::Expr>) -> Option<TypeRef> {
     let ast::Expr::FnLiteral(fn_lit) = body? else {
         return None;
@@ -913,21 +903,10 @@ fn type_ref_from_fn_literal(body: Option<ast::Expr>) -> Option<TypeRef> {
         .ret_type()
         .and_then(|rt| rt.ty())
         .map(|t| Box::new(TypeRef::from_ast(t)));
-    let declares_import = fn_lit.declares_host_import();
     let type_ref = TypeRef::Fn {
         params,
         ret,
-        unsafe_to_call: declares_import,
-    };
-    // The RETIRED import spelling gets the contract rule here, BEFORE the
-    // fully-typed gate: `static r = extern fn(len: usize);` has no `->` to
-    // read, and a `ret: None` would fail that gate and leave the import
-    // with no type at all. One rule for both spellings, so a retired
-    // program's import means exactly what its respelling would.
-    let type_ref = if declares_import {
-        import_contract(type_ref)
-    } else {
-        type_ref
+        unsafe_to_call: false,
     };
     type_ref.is_fully_typed().then_some(type_ref)
 }

@@ -10,7 +10,7 @@
 // report.
 //
 // `must-lsp check examples/errors.must` reports, at the time of writing,
-// exactly: found 41 errors and 1 warning.
+// exactly: found 40 errors and 1 warning.
 
 // 1. Type mismatch, with the annotation blamed as the cause.
 //    error: type mismatch: expected `usize`, found `str`
@@ -342,17 +342,7 @@ static retired_prefix_borrow = fn () -> () {
 unsafe extern static host_read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
 static call_outside_unsafe = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
 
-// 33. The retired INITIALIZER spelling of an import. An import sets nothing
-//     to anything, so it is written as the declaration it is; the old form
-//     put an `=` in front of something that is not a value. Like the prefix
-//     borrow (31 above) it still parses and still means the same import —
-//     retiring a spelling must not reinterpret programs written in it — and
-//     a fix rewrites it.
-//     error: a host import is a DECLARATION, not an initializer: write `unsafe extern static retired_import: unsafe fn(...) -> T;`
-//     quick fix offered: "Rewrite as an `unsafe extern static` declaration"
-static retired_import = extern fn(n: usize) -> usize;
-
-// 34. An initializer on an `extern static`. The declaration is the whole
+// 33. An initializer on an `extern static`. The declaration is the whole
 //     contract — the item's name is the name the host is asked for and the
 //     annotation is the one machine signature it must provide — so there is
 //     nothing left to set. The value wins where one is written (this item
@@ -361,12 +351,12 @@ static retired_import = extern fn(n: usize) -> usize;
 //     quick fix offered: "Remove the initializer"
 unsafe extern static import_with_a_value: unsafe fn(n: usize) -> usize = fn (n: usize) -> usize { n };
 
-// 35. An `extern static` without `unsafe`.
+// 34. An `extern static` without `unsafe`.
 //     error: declaring a host import is a VOUCH: write `unsafe extern static`
 //     quick fix offered: "Write `unsafe extern`"
 extern static unvouched_import: fn() -> i64;
 
-// 36. A DATA import. The spelling admits it — an annotation is an
+// 35. A DATA import. The spelling admits it — an annotation is an
 //     annotation — but a function import's price rides its TYPE, and there
 //     is no `unsafe usize` for a data import's to ride. Reserved rather
 //     than guessed at, so granting it later deletes a diagnostic instead of
@@ -374,14 +364,14 @@ extern static unvouched_import: fn() -> i64;
 //     error: data imports are not supported yet — an import must have a function type
 unsafe extern static a_data_import: usize;
 
-// 37. A hole in an import's contract. `_` names a type the BODY
+// 36. A hole in an import's contract. `_` names a type the BODY
 //     determines, and an import has no body — the declaration is the whole
 //     contract, so a piece of it left unwritten is unwritten for good.
 //     Refused once per hole, wherever in the signature it stands.
 //     error: an import's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
 unsafe extern static a_partial_contract: unsafe fn(n: _) -> i64;
 
-// 38. A region written at a CALL SITE. Regions are elided at every call:
+// 37. A region written at a CALL SITE. Regions are elided at every call:
 //     a written turbofish spells the callee's type and const arguments
 //     only, and the callee's regions become fresh existentials of this
 //     call, solved from the arguments actually passed. Named or wildcard,
@@ -392,7 +382,7 @@ unsafe extern static a_partial_contract: unsafe fn(n: _) -> i64;
 static first = fn::<@a, T>(r: T.&::<@a>) -> T.&::<@a> { r };
 static region_at_a_call = fn::<@b>(p: usize.&::<@b>) -> usize { first::<@b, usize>(p).* };
 
-// 39. A region parameter AFTER a type parameter in a binder. Regions come
+// 38. A region parameter AFTER a type parameter in a binder. Regions come
 //     first (`fn::<@a, T>`): a turbofish spells the binder minus its
 //     regions, and that subtraction only reads correctly when the elided
 //     part is a contiguous prefix. Checking itself does not need the
@@ -400,7 +390,7 @@ static region_at_a_call = fn::<@b>(p: usize.&::<@b>) -> usize { first::<@b, usiz
 //     error: region parameters come first in a binder; move `@a` before `T`
 static misordered_binder = fn::<T, @a>(r: T.&::<@a>) -> T.&::<@a> { r };
 
-// 40. A region written on a BORROW expression. Regions are written only in
+// 39. A region written on a BORROW expression. Regions are written only in
 //     type positions, and a borrow is an operation: its region is inferred,
 //     and a body that wants to pin one says so in an annotation
 //     (`let q: _.&::<@c> = p.*.&;`). Named or wildcard, the whole list is
@@ -409,7 +399,7 @@ static misordered_binder = fn::<T, @a>(r: T.&::<@a>) -> T.&::<@a> { r };
 //     quick fix offered: "Drop the region argument"
 static region_at_a_borrow = fn::<@c>(p: usize.&::<@c>) -> usize { let q = p.*.&::<@c>; q.* };
 
-// 41. `.&mut` of a non-`mut` root: the safe twin of `.&raw mut` (11 above)
+// 40. `.&mut` of a non-`mut` root: the safe twin of `.&raw mut` (11 above)
 //     — an exclusive borrow may only be taken from something already
 //     assignable, so the same mut-root rule blames the binding and offers
 //     the same "make it `mut`" quick fix.

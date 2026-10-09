@@ -516,16 +516,13 @@ module.exports = grammar({
       optional(seq('=', field('value', $._expr))),
     ),
 
-    fn_literal: $ => choice(
-      seq(
-        optional('const'),
-        'fn',
-        optional($.generic_param_list),
-        optional($.param_list),
-        optional($.ret_type),
-        field('body', $.block_expr),
-      ),
-      $._retired_extern_fn_literal,
+    fn_literal: $ => seq(
+      optional('const'),
+      'fn',
+      optional($.generic_param_list),
+      optional($.param_list),
+      optional($.ret_type),
+      field('body', $.block_expr),
     ),
 
     param_list: $ => seq('(', commaSep($.param), ')'),
@@ -657,17 +654,6 @@ module.exports = grammar({
 
     // `struct { x: 1 }`: now `struct { x = 1 }`.
     _retired_field_colon_value: $ => field('value', choice($._literal, $.neg_expr)),
-
-    // `extern fn(n: usize) -> usize` as a value, body optional: now an
-    // `extern static` declaration.
-    _retired_extern_fn_literal: $ => prec.right(seq(
-      choice(seq('extern', optional('const')), seq('const', 'extern')),
-      'fn',
-      optional($.generic_param_list),
-      optional($.param_list),
-      optional($.ret_type),
-      optional(field('body', $.block_expr)),
-    )),
 
     // `Circle(r)` as a match pattern: now `::Circle(r)`.
     _retired_unqualified_variant_pat: $ => seq(

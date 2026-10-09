@@ -86,38 +86,6 @@ static f = fn (b: Boxed<usize>) { };
       (block_expr))))
 
 ==================
-Extern function values
-==================
-
-static a = extern fn(n: usize) -> usize;
-unsafe extern static b: unsafe fn() -> () = fn () { };
-
----
-
-(source_file
-  (static_item
-    (identifier)
-    (fn_literal
-      (param_list
-        (param
-          (bind_pat
-            (param_name))
-          (path_type
-            (identifier))))
-      (ret_type
-        (path_type
-          (identifier)))))
-  (static_item
-    (identifier)
-    (fn_type
-      (param_list)
-      (ret_type
-        (unit_type)))
-    (fn_literal
-      (param_list)
-      (block_expr))))
-
-==================
 Unqualified variant pattern
 ==================
 

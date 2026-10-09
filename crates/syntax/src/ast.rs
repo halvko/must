@@ -540,8 +540,7 @@ impl StaticItem {
             .find(|it| !it.kind().is_trivia() && !matches!(it.kind(), EXTERN_KW | UNSAFE_KW))
             .is_some_and(|it| it.kind() == CONST_KW)
     }
-    /// The item's own `extern` marker, not the one in a retired `extern fn`
-    /// initializer.
+    /// The item's `extern` marker.
     pub fn extern_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, EXTERN_KW)
     }
@@ -561,29 +560,12 @@ impl StaticItem {
     pub fn eq_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, EQ)
     }
-    /// Whether this item DECLARES a host import — the one question hir
-    /// asks, and it has two right answers: the live spelling (the item's
-    /// own `extern` marker and no initializer) and the RETIRED one
-    /// (`static read = extern fn(...);`, a bodyless `extern fn` literal in
-    /// the initializer slot), which still means the same import because
-    /// retiring a spelling must not reinterpret programs written in it.
-    ///
-    /// A written value wins in both: `extern static x: T = v;` is an
-    /// ordinary item with a diagnostic, not an import whose initializer was
-    /// discarded, and a bodyless-literal check that the placement is right
-    /// (see [`FnLiteral::declares_host_import`]) keeps an ill-formed
-    /// declaration from being refused at run time under a name the program
-    /// never declared.
+    /// Whether this item DECLARES a host import: the `extern` marker, not
+    /// `const`, and no initializer. A written value wins: `extern static x:
+    /// T = v;` is an ordinary item with a diagnostic, not an import whose
+    /// initializer was discarded.
     pub fn declares_host_import(&self) -> bool {
-        match self.body() {
-            // The retired spelling wrote no marker on the ITEM, so an item
-            // carrying both is not it: `extern static x: T = extern fn(...)`
-            // is a doubly-malformed declaration with a written value, and a
-            // written value always wins.
-            Some(Expr::FnLiteral(fn_lit)) => !self.is_extern() && fn_lit.declares_host_import(),
-            Some(_) => false,
-            None => self.is_extern() && !self.is_const(),
-        }
+        self.is_extern() && !self.is_const() && self.body().is_none()
     }
 }
 
@@ -792,37 +774,6 @@ impl FnLiteral {
     }
     pub fn is_const(&self) -> bool {
         self.const_token().is_some()
-    }
-    /// The `extern` marker of the RETIRED host-import spelling
-    /// (`static read = extern fn(...) -> T;`), if present. It rides the same
-    /// modifier slot `const` does, so an `extern fn` is one `FN_LITERAL`
-    /// node — the only structural difference is that it has no
-    /// [`Self::body`]. Superset-parsed: `validation` refuses it with a fix
-    /// that rewrites it as an `extern static` declaration.
-    pub fn extern_token(&self) -> Option<SyntaxToken> {
-        token(&self.syntax, EXTERN_KW)
-    }
-    pub fn is_extern(&self) -> bool {
-        self.extern_token().is_some()
-    }
-    /// Whether this literal actually DECLARES a host import in the retired
-    /// spelling: the `extern` marker, no body, and the placement that gives
-    /// the import its name — a non-`const` `static`'s initializer. The
-    /// retirement is a migration, never a reinterpretation, so a literal
-    /// that passes still means the same import it always did; one that does
-    /// not is an ordinary literal, because an import that is not well formed
-    /// would be refused at run time under a name (the enclosing item's) the
-    /// program never declared. Asked through
-    /// [`StaticItem::declares_host_import`], which answers for both
-    /// spellings at once.
-    pub fn declares_host_import(&self) -> bool {
-        self.is_extern()
-            && self.body().is_none()
-            && self
-                .syntax()
-                .parent()
-                .and_then(StaticItem::cast)
-                .is_some_and(|item| !item.is_const())
     }
     /// The generic binder (`fn::<T, const N: usize>`), when present; hir
     /// lowers it.
