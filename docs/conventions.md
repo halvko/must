@@ -31,10 +31,10 @@ here; they live in `docs/design/`.
 
 ## Tests
 
-- A test program is a raw string, `r#"..."#`, opening on its own line with
-  the program at column zero and indented by brace depth. No `"...\n\`
-  line continuations: they hide every `"` behind a backslash and silently
-  flatten the indentation the compiler sees.
+- A multi-line test program is a raw string, `r#"..."#`, opening on its
+  own line with the program at column zero and indented by brace depth. No
+  `"...\n\` line continuations: they hide every `"` behind a backslash and
+  silently flatten the indentation the compiler sees.
 - The program and its expectation stay together in the test (expect-test).
   A program lives in a `.must` file only when it ships in `examples/` and
   the test includes that file to check the shipped copy.
