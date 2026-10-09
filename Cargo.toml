@@ -37,3 +37,10 @@ expect-test = "1.5"
 # compiled modules on (`wasmi` — a lightweight, dependency-light
 # interpreter). Never a dependency of the compiler itself.
 wasmi = "1.1"
+# TEST-ONLY: what `crates/tree-sitter-agreement` loads the editors'
+# tree-sitter grammar with (`cc` builds the generated parser, `sha2` checks
+# it is current). Never a dependency of the compiler or the server.
+tree-sitter = "0.25"
+tree-sitter-language = "0.1"
+sha2 = "0.10"
+cc = "1"

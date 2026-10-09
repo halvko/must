@@ -5,9 +5,14 @@ line_comments = ["// "]
 # is the precedent); `prefix`/`tab_size` left at their no-op defaults since
 # Must has no continuation-formatting convention for a multi-line comment.
 block_comment = { start = "/*", end = "*/", prefix = "", tab_size = 0 }
-# Deliberately no `grammar`: no tree-sitter grammar; highlighting comes from
-# the server's semantic tokens (`semantic_tokens: "full"` in the README).
-# Diagnostics/hover/goto-def also come from the LSP.
+# The tree-sitter grammar (`[grammars.must]` in extension.toml) colors the
+# buffer through `highlights.scm`, which is generated from
+# editors/tree-sitter-must/queries/highlights.scm; the server's semantic
+# tokens refine it (`semantic_tokens: "combined"` in the README).
+# Deliberately no `indents.scm`: the server's multi-line completion
+# snippets carry absolute indentation, which is right only while Zed has no
+# indents query to re-indent them with.
+grammar = "must"
 
 brackets = [
     { start = "{", end = "}", close = true, newline = true },

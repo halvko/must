@@ -1,8 +1,9 @@
-//! Full-file highlighting. With no tree-sitter grammar in the editor, this
-//! is the *only* coloring source, so it covers the lexical classes too —
-//! but names are classified through hir: a reference renders as a function
-//! because inference says its type is `fn(...)`, not because of a textual
-//! heuristic.
+//! Full-file highlighting. A client may show these tokens alone, without
+//! the tree-sitter grammar in `editors/tree-sitter-must`, so they cover the
+//! lexical classes too — but names are classified through hir: a reference
+//! renders as a function because inference says its type is `fn(...)`, not
+//! because of a textual heuristic. `crates/tree-sitter-agreement` checks
+//! that the grammar's captures never contradict these classes.
 
 use base_db::{RootDatabase, SourceFile, parse};
 use syntax::{SyntaxKind, SyntaxNode, SyntaxNodePtr, SyntaxToken, TextRange, TextSize};
@@ -171,14 +172,21 @@ fn classify_ident(
         // (`BIND_PAT`, nested under `PARAM`/`LET_STMT` directly, inside a
         // `NEWTYPE_PAT`, or as a match-arm pattern) or one field of a
         // record-destructuring pattern (`RECORD_PAT_FIELD` — the shorthand
-        // field name doubles as its own binding's declaration; a rename's
-        // field-name token is a second `NAME` child that is *not* bound,
-        // and falls out of `binding_for_node` returning `None` for it).
+        // field name doubles as its own binding's declaration).
         // Colors as a parameter when a `PARAM` sits somewhere above the
         // pattern, a plain local otherwise. A bare `BIND_PAT` name is
         // always a binding now (never reinterpreted as a variant), so it
         // always falls through to the binding/parameter coloring.
         (NAME, BIND_PAT) | (NAME, RECORD_PAT_FIELD) => {
+            // With a rename (`y as z`) the first name selects a field and
+            // binds nothing, so it stays plain like every other field name.
+            let selects_field = ast::RecordPatField::cast(owner.clone()).is_some_and(|field| {
+                field.rename().is_some()
+                    && field.field_name().is_some_and(|n| n.syntax() == &parent)
+            });
+            if selects_field {
+                return None;
+            }
             let is_param = parent.ancestors().any(|n| n.kind() == PARAM);
             let binding = hir::checkable_item_at(db, file, &owner).and_then(|item| {
                 let (_, source_map) = hir::body_with_source_map(db, item);
@@ -276,60 +284,15 @@ fn classify_ident(
             {
                 return Some(classify_type_position(db, file, &parent));
             }
-            let item = hir::checkable_item_at(db, file, &owner)?;
-            let (body, source_map) = hir::body_with_source_map(db, item);
-            // The base of a `::` path has its own expression on the
-            // segment's node; a plain path sits on the whole path node.
-            let expr = source_map
-                .expr_for_node(SyntaxNodePtr::new(&parent))
-                .or_else(|| source_map.expr_for_node(SyntaxNodePtr::new(&owner)))?;
-            match *hir::resolutions(db, item).get(expr)? {
-                hir::Resolution::Local(binding) => {
-                    let def = source_map.node_for_binding(binding)?.to_node(root);
-                    let is_param = def.ancestors().any(|n| n.kind() == PARAM);
-                    let tag = if is_param {
-                        HlTag::Parameter
-                    } else {
-                        HlTag::Variable
-                    };
-                    let mods = if body.bindings[binding].mutable {
-                        HlMods::MUTABLE
-                    } else {
-                        0
-                    };
-                    Some((tag, HlMods(mods)))
-                }
-                hir::Resolution::Item(ref loc) | hir::Resolution::Ambiguous(ref loc) => {
-                    let infer = hir::infer::infer(db, item);
-                    // A GENERIC item's mention is the base of an
-                    // application (`show::<usize>(42)`), and inference
-                    // types that base with the uninstantiated scheme rather
-                    // than a `Ty::Fn` — so the item's own signature is what
-                    // says "function" for it.
-                    let is_fn = matches!(infer.type_of_expr.get(expr), Some(hir::Ty::Fn(_)))
-                        || matches!(hir::signature(db, loc.to_id(db)), hir::Ty::Fn(_));
-                    let tag = if is_fn {
-                        HlTag::Function
-                    } else {
-                        HlTag::Variable
-                    };
-                    Some((tag, HlMods(HlMods::STATIC)))
-                }
-                // A construction head (`Foo(...)`) — or a stray value use,
-                // which the diagnostics call out; either way the name *is*
-                // a type.
-                hir::Resolution::TypeItem(_) => Some((HlTag::Type, HlMods::NONE)),
-                // A qualified call's base (`Display::fmt(w, x)`) — the one
-                // expression position a trait name may appear in.
-                hir::Resolution::TraitItem(_) => Some((HlTag::Trait, HlMods::NONE)),
-                // A const param: a binder-supplied name, fixed per
-                // instantiation — the same generic-parameter class its
-                // binder declaration wears, not a runtime parameter.
-                hir::Resolution::ConstParam(_) => Some((HlTag::TypeParameter, HlMods::NONE)),
-                hir::Resolution::Builtin(_) => {
-                    Some((HlTag::Function, HlMods(HlMods::DEFAULT_LIBRARY)))
-                }
-            }
+            classify_resolved_path(db, file, root, &parent, &owner).or_else(|| {
+                // A const argument written in a signature (`[usize; N]`)
+                // is no body expression, so nothing resolves it; the
+                // binder in scope is what says it is a const parameter.
+                let in_const_arg = owner.parent().is_some_and(|n| n.kind() == CONST_ARG);
+                let name = ident_text(&parent)?;
+                (in_const_arg && binder_declares(&parent, &name))
+                    .then_some((HlTag::TypeParameter, HlMods::NONE))
+            })
         }
         // The field name of a dot-call that resolved to a member: a
         // function. Both dispatch shapes count — the STRUCTURAL one (an
@@ -350,6 +313,68 @@ fn classify_ident(
         }
         // Unresolved or junk: leave it plain; diagnostics carry the news.
         _ => None,
+    }
+}
+
+/// A path expression's first segment, classified by what it resolves to
+/// in the body that contains it. `None` when it resolves to nothing.
+fn classify_resolved_path(
+    db: &RootDatabase,
+    file: SourceFile,
+    root: &SyntaxNode,
+    parent: &SyntaxNode,
+    owner: &SyntaxNode,
+) -> Option<(HlTag, HlMods)> {
+    use SyntaxKind::PARAM;
+    let item = hir::checkable_item_at(db, file, owner)?;
+    let (body, source_map) = hir::body_with_source_map(db, item);
+    // The base of a `::` path has its own expression on the segment's
+    // node; a plain path sits on the whole path node.
+    let expr = source_map
+        .expr_for_node(SyntaxNodePtr::new(parent))
+        .or_else(|| source_map.expr_for_node(SyntaxNodePtr::new(owner)))?;
+    match *hir::resolutions(db, item).get(expr)? {
+        hir::Resolution::Local(binding) => {
+            let def = source_map.node_for_binding(binding)?.to_node(root);
+            let is_param = def.ancestors().any(|n| n.kind() == PARAM);
+            let tag = if is_param {
+                HlTag::Parameter
+            } else {
+                HlTag::Variable
+            };
+            let mods = if body.bindings[binding].mutable {
+                HlMods::MUTABLE
+            } else {
+                0
+            };
+            Some((tag, HlMods(mods)))
+        }
+        hir::Resolution::Item(ref loc) | hir::Resolution::Ambiguous(ref loc) => {
+            let infer = hir::infer::infer(db, item);
+            // A GENERIC item's mention is the base of an application
+            // (`show::<usize>(42)`), and inference types that base with
+            // the uninstantiated scheme rather than a `Ty::Fn` — so the
+            // item's own signature is what says "function" for it.
+            let is_fn = matches!(infer.type_of_expr.get(expr), Some(hir::Ty::Fn(_)))
+                || matches!(hir::signature(db, loc.to_id(db)), hir::Ty::Fn(_));
+            let tag = if is_fn {
+                HlTag::Function
+            } else {
+                HlTag::Variable
+            };
+            Some((tag, HlMods(HlMods::STATIC)))
+        }
+        // A construction head (`Foo(...)`) — or a stray value use, which
+        // the diagnostics call out; either way the name *is* a type.
+        hir::Resolution::TypeItem(_) => Some((HlTag::Type, HlMods::NONE)),
+        // A qualified call's base (`Display::fmt(w, x)`) — the one
+        // expression position a trait name may appear in.
+        hir::Resolution::TraitItem(_) => Some((HlTag::Trait, HlMods::NONE)),
+        // A const param: a binder-supplied name, fixed per instantiation
+        // — the same generic-parameter class its binder declaration wears,
+        // not a runtime parameter.
+        hir::Resolution::ConstParam(_) => Some((HlTag::TypeParameter, HlMods::NONE)),
+        hir::Resolution::Builtin(_) => Some((HlTag::Function, HlMods(HlMods::DEFAULT_LIBRARY))),
     }
 }
 

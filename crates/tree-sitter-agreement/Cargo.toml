@@ -1,0 +1,20 @@
+[package]
+name = "tree-sitter-agreement"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+# Test-only: checks the tree-sitter grammar in `editors/tree-sitter-must`
+# against the rowan parser and the semantic highlighter. It is its own
+# crate so the C build of the generated parser stays out of `ide` and
+# `must-lsp`; nothing depends on it.
+[dev-dependencies]
+ide.workspace = true
+syntax.workspace = true
+tree-sitter.workspace = true
+tree-sitter-language.workspace = true
+sha2.workspace = true
+expect-test.workspace = true
+
+[build-dependencies]
+cc.workspace = true

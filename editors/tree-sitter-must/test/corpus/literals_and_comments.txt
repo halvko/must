@@ -1,0 +1,59 @@
+==================
+Nested block comment
+==================
+
+/* a /* nested */ comment */
+static x = 1; // trailing
+
+---
+
+(source_file
+  (block_comment)
+  (static_item
+    (identifier)
+    (integer))
+  (line_comment))
+
+==================
+Strings and chars
+==================
+
+static s = "a \" /* not a comment */ // nor this\n";
+static c = '\'';
+static d = '/';
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (string
+      (string_content)
+      (escape_sequence)
+      (string_content)
+      (escape_sequence)))
+  (static_item
+    (identifier)
+    (char
+      (escape_sequence)))
+  (static_item
+    (identifier)
+    (char
+      (char_content))))
+
+==================
+Identifiers and holes
+==================
+
+static blå_bær = 1_000;
+static _ = _x;
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (integer))
+  (static_item
+    (path_expr
+      (identifier))))
