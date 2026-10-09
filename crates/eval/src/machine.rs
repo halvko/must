@@ -10,13 +10,13 @@ use hir::{Builtin, ConstLegality, ExprId, IntKind, ItemLoc, Ty};
 use la_arena::ArenaMap;
 use mir::{
     AggregateKind, BodyId, Const, LocalData, LocalId, MirBody, MirLowered, Operand, ProjElem,
-    Rvalue, StatementKind, TerminatorKind,
+    Rvalue, Scope, StatementKind, TerminatorKind,
 };
 use rustc_hash::FxHashMap;
 
 use crate::{
     AllocId, BorrowTag, EvalError, EvalErrorKind, EvalNote, FnValue, GenericArgValue, Instance,
-    PathElem, Provenance, Value,
+    NoteAnchor, PathElem, Provenance, Value,
 };
 
 /// What the machine does at its impure edges. [`ConstMode`] refuses;
@@ -278,6 +278,10 @@ struct Allocation {
     /// heap-UB diagnostics: double free / use-after-free / dealloc
     /// mismatches attach an "allocated here" note pointing at it.
     origin: Option<(ItemLoc, ExprId)>,
+    /// Where a local's storage ended before its frame did: the exit that
+    /// killed it and the kind of scope it left. `None` for every other
+    /// allocation, and for a local that died with its frame.
+    ended: Option<(ItemLoc, ExprId, Scope)>,
 }
 
 impl Allocation {
@@ -290,6 +294,7 @@ impl Allocation {
                 vec![EvalNote {
                     message: "allocated here".to_owned(),
                     origin: Some(origin.clone()),
+                    anchor: NoteAnchor::Expr,
                 }]
             })
             .unwrap_or_default()
@@ -782,6 +787,22 @@ impl<'db, M: Mode> Machine<'db, M> {
                         )?;
                     } else {
                         self.write_place(&loc, body, dest.local, &projection, value, stmt.origin)?;
+                    }
+                }
+                // The local's storage ends: its value is gone, and if its
+                // address was taken the allocation goes dead exactly as a
+                // returned frame's do — ids are never reused, so a later
+                // deref through a surviving pointer is detected UB, and
+                // the next iteration's `let` writes a plain value again.
+                // A local this path never initialized has nothing to end.
+                StatementKind::StorageDead { local, scope } => {
+                    let frame = self.frames.last_mut().expect("frame still live");
+                    frame.locals.remove(*local);
+                    if let Some(alloc) = frame.promoted.remove(local)
+                        && let Some(allocation) = self.memory.get_mut(&alloc)
+                    {
+                        allocation.live = false;
+                        allocation.ended = Some((loc.clone(), stmt.origin, *scope));
                     }
                 }
             }
@@ -1737,6 +1758,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                             writable: false,
                             kind: AllocKind::Static,
                             origin: None,
+                            ended: None,
                         });
                         self.static_allocs.insert(item.clone(), alloc);
                         alloc
@@ -1809,6 +1831,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             writable: true,
             kind: AllocKind::Local,
             origin: None,
+            ended: None,
         });
         let frame = self.frames.last_mut().expect("frame still live");
         frame.promoted.insert(local, alloc);
@@ -1849,10 +1872,28 @@ impl<'db, M: Mode> Machine<'db, M> {
         };
         if !allocation.live {
             return Err(match allocation.kind {
-                AllocKind::Local => ub(
-                    "dangling pointer — the local it pointed to no longer exists \
-                     (its frame has returned)",
-                ),
+                AllocKind::Local => match allocation.ended.clone() {
+                    Some((loc, origin, scope)) => {
+                        let mut err = ub(&format!(
+                            "dangling pointer — the local it pointed to no longer exists \
+                             (its {} has ended)",
+                            scope.name()
+                        ));
+                        err.notes.push(EvalNote {
+                            message: format!(
+                                "its storage ended here, when its {} was left",
+                                scope.name()
+                            ),
+                            origin: Some((loc, origin)),
+                            anchor: NoteAnchor::Exit,
+                        });
+                        err
+                    }
+                    None => ub(
+                        "dangling pointer — the local it pointed to no longer exists \
+                         (its frame has returned)",
+                    ),
+                },
                 // A static's allocation is never popped, so a pointer into
                 // one can never dangle this way; the arm only keeps the
                 // match total.
@@ -2630,6 +2671,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             kind: AllocKind::Heap,
             // The birth site: the blame the heap-UB notes point back at.
             origin: Some((loc.clone(), origin)),
+            ended: None,
         });
         // The head pointer: element 0 of the allocation.
         Ok(builtin_variant(
@@ -3181,6 +3223,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                     writable: false,
                     kind: AllocKind::Dangling,
                     origin: None,
+                    ended: None,
                 });
                 self.dangling_alloc = Some(alloc);
                 alloc
@@ -3798,6 +3841,7 @@ impl<M> Machine<'_, M> {
             notes.push(EvalNote {
                 message: "this borrow was created here".to_owned(),
                 origin: Some(born),
+                anchor: NoteAnchor::Expr,
             });
         }
         if let Some(invalidated) = node.invalidated.clone() {
@@ -3815,6 +3859,7 @@ impl<M> Machine<'_, M> {
                 }
                 .to_owned(),
                 origin: Some(invalidated),
+                anchor: NoteAnchor::Expr,
             });
         }
         let ub = |message: &str| EvalError {

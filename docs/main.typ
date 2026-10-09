@@ -1481,9 +1481,10 @@ order, and a temporary in a `match` arm or a loop body is created on the
 path that runs, each time it runs. A `const` context works the same way.
 
 A temporary lives to the end of the innermost enclosing block; a shorter
-life is spelled with an explicit block. A borrow of a temporary that has to
-outlive the body is refused as `borrowed value does not live long enough`,
-naming the temporary.
+life is spelled with an explicit block. A borrow still live where the block
+is left, at its closing brace or at a `break` or `continue` out of it, is
+refused there. A borrow that has to outlive the body is refused as `borrowed
+value does not live long enough`, naming the temporary.
 
 `.&raw` and `.&raw mut` materialize the same storage. One thing is refused
 under every flavor: a temporary of a type that *must be consumed*. It has no
@@ -1596,9 +1597,10 @@ finished with is dead where you finished with it, which is what makes a
 loop that reads a line, uses it, and reads the next one perfectly ordinary
 code.
 
-Four things count as touching it behind its back, and they are the same
-four the interpreter enforces. Three of them are *writes*, and a write
-invalidates every borrow of an overlapping part, shared or exclusive:
+Five things count as touching it behind its back, and they are the same
+five the interpreter enforces. Four of them invalidate every borrow of an
+overlapping part, shared or exclusive; three are writes and the fourth is
+the end of the storage itself:
 
 Using the place *mutably* — writing `x.&mut`, or simply mentioning a `.&mut`
 you already hold, which mints a fresh reborrow.
@@ -1616,7 +1618,14 @@ ordinary code, in a loop too.
 into. Disposing of a reader while one of its views is still needed is a
 compile error, not a run-time trap.
 
-The fourth is a *read* — taking a `.&` of the place, or just naming the
+*Leaving the block* that declared it. A local declared in a block, or a
+temporary a borrow materialized in one, has storage only up to the block's
+exit — its closing brace, or a `break` or `continue` out of it — so a
+borrow of it that is still live there is refused at that exit, named as
+the block ending the storage of the local. Nothing is written here; the
+storage is simply gone.
+
+The fifth is a *read* — taking a `.&` of the place, or just naming the
 local — and it invalidates only an *exclusive* borrow, which is the point of
 an exclusive borrow: while it lasts it is the only way to the value. Shared
 borrows are untouched by a read; any number of readers coexist.
@@ -1664,11 +1673,14 @@ It reports a violation only on a path that actually runs. A branch never
 taken is never checked, and a program that passes on one input says
 nothing about another. That is fine for what it is for.
 
-Its liveness notion is the FRAME, not the block, and so is the checker's:
-neither models the end of a block's storage, so a borrow of an inner-block
-local, read after its block ends, is caught by NEITHER layer. It is the one
-shape in this chapter that is neither rejected nor detected, and the end of
-a temporary's block is the same shape.
+Its liveness notion is the BLOCK, like the checker's: a local declared in a
+block, or a temporary created in one, has storage that ends when the block
+is left, fresh on every entry. The checker refuses a safe borrow of it that
+is still live at that point; a raw pointer to it is refused nowhere, and
+the interpreter detects the deref of one after the block has ended as the
+dangling pointer it is, with a note at the exit that ended the storage —
+the same detection a pointer into a returned frame or a freed allocation
+gets. The compile-time evaluator applies the same rule.
 
 In the other direction the static rule is deliberately stricter than the
 interpreter on two points. Reading a place around a live exclusive borrow
