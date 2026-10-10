@@ -3,11 +3,20 @@ name: Review
 
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review, labeled]
+    types: [opened, reopened, ready_for_review, synchronize, labeled]
 
-# A newer run on the same PR supersedes the running review.
+env:
+  # Once this many rounds have run, pushes no longer start one; the `review`
+  # label still does, and starts a fresh budget.
+  MAX_ROUNDS: 3
+
+# A newer run on the same PR supersedes the running review. Other labels get a
+# group of their own, so adding one does not cancel a review in progress.
 concurrency:
-  group: review-${{ github.event.pull_request.number }}
+  group: >-
+    review-${{ github.event.pull_request.number }}${{
+    github.event.action == 'labeled' && github.event.label.name != 'review'
+    && format('-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -17,11 +26,65 @@ jobs:
       !github.event.pull_request.draft &&
       (github.event.action != 'labeled' || github.event.label.name == 'review')
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     outputs:
       roles: ${{ steps.list.outputs.roles }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Opening the PR and the `review` label always start a round; pushes,
+      # reopening and marking ready are gated. Each reviewer's summary carries
+      # a marker naming its role, the head it reviewed and what started it.
+      - id: gate
+        if: >-
+          github.event.action != 'opened' && github.event.action != 'labeled' &&
+          !contains(github.event.pull_request.labels.*.name, 'review')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AFTER: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          comments=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+            --jq '.[] | select(.user.type == "Bot") | .body')
+          markers=$(printf '%s\n' "$comments" \
+            | { grep -E '^<!-- review-round: [^ ]+ [0-9a-f]{40} (label|auto) -->$' || true; })
+          # A labelled round starts a fresh budget and counts as its first round.
+          rounds=$(printf '%s\n' "$markers" | awk '
+            NF { n[$3] = ($5 == "label") ? 1 : n[$3] + 1 }
+            END { m = 0; for (r in n) if (n[r] > m) m = n[r]; print m }')
+          # A change that keeps the patch last reviewed (a rebase) gets no round.
+          reviewed=$(printf '%s\n' "$markers" | awk 'NF { s = $4 } END { print s }')
+          if [ -n "$reviewed" ] \
+            && git fetch -q origin "$reviewed" "$AFTER" "$BASE_REF" 2>/dev/null; then
+            patch() {
+              git diff "$(git merge-base "origin/$BASE_REF" "$1")" "$1" \
+                | git patch-id --stable | cut -d' ' -f1
+            }
+            if [ "$(patch "$reviewed")" = "$(patch "$AFTER")" ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          if [ "$rounds" -ge "$MAX_ROUNDS" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            # One notice per budget: a labelled round makes room for another.
+            noticed=$(printf '%s\n' "$comments" | awk '
+              /^<!-- review-round: .* label -->$/ { c = 0 }
+              /<!-- review-cap -->/ { c = 1 }
+              END { print c + 0 }')
+            if [ "$noticed" = 0 ]; then
+              gh pr comment "$PR" --repo "$REPO" --body "<!-- review-cap -->
+          The reviewers have had $rounds rounds on this PR, so changes no longer start a new one. This needs a human look; add the \`review\` label to ask for another round." \
+                || echo "could not post the cap notice"
+            fi
+          fi
       - id: list
+        if: steps.gate.outputs.skip != 'true'
         run: |
           roles=$(find .github/reviewers -maxdepth 1 -name '*.md' ! -name README.md \
             -printf '%f\n' | sed 's/\.md$//' | sort | jq -Rnc '[inputs]')
@@ -29,7 +92,7 @@ jobs:
 
   review:
     needs: roles
-    if: needs.roles.outputs.roles != '[]'
+    if: needs.roles.outputs.roles != '' && needs.roles.outputs.roles != '[]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -92,12 +155,23 @@ jobs:
             unaddressed, list it once in your summary as still open, with no new
             inline comment.
 
+            If you already have summary comments on this PR, this is a later
+            round: judge what changed since your latest summary, and whether
+            your earlier findings were addressed. On code that has not changed,
+            raise only real defects, not points an earlier round could have
+            raised, and never post a second inline comment on a line where you
+            already have one. If nothing new reaches that bar, say "No new
+            findings" in one line.
+
             Post each finding as an inline comment on the line it concerns, with
             mcp__github_inline_comment__create_inline_comment and
             `confirmed: true`, opening with
             `**${{ matrix.role }}:**`. Then post one summary comment with
-            `gh pr comment`, headed `### ${{ matrix.role }} review`, listing the
-            findings in a sentence each (or saying there are none).
+            `gh pr comment`. Its first line is exactly
+            `<!-- review-round: ${{ matrix.role }} ${{ github.event.pull_request.head.sha }} ${{ contains(github.event.pull_request.labels.*.name, 'review') && 'label' || 'auto' }} -->`
+            and its second
+            `### ${{ matrix.role }} review`; then list the findings in a sentence
+            each (or say there are none).
 
             Your brief:
 
