@@ -1746,18 +1746,11 @@ fn match_template_items(
 /// back at the `match`'s own indentation.
 ///
 /// **The indentation is ABSOLUTE** — every continuation line carries the
-/// full indentation it should end up with, rather than the relative
-/// indentation a re-indenting client would add its own base to. That is
-/// correct for Zed as it stands, which is the client this repo ships: Zed's
-/// snippet insertion runs `AutoindentMode::Block`, whose shift comes from a
-/// tree-sitter `suggest_autoindents` result, and the Must extension
-/// deliberately ships NO `indents.scm` beside its grammar (see
-/// `editors/zed/languages/must/config.toml`) — so there is no suggestion,
-/// the shift is zero, and the body lands verbatim. `insertTextMode` cannot
-/// pin this down instead: Zed reads it only on its non-snippet path.
-/// The day the extension gains an indents query this constant-shaped choice
-/// has to flip to relative; `platform-codegen-and-tooling.md` carries that
-/// as a re-evaluate-when item.
+/// full indentation it should end up with (P12). Zed's snippet insertion
+/// shifts the body by its indents query's suggestion for the first arm
+/// minus that arm's indentation in the text, which is zero for an absolute
+/// arm list opening on its own line. `insertTextMode` cannot pin this down
+/// instead: Zed reads it only on its non-snippet path.
 ///
 /// `snippet` picks the two spellings apart. With tab stops, a payload gets
 /// **one stop per element** (`::Pair($1, $2)`) because a pattern must name
