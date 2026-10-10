@@ -2421,6 +2421,48 @@ impl InferenceDiagnostic {
     }
 }
 
+/// Whether `place.&mut` in `item` is refused, by `check_borrow_place`'s
+/// rules for a well-typed place: a name root must be a `mut` local, a
+/// raw pointer is never borrowed through, and a deref chain must hold no
+/// shared step ([`InferCtx::shared_step_governing`]).
+pub fn mut_borrow_refused<'db>(db: &'db dyn Db, item: ItemId<'db>, place: ExprId) -> bool {
+    let body = body(db, item);
+    let types = &infer(db, item).type_of_expr;
+    let root = body.place_root(place);
+    match &body.exprs[root] {
+        ExprData::NameRef(_) => match resolutions(db, item).get(root) {
+            Some(Resolution::Local(binding)) => !body.bindings[*binding].mutable,
+            Some(Resolution::Item(_)) => true,
+            _ => false,
+        },
+        ExprData::Deref { receiver } if matches!(types.get(*receiver), Some(Ty::RawPtr { .. })) => {
+            true
+        }
+        _ => {
+            let mut ty_of = |expr| types.get(expr).cloned().unwrap_or(Ty::Error);
+            shared_step(body, place, &mut ty_of).is_some()
+        }
+    }
+}
+
+/// [`InferCtx::shared_step_governing`]'s walk, reading each deref's
+/// receiver type through `ty_of`.
+fn shared_step(body: &Body, place: ExprId, ty_of: &mut dyn FnMut(ExprId) -> Ty) -> Option<Ty> {
+    match &body.exprs[place] {
+        ExprData::Field { receiver, .. } => shared_step(body, *receiver, ty_of),
+        ExprData::Index { base, .. } => shared_step(body, *base, ty_of),
+        ExprData::Deref { receiver } => match ty_of(*receiver) {
+            Ty::RawPtr { mutable: true, .. } => None,
+            Ty::Borrow { mutable: true, .. } => shared_step(body, *receiver, ty_of),
+            shared @ (Ty::RawPtr { .. } | Ty::Borrow { .. }) => Some(shared),
+            // An unknown or broken receiver: the read already
+            // carries its own diagnostic.
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 #[salsa::tracked(returns(ref))]
 pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
     let body = body(db, item);
@@ -2832,34 +2874,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// reassigns no binding, so the root's own `mut`ness is a different
     /// rule, judged by the callers on NAME-rooted chains only.
     fn shared_step_governing(&mut self, place: ExprId) -> Option<Ty> {
-        match &self.body.exprs[place] {
-            ExprData::Field { receiver, .. } => {
-                let receiver = *receiver;
-                self.shared_step_governing(receiver)
-            }
-            ExprData::Index { base, .. } => {
-                let base = *base;
-                self.shared_step_governing(base)
-            }
-            ExprData::Deref { receiver } => {
-                let receiver = *receiver;
-                let receiver_ty = self
-                    .result
-                    .type_of_expr
-                    .get(receiver)
-                    .cloned()
-                    .unwrap_or(Ty::Error);
-                match self.resolve_shallow(&receiver_ty) {
-                    Ty::RawPtr { mutable: true, .. } => None,
-                    Ty::Borrow { mutable: true, .. } => self.shared_step_governing(receiver),
-                    shared @ (Ty::RawPtr { .. } | Ty::Borrow { .. }) => Some(shared),
-                    // An unknown or broken receiver: the read already
-                    // carries its own diagnostic.
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
+        let body = self.body;
+        shared_step(body, place, &mut |expr| {
+            let ty = self
+                .result
+                .type_of_expr
+                .get(expr)
+                .cloned()
+                .unwrap_or(Ty::Error);
+            self.resolve_shallow(&ty)
+        })
     }
 
     /// The place rules for a SAFE borrow — `check_addr_of_place`'s twin,

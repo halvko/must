@@ -150,10 +150,11 @@ pub struct CompletionItem {
     /// before locals before items before builtins before keywords,
     /// alphabetically within each tier.
     pub sort_text: String,
-    /// Usually `label` (the editor filters client-side). The one exception:
-    /// a bare match-arm slot's variant items label/insert the sigil form
+    /// Usually `label` (the editor filters client-side). Two exceptions: a
+    /// bare match-arm slot's variant items label/insert the sigil form
     /// `::Variant` but filter on the bare variant name — what the user
-    /// actually types.
+    /// actually types; and a member reached through a written borrow
+    /// filters on `.name`, its edit starting at the dot.
     pub filter_text: String,
     /// Replaces the typed prefix (if any) with [`InsertText`]: a plain
     /// label most of the time, a tab-stop snippet for the handful of rules
@@ -224,6 +225,10 @@ enum Provenance {
 /// the candidate, or a plain mismatch — all rank the same, leaving the
 /// provenance order to decide.
 const TYPE_TIER_NONE: u8 = 2;
+
+/// Below [`TYPE_TIER_NONE`]: a candidate offered although accepting it
+/// gives an error.
+const TYPE_TIER_REFUSED: u8 = 3;
 
 /// The scrutinee slot spends the gold band (`00`–`09`, the gap below
 /// [`Provenance::Local`]) on **definition-scope distance**: an enum-typed
@@ -437,11 +442,14 @@ enum Context {
         /// reasoning `infer.rs` uses for `BreakOutsideLoop`.
         in_loop: bool,
     },
-    /// `receiver.NAME`, the marker is the field name. Carries the
-    /// receiver's speculative-tree range: it ends before the cursor, so
-    /// (per the module doc) it is byte-identical in the real tree, and
-    /// [`expr_for_range`] back-maps it straight to an `ExprId`.
-    FieldAccess { receiver_range: TextRange },
+    /// `receiver.NAME`, the marker is the field name. The receiver's range
+    /// ends before the cursor, so it is byte-identical in the real tree and
+    /// [`expr_for_range`] back-maps it to an `ExprId`. `dot` is the `.`
+    /// token's start, replaced by a written borrow ([`borrowed_member_item`]).
+    FieldAccess {
+        receiver_range: TextRange,
+        dot: TextSize,
+    },
     /// The second segment of a `::` path, in expression (`PathExpr`)
     /// or type (`PathType`) position. `base_name` is the *first* segment's
     /// text, read straight off the speculative tree — it sits before the
@@ -577,11 +585,15 @@ pub(crate) fn completions(
             expected_ty,
             false,
         ),
-        Some(Context::FieldAccess { receiver_range }) => field_items(
+        Some(Context::FieldAccess {
+            receiver_range,
+            dot,
+        }) => field_items(
             db,
             file,
             &real_root,
             receiver_range,
+            dot,
             edit_range,
             expected_ty,
         ),
@@ -889,8 +901,13 @@ fn classify(parent: &SyntaxNode) -> Option<Context> {
             return None;
         }
         let receiver = field_expr.receiver()?;
+        let dot = field_expr
+            .syntax()
+            .children_with_tokens()
+            .find(|t| t.kind() == SyntaxKind::DOT)?;
         return Some(Context::FieldAccess {
             receiver_range: receiver.syntax().text_range(),
+            dot: dot.text_range().start(),
         });
     }
 
@@ -1436,8 +1453,8 @@ fn dispatch_ty(ty: &hir::Ty) -> &hir::Ty {
 /// A BORROW receiver has no fields — projecting through it would be
 /// auto-deref, which is sealed — but it does reach the members its shape
 /// can take, read off the same [`hir::receiver_takes`] table inference
-/// uses, so the dot never offers what a call would refuse (or hides what
-/// it would accept).
+/// uses, so the dot offers exactly what a call would accept, counting the
+/// borrow the edit adds ([`borrowed_member_item`]).
 ///
 /// A RIGID receiver has neither fields nor an impl to look in, and its
 /// bounds are the only thing that re-opens its dot (TR07) — so its offers
@@ -1452,6 +1469,7 @@ fn field_items(
     file: SourceFile,
     real_root: &SyntaxNode,
     receiver_range: TextRange,
+    dot: TextSize,
     edit_range: TextRange,
     expected: Option<&hir::Ty>,
 ) -> Vec<CompletionItem> {
@@ -1469,6 +1487,7 @@ fn field_items(
     let Some(ty) = inference.type_of_expr.get(expr) else {
         return Vec::new();
     };
+    let mut_refused = hir::infer::mut_borrow_refused(db, item, expr);
     let record = match ty {
         hir::Ty::Record(rec) => Some(rec.clone()),
         hir::Ty::Named(named) => match hir::type_underlying_for(db, named) {
@@ -1509,24 +1528,25 @@ fn field_items(
     };
     if let Some(decl) = decl {
         for member_id in hir::member_item_ids(db, decl.to_id(db)) {
-            let dot_callable = hir::member_self_position(db, member_id)
-                .is_some_and(|position| hir::receiver_takes(shape, position));
-            if !dot_callable {
+            let Some(reach) = hir::member_self_position(db, member_id)
+                .and_then(|position| hir::dot_reach(shape, position))
+            else {
                 continue;
-            }
+            };
             let sig = hir::signature(db, member_id);
             // A member is fn-shaped, so it may satisfy the position when
             // CALLED — the same ranking a top-level fn gets. The receiver
             // does not count toward the written arity, so a
             // nullary-through-the-dot member inserts `name()`.
-            items.push(fn_shaped_item(
+            let item = fn_shaped_item(
                 hir::item_loc(db, member_id).display_name().to_owned(),
                 Provenance::Item,
                 &sig,
                 Some(&sig),
                 expected,
                 edit_range,
-            ));
+            );
+            items.push(borrowed_member_item(item, reach, dot, mut_refused));
         }
     }
     // A RIGID receiver's bounds — the whole of its dot. Which requirements
@@ -1538,14 +1558,15 @@ fn field_items(
         // A requirement is fn-shaped like a member, so it earns the same
         // ranking and the same call-shaped insert (its receiver — `Self`
         // — does not count toward the written arity either).
-        items.push(fn_shaped_item(
+        let item = fn_shaped_item(
             offer.name,
             Provenance::Item,
             &offer.sig,
             Some(&offer.sig),
             expected,
             edit_range,
-        ));
+        );
+        items.push(borrowed_member_item(item, offer.reach, dot, mut_refused));
     }
     // BUILTIN members (`"...".next_char`), offered on the same dot. Ranked
     // as a builtin, like the builtin *functions* in expression position —
@@ -1566,6 +1587,38 @@ fn field_items(
         ));
     }
     items
+}
+
+/// A dot item whose member an owned receiver reaches only through a written
+/// borrow ([`hir::DotReach::WrittenBorrow`]): the edit takes the `.` back
+/// and writes `.&.get()` / `.&mut.get()`, and the filter text starts with
+/// the dot. A refused `.&mut` (`mut_refused`) sorts last (P16). Any other
+/// item passes through untouched.
+fn borrowed_member_item(
+    mut item: CompletionItem,
+    reach: hir::DotReach,
+    dot: TextSize,
+    mut_refused: bool,
+) -> CompletionItem {
+    let hir::DotReach::WrittenBorrow { mutable } = reach else {
+        return item;
+    };
+    if mutable && mut_refused {
+        // The key's first character is its type tier.
+        item.sort_text
+            .replace_range(..1, &TYPE_TIER_REFUSED.to_string());
+    }
+    let borrow = if mutable { ".&mut." } else { ".&." };
+    item.text_edit.range = TextRange::new(dot, item.text_edit.range.end());
+    item.text_edit.insert = match item.text_edit.insert {
+        InsertText::Plain(text) => InsertText::Plain(format!("{borrow}{text}")),
+        InsertText::Snippet { snippet, plain } => InsertText::Snippet {
+            snippet: format!("{borrow}{snippet}"),
+            plain: format!("{borrow}{plain}"),
+        },
+    };
+    item.filter_text = format!(".{}", item.label);
+    item
 }
 
 /// The second segment of a `::` path (`Shape::Circle`), in expression
