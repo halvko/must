@@ -680,6 +680,20 @@ impl LowerCtx {
         }
     }
 
+    /// An optional value of `owner` (a `break`, `return` or block tail):
+    /// absent, or missing when `owner` ends in digit-group commas.
+    fn lower_opt_value(
+        &mut self,
+        expr: Option<ast::Expr>,
+        owner: &syntax::SyntaxNode,
+    ) -> Option<ExprId> {
+        match expr {
+            Some(expr) => Some(self.lower_expr(expr)),
+            None if ends_in_digit_groups(owner) => Some(self.missing_expr()),
+            None => None,
+        }
+    }
+
     /// One written turbofish list, in source order. Type arguments stay
     /// syntactic (`TypeRef`, range-free); const arguments are ordinary
     /// expressions, allocated here so they resolve, type and evaluate like
@@ -984,12 +998,12 @@ impl LowerCtx {
                 self.alloc_expr(ExprData::Loop { body }, it.syntax())
             }
             ast::Expr::BreakExpr(it) => {
-                let value = it.expr().map(|e| self.lower_expr(e));
+                let value = self.lower_opt_value(it.expr(), it.syntax());
                 self.alloc_expr(ExprData::Break { value }, it.syntax())
             }
             ast::Expr::ContinueExpr(it) => self.alloc_expr(ExprData::Continue, it.syntax()),
             ast::Expr::ReturnExpr(it) => {
-                let value = it.expr().map(|e| self.lower_expr(e));
+                let value = self.lower_opt_value(it.expr(), it.syntax());
                 self.alloc_expr(ExprData::Return { value }, it.syntax())
             }
             ast::Expr::FnLiteral(it) => {
@@ -1193,7 +1207,7 @@ impl LowerCtx {
                 ast::Stmt::ExprStmt(it) => Stmt::Expr(self.lower_opt_expr(it.expr())),
             })
             .collect();
-        let tail = block.tail_expr().map(|e| self.lower_expr(e));
+        let tail = self.lower_opt_value(block.tail_expr(), block.syntax());
         let id = self.alloc_expr(ExprData::Block { stmts, tail }, block.syntax());
         if let Some(brace) = block.r_brace_token() {
             self.source_map.exit_back.insert(id, brace.text_range());
@@ -1299,4 +1313,17 @@ pub(crate) fn unescape(raw: &str) -> String {
         }
     }
     out
+}
+
+/// Whether `node` ends in a number with digit groups (`{ 2,147 }`,
+/// `return 1,000`): one `ERROR` node starting at the number, where an
+/// expression was meant. It lowers as missing, so it traps instead of
+/// reading as no value.
+fn ends_in_digit_groups(node: &syntax::SyntaxNode) -> bool {
+    node.last_child().is_some_and(|it| {
+        it.kind() == syntax::SyntaxKind::ERROR
+            && it
+                .first_token()
+                .is_some_and(|t| t.kind() == syntax::SyntaxKind::INT_NUMBER)
+    })
 }

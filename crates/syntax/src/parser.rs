@@ -23,6 +23,12 @@ pub(crate) enum Event {
         /// an `after_prev` error, else replacing the token looked at.
         fix: Option<TokenFix>,
     },
+    /// Sits right after a number literal's token, inside its `ERROR` node:
+    /// the next `tokens` tokens are its `,`-separated digit groups. One
+    /// error spans them all, with a fix that joins the groups with `_`.
+    DigitGroupCommas {
+        tokens: usize,
+    },
 }
 
 #[derive(Debug)]
@@ -34,11 +40,8 @@ pub(crate) struct TokenFix {
 pub(crate) struct Parser<'t> {
     tokens: &'t [SyntaxKind],
     /// The source text of each token in [`Self::tokens`], same indexing.
-    /// The parser is KIND-driven everywhere but one place: a RETIRED
-    /// spelling lexes as an ordinary identifier, and the only way to
-    /// refuse it by name — instead of desyncing on tokens that are each
-    /// individually fine — is to look at the word (see
-    /// [`Parser::at_word`]).
+    /// Read only where kinds can't tell: a retired spelling
+    /// ([`Parser::at_word`]) and `,` digit groups ([`Parser::nth_joined`]).
     texts: &'t [&'t str],
     pos: usize,
     events: Vec<Event>,
@@ -61,6 +64,25 @@ impl<'t> Parser<'t> {
     /// without a keyword to go with it.
     pub(crate) fn at_word(&self, word: &str) -> bool {
         self.at(IDENT) && self.texts.get(self.pos).is_some_and(|t| *t == word)
+    }
+
+    /// The source text of the `n`th token ahead; empty at the end.
+    fn nth_text(&self, n: usize) -> &'t str {
+        self.texts.get(self.pos + n).copied().unwrap_or("")
+    }
+
+    /// Whether the `n`th token ahead touches the token before it, with no
+    /// trivia between. Every text is a slice of the one source, so two
+    /// tokens touch exactly when one's end address is the other's start.
+    fn nth_joined(&self, n: usize) -> bool {
+        let i = self.pos + n;
+        match (
+            i.checked_sub(1).and_then(|j| self.texts.get(j)),
+            self.texts.get(i),
+        ) {
+            (Some(a), Some(b)) => a.as_ptr().wrapping_add(a.len()) == b.as_ptr(),
+            _ => false,
+        }
     }
 
     pub(crate) fn finish(self) -> Vec<Event> {
@@ -153,6 +175,9 @@ impl<'t> Parser<'t> {
         if self.eat(kind) {
             return true;
         }
+        if kind == SEMICOLON && self.eat_digit_group_commas() && self.eat(kind) {
+            return true;
+        }
         self.error_after_prev(kind);
         false
     }
@@ -174,6 +199,76 @@ impl<'t> Parser<'t> {
                 insert: insert.to_owned(),
             }),
         });
+    }
+
+    /// `2,147,483,647` where a `;` is owed, so no `,` can continue what came
+    /// before: the number literal just consumed and every `,ddd` group
+    /// touching it become one error. Only 1–3 digits then exact 3-digit
+    /// groups, all unspaced, so `1, 234` and `3,14` keep their usual errors.
+    /// Events after the literal shift, so no marker past it may be held.
+    pub(crate) fn eat_digit_group_commas(&mut self) -> bool {
+        let digits = |text: &str, len: std::ops::RangeInclusive<usize>| {
+            len.contains(&text.len()) && text.bytes().all(|b| b.is_ascii_digit())
+        };
+        let Some(lit) = self.pos.checked_sub(1).map(|i| self.texts[i]) else {
+            return false;
+        };
+        if self.nth(0) != COMMA || self.prev() != Some(INT_NUMBER) || !digits(lit, 1..=3) {
+            return false;
+        }
+        let mut n = 0;
+        while self.nth(n) == COMMA
+            && self.nth(n + 1) == INT_NUMBER
+            && self.nth_joined(n)
+            && self.nth_joined(n + 1)
+            && digits(self.nth_text(n + 1), 3..=3)
+        {
+            n += 2;
+        }
+        if n == 0 {
+            return false;
+        }
+        // The literal's node: its `Start` sits right before its one token.
+        let Some(start) = self
+            .events
+            .iter()
+            .rposition(|e| matches!(e, Event::Token))
+            .and_then(|token| token.checked_sub(1))
+            .filter(|&i| matches!(self.events[i], Event::Start { kind: LITERAL, .. }))
+        else {
+            return false;
+        };
+        self.err_digit_group_commas(start, n);
+        true
+    }
+
+    /// Reopen the literal whose `Start` is at `start` as one `ERROR` node
+    /// holding the next `tokens` tokens too ([`Event::DigitGroupCommas`]).
+    /// The splice shifts later events and patches only `forward_parent`, so
+    /// no live marker may start after `start`.
+    fn err_digit_group_commas(&mut self, start: usize, tokens: usize) {
+        if let Event::Start { kind, .. } = &mut self.events[start] {
+            *kind = ERROR;
+        }
+        let at = start + 2;
+        let mut rest = self.events.split_off(at);
+        self.events.push(Event::DigitGroupCommas { tokens });
+        for _ in 0..tokens {
+            self.bump_any();
+        }
+        let inserted = (self.events.len() - at) as u32;
+        // A wrapper preceded onto an earlier node may start past `at`.
+        for (i, event) in self.events[..at].iter_mut().enumerate() {
+            if let Event::Start {
+                forward_parent: Some(fp),
+                ..
+            } = event
+                && i + *fp as usize >= at
+            {
+                *fp += inserted;
+            }
+        }
+        self.events.append(&mut rest);
     }
 
     /// Report an error and wrap the offending token in an `ERROR` node.
