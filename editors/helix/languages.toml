@@ -11,10 +11,11 @@
 # What it cannot get: the ▶ run lenses (Helix has no code-lens support).
 # Run a file from the shell instead: `must-lsp run path/to/file.must`.
 #
-# Highlighting comes from the tree-sitter grammar at the bottom of this
-# file; Helix has no LSP semantic tokens. It needs Helix 25.07 or later:
-# the queries rely on a later pattern winning over an earlier one on the
-# same node, and older releases resolve that the other way round. Set up:
+# Highlighting and indentation come from the tree-sitter grammar at the
+# bottom of this file; Helix has no LSP semantic tokens. It needs Helix
+# 25.07 or later: the queries rely on a later pattern winning over an
+# earlier one on the same node, and older releases resolve that the other
+# way round. Set up:
 #
 #   hx --grammar fetch && hx --grammar build
 #   mkdir -p ~/.config/helix/runtime/queries

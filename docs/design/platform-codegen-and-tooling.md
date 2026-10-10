@@ -88,8 +88,9 @@
   hand-written tier list, so closures inherit the rule). Nothing is
   suppressed. The template lives on an explicit invoke plus a quick fix on
   the non-exhaustive-match diagnostic, not on a trigger character. Snippets
-  are indented absolutely, because the editor's snippet path shifts by a
-  tree-sitter indents-query result and the extension ships no indents query.
+  are indented absolutely: Zed's snippet path shifts the body by the indents
+  query's suggestion for its first line minus that line's own indentation,
+  which is zero for an absolute arm list that opens on its own line.
 - **P03** `print` emits exactly what it is given: `str` only, no newline, no formatting, no
   interpolation. The CLI runner writes to `stdout.lock()` — Rust's own line buffering, no
   per-call flush — and flushes it explicitly before a crash report and before a blocking
@@ -176,12 +177,14 @@
 - **`RunMode::read` flushes before it blocks too** — the stdin hint's ordering guarantee
   holds only on the `read_line` path today, so the note can precede a newline-less prompt
   written before a `read(buf, len)` call. **P09 P03**
-- **The editor extension gains an `indents.scm`** — the client then
-  re-indents multi-line snippet bodies and the template's absolute indentation
-  doubles. One function to fix; recorded because nobody would connect the
-  trigger to completions. The extension has a grammar and highlight queries
-  but no indents query, which is assumed to leave the shift at zero: check the
-  match-arm template in a live Zed once the grammar is installed. **P12**
+- **The match-arm template's no-braces shape misplaces in Zed** — that
+  shape opens mid-line (`match s {`), where Zed measures the shift from the
+  `match` line's own indentation against the text's column-0 `{`, so an
+  absolute body moves right by that indentation; a relative one would land,
+  as it would in clients that prefix continuation lines with the line's
+  indentation. Read off Zed's `Buffer::edit` and `suggest_autoindents`, not
+  seen live: check in Zed, then let the two shapes differ in `match_template`.
+  **P12**
 - **Completion layers designed, not built**: values that yield an enum one
   step deep (hierarchy and perf unresolved), and importable enums, moot
   until modules exist. Streaming is unavailable; the protocol's only
