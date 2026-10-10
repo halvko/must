@@ -98,12 +98,16 @@ ln -s "$PWD/editors/tree-sitter-must/queries" ~/.config/helix/runtime/queries/mu
 `editors/tree-sitter-must/` holds `grammar.js`, the generated parser in
 `src/` (committed: both editors compile that C), and the canonical
 `queries/highlights.scm`, written in Helix's scope names. Zed's copy,
-`editors/zed/languages/must/highlights.scm`, is generated from it.
+`editors/zed/languages/must/highlights.scm`, is generated from it. The
+indent queries, which place typed and pasted lines, are one per editor
+(`queries/indents.scm` for Helix, `editors/zed/languages/must/indents.scm`):
+the two editors read indent captures differently.
 `crates/tree-sitter-agreement` runs under `cargo test` and fails when the
 grammar cannot parse `examples/`, when a token is highlighted differently by
-the query and by the server, when a keyword or a query pattern is missing
-from the test corpus, when `grammar.js` was edited without regenerating, or
-when Zed's copy has drifted.
+the query and by the server, when either indent query would move a line of
+the corpus, when a keyword or a query pattern is missing from the test
+corpus, when `grammar.js` was edited without regenerating, or when Zed's
+copy has drifted.
 
 After editing `grammar.js` (node and npm needed, only here):
 
@@ -248,7 +252,7 @@ crates/
   tree-sitter-agreement/ test-only: the tree-sitter grammar checked against syntax + ide
 editors/zed/ Zed extension (separate workspace; compiled to wasm by Zed)
 editors/helix/ Helix configuration (languages.toml)
-editors/tree-sitter-must/ tree-sitter grammar + highlight queries, for both editors
+editors/tree-sitter-must/ tree-sitter grammar + highlight and Helix indent queries
 tools/       run a compiled `.wasm` module: wasm-run.mjs (Node CLI), playground.html (browser)
 ```
 
