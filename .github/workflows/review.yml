@@ -109,8 +109,10 @@ jobs:
           fetch-depth: 0
       # A brief may open with a `---` front matter block holding `model: <name>`.
       - id: brief
+        env:
+          ROLE: ${{ matrix.role }}
         run: |
-          file=".github/reviewers/${{ matrix.role }}.md"
+          file=".github/reviewers/$ROLE.md"
           if [ "$(head -n1 "$file")" = "---" ]; then
             front=$(awk 'NR > 1 && /^---$/ { exit } NR > 1' "$file")
             body=$(awk 'f; NR > 1 && /^---$/ { f = 1 }' "$file")
@@ -121,9 +123,10 @@ jobs:
           model=$(printf '%s\n' "$front" | sed -n 's/^model:[[:space:]]*//p')
           {
             echo "model_arg=${model:+--model $model}"
-            echo 'text<<__REVIEWER_BRIEF__'
+            delim="BRIEF_$(openssl rand -hex 16)"
+            echo "text<<$delim"
             printf '%s\n' "$body"
-            echo '__REVIEWER_BRIEF__'
+            echo "$delim"
           } >> "$GITHUB_OUTPUT"
       - uses: anthropics/claude-code-action@v1
         with:
