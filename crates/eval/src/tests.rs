@@ -1893,6 +1893,186 @@ static f = fn (point: bool) -> usize {
 }
 
 #[test]
+fn let_patterns_bind_the_parts_of_a_value() {
+    check_run(
+        r#"
+type Only = enum { One(usize, usize) };
+type Opt = enum { Some(usize), None };
+type Pair = struct { lo: usize, hi: usize };
+static arrays = fn () -> usize {
+    let [a, mut b, _] = [1, 2, 3];
+    b = b * 10;
+    let [[p, q], [r, s]]: [[usize; 2]; 2] = [[1, 2], [3, 4]];
+    a + b + p * 1000 + q * 100 + r * 10 + s
+};
+static variants = fn (o: Only) -> usize {
+    let ::One(x, mut y) = o;
+    y = y + 1;
+    let Only::One(z, _) = o;
+    x * 100 + y * 10 + z
+};
+static nested = fn (v: Opt::Some, w: Opt::Some) -> usize {
+    let [::Some(n), ::Some(m)] = [v, w];
+    let [Pair(struct { lo, hi }), _] = [Pair(struct { lo = 5, hi = 6 }), Pair(struct { lo = 7, hi = 8 })];
+    n * 1000 + m * 100 + lo * 10 + hi
+};
+static borrowed = fn (mut o: Only) -> usize {
+    let r = o.&mut;
+    let ::One(x, y) = r;
+    x.* = 100;
+    let v = y.*;
+    match o {
+        ::One(a, _) => a + v,
+    }
+};
+static params = fn ([a, b]: [usize; 2], ::One(c, d): Only) -> usize {
+    a * 1000 + b * 100 + c * 10 + d
+};
+static main = fn () -> [usize; 5] {
+    [
+        arrays(),
+        variants(Only::One(1, 2)),
+        nested(Opt::Some(1), Opt::Some(2)),
+        borrowed(Only::One(1, 2)),
+        params([1, 2], Only::One(3, 4)),
+    ]
+};
+"#,
+        "main()",
+        expect![[r#"
+            => [1255, 131, 1256, 102, 1234]
+        "#]],
+    );
+}
+
+#[test]
+fn a_refutable_let_pattern_traps_with_the_diagnostic_message() {
+    check_run(
+        r#"
+type Opt = enum { Some(usize), None };
+static f = fn (o: Opt) -> usize {
+    let ::Some(n) = o;
+    n
+};
+"#,
+        "f(Opt::Some(1))",
+        expect![[r#"
+            error[Trap]: this pattern can fail to match; use `match`
+        "#]],
+    );
+}
+
+#[test]
+fn a_let_pattern_naming_another_variant_traps_instead_of_binding() {
+    // The `Circle`'s payload is never read as the `Label`'s `str`.
+    let text = r#"
+type Shape = enum { Circle(usize), Label(str) };
+static owned = fn (c: Shape::Circle) -> str {
+    let ::Label(s) = c;
+    s
+};
+static borrowed = fn (c: Shape::Circle) -> str {
+    let ::Label(s) = c.&;
+    s.*
+};
+"#;
+    check_run(
+        text,
+        "owned(Shape::Circle(1))",
+        expect![[r#"
+            error[Trap]: this pattern can fail to match; use `match`
+        "#]],
+    );
+    check_run(
+        text,
+        "borrowed(Shape::Circle(1))",
+        expect![[r#"
+            error[Trap]: this pattern can fail to match; use `match`
+        "#]],
+    );
+}
+
+#[test]
+fn a_refutable_parameter_pattern_traps_before_it_reads_the_argument() {
+    let text = r#"
+type S = enum { A(usize), B(usize, usize) };
+static owned = fn (::B(x, y): S) -> usize { x + y };
+static borrowed = fn::<@a>(::B(x, y): S.&::<@a>) -> usize { x.* + y.* };
+static nested = fn ([::B(x, y)]: [S; 1]) -> usize { x + y };
+"#;
+    check_run(
+        text,
+        "owned(S::A(1))",
+        expect![[r#"
+            error[Trap]: this pattern can fail to match; use `match`
+        "#]],
+    );
+    check_run(
+        text,
+        "{ let s: S = S::A(1); borrowed(s.&) }",
+        expect![[r#"
+            error[Trap]: this pattern can fail to match; use `match`
+        "#]],
+    );
+    check_run(
+        text,
+        "nested([S::A(1)])",
+        expect![[r#"
+            error[Trap]: this pattern can fail to match; use `match`
+        "#]],
+    );
+}
+
+#[test]
+fn a_broken_parameter_pattern_traps_before_it_reads_the_argument() {
+    let text = r#"
+type S = enum { A(usize), B(usize, usize) };
+type R = struct { a: usize };
+static arity = fn (::A(x, y): S) -> usize { x + y };
+static fields = fn (R(struct { a, b }): R) -> usize { a + b };
+static length = fn ([a, b, c]: [usize; 2]) -> usize { a + b + c };
+"#;
+    check_run(
+        text,
+        "arity(S::A(1))",
+        expect![[r#"
+            error[Trap]: `A` has 1 payload, this pattern names 2
+        "#]],
+    );
+    check_run(
+        text,
+        "fields(R(struct { a = 1 }))",
+        expect![[r#"
+            error[Trap]: no field `b` on `struct { a: usize }`
+        "#]],
+    );
+    check_run(
+        text,
+        "length([1, 2])",
+        expect![[r#"
+            error[Trap]: this pattern has 3 elements, but the array has length 2
+        "#]],
+    );
+}
+
+#[test]
+fn a_qualified_variant_let_pattern_binds_through_a_borrow() {
+    check_run(
+        r#"
+type Only = enum { One(usize, usize) };
+static f = fn (o: Only) -> usize {
+    let Only::One(a, b) = o.&;
+    a.* + b.*
+};
+"#,
+        "f(Only::One(40, 2))",
+        expect![[r#"
+            => 42
+        "#]],
+    );
+}
+
+#[test]
 fn nonexhaustive_match_traps_with_the_diagnostic_message() {
     // Reaching the uncovered variant crashes with exactly the text the
     // squiggle shows; the covered variant still runs fine.

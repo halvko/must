@@ -446,6 +446,9 @@ pub enum PatData {
         /// field of the scrutinee's type must be named.
         rest: bool,
     },
+    /// `[a, b, c]` — destructures a fixed-length array, one pattern per
+    /// element (a `let`/parameter pattern).
+    Array { elements: Vec<PatId> },
     /// `Name(pattern)` — unwraps a newtype and destructures its underlying
     /// shape, construction's mirror image (`Name(struct { ... })`). Erased
     /// at runtime (a named type's value *is* its underlying value — see
@@ -495,6 +498,11 @@ impl Body {
                 out.extend(fields.iter().map(|f| f.binding));
             }
             PatData::Newtype { inner, .. } => self.collect_pat_bindings(*inner, out),
+            PatData::Array { elements } => {
+                for &element in elements {
+                    self.collect_pat_bindings(element, out);
+                }
+            }
         }
     }
 }
@@ -1095,7 +1103,7 @@ impl LowerCtx {
             // `let`/parameter-only shapes; `match_pattern`'s grammar never
             // produces them, but a defensive fallback keeps this function
             // total if that ever changes.
-            ast::Pat::RecordPat(_) | ast::Pat::NewtypePat(_) => {
+            ast::Pat::RecordPat(_) | ast::Pat::NewtypePat(_) | ast::Pat::ArrayPat(_) => {
                 self.lower_binding_pattern(pat, None, false)
             }
         }
@@ -1106,9 +1114,10 @@ impl LowerCtx {
     /// [`PatData::Bind`] (never [`PatData::Wildcard`]): a `let`/parameter
     /// hole has always allocated an (unnamed) value slot, and this keeps
     /// doing exactly that. `type_ref`/`mutable` apply only when `pat` is
-    /// directly a bare name — nested patterns (a `Newtype`'s inner, a
-    /// `Record`'s fields) carry no type ascription in v1, and a field's own
-    /// `mut` is read straight off its syntax instead.
+    /// directly a bare name — nested patterns carry no type ascription, and
+    /// a nested binding's own `mut` is read straight off its syntax.
+    /// Variant and literal patterns lower as in a match arm; inference
+    /// refuses them where they can fail to match.
     fn lower_binding_pattern(
         &mut self,
         pat: ast::Pat,
@@ -1117,9 +1126,18 @@ impl LowerCtx {
     ) -> PatId {
         match pat {
             ast::Pat::BindPat(it) => {
+                let mutable = mutable || it.is_mut();
                 let binding = self.alloc_binding(it.name(), type_ref, mutable, it.syntax());
                 self.alloc_pat(PatData::Bind(binding), it.syntax())
             }
+            ast::Pat::ArrayPat(it) => {
+                let elements = it
+                    .pats()
+                    .map(|element| self.lower_binding_pattern(element, None, false))
+                    .collect();
+                self.alloc_pat(PatData::Array { elements }, it.syntax())
+            }
+            ast::Pat::VariantPat(_) | ast::Pat::LiteralPat(_) => self.lower_pat(pat),
             ast::Pat::RecordPat(it) => {
                 let fields = it
                     .fields()
@@ -1151,9 +1169,7 @@ impl LowerCtx {
             // Match-only shapes; `binding_pattern`'s grammar never produces
             // them. Broken/defensive fallback: nothing to bind.
             ast::Pat::WildcardPat(it) => self.alloc_pat(PatData::Missing, it.syntax()),
-            ast::Pat::VariantPat(it) => self.alloc_pat(PatData::Missing, it.syntax()),
             ast::Pat::RestPat(it) => self.alloc_pat(PatData::Missing, it.syntax()),
-            ast::Pat::LiteralPat(it) => self.alloc_pat(PatData::Missing, it.syntax()),
         }
     }
 

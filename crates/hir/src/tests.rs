@@ -2049,10 +2049,7 @@ static f = fn (s: Shape) -> usize {
 }
 
 #[test]
-fn newtype_nested_binding_assign_offers_no_fix() {
-    // A newtype's inner bind (`Foo(inner)`) has no `mut` slot at any
-    // depth: `newtype_pat` never eats `MUT_KW`, so `Foo(mut inner)` does
-    // not parse and the fix must not offer it.
+fn newtype_nested_binding_assign_offers_a_make_mutable_fix() {
     let text = r#"
 type Foo = struct { n: usize };
 static f = fn (v: Foo) -> usize {
@@ -2068,15 +2065,189 @@ static f = fn (v: Foo) -> usize {
         .iter()
         .find(|d| d.message.starts_with("cannot assign to `inner`"))
         .unwrap_or_else(|| panic!("no assign-to-immutable diagnostic in {diagnostics:?}"));
-    assert_eq!(
-        diag.message,
-        "cannot assign to `inner`: it is not declared `mut`"
+    let fix = diag.fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Make `inner` mutable");
+    assert_eq!(fix.edits[0].insert, "mut ");
+    // Immediately before the inner name: `Foo(mut inner)`.
+    let inner = text.find("Foo(inner)").unwrap() + "Foo(".len();
+    assert_eq!(usize::from(fix.edits[0].range.start()), inner);
+}
+
+#[test]
+fn a_let_array_pattern_binds_each_element() {
+    check_diagnostics(
+        r#"
+static f = fn () -> usize {
+    let [a, b, c] = [0; 3];
+    let [[p, mut q], _]: [[usize; 2]; 2] = [[1, 2], [3, 4]];
+    q = p;
+    a + b + c + q
+};
+"#,
+        expect![[r#""#]],
     );
-    assert!(diag.fix.is_none(), "expected no fix, got {:?}", diag.fix);
-    assert_eq!(diag.related.len(), 1, "related: {:?}", diag.related);
-    assert_eq!(
-        diag.related[0].message,
-        "`inner` is declared without `mut` here"
+}
+
+#[test]
+fn a_refutable_let_pattern_is_refused_once() {
+    check_diagnostics(
+        r#"
+static f = fn () -> () {
+    let s = "abc";
+    let ::Char(c, _) = s.next_char(0);
+};
+static g = fn (n: usize) -> () {
+    let 0 = n;
+};
+"#,
+        expect![[r#"
+            53..65: this pattern can fail to match; use `match`
+            128..129: this pattern can fail to match; use `match`
+        "#]],
+    );
+}
+
+#[test]
+fn a_variant_let_pattern_must_cover_its_type() {
+    check_diagnostics(
+        r#"
+type Only = enum { One(usize, usize) };
+type Shape = enum { Circle(usize), Point };
+static f = fn (o: Only, c: Shape::Circle) -> usize {
+    let ::One(x, mut y) = o;
+    y = y + 1;
+    let Only::One(z, _) = o;
+    let ::Circle(r) = c;
+    x + y + z + r
+};
+static g = fn (s: Shape) -> usize {
+    let ::Circle(r) = s;
+    r
+};
+"#,
+        expect![[r#"
+            301..312: this pattern can fail to match; use `match`
+        "#]],
+    );
+}
+
+#[test]
+fn a_let_pattern_naming_another_variant_than_the_value_is_refused() {
+    // The value is variant-precise, so the pattern matches no value: it is
+    // unreachable and can fail to match, owned or through a borrow.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Label(str) };
+static f = fn (c: Shape::Circle) -> str {
+    let ::Label(s) = c;
+    s
+};
+static g = fn (c: Shape::Circle) -> str {
+    let ::Label(s) = c.&;
+    s.*
+};
+"#,
+        expect![[r#"
+            100..110: this arm is unreachable: the scrutinee is a `Shape::Circle`
+            100..110: this pattern can fail to match; use `match`
+            175..185: this arm is unreachable: the scrutinee is a `Shape::Circle`
+            175..185: this pattern can fail to match; use `match`
+        "#]],
+    );
+}
+
+#[test]
+fn a_qualified_variant_let_pattern_binds_through_a_borrow() {
+    check_diagnostics(
+        r#"
+type Only = enum { One(usize, usize) };
+static f = fn (o: Only) -> usize {
+    let Only::One(a, b) = o.&;
+    a.* + b.*
+};
+"#,
+        expect![[""]],
+    );
+}
+
+#[test]
+fn a_qualified_let_pattern_naming_another_variant_than_the_value_is_refused() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Label(str) };
+static f = fn (c: Shape::Circle) -> str {
+    let Shape::Label(s) = c;
+    s
+};
+"#,
+        expect![[r#"
+            100..115: this arm is unreachable: the scrutinee is a `Shape::Circle`
+            100..115: this pattern can fail to match; use `match`
+        "#]],
+    );
+}
+
+#[test]
+fn an_array_pattern_must_match_the_array_length_and_kind() {
+    check_diagnostics(
+        r#"
+static f = fn (n: usize) -> usize {
+    let [a, b] = [1, 2, 3];
+    let [c] = n;
+    a + b + c
+};
+"#,
+        expect![[r#"
+            45..51: this pattern has 2 elements, but the array has length 3
+            73..76: this pattern only matches an array; found `usize`
+        "#]],
+    );
+}
+
+#[test]
+fn array_and_variant_parameter_patterns_bind() {
+    check_diagnostics(
+        r#"
+type Only = enum { One(usize, usize) };
+static f = fn ([a, mut b]: [usize; 2], ::One(c, d): Only) -> usize {
+    b = b + 1;
+    a + b + c + d
+};
+"#,
+        expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_let_pattern_hands_each_linear_element_its_obligation() {
+    check_linear(
+        r#"
+type Box = enum { Holds(Res) };
+static clean = fn() -> () {
+    let [a, b] = [make(1), make(2)];
+    a.drop();
+    b.drop();
+    let ::Holds(r) = Box::Holds(make(3));
+    r.drop();
+};
+static leak = fn() -> () {
+    let [a, b] = [make(1), make(2)];
+    a.drop();
+};
+static twice = fn() -> () {
+    let arr = [make(1), make(2)];
+    let [a, b] = arr;
+    a.drop();
+    b.drop();
+    let [c, d] = arr;
+    c.drop();
+    d.drop();
+};
+"#,
+        expect![[r#"
+            545..599: `b` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`b` is born here and must be consumed at 559..560)
+            730..733: `arr` was already consumed (`arr` is born here and must be consumed at 637..640) (first consumed here at 680..683)
+        "#]],
     );
 }
 

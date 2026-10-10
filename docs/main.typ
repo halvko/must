@@ -202,6 +202,30 @@ static from_match = fn (m: Maybe) -> str {
 }
 ```
 
+`let` takes a *pattern*, not just a name, so a value can be taken apart as
+it is bound. A pattern is a name (each one may take its own `mut`), `_`, an
+array pattern with one pattern per element, the record and named-type
+patterns parameters take (see "functions can destructure arguments"), and
+the variant and literal patterns of `match` arms:
+
+```must
+type Point = enum { At(usize, usize) };
+
+static sum = fn (p: Point) -> usize {
+    let [a, mut b, _] = [1, 2, 3];
+    b = b + a;
+    let ::At(x, y) = p;
+    x + y + b
+};
+```
+
+A `let` pattern must match every value of its type: it is a `match` with
+one arm, and that arm has to be exhaustive. `::At(x, y)` above can never
+fail, because `At` is the only variant; on an enum with more variants, or a
+literal like `let 0 = n;`, the pattern can fail to match, and that is
+an error telling you to use `match`. An array pattern names exactly as
+many elements as the array's length.
+
 == Const functions and const blocks
 
 Every item initializer — `static` and `const` alike — is evaluated at
@@ -343,11 +367,11 @@ static fib2 = fn (n: usize) -> usize {
 
 == functions can destructure arguments
 
-A parameter is a *pattern* against a declared type, not just a name — its
-own pattern language, distinct from what `match` arms accept: a name,
-`mut name`, `_`, a named type's pattern peeling one layer of newtype, or a
-record pattern (no variant patterns, and no sub-pattern below a bound
-field). A record pattern binds fields by name, optionally renaming with
+A parameter is a *pattern* against a declared type, not just a name — the
+pattern language `let` takes (see "Variable declarations"): a name,
+`mut name`, `_`, an array pattern, a named type's pattern peeling one layer
+of newtype, a record pattern (no sub-pattern below a bound field), or a
+variant pattern that cannot fail to match. A record pattern binds fields by name, optionally renaming with
 `as`, and a named type's pattern peels the newtype before the record
 pattern underneath sees it:
 
@@ -2055,8 +2079,9 @@ static table = const {
 
 Const-param lengths connect arrays to generics: a generic function's `const
 N: usize` may be the length of a `[usize; N]` parameter, and a generic type
-may carry a `[usize; N]` field (`Buf::<2>` above). Not yet: a length
-accessor, and matching on arrays.
+may carry a `[usize; N]` field (`Buf::<2>` above). An array is taken apart
+by a `let` pattern (`let [a, b, c] = t;`, see "Variable declarations").
+Not yet: a length accessor, and array patterns in `match` arms.
 
 == Characters
 

@@ -159,3 +159,60 @@ static f = fn () { match s { ::Char(mut c, _) => c, mut other => other } };
                 (identifier))
               (path_expr
                 (identifier)))))))))
+
+==================
+Let patterns
+==================
+
+static f = fn ([a, mut b]: [usize; 2]) { let [x, [mut y, _]] = v; let ::Char(c, _) = s; let Opt::Some(n) = o; let 0 = z; };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_literal
+      (param_list
+        (param
+          (array_pat
+            (bind_pat
+              (param_name))
+            (bind_pat
+              (param_name)))
+          (array_type
+            (path_type
+              (identifier))
+            (const_arg
+              (integer)))))
+      (block_expr
+        (let_stmt
+          (array_pat
+            (bind_pat
+              (identifier))
+            (array_pat
+              (bind_pat
+                (identifier))
+              (bind_pat)))
+          (path_expr
+            (identifier)))
+        (let_stmt
+          (variant_pat
+            (identifier)
+            (bind_pat
+              (identifier))
+            (bind_pat))
+          (path_expr
+            (identifier)))
+        (let_stmt
+          (variant_pat
+            (identifier)
+            (identifier)
+            (bind_pat
+              (identifier)))
+          (path_expr
+            (identifier)))
+        (let_stmt
+          (literal_pat
+            (integer))
+          (path_expr
+            (identifier)))))))

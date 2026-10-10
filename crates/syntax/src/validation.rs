@@ -673,7 +673,8 @@ fn reject_requirement_param_patterns(fn_type: &ast::FnType, errors: &mut Vec<Syn
         let Some(pat) = param.pat() else {
             continue;
         };
-        let plain = matches!(pat, ast::Pat::BindPat(_)) && param.mut_token().is_none();
+        let plain =
+            matches!(&pat, ast::Pat::BindPat(b) if !b.is_mut()) && param.mut_token().is_none();
         if plain {
             continue;
         }

@@ -426,6 +426,18 @@ static main = fn () -> usize { describe(Shape::Point) }
 }
 
 #[test]
+fn a_refutable_parameter_pattern_traps_with_the_editors_message() {
+    check(
+        r#"
+type S = enum { A(usize), B(usize, usize) };
+static f = fn (::B(x, y): S) -> usize { x + y };
+static main = fn () -> usize { f(S::A(1)) }
+"#,
+        "main()",
+    );
+}
+
+#[test]
 fn a_variant_typed_match_needs_no_tag() {
     check(
         r#"
