@@ -4064,8 +4064,9 @@ static f = fn (s: Shape) -> usize {
                           NAME_REF@66..72
                             IDENT@66..72 "Circle"
                           L_PAREN@72..73 "("
-                          NAME@73..74
-                            IDENT@73..74 "r"
+                          BIND_PAT@73..74
+                            NAME@73..74
+                              IDENT@73..74 "r"
                           R_PAREN@74..75 ")"
                         WHITESPACE@75..76 " "
                         FAT_ARROW@76..78 "=>"
@@ -4081,12 +4082,14 @@ static f = fn (s: Shape) -> usize {
                           NAME_REF@92..96
                             IDENT@92..96 "Pair"
                           L_PAREN@96..97 "("
-                          NAME@97..98
-                            IDENT@97..98 "a"
+                          BIND_PAT@97..98
+                            NAME@97..98
+                              IDENT@97..98 "a"
                           COMMA@98..99 ","
                           WHITESPACE@99..100 " "
-                          NAME@100..101
-                            HOLE@100..101 "_"
+                          BIND_PAT@100..101
+                            NAME@100..101
+                              HOLE@100..101 "_"
                           R_PAREN@101..102 ")"
                         WHITESPACE@102..103 " "
                         FAT_ARROW@103..105 "=>"
@@ -4293,8 +4296,9 @@ static f = fn (s: Shape) -> usize {
                           NAME_REF@61..67
                             IDENT@61..67 "Circle"
                           L_PAREN@67..68 "("
-                          NAME@68..69
-                            IDENT@68..69 "r"
+                          BIND_PAT@68..69
+                            NAME@68..69
+                              IDENT@68..69 "r"
                           COMMA@69..70 ","
                           WHITESPACE@70..71 " "
                           REST_PAT@71..73
@@ -4395,8 +4399,9 @@ static f = fn (s: Shape) -> usize {
                           NAME_REF@59..65
                             IDENT@59..65 "Circle"
                           L_PAREN@65..66 "("
-                          NAME@66..67
-                            IDENT@66..67 "r"
+                          BIND_PAT@66..67
+                            NAME@66..67
+                              IDENT@66..67 "r"
                           R_PAREN@67..68 ")"
                         WHITESPACE@68..69 " "
                         FAT_ARROW@69..71 "=>"
@@ -9830,6 +9835,93 @@ fn a_bare_quote_is_an_unterminated_character_literal() {
                     R_BRACE@20..21 "}"
                 SEMICOLON@21..22 ";"
             error 16..17: unterminated character literal: expected a closing `'`
+        "#]],
+    );
+}
+
+#[test]
+fn match_pattern_bindings_take_mut() {
+    check(
+        "static f = fn { match s { ::Char(mut c, _) => c, mut o => o } };",
+        expect![[r#"
+            SOURCE_FILE@0..64
+              STATIC_ITEM@0..64
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..63
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..63
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    MATCH_EXPR@16..61
+                      MATCH_KW@16..21 "match"
+                      WHITESPACE@21..22 " "
+                      PATH_EXPR@22..23
+                        NAME_REF@22..23
+                          IDENT@22..23 "s"
+                      WHITESPACE@23..24 " "
+                      L_BRACE@24..25 "{"
+                      WHITESPACE@25..26 " "
+                      MATCH_ARM@26..48
+                        VARIANT_PAT@26..42
+                          COLON2@26..28 "::"
+                          NAME_REF@28..32
+                            IDENT@28..32 "Char"
+                          L_PAREN@32..33 "("
+                          BIND_PAT@33..38
+                            MUT_KW@33..36 "mut"
+                            WHITESPACE@36..37 " "
+                            NAME@37..38
+                              IDENT@37..38 "c"
+                          COMMA@38..39 ","
+                          WHITESPACE@39..40 " "
+                          BIND_PAT@40..41
+                            NAME@40..41
+                              HOLE@40..41 "_"
+                          R_PAREN@41..42 ")"
+                        WHITESPACE@42..43 " "
+                        FAT_ARROW@43..45 "=>"
+                        WHITESPACE@45..46 " "
+                        PATH_EXPR@46..47
+                          NAME_REF@46..47
+                            IDENT@46..47 "c"
+                        COMMA@47..48 ","
+                      WHITESPACE@48..49 " "
+                      MATCH_ARM@49..59
+                        BIND_PAT@49..54
+                          MUT_KW@49..52 "mut"
+                          WHITESPACE@52..53 " "
+                          NAME@53..54
+                            IDENT@53..54 "o"
+                        WHITESPACE@54..55 " "
+                        FAT_ARROW@55..57 "=>"
+                        WHITESPACE@57..58 " "
+                        PATH_EXPR@58..59
+                          NAME_REF@58..59
+                            IDENT@58..59 "o"
+                      WHITESPACE@59..60 " "
+                      R_BRACE@60..61 "}"
+                    WHITESPACE@61..62 " "
+                    R_BRACE@62..63 "}"
+                SEMICOLON@63..64 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn mut_without_a_name_in_a_match_pattern() {
+    check_errors(
+        "static f = fn { match s { ::Char(mut) => 0, mut => 1 } };",
+        expect![[r#"
+            36..37: expected a binding name
+            48..50: expected a binding name
         "#]],
     );
 }

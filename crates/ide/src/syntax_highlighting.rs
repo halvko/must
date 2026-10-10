@@ -166,11 +166,9 @@ fn classify_ident(
         (NAME, PARAM) => Some((HlTag::Parameter, HlMods(HlMods::DECLARATION))),
         // A variant declared inside an `enum` literal.
         (NAME, ENUM_VARIANT) => Some((HlTag::EnumMember, HlMods(HlMods::DECLARATION))),
-        // A payload binding in a variant pattern declares a plain local.
-        (NAME, VARIANT_PAT) => Some((HlTag::Variable, HlMods(HlMods::DECLARATION))),
-        // A binding declared by a `let`/parameter pattern: a bare name
-        // (`BIND_PAT`, nested under `PARAM`/`LET_STMT` directly, inside a
-        // `NEWTYPE_PAT`, or as a match-arm pattern) or one field of a
+        // A binding declared by a pattern: a bare name (`BIND_PAT`, nested
+        // under `PARAM`/`LET_STMT` directly, inside a `NEWTYPE_PAT`, as a
+        // match-arm pattern or a variant payload) or one field of a
         // record-destructuring pattern (`RECORD_PAT_FIELD` — the shorthand
         // field name doubles as its own binding's declaration).
         // Colors as a parameter when a `PARAM` sits somewhere above the

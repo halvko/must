@@ -142,6 +142,9 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             report_duplicate_fields(names, &mut errors);
         } else if let Some(variant_pat) = ast::VariantPat::cast(node.clone()) {
             reject_unqualified_bare_variant_pat(&variant_pat, &mut errors);
+        } else if let Some(bind_pat) = ast::BindPat::cast(node.clone()) {
+            let mut_token = bind_pat.mut_token();
+            require_mut_names_a_binding(mut_token, Some(ast::Pat::BindPat(bind_pat)), &mut errors);
         } else if let Some(param) = ast::Param::cast(node.clone()) {
             require_mut_names_a_binding(param.mut_token(), param.pat(), &mut errors);
         } else if let Some(unsafe_block) = ast::UnsafeBlockExpr::cast(node.clone()) {

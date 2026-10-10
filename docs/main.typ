@@ -724,6 +724,13 @@ scrutinee's enum is well-typed but warns, pointing at the `::Name`
 spelling. Writing the retired `Name(...)` shape (a bare name with parens)
 is a check-time error asking for `::Name(...)`.
 
+Any binding a pattern introduces — a payload binding or a whole-value
+binding — may take `mut` (`::Char(mut c, _)`, `mut other =>`). Exactly as
+for `let mut`, that makes the binding assignable inside its arm; it says
+nothing about the scrutinee and changes neither dispatch nor coverage.
+Assigning to a binding written without `mut` is the same error it is for
+a `let`.
+
 Arms are branches of one join, exactly like `if`/`else`: arms that agree on
 one variant keep that variant's precision, mixed variants of one enum widen
 to the enum (the conversion sits on each arm's edge), and a match nested in

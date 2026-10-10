@@ -774,12 +774,12 @@ impl Name {
     }
 
     /// Where the insert-`mut` fix may write `mut` for this name, if
-    /// anywhere: the name's own start for a `let` binding or a parameter,
-    /// and the field name's start for a record-pattern field (`mut? field
-    /// (as rename)?` — `mut` goes before the FIELD name even when the name
-    /// bound is the rename). `None` at every other binding site — a
-    /// match-arm bind, a variant payload, a newtype's inner pattern —
-    /// where no `mut` can be written at all, and `None` for a hole, which
+    /// anywhere: the name's own start for a `let` binding, a parameter, a
+    /// match-arm bind or a variant payload, and the field name's start for
+    /// a record-pattern field (`mut? field (as rename)?` — `mut` goes
+    /// before the FIELD name even when the name bound is the rename).
+    /// `None` inside a newtype's inner pattern, where no `mut` can be
+    /// written at all, and `None` for a hole, which
     /// does have the slot (`let mut _` parses) but is no assignment
     /// target, so the only `mut` it could take is the one `hir` already
     /// refuses on its own.
@@ -790,7 +790,14 @@ impl Name {
         let parent = self.syntax.parent()?;
         let slot = match parent.kind() {
             RECORD_PAT_FIELD => RecordPatField::cast(parent)?.field_name()?.syntax,
-            BIND_PAT if matches!(parent.parent()?.kind(), LET_STMT | PARAM) => self.syntax.clone(),
+            BIND_PAT
+                if matches!(
+                    parent.parent()?.kind(),
+                    LET_STMT | PARAM | MATCH_ARM | VARIANT_PAT
+                ) =>
+            {
+                self.syntax.clone()
+            }
             _ => return None,
         };
         Some(slot.text_range().start())
@@ -1306,7 +1313,7 @@ impl VariantPat {
         token(&self.syntax, COLON2)
     }
     /// The positional payload bindings (holes included), in source order.
-    pub fn bindings(&self) -> impl Iterator<Item = Name> + use<> {
+    pub fn bindings(&self) -> impl Iterator<Item = BindPat> + use<> {
         children(&self.syntax)
     }
     /// The reserved `..` rest marker, if written.
@@ -1316,6 +1323,12 @@ impl VariantPat {
 }
 
 impl BindPat {
+    pub fn mut_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, MUT_KW)
+    }
+    pub fn is_mut(&self) -> bool {
+        self.mut_token().is_some()
+    }
     pub fn name(&self) -> Option<Name> {
         child(&self.syntax)
     }
