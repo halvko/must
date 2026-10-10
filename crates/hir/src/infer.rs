@@ -2528,6 +2528,11 @@ pub(crate) struct InferCtx<'a, 'db> {
     /// stays quiet about it rather than saying it twice — the arms are two
     /// symptoms, the missing annotation is one fact.
     unresolved_scrutinees: rustc_hash::FxHashSet<ExprId>,
+    /// Each unannotated deferred `let mut x;` awaiting its first assignment,
+    /// which removes it and widens a variant to its enum, as `let mut x = v;`
+    /// does. A `!` or `{error}` value gives the binding no type, so it keeps
+    /// waiting.
+    deferred_unannotated: rustc_hash::FxHashSet<BindingId>,
     /// Literals directly under a unary minus (`-5`): their range check
     /// applies the sign (`-128` fits `i8`; plain `128` does not). Filled by
     /// the [`crate::body::ExprData::Neg`] arm before its operand is
@@ -2708,6 +2713,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             pending_empty_arrays: Vec::new(),
             pending_number_literals: Vec::new(),
             unresolved_scrutinees: rustc_hash::FxHashSet::default(),
+            deferred_unannotated: Default::default(),
             negated_literals: rustc_hash::FxHashSet::default(),
             number_expectations: rustc_hash::FxHashSet::default(),
             pending_obligations: Vec::new(),
@@ -3191,6 +3197,18 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             self.result.widened.insert(expr, variant);
         }
         self.result.diagnostics.extend(diagnostics);
+    }
+
+    /// An unannotated `let mut`'s initializer type: a variant widens to
+    /// its enum, with the conversion recorded on `init` (T04).
+    fn widen_mut_initializer(&mut self, init: ExprId, ty: Ty) -> Ty {
+        match self.resolve_shallow(&ty) {
+            Ty::Variant(variant) => {
+                self.result.widened.insert(init, variant.clone());
+                variant.enum_ty()
+            }
+            _ => ty,
+        }
     }
 
     fn finish(mut self) -> InferenceResult {
@@ -4214,6 +4232,19 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     .unwrap_or_else(|| self.fresh_var());
                                 let binding_cause =
                                     has_annotation.then_some(Cause::Binding(binding));
+                                // A deferred `let mut x;` takes its type
+                                // from the annotation, or else from the
+                                // assignments that give it a value.
+                                let Some(init) = init else {
+                                    if !has_annotation {
+                                        self.deferred_unannotated.insert(binding);
+                                    }
+                                    self.result
+                                        .type_of_binding
+                                        .insert(binding, declared.clone());
+                                    self.result.type_of_pat.insert(*pat, declared);
+                                    continue;
+                                };
                                 let ty = self.infer_expr_with(*init, &declared, binding_cause);
                                 let mut ty = self.trust_declared(ty, &declared);
                                 // `let mut` widening: an UNANNOTATED mutable
@@ -4228,12 +4259,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 // already known here; a join-typed initializer
                                 // resolves later, driven by the axioms its
                                 // uses provide.
-                                if !has_annotation
-                                    && self.body.bindings[binding].mutable
-                                    && let Ty::Variant(variant) = self.resolve_shallow(&ty)
-                                {
-                                    self.result.widened.insert(*init, variant.clone());
-                                    ty = variant.enum_ty();
+                                if !has_annotation && self.body.bindings[binding].mutable {
+                                    ty = self.widen_mut_initializer(*init, ty);
                                 }
                                 self.result.type_of_binding.insert(binding, ty.clone());
                                 self.result.type_of_pat.insert(*pat, ty);
@@ -4249,6 +4276,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     None => self
                                         .declared_type_for_pat(*pat)
                                         .unwrap_or_else(|| self.fresh_var()),
+                                };
+                                // A destructuring `let` without an
+                                // initializer: validation refuses it.
+                                let Some(init) = init else {
+                                    self.bind_error(&self.body.pat_bindings(*pat));
+                                    continue;
                                 };
                                 let ty = self.infer_expr_with(*init, &declared, None);
                                 let ty = self.trust_declared(ty, &declared);
@@ -4353,6 +4386,30 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 }
                                 Some(Resolution::Ambiguous(_)) | None => None,
                             };
+                            // The first assignment to an unannotated
+                            // deferred `let mut x;` is its initializer: a
+                            // variant widens to its enum, as in
+                            // `let mut x = v;`.
+                            if let Some(Resolution::Local(binding)) = self.resolutions.get(*target)
+                                && self.deferred_unannotated.contains(binding)
+                            {
+                                let binding = *binding;
+                                let fresh = self.fresh_var();
+                                let ty = self.infer_expr_with(*value, &fresh, cause);
+                                let ty = self.widen_mut_initializer(*value, ty);
+                                match self.resolve_shallow(&ty) {
+                                    Ty::Never => {}
+                                    // Skip the check and leave `x` untyped, so
+                                    // `{error}` doesn't leak; the next real
+                                    // value types it.
+                                    Ty::Error => continue,
+                                    _ => {
+                                        self.deferred_unannotated.remove(&binding);
+                                    }
+                                }
+                                self.check(*value, ty, &target_ty, cause);
+                                continue;
+                            }
                             self.infer_expr_with(*value, &target_ty, cause);
                         }
                         Stmt::Expr(e) => {

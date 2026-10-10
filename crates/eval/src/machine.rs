@@ -1079,10 +1079,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             None => frame.and_then(|frame| frame.locals.get(local)),
         };
         let Some(mut current) = root else {
-            return Err(self.internal_error(
-                format!("read of uninitialized {}", local_name(body, local)),
-                Some((loc.clone(), origin)),
-            ));
+            return Err(self.unwritten_local(body, local, "read of", loc, origin));
         };
         // `(tag, allocation, path)` per deref stepped through — checked
         // against the aliasing tree once the walk's borrow of memory is
@@ -1446,6 +1443,23 @@ impl<'db, M: Mode> Machine<'db, M> {
         }
     }
 
+    /// A read of a local no statement has written, a write into one of its
+    /// fields or elements, or its address. Always a compiler bug: the checker
+    /// rejects uses of a deferred `let mut x;` before assignment.
+    fn unwritten_local(
+        &self,
+        body: &MirBody,
+        local: LocalId,
+        access: &str,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> EvalError {
+        self.internal_error(
+            format!("{access} uninitialized {}", local_name(body, local)),
+            Some((loc.clone(), origin)),
+        )
+    }
+
     /// The tracked-uninit gate's error — detected UB, one message
     /// everywhere ([`UNINIT_READ`]).
     fn uninit_read(&self, loc: &ItemLoc, origin: ExprId) -> EvalError {
@@ -1573,10 +1587,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             return Ok(());
         }
         match frame.locals.get_mut(local) {
-            None => Err(self.internal_error(
-                format!("write through uninitialized {}", local_name(body, local)),
-                Some((loc.clone(), origin)),
-            )),
+            None => Err(self.unwritten_local(body, local, "write into", loc, origin)),
             Some(slot) => match project_mut(slot, projection) {
                 Ok(field) => {
                     *field = value;
@@ -1896,13 +1907,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             return Ok(alloc);
         }
         let Some(value) = frame.locals.remove(local) else {
-            // `.&raw` of a local no `let` initialized: unreachable from real
-            // programs (a `let` always initializes); loud like other reads
-            // of uninitialized slots.
-            return Err(self.internal_error(
-                format!("address of uninitialized {}", local_name(body, local)),
-                Some((loc.clone(), origin)),
-            ));
+            return Err(self.unwritten_local(body, local, "address of", loc, origin));
         };
         let alloc = self.fresh_alloc(Allocation {
             value,
@@ -2222,10 +2227,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 match frame.and_then(|frame| frame.locals.get(place.local)) {
                     Some(Value::Uninit) => Err(self.uninit_read_in(None, loc, origin)),
                     Some(value) => Ok(value.clone()),
-                    None => Err(self.internal_error(
-                        format!("read of uninitialized {}", local_name(body, place.local)),
-                        Some((loc.clone(), origin)),
-                    )),
+                    None => Err(self.unwritten_local(body, place.local, "read of", loc, origin)),
                 }
             }
             // A MOVE reads exactly what a copy reads, and then says so to

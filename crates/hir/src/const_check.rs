@@ -221,7 +221,11 @@ impl CheckCtx<'_> {
             ExprData::Block { stmts, tail } => {
                 for stmt in stmts {
                     match stmt {
-                        Stmt::Let { init, .. } => self.check_expr(*init, in_const),
+                        Stmt::Let { init, .. } => {
+                            if let Some(init) = init {
+                                self.check_expr(*init, in_const);
+                            }
+                        }
                         // Local mutation is allowed in const contexts (no
                         // rule rejects it here); just visit both
                         // sub-expressions the same as any other statement.

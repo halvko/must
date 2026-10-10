@@ -798,6 +798,18 @@ impl Name {
         };
         Some(slot.text_range().start())
     }
+
+    /// The fix that writes `mut ` at [`Self::mut_slot`], if there is one.
+    pub fn insert_mut_fix(&self) -> Option<crate::Fix> {
+        let slot = self.mut_slot()?;
+        Some(crate::Fix {
+            label: format!("Make `{}` mutable", self.text()),
+            edits: vec![crate::TextEdit {
+                range: crate::TextRange::empty(slot),
+                insert: "mut ".to_owned(),
+            }],
+        })
+    }
 }
 
 impl NameRef {
@@ -995,6 +1007,9 @@ impl LetStmt {
     }
     pub fn semicolon_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, SEMICOLON)
+    }
+    pub fn eq_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, EQ)
     }
 }
 
