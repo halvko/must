@@ -3,7 +3,7 @@
 
 use crate::SyntaxKind::{self, *};
 use crate::lexer::Token;
-use crate::parser::Event;
+use crate::parser::{Event, TokenFix};
 use crate::{Fix, SyntaxError, TextEdit};
 use rowan::{GreenNode, GreenNodeBuilder};
 use text_size::{TextRange, TextSize};
@@ -67,8 +67,8 @@ pub(crate) fn build(
             Event::Error {
                 msg,
                 after_prev,
-                fix_insert,
-            } => builder.error(msg, after_prev, fix_insert),
+                fix,
+            } => builder.error(msg, after_prev, fix),
         }
     }
 
@@ -115,7 +115,7 @@ impl Builder<'_> {
         self.do_token();
     }
 
-    fn error(&mut self, message: String, after_prev: bool, fix_insert: Option<String>) {
+    fn error(&mut self, message: String, after_prev: bool, fix: Option<TokenFix>) {
         // "Missing X after this token" is noise when that token is itself
         // broken (e.g. an unterminated string). A prior after-prev error on
         // the same token intersects it directly, which is what drops the
@@ -159,8 +159,8 @@ impl Builder<'_> {
         } else {
             range
         };
-        let fix = fix_insert.map(|insert| Fix {
-            label: format!("Insert `{insert}`"),
+        let fix = fix.map(|TokenFix { label, insert }| Fix {
+            label,
             edits: vec![TextEdit {
                 range: fix_at,
                 insert,

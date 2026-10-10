@@ -19,10 +19,16 @@ pub(crate) enum Event {
         /// cursor-targetable range) instead of the token the parser is
         /// looking at; a fix inserts at the token's end.
         after_prev: bool,
-        /// Text whose insertion at the error position fixes the error;
-        /// becomes a quick fix.
-        fix_insert: Option<String>,
+        /// Becomes a quick fix: inserted at the previous token's end for
+        /// an `after_prev` error, else replacing the token looked at.
+        fix: Option<TokenFix>,
     },
+}
+
+#[derive(Debug)]
+pub(crate) struct TokenFix {
+    pub(crate) label: String,
+    pub(crate) insert: String,
 }
 
 pub(crate) struct Parser<'t> {
@@ -117,7 +123,25 @@ impl<'t> Parser<'t> {
         self.events.push(Event::Error {
             msg: msg.into(),
             after_prev: false,
-            fix_insert: None,
+            fix: None,
+        });
+    }
+
+    /// Report an error at the current token whose quick fix replaces that
+    /// token with `insert` (an empty `insert` removes it).
+    pub(crate) fn error_replacing_current(
+        &mut self,
+        msg: impl Into<String>,
+        label: impl Into<String>,
+        insert: impl Into<String>,
+    ) {
+        self.events.push(Event::Error {
+            msg: msg.into(),
+            after_prev: false,
+            fix: Some(TokenFix {
+                label: label.into(),
+                insert: insert.into(),
+            }),
         });
     }
 
@@ -145,7 +169,10 @@ impl<'t> Parser<'t> {
         self.events.push(Event::Error {
             msg: format!("expected `{insert}`"),
             after_prev: true,
-            fix_insert: Some(insert.to_owned()),
+            fix: Some(TokenFix {
+                label: format!("Insert `{insert}`"),
+                insert: insert.to_owned(),
+            }),
         });
     }
 
