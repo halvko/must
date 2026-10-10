@@ -1800,11 +1800,7 @@ static main = fn {
         expect_test::expect![[r#"
             panic Function (fn(str) -> !)
             x Variable (usize)
-            AllocResult Enum (enum { Ok(T.&raw mut), Err })
-            NextChar Enum (enum { Char(char, usize), End })
-            ReadLineResult Enum (enum { Line(str), End })
             Shape Struct (struct { r: usize })
-            Utf8Result Enum (enum { Ok(str), Err })
             area Function (fn(usize) -> usize)
             main Function (fn())
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
@@ -1845,10 +1841,6 @@ static main = fn {
 "#,
         expect_test::expect![[r#"
             x Variable (mut usize)
-            AllocResult Enum (enum { Ok(T.&raw mut), Err })
-            NextChar Enum (enum { Char(char, usize), End })
-            ReadLineResult Enum (enum { Line(str), End })
-            Utf8Result Enum (enum { Ok(str), Err })
             main Function (fn())
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -2545,10 +2537,6 @@ static main = fn (s: str, n: usize) {
             s Variable (str)
             panic Function (fn(str) -> !)
             n Variable (usize)
-            AllocResult Enum (enum { Ok(T.&raw mut), Err })
-            NextChar Enum (enum { Char(char, usize), End })
-            ReadLineResult Enum (enum { Line(str), End })
-            Utf8Result Enum (enum { Ok(str), Err })
             main Function (fn(str, usize))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -2589,10 +2577,6 @@ static main = fn {
         expect_test::expect![[r#"
             get_s Function (fn() -> str)
             panic Function (fn(str) -> !)
-            AllocResult Enum (enum { Ok(T.&raw mut), Err })
-            NextChar Enum (enum { Char(char, usize), End })
-            ReadLineResult Enum (enum { Line(str), End })
-            Utf8Result Enum (enum { Ok(str), Err })
             get_n Function (fn() -> usize)
             main Function (fn())
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
@@ -2635,10 +2619,6 @@ static main = fn {
         expect_test::expect![[r#"
             helper Function (fn(usize) -> usize)
             panic Function (fn(str) -> !)
-            AllocResult Enum (enum { Ok(T.&raw mut), Err })
-            NextChar Enum (enum { Char(char, usize), End })
-            ReadLineResult Enum (enum { Line(str), End })
-            Utf8Result Enum (enum { Ok(str), Err })
             main Function (fn())
             other Function (fn(usize) -> str)
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
@@ -2679,10 +2659,6 @@ static main = fn {
         expect_test::expect![[r#"
             helper Function (fn() -> usize)
             panic Function (fn(str) -> !)
-            AllocResult Enum (enum { Ok(T.&raw mut), Err })
-            NextChar Enum (enum { Char(char, usize), End })
-            ReadLineResult Enum (enum { Line(str), End })
-            Utf8Result Enum (enum { Ok(str), Err })
             main Function (fn())
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -2724,11 +2700,7 @@ static main = fn (p: Point, n: usize) {
             p Variable (Point)
             panic Function (fn(str) -> !)
             n Variable (usize)
-            AllocResult Enum (enum { Ok(T.&raw mut), Err })
-            NextChar Enum (enum { Char(char, usize), End })
             Point Struct (struct { x: usize })
-            ReadLineResult Enum (enum { Line(str), End })
-            Utf8Result Enum (enum { Ok(str), Err })
             main Function (fn(Point, usize))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -2836,10 +2808,6 @@ static main = fn {
 "#,
         expect_test::expect![[r#"
             s Variable (str)
-            AllocResult Enum (enum { Ok(T.&raw mut), Err })
-            NextChar Enum (enum { Char(char, usize), End })
-            ReadLineResult Enum (enum { Line(str), End })
-            Utf8Result Enum (enum { Ok(str), Err })
             main Function (fn())
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -3053,6 +3021,225 @@ fn completions_snippet_type_item_rhs_struct_and_enum() {
             plain: "enum { }".to_owned(),
         }
     );
+}
+
+#[test]
+fn completions_snippet_block_keywords_write_their_block() {
+    let fixture_text = r#"
+static main = fn {
+    $0
+};
+"#;
+    assert_eq!(
+        completion_insert(fixture_text, "loop"),
+        crate::InsertText::Snippet {
+            snippet: "loop {$0}".to_owned(),
+            plain: "loop".to_owned(),
+        }
+    );
+    assert_eq!(
+        completion_insert(fixture_text, "if"),
+        crate::InsertText::Snippet {
+            snippet: "if $0".to_owned(),
+            plain: "if".to_owned(),
+        }
+    );
+    assert_eq!(
+        completion_insert(fixture_text, "match"),
+        crate::InsertText::Snippet {
+            snippet: "match $0".to_owned(),
+            plain: "match".to_owned(),
+        }
+    );
+}
+
+/// Accepting a whole scrutinee for a `match` with no `{` yet ends in a
+/// space, so the next key is the arm list's `{`.
+#[test]
+fn completions_brace_less_scrutinee_ends_in_a_space() {
+    let fixture_text = r#"
+type Shape = enum { Circle(usize), Point };
+static pick = fn (n: usize) -> Shape { ::Point };
+static f = fn (x: Shape) {
+    match $0
+};
+"#;
+    assert_eq!(
+        completion_insert(fixture_text, "x"),
+        crate::InsertText::Plain("x ".to_owned())
+    );
+    // A fn is called, with the space after the call.
+    assert_eq!(
+        completion_insert(fixture_text, "pick"),
+        crate::InsertText::Snippet {
+            snippet: "pick($1) ".to_owned(),
+            plain: "pick() ".to_owned(),
+        }
+    );
+    // `match` opens a longer expression, so it gets no space.
+    assert_eq!(
+        completion_insert(fixture_text, "match"),
+        crate::InsertText::Snippet {
+            snippet: "match $0".to_owned(),
+            plain: "match".to_owned(),
+        }
+    );
+}
+
+/// A fn named in full as the scrutinee completes as a call: the
+/// scrutinee's own type is no expectation asking for the fn as a value.
+#[test]
+fn completions_scrutinee_written_in_full_calls_the_fn() {
+    assert_eq!(
+        completion_insert(
+            r#"
+type Shape = enum { Circle(usize), Point };
+static pick = fn (n: usize) -> Shape { ::Point };
+static f = fn () {
+    match pick$0
+};
+"#,
+            "pick",
+        ),
+        crate::InsertText::Snippet {
+            snippet: "pick($1) ".to_owned(),
+            plain: "pick() ".to_owned(),
+        }
+    );
+}
+
+/// Accepting the whole condition of an `if` with no block yet ends in a
+/// space.
+#[test]
+fn completions_brace_less_if_condition_ends_in_a_space() {
+    let fixture_text = r#"
+static ready = fn () -> bool { true };
+static f = fn (b: bool) {
+    if $0
+};
+"#;
+    assert_eq!(
+        completion_insert(fixture_text, "b"),
+        crate::InsertText::Plain("b ".to_owned())
+    );
+    assert_eq!(
+        completion_insert(fixture_text, "ready"),
+        crate::InsertText::Plain("ready() ".to_owned())
+    );
+    // With the block written, the condition gets no space.
+    assert_eq!(
+        completion_insert(
+            r#"
+static f = fn (b: bool) {
+    if $0 {}
+};
+"#,
+            "b",
+        ),
+        crate::InsertText::Plain("b".to_owned()),
+    );
+}
+
+/// An enum name is not a value, so no expression position offers it.
+#[test]
+fn completions_offer_no_enum_name_as_a_value() {
+    for body in ["match Sha$0", "match Sha$0 {}", "let s = Sha$0;"] {
+        let text = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn () {
+    BODY
+};
+"#
+        .replace("BODY", body);
+        let (analysis, _file, pos) = fixture(&text);
+        let items = analysis.completions(pos);
+        assert!(items.iter().any(|c| c.label == "panic"), "{items:?}");
+        assert!(items.iter().all(|c| c.label != "Shape"), "{items:?}");
+    }
+}
+
+#[test]
+fn completions_brace_less_scrutinee_field_ends_in_a_space() {
+    assert_eq!(
+        completion_insert(
+            r#"
+type Shape = enum { Circle(usize), Point };
+type P = struct { s: Shape };
+static f = fn (p: P) {
+    match p.$0
+};
+"#,
+            "s",
+        ),
+        crate::InsertText::Plain("s ".to_owned())
+    );
+}
+
+#[test]
+fn completions_brace_less_scrutinee_variant_ends_in_a_space() {
+    assert_eq!(
+        completion_insert(
+            r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn () {
+    match Shape::$0
+};
+"#,
+            "Point",
+        ),
+        crate::InsertText::Plain("Point ".to_owned())
+    );
+}
+
+#[test]
+fn completions_scrutinee_with_an_arm_list_adds_no_space() {
+    assert_eq!(
+        completion_insert(
+            r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (x: Shape) {
+    match x$0 {
+        _ => {},
+    }
+};
+"#,
+            "x",
+        ),
+        crate::InsertText::Plain("x".to_owned()),
+    );
+}
+
+#[test]
+fn completions_non_scrutinee_expression_adds_no_space() {
+    assert_eq!(
+        completion_insert(
+            r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (x: Shape) {
+    let y = x$0;
+};
+"#,
+            "x",
+        ),
+        crate::InsertText::Plain("x".to_owned()),
+    );
+}
+
+#[test]
+fn completions_keywords_without_a_block_stay_plain() {
+    let fixture_text = r#"
+static main = fn {
+    loop {
+        $0
+    }
+};
+"#;
+    for word in ["break", "continue", "true", "let"] {
+        assert_eq!(
+            completion_insert(fixture_text, word),
+            crate::InsertText::Plain(word.to_owned()),
+        );
+    }
 }
 
 #[test]
@@ -3372,11 +3559,6 @@ static f = fn (s: Shape) {
         expect_test::expect![[r#"
             match arms Snippet (all 2 variants of Shape)
             s Variable (Shape)
-            AllocResult Enum (enum { Ok(T.&raw mut), Err })
-            NextChar Enum (enum { Char(char, usize), End })
-            ReadLineResult Enum (enum { Line(str), End })
-            Shape Enum (enum { Circle(usize), Point })
-            Utf8Result Enum (enum { Ok(str), Err })
             f Function (fn(Shape) -> !)
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -3693,6 +3875,27 @@ static f = fn () {
     assert_eq!(completion_sort_text(CHAR_SCRUTINEE, "s"), "2_10_s");
 }
 
+/// With the arm list written, the `char` local (what a `match` dispatches
+/// on) ranks above the `str` one.
+#[test]
+fn completions_match_scrutinee_ranking_holds_with_braces_written() {
+    let (analysis, _file, pos) = fixture(
+        r#"
+static f = fn () {
+    let s = "x";
+    let c = 'x';
+    match $0 {}
+};
+"#,
+    );
+    let labels: Vec<String> = analysis
+        .completions(pos)
+        .into_iter()
+        .map(|item| item.label)
+        .collect();
+    assert_eq!(labels[..2], ["c", "s"], "{labels:?}");
+}
+
 #[test]
 fn completions_match_scrutinee_lifts_an_integer_typed_local() {
     // The same rule discharging one more case: integer literal patterns
@@ -3712,8 +3915,8 @@ static f = fn () {
 
 #[test]
 fn completions_match_scrutinee_does_not_suppress_the_normal_set() {
-    // The enum-typed values lead; everything an expression position would
-    // otherwise offer still follows, in its usual order.
+    // The enum-typed values lead; everything else an expression position
+    // offers follows in its usual order. Enum names are never offered.
     check_completions(
         SCRUTINEE_LAYERS,
         expect_test::expect![[r#"
@@ -3722,11 +3925,6 @@ fn completions_match_scrutinee_does_not_suppress_the_normal_set() {
             param Variable (Shape)
             ambient Constant (Shape)
             noise Variable (str)
-            AllocResult Enum (enum { Ok(T.&raw mut), Err })
-            NextChar Enum (enum { Char(char, usize), End })
-            ReadLineResult Enum (enum { Line(str), End })
-            Shape Enum (enum { Circle(usize), Point })
-            Utf8Result Enum (enum { Ok(str), Err })
             f Function (fn(Shape) -> !)
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -4193,11 +4391,6 @@ static main = fn(o: Option::<usize>, wide: fn(usize) -> bool) -> bool {
             wide Variable (fn(usize) -> bool)
             panic Function (fn(str) -> !)
             o Variable (Option::<usize>)
-            AllocResult Enum (enum { Ok(T.&raw mut), Err })
-            NextChar Enum (enum { Char(char, usize), End })
-            Option Enum (enum { Some(T), None })
-            ReadLineResult Enum (enum { Line(str), End })
-            Utf8Result Enum (enum { Ok(str), Err })
             main Function (fn(Option::<usize>, fn(usize) -> bool) -> bool)
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -5589,10 +5782,6 @@ static main = fn () -> () {
             get Function (fn(usize.&::<@a>) -> usize)
             mk Function (fn() -> usize)
             panic Function (fn(str) -> !)
-            AllocResult Enum (enum { Ok(T.&raw mut), Err })
-            NextChar Enum (enum { Char(char, usize), End })
-            ReadLineResult Enum (enum { Line(str), End })
-            Utf8Result Enum (enum { Ok(str), Err })
             main Function (fn())
             show Function (fn(usize))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
@@ -5633,10 +5822,6 @@ static f = fn (p: usize) {
             p Variable (usize)
             s Variable (usize)
             panic Function (fn(str) -> !)
-            AllocResult Enum (enum { Ok(T.&raw mut), Err })
-            NextChar Enum (enum { Char(char, usize), End })
-            ReadLineResult Enum (enum { Line(str), End })
-            Utf8Result Enum (enum { Ok(str), Err })
             f Function (fn(usize))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
@@ -5728,10 +5913,6 @@ static f = fn {
             xtra Variable (usize)
             panic Function (fn(str) -> !)
             xf Variable (fn(usize))
-            AllocResult Enum (enum { Ok(T.&raw mut), Err })
-            NextChar Enum (enum { Char(char, usize), End })
-            ReadLineResult Enum (enum { Line(str), End })
-            Utf8Result Enum (enum { Ok(str), Err })
             f Function (fn())
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)

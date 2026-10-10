@@ -3772,6 +3772,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         self.infer_expr_with(expr, expected, None)
     }
 
+    /// Infer `expr` when nothing outside it constrains its type (a match
+    /// scrutinee, a method receiver), and drop the expectation recorded for
+    /// it: the fresh variable standing in would only equal `expr`'s own type.
+    fn infer_expr_unconstrained(&mut self, expr: ExprId) -> Ty {
+        let fresh = self.fresh_var();
+        let ty = self.infer_expr(expr, &fresh);
+        self.result.expectation_of_expr.remove(expr);
+        ty
+    }
+
     /// As [`InferCtx::infer_expr`], with the [`Cause`] that makes `expected`
     /// expected — recorded when the expectation binds a type variable, and
     /// cited when the check fails outright.
@@ -5597,8 +5607,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         self.result
             .expectation_of_expr
             .insert(callee, callee_expectation.clone());
-        let receiver_fresh = self.fresh_var();
-        let receiver_ty = self.infer_expr(receiver, &receiver_fresh);
+        let receiver_ty = self.infer_expr_unconstrained(receiver);
         let resolved = self.resolve_shallow(&receiver_ty);
 
         // A BORROW receiver reaches the referent's MEMBERS — and only its
@@ -8897,8 +8906,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         expected: &Ty,
         cause: Option<Cause>,
     ) -> Ty {
-        let scrut_fresh = self.fresh_var();
-        let scrut_ty = self.infer_expr(scrutinee, &scrut_fresh);
+        let scrut_ty = self.infer_expr_unconstrained(scrutinee);
         // A qualified variant pattern can pin a still-unknown scrutinee:
         // `Shape::Circle(r) =>` says the value dispatches over `Shape`
         // (patterns are construction's mirror image, so the qualified
