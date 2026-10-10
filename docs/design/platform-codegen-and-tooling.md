@@ -124,6 +124,11 @@
   suppresses the name rather than offering a merged or shape-picked row. Two recorded
   divergences from what a call there would resolve to: that suppression, and a nested body
   still being offered its enclosing bounds.
+- **P16** Completion writes the borrow the compiler will not (G14). On an owned receiver the
+  dot also offers members and requirements taking `Self.&` / `Self.&mut`, and accepting one
+  rewrites the dot as `.&.` / `.&mut.`, so the user lands on the licensed borrow-receiver
+  call rather than the no-auto-ref refusal. The edit starts at the dot, and clients filter on
+  the text from the edit's start, so its filter text is `.name`.
 - **P13** The examples smoke target checks and runs every example against recorded snapshots
   under a timeout, so a hang fails naming the file, and a coverage guard fails if an example
   ships untested.

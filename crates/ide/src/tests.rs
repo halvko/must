@@ -4280,6 +4280,108 @@ type Counter = struct { n: usize } with {
     check_no_completion(&shared, "bump");
 }
 
+/// Applies the `label` completion's edit to the fixture, its snippet
+/// spelling when it has one, and renders the line the cursor was on plus
+/// the item's filter text.
+fn check_completion_applied(fixture_text: &str, label: &str, expect: expect_test::Expect) {
+    let (analysis, file, pos) = fixture(fixture_text);
+    let items = analysis.completions(pos);
+    let item = items
+        .iter()
+        .find(|c| c.label == label)
+        .unwrap_or_else(|| panic!("no completion labeled {label:?}: {items:?}"));
+    let insert = match &item.text_edit.insert {
+        crate::InsertText::Plain(text) => text,
+        crate::InsertText::Snippet { snippet, .. } => snippet,
+    };
+    let mut text = analysis.file_text(file).to_string();
+    let range = item.text_edit.range;
+    text.replace_range(usize::from(range.start())..usize::from(range.end()), insert);
+    let line_start = text[..usize::from(range.start())]
+        .rfind('\n')
+        .map_or(0, |i| i + 1);
+    let line_end = text[line_start..]
+        .find('\n')
+        .map_or(text.len(), |i| line_start + i);
+    expect.assert_eq(&format!(
+        "{}\nfilter: {}\n",
+        text[line_start..line_end].trim(),
+        item.filter_text
+    ));
+}
+
+const BORROWED_MEMBER_FIXTURE: &str = r#"
+type Counter = struct { n: usize } with {
+    impl Self {
+        take = fn(s: Self) -> usize { s.n };
+        get = fn::<@a>(s: Self.&::<@a>) -> usize { s.*.n };
+        add = fn::<@a>(by: usize, s: Self.&mut::<@a>) -> () { s.*.n = s.*.n + by; };
+    }
+};
+"#;
+
+#[test]
+fn dot_completions_on_an_owned_receiver_write_the_borrow_a_member_takes() {
+    const MAIN: &str = r#"
+static main = fn () -> () {
+    let mut c: Counter = Counter(struct { n = 1 });
+    BODY
+};
+"#;
+    let at = |body: &str| format!("{BORROWED_MEMBER_FIXTURE}{}", MAIN.replace("BODY", body));
+    check_completion_applied(
+        &at("let v = c.$0;"),
+        "get",
+        expect_test::expect![[r#"
+            let v = c.&.get();
+            filter: .get
+        "#]],
+    );
+    check_completion_applied(
+        &at("c.$0;"),
+        "add",
+        expect_test::expect![[r#"
+            c.&mut.add($1);
+            filter: .add
+        "#]],
+    );
+    // A typed prefix is replaced along with the dot.
+    check_completion_applied(
+        &at("let v = c.ge$0;"),
+        "get",
+        expect_test::expect![[r#"
+            let v = c.&.get();
+            filter: .get
+        "#]],
+    );
+    // A value-`Self` member is reached as written.
+    check_completion_applied(
+        &at("let v = c.$0;"),
+        "take",
+        expect_test::expect![[r#"
+            let v = c.take();
+            filter: take
+        "#]],
+    );
+}
+
+#[test]
+fn dot_completions_on_a_borrow_receiver_write_no_borrow() {
+    const F: &str = r#"
+static f = fn::<@a>(c: Counter.&mut::<@a>) -> usize {
+    c.$0
+};
+"#;
+    check_completion_applied(
+        &format!("{BORROWED_MEMBER_FIXTURE}{F}"),
+        "get",
+        expect_test::expect![[r#"
+            c.get()
+            filter: get
+        "#]],
+    );
+}
+
 #[test]
 fn member_bodies_highlight_as_code() {
     check_highlights(
@@ -5171,7 +5273,14 @@ fn the_receiver_shape_filters_the_bounds_offer_both_ways() {
     // SHARED borrow is refused an exclusive one, and an exclusive borrow
     // takes both — `receiver_takes`, read through the completion list.
     let owned = format!("{BOUND_FIXTURE_HEAD}static f = fn::<W: Write>(w: W) -> () {{ w.$0 }};");
-    check_no_completion(&owned, "push");
+    check_completion_applied(
+        &owned,
+        "push",
+        expect_test::expect![[r#"
+            static f = fn::<W: Write>(w: W) -> () { w.&mut.push($1) };
+            filter: .push
+        "#]],
+    );
     let shared = format!(
         "{BOUND_FIXTURE_HEAD}\
          static f = fn::<@a, W: Write>(w: W.&::<@a>) -> () {{ w.$0 }};"

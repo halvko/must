@@ -1078,6 +1078,60 @@ fn dot_triggered_completion_over_protocol_returns_field_items() {
     drop(client);
 }
 
+#[test]
+fn dot_completion_of_a_borrow_member_on_an_owned_receiver_replaces_the_dot() {
+    let mut client = TestClient::start();
+    let file = uri("file:///borrow_member_completion.must");
+
+    client.open(
+        &file,
+        r#"
+type Counter = struct { n: usize } with {
+    impl Self {
+        get = fn::<@a>(s: Self.&::<@a>) -> usize { s.*.n };
+    }
+};
+static main = fn () -> () {
+    let c: Counter = Counter(struct { n = 1 });
+    let v = c.ge
+};
+"#,
+    );
+    client.next_diagnostics();
+
+    // After `c.ge` on line 8: the edit starts at the dot (column 13) and
+    // writes the borrow `get` takes.
+    let response = client.request::<lsp_types::request::Completion>(lsp_types::CompletionParams {
+        text_document_position: lsp_types::TextDocumentPositionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+            position: lsp_types::Position::new(8, 16),
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+        context: None,
+    });
+    let Some(lsp_types::CompletionResponse::Array(items)) = response else {
+        panic!("expected a plain array of completion items, got {response:?}");
+    };
+    let get = items
+        .iter()
+        .find(|it| it.label == "get")
+        .expect("member `get` is offered");
+    assert_eq!(get.filter_text.as_deref(), Some(".get"));
+    assert_eq!(
+        get.text_edit,
+        Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
+            range: lsp_types::Range::new(
+                lsp_types::Position::new(8, 13),
+                lsp_types::Position::new(8, 16)
+            ),
+            new_text: ".&.get()".to_owned(),
+        }))
+    );
+
+    drop(client);
+}
+
 /// `InitializeParams` advertising (or not) `snippetSupport` — the one
 /// capability snippet insertion gates on (`GlobalState::new`'s
 /// `snippet_support`).
