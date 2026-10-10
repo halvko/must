@@ -35,11 +35,31 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # claude-code-action skips without failing when this workflow differs
+      # from the default branch's copy. A stale base fails the run instead; a
+      # PR that edits the workflow gets a warning and no round.
+      - id: current
+        env:
+          DEFAULT: ${{ github.event.repository.default_branch }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          file=.github/workflows/review.yml
+          git cat-file -e "origin/$DEFAULT^{commit}"
+          git cat-file -e "$HEAD_SHA^{commit}"
+          git diff --quiet "origin/$DEFAULT" -- "$file" && exit 0
+          base=$(git merge-base "origin/$DEFAULT" "$HEAD_SHA")
+          if git diff --quiet "$base" "$HEAD_SHA" -- "$file"; then
+            echo "::error file=$file::This run's copy of the review workflow is older than $DEFAULT's, so the reviewers would not run. Rebase the PR onto $DEFAULT and push to get a review."
+            exit 1
+          fi
+          echo "::warning file=$file::This PR edits the review workflow, which the reviewers can only run once it is on $DEFAULT."
+          echo "skip=true" >> "$GITHUB_OUTPUT"
       # Opening the PR and the `review` label always start a round; pushes,
       # reopening and marking ready are gated. Each reviewer's summary carries
       # a marker naming its role, the head it reviewed and what started it.
       - id: gate
         if: >-
+          steps.current.outputs.skip != 'true' &&
           github.event.action != 'opened' && github.event.action != 'labeled' &&
           !contains(github.event.pull_request.labels.*.name, 'review')
         env:
@@ -84,7 +104,7 @@ jobs:
             fi
           fi
       - id: list
-        if: steps.gate.outputs.skip != 'true'
+        if: steps.current.outputs.skip != 'true' && steps.gate.outputs.skip != 'true'
         run: |
           roles=$(find .github/reviewers -maxdepth 1 -name '*.md' ! -name README.md \
             -printf '%f\n' | sed 's/\.md$//' | sort | jq -Rnc '[inputs]')
