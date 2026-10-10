@@ -48,6 +48,12 @@ impl Body {
     pub fn temp_local(&self, expr: ExprId) -> Option<BindingId> {
         self.temps.get(expr).copied()
     }
+
+    /// The expression a place's field and index steps hang off: `a` for
+    /// `a.b[i].c`, and `place` itself when it has no such step.
+    pub fn place_root(&self, place: ExprId) -> ExprId {
+        place_root(&self.exprs, place)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1298,13 +1304,20 @@ impl LowerCtx {
 ///
 /// TODO: one recorded place root for every layer (halvko/must#30).
 fn borrowed_temp_root(exprs: &Arena<ExprData>, place: ExprId) -> Option<ExprId> {
+    let root = place_root(exprs, place);
+    match &exprs[root] {
+        ExprData::NameRef(_) | ExprData::Deref { .. } | ExprData::Missing => None,
+        _ => Some(root),
+    }
+}
+
+fn place_root(exprs: &Arena<ExprData>, place: ExprId) -> ExprId {
     let mut root = place;
     loop {
         match &exprs[root] {
             ExprData::Field { receiver, .. } => root = *receiver,
             ExprData::Index { base, .. } => root = *base,
-            ExprData::NameRef(_) | ExprData::Deref { .. } | ExprData::Missing => return None,
-            _ => return Some(root),
+            _ => return root,
         }
     }
 }
