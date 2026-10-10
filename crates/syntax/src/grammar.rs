@@ -540,28 +540,50 @@ fn pattern(p: &mut Parser<'_>, msg: &str) {
     }
 }
 
-/// A `let`/parameter pattern — construction's mirror image. A bare name or
-/// `_` (`BIND_PAT`/wrapped `NAME`, holes included — same shape a `let`/param
-/// name has always had, just now nested one level so it can sit alongside
-/// the richer forms below), a `struct { ... }` record destructure
-/// (`RECORD_PAT`), or `Name(pattern)` unwrapping a newtype (`NEWTYPE_PAT`).
-/// Unlike [`match_pattern`] there is no bare `_`-as-whole-pattern distinct
-/// node and no top-level `..` — those stay reserved for `match`.
+/// A `let`/parameter pattern: `mut? name` or `_` (`BIND_PAT`), a
+/// `struct { ... }` record (`RECORD_PAT`), `Name(pattern)` unwrapping a
+/// newtype (`NEWTYPE_PAT`), an array (`ARRAY_PAT`), and variant and literal
+/// patterns, which `hir` refuses where they can fail to match. `..` is no
+/// pattern here.
 fn binding_pattern(p: &mut Parser<'_>, msg: &str) {
     match p.current() {
         IDENT if p.nth(1) == L_PAREN => {
             newtype_pat(p);
         }
-        IDENT | HOLE => {
+        IDENT if p.nth(1) == COLON2 => variant_pat(p),
+        COLON2 => variant_pat(p),
+        IDENT | HOLE | MUT_KW => {
             let m = p.start();
+            p.eat(MUT_KW);
             pattern(p, msg);
             m.complete(p, BIND_PAT);
         }
         STRUCT_KW if p.nth(1) == L_BRACE => {
             record_pat(p);
         }
+        L_BRACKET => array_pat(p),
+        INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW => literal_pat(p),
         _ => p.error(msg),
     }
+}
+
+/// `[a, b, c]` — destructures a fixed-length array, one pattern per
+/// element.
+fn array_pat(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.bump(L_BRACKET);
+    while !p.at(R_BRACKET) && !p.at(EOF) {
+        let before = p.pos();
+        binding_pattern(p, "expected a pattern");
+        if !p.at(R_BRACKET) {
+            p.expect(COMMA, "`,`");
+        }
+        if p.pos() == before {
+            break;
+        }
+    }
+    p.expect_after_prev(R_BRACKET);
+    m.complete(p, ARRAY_PAT);
 }
 
 /// `struct { x, y as z, mut w, .. }` — a record-destructuring pattern. The
@@ -1037,22 +1059,7 @@ fn skip_arm_body(p: &mut Parser<'_>) {
 /// nesting, or-patterns or guards yet.
 fn match_pattern(p: &mut Parser<'_>) {
     match p.current() {
-        // A literal pattern. EVERY literal kind parses here, not just the
-        // two scalars that have semantics yet: `match s { "a" => ... }` is
-        // a thing people write, and the superset parse lets `validation`
-        // hand back "string literal patterns are not supported yet"
-        // instead of the parser's blank "expected a pattern". A NEGATIVE
-        // literal is deliberately NOT in the superset: `-1` is an operator
-        // applied to a literal, and taking it here would be the first step
-        // of a pattern *expression* grammar — reserved with the rest of
-        // the pattern language.
-        INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW => {
-            let m = p.start();
-            let lit = p.start();
-            p.bump_any();
-            lit.complete(p, LITERAL);
-            m.complete(p, LITERAL_PAT);
-        }
+        INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW => literal_pat(p),
         HOLE => {
             let m = p.start();
             p.bump(HOLE);
@@ -1066,49 +1073,52 @@ fn match_pattern(p: &mut Parser<'_>) {
             p.bump(DOT2);
             m.complete(p, REST_PAT);
         }
-        // The elided sigil spelling `::Variant(...)`: a variant of the
-        // scrutinee's enum with the enum segment dropped. Exactly one
-        // `NameRef` child (the variant), with the `COLON2` *before* it.
-        COLON2 => {
-            let m = p.start();
-            p.bump(COLON2);
-            if p.at(IDENT) {
-                name_ref(p);
-            } else {
-                p.error("expected a variant name after `::`");
-            }
-            if p.at(L_PAREN) {
-                pattern_binding_list(p);
-            }
-            m.complete(p, VARIANT_PAT);
-        }
-        IDENT => {
-            // `Name::…` (qualified) or the retired `Name(...)` shape parse
-            // as a variant pattern; a bare name alone is *always* a binding
-            // now (no type-directed reinterpretation). The retired
-            // `Name(...)` shape is kept parseable only so `validation` can
-            // report an honest "write `::Name(...)`" error.
-            if matches!(p.nth(1), COLON2 | L_PAREN) {
-                let m = p.start();
-                name_ref(p);
-                if p.eat(COLON2) {
-                    if p.at(IDENT) {
-                        name_ref(p);
-                    } else {
-                        p.error("expected a variant name after `::`");
-                    }
-                }
-                if p.at(L_PAREN) {
-                    pattern_binding_list(p);
-                }
-                m.complete(p, VARIANT_PAT);
-            } else {
-                bind_pat(p);
-            }
-        }
-        MUT_KW => bind_pat(p),
+        COLON2 => variant_pat(p),
+        // `Name::…` (qualified) or the bare `Name(...)` shape parse as a
+        // variant pattern; a bare name alone is *always* a binding (no
+        // type-directed reinterpretation). The bare `Name(...)` shape, which
+        // `validation` rejects, parses only so it can report an honest
+        // "write `::Name(...)`" error.
+        IDENT if matches!(p.nth(1), COLON2 | L_PAREN) => variant_pat(p),
+        IDENT | MUT_KW => bind_pat(p),
         _ => p.error("expected a pattern"),
     }
+}
+
+/// A literal pattern. EVERY literal kind parses here, not just the two
+/// scalars that have semantics: `match s { "a" => ... }` is a thing people
+/// write, and the superset parse lets `validation` name the kind instead
+/// of the parser's blank "expected a pattern". A NEGATIVE literal is
+/// deliberately NOT in the superset: `-1` is an operator applied to a
+/// literal, the first step of a pattern *expression* grammar.
+fn literal_pat(p: &mut Parser<'_>) {
+    let m = p.start();
+    let lit = p.start();
+    p.bump_any();
+    lit.complete(p, LITERAL);
+    m.complete(p, LITERAL_PAT);
+}
+
+/// A variant pattern in one of its three spellings: the elided sigil
+/// `::Variant(...)` (one `NameRef`, `COLON2` before it), qualified
+/// `Enum::Variant(...)`, and the bare `Variant(...)`, which `validation`
+/// rejects.
+fn variant_pat(p: &mut Parser<'_>) {
+    let m = p.start();
+    if !p.at(COLON2) {
+        name_ref(p);
+    }
+    if p.eat(COLON2) {
+        if p.at(IDENT) {
+            name_ref(p);
+        } else {
+            p.error("expected a variant name after `::`");
+        }
+    }
+    if p.at(L_PAREN) {
+        pattern_binding_list(p);
+    }
+    m.complete(p, VARIANT_PAT);
 }
 
 /// `mut? name` — one binding of a match pattern, a `BIND_PAT` either way
@@ -1349,7 +1359,9 @@ fn param_list(p: &mut Parser<'_>) {
 
 fn param(p: &mut Parser<'_>) {
     let m = p.start();
-    if matches!(p.current(), IDENT | HOLE | MUT_KW) || (p.at(STRUCT_KW) && p.nth(1) == L_BRACE) {
+    if matches!(p.current(), IDENT | HOLE | MUT_KW | L_BRACKET | COLON2)
+        || (p.at(STRUCT_KW) && p.nth(1) == L_BRACE)
+    {
         p.eat(MUT_KW);
         binding_pattern(p, "expected a parameter name");
         if p.eat(COLON) {

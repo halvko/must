@@ -9926,6 +9926,116 @@ fn mut_without_a_name_in_a_match_pattern() {
     );
 }
 
+#[test]
+fn let_takes_a_pattern() {
+    check(
+        "static f = fn { let [a, [mut b, _]] = v; let ::Char(c, _) = s; let 0 = n; };",
+        expect![[r#"
+            SOURCE_FILE@0..76
+              STATIC_ITEM@0..76
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..75
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..75
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..40
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      ARRAY_PAT@20..35
+                        L_BRACKET@20..21 "["
+                        BIND_PAT@21..22
+                          NAME@21..22
+                            IDENT@21..22 "a"
+                        COMMA@22..23 ","
+                        WHITESPACE@23..24 " "
+                        ARRAY_PAT@24..34
+                          L_BRACKET@24..25 "["
+                          BIND_PAT@25..30
+                            MUT_KW@25..28 "mut"
+                            WHITESPACE@28..29 " "
+                            NAME@29..30
+                              IDENT@29..30 "b"
+                          COMMA@30..31 ","
+                          WHITESPACE@31..32 " "
+                          BIND_PAT@32..33
+                            NAME@32..33
+                              HOLE@32..33 "_"
+                          R_BRACKET@33..34 "]"
+                        R_BRACKET@34..35 "]"
+                      WHITESPACE@35..36 " "
+                      EQ@36..37 "="
+                      WHITESPACE@37..38 " "
+                      PATH_EXPR@38..39
+                        NAME_REF@38..39
+                          IDENT@38..39 "v"
+                      SEMICOLON@39..40 ";"
+                    WHITESPACE@40..41 " "
+                    LET_STMT@41..62
+                      LET_KW@41..44 "let"
+                      WHITESPACE@44..45 " "
+                      VARIANT_PAT@45..57
+                        COLON2@45..47 "::"
+                        NAME_REF@47..51
+                          IDENT@47..51 "Char"
+                        L_PAREN@51..52 "("
+                        BIND_PAT@52..53
+                          NAME@52..53
+                            IDENT@52..53 "c"
+                        COMMA@53..54 ","
+                        WHITESPACE@54..55 " "
+                        BIND_PAT@55..56
+                          NAME@55..56
+                            HOLE@55..56 "_"
+                        R_PAREN@56..57 ")"
+                      WHITESPACE@57..58 " "
+                      EQ@58..59 "="
+                      WHITESPACE@59..60 " "
+                      PATH_EXPR@60..61
+                        NAME_REF@60..61
+                          IDENT@60..61 "s"
+                      SEMICOLON@61..62 ";"
+                    WHITESPACE@62..63 " "
+                    LET_STMT@63..73
+                      LET_KW@63..66 "let"
+                      WHITESPACE@66..67 " "
+                      LITERAL_PAT@67..68
+                        LITERAL@67..68
+                          INT_NUMBER@67..68 "0"
+                      WHITESPACE@68..69 " "
+                      EQ@69..70 "="
+                      WHITESPACE@70..71 " "
+                      PATH_EXPR@71..72
+                        NAME_REF@71..72
+                          IDENT@71..72 "n"
+                      SEMICOLON@72..73 ";"
+                    WHITESPACE@73..74 " "
+                    R_BRACE@74..75 "}"
+                SEMICOLON@75..76 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn a_broken_array_pattern_recovers_at_the_let() {
+    check_errors(
+        "static f = fn { let [a b] = v; let [a, = w; let ok = 1; };",
+        expect![[r#"
+            23..24: expected `,`
+            37..38: expected `]`
+            39..40: expected a pattern
+        "#]],
+    );
+}
+
 /// The errors a snippet produces, one per line — for the character literal
 /// shapes below, where the TREE is uninteresting (one `CHAR` token either
 /// way) and the message is the whole point.

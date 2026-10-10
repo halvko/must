@@ -81,7 +81,7 @@
   | an unannotated `fn` literal's parameters and return | the position's, taken apart |
   | a block's tail, a `const` or `unsafe` block's body | the enclosing expectation, unchanged |
   | a join leaf (an `if`/`match` branch, a `break` value) | none; see the Re-evaluate entry |
-  | a scrutinee, a callee, an expression statement, an unannotated `let` | none |
+  | a scrutinee, a `let` variant pattern's initializer, a callee, an expression statement, an unannotated `let` | none |
   | a receiver — of a field, an index, a deref, a borrow or `&raw` | none |
 
   A position missing from this table is a bug in the table.
