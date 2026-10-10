@@ -393,6 +393,71 @@ fn quick_fix_makes_an_immutable_binding_mutable() {
 }
 
 #[test]
+fn quick_fix_borrows_an_owned_receiver() {
+    let mut client = TestClient::start();
+    let file = uri("file:///borrow-receiver.must");
+
+    client.open(
+        &file,
+        r#"
+type Counter = struct { n: usize } with {
+    impl Self {
+        get = fn::<@a>(s: Self.&::<@a>) -> usize { s.*.n };
+    }
+};
+static f = fn () -> usize {
+    let c: Counter = Counter(struct { n = 1 });
+    c.get()
+};
+"#,
+    );
+    let diags = client.next_diagnostics();
+    assert_eq!(diags.diagnostics.len(), 2); // the error + the companion hint
+    let diag = diags
+        .diagnostics
+        .iter()
+        .find(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
+        .expect("has the error diagnostic");
+    assert_eq!(
+        diag.message,
+        "`get` takes `Self.&`, and a borrow is never inserted for an owned receiver \
+         — write `.&.get(...)`"
+    );
+
+    let response =
+        client.request::<lsp_types::request::CodeActionRequest>(lsp_types::CodeActionParams {
+            text_document: lsp_types::TextDocumentIdentifier { uri: file.clone() },
+            range: diag.range,
+            context: lsp_types::CodeActionContext::default(),
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        });
+    let actions = response.expect("expected code actions");
+    assert_eq!(actions.len(), 1);
+    let lsp_types::CodeActionOrCommand::CodeAction(action) = &actions[0] else {
+        panic!("expected a code action, got {actions:?}");
+    };
+    assert_eq!(action.title, "Insert `.&` before `.get`");
+
+    // Uri-keyed maps are the shape the LSP protocol mandates.
+    #[allow(clippy::mutable_key_type)]
+    let changes = action
+        .edit
+        .as_ref()
+        .and_then(|e| e.changes.as_ref())
+        .expect("action has a workspace edit");
+    let edits = &changes[&file];
+    assert_eq!(edits.len(), 1);
+    // A pure insertion right before the `.` of `c.get()` (line 8, column
+    // 5): applying it yields `c.&.get()`.
+    assert_eq!(edits[0].range.start, lsp_types::Position::new(8, 5));
+    assert_eq!(edits[0].range.end, lsp_types::Position::new(8, 5));
+    assert_eq!(edits[0].new_text, ".&");
+
+    drop(client);
+}
+
+#[test]
 fn quick_fix_adds_missing_match_arms_attached_to_the_diagnostic() {
     let mut client = TestClient::start();
     let file = uri("file:///match-fix.must");
