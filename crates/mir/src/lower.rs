@@ -132,7 +132,8 @@ impl LowerCtx<'_> {
         if let (Some(root), Some(message)) = (self.body.root, &self.body.declaration_error) {
             self.value_traps.insert(root, message.clone());
         }
-        for diag in &self.infer.diagnostics {
+        let infer = self.infer;
+        for diag in infer.diagnostics.iter().chain(&infer.hidden_diagnostics) {
             match diag {
                 InferenceDiagnostic::TypeMismatch { expr, .. }
                 | InferenceDiagnostic::AllBranchesMismatch { expr, .. } => {

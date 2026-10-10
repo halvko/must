@@ -1643,6 +1643,44 @@ fn field_access_on_a_nonexistent_field_still_traps_at_runtime() {
     );
 }
 
+/// A field access whose diagnostic is hidden (its type prints `{error}`)
+/// traps at runtime.
+#[test]
+fn a_hidden_no_such_field_diagnostic_traps() {
+    check_run(
+        r#"
+static main = fn () -> usize {
+    let y: Nope = 5;
+    let r = struct { a = y, b = "s" };
+    r.c + 1
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[Trap]: no field `c` on `struct { a: {error}, b: str }`
+        "#]],
+    );
+}
+
+/// An annotated `let` whose initializer is only partly poisoned keeps the
+/// mismatch's trap.
+#[test]
+fn a_partly_poisoned_initializer_traps_on_its_hidden_mismatch() {
+    check_run(
+        r#"
+static main = fn () -> usize {
+    let y: Nope = 5;
+    let x: usize = struct { a = y, b = "hi" };
+    x + 1
+};
+"#,
+        "main()",
+        expect![[r#"
+            error[Trap]: type mismatch: expected `usize`, found `struct { a: {error}, b: str }`
+        "#]],
+    );
+}
+
 #[test]
 fn named_type_construction_erases_to_its_record() {
     // Full erasure: `Foo(v)` is `v` at runtime — the const value of a
