@@ -8,12 +8,15 @@ use crate::{Fix, SyntaxError, TextEdit};
 use rowan::{GreenNode, GreenNodeBuilder};
 use text_size::{TextRange, TextSize};
 
+/// The tree, the errors, and for each error the range of the node the
+/// parser was building when it reported it (`None` for the lexer's).
 pub(crate) fn build(
     text: &str,
     tokens: &[Token],
     mut events: Vec<Event>,
     mut errors: Vec<SyntaxError>,
-) -> (GreenNode, Vec<SyntaxError>) {
+) -> (GreenNode, Vec<SyntaxError>, Vec<Option<TextRange>>) {
+    let lexer_errors = errors.len();
     let mut builder = Builder {
         inner: GreenNodeBuilder::new(),
         text,
@@ -23,6 +26,8 @@ pub(crate) fn build(
         prev_token_range: TextRange::empty(TextSize::new(0)),
         depth: 0,
         errors: &mut errors,
+        open_starts: Vec::new(),
+        error_owners: Vec::new(),
     };
 
     const CONSUMED: Event = Event::Start {
@@ -72,7 +77,34 @@ pub(crate) fn build(
         }
     }
 
-    (builder.inner.finish(), errors)
+    let green = builder.inner.finish();
+    let mut owners = vec![None; lexer_errors];
+    if !builder.error_owners.is_empty() {
+        let root = crate::SyntaxNode::new_root(green.clone());
+        owners.extend(
+            builder
+                .error_owners
+                .into_iter()
+                .map(|(start, depth)| Some(node_at(&root, start, depth).text_range())),
+        );
+    }
+    (green, errors, owners)
+}
+
+/// The node `depth` levels below `root` that begins at `start`.
+fn node_at(root: &crate::SyntaxNode, start: TextSize, depth: usize) -> crate::SyntaxNode {
+    let mut node = root.clone();
+    for _ in 0..depth {
+        let child = node
+            .children()
+            .filter(|child| child.text_range().start() <= start)
+            .last();
+        match child {
+            Some(child) => node = child,
+            None => break,
+        }
+    }
+    node
 }
 
 struct Builder<'a> {
@@ -87,6 +119,11 @@ struct Builder<'a> {
     prev_token_range: TextRange,
     depth: usize,
     errors: &'a mut Vec<SyntaxError>,
+    /// Where each open node begins, innermost last.
+    open_starts: Vec<TextSize>,
+    /// For each error this builder pushed, the node it was reported in, as
+    /// its start and its depth below the root.
+    error_owners: Vec<(TextSize, usize)>,
 }
 
 impl Builder<'_> {
@@ -99,6 +136,7 @@ impl Builder<'_> {
         }
         self.inner.start_node(kind.into());
         self.depth += 1;
+        self.open_starts.push(self.offset);
     }
 
     fn finish_node(&mut self) {
@@ -108,6 +146,7 @@ impl Builder<'_> {
             self.eat_trivia();
         }
         self.inner.finish_node();
+        self.open_starts.pop();
     }
 
     fn token(&mut self) {
@@ -166,11 +205,20 @@ impl Builder<'_> {
                 insert,
             }],
         });
+        // The owner is the innermost open node that began before the
+        // error: one begun AT the offending token may be the next construct.
+        let depth = self
+            .open_starts
+            .iter()
+            .rposition(|&start| start < range.start())
+            .unwrap_or(0);
+        let start = self.open_starts.get(depth).copied().unwrap_or_default();
         self.errors.push(SyntaxError {
             message,
             range,
             fix,
         });
+        self.error_owners.push((start, depth));
     }
 
     fn eat_trivia(&mut self) {

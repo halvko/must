@@ -188,6 +188,28 @@ impl LinearDiagnostic {
         }
     }
 
+    /// The message as reported for a finding of `item`'s check: the
+    /// subject and the blamed root read off its body and types.
+    pub fn render(&self, db: &dyn Db, item: ItemId<'_>) -> String {
+        let body = body(db, item);
+        let types = infer(db, item);
+        let subject = self.binding().map(|binding| &body.bindings[binding].kind);
+        let ty = self
+            .binding()
+            .and_then(|binding| types.type_of_binding.get(binding))
+            .or_else(|| self.expr().and_then(|expr| types.type_of_expr.get(expr)));
+        // Duplication and loss ask different questions of the type, so
+        // they blame different roots (see [`Self::about_duplication`]).
+        let root = ty.and_then(|ty| {
+            if self.about_duplication() {
+                crate::capability::affine_root(db, ty)
+            } else {
+                crate::capability::blaming_param(db, ty).map(Affine::Param)
+            }
+        });
+        self.message(subject, root.as_ref())
+    }
+
     /// The message, given the binding's name and — when the value's type
     /// has a root the message can name — what that root is.
     ///

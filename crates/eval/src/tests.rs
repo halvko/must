@@ -2424,10 +2424,10 @@ fn type_param_generic_runs_end_to_end() {
 
 #[test]
 fn mixed_binder_instantiates() {
-    // `fn::<T, const N: usize>`: the type param claims no runtime slot —
+    // `fn::<T: forget, const N: usize>`: the type param claims no runtime slot —
     // `N` is dense const index 0 even though its binder index is 1.
     check_run(
-        "static tag = fn::<T, const N: usize>(x: T) -> usize { N };",
+        "static tag = fn::<T: forget, const N: usize>(x: T) -> usize { N };",
         r#"tag::<str, 7>("s")"#,
         expect![[r#"
             => 7
@@ -2589,7 +2589,10 @@ fn generic_frame_shows_const_params_as_named_locals() {
 #[test]
 fn generic_record_constructs_and_projects() {
     check_run(
-        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static main = fn () -> usize { let p = Pair::<usize>(struct { a = 1, b = 2 }); p.a + p.b };",
+        r#"
+type Pair = struct::<T> { a: T, b: T };
+static main = fn () -> usize { let p = Pair::<usize>(struct { a = 1, b = 2 }); p.a + p.b };
+"#,
         "main()",
         expect![[r#"
             => 3
@@ -2636,7 +2639,10 @@ static main = fn () -> Option::<usize> { Option::Some(3) };
 #[test]
 fn const_param_type_constructs_and_evaluates() {
     check_run(
-        "type Buf = struct::<const N: usize> { len: usize };\n\\\n         static main = fn () -> usize { let b: Buf::<8> = Buf::<8>(struct { len = 3 }); b.len };",
+        r#"
+type Buf = struct::<const N: usize> { len: usize };
+static main = fn () -> usize { let b: Buf::<8> = Buf::<8>(struct { len = 3 }); b.len };
+"#,
         "main()",
         expect![[r#"
             => 3
@@ -4713,12 +4719,12 @@ fn generic_member_dispatches_at_the_receiver_args() {
         r#"
 type Box2 = struct::<T> { v: T } with {
     impl Self {
-        get = fn(b: Self) -> T { b.v };
-        put = fn(x: T, b: Self) -> Self { Box2::<T>(struct { v = x }) };
+        get = fn(b: Self) -> T { let Box2(struct { v }) = b; v };
+        rewrap = fn(b: Self) -> Self { let Box2(struct { v }) = b; Box2::<T>(struct { v = v }) };
     }
 };
 "#,
-        r#"Box2(struct { v = "hi" }).put("ho").get()"#,
+        r#"Box2(struct { v = "ho" }).rewrap().get()"#,
         expect![[r#"
             => "ho"
         "#]],
@@ -5001,8 +5007,8 @@ fn qualified_inherent_member_runs_as_a_plain_fn_value() {
     // and instantiated at the TYPE's arguments when the owner is generic.
     check_run(
         r#"
-type Pair = struct::<T> { a: T, b: T } with {
-    impl Self { first = fn(p: Self) -> T { p.a }; }
+type Pair = struct::<T> { a: T, b: usize } with {
+    impl Self { first = fn(p: Self) -> T { let Pair(struct { a, b }) = p; a }; }
 };
 type P = struct { v: usize } with {
     impl Self { len = fn(p: Self) -> usize { p.v }; }
@@ -7409,18 +7415,12 @@ static f = fn() -> usize {
 fn the_write_shaped_twin_of_a_move_invalidation_says_the_same_thing() {
     check_run(
         r#"
-type Lin = struct { id: usize } only move with {
-    impl Self {
-        eat = fn(s: Self) -> () { let Lin(struct { id }) = s; };
-    }
-};
+type Id = struct { id: usize };
 static f = fn() -> usize {
-    let mut s = Lin(struct { id = 1 });
+    let mut s = Id(struct { id = 1 });
     let b = s.&;
-    s = Lin(struct { id = 2 });
-    let n = b.*.id;
-    s.eat();
-    n
+    s = Id(struct { id = 2 });
+    b.*.id
 };
 "#,
         "f()",
@@ -7483,10 +7483,10 @@ static f = fn() -> usize {
     );
 }
 
-/// A borrow taken after the move, which the checker refuses, reads the
-/// same uninitialized storage when the program runs anyway.
+/// A borrow taken after the move, which the checker refuses, traps before
+/// it can read the moved-out storage.
 #[test]
-fn a_borrow_of_moved_out_storage_is_detected_when_it_is_read() {
+fn a_borrow_of_moved_out_storage_traps_before_it_is_read() {
     check_run(
         r#"
 type Tok = struct { n: usize } only move with {
@@ -7504,8 +7504,7 @@ static f = fn() -> usize {
 "#,
         "f()",
         expect![[r#"
-            error[UndefinedBehavior]: read of uninitialized memory — the local's value was moved out
-              note: its value was moved out here
+            error[Trap]: `v` was already consumed
         "#]],
     );
 }
@@ -8135,6 +8134,448 @@ static f = fn() -> usize {
             error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
               note: invalidated here — the value was borrowed again, written through another borrow, or moved away
+        "#]],
+    );
+}
+
+/// A pattern the lowering refuses (a string literal) traps the whole `match`
+/// before it runs, instead of dropping the arm.
+#[test]
+fn an_unsupported_literal_pattern_traps_the_match() {
+    check_run(
+        r#"
+static f = fn() -> usize {
+    print("before;");
+    match "x" { "x" => 1, _ => 2 }
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: string literal patterns are not supported yet; only character (`'x'`) and integer (`0`) literals can be matched
+        "#]],
+    );
+}
+
+/// An unknown type in a `let` annotation traps when the `let` runs.
+#[test]
+fn an_unknown_type_in_a_let_annotation_traps_at_the_let() {
+    check_run(
+        r#"
+static f = fn() -> usize {
+    print("before;");
+    let x: Foo = 5;
+    x + 1
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: unknown type `Foo`
+        "#]],
+    );
+}
+
+/// A `let` destructuring that names a field the value lacks traps at the
+/// `let`.
+#[test]
+fn a_broken_let_destructuring_traps_at_the_let() {
+    check_run(
+        r#"
+static f = fn() -> usize {
+    print("before;");
+    let struct { y } = struct { x: usize = 1 };
+    y
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: no field `y` on `struct { x: usize }`
+        "#]],
+    );
+}
+
+/// A parameter destructuring that names a field the argument lacks traps
+/// when the function is created.
+#[test]
+fn a_broken_parameter_destructuring_traps() {
+    check_run(
+        r#"
+static f = fn(struct { y }: struct { x: usize }) -> usize { y };
+"#,
+        r#"f(struct { x = 1 })"#,
+        expect![[r#"
+            error[Trap]: no field `y` on `struct { x: usize }`
+        "#]],
+    );
+}
+
+/// An impl member whose signature does not match its requirement traps
+/// when called through a bound, instead of handing back the wrong type.
+#[test]
+fn a_mismatched_impl_member_traps_through_a_bound() {
+    check_run(
+        r#"
+trait D = requires { f: fn(x: Self) -> usize; } with {
+    impl usize { f = fn(x: usize) -> str { "oops" }; }
+};
+static g = fn::<T: D>(x: T) -> usize { x.f() + 1 };
+static main = fn() -> usize {
+    print("before;");
+    let n: usize = 1;
+    g(n)
+};
+"#,
+        "main()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: member `f` does not match `D`'s requirement: expected `fn(usize) -> usize`, found `fn(usize) -> str`
+        "#]],
+    );
+}
+
+/// A member without its full signature traps when a dot-call reaches it.
+#[test]
+fn a_member_without_a_full_signature_traps_at_the_call() {
+    check_run(
+        r#"
+type T = struct { a: usize } with {
+    impl Self { f = fn(p: Self) { print("in f;"); }; }
+};
+static main = fn() {
+    print("before;");
+    let t = T(struct { a = 1 });
+    t.f();
+};
+"#,
+        "main()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: member `f` must spell its full signature: every parameter and the return type
+        "#]],
+    );
+}
+
+/// A linear value left live on one branch traps at the join, after the
+/// branch that runs.
+#[test]
+fn a_linear_join_disagreement_traps_at_the_join() {
+    check_run(
+        r#"
+type L = struct { x: usize } only move;
+static eat = fn(l: L) { let L(struct { x }) = l; };
+static f = fn(c: bool) {
+    let t = L(struct { x = 1 });
+    if c { eat(t); } else { print("leak;"); }
+    print("after;");
+};
+"#,
+        "f(false)",
+        expect![[r#"
+            output: "leak;"
+            error[Trap]: `t` is consumed on some paths through this expression and not on others
+        "#]],
+    );
+}
+
+/// A borrow of a local that escapes its body traps before it is returned.
+#[test]
+fn an_escaping_borrow_traps_before_it_leaves() {
+    check_run(
+        r#"
+static f = fn::<@a>(x: usize.&::<@a>) -> usize.&::<@a> {
+    let n: usize = 7;
+    n.&
+};
+static main = fn() -> usize {
+    print("before;");
+    let m: usize = 1;
+    f(m.&).*
+};
+"#,
+        "main()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
+        "#]],
+    );
+}
+
+/// A missing `;` traps the statement it belongs to, before it runs.
+#[test]
+fn a_missing_semicolon_traps_the_statement() {
+    check_run(
+        r#"
+static f = fn() {
+    print("a;");
+    print("b;") print("c;");
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "a;"
+            error[Trap]: expected `;`
+        "#]],
+    );
+}
+
+/// A stray character between statements traps before the next one runs.
+#[test]
+fn a_stray_character_traps_before_the_next_statement() {
+    check_run(
+        r#"
+static f = fn() {
+    print("a;");
+    $ print("b;");
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "a;"
+            error[Trap]: unexpected character `$`
+        "#]],
+    );
+}
+
+/// An error in a `type` declaration traps where the type is named, not
+/// before.
+#[test]
+fn a_broken_type_traps_where_it_is_named() {
+    check_run(
+        r#"
+type P = struct { x: usize, pub y: usize };
+static f = fn() -> usize {
+    print("before;");
+    let p = P(struct { x = 1, y = 2 });
+    p.x
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: field visibility is not supported yet
+        "#]],
+    );
+}
+
+/// An item that never names a broken declaration runs normally.
+#[test]
+fn an_item_that_does_not_name_a_broken_type_runs() {
+    check_run(
+        r#"
+type P = struct { x: usize, pub y: usize };
+static f = fn() -> usize { 3 };
+"#,
+        "f()",
+        expect![[r#"
+            => 3
+        "#]],
+    );
+}
+
+/// An error in a trait traps a function bounded by it when the function's
+/// value is read.
+#[test]
+fn a_broken_trait_traps_a_function_bounded_by_it() {
+    check_run(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; m: fn(x: Self) -> usize; } with {
+    impl usize { m = fn(x: usize) -> usize { x }; }
+};
+static g = fn::<T: D>(t: T) -> usize { 1 };
+static f = fn() -> usize {
+    print("before;");
+    let n: usize = 5;
+    g(n)
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: duplicate requirement `m`
+        "#]],
+    );
+}
+
+/// A missing impl member traps where the implementing type is named.
+#[test]
+fn a_missing_impl_member_traps_where_the_type_is_named() {
+    check_run(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; };
+type P = struct { x: usize } with { impl D { } };
+static f = fn() -> usize {
+    print("before;");
+    P(struct { x = 1 }).x
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: this impl of `D` is missing the member `m`
+        "#]],
+    );
+}
+
+/// An error outside every item traps every item's value.
+#[test]
+fn an_error_outside_every_item_traps_every_item() {
+    check_run(
+        r#"
+static f = fn() -> usize { 3 };
+\
+"#,
+        "f()",
+        expect![[r#"
+            error[Trap]: unexpected character `\`
+        "#]],
+    );
+}
+
+/// A `static` with no value traps where it is read.
+#[test]
+fn a_static_without_a_value_traps_where_it_is_read() {
+    check_run(
+        r#"
+static s: usize;
+static f = fn() -> usize {
+    print("before;");
+    s + 1
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: expected `=` followed by the item's value
+        "#]],
+    );
+}
+
+/// A broken enum traps at a variant path naming it.
+#[test]
+fn a_broken_enum_traps_at_a_variant_path() {
+    check_run(
+        r#"
+type E = enum { A, B(_) };
+static f = fn() -> usize {
+    print("before;");
+    let e = E::A;
+    1
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: a variant payload must be a fully written type; a declaration has nothing to infer `_` from
+        "#]],
+    );
+}
+
+/// A broken trait traps at a qualified call through it.
+#[test]
+fn a_broken_trait_traps_at_a_qualified_call() {
+    check_run(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; m: fn(x: Self) -> usize; } with {
+    impl usize { m = fn(x: usize) -> usize { x }; }
+};
+static f = fn() -> usize {
+    print("before;");
+    let n: usize = 5;
+    D::m(n)
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: duplicate requirement `m`
+        "#]],
+    );
+}
+
+/// An unknown type in a construction's turbofish traps at the
+/// construction.
+#[test]
+fn an_unknown_type_in_a_construction_turbofish_traps() {
+    check_run(
+        r#"
+type Pair = struct::<T> { a: T, b: T };
+static f = fn() -> usize {
+    print("a;");
+    let p = Pair::<Bogus>(struct { a = 1, b = 2 });
+    print("b;");
+    3
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "a;"
+            error[Trap]: unknown type `Bogus`
+        "#]],
+    );
+}
+
+/// An unknown type in a variant path's turbofish traps at the variant.
+#[test]
+fn an_unknown_type_in_a_variant_turbofish_traps() {
+    check_run(
+        r#"
+type O = enum::<T> { Some(T), None };
+static f = fn() -> usize {
+    print("a;");
+    let o = O::<Bogus>::Some(1);
+    print("b;");
+    3
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "a;"
+            error[Trap]: unknown type `Bogus`
+        "#]],
+    );
+}
+
+/// A parse error on a link of a borrowed place traps at the borrow.
+#[test]
+fn a_broken_field_in_a_borrowed_place_traps() {
+    check_run(
+        r#"
+type P = struct { a: usize, b: usize };
+static f = fn() -> usize {
+    let p = P(struct { a = 1, b = 2 });
+    print("a;");
+    let r = (p.).&;
+    print("b;");
+    3
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "a;"
+            error[Trap]: expected a field name after `.`
+        "#]],
+    );
+}
+
+/// A parse error on a link of an assignment target traps at the write.
+#[test]
+fn a_broken_field_in_an_assignment_target_traps() {
+    check_run(
+        r#"
+static f = fn() -> usize {
+    let mut p = struct { a: usize = 1 };
+    print("a;");
+    p. = 5;
+    print("b;");
+    3
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "a;"
+            error[Trap]: expected a field name after `.`
         "#]],
     );
 }

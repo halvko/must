@@ -93,6 +93,9 @@ pub type SyntaxNodePtr = rowan::ast::SyntaxNodePtr<MustLanguage>;
 pub struct Parse {
     green: rowan::GreenNode,
     errors: Arc<[SyntaxError]>,
+    /// Per error, the range of the node the parser was building when it
+    /// reported it; `None` for lexer and validation errors.
+    owners: Arc<[Option<TextRange>]>,
 }
 
 impl Parse {
@@ -107,6 +110,17 @@ impl Parse {
 
     pub fn errors(&self) -> &[SyntaxError] {
         &self.errors
+    }
+
+    /// The range of the construct `err` belongs to: the node the parser was
+    /// building when it reported it, which an error naming a missing token
+    /// can lie outside of. The error's own range for every other error.
+    pub fn blame(&self, err: &SyntaxError) -> TextRange {
+        self.errors
+            .iter()
+            .position(|e| e == err)
+            .and_then(|index| self.owners[index])
+            .unwrap_or(err.range)
     }
 
     /// Tree + errors as text; the format snapshot tests assert against.
@@ -138,10 +152,16 @@ pub fn parse(text: &str) -> Parse {
     let mut parser = parser::Parser::new(&kinds, &texts);
     grammar::source_file(&mut parser);
     let events = parser.finish();
-    let (green, mut errors) = builder::build(text, &tokens, events, lex_errors);
+    let (green, errors, owners) = builder::build(text, &tokens, events, lex_errors);
+    let mut errors: Vec<(SyntaxError, Option<TextRange>)> =
+        errors.into_iter().zip(owners).collect();
     // Things the grammar accepts (for resilience and fixes) but the
     // language rejects.
-    errors.extend(validation::validate(&SyntaxNode::new_root(green.clone())));
+    errors.extend(
+        validation::validate(&SyntaxNode::new_root(green.clone()))
+            .into_iter()
+            .map(|err| (err, None)),
+    );
     // One error per position: errors are reported most-fundamental-first
     // (lexer before parser, "expected a name" before "expected `=`"), and
     // editors tend to surface only one diagnostic per spot anyway. The
@@ -151,11 +171,13 @@ pub fn parse(text: &str) -> Parse {
     // residual same-range collisions. The sort is stable, so those are
     // settled by push order: lexer errors seed the vec first, and flipping
     // that order would flip winners.
-    errors.sort_by_key(|err| (err.range.start(), err.range.end()));
-    errors.dedup_by(|next, prev| next.range == prev.range);
+    errors.sort_by_key(|(err, _)| (err.range.start(), err.range.end()));
+    errors.dedup_by(|(next, _), (prev, _)| next.range == prev.range);
+    let (errors, owners): (Vec<_>, Vec<_>) = errors.into_iter().unzip();
     Parse {
         green,
         errors: errors.into(),
+        owners: owners.into(),
     }
 }
 

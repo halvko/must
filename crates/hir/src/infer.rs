@@ -5578,12 +5578,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 let inherent = named_recv
                     .as_ref()
                     .and_then(|named| self.member_of(&named.decl, name));
-                if inherent
+                if let Some(loc) = inherent
                     .as_ref()
-                    .is_some_and(|loc| signature(self.db, loc.to_id(self.db)).contains_error())
+                    .filter(|loc| signature(self.db, loc.to_id(self.db)).contains_error())
                 {
                     // A broken member definition (not fully annotated): the
-                    // definition site carries the diagnostic.
+                    // definition site carries the diagnostic, and the call
+                    // names the member, whose value traps with it.
+                    self.result.member_of_expr.insert(expr, loc.clone());
                     self.result.type_of_expr.insert(callee, Ty::Error);
                     self.infer_args_broken(args);
                     return self.finish_dot_call(expr, Ty::Error, expected, cause);
@@ -5594,8 +5596,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     .cloned();
                 let traits = self.trait_call_candidates(&recv_ty, name, receiver_shape);
                 // A broken IMPL member is the definition site's problem
-                // too — it carries no call and makes nothing ambiguous.
-                if traits.iter().any(|candidate| candidate.broken) {
+                // too — it makes nothing ambiguous, and the call names it.
+                if let Some(broken) = traits.iter().find(|candidate| candidate.broken) {
+                    if let Some(member) = &broken.member {
+                        self.result.member_of_expr.insert(expr, member.clone());
+                    }
                     self.result.type_of_expr.insert(callee, Ty::Error);
                     self.infer_args_broken(args);
                     return self.finish_dot_call(expr, Ty::Error, expected, cause);
