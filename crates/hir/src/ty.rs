@@ -1753,6 +1753,23 @@ pub fn enum_variants<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<Vec<(Str
     )
 }
 
+/// `Circle(usize)` / `Point`: a variant as its declaration writes it.
+pub fn render_variant(name: &str, payload: &[Ty]) -> String {
+    if payload.is_empty() {
+        return name.to_owned();
+    }
+    let payload: Vec<String> = payload.iter().map(Ty::display).collect();
+    format!("{name}({})", payload.join(", "))
+}
+
+/// One variant's stored payload with an enum mention's `args` substituted.
+pub(crate) fn substitute_payload(payload: &[Ty], decl: &ItemLoc, args: &[GenericArg]) -> Vec<Ty> {
+    payload
+        .iter()
+        .map(|ty| substitute_args(ty, decl, args))
+        .collect()
+}
+
 /// Erase dangling inference variables to `Ty::Error` — for lowering done
 /// outside any inference context (declarations).
 fn erase_infer(ty: &Ty) -> Ty {
@@ -1902,12 +1919,7 @@ pub fn type_underlying_for(db: &dyn Db, named: &NamedTy) -> Option<Ty> {
 pub fn variant_payloads_for(db: &dyn Db, variant: &VariantTy) -> Option<Vec<Ty>> {
     let variants = enum_variants(db, variant.decl.to_id(db)).as_ref()?;
     let (_, payload) = variants.get(variant.index as usize)?;
-    Some(
-        payload
-            .iter()
-            .map(|ty| substitute_args(ty, &variant.decl, &variant.args))
-            .collect(),
-    )
+    Some(substitute_payload(payload, &variant.decl, &variant.args))
 }
 
 /// The type other items see for `item`. A fully-typed contract is the

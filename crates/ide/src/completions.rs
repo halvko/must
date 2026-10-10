@@ -113,7 +113,7 @@
 //! candidates and `local_detail`), the declaration shape for a `type` item
 //! (`type_item_detail` — a `struct { … }`/`enum { … }` body, the type-item
 //! provenance its `Struct`/`Enum` kind already names), a variant's payload
-//! signature for a variant candidate (`hover::render_variant`), and the
+//! signature for a variant candidate (`hir::render_variant`), and the
 //! field's own type for a field completion (field access, record-literal
 //! fields, and record-pattern fields alike). All of it is already
 //! memoized on the real snapshot (`infer`, `type_underlying`,
@@ -407,7 +407,7 @@ fn type_item_detail(db: &RootDatabase, item: hir::ItemId<'_>) -> Option<String> 
             "enum {{ {} }}",
             variants
                 .iter()
-                .map(|(name, payload)| crate::hover::render_variant(name, payload))
+                .map(|(name, payload)| hir::render_variant(name, payload))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -1614,7 +1614,7 @@ fn variant_segment_items(
                     CompletionItemKind::EnumMember,
                     Provenance::Item,
                     type_tier(Some(&variant_ty), expected),
-                    Some(crate::hover::render_variant(name, payload)),
+                    Some(hir::render_variant(name, payload)),
                     edit_range,
                 )
             }
@@ -1744,7 +1744,7 @@ fn match_arm_items(
                 CompletionItemKind::EnumMember,
                 provenance,
                 type_tier(Some(&variant_ty), Some(&scrutinee_ty)),
-                Some(crate::hover::render_variant(name, payload)),
+                Some(hir::render_variant(name, payload)),
                 edit_range,
             );
             if bare {

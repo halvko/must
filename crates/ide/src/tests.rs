@@ -105,10 +105,12 @@ static f = fn {
     );
 }
 
+/// `expected_markup` may open and close on lines of its own (a raw string);
+/// those surrounding newlines are not part of the markup.
 fn check_hover(fixture_text: &str, expected_markup: &str) {
     let (analysis, _file, pos) = fixture(fixture_text);
     let hover = analysis.hover(pos).expect("hover returned None");
-    assert_eq!(hover.markup, expected_markup);
+    assert_eq!(hover.markup, expected_markup.trim_matches('\n'));
 }
 
 fn check_no_hover(fixture_text: &str) {
@@ -1299,7 +1301,29 @@ static f = fn {
     s$0;
 };
 "#,
-        "```must\nmut s: Shape\n```",
+        r#"
+```must
+mut s: Shape
+type Shape = enum { Circle(usize), Point }
+```
+"#,
+    );
+}
+
+#[test]
+fn hover_builtin_enum_binding_shows_its_variants() {
+    check_hover(
+        r#"
+static f = fn (s: str) {
+    let c$0 = s.next_char(0);
+};
+"#,
+        r#"
+```must
+c: NextChar
+type NextChar = enum { Char(char, usize), End }
+```
+"#,
     );
 }
 
@@ -1545,7 +1569,12 @@ static f = fn (s: Shape) -> usize {
     }
 };
 "#,
-        "```must\nPoint: Shape\n```",
+        r#"
+```must
+Point: Shape
+type Shape = enum { Circle(usize), Point }
+```
+"#,
     );
 }
 
