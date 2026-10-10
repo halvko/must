@@ -443,6 +443,7 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |
             309 |     c.bump()
                 |     ^^^^^^^^
+               = help: Insert `.&mut` before `.bump`
                = note: `bump` is defined here (examples/errors.must:304:9)
 
             error: generic arguments use the turbofish: write `Boxed::<...>`

@@ -12976,6 +12976,70 @@ static f = fn() -> usize {
     );
 }
 
+/// Applies the single diagnostic's fix to `text`, checking its label, and
+/// returns the fixed program.
+fn apply_borrow_receiver_fix(text: &str, label: &str) -> String {
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, label);
+    assert_eq!(fix.edits.len(), 1);
+    assert!(fix.edits[0].range.is_empty());
+    let mut fixed = text.to_owned();
+    fixed.insert_str(
+        u32::from(fix.edits[0].range.start()) as usize,
+        &fix.edits[0].insert,
+    );
+    fixed
+}
+
+#[test]
+fn an_owned_receiver_offers_the_insert_borrow_fix() {
+    let fixed = apply_borrow_receiver_fix(
+        r#"
+type Counter = struct { n: usize } with {
+    impl Self {
+        get = fn::<@a>(s: Self.&::<@a>) -> usize { s.*.n };
+    }
+};
+static f = fn () -> usize {
+    let c: Counter = Counter(struct { n = 1 });
+    c.get()
+};
+"#,
+        "Insert `.&` before `.get`",
+    );
+    assert!(fixed.contains("    c.&.get()\n"), "fixed: {fixed}");
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
+fn an_owned_receiver_of_an_exclusive_member_offers_the_insert_borrow_mut_fix() {
+    // The borrow lands right before the call's own `.`, so a call chained
+    // onto a new line keeps its layout and a temporary receiver works too.
+    let fixed = apply_borrow_receiver_fix(
+        r#"
+type Cell = struct { n: usize } with {
+    impl Self {
+        bump = fn::<@b>(m: Self.&mut::<@b>) -> () { m.*.n = m.*.n + 1; };
+    }
+};
+static f = fn () -> () {
+    Cell(struct { n = 1 })
+        .bump();
+};
+"#,
+        "Insert `.&mut` before `.bump`",
+    );
+    assert!(
+        fixed.contains("    Cell(struct { n = 1 })\n        .&mut.bump();\n"),
+        "fixed: {fixed}"
+    );
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
 #[test]
 fn a_shared_receiver_cannot_reach_an_exclusive_member() {
     // Shared never sharpens to exclusive — the same rule `try_reborrow`
