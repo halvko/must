@@ -736,20 +736,8 @@ impl LowerCtx<'_> {
         // where its enum was needed — the conversion (tag injection)
         // happens here and only here.
         if let Some(variant) = self.infer.widened.get(expr).cloned() {
-            let dest = b.temp(Ty::Named(hir::NamedTy {
-                decl: variant.decl.clone(),
-                args: variant.args.clone(),
-            }));
-            b.push_assign(
-                dest,
-                Rvalue::WidenToEnum {
-                    op,
-                    decl: variant.decl,
-                    index: variant.index,
-                    variant: variant.name.to_string(),
-                },
-                expr,
-            );
+            let dest = b.temp(variant.enum_ty());
+            b.push_assign(dest, widen_rvalue(op, variant), expr);
             return Operand::Copy(dest.into());
         }
         op
@@ -2189,9 +2177,15 @@ impl LowerCtx<'_> {
             PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int(_) => {}
             PatData::Bind(binding) => {
                 // A bare bind always binds the whole scrutinee (never
-                // narrowed to a variant), so it just aliases the value.
+                // narrowed to a variant), so it just aliases the value —
+                // widened to its enum for a `mut` binder of a variant-typed
+                // value (`InferenceResult::widened_bindings`).
                 let local = self.alloc_binding_local(b, *binding);
-                b.push_assign(local, Rvalue::Use(scrut.clone()), origin);
+                let rvalue = match self.infer.widened_bindings.get(*binding).cloned() {
+                    Some(variant) => widen_rvalue(scrut.clone(), variant),
+                    None => Rvalue::Use(scrut.clone()),
+                };
+                b.push_assign(local, rvalue, origin);
             }
             PatData::Variant { bindings, .. } => {
                 let payloads = self
@@ -3774,6 +3768,16 @@ struct BodyBuilder {
     scopes: Vec<(Scope, Vec<LocalId>)>,
     /// Origin for the placeholder terminators of fresh blocks.
     fallback_origin: ExprId,
+}
+
+/// The variant → enum conversion of `op`, a value of type `variant`.
+fn widen_rvalue(op: Operand, variant: hir::VariantTy) -> Rvalue {
+    Rvalue::WidenToEnum {
+        op,
+        decl: variant.decl,
+        index: variant.index,
+        variant: variant.name.to_string(),
+    }
 }
 
 impl BodyBuilder {

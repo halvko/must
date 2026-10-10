@@ -402,7 +402,9 @@ module.exports = grammar({
 
     wildcard_pat: _ => '_',
 
-    _match_bind_pat: $ => $.identifier,
+    _match_bind_pat: $ => choice($.identifier, seq('mut', $._name)),
+
+    _payload_bind_pat: $ => seq(optional('mut'), $._name),
 
     variant_pat: $ => choice(
       seq(
@@ -416,7 +418,7 @@ module.exports = grammar({
 
     _pattern_binding_list: $ => seq(
       '(',
-      commaSep(choice(field('binding', $._name), $.rest_pat)),
+      commaSep(choice(alias($._payload_bind_pat, $.bind_pat), $.rest_pat)),
       ')',
     ),
 

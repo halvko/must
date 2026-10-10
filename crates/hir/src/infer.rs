@@ -51,6 +51,11 @@ pub struct InferenceResult {
     /// check site, and the precise variant where it happened at a deferred
     /// join edge.
     pub widened: ArenaMap<ExprId, VariantTy>,
+    /// Every unannotated `mut` whole-value binder in a match pattern on a
+    /// variant-typed scrutinee, mapped to the variant the scrutinee was.
+    /// The binding's type is the enum (G27), and MIR plants the
+    /// `WidenToEnum` op where it binds the value.
+    pub widened_bindings: ArenaMap<BindingId, VariantTy>,
     /// Resolution of every `Enum::Variant` path expression that named a
     /// real variant — the type-directed second-segment resolution (`::`
     /// paths resolve against the enum's declaration during inference, not
@@ -3341,6 +3346,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         for (_, variant) in result.widened.iter_mut() {
             variant.args = resolve_args_fully(self.table, &variant.args);
         }
+        for (_, variant) in result.widened_bindings.iter_mut() {
+            variant.args = resolve_args_fully(self.table, &variant.args);
+        }
         for (_, variant) in result.variant_of_expr.iter_mut() {
             variant.args = resolve_args_fully(self.table, &variant.args);
         }
@@ -4205,12 +4213,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     && let Ty::Variant(variant) = self.resolve_shallow(&ty)
                                 {
                                     self.result.widened.insert(*init, variant.clone());
-                                    // Argument-preserving, like every
-                                    // widening edge.
-                                    ty = Ty::Named(NamedTy {
-                                        decl: variant.decl,
-                                        args: variant.args,
-                                    });
+                                    ty = variant.enum_ty();
                                 }
                                 self.result.type_of_binding.insert(binding, ty.clone());
                                 self.result.type_of_pat.insert(*pat, ty);
@@ -9254,6 +9257,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
                 let ty = match scrut {
                     Scrutinee::Enum(named) => Ty::Named(named.clone()),
+                    // `mut` widening (G27): an owned `mut` binder takes the
+                    // enum so it can be reassigned across variants.
+                    Scrutinee::Variant(variant)
+                        if lens.is_none() && self.body.bindings[binding].mutable =>
+                    {
+                        self.result
+                            .widened_bindings
+                            .insert(binding, variant.clone());
+                        variant.enum_ty()
+                    }
                     Scrutinee::Variant(variant) => Ty::Variant(variant.clone()),
                     Scrutinee::Other(ty) | Scrutinee::Unknown(ty) => ty.clone(),
                     Scrutinee::Error => Ty::Error,

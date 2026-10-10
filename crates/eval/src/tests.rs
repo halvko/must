@@ -1838,6 +1838,61 @@ static sum = fn (s: Shape) -> usize {
 }
 
 #[test]
+fn mut_match_bindings_are_assigned_locally() {
+    check_run(
+        r#"
+type Opt = enum { Some(usize), None };
+static bump = fn (o: Opt) -> usize {
+    match o {
+        ::Some(mut n) => {
+            n = n + 1;
+            n
+        },
+        mut other => {
+            other = Opt::Some(100);
+            match other {
+                ::Some(n) => n,
+                ::None => 0,
+            }
+        },
+    }
+};
+"#,
+        "bump(Opt::Some(41)) + bump(Opt::None)",
+        expect![[r#"
+            => 142
+        "#]],
+    );
+}
+
+#[test]
+fn mut_match_bind_of_a_variant_value_widens_to_its_enum() {
+    // The binder holds a tagged enum value: it starts as the `Circle` and
+    // can be reassigned to `Point`.
+    check_run(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (point: bool) -> usize {
+    let c = Shape::Circle(1);
+    match c {
+        mut o => {
+            if point { o = Shape::Point; }
+            match o {
+                ::Circle(n) => n,
+                ::Point => 7,
+            }
+        },
+    }
+};
+"#,
+        "f(false) * 10 + f(true)",
+        expect![[r#"
+            => 17
+        "#]],
+    );
+}
+
+#[test]
 fn nonexhaustive_match_traps_with_the_diagnostic_message() {
     // Reaching the uncovered variant crashes with exactly the text the
     // squiggle shows; the covered variant still runs fine.

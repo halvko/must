@@ -54,10 +54,10 @@ impl Body {
 pub struct BindingData {
     pub kind: BindingKind,
     pub type_ref: Option<TypeRef>,
-    /// Whether the binding was introduced with `mut` (`let mut` / a `mut`
-    /// parameter). A hole (`_`) is never mutable — there is no name to
-    /// assign through — regardless of a written `mut` (validation flags
-    /// that as pointless).
+    /// Whether the binding was introduced with `mut` (`let mut`, a `mut`
+    /// parameter or field, `mut name` in a match pattern). A hole (`_`) is
+    /// never mutable — there is no name to assign through — regardless of
+    /// a written `mut` (validation flags that as pointless).
     pub mutable: bool,
 }
 
@@ -1065,7 +1065,7 @@ impl LowerCtx {
                 self.alloc_pat(data, it.syntax())
             }
             ast::Pat::BindPat(it) => {
-                let binding = self.alloc_binding(it.name(), None, false, it.syntax());
+                let binding = self.alloc_binding(it.name(), None, it.is_mut(), it.syntax());
                 self.alloc_pat(PatData::Bind(binding), it.syntax())
             }
             ast::Pat::VariantPat(it) => {
@@ -1079,10 +1079,7 @@ impl LowerCtx {
                 let variant = it.variant_name_ref().map(|n| n.text()).unwrap_or_default();
                 let bindings = it
                     .bindings()
-                    .map(|name| {
-                        let node = name.syntax().clone();
-                        self.alloc_binding(Some(name), None, false, &node)
-                    })
+                    .map(|bind| self.alloc_binding(bind.name(), None, bind.is_mut(), bind.syntax()))
                     .collect();
                 let rest = it.rest_pat().is_some();
                 self.alloc_pat(

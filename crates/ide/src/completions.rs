@@ -764,11 +764,12 @@ fn classify(parent: &SyntaxNode) -> Option<Context> {
     // A bare pattern name: `BIND_PAT` wrapping a declaration `Name` (never
     // a `NameRef` — that's why this is checked before the `NameRef` cast
     // below). Only a match arm's own pattern is a completion context here:
-    // a `let`/parameter binding name is a brand-new name, nothing to
-    // complete — this falls through to `None` for that
-    // case since `parent` then fails the `NameRef` cast too.
+    // a `let`/parameter binding name, or one written after `mut`, is a
+    // brand-new name, nothing to complete — this falls through to `None`
+    // for that case since `parent` then fails the `NameRef` cast too.
     if let Some(name) = ast::Name::cast(parent.clone())
         && let Some(bind_pat) = name.syntax().parent().and_then(ast::BindPat::cast)
+        && !bind_pat.is_mut()
         && let Some(arm) = bind_pat.syntax().parent().and_then(ast::MatchArm::cast)
     {
         let match_expr = ast::MatchExpr::cast(arm.syntax().parent()?)?;
