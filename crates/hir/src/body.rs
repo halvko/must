@@ -1193,7 +1193,19 @@ impl LowerCtx {
                 ast::Stmt::ExprStmt(it) => Stmt::Expr(self.lower_opt_expr(it.expr())),
             })
             .collect();
-        let tail = block.tail_expr().map(|e| self.lower_expr(e));
+        // A block that ends in an `ERROR` (`{ 2,147 }`) has a broken tail,
+        // not none: it lowers as missing, so it traps instead of being `()`.
+        let tail = match block.tail_expr() {
+            Some(e) => Some(self.lower_expr(e)),
+            None if block
+                .syntax()
+                .last_child()
+                .is_some_and(|it| it.kind() == syntax::SyntaxKind::ERROR) =>
+            {
+                Some(self.missing_expr())
+            }
+            None => None,
+        };
         let id = self.alloc_expr(ExprData::Block { stmts, tail }, block.syntax());
         if let Some(brace) = block.r_brace_token() {
             self.source_map.exit_back.insert(id, brace.text_range());

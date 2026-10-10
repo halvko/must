@@ -493,6 +493,35 @@ fn missing_operand_traps() {
 }
 
 #[test]
+fn digit_group_commas_trap_instead_of_running_the_first_group() {
+    check_mir(
+        r#"
+static a: i64 = 1,000;
+static b = fn () -> i64 { -2,147 };
+"#,
+        expect![[r#"
+            item a:
+            item b:
+            fn b0() -> i64 {
+              _0: i64  // return
+              _1: {error}
+              bb0:
+                _1 = trap "syntax error: missing expression" -> bb1
+              bb1:
+                _0 = ()
+                return
+            }
+            fn b1() -> fn() -> i64 {
+              _0: fn() -> i64  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
 fn annotation_recovered_never_does_not_make_a_returning_call_diverge() {
     // Inference recovers `g()` as `!` (trusting the annotation); the call
     // must still get a return target — the mismatch is the trap after it.

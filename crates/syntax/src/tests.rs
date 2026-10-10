@@ -16881,3 +16881,61 @@ fn a_capability_bound_rides_the_ordinary_bounds_slot() {
         "#]],
     );
 }
+
+#[test]
+fn digit_group_commas_are_one_error_where_a_semicolon_is_owed() {
+    check_errors(
+        r#"
+static big: i64 = 1,000,000;
+static f = fn () -> i32 {
+    let min: i32 = 2,147,483,647;
+    x = 12,345;
+    -2,147,483,648
+};
+"#,
+        expect![[r#"
+            19..28: digit groups cannot be separated by `,`; use `_`
+            75..88: digit groups cannot be separated by `,`; use `_`
+            98..104: digit groups cannot be separated by `,`; use `_`
+            111..124: digit groups cannot be separated by `,`; use `_`
+        "#]],
+    );
+}
+
+#[test]
+fn digit_group_commas_fix_joins_the_groups_with_underscores() {
+    let text = "static f = fn () -> () { let min: i32 = 2,147,483,647; };";
+    let parse = crate::parse(text);
+    let errors = parse.errors();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    let fix = errors[0].fix.as_ref().expect("a fix");
+    assert_eq!(fix.label, "Write `2_147_483_647`");
+    let fixed = apply_fix(text, fix);
+    assert_eq!(
+        fixed,
+        "static f = fn () -> () { let min: i32 = 2_147_483_647; };"
+    );
+    assert!(crate::parse(&fixed).errors().is_empty());
+}
+
+#[test]
+fn digit_group_commas_leave_lists_and_other_shapes_alone() {
+    // A `,` that separates list elements is legal, and a spaced or
+    // non-3-digit group is not read as a digit group.
+    check_errors(
+        r#"
+static f = fn () -> () {
+    g(1,234);
+    let a = [1,234];
+    let b = 1, 234;
+    let c = 3,14;
+};
+"#,
+        expect![[r#"
+            73..74: expected `;`
+            74..75: expected an expression
+            93..94: expected `;`
+            94..95: expected an expression
+        "#]],
+    );
+}
