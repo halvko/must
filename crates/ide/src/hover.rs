@@ -201,8 +201,19 @@ pub(crate) fn hover(
 
     let value = value.map(|v| format!(" = {v}")).unwrap_or_default();
     let mut_prefix = if mutable { "mut " } else { "" };
+    // An enum's shape is not in its name, and it decides how the value is
+    // used (a `match`), so its declaration follows on the next line.
+    let decl = match &ty {
+        hir::Ty::Named(named) => enum_decl(db, named.decl.to_id(db))
+            .map(|decl| format!("\n{decl}"))
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
     Some(HoverResult {
-        markup: format!("```must\n{mut_prefix}{name}: {}{value}\n```", ty.display()),
+        markup: format!(
+            "```must\n{mut_prefix}{name}: {}{value}{decl}\n```",
+            ty.display()
+        ),
         range,
     })
 }
@@ -216,22 +227,36 @@ fn type_item_hover(
     item: hir::ItemId<'_>,
     range: TextRange,
 ) -> Option<HoverResult> {
+    Some(HoverResult {
+        markup: format!("```must\n{}\n```", type_item_decl(db, item)),
+        range,
+    })
+}
+
+/// A `type` item's declaration on one line.
+fn type_item_decl(db: &RootDatabase, item: hir::ItemId<'_>) -> String {
     let name = item.name(db);
-    let markup = if let Some(underlying) = hir::type_underlying(db, item) {
-        format!("```must\ntype {name} = {}\n```", underlying.display())
-    } else if let Some(variants) = hir::enum_variants(db, item) {
-        format!(
-            "```must\ntype {name} = enum {{ {} }}\n```",
-            variants
-                .iter()
-                .map(|(name, payload)| render_variant(name, payload))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
+    if let Some(underlying) = hir::type_underlying(db, item) {
+        format!("type {name} = {}", underlying.display())
+    } else if let Some(decl) = enum_decl(db, item) {
+        decl
     } else {
-        format!("```must\ntype {name}\n```")
-    };
-    Some(HoverResult { markup, range })
+        format!("type {name}")
+    }
+}
+
+/// An enum item's declaration on one line; `None` when `item` is no enum.
+fn enum_decl(db: &RootDatabase, item: hir::ItemId<'_>) -> Option<String> {
+    let variants = hir::enum_variants(db, item).as_ref()?;
+    let variants: Vec<String> = variants
+        .iter()
+        .map(|(name, payload)| hir::render_variant(name, payload))
+        .collect();
+    Some(format!(
+        "type {} = enum {{ {} }}",
+        item.name(db),
+        variants.join(", ")
+    ))
 }
 
 /// Hover for a `trait` item (on its declaration, a bound, an impl head or
@@ -285,27 +310,10 @@ fn variant_hover(
         markup: format!(
             "```must\n{}::{}\n```",
             loc.display_name(),
-            render_variant(variant, payload)
+            hir::render_variant(variant, payload)
         ),
         range,
     })
-}
-
-/// `Circle(usize)` / `Point` — a variant as its declaration writes it.
-/// `pub(crate)`: `completions`'s `::`-segment and match-arm-pattern
-/// candidates render a variant's payload signature the same way.
-pub(crate) fn render_variant(name: &str, payload: &[hir::Ty]) -> String {
-    if payload.is_empty() {
-        return name.to_owned();
-    }
-    format!(
-        "{name}({})",
-        payload
-            .iter()
-            .map(hir::Ty::display)
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
 }
 
 /// Hovering the `const` keyword of a `const { … }` block shows the block's

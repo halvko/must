@@ -51,7 +51,7 @@ pub use trap_sites::{
 pub use ty::{
     ConstArgValue, FnTy, GenericArg, IntKind, IntValue, NamedTy, ReceiverShape, Region, RegionVar,
     SelfPosition, Ty, VariantTy, dispatches_on, enum_variants, member_self_position,
-    member_self_ty, receiver_takes, signature, substitute_args, type_underlying,
+    member_self_ty, receiver_takes, render_variant, signature, substitute_args, type_underlying,
     type_underlying_for, variant_payloads_for, widens_to,
 };
 pub use unsafe_check::UnsafeCheckDiagnostic;
@@ -540,6 +540,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             };
             // Messages render in `InferenceDiagnostic::message` (shared with
             // MIR's traps); only ranges and related locations attach here.
+            let mut enum_note = None;
             let mut related = match diag {
                 InferenceDiagnostic::NeedsAnnotation { item, .. }
                 | InferenceDiagnostic::CannotInferGenericParam { item, .. } => item_name(item)
@@ -563,11 +564,18 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     })
                     .unwrap_or_default(),
                 InferenceDiagnostic::TypeMismatch {
-                    reasons, expected, ..
+                    reasons,
+                    expected,
+                    actual,
+                    ..
                 }
                 | InferenceDiagnostic::AllBranchesMismatch {
-                    reasons, expected, ..
+                    reasons,
+                    expected,
+                    actual,
+                    ..
                 } => {
+                    let mut operand = None;
                     // Resolve an expression to its AST node for hints that
                     // point at a sub-element (a return type, an operator
                     // token) rather than the whole expression.
@@ -674,13 +682,16 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                                 .collect(),
                             Cause::Operand(operand_expr) => source_map
                                 .node_for_expr(*operand_expr)
-                                .map(|ptr| RelatedInfo {
-                                    file,
-                                    range: ptr.text_range(),
-                                    message: format!(
-                                        "this operand has type `{}`",
-                                        expected.display()
-                                    ),
+                                .map(|ptr| {
+                                    operand.get_or_insert(ptr.text_range());
+                                    RelatedInfo {
+                                        file,
+                                        range: ptr.text_range(),
+                                        message: format!(
+                                            "this operand has type `{}`",
+                                            expected.display()
+                                        ),
+                                    }
                                 })
                                 .into_iter()
                                 .collect(),
@@ -872,7 +883,21 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                             }
                         }
                     };
-                    reasons.iter().flat_map(render_reason).collect()
+                    let related = reasons.iter().flat_map(render_reason).collect();
+                    // `==` between an enum and something else: say how to
+                    // look inside the enum, on whichever operand is one.
+                    if let Some(lhs) = operand {
+                        enum_note = match enum_comparison_note(db, expected, actual) {
+                            Some(note) => Some((lhs, note)),
+                            None => enum_comparison_note(db, actual, expected).map(|n| (range, n)),
+                        }
+                        .map(|(range, message)| RelatedInfo {
+                            file,
+                            range,
+                            message,
+                        });
+                    }
+                    related
                 }
                 InferenceDiagnostic::IfBranchMismatch {
                     then_expr, then_ty, ..
@@ -1059,6 +1084,9 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             // already looking at it (e.g. "this call requires `str`" on the
             // very call whose argument carries the mismatch).
             related.retain(|r| !(r.file == file && r.range.contains_range(range)));
+            // Added after the filter above, since the enum operand may be
+            // the squiggled one.
+            related.extend(enum_note);
             let fix = match diag {
                 // Insert `mut ` where the grammar has a slot for it before
                 // this binding — a `let`, a parameter, or a record-pattern
@@ -2713,6 +2741,44 @@ fn declared_here(db: &dyn Db, loc: &ItemLoc) -> Vec<RelatedInfo> {
             }]
         })
         .unwrap_or_default()
+}
+
+/// When `enum_ty` is an enum and `other` is a different type, the note that
+/// says to `match` on it: the variants whose payload carries an `other`, or
+/// every variant when none does.
+fn enum_comparison_note(db: &dyn Db, enum_ty: &Ty, other: &Ty) -> Option<String> {
+    let Ty::Named(named) = enum_ty else {
+        return None;
+    };
+    if let Ty::Named(NamedTy { decl, .. }) | Ty::Variant(VariantTy { decl, .. }) = other
+        && *decl == named.decl
+    {
+        return None;
+    }
+    let variants = enum_variants(db, named.decl.to_id(db)).as_ref()?;
+    let name = named.decl.display_name();
+    let mut carriers = Vec::new();
+    let mut all = Vec::new();
+    for (variant, payload) in variants {
+        let payload = ty::substitute_payload(payload, &named.decl, &named.args);
+        let rendered = format!("`{name}::{}`", render_variant(variant, &payload));
+        if payload.contains(other) {
+            carriers.push(rendered.clone());
+        }
+        all.push(rendered);
+    }
+    Some(if carriers.is_empty() {
+        format!(
+            "`{name}` is an enum: `match` on it to tell its variants apart ({})",
+            all.join(", ")
+        )
+    } else {
+        format!(
+            "`{name}` is an enum: `match` on it to get at the `{}` in {}",
+            other.display(),
+            carriers.join(" or ")
+        )
+    })
 }
 
 /// The enclosing generic binder's params, read syntactically — the mirror
