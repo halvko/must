@@ -8667,7 +8667,7 @@ fn a_user_member_shadows_the_builtin_next_char() {
     check_infer(
         r#"
 trait Chars = requires {
-    next_char: fn(i: usize, s: Self) -> usize;
+    next_char: fn(usize, Self) -> usize;
 } with {
     impl str {
         next_char = fn (i: usize, s: str) -> usize { i };
@@ -8678,14 +8678,14 @@ static f = fn (s: str) {
 };
 "#,
         expect![[r#"
-            175..218 'fn (s: str) {    ...': fn(str)
-            179..180 's': str
-            187..218 '{     let n = s.n...': ()
-            197..198 'n': usize
-            201..202 's': str
-            201..212 's.next_char': fn(usize, str) -> usize
-            201..215 's.next_char(0)': usize
-            213..214 '0': usize
+            169..212 'fn (s: str) {    ...': fn(str)
+            173..174 's': str
+            181..212 '{     let n = s.n...': ()
+            191..192 'n': usize
+            195..196 's': str
+            195..206 's.next_char': fn(usize, str) -> usize
+            195..209 's.next_char(0)': usize
+            207..208 '0': usize
         "#]],
     );
 }
@@ -10099,10 +10099,10 @@ static a: struct { n: usize } = struct { n: 1 };
 /// qualified short form. Must be diagnostics-clean.
 const TRAIT_FIXTURE: &str = r#"
 trait Write = requires {
-    push: fn(s: str, w: Self) -> Self;
+    push: fn(str, Self) -> Self;
 };
 trait Display = requires {
-    fmt: fn::<W: Write>(w: W, x: Self) -> W;
+    fmt: fn::<W: Write>(W, Self) -> W;
 } with {
     impl str {
         fmt = fn::<W: Write>(w: W, x: str) -> W { w.push(x) };
@@ -10149,14 +10149,14 @@ fn trait_fixture_is_clean() {
 fn duplicate_impl_names_both_sites() {
     check_diagnostics(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; } with {
+trait D = requires { m: fn(Self) -> usize; } with {
     impl usize { m = fn(x: usize) -> usize { 1 }; }
     impl usize { m = fn(x: usize) -> usize { 2 }; }
 };
 "#,
         expect![[r#"
-            117..122: duplicate impl of `D` for `usize` (first implemented here at 65..70)
-            125..126: duplicate member `m` (first defined here at 73..74)
+            114..119: duplicate impl of `D` for `usize` (first implemented here at 62..67)
+            122..123: duplicate member `m` (first defined here at 70..71)
         "#]],
     );
 }
@@ -10165,7 +10165,7 @@ trait D = requires { m: fn(x: Self) -> usize; } with {
 fn duplicate_impl_across_homes_names_both_sites() {
     check_diagnostics(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; } with {
+trait D = requires { m: fn(Self) -> usize; } with {
     impl P { m = fn(x: Self) -> usize { 1 }; }
 };
 type P = struct { a: usize } with {
@@ -10173,7 +10173,7 @@ type P = struct { a: usize } with {
 };
 "#,
         expect![[r#"
-            151..152: duplicate impl of `D` for `P` (first implemented here at 65..66)
+            148..149: duplicate impl of `D` for `P` (first implemented here at 62..63)
         "#]],
     );
 }
@@ -10182,13 +10182,13 @@ type P = struct { a: usize } with {
 fn impl_missing_and_extra_members() {
     check_diagnostics(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; } with {
+trait D = requires { m: fn(Self) -> usize; } with {
     impl usize { extra = fn(x: usize) -> usize { 1 }; }
 };
 "#,
         expect![[r#"
-            65..70: this impl of `D` is missing the member `m` (required by the trait here at 22..23)
-            73..78: `D` has no requirement `extra` (declared here at 7..8)
+            62..67: this impl of `D` is missing the member `m` (required by the trait here at 22..23)
+            70..75: `D` has no requirement `extra` (declared here at 7..8)
         "#]],
     );
 }
@@ -10197,12 +10197,12 @@ trait D = requires { m: fn(x: Self) -> usize; } with {
 fn impl_member_signature_mismatch() {
     check_diagnostics(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; } with {
+trait D = requires { m: fn(Self) -> usize; } with {
     impl usize { m = fn(x: usize) -> str { "s" }; }
 };
 "#,
         expect![[r#"
-            73..74: member `m` does not match `D`'s requirement: expected `fn(usize) -> usize`, found `fn(usize) -> str` (required by the trait here at 22..23)
+            70..71: member `m` does not match `D`'s requirement: expected `fn(usize) -> usize`, found `fn(usize) -> str` (required by the trait here at 22..23)
         "#]],
     );
 }
@@ -10211,15 +10211,15 @@ trait D = requires { m: fn(x: Self) -> usize; } with {
 fn impl_member_binder_mismatch() {
     check_diagnostics(
         r#"
-trait W = requires { p: fn(x: Self) -> usize; } with {
+trait W = requires { p: fn(Self) -> usize; } with {
     impl usize { p = fn(x: usize) -> usize { 1 }; }
 };
-trait D = requires { m: fn::<X: W>(v: X, x: Self) -> usize; } with {
+trait D = requires { m: fn::<X: W>(X, Self) -> usize; } with {
     impl usize { m = fn::<X: forget>(v: X, x: usize) -> usize { 1 }; }
 };
 "#,
         expect![[r#"
-            197..198: member `m`'s generic binder does not match `D`'s requirement (arity, kinds and bounds must agree) (required by the trait here at 132..133)
+            188..189: member `m`'s generic binder does not match `D`'s requirement (arity, kinds and bounds must agree) (required by the trait here at 129..130)
         "#]],
     );
 }
@@ -10280,7 +10280,7 @@ trait E = requires { } with {
 fn unsatisfied_bound_at_instantiation() {
     check_diagnostics(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; };
+trait D = requires { m: fn(Self) -> usize; };
 type P = struct { a: usize };
 static f = fn::<T: D>(x: T) -> usize { x.m() };
 static main = fn() -> () {
@@ -10289,7 +10289,7 @@ static main = fn() -> () {
 };
 "#,
         expect![[r#"
-            167..173: the bound `T: D` is not satisfied here: `P` does not implement `D`
+            164..170: the bound `T: D` is not satisfied here: `P` does not implement `D`
         "#]],
     );
 }
@@ -10300,7 +10300,7 @@ fn unsatisfied_bound_on_structural_type() {
     // types only), so a record can never satisfy a bound.
     check_diagnostics(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; };
+trait D = requires { m: fn(Self) -> usize; };
 static f = fn::<T: D>(x: T) -> usize { x.m() };
 static main = fn() -> () {
     let a = f(struct { q: usize = 1 });
@@ -10308,7 +10308,7 @@ static main = fn() -> () {
 };
 "#,
         expect![[r#"
-            137..138: the bound `T: D` is not satisfied here: `struct { q: usize }` does not implement `D`
+            134..135: the bound `T: D` is not satisfied here: `struct { q: usize }` does not implement `D`
         "#]],
     );
 }
@@ -10319,14 +10319,14 @@ fn bound_forwarding_requires_the_bound() {
     // is unsatisfied AT g's call of f — bodies check against bounds.
     check_diagnostics(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; } with {
+trait D = requires { m: fn(Self) -> usize; } with {
     impl usize { m = fn(x: usize) -> usize { x }; }
 };
 static f = fn::<T: D>(x: T) -> usize { x.m() };
 static g = fn::<T>(x: T) -> usize { f(x) };
 "#,
         expect![[r#"
-            195..196: the bound `T: D` is not satisfied here: `T` does not implement `D`
+            192..193: the bound `T: D` is not satisfied here: `T` does not implement `D`
         "#]],
     );
 }
@@ -10335,8 +10335,8 @@ static g = fn::<T>(x: T) -> usize { f(x) };
 fn ambiguous_member_and_qualified_disambiguation() {
     check_diagnostics(
         r#"
-trait A = requires { m: fn(x: Self) -> usize; } with { impl usize { m = fn(x: usize) -> usize { 1 }; } };
-trait B = requires { m: fn(x: Self) -> usize; } with { impl usize { m = fn(x: usize) -> usize { 2 }; } };
+trait A = requires { m: fn(Self) -> usize; } with { impl usize { m = fn(x: usize) -> usize { 1 }; } };
+trait B = requires { m: fn(Self) -> usize; } with { impl usize { m = fn(x: usize) -> usize { 2 }; } };
 static main = fn() -> () {
     let n: usize = 4;
     let x = n.m();
@@ -10345,7 +10345,7 @@ static main = fn() -> () {
 };
 "#,
         expect![[r#"
-            274..279: `m` is ambiguous on `usize`: it could be `A`'s member (`A::m(value)`) or `B`'s member (`B::m(value)`) — spell the one you mean (`A::m` for `usize` is defined here at 69..70) (`B::m` for `usize` is defined here at 175..176)
+            268..273: `m` is ambiguous on `usize`: it could be `A`'s member (`A::m(value)`) or `B`'s member (`B::m(value)`) — spell the one you mean (`A::m` for `usize` is defined here at 66..67) (`B::m` for `usize` is defined here at 169..170)
         "#]],
     );
 }
@@ -10355,22 +10355,22 @@ fn trait_member_shadows_field_under_call_syntax() {
     // `s.m()` picks the trait member; bare `s.m` stays the field.
     check_infer(
         r#"
-trait D = requires { m: fn(x: Self) -> str; };
+trait D = requires { m: fn(Self) -> str; };
 type S = struct { m: usize } with {
     impl D { m = fn(x: Self) -> str { "member" }; }
 };
 static f = fn(s: S) -> str { let a = s.m; s.m() };
 "#,
         expect![[r#"
-            150..188 'fn(s: S) -> str {...': fn(S) -> str
-            153..154 's': S
-            166..188 '{ let a = s.m; s....': str
-            172..173 'a': usize
-            176..177 's': S
-            176..179 's.m': usize
-            181..182 's': S
-            181..184 's.m': fn(S) -> str
-            181..186 's.m()': str
+            147..185 'fn(s: S) -> str {...': fn(S) -> str
+            150..151 's': S
+            163..185 '{ let a = s.m; s....': str
+            169..170 'a': usize
+            173..174 's': S
+            173..176 's.m': usize
+            178..179 's': S
+            178..181 's.m': fn(S) -> str
+            178..183 's.m()': str
         "#]],
     );
 }
@@ -10397,15 +10397,15 @@ fn bare_trait_member_value_needs_the_implementer() {
     // arguments are reserved (generic traits): a non-generic trait takes none.
     check_diagnostics(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; } with {
+trait D = requires { m: fn(Self) -> usize; } with {
     impl usize { m = fn(x: usize) -> usize { x }; }
 };
 static a = fn() -> usize { let f = D::m; 1 };
 static b = fn() -> usize { let n: usize = 1; D::<usize>::m(n) };
 "#,
         expect![[r#"
-            146..150: a member value is impl-specific, so it must name the implementer: `D::<Self = Type>::m`
-            202..215: `D` takes no generic arguments
+            143..147: a member value is impl-specific, so it must name the implementer: `D::<Self = Type>::m`
+            199..212: `D` takes no generic arguments
         "#]],
     );
 }
@@ -10417,15 +10417,15 @@ fn qualified_call_self_resolution_errors() {
     // named-Self form spells it — see `named_self_call_pins_self`).
     check_diagnostics(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; n: fn(k: usize) -> Self; } with {
+trait D = requires { m: fn(Self) -> usize; n: fn(usize) -> Self; } with {
     impl usize { m = fn(x: usize) -> usize { x }; n = fn(k: usize) -> usize { k }; }
 };
 static a = fn::<T>(x: T) -> usize { D::m(x) };
 static b = fn() -> usize { let v = D::n(3); 1 };
 "#,
         expect![[r#"
-            205..212: the bound `T: D` is not satisfied here: `T` does not implement `D`
-            251..258: cannot infer `Self` for `D::n`: no argument determines the implementing type — annotate an argument
+            199..206: the bound `T: D` is not satisfied here: `T` does not implement `D`
+            245..252: cannot infer `Self` for `D::n`: no argument determines the implementing type — annotate an argument
         "#]],
     );
 }
@@ -10434,7 +10434,7 @@ static b = fn() -> usize { let v = D::n(3); 1 };
 fn bound_fn_value_reserved() {
     check_diagnostics(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; } with {
+trait D = requires { m: fn(Self) -> usize; } with {
     impl usize { m = fn(x: usize) -> usize { x }; }
 };
 static f = fn::<T: D>(x: T) -> usize { x.m() };
@@ -10444,7 +10444,50 @@ static main = fn() -> () {
 };
 "#,
         expect![[r#"
-            198..208: `f` has bounds on its type parameters, so it cannot be used as a value yet; call it directly
+            195..205: `f` has bounds on its type parameters, so it cannot be used as a value yet; call it directly
+        "#]],
+    );
+}
+
+#[test]
+fn requirement_params_are_bare_types() {
+    // A requirement's signature is a type position with bare parameter
+    // types. Impl conformance, `Self`-parameter receiver detection (both the
+    // concrete and the bound-directed dot-call) and the region binder all
+    // read the types alone.
+    check_diagnostics(
+        r#"
+trait Write = requires { push: fn(str, Self) -> Self; };
+trait Display = requires {
+    fmt: fn::<@a, @b, W: Write>(W.&mut::<@a>, Self.&::<@b>) -> ();
+} with {
+    impl usize {
+        fmt = fn::<@a, @b, W: Write>(w: W.&mut::<@a>, x: usize.&::<@b>) -> () {};
+    }
+};
+type Sink = struct { n: usize } with {
+    impl Write {
+        push = fn(s: str, w: Self) -> Self { Sink(struct { n = w.n + 1 }) };
+    }
+};
+static direct = fn(s: Sink) -> Sink { s.push("x") };
+static generic = fn::<W: Write>(w: W) -> W { Write::push("x", w) };
+static shown = fn::<@z, @y, T: Display>(w: Sink.&mut::<@z>, t: T.&::<@y>) -> () {
+    t.fmt(w)
+};
+"#,
+        expect![[r#""#]],
+    );
+    // Conformance compares the types position by position.
+    check_diagnostics(
+        r#"
+trait Write = requires { push: fn(str, Self) -> Self; };
+type Sink = struct { n: usize } with {
+    impl Write { push = fn(s: usize, w: Self) -> Self { w }; }
+};
+"#,
+        expect![[r#"
+            114..118: member `push` does not match `Write`'s requirement: expected `fn(str, Sink) -> Sink`, found `fn(usize, Sink) -> Sink` (required by the trait here at 26..30)
         "#]],
     );
 }
@@ -10454,14 +10497,30 @@ fn requirement_rules() {
     check_diagnostics(
         r#"
 trait D = requires {
-    m: fn(x: Self) -> usize;
-    m: fn(x: Self) -> str;
-    n: fn(x, y: usize) -> usize;
+    m: fn(Self) -> usize;
+    m: fn(Self) -> str;
+    n: fn(_, usize) -> usize;
+    o: fn(Self);
+    p: fn -> usize;
 };
 "#,
         expect![[r#"
-            55..56: duplicate requirement `m`
-            82..83: requirement `n` must spell its full signature: every parameter and the return type
+            52..53: duplicate requirement `m`
+            76..77: requirement `n` must spell its full signature: every parameter's type and the return type
+            106..107: requirement `o` must spell its full signature: every parameter's type and the return type
+            129..131: expected `(`: function types are written `fn(...) -> ...`
+        "#]],
+    );
+    // A parameter with no type is reported by syntax, not again here.
+    check_diagnostics(
+        r#"
+trait D = requires {
+    m: fn(x: ) -> usize;
+};
+"#,
+        expect![[r#"
+            32..33: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
+            35..36: expected a type
         "#]],
     );
 }
@@ -10470,11 +10529,11 @@ trait D = requires {
 fn no_member_in_bounds_on_rigid_receiver() {
     check_diagnostics(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; };
+trait D = requires { m: fn(Self) -> usize; };
 static f = fn::<T: D>(x: T) -> usize { x.q() };
 "#,
         expect![[r#"
-            89..94: no field or member `q` on `T`
+            86..91: no field or member `q` on `T`
         "#]],
     );
 }
@@ -10486,8 +10545,8 @@ fn trait_member_call_types_flow() {
     // argument).
     check_infer(
         r#"
-trait W = requires { push: fn(s: str, w: Self) -> Self; };
-trait D = requires { fmt: fn::<X: W>(w: X, v: Self) -> X; } with {
+trait W = requires { push: fn(str, Self) -> Self; };
+trait D = requires { fmt: fn::<X: W>(X, Self) -> X; } with {
     impl usize { fmt = fn::<X: W>(w: X, v: usize) -> X { w.push("n") }; }
 };
 type S = struct { c: usize } with {
@@ -10496,16 +10555,16 @@ type S = struct { c: usize } with {
 static f = fn(n: usize) -> S { n.fmt(S(struct { c = 0 })) };
 "#,
         expect![[r#"
-            311..359 'fn(n: usize) -> S...': fn(usize) -> S
-            314..315 'n': usize
-            329..359 '{ n.fmt(S(struct ...': S
-            331..332 'n': usize
-            331..336 'n.fmt': fn(S, usize) -> S
-            331..357 'n.fmt(S(struct { ...': S
-            337..338 'S': fn(struct { c: usize }) -> S
-            337..356 'S(struct { c = 0 })': S
-            339..355 'struct { c = 0 }': struct { c: usize }
-            352..353 '0': usize
+            299..347 'fn(n: usize) -> S...': fn(usize) -> S
+            302..303 'n': usize
+            317..347 '{ n.fmt(S(struct ...': S
+            319..320 'n': usize
+            319..324 'n.fmt': fn(S, usize) -> S
+            319..345 'n.fmt(S(struct { ...': S
+            325..326 'S': fn(struct { c: usize }) -> S
+            325..344 'S(struct { c = 0 })': S
+            327..343 'struct { c = 0 }': struct { c: usize }
+            340..341 '0': usize
         "#]],
     );
 }
@@ -10519,7 +10578,7 @@ fn nested_fn_literal_cannot_use_enclosing_bounds() {
     // forwarding call forms).
     check_diagnostics(
         r#"
-trait Size = requires { size: fn(x: Self) -> usize; } with {
+trait Size = requires { size: fn(Self) -> usize; } with {
     impl usize { size = fn(x: usize) -> usize { x }; }
 };
 static bounded = fn::<T: Size>(x: T) -> usize { x.size() };
@@ -10530,8 +10589,8 @@ static outer = fn::<T: Size>(x: T, z: T) -> usize {
 };
 "#,
         expect![[r#"
-            264..272: code nested inside a bounded fn (a nested fn literal or a `const` block) cannot use the enclosing bounds yet (it would have to capture the dictionary)
-            308..315: code nested inside a bounded fn (a nested fn literal or a `const` block) cannot use the enclosing bounds yet (it would have to capture the dictionary)
+            261..269: code nested inside a bounded fn (a nested fn literal or a `const` block) cannot use the enclosing bounds yet (it would have to capture the dictionary)
+            305..312: code nested inside a bounded fn (a nested fn literal or a `const` block) cannot use the enclosing bounds yet (it would have to capture the dictionary)
         "#]],
     );
 }
@@ -10543,14 +10602,14 @@ fn const_block_cannot_use_enclosing_bounds() {
     // rejection fires alongside).
     check_diagnostics(
         r#"
-trait Size = requires { size: fn(x: Self) -> usize; } with {
+trait Size = requires { size: fn(Self) -> usize; } with {
     impl usize { size = fn(x: usize) -> usize { x }; }
 };
 static outer = fn::<T: Size>(x: T) -> usize { const { x.size() } };
 "#,
         expect![[r#"
-            174..180: cannot call a value in a const context; whether it is a `const fn` is not known from its type (this `const` block is a const context at 166..171)
-            174..182: code nested inside a bounded fn (a nested fn literal or a `const` block) cannot use the enclosing bounds yet (it would have to capture the dictionary)
+            171..177: cannot call a value in a const context; whether it is a `const fn` is not known from its type (this `const` block is a const context at 163..168)
+            171..179: code nested inside a bounded fn (a nested fn literal or a `const` block) cannot use the enclosing bounds yet (it would have to capture the dictionary)
         "#]],
     );
 }
@@ -10565,7 +10624,7 @@ fn qualified_variant_self_resolves_through_the_enum() {
 type Shape = enum { Circle(usize), Point } with {
     impl Id { id = fn(x: Self) -> Self { Shape::Point }; }
 };
-trait Id = requires { id: fn(x: Self) -> Self; };
+trait Id = requires { id: fn(Self) -> Self; };
 static main = fn() -> () {
     let c = Id::id(Shape::Circle(3));
     let r = match c { ::Circle(n) => n };
@@ -10573,7 +10632,7 @@ static main = fn() -> () {
 };
 "#,
         expect![[r#"
-            240..245: this `match` does not cover `Shape::Point`
+            237..242: this `match` does not cover `Shape::Point`
         "#]],
     );
 }
@@ -10585,7 +10644,7 @@ fn reserved_generic_trait_is_fully_non_live() {
     // dispatches through the reserved trait.
     check_diagnostics(
         r#"
-trait Gen = requires::<T> { get: fn(x: Self) -> usize; };
+trait Gen = requires::<T> { get: fn(Self) -> usize; };
 type X = struct { a: usize } with {
     impl Gen { get = fn(x: Self) -> usize { x.a }; }
 };
@@ -10594,10 +10653,10 @@ static g = fn(x: X) -> usize { Gen::get(x) };
 "#,
         expect![[r#"
             21..26: generic traits are not supported yet
-            104..107: `Gen` is a reserved generic trait (generic traits are not supported yet); it cannot be implemented
-            170..173: `Gen` is a reserved generic trait (generic traits are not supported yet); it cannot be a bound
-            192..199: no field or member `get` on `B`
-            234..242: `Gen` is a reserved generic trait (generic traits are not supported yet) and cannot be used
+            101..104: `Gen` is a reserved generic trait (generic traits are not supported yet); it cannot be implemented
+            167..170: `Gen` is a reserved generic trait (generic traits are not supported yet); it cannot be a bound
+            189..196: no field or member `get` on `B`
+            231..239: `Gen` is a reserved generic trait (generic traits are not supported yet) and cannot be used
         "#]],
     );
 }
@@ -10612,7 +10671,7 @@ fn trait_member_vs_fn_field_call_is_ambiguous() {
     // member-shadows-field rule.
     check_diagnostics(
         r#"
-trait Get = requires { get: fn(x: Self) -> usize; };
+trait Get = requires { get: fn(Self) -> usize; };
 type B = struct { get: fn() -> usize } with {
     impl Get { get = fn(x: Self) -> usize { 100 }; }
 };
@@ -10629,7 +10688,7 @@ static escapes = fn(b: B, c: C) -> usize {
 };
 "#,
         expect![[r#"
-            279..286: `get` is ambiguous on `B`: it could be `Get`'s member (`Get::get(value)`) or the fn-typed field (`(value.get)(...)`) — spell the one you mean (`Get::get` for `B` is defined here at 115..118)
+            276..283: `get` is ambiguous on `B`: it could be `Get`'s member (`Get::get(value)`) or the fn-typed field (`(value.get)(...)`) — spell the one you mean (`Get::get` for `B` is defined here at 112..115)
         "#]],
     );
 }
@@ -10659,7 +10718,7 @@ fn inherent_member_vs_trait_member_call_is_ambiguous() {
     // escapes are named, and both work.
     check_diagnostics(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; };
+trait D = requires { m: fn(Self) -> usize; };
 type P = struct { v: usize } with {
     impl Self { m = fn(x: Self) -> usize { 1 }; }
     impl D { m = fn(x: Self) -> usize { 2 }; }
@@ -10668,7 +10727,7 @@ static collides = fn(p: P) -> usize { p.m() };
 static escapes = fn(p: P) -> usize { P::m(p) + D::m(p) };
 "#,
         expect![[r#"
-            224..229: `m` is ambiguous on `P`: it could be the inherent member (`P::m(value)`) or `D`'s member (`D::m(value)`) — spell the one you mean (`P::m` is defined here at 102..103) (`D::m` for `P` is defined here at 149..150)
+            221..226: `m` is ambiguous on `P`: it could be the inherent member (`P::m(value)`) or `D`'s member (`D::m(value)`) — spell the one you mean (`P::m` is defined here at 99..100) (`D::m` for `P` is defined here at 146..147)
         "#]],
     );
 }
@@ -10679,7 +10738,7 @@ fn inherent_trait_and_field_call_is_ambiguous() {
     // candidate, in resolution order (inherent, traits, field).
     check_diagnostics(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; };
+trait D = requires { m: fn(Self) -> usize; };
 type P = struct { m: fn() -> usize } with {
     impl Self { m = fn(x: Self) -> usize { 1 }; }
     impl D { m = fn(x: Self) -> usize { 2 }; }
@@ -10688,7 +10747,7 @@ static collides = fn(p: P) -> usize { p.m() };
 static escapes = fn(p: P) -> usize { P::m(p) + D::m(p) + (p.m)() };
 "#,
         expect![[r#"
-            232..237: `m` is ambiguous on `P`: it could be the inherent member (`P::m(value)`), `D`'s member (`D::m(value)`), or the fn-typed field (`(value.m)(...)`) — spell the one you mean (`P::m` is defined here at 110..111) (`D::m` for `P` is defined here at 157..158)
+            229..234: `m` is ambiguous on `P`: it could be the inherent member (`P::m(value)`), `D`'s member (`D::m(value)`), or the fn-typed field (`(value.m)(...)`) — spell the one you mean (`P::m` is defined here at 107..108) (`D::m` for `P` is defined here at 154..155)
         "#]],
     );
 }
@@ -10699,7 +10758,7 @@ fn collision_leaves_bare_access_alone() {
     // more than one candidate to choose between.
     check_infer(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; };
+trait D = requires { m: fn(Self) -> usize; };
 type P = struct { m: fn() -> usize } with {
     impl Self { m = fn(x: Self) -> usize { 1 }; }
     impl D { m = fn(x: Self) -> usize { 2 }; }
@@ -10707,11 +10766,11 @@ type P = struct { m: fn() -> usize } with {
 static bare = fn(p: P) -> fn() -> usize { p.m };
 "#,
         expect![[r#"
-            208..241 'fn(p: P) -> fn() ...': fn(P) -> fn() -> usize
-            211..212 'p': P
-            234..241 '{ p.m }': fn() -> usize
-            236..237 'p': P
-            236..239 'p.m': fn() -> usize
+            205..238 'fn(p: P) -> fn() ...': fn(P) -> fn() -> usize
+            208..209 'p': P
+            231..238 '{ p.m }': fn() -> usize
+            233..234 'p': P
+            233..236 'p.m': fn() -> usize
         "#]],
     );
 }
@@ -10722,13 +10781,13 @@ fn bound_directed_collision_is_ambiguous() {
     // ambiguity, with the escapes naming the param.
     check_diagnostics(
         r#"
-trait A = requires { m: fn(x: Self) -> usize; };
-trait B = requires { m: fn(x: Self) -> usize; };
+trait A = requires { m: fn(Self) -> usize; };
+trait B = requires { m: fn(Self) -> usize; };
 static collides = fn::<T: A + B>(x: T) -> usize { x.m() };
 static escapes = fn::<T: A + B>(x: T, y: T) -> usize { A::m(x) + B::<Self = T>::m(y) };
 "#,
         expect![[r#"
-            149..154: `m` is ambiguous on `T`: it could be `A`'s member (`A::m(value)`) or `B`'s member (`B::m(value)`) — spell the one you mean (required by the trait here at 22..23) (required by the trait here at 71..72)
+            143..148: `m` is ambiguous on `T`: it could be `A`'s member (`A::m(value)`) or `B`'s member (`B::m(value)`) — spell the one you mean (required by the trait here at 22..23) (required by the trait here at 68..69)
         "#]],
     );
 }
@@ -10791,14 +10850,14 @@ fn qualified_member_path_reaches_inherent_members_only() {
     // member, and a trait member is spelled through its trait.
     check_diagnostics(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; };
+trait D = requires { m: fn(Self) -> usize; };
 type P = struct { v: usize } with {
     impl D { m = fn(x: Self) -> usize { 2 }; }
 };
 static main = fn(p: P) -> usize { P::m(p) };
 "#,
         expect![[r#"
-            170..174: `m` is not a member of `P` itself: `D` provides it — write `D::m(value)` (a trait member is spelled through its trait)
+            167..171: `m` is not a member of `P` itself: `D` provides it — write `D::m(value)` (a trait member is spelled through its trait)
         "#]],
     );
 }
@@ -11330,7 +11389,7 @@ fn trait_member_own_type_generic_arguments_are_spendable_in_both_forms() {
     // the one `matched_member_args` every member path shares.
     check_diagnostics(
         r#"
-trait D = requires { n: fn::<T: forget>(t: T, s: Self) -> usize; } with {
+trait D = requires { n: fn::<T: forget>(T, Self) -> usize; } with {
     impl usize { n = fn::<T: forget>(t: T, s: usize) -> usize { s }; }
 };
 static value = fn() -> usize {
@@ -11347,7 +11406,7 @@ static called = fn(s: usize) -> usize { D::n::<usize>(1, s) };
     // spelling collides with the separately reserved generic-trait form.
     check_diagnostics(
         r#"
-trait D = requires { n: fn(s: Self) -> usize; } with {
+trait D = requires { n: fn(Self) -> usize; } with {
     impl usize { n = fn(s: usize) -> usize { s }; }
 };
 static value = fn() -> usize {
@@ -11357,8 +11416,8 @@ static value = fn() -> usize {
 static called = fn(s: usize) -> usize { D::n::<usize>(s) };
 "#,
         expect![[r#"
-            154..183: `D::n` takes no generic arguments
-            234..250: `D::n` takes no generic arguments
+            151..180: `D::n` takes no generic arguments
+            231..247: `D::n` takes no generic arguments
         "#]],
     );
 }
@@ -11373,9 +11432,9 @@ fn a_member_reached_through_a_borrow_is_named_by_its_impl_head() {
     check_diagnostics(
         r#"
 trait Peek = requires {
-    none: fn::<@a>(s: Self.&::<@a>) -> usize;
-    one: fn::<@a, U: forget>(u: U, s: Self.&mut::<@a>) -> usize;
-    counted: fn::<@a, const N: usize>(s: Self.&::<@a>) -> usize;
+    none: fn::<@a>(Self.&::<@a>) -> usize;
+    one: fn::<@a, U: forget>(U, Self.&mut::<@a>) -> usize;
+    counted: fn::<@a, const N: usize>(Self.&::<@a>) -> usize;
 } with {
     impl usize {
         none = fn::<@a>(s: usize.&::<@a>) -> usize { 1 };
@@ -11388,9 +11447,9 @@ static f = fn::<@a>(n: usize.&::<@a>, m: usize.&mut::<@a>) -> usize {
 };
 "#,
         expect![[r#"
-            522..538: `usize::none` takes no generic arguments
-            541..565: `usize::one` takes 1 generic argument, found 2
-            568..584: `usize::counted` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)
+            510..526: `usize::none` takes no generic arguments
+            529..553: `usize::one` takes 1 generic argument, found 2
+            556..572: `usize::counted` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)
         "#]],
     );
 }
@@ -11402,17 +11461,17 @@ fn member_own_generic_arguments_on_a_trait_declaring_its_own_binder() {
     // fn's turbofish argument is.
     check_diagnostics(
         r#"
-trait Write = requires { push: fn(s: str, w: Self) -> Self; } with {
+trait Write = requires { push: fn(str, Self) -> Self; } with {
     impl usize { push = fn(s: str, w: usize) -> usize { w }; }
 };
-trait Display = requires { fmt: fn::<W: Write>(w: W, x: Self) -> W; } with {
+trait Display = requires { fmt: fn::<W: Write>(W, Self) -> W; } with {
     impl bool { fmt = fn::<W: Write>(w: W, x: bool) -> W { w }; }
 };
 static ok = fn(w: usize, x: bool) -> usize { Display::fmt::<usize>(w, x) };
 static bad = fn(w: str, x: bool) -> str { Display::fmt::<str>(w, x) };
 "#,
         expect![[r#"
-            400..425: the bound `W: Write` is not satisfied here: `str` does not implement `Write`
+            388..413: the bound `W: Write` is not satisfied here: `str` does not implement `Write`
         "#]],
     );
 }
@@ -11426,7 +11485,7 @@ fn member_own_generic_arguments_infer_the_owners_const_args_exactly_once() {
     // not two, in both the value and called forms.
     check_diagnostics(
         r#"
-trait D = requires { n: fn(k: usize) -> Self; } with {
+trait D = requires { n: fn(usize) -> Self; } with {
     impl usize { n = fn(k: usize) -> usize { k }; }
 };
 static value = fn() -> usize {
@@ -11436,13 +11495,13 @@ static value = fn() -> usize {
 static called = fn() -> usize { D::<const { 1 + true }>::n::<usize>(3) };
 "#,
         expect![[r#"
-            154..189: `D` takes no generic arguments
-            154..189: a member value is impl-specific, so it must name the implementer: `D::<Self = Type>::n`
-            170..174: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 168..169)
-            232..267: `D` takes no generic arguments
-            232..270: `D::n` takes no generic arguments
-            232..270: cannot infer `Self` for `D::n`: no argument determines the implementing type — annotate an argument
-            248..252: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 246..247)
+            151..186: `D` takes no generic arguments
+            151..186: a member value is impl-specific, so it must name the implementer: `D::<Self = Type>::n`
+            167..171: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 165..166)
+            229..264: `D` takes no generic arguments
+            229..267: `D::n` takes no generic arguments
+            229..267: cannot infer `Self` for `D::n`: no argument determines the implementing type — annotate an argument
+            245..249: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 243..244)
         "#]],
     );
 }
@@ -11746,7 +11805,7 @@ fn every_refused_member_turbofish_still_types_its_const_arguments() {
 type Shape = enum::<T> { Circle(T), Point } with {
     impl Self { keep = fn(s: Self) -> Self { s }; }
 };
-trait D = requires { n: fn(s: Self) -> usize; } with {
+trait D = requires { n: fn(Self) -> usize; } with {
     impl usize { n = fn(s: usize) -> usize { s }; }
 };
 static nope = fn() -> usize { Shape::missing::<const { 1 + true }>(1) };
@@ -11756,16 +11815,16 @@ static no_impl = fn() -> usize { let f = D::<Self = bool>::n::<const { 1 + true 
 static on_a_value = fn(n: usize) -> usize { n.oops::<const { 1 + true }>(); 0 };
 "#,
         expect![[r#"
-            254..261: `Shape` has no variant `missing` (`Shape` is defined here at 6..11)
-            276..280: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 274..275)
-            331..366: a variant has no generic arguments of its own: they belong to the owner — write `Shape::<...>::Circle`
-            359..363: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 357..358)
-            415..444: `D` has no requirement `gone`
-            437..441: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 435..436)
-            492..533: `bool` does not implement `D`
-            526..530: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 524..525)
-            584..614: no field or member `oops` on `usize`
-            605..609: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 603..604)
+            251..258: `Shape` has no variant `missing` (`Shape` is defined here at 6..11)
+            273..277: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 271..272)
+            328..363: a variant has no generic arguments of its own: they belong to the owner — write `Shape::<...>::Circle`
+            356..360: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 354..355)
+            412..441: `D` has no requirement `gone`
+            434..438: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 432..433)
+            489..530: `bool` does not implement `D`
+            523..527: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 521..522)
+            581..611: no field or member `oops` on `usize`
+            602..606: type mismatch: expected `{number}`, found `bool` (`+` requires `{number}` operands at 600..601)
         "#]],
     );
 }
@@ -11822,7 +11881,7 @@ fn a_binderless_member_refuses_even_an_empty_turbofish() {
 type Measured = struct { n: usize } with {
     impl Self { size = fn(m: Self) -> usize { m.n }; }
 };
-trait D = requires { n: fn(s: Self) -> usize; } with {
+trait D = requires { n: fn(Self) -> usize; } with {
     impl usize { n = fn(s: usize) -> usize { s }; }
 };
 static empty_inherent = fn(m: Measured) -> usize { m.size::<>() };
@@ -11830,9 +11889,9 @@ static empty_impl = fn(s: usize) -> usize { s.n::<>() };
 static empty_path = fn(m: Measured) -> usize { Measured::size::<>(m) };
 "#,
         expect![[r#"
-            263..275: `Measured::size` takes no generic arguments
-            323..332: `usize::n` takes no generic arguments
-            383..401: `Measured::size` takes no generic arguments
+            260..272: `Measured::size` takes no generic arguments
+            320..329: `usize::n` takes no generic arguments
+            380..398: `Measured::size` takes no generic arguments
         "#]],
     );
 }
@@ -11899,7 +11958,7 @@ fn a_written_region_is_refused_on_a_requirement_and_a_builtin() {
         r#"
 type Counter = struct { n: usize };
 trait Counted = requires {
-    count: fn::<@b, U>(alt: U, s: Self.&::<@b>) -> U;
+    count: fn::<@b, U>(U, Self.&::<@b>) -> U;
 } with {
     impl Counter { count = fn::<@b, U>(alt: U, s: Counter.&::<@b>) -> U { alt }; }
 };
@@ -11912,9 +11971,9 @@ static qualified = fn::<@z>(c: Counter.&::<@z>) -> usize {
 };
 "#,
         expect![[r#"
-            290..292: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
-            392..394: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
-            428..430: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            282..284: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            384..386: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            420..422: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
         "#]],
     );
 }
@@ -11930,7 +11989,7 @@ fn a_written_region_on_a_binderless_name_is_refused_the_same_way() {
     check_diagnostics(
         r#"
 type Holder = struct { go: fn(usize) -> usize };
-trait D = requires { n: fn(s: Self) -> usize; } with {
+trait D = requires { n: fn(Self) -> usize; } with {
     impl usize { n = fn(s: usize) -> usize { s }; }
 };
 static k = fn(x: usize) -> usize { x };
@@ -11947,15 +12006,15 @@ static main = fn::<@a>(p: usize.&::<@a>, h: Holder) -> usize {
 };
 "#,
         expect![[r#"
-            349..351: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
-            376..390: `k` takes no generic arguments
-            380..382: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
-            414..437: `regionless` takes no generic arguments
-            427..429: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
-            468..470: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
-            499..501: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
-            527..529: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
-            564..566: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            346..348: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            373..387: `k` takes no generic arguments
+            377..379: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            411..434: `regionless` takes no generic arguments
+            424..426: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            465..467: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            496..498: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            524..526: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
+            561..563: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
         "#]],
     );
 }
@@ -12067,7 +12126,7 @@ type Option = enum::<T> { Some(T), None } with {
         };
     }
 };
-trait Pk = requires { pick: fn::<U>(alt: U, s: Self) -> U; } with {
+trait Pk = requires { pick: fn::<U>(U, Self) -> U; } with {
     impl usize { pick = fn::<U>(alt: U, s: usize) -> U { alt }; }
 };
 static width = fn(n: usize) -> bool { n > 2 };
@@ -12078,11 +12137,11 @@ static trait_path = fn(n: usize) -> bool { Pk::pick::<Self = bool>(true, n) };
 static bound = fn::<T: Pk>(x: T) -> bool { x.pick::<Self = bool>(true) };
 "#,
         expect![[r#"
-            484..514: only a trait has a `Self` argument to name
-            567..596: only a trait has a `Self` argument to name
-            651..678: a member's own generic arguments are positional: `Self` is the owner's, one segment to the left (`Trait::<Self = Type>::member`)
-            725..757: a member's own generic arguments are positional: `Self` is the owner's, one segment to the left (`Trait::<Self = Type>::member`)
-            804..831: a member's own generic arguments are positional: `Self` is the owner's, one segment to the left (`Trait::<Self = Type>::member`)
+            476..506: only a trait has a `Self` argument to name
+            559..588: only a trait has a `Self` argument to name
+            643..670: a member's own generic arguments are positional: `Self` is the owner's, one segment to the left (`Trait::<Self = Type>::member`)
+            717..749: a member's own generic arguments are positional: `Self` is the owner's, one segment to the left (`Trait::<Self = Type>::member`)
+            796..823: a member's own generic arguments are positional: `Self` is the owner's, one segment to the left (`Trait::<Self = Type>::member`)
         "#]],
     );
 }
@@ -12104,7 +12163,7 @@ fn cannot_infer_a_member_own_param_names_the_spelling_that_pins_it() {
 type Option = enum { Some(usize), None } with {
     impl Self { fresh = fn::<U>(s: Self) -> U { panic("x") }; }
 };
-trait Mk = requires { mk: fn::<U>(s: Self) -> U; } with {
+trait Mk = requires { mk: fn::<U>(Self) -> U; } with {
     impl usize { mk = fn::<U>(s: usize) -> U { panic("x") }; }
 };
 static a = fn(o: Option) -> usize { o.fresh(); 1 };
@@ -12115,12 +12174,12 @@ static e = fn::<T: Mk>(x: T) -> usize { x.mk(); 1 };
 static f = fn(n: usize) -> usize { let g = Mk::<Self = usize>::mk; g(n); 1 };
 "#,
         expect![[r#"
-            276..285: cannot infer the type parameter `U` of `Option::fresh`; write `.fresh::<...>(...)` to specify it
-            328..341: cannot infer the type parameter `U` of `Option::fresh`; write `Option::fresh::<...>` to specify it
-            386..392: cannot infer the type parameter `U` of `usize::mk`; write `.mk::<...>(...)` to specify it
-            434..443: cannot infer the type parameter `U` of `Mk::mk`; write `Mk::mk::<...>` to specify it (defined here at 122..124)
-            490..496: cannot infer the type parameter `U` of `Mk::mk`; write `.mk::<...>(...)` to specify it (defined here at 122..124)
-            546..568: cannot infer the type parameter `U` of `Mk::mk`; write `Mk::<Self = usize>::mk::<...>` to specify it
+            273..282: cannot infer the type parameter `U` of `Option::fresh`; write `.fresh::<...>(...)` to specify it
+            325..338: cannot infer the type parameter `U` of `Option::fresh`; write `Option::fresh::<...>` to specify it
+            383..389: cannot infer the type parameter `U` of `usize::mk`; write `.mk::<...>(...)` to specify it
+            431..440: cannot infer the type parameter `U` of `Mk::mk`; write `Mk::mk::<...>` to specify it (defined here at 122..124)
+            487..493: cannot infer the type parameter `U` of `Mk::mk`; write `.mk::<...>(...)` to specify it (defined here at 122..124)
+            543..565: cannot infer the type parameter `U` of `Mk::mk`; write `Mk::<Self = usize>::mk::<...>` to specify it
         "#]],
     );
 }
@@ -12133,7 +12192,7 @@ fn a_bound_directed_dot_call_spends_a_member_turbofish() {
     // exactly as a concrete receiver's are.
     check_diagnostics(
         r#"
-trait D = requires { pick: fn::<U>(alt: U, s: Self) -> U; } with {
+trait D = requires { pick: fn::<U>(U, Self) -> U; } with {
     impl usize { pick = fn::<U>(alt: U, s: usize) -> U { alt }; }
 };
 static generic = fn::<T: D>(x: T) -> bool { x.pick::<bool>(true) };
@@ -12236,15 +12295,15 @@ fn a_member_own_const_argument_is_the_one_reservation_left() {
     // refusal is of the WHOLE list, in both the called and the dot forms.
     check_diagnostics(
         r#"
-trait D = requires { n: fn::<const N: usize>(s: Self) -> usize; } with {
+trait D = requires { n: fn::<const N: usize>(Self) -> usize; } with {
     impl usize { n = fn::<const N: usize>(s: usize) -> usize { N }; }
 };
 static called = fn(s: usize) -> usize { D::n::<3>(s) };
 static dotted = fn(s: usize) -> usize { s.n::<3>() };
 "#,
         expect![[r#"
-            187..199: `D::n` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)
-            243..253: `usize::n` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)
+            184..196: `D::n` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)
+            240..250: `usize::n` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)
         "#]],
     );
 }
@@ -12276,7 +12335,7 @@ fn named_self_call_pins_an_uninferable_self() {
     // the named-Self form states it — much of its point.
     check_diagnostics(
         r#"
-trait D = requires { n: fn(k: usize) -> Self; } with {
+trait D = requires { n: fn(usize) -> Self; } with {
     impl usize { n = fn(k: usize) -> usize { k }; }
 };
 static main = fn() -> usize { D::<Self = usize>::n(3) };
@@ -12289,7 +12348,7 @@ static main = fn() -> usize { D::<Self = usize>::n(3) };
 fn named_self_call_on_a_rigid_self_dispatches_through_the_dictionary() {
     check_diagnostics(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; } with {
+trait D = requires { m: fn(Self) -> usize; } with {
     impl usize { m = fn(x: usize) -> usize { x }; }
 };
 static f = fn::<T: D>(x: T) -> usize { D::<Self = T>::m(x) };
@@ -12306,14 +12365,14 @@ fn named_self_member_value_is_impl_specific() {
     // capture wall as `BoundFnValue`.
     check_diagnostics(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; } with {
+trait D = requires { m: fn(Self) -> usize; } with {
     impl usize { m = fn(x: usize) -> usize { x }; }
 };
 static ok = fn() -> usize { let f = D::<Self = usize>::m; f(4) };
 static reserved = fn::<T: D>(x: T) -> usize { let f = D::<Self = T>::m; f(x) };
 "#,
         expect![[r#"
-            231..247: `D::m` on a rigid `Self` comes from the enclosing dictionary, so it cannot be used as a value yet; call it directly
+            228..244: `D::m` on a rigid `Self` comes from the enclosing dictionary, so it cannot be used as a value yet; call it directly
         "#]],
     );
 }
@@ -12324,7 +12383,7 @@ fn named_self_argument_list_rules() {
     // non-generic trait takes no positional arguments of its own.
     check_diagnostics(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; } with {
+trait D = requires { m: fn(Self) -> usize; } with {
     impl usize { m = fn(x: usize) -> usize { x }; }
 };
 static a = fn() -> usize { D::<Self = usize, Self = usize>::m(1) };
@@ -12336,11 +12395,11 @@ type Pair = struct::<T> { a: T, b: T };
 static e = fn(p: Pair::<Self = usize>) -> usize { 1 };
 "#,
         expect![[r#"
-            138..172: `Self` is given more than once
-            206..237: `W` cannot be supplied by name: `Self` is the only nameable generic argument (`Trait::<Self = Type>::member`)
-            271..298: `D` takes no generic arguments
-            340..358: only a trait has a `Self` argument to name
-            467..479: only a trait has a `Self` argument to name
+            135..169: `Self` is given more than once
+            203..234: `W` cannot be supplied by name: `Self` is the only nameable generic argument (`Trait::<Self = Type>::member`)
+            268..295: `D` takes no generic arguments
+            337..355: only a trait has a `Self` argument to name
+            464..476: only a trait has a `Self` argument to name
         "#]],
     );
 }
@@ -12359,20 +12418,20 @@ fn named_self_argument_may_not_be_a_hole() {
     // `D::m(v)` — and both short and full spellings still work below.
     check_diagnostics(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; } with {
+trait D = requires { m: fn(Self) -> usize; } with {
     impl usize { m = fn(x: usize) -> usize { x }; }
 };
 type Pair = struct::<T> { a: T, b: T };
-trait E = requires { n: fn(x: Self) -> usize; };
+trait E = requires { n: fn(Self) -> usize; };
 static a = fn(v: usize) -> usize { D::<Self = _>::m(v) };
 static b = fn() -> () { let f = D::<Self = _>::m; };
 static c = fn() -> () { let f = E::<Self = Pair::<_>>::n; };
 static ok = fn(v: usize) -> usize { D::<Self = usize>::m(v) + D::m(v) };
 "#,
         expect![[r#"
-            235..251: `Self` names the implementer, so it cannot be `_`: write the type (`Trait::<Self = Type>::member`), or use the short form `Trait::member(...)` where an argument determines `Self`
-            290..306: `Self` names the implementer, so it cannot be `_`: write the type (`Trait::<Self = Type>::member`), or use the short form `Trait::member(...)` where an argument determines `Self`
-            343..367: `Self` names the implementer, so it cannot be `_`: write the type (`Trait::<Self = Type>::member`), or use the short form `Trait::member(...)` where an argument determines `Self`
+            229..245: `Self` names the implementer, so it cannot be `_`: write the type (`Trait::<Self = Type>::member`), or use the short form `Trait::member(...)` where an argument determines `Self`
+            284..300: `Self` names the implementer, so it cannot be `_`: write the type (`Trait::<Self = Type>::member`), or use the short form `Trait::member(...)` where an argument determines `Self`
+            337..361: `Self` names the implementer, so it cannot be `_`: write the type (`Trait::<Self = Type>::member`), or use the short form `Trait::member(...)` where an argument determines `Self`
         "#]],
     );
 }
@@ -12383,10 +12442,10 @@ fn named_self_reservations_survive() {
     // bounded-value capture wall are untouched by the named-Self form.
     check_diagnostics(
         r#"
-trait Gen = requires::<T> { g: fn(x: Self) -> T; };
+trait Gen = requires::<T> { g: fn(Self) -> T; };
 trait D = requires {
     type Item;
-    m: fn::<W: D + forget>(w: W, x: Self) -> usize;
+    m: fn::<W: D + forget>(W, Self) -> usize;
 } with {
     impl usize { m = fn::<W: D + forget>(w: W, x: usize) -> usize { x }; }
 };
@@ -12396,10 +12455,10 @@ static c = fn(x: usize) -> usize { let f = D::<Self = usize>::m; 1 };
 "#,
         expect![[r#"
             21..26: generic traits are not supported yet
-            78..82: associated types are not supported yet
-            263..286: `D::Item` is an associated type; associated types are not supported yet
-            325..347: `Gen` is a reserved generic trait (generic traits are not supported yet) and cannot be used
-            397..417: `D::m` has bounds on its type parameters, so it cannot be used as a value yet; call it directly
+            75..79: associated types are not supported yet
+            254..277: `D::Item` is an associated type; associated types are not supported yet
+            316..338: `Gen` is a reserved generic trait (generic traits are not supported yet) and cannot be used
+            388..408: `D::m` has bounds on its type parameters, so it cannot be used as a value yet; call it directly
         "#]],
     );
 }
@@ -12409,7 +12468,7 @@ fn bounded_fn_as_value_reports_once() {
     // The reservation is the whole story — no cannot-infer sibling.
     check_diagnostics(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; } with {
+trait D = requires { m: fn(Self) -> usize; } with {
     impl usize { m = fn(x: usize) -> usize { x }; }
 };
 static bounded = fn::<T: D>(x: T) -> usize { x.m() };
@@ -12419,7 +12478,7 @@ static main = fn() -> () {
 };
 "#,
         expect![[r#"
-            204..211: `bounded` has bounds on its type parameters, so it cannot be used as a value yet; call it directly
+            201..208: `bounded` has bounds on its type parameters, so it cannot be used as a value yet; call it directly
         "#]],
     );
 }
@@ -13406,11 +13465,11 @@ fn a_trait_requirement_may_carry_a_region_binder() {
     check_diagnostics(
         r#"
 type Cell = struct { n: usize };
-trait A = requires { f: fn(x: usize, s: Self) -> usize; }
+trait A = requires { f: fn(usize, Self) -> usize; }
   with { impl Cell { f = fn(x: usize, s: Self) -> usize { x }; } };
-trait B = requires { g: fn::<T: forget>(x: T, s: Self) -> usize; }
+trait B = requires { g: fn::<T: forget>(T, Self) -> usize; }
   with { impl Cell { g = fn::<T: forget>(x: T, s: Self) -> usize { 1 }; } };
-trait C = requires { h: fn::<@b>(x: usize.&::<@b>, s: Self) -> usize; }
+trait C = requires { h: fn::<@b>(usize.&::<@b>, Self) -> usize; }
   with { impl Cell { h = fn::<@b>(x: usize.&::<@b>, s: Self) -> usize { 1 }; } };
 "#,
         expect![""],
@@ -13427,21 +13486,21 @@ fn a_region_binders_outlives_bounds_must_agree_positionally() {
     check_diagnostics(
         r#"
 type Cell = struct { n: usize };
-trait Renamed = requires { f: fn::<@a, @b: @a>(p: usize.&::<@b>, s: Self) -> usize; }
+trait Renamed = requires { f: fn::<@a, @b: @a>(usize.&::<@b>, Self) -> usize; }
   with { impl Cell { f = fn::<@x, @y: @x>(p: usize.&::<@y>, s: Self) -> usize { 1 }; } };
 "#,
         expect![[r#"
-            141..142: member `f` does not match `Renamed`'s requirement: expected `fn(usize.&::<@b>, Cell) -> usize`, found `fn(usize.&::<@y>, Cell) -> usize` (required by the trait here at 61..62)
+            135..136: member `f` does not match `Renamed`'s requirement: expected `fn(usize.&::<@b>, Cell) -> usize`, found `fn(usize.&::<@y>, Cell) -> usize` (required by the trait here at 61..62)
         "#]],
     );
     check_diagnostics(
         r#"
 type Cell = struct { n: usize };
-trait Dropped = requires { f: fn::<@a, @b: @a>(p: usize.&::<@b>, s: Self) -> usize; }
+trait Dropped = requires { f: fn::<@a, @b: @a>(usize.&::<@b>, Self) -> usize; }
   with { impl Cell { f = fn::<@x, @y>(p: usize.&::<@y>, s: Self) -> usize { 1 }; } };
 "#,
         expect![[r#"
-            141..142: member `f`'s generic binder does not match `Dropped`'s requirement (arity, kinds and bounds must agree) (required by the trait here at 61..62)
+            135..136: member `f`'s generic binder does not match `Dropped`'s requirement (arity, kinds and bounds must agree) (required by the trait here at 61..62)
         "#]],
     );
 }
@@ -13456,7 +13515,7 @@ fn a_borrow_self_requirement_is_reachable_both_ways() {
         r#"
 type Cell = struct { n: usize };
 trait Readable = requires {
-    read: fn::<@r>(s: Self.&::<@r>) -> usize;
+    read: fn::<@r>(Self.&::<@r>) -> usize;
 } with {
     impl Cell { read = fn::<@r>(s: Cell.&::<@r>) -> usize { s.*.n }; }
 };
@@ -13477,7 +13536,7 @@ fn the_receiver_shape_table_is_the_same_on_a_rigid_receiver() {
         r#"
 type Cell = struct { n: usize };
 trait Bump = requires {
-    bump: fn::<@r>(s: Self.&mut::<@r>) -> ();
+    bump: fn::<@r>(Self.&mut::<@r>) -> ();
 } with {
     impl Cell { bump = fn::<@r>(s: Cell.&mut::<@r>) -> () { s.*.n = 1; }; }
 };
@@ -13486,8 +13545,8 @@ static shared = fn::<@z, T: Bump>(t: T.&::<@z>) -> () { t.bump() };
 static exclusive = fn::<@z, T: Bump>(t: T.&mut::<@z>) -> () { t.bump() };
 "#,
         expect![[r#"
-            235..243: `bump` takes `Self.&mut`, and a borrow is never inserted for an owned receiver — write `.&mut.bump(...)`
-            303..311: `bump` takes `Self.&mut`, but `T.&::<@z>` is a shared borrow — a shared borrow never becomes exclusive
+            232..240: `bump` takes `Self.&mut`, and a borrow is never inserted for an owned receiver — write `.&mut.bump(...)`
+            300..308: `bump` takes `Self.&mut`, but `T.&::<@z>` is a shared borrow — a shared borrow never becomes exclusive
         "#]],
     );
 }
@@ -14392,13 +14451,13 @@ fn an_extern_items_declared_type_carries_its_price() {
     // owns no syntax node (nothing here is that expression), so the type is
     // read where a reader can see it: at a mention.
     check_infer(
-        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> i64;\n\
          static held = fn() -> () { let f = read; };",
         expect![[r#"
-            89..117 'fn() -> () { let ...': fn()
-            100..117 '{ let f = read; }': ()
-            106..107 'f': unsafe fn(u8.&raw mut, usize) -> i64
-            110..114 'read': unsafe fn(u8.&raw mut, usize) -> i64
+            79..107 'fn() -> () { let ...': fn()
+            90..107 '{ let f = read; }': ()
+            96..97 'f': unsafe fn(u8.&raw mut, usize) -> i64
+            100..104 'read': unsafe fn(u8.&raw mut, usize) -> i64
         "#]],
     );
 }
@@ -14410,13 +14469,13 @@ fn an_extern_items_unwritten_return_type_is_unit() {
     // missing return can mean here is "nothing comes back". (Every other fn
     // type's elided return is still inference's business.)
     check_infer(
-        "unsafe extern static tick: unsafe fn(n: i64);\n\
+        "unsafe extern static tick: unsafe fn(i64);\n\
          static held = fn() -> () { let f = tick; };",
         expect![[r#"
-            60..88 'fn() -> () { let ...': fn()
-            71..88 '{ let f = tick; }': ()
-            77..78 'f': unsafe fn(i64)
-            81..85 'tick': unsafe fn(i64)
+            57..85 'fn() -> () { let ...': fn()
+            68..85 '{ let f = tick; }': ()
+            74..75 'f': unsafe fn(i64)
+            78..82 'tick': unsafe fn(i64)
         "#]],
     );
 }
@@ -14424,10 +14483,10 @@ fn an_extern_items_unwritten_return_type_is_unit() {
 #[test]
 fn calling_an_extern_item_outside_unsafe_is_rejected() {
     check_diagnostics(
-        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> i64;\n\
          static f = fn(p: u8.&raw mut) -> i64 { read(p, 1) };",
         expect![[r#"
-            114..124: calling the `extern` item `read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
+            104..114: calling the `extern` item `read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
         "#]],
     );
 }
@@ -14439,10 +14498,10 @@ fn calling_an_extern_item_in_a_const_context_is_rejected() {
     // is no const spelling of one to reach for. The honest refusal names
     // the missing host.
     check_diagnostics(
-        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> i64;\n\
          static f = const fn(p: u8.&raw mut) -> i64 { unsafe { read(p, 1) } };",
         expect![[r#"
-            129..133: cannot call the `extern` item `read` in a const context; there is no host at compile time (this `const fn` is always a const context at 86..91)
+            119..123: cannot call the `extern` item `read` in a const context; there is no host at compile time (this `const fn` is always a const context at 76..81)
         "#]],
     );
 }
@@ -14456,13 +14515,13 @@ fn taking_an_extern_item_as_a_value_is_free_and_its_call_is_gated() {
     // one a reader of the call can act on. Binding, passing and returning
     // an `extern` item are now ordinary things to do.
     check_diagnostics(
-        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;\n\
+        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;\n\
          static bound = fn() -> () { let f = read; };\n\
          static loose = fn(p: u8.&raw mut) -> isize { let f = read; f(p, 1) };\n\
          static vouched = fn(p: u8.&raw mut) -> isize { let f = read; unsafe { f(p, 1) } };\n\
          static called = fn(p: u8.&raw mut) -> isize { unsafe { read(p, 1) } };",
         expect![[r#"
-            181..188: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            171..178: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -14474,7 +14533,7 @@ fn one_signature_two_spellings_is_one_type() {
     // at the syntax layer, so the two spellings must be the same type —
     // otherwise a signature would depend on whether someone wrote `buf`.
     check_diagnostics(
-        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;\n\
+        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;\n\
          static held: unsafe fn(u8.&raw mut, usize) -> isize = read;",
         expect![[""]],
     );
@@ -14490,12 +14549,12 @@ fn an_extern_static_with_an_initializer_is_an_ordinary_item() {
     // ORDINARY message (advice that can be taken — mark it `const fn`)
     // rather than the `extern` one (advice that cannot).
     check_diagnostics(
-        "unsafe extern static bad: unsafe fn(n: i64) -> i64 = fn(n: i64) -> i64 { n };\n\
+        "unsafe extern static bad: unsafe fn(i64) -> i64 = fn(n: i64) -> i64 { n };\n\
          static f = fn() -> i64 { unsafe { bad(1) } };\n\
          static g = const fn() -> i64 { unsafe { bad(1) } };",
         expect![[r#"
-            51..76: an `extern static` has no initializer: the declaration is the whole contract, and an `extern` item sets nothing to anything
-            164..167: cannot call `bad` in a const context; marking it `const fn` would allow this (`bad` is defined here at 21..24) (this `const fn` is always a const context at 135..140)
+            48..73: an `extern static` has no initializer: the declaration is the whole contract, and an `extern` item sets nothing to anything
+            161..164: cannot call `bad` in a const context; marking it `const fn` would allow this (`bad` is defined here at 21..24) (this `const fn` is always a const context at 132..137)
         "#]],
     );
 }
@@ -14508,10 +14567,10 @@ fn an_extern_items_contract_admits_no_holes() {
     // error here — otherwise the mention would read a free variable and the
     // use site would be told to annotate a definition that already is.
     check_diagnostics(
-        "unsafe extern static f: unsafe fn(n: _) -> i64;\n\
+        "unsafe extern static f: unsafe fn(_) -> i64;\n\
          static g = fn() -> i64 { unsafe { f(1) } };",
         expect![[r#"
-            37..38: an `extern` item's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
+            34..35: an `extern` item's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
         "#]],
     );
 }
@@ -14580,7 +14639,7 @@ fn a_safe_typed_extern_item_still_has_no_host_at_compile_time() {
 /// A safe function, an `extern` item (`unsafe fn`), and a higher-order
 /// function that takes either — the shapes every test below draws from.
 const UNSAFE_FN_PRELUDE: &str = "\
-unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
+unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;
 static safe_read = fn(buf: u8.&raw mut, len: usize) -> isize { 0 };
 ";
 
@@ -14624,7 +14683,7 @@ fn an_unsafe_fn_does_not_coerce_to_a_safe_fn() {
     check_unsafe_fn(
         "static f = fn() -> () { let g: fn(u8.&raw mut, usize) -> isize = read; };",
         expect![[r#"
-            210..214: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize` (expected `fn(u8.&raw mut, usize) -> isize` because of this annotation at 176..207)
+            200..204: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize` (expected `fn(u8.&raw mut, usize) -> isize` because of this annotation at 166..197)
         "#]],
     );
 }
@@ -14635,7 +14694,7 @@ fn calling_a_let_bound_unsafe_fn_needs_the_marker() {
         "static f = fn(p: u8.&raw mut) -> isize { let g = read; g(p, 1) };\n\
          static ok = fn(p: u8.&raw mut) -> isize { let g = read; unsafe { g(p, 1) } };",
         expect![[r#"
-            200..207: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            190..197: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -14648,7 +14707,7 @@ fn calling_an_unsafe_fn_parameter_needs_the_marker() {
         "static apply = fn(g: unsafe fn(u8.&raw mut, usize) -> isize, p: u8.&raw mut) -> isize { g(p, 1) };\n\
          static ok = fn(g: unsafe fn(u8.&raw mut, usize) -> isize, p: u8.&raw mut) -> isize { unsafe { g(p, 1) } };",
         expect![[r#"
-            233..240: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            223..230: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -14659,7 +14718,7 @@ fn calling_an_unsafe_fn_returned_from_a_function_needs_the_marker() {
         "static pick = fn() -> unsafe fn(u8.&raw mut, usize) -> isize { read };\n\
          static f = fn(p: u8.&raw mut) -> isize { pick()(p, 1) };",
         expect![[r#"
-            257..269: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            247..259: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -14671,7 +14730,7 @@ fn calling_an_unsafe_fn_out_of_a_record_field_needs_the_marker() {
              let h = struct { go = read }; h.go(p, 1) \
          };",
         expect![[r#"
-            216..226: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            206..216: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -14722,8 +14781,8 @@ fn the_conversion_is_shallow_but_a_literal_is_checked_per_part() {
              let h: fn() -> unsafe fn(usize) -> usize = g; \
          };",
         expect![[r#"
-            407..408: type mismatch: expected `struct { go: unsafe fn(u8.&raw mut, usize) -> isize }`, found `struct { go: fn(u8.&raw mut, usize) -> isize }` (expected `struct { go: unsafe fn(u8.&raw mut, usize) -> isize }` because of this annotation at 351..404)
-            516..517: type mismatch: expected `fn() -> unsafe fn(usize) -> usize`, found `fn() -> fn(usize) -> usize` (expected `fn() -> unsafe fn(usize) -> usize` because of this annotation at 480..513)
+            397..398: type mismatch: expected `struct { go: unsafe fn(u8.&raw mut, usize) -> isize }`, found `struct { go: fn(u8.&raw mut, usize) -> isize }` (expected `struct { go: unsafe fn(u8.&raw mut, usize) -> isize }` because of this annotation at 341..394)
+            506..507: type mismatch: expected `fn() -> unsafe fn(usize) -> usize`, found `fn() -> fn(usize) -> usize` (expected `fn() -> unsafe fn(usize) -> usize` because of this annotation at 470..503)
         "#]],
     );
 }
@@ -14739,7 +14798,7 @@ fn a_safe_fn_parameter_refuses_an_unsafe_fn() {
          };\n\
          static f = fn(p: u8.&raw mut) -> isize { apply(read, p) };",
         expect![[r#"
-            284..288: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize`
+            274..278: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize`
         "#]],
     );
 }
@@ -14767,7 +14826,7 @@ fn a_generic_instantiated_at_an_unsafe_fn_keeps_the_price() {
          static f = fn(p: u8.&raw mut) -> isize { id(read)(p, 1) };\n\
          static ok = fn(p: u8.&raw mut) -> isize { unsafe { id(read)(p, 1) } };",
         expect![[r#"
-            224..238: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            214..228: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -14830,7 +14889,7 @@ fn an_item_level_unsafe_fn_annotation_lowers_the_same() {
         "static vouching: unsafe fn(u8.&raw mut, usize) -> isize = safe_read;\n\
          static f = fn(p: u8.&raw mut) -> isize { vouching(p, 1) };",
         expect![[r#"
-            255..269: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            245..259: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -14865,7 +14924,7 @@ fn a_join_of_unsafe_fns_is_an_unsafe_fn_and_its_call_is_gated() {
              let g = if c { read } else { read }; unsafe { g(p, n) } \
          };",
         expect![[r#"
-            246..253: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            236..243: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -14897,8 +14956,8 @@ fn a_match_join_and_a_loop_break_join_mint_the_same_way() {
              let g = loop { if c { break read; }; break read; }; g(p, len) \
          };",
         expect![[r#"
-            258..267: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
-            392..401: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            248..257: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            382..391: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -14918,7 +14977,7 @@ fn a_join_mixing_a_safe_fn_and_an_unsafe_fn_settles_on_the_unsafe_one() {
              let g = if c { read } else { safe_read }; unsafe { g(p, n) } \
          };",
         expect![[r#"
-            251..258: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            241..248: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -14943,8 +15002,8 @@ fn a_chain_of_pending_joins_is_followed_to_its_unsafe_witness() {
              let g = if c { h } else { h }; unsafe { g(p, n) } \
          };",
         expect![[r#"
-            286..293: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
-            446..453: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            276..283: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
+            436..443: calling a value of `unsafe fn` type requires an `unsafe { ... }` block
         "#]],
     );
 }
@@ -14990,7 +15049,7 @@ fn an_unconsumed_mixed_safety_join_is_a_branch_disagreement() {
     check_unsafe_fn(
         "static f = fn(c: bool) -> () { let g = if c { read } else { safe_read }; };",
         expect![[r#"
-            205..214: `if` branches have incompatible types: `unsafe fn(u8.&raw mut, usize) -> isize` vs `fn(u8.&raw mut, usize) -> isize`; add a type annotation to decide between them (this branch has type `unsafe fn(u8.&raw mut, usize) -> isize` at 191..195)
+            195..204: `if` branches have incompatible types: `unsafe fn(u8.&raw mut, usize) -> isize` vs `fn(u8.&raw mut, usize) -> isize`; add a type annotation to decide between them (this branch has type `unsafe fn(u8.&raw mut, usize) -> isize` at 181..185)
         "#]],
     );
 }
@@ -15025,7 +15084,7 @@ fn a_join_still_refuses_an_unsafe_fn_where_a_safe_fn_is_demanded() {
              let g: fn(u8.&raw mut, usize) -> isize = if c { read } else { safe_read }; \
          };",
         expect![[r#"
-            224..228: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize` (expected `fn(u8.&raw mut, usize) -> isize` because of this annotation at 183..214)
+            214..218: type mismatch: expected `fn(u8.&raw mut, usize) -> isize`, found `unsafe fn(u8.&raw mut, usize) -> isize` (expected `fn(u8.&raw mut, usize) -> isize` because of this annotation at 173..204)
         "#]],
     );
 }
@@ -15754,7 +15813,7 @@ fn a_trait_named_after_a_capability_is_declarable_and_unreachable() {
     // only its reachability is surprising.
     check_diagnostics(
         r#"
-trait forget = requires { m: fn(s: Self) -> usize; };
+trait forget = requires { m: fn(Self) -> usize; };
 static f = fn::<T: forget>(t: T) -> usize { 1 };
 "#,
         expect![[r#"
@@ -16176,13 +16235,13 @@ fn a_capability_bound_is_part_of_a_requirements_contract() {
     // `outlives` positionally. Strict-first, so loosening stays additive.
     check_diagnostics(
         r#"
-trait Adds = requires { m: fn::<W>(w: W, x: Self) -> W; } with { impl usize { m = fn::<W: forget>(w: W, x: usize) -> W { w }; } };
-trait Omits = requires { m: fn::<W: forget>(w: W, x: Self) -> W; } with { impl usize { m = fn::<W>(w: W, x: usize) -> W { w }; } };
-trait Agrees = requires { m: fn::<W: forget>(w: W, x: Self) -> W; } with { impl usize { m = fn::<W: forget>(w: W, x: usize) -> W { w }; } };
+trait Adds = requires { m: fn::<W>(W, Self) -> W; } with { impl usize { m = fn::<W: forget>(w: W, x: usize) -> W { w }; } };
+trait Omits = requires { m: fn::<W: forget>(W, Self) -> W; } with { impl usize { m = fn::<W>(w: W, x: usize) -> W { w }; } };
+trait Agrees = requires { m: fn::<W: forget>(W, Self) -> W; } with { impl usize { m = fn::<W: forget>(w: W, x: usize) -> W { w }; } };
 "#,
         expect![[r#"
-            79..80: member `m`'s generic binder does not match `Adds`'s requirement (arity, kinds and bounds must agree) (required by the trait here at 25..26)
-            219..220: member `m`'s generic binder does not match `Omits`'s requirement (arity, kinds and bounds must agree) (required by the trait here at 157..158)
+            73..74: member `m`'s generic binder does not match `Adds`'s requirement (arity, kinds and bounds must agree) (required by the trait here at 25..26)
+            207..208: member `m`'s generic binder does not match `Omits`'s requirement (arity, kinds and bounds must agree) (required by the trait here at 151..152)
         "#]],
     );
 }

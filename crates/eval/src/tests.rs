@@ -5298,10 +5298,10 @@ fn trait_dispatch_through_generic_fn() {
     check_run(
         r#"
 trait Write = requires {
-    push: fn(s: str, w: Self) -> Self;
+    push: fn(str, Self) -> Self;
 };
 trait Display = requires {
-    fmt: fn::<W: Write>(w: W, x: Self) -> W;
+    fmt: fn::<W: Write>(W, Self) -> W;
 } with {
     impl str {
         fmt = fn::<W: Write>(w: W, x: str) -> W { w.push(x) };
@@ -5348,13 +5348,48 @@ static main = fn() -> usize {
 }
 
 #[test]
+fn trait_dispatch_through_requirements_with_bare_param_types() {
+    check_run(
+        r#"
+trait Write = requires { push: fn(str, Self) -> Self; };
+trait Display = requires { fmt: fn::<W: Write>(W, Self) -> W; } with {
+    impl usize {
+        fmt = fn::<W: Write>(w: W, x: usize) -> W { w.push("num") };
+    }
+};
+type Sink = struct { pushes: usize } with {
+    impl Write {
+        push = fn(s: str, w: Self) -> Self {
+            print(s);
+            Sink(struct { pushes = w.pushes + 1 })
+        };
+    }
+};
+static show = fn::<T: Display>(x: T) -> usize {
+    let s = x.fmt(Sink(struct { pushes = 0 }));
+    s.pushes
+};
+static main = fn() -> usize {
+    let n: usize = 2;
+    show::<usize>(7) + Display::fmt(Sink(struct { pushes = 1 }), n).pushes
+};
+"#,
+        "main()",
+        expect![[r#"
+            output: "numnum"
+            => 3
+        "#]],
+    );
+}
+
+#[test]
 fn dictionary_forwarding_through_recursion() {
     // `fmt_usize` recurses (forwarding its own dictionary) and is called
     // from an impl member (forwarding the member's binder dictionary).
     check_run(
         r#"
-trait Write = requires { push: fn(s: str, w: Self) -> Self; };
-trait Display = requires { fmt: fn::<W: Write>(w: W, x: Self) -> W; } with {
+trait Write = requires { push: fn(str, Self) -> Self; };
+trait Display = requires { fmt: fn::<W: Write>(W, Self) -> W; } with {
     impl usize {
         fmt = fn::<W: Write>(w: W, x: usize) -> W { fmt_usize(w, x) };
     }
@@ -5394,7 +5429,7 @@ static main = fn() -> usize {
 fn qualified_short_form_dispatches() {
     check_run(
         r#"
-trait D = requires { m: fn(x: Self) -> str; } with {
+trait D = requires { m: fn(Self) -> str; } with {
     impl usize { m = fn(x: usize) -> str { "int" }; }
     impl str { m = fn(x: str) -> str { x }; }
 };
@@ -5419,7 +5454,7 @@ fn collision_escapes_each_run_to_their_own_member() {
     // thing it names — inherent, trait impl, fn-typed field.
     check_run(
         r#"
-trait D = requires { m: fn(x: Self) -> str; };
+trait D = requires { m: fn(Self) -> str; };
 type P = struct { m: fn() -> str } with {
     impl Self { m = fn(x: Self) -> str { "inherent" }; }
     impl D { m = fn(x: Self) -> str { "trait" }; }
@@ -5445,7 +5480,7 @@ fn collision_call_traps_with_the_ambiguity_message() {
     // Deferred-error mode: the refused call carries the squiggle's text.
     check_run(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; };
+trait D = requires { m: fn(Self) -> usize; };
 type P = struct { v: usize } with {
     impl Self { m = fn(x: Self) -> usize { 1 }; }
     impl D { m = fn(x: Self) -> usize { 2 }; }
@@ -5531,7 +5566,7 @@ fn named_self_call_and_value_dispatch() {
     // its member VALUE is one impl's fn.
     check_run(
         r#"
-trait D = requires { n: fn(k: usize) -> Self; m: fn(x: Self) -> str; } with {
+trait D = requires { n: fn(usize) -> Self; m: fn(Self) -> str; } with {
     impl usize { n = fn(k: usize) -> usize { k + 1 }; m = fn(x: usize) -> str { "int" }; }
     impl str { n = fn(k: usize) -> str { "s" }; m = fn(x: str) -> str { x }; }
 };
@@ -5557,7 +5592,7 @@ fn unsatisfied_bound_traps_at_runtime() {
     // when it actually runs.
     check_run(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; };
+trait D = requires { m: fn(Self) -> usize; };
 type P = struct { a: usize };
 static f = fn::<T: D>(x: T) -> usize { x.m() };
 static main = fn() -> usize { f::<P>(P(struct { a = 1 })) };
@@ -5576,7 +5611,7 @@ fn trait_impls_on_enums_and_variant_receivers() {
     check_run(
         r#"
 type Shape = enum { Circle(usize), Point };
-trait D = requires { m: fn(x: Self) -> usize; } with {
+trait D = requires { m: fn(Self) -> usize; } with {
     impl Shape {
         m = fn(x: Self) -> usize {
             match x { ::Circle(r) => r, ::Point => 0 }
@@ -5607,7 +5642,7 @@ fn qualified_variant_self_widens_and_dispatches() {
 type Shape = enum { Circle(usize), Point } with {
     impl Id { id = fn(x: Self) -> Self { Shape::Point }; }
 };
-trait Id = requires { id: fn(x: Self) -> Self; };
+trait Id = requires { id: fn(Self) -> Self; };
 static main = fn() -> () {
     let c = Id::id(Shape::Circle(3));
     match c {
@@ -5630,7 +5665,7 @@ fn nested_bound_use_traps_with_the_reservation() {
     // text at runtime (never an internal error).
     check_run(
         r#"
-trait Size = requires { size: fn(x: Self) -> usize; } with {
+trait Size = requires { size: fn(Self) -> usize; } with {
     impl usize { size = fn(x: usize) -> usize { x }; }
 };
 static outer = fn::<T: Size>(x: T) -> usize {
@@ -6881,7 +6916,7 @@ fn the_host_read_fills_a_byte_buffer_and_answers_the_count() {
     // back as bytes.
     check_run_with_input(
         r#"
-unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;
+unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> i64;
 static f = fn() -> i64 {
     match alloc_array::<u8>(8) {
         AllocResult::Ok(p) => {
@@ -6906,7 +6941,7 @@ static f = fn() -> i64 {
 fn the_host_read_reports_zero_at_end_of_input() {
     check_run(
         r#"
-unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;
+unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> i64;
 static f = fn() -> i64 {
     match alloc_array::<u8>(4) {
         AllocResult::Ok(p) => {
@@ -6932,7 +6967,7 @@ fn an_extern_item_this_host_does_not_provide_is_refused_by_name() {
     // whole difference between a refusal and a crash.
     check_run(
         r#"
-unsafe extern static launch_missiles: unsafe fn(n: i64) -> i64;
+unsafe extern static launch_missiles: unsafe fn(i64) -> i64;
 static f = fn() -> i64 { unsafe { launch_missiles(1) } };
 "#,
         "f()",
@@ -7019,7 +7054,7 @@ fn the_host_read_refuses_a_buffer_shorter_than_the_request() {
     // trapped would have eaten bytes nobody can get back.
     check_run_with_input(
         r#"
-unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;
+unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> i64;
 static f = fn() -> i64 {
     match alloc_array::<u8>(2) {
         AllocResult::Ok(p) => unsafe { read(p, 8) },
@@ -7043,7 +7078,7 @@ fn a_zero_length_host_read_touches_nothing() {
     // the answer is none. `0` here is NOT end of input.
     check_run_with_input(
         r#"
-unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;
+unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> i64;
 static f = fn() -> i64 { unsafe { read(dangling::<u8>(), 0) } };
 "#,
         "f()",
@@ -7062,7 +7097,7 @@ fn the_host_read_invalidates_a_safe_borrow_of_the_bytes_it_writes() {
     // would be after `p.*[3] = v`.
     check_run_with_input(
         r#"
-unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;
+unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> i64;
 static f = fn() -> u8 {
     let mut a: [u8; 4] = [1, 2, 3, 4];
     let p = a[0].&raw mut;
@@ -7086,7 +7121,7 @@ fn the_host_read_is_fine_with_no_live_borrow_of_the_buffer() {
     // The twin: the same write, with nothing borrowing the range.
     check_run_with_input(
         r#"
-unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;
+unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> i64;
 static f = fn() -> u8 {
     let mut a: [u8; 4] = [1, 2, 3, 4];
     let p = a[0].&raw mut;
@@ -7112,7 +7147,7 @@ fn the_host_read_judges_aliasing_before_consuming_input() {
     // work.
     check_run_with_input(
         r#"
-unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;
+unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> i64;
 static f = fn () -> u8 {
     let mut a: [u8; 4] = [1, 2, 3, 4];
     let m = a[0].&mut;
@@ -7144,7 +7179,7 @@ static f = fn () -> u8 {
 fn an_extern_item_declared_with_the_wrong_signature_is_refused() {
     let program = |buf: &str, arg: &str, len: &str, ret: &str| {
         format!(
-            "unsafe extern static read: unsafe fn(buf: {buf}, len: usize) -> {ret};\n\
+            "unsafe extern static read: unsafe fn({buf}, usize) -> {ret};\n\
              static f = fn() -> {ret} {{\n\
                  match alloc_array::<u8>(8) {{\n\
                      ::Ok(p) => {{ unsafe {{ p.* = 0; }}; unsafe {{ read({arg}, {len}) }} }}\n\
@@ -7205,7 +7240,7 @@ fn an_extern_item_declared_with_the_wrong_signature_is_refused() {
     );
     // Declaring `read` as a safe `fn` is a signature error.
     check_run(
-        "unsafe extern static read: fn(buf: u8.&raw mut, len: usize) -> isize;\n\
+        "unsafe extern static read: fn(u8.&raw mut, usize) -> isize;\n\
          static f = fn() -> isize {\n\
              match alloc_array::<u8>(8) {\n\
                  ::Ok(p) => read(p, 8),\n\
@@ -7228,7 +7263,7 @@ fn the_host_read_answers_in_whichever_signed_word_the_declaration_asked_for() {
     for spelling in ["isize", "i64"] {
         check_run_with_input(
             &format!(
-                "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> {spelling};\n\
+                "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> {spelling};\n\
                  static f = fn() -> {spelling} {{\n\
                      match alloc_array::<u8>(8) {{\n\
                          ::Ok(p) => unsafe {{ read(p, 8) }},\n\
@@ -7254,7 +7289,7 @@ fn calling_an_extern_item_through_a_binding_traps_with_the_squiggle_text() {
     // operation and `g`'s type is what still knows a marker is owed.
     check_run_with_input(
         r#"
-unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
+unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;
 static f = fn() -> isize {
     let g = read;
     match alloc_array::<u8>(8) { ::Ok(p) => g(p, 8), ::Err => 0 }
@@ -7270,7 +7305,7 @@ static f = fn() -> isize {
     // removed, and the binding itself never needed a marker.
     check_run_with_input(
         r#"
-unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
+unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;
 static f = fn() -> isize {
     let g = read;
     match alloc_array::<u8>(8) { ::Ok(p) => unsafe { g(p, 8) }, ::Err => 0 }
@@ -7288,7 +7323,7 @@ static f = fn() -> isize {
 fn an_extern_static_with_an_initializer_traps_with_the_declaration_error() {
     check_run(
         r#"
-unsafe extern static bad: unsafe fn(n: i64) -> i64 = fn(n: i64) -> i64 { n + 1 };
+unsafe extern static bad: unsafe fn(i64) -> i64 = fn(n: i64) -> i64 { n + 1 };
 static f = fn() -> i64 { unsafe { bad(1) } };
 "#,
         "f()",
@@ -8672,7 +8707,7 @@ static f = fn(struct { y }: struct { x: usize }) -> usize { y };
 fn a_mismatched_impl_member_traps_through_a_bound() {
     check_run(
         r#"
-trait D = requires { f: fn(x: Self) -> usize; } with {
+trait D = requires { f: fn(Self) -> usize; } with {
     impl usize { f = fn(x: usize) -> str { "oops" }; }
 };
 static g = fn::<T: D>(x: T) -> usize { x.f() + 1 };
@@ -8835,7 +8870,7 @@ static f = fn() -> usize { 3 };
 fn a_broken_trait_traps_a_function_bounded_by_it() {
     check_run(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; m: fn(x: Self) -> usize; } with {
+trait D = requires { m: fn(Self) -> usize; m: fn(Self) -> usize; } with {
     impl usize { m = fn(x: usize) -> usize { x }; }
 };
 static g = fn::<T: D>(t: T) -> usize { 1 };
@@ -8858,7 +8893,7 @@ static f = fn() -> usize {
 fn a_missing_impl_member_traps_where_the_type_is_named() {
     check_run(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; };
+trait D = requires { m: fn(Self) -> usize; };
 type P = struct { x: usize } with { impl D { } };
 static f = fn() -> usize {
     print("before;");
@@ -8932,7 +8967,7 @@ static f = fn() -> usize {
 fn a_broken_trait_traps_at_a_qualified_call() {
     check_run(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; m: fn(x: Self) -> usize; } with {
+trait D = requires { m: fn(Self) -> usize; m: fn(Self) -> usize; } with {
     impl usize { m = fn(x: usize) -> usize { x }; }
 };
 static f = fn() -> usize {
@@ -8954,7 +8989,7 @@ static f = fn() -> usize {
 fn a_broken_trait_traps_at_a_dot_call() {
     check_run(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; m: fn(x: Self) -> usize; } with {
+trait D = requires { m: fn(Self) -> usize; m: fn(Self) -> usize; } with {
     impl usize { m = fn(x: usize) -> usize { x }; }
 };
 static f = fn() -> usize {
@@ -8976,7 +9011,7 @@ static f = fn() -> usize {
 fn a_broken_trait_traps_at_a_dot_call_on_its_implementer() {
     check_run(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; m: fn(x: Self) -> usize; };
+trait D = requires { m: fn(Self) -> usize; m: fn(Self) -> usize; };
 type P = struct { v: usize } with {
     impl D { m = fn(x: P) -> usize { 1 }; }
 };

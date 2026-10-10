@@ -35,7 +35,7 @@ const f = fn (n: usize) -> usize { n };
 Extern item
 ==================
 
-unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
+unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;
 
 ---
 
@@ -45,14 +45,10 @@ unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
     (fn_type
       (param_list
         (param
-          (bind_pat
-            (param_name))
           (raw_ptr_type
             (path_type
               (identifier))))
         (param
-          (bind_pat
-            (param_name))
           (path_type
             (identifier))))
       (ret_type
@@ -63,7 +59,7 @@ unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
 Trait with requires and impl
 ==================
 
-trait Show = requires { show: fn(s: Self) -> str; } with {
+trait Show = requires { show: fn(Self) -> str; } with {
     impl usize { show = fn(s: usize) -> str { "n" }; }
 };
 
@@ -78,8 +74,6 @@ trait Show = requires { show: fn(s: Self) -> str; } with {
         (fn_type
           (param_list
             (param
-              (bind_pat
-                (param_name))
               (path_type
                 (identifier))))
           (ret_type

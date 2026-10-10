@@ -295,12 +295,6 @@ impl TypeRef {
         match ty {
             ast::Type::UnitType(_) => TypeRef::Unit,
             ast::Type::NeverType(_) => TypeRef::Never,
-            // Either parameter spelling — bare types (`fn(usize, str)`) or
-            // the NAMED list an `extern` item's declaration writes
-            // (`unsafe fn(buf: u8.&raw mut, len: usize)`). The names are
-            // documentation and stop at the syntax layer: no call passes an
-            // argument by name, so two spellings of one signature must
-            // produce one type.
             ast::Type::FnType(it) => TypeRef::Fn {
                 params: it
                     .params_types()
@@ -1161,8 +1155,8 @@ pub fn member_source(db: &dyn Db, item: crate::ItemId<'_>) -> Option<ast::Member
 
 // ---- trait declarations -------------------------------------------------
 
-/// One requirement of a trait declaration (`fmt: fn::<W: Write>(w: W,
-/// x: Self) -> W;`), range-free. Identity is the position in
+/// One requirement of a trait declaration (`fmt: fn::<W: Write>(W,
+/// Self) -> W;`), range-free. Identity is the position in
 /// [`trait_requirements`]'s list AND the name (first occurrence of a
 /// duplicated name wins lookups; the duplicate is diagnosed).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1246,11 +1240,8 @@ pub fn trait_assoc_types<'db>(db: &'db dyn Db, item: crate::ItemId<'db>) -> Vec<
 }
 
 /// Synthesize a [`TypeRef::Fn`] from a colon-declared member signature
-/// (`fn::<W: Write>(w: W, x: Self) -> W` — NAMED params, so the types
-/// come from the param list, not from bare child types). `None` unless
-/// every param is annotated and the return type is written (declarations
-/// have nothing to infer from), or when the signature carries the
-/// reserved `unsafe` marker.
+/// (`fn::<W: Write>(W) -> W`). `None` when a parameter type or the return type is
+/// missing or holds a hole, or the signature carries the `unsafe` marker.
 fn type_ref_from_decl_signature(fn_type: &ast::FnType) -> Option<TypeRef> {
     if fn_type.unsafe_token().is_some() {
         return None;

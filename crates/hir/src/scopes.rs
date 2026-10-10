@@ -262,9 +262,8 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
         // An elided variant names nothing scopes can resolve: its one
         // segment is the VARIANT, resolved type-directed during
         // inference, exactly like a variant path's second segment.
-        // An `extern` item declares no names of its own either: the parameter
-        // names in `unsafe fn(buf: ..., len: ...)` are a signature's
-        // spelling, and there is no body for them to be visible in.
+        // An `extern` item declares no names of its own either: its
+        // signature is a fn type, and there is no body.
         ExprData::Missing
         | ExprData::Literal(_)
         | ExprData::NameRef(_)

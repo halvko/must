@@ -824,10 +824,10 @@ fn trait_dictionaries_resolve_into_direct_calls() {
     check(
         r#"
 trait Write = requires {
-    push: fn(s: str, w: Self) -> Self;
+    push: fn(str, Self) -> Self;
 };
 trait Display = requires {
-    fmt: fn::<W: Write>(w: W, x: Self) -> W;
+    fmt: fn::<W: Write>(W, Self) -> W;
 } with {
     impl str {
         fmt = fn::<W: Write>(w: W, x: str) -> W { w.push(x) };
@@ -872,7 +872,7 @@ fn qualified_and_named_self_call_forms() {
     check(
         r#"
 trait Greet = requires {
-    hello: fn(x: Self) -> str;
+    hello: fn(Self) -> str;
 } with {
     impl usize {
         hello = fn (x: usize) -> str { "number" };
@@ -1709,7 +1709,7 @@ trait Named = requires {
 };
 trait Zero = requires {
     zero: fn() -> Self;
-    score: fn(x: Self) -> usize;
+    score: fn(Self) -> usize;
 };
 
 type Meters = struct { v: usize } with {

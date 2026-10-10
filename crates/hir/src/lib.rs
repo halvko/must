@@ -2174,22 +2174,27 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
                 continue;
             }
             seen.push(name.clone());
-            // The fully-annotated rule: a requirement is a contract — every
-            // parameter and the return type must be written. (Reserved
-            // shapes — `unsafe fn`, non-fn signatures — carry validation's
-            // own story.)
+            // The fully-annotated rule: a requirement is a contract, so it
+            // writes a return type and no `_` hole. A missing parameter list
+            // or type, and reserved shapes (`unsafe fn`, non-fn signatures),
+            // are syntax errors.
             if let Some(ast::Type::FnType(fn_type)) = member.ty()
                 && fn_type.unsafe_token().is_none()
             {
-                let fully = item_tree::trait_requirements(db, item)
-                    .iter()
-                    .any(|req| req.name == name && req.sig.is_some());
-                if !fully {
+                let ret = fn_type.ret_type();
+                let has_hole = fn_type
+                    .param_list()
+                    .into_iter()
+                    .flat_map(|list| list.params())
+                    .filter_map(|param| param.ty())
+                    .chain(ret.as_ref().and_then(|rt| rt.ty()))
+                    .any(|ty| !TypeRef::from_ast(ty).is_fully_typed());
+                if ret.is_none() || has_hole {
                     diagnostics.push(simple_error(
                         range,
                         format!(
                             "requirement `{name}` must spell its full signature: \
-                             every parameter and the return type"
+                             every parameter's type and the return type"
                         ),
                     ));
                 }

@@ -1688,54 +1688,12 @@
       ]
     },
     "fn_type_param": {
-      "type": "CHOICE",
-      "members": [
-        {
-          "type": "SEQ",
-          "members": [
-            {
-              "type": "CHOICE",
-              "members": [
-                {
-                  "type": "STRING",
-                  "value": "mut"
-                },
-                {
-                  "type": "BLANK"
-                }
-              ]
-            },
-            {
-              "type": "FIELD",
-              "name": "pattern",
-              "content": {
-                "type": "SYMBOL",
-                "name": "_param_pattern"
-              }
-            },
-            {
-              "type": "STRING",
-              "value": ":"
-            },
-            {
-              "type": "FIELD",
-              "name": "type",
-              "content": {
-                "type": "SYMBOL",
-                "name": "_type"
-              }
-            }
-          ]
-        },
-        {
-          "type": "FIELD",
-          "name": "type",
-          "content": {
-            "type": "SYMBOL",
-            "name": "_type"
-          }
-        }
-      ]
+      "type": "FIELD",
+      "name": "type",
+      "content": {
+        "type": "SYMBOL",
+        "name": "_type"
+      }
     },
     "ret_type": {
       "type": "SEQ",

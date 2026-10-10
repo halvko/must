@@ -372,8 +372,8 @@ fn errors_checks_dirty_with_the_documented_count() {
             error: a declare-only inherent member is an unimplementable promise; define it: `name = fn(...) -> ... { ... };`
               --> examples/errors.must:179:9
                 |
-            179 |         len: fn(p: Self) -> usize;
-                |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+            179 |         len: fn(Self) -> usize;
+                |         ^^^^^^^^^^^^^^^^^^^^^^^
 
             error: no field or member `plain_len` on `Opted`
               --> examples/errors.must:189:47
@@ -474,10 +474,10 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |                                                             ^^^^^^^^^^^^^^^
 
             error: an `extern static` has no initializer: the declaration is the whole contract, and an `extern` item sets nothing to anything
-              --> examples/errors.must:352:72
+              --> examples/errors.must:352:69
                 |
-            352 | unsafe extern static extern_with_a_value: unsafe fn(n: usize) -> usize = fn (n: usize) -> usize { n };
-                |                                                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+            352 | unsafe extern static extern_with_a_value: unsafe fn(usize) -> usize = fn (n: usize) -> usize { n };
+                |                                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
                = help: Remove the initializer
 
             error: declaring an `extern` item is a VOUCH: write `unsafe extern static`
@@ -494,10 +494,10 @@ fn errors_checks_dirty_with_the_documented_count() {
                 |                                   ^^^^^
 
             error: an `extern` item's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
-              --> examples/errors.must:372:55
+              --> examples/errors.must:372:52
                 |
-            372 | unsafe extern static a_partial_contract: unsafe fn(n: _) -> i64;
-                |                                                       ^
+            372 | unsafe extern static a_partial_contract: unsafe fn(_) -> i64;
+                |                                                    ^
 
             error: regions are inferred at calls, never written: drop this argument — a turbofish spells type and const arguments only
               --> examples/errors.must:383:73

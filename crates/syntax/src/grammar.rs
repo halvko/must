@@ -449,39 +449,6 @@ fn impl_element(p: &mut Parser<'_>) {
     m.complete(p, IMPL_ELEMENT);
 }
 
-/// A colon-declared member's fn signature: like a fn literal's head
-/// (named, annotated params; optional binder; return type) with no body —
-/// wrapped in `FN_TYPE` so it sits in the tree as the annotation it is.
-///
-/// What is left distinguishing it from [`anon_fn_type`], now that a plain
-/// fn type takes `name: Type` parameters too, is the parameter GRAMMAR: a
-/// requirement is written as the signature it is, every parameter named
-/// ([`param_list`], so hir can refuse a half-written one), while a fn
-/// type's names are optional documentation. Routed through the fn-type
-/// list instead, `m: fn(x, y: usize) -> R;` would stop being a
-/// half-written signature and silently become a parameter of type `x` —
-/// so the two productions stay apart until the requirement form is ruled
-/// on its own.
-fn member_decl_fn_signature(p: &mut Parser<'_>) {
-    let m = p.start();
-    // `dealloc: unsafe fn(...)` — an unsafe-to-call requirement; parses
-    // into the FN_TYPE (reserved: validation rejects it for now).
-    p.eat(UNSAFE_KW);
-    p.bump(FN_KW);
-    if p.at(COLON2) && p.nth(1) == L_ANGLE {
-        generic_param_list(p);
-    }
-    if p.at(L_PAREN) {
-        param_list(p);
-    } else {
-        p.error("expected `(`");
-    }
-    if p.at(THIN_ARROW) {
-        ret_type(p);
-    }
-    m.complete(p, FN_TYPE);
-}
-
 /// One member, the shared member grammar: equals-defines (`name =
 /// fn(...) -> R { ... };` — an impl-body member, or a reserved default in
 /// a requires body), colon-declares (`name: fn(...);` — a trait's
@@ -508,14 +475,10 @@ fn member(p: &mut Parser<'_>) {
     }
     pattern(p, "expected a member name");
     if p.eat(COLON) {
-        // The sealed colon-declare form spells NAMED params
-        // (`alloc: fn(n: usize, v: Self) -> R;`), which the plain fn TYPE
-        // grammar doesn't accept — parse a signature-shaped fn instead.
-        if p.at(FN_KW) || (p.at(UNSAFE_KW) && p.nth(1) == FN_KW) {
-            member_decl_fn_signature(p);
-        } else {
-            type_(p);
-        }
+        // A requirement's signature sits in a TYPE position: a plain fn type
+        // ([`anon_fn_type`]), `push: fn(str, Self) -> Self;`. It may carry a
+        // binder: `fn::<W: Write>(W) -> W`.
+        type_(p);
     }
     if p.eat(EQ) {
         expr(p);
@@ -2270,24 +2233,15 @@ fn borrow_op_generic_args(p: &mut Parser<'_>) {
     generic_arg_list(p);
 }
 
-/// A fn type — `fn(usize) -> usize`, or `unsafe fn(usize) -> usize`, which
-/// is a DIFFERENT type (a value of it may only be called inside
-/// `unsafe { ... }`). The `unsafe` token rides the same slot it does on a
-/// fn literal, so both spellings produce one `FN_TYPE` node and the flag is
-/// read off the token.
-///
-/// Parameters may be NAMED (`unsafe fn(buf: u8.&raw mut, len: usize) ->
-/// isize`), which is how an `extern` item's declaration spells its contract —
-/// a signature a reader must be able to read. The names are documentation:
-/// no call passes arguments by name, and hir keeps only the types.
+/// A fn type: optional `unsafe`, `fn`, an optional binder (`::<...>`), a
+/// parameter list of bare types, and an optional return type —
+/// `unsafe fn(u8.&raw mut, usize) -> isize`.
 fn anon_fn_type(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.eat(UNSAFE_KW);
     p.bump(FN_KW);
-    // A generic binder on a fn TYPE: superset (the colon-declared member
-    // signature is the one place it means something — see
-    // [`member_decl_fn_signature`]), refused by validation everywhere else
-    // with the reason, rather than by a bare "expected `(`".
+    // A generic binder is parsed here so validation can refuse it with a
+    // reason where it is not allowed, rather than a bare "expected `(`".
     if p.at(COLON2) && p.nth(1) == L_ANGLE {
         generic_param_list(p);
     }
@@ -2330,35 +2284,35 @@ fn fn_type_param_list(p: &mut Parser<'_>) {
     m.complete(p, PARAM_LIST);
 }
 
-/// One parameter of a fn TYPE: `Type`, or `name: Type` where the name is an
-/// identifier or `_` (documentation, kept in the tree, dropped below the
-/// syntax layer).
+/// One parameter of a fn TYPE: a bare `Type`. A leading `mut` or `name:`, or
+/// a pattern that parsed as a type and then met its colon (`struct { x }:
+/// T`), is refused once and consumed, so one written mistake costs the
+/// reader one message, not the rest of the list.
 fn fn_type_param(p: &mut Parser<'_>) {
     let m = p.start();
-    // `mut` is a binding-mode marker and a fn type binds nothing. Consumed
-    // (so one written mistake costs the reader one message, not the rest of
-    // the list) and named where it stands.
-    if p.at(MUT_KW) {
-        p.error("a function type's parameters are not patterns: write `name: Type` or `Type`");
-        p.bump(MUT_KW);
-    }
-    if matches!(p.current(), IDENT | HOLE) && p.nth(1) == COLON {
-        let nm = p.start();
-        p.bump_any();
-        nm.complete(p, NAME);
-        p.bump(COLON);
+    let at_name = |p: &Parser<'_>| matches!(p.current(), IDENT | HOLE) && p.nth(1) == COLON;
+    let refused = p.at(MUT_KW) || at_name(p);
+    if refused {
+        p.error(FN_TYPE_PARAM_IS_BARE);
+        p.eat(MUT_KW);
+        if at_name(p) {
+            p.bump_any();
+            p.bump(COLON);
+        }
     }
     type_(p);
-    // A pattern that PARSED as a type and then met its colon
-    // (`struct { x }: T`): same refusal, said at the colon that gives it
-    // away, and the annotation is consumed so the list stays readable.
     if p.at(COLON) {
-        p.error("a function type's parameters are not patterns: write `name: Type` or `Type`");
+        if !refused {
+            p.error(FN_TYPE_PARAM_IS_BARE);
+        }
         p.bump(COLON);
         type_(p);
     }
     m.complete(p, PARAM);
 }
+
+const FN_TYPE_PARAM_IS_BARE: &str =
+    "a function type's parameters are bare types, not patterns: write `fn(usize, str)`";
 
 /// The core (non-postfix) type. Returns `None` only when nothing was parsed
 /// (the `_ => error` arm), so the postfix loop in [`type_`] has no operand.

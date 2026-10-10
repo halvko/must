@@ -646,7 +646,6 @@ fn validate_requirement_member(member: &ast::Member, errors: &mut Vec<SyntaxErro
                     fix: None,
                 });
             }
-            reject_requirement_param_patterns(&fn_type, errors);
         }
         Some(other) => errors.push(SyntaxError {
             message: "a requirement's signature must be an `fn` signature".to_owned(),
@@ -655,39 +654,6 @@ fn validate_requirement_member(member: &ast::Member, errors: &mut Vec<SyntaxErro
         }),
         // `name: ;` — the parse error covers it.
         None => {}
-    }
-}
-
-/// A requirement DECLARES a signature; it has no body to bind anything in.
-/// The parameter grammar it shares with a fn literal ([`param_list`]) can
-/// still spell `mut` and a destructuring pattern, and both would be
-/// promises about an implementation the declaration does not contain: the
-/// binding mode and the shape a body picks apart are the implementer's
-/// business, one per impl. So a requirement's parameter is a plain
-/// `name: Type`, and everything else is refused here rather than silently
-/// ignored by the signature reader.
-fn reject_requirement_param_patterns(fn_type: &ast::FnType, errors: &mut Vec<SyntaxError>) {
-    let Some(list) = fn_type.param_list() else {
-        return;
-    };
-    for param in list.params() {
-        let Some(pat) = param.pat() else {
-            continue;
-        };
-        let plain =
-            matches!(&pat, ast::Pat::BindPat(b) if !b.is_mut()) && param.mut_token().is_none();
-        if plain {
-            continue;
-        }
-        let start = param
-            .mut_token()
-            .map(|token| token.text_range().start())
-            .unwrap_or_else(|| pat.syntax().text_range().start());
-        errors.push(SyntaxError {
-            message: "a requirement's parameter is a plain `name: Type`".to_owned(),
-            range: TextRange::new(start, pat.syntax().text_range().end()),
-            fix: None,
-        });
     }
 }
 
@@ -1680,7 +1646,7 @@ fn reject_stray_type_binder(
     });
 }
 
-/// `unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;`
+/// `unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;`
 fn validate_extern_static(item: &ast::StaticItem, errors: &mut Vec<SyntaxError>) {
     let Some(head) = item.head() else {
         return;
@@ -1867,14 +1833,11 @@ const UNSAFE_ONLY_ON_EXTERN: &str = "only an `extern static` can be `unsafe`: th
 /// annotation is one fn type among many and gets no parameter grammar of
 /// its own (its extra refusals are in [`validate_extern_static`]).
 ///
-/// The colon-declared MEMBER signature is the one shape excused: it parses
-/// the pattern-shaped [`grammar::param_list`] and its binder is live (a
-/// trait requirement may be a generic fn), so its own rules apply.
+/// The colon-declared MEMBER signature is excused from one rule: its binder
+/// is live (a trait requirement may be a generic fn).
 fn validate_fn_type(fn_type: &ast::FnType, errors: &mut Vec<SyntaxError>) {
-    let parent_kind = fn_type.syntax().parent().map(|p| p.kind());
-    if parent_kind == Some(SyntaxKind::MEMBER) {
-        return;
-    }
+    let is_member_signature =
+        fn_type.syntax().parent().map(|p| p.kind()) == Some(SyntaxKind::MEMBER);
     // A generic function is declared by an ITEM; a type mentions instances
     // of one. (An `extern` item's own version of this refusal says more and fires
     // instead — see `validate_extern_static`.)
@@ -1885,28 +1848,13 @@ fn validate_fn_type(fn_type: &ast::FnType, errors: &mut Vec<SyntaxError>) {
         .is_some_and(|item| item.is_extern());
     if let Some(binder) = fn_type.generic_param_list()
         && !is_extern_annotation
+        && !is_member_signature
     {
         errors.push(SyntaxError {
             message: "a function type has no generic binder: a generic function is \
                       declared by an item, and a type names one of its instances"
                 .to_owned(),
             range: binder.syntax().text_range(),
-            fix: None,
-        });
-    }
-    // A parameter with a name and no type. The grammar admits `Type` and
-    // `name: Type`; anything with a name and nothing after the colon is a
-    // half-written signature, and a fn type has nothing to infer the rest
-    // from.
-    let Some(list) = fn_type.param_list() else {
-        return;
-    };
-    for param in list.params().filter(|p| p.ty().is_none()) {
-        errors.push(SyntaxError {
-            message: "this parameter has no type: a function type's parameters are \
-                      `name: Type` or `Type`"
-                .to_owned(),
-            range: param.syntax().text_range(),
             fix: None,
         });
     }

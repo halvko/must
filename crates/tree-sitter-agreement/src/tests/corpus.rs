@@ -32,12 +32,12 @@ const SNIPPETS: &[(&str, &str)] = &[
     (
         "reserved element and member forms",
         r#"
-trait Eq = requires { eq: fn(a: Self, b: Self) -> bool; };
+trait Eq = requires { eq: fn(Self, Self) -> bool; };
 trait Ord = Eq + PartialOrd;
 trait Iterator = unsafe requires ::<Item> Self: Eq + Ord, {
     type Item;
     const LEN: usize;
-    next: unsafe fn(it: Self) -> Item;
+    next: unsafe fn(Self) -> Item;
 };
 type Wrapper = struct::<T> { pub value: T, ... } with ::<U> T: Eq + Ord, U = usize, {
     impl Marker;
@@ -135,7 +135,7 @@ static reserved = fn (s: Shape, t: str) -> usize {
     (
         "generic arguments and regions",
         r#"
-trait Show = requires { show: fn(s: Self) -> str; } with {
+trait Show = requires { show: fn(Self) -> str; } with {
     impl usize { show = fn(s: usize) -> str { "n" }; }
 };
 type Buf = struct::<const N: usize, T> { data: [T; N] };
@@ -208,7 +208,7 @@ static spin = fn (limit: usize) -> usize {
     const { found }
 };
 static never = fn () -> ! { loop { } };
-static apply = fn (f: fn(usize) -> usize, g: unsafe fn(n: usize, _: str) -> (), x: usize) -> usize { f(x) };
+static apply = fn (f: fn(usize) -> usize, g: unsafe fn(usize, str) -> (), x: usize) -> usize { f(x) };
 static closure = unsafe fn () { };
 "#,
     ),
@@ -221,7 +221,7 @@ type Row = [usize; 4];
 type Opt = enum::<T> { Some(T), None };
 type OnlySome = Opt::<usize>;
 type Tagged = struct { which: Opt::Some, row: Row };
-type Callback = struct { run: fn(n: usize) -> usize };
+type Callback = struct { run: fn(usize) -> usize };
 "#,
     ),
     (
@@ -251,8 +251,8 @@ static old = fn (b: Boxed<usize>) -> usize { b.value };
     (
         "malformed extern statics",
         r#"
-extern static valued: unsafe fn(n: usize) -> usize = fn (n: usize) -> usize { n };
-extern static live: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
+extern static valued: unsafe fn(usize) -> usize = fn (n: usize) -> usize { n };
+extern static live: unsafe fn(u8.&raw mut, usize) -> isize;
 "#,
     ),
     (
@@ -292,7 +292,7 @@ type Shape = enum {
     Point,
 };
 trait Show = requires {
-    show: fn(s: Self) -> str;
+    show: fn(Self) -> str;
 };
 type Point = struct {
     x: usize,

@@ -176,7 +176,7 @@ type Reserved = struct { n: usize } with {
 //     error: a declare-only inherent member is an unimplementable promise; define it: `name = fn(...) -> ... { ... };`
 type Promised = struct { n: usize } with {
     impl Self {
-        len: fn(p: Self) -> usize;
+        len: fn(Self) -> usize;
     }
 };
 
@@ -246,7 +246,7 @@ static member_own_turbofish = fn () -> () { let f = Measured::size::<usize>; };
 //     part of WHICH instance is called, and a member's arguments are read
 //     off the receiver's own type, which cannot supply one.
 //     error: `Counted::step` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)
-trait Counted = requires { step: fn::<const N: usize>(s: Self) -> usize; } with {
+trait Counted = requires { step: fn::<const N: usize>(Self) -> usize; } with {
     impl usize { step = fn::<const N: usize>(s: usize) -> usize { N }; }
 };
 static member_own_const_turbofish = fn (n: usize) -> usize { Counted::step::<3>(n) };
@@ -266,7 +266,7 @@ static field_through_the_type = fn () -> () { let n = Sized::len; };
 //     (or a message).
 //     error: `Self` names the implementer, so it cannot be `_`: write the type (`Trait::<Self = Type>::member`), or use the short form `Trait::member(...)` where an argument determines `Self`
 trait Countable = requires {
-    count: fn (c: Self) -> usize;
+    count: fn (Self) -> usize;
 } with {
     impl usize { count = fn (c: usize) -> usize { c }; }
 };
@@ -339,7 +339,7 @@ static retired_prefix_borrow = fn () -> () {
 
 // 32. Calling an `unsafe fn`-typed extern item outside an `unsafe` block.
 //     error: calling the `extern` item `host_read` requires an `unsafe { ... }` block; nothing on this side of the boundary can check what it does
-unsafe extern static host_read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
+unsafe extern static host_read: unsafe fn(u8.&raw mut, usize) -> isize;
 static call_outside_unsafe = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
 
 // 33. An initializer on an `extern static`. The declaration is the whole
@@ -349,7 +349,7 @@ static call_outside_unsafe = fn (p: u8.&raw mut) -> isize { host_read(p, 8) };
 //     is NOT `extern`), and the fix cuts the value, not the contract.
 //     error: an `extern static` has no initializer: the declaration is the whole contract, and an `extern` item sets nothing to anything
 //     quick fix offered: "Remove the initializer"
-unsafe extern static extern_with_a_value: unsafe fn(n: usize) -> usize = fn (n: usize) -> usize { n };
+unsafe extern static extern_with_a_value: unsafe fn(usize) -> usize = fn (n: usize) -> usize { n };
 
 // 34. An `extern static` without `unsafe`.
 //     error: declaring an `extern` item is a VOUCH: write `unsafe extern static`
@@ -369,7 +369,7 @@ unsafe extern static extern_data: usize;
 //     contract, so a piece of it left unwritten is unwritten for good.
 //     Refused once per hole, wherever in the signature it stands.
 //     error: an `extern` item's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
-unsafe extern static a_partial_contract: unsafe fn(n: _) -> i64;
+unsafe extern static a_partial_contract: unsafe fn(_) -> i64;
 
 // 37. A region written at a CALL SITE. Regions are elided at every call:
 //     a written turbofish spells the callee's type and const arguments
