@@ -18,8 +18,9 @@
 - **T04** Variant widening is a runtime conversion over a tag-free variant representation: a
   variant-typed value carries no tag, and widening adds one. A plain `let` keeps the precise
   variant; an unannotated `let mut` widens to the enum at binding time, the one place
-  mutability changes a type rather than only permissions. Trait dispatch adds a second
-  widening site: every RECEIVER-LIKE `Self` position — a dot-call's receiver, and each
+  mutability changes a type rather than only permissions. An unannotated deferred
+  `let mut x;` widens at its first assignment instead, which plays the initializer's part.
+  Trait dispatch adds a second widening site: every RECEIVER-LIKE `Self` position — a dot-call's receiver, and each
   argument at a literal-`Self` position of a qualified short-form call — is inferred freely
   first, widens to its enum if it came back a variant, and only THEN is checked against the
   determined `Self`, so `Self` itself can never bind to a tag-free variant type (a variant has
@@ -30,7 +31,9 @@
   `Utf8Result`) are the prelude Must cannot write yet: ordinary declarations minted per file
   from one table, user-shadowable and never duplicate-flagged; the table's order is the
   variant index. It goes away when modules land.
-- **T07** Mutability. `let mut` declares a mutable binding; assignment is a statement; local
+- **T07** Mutability. `let mut` declares a mutable binding, with or without an initializer
+  (`let mut x;` starts uninitialized, M21); its type is the annotation's or the assignments';
+  assignment is a statement; local
   mutation inside a const context is fine; `mut` parameters are local copies; an assignment
   the checker rejects traps rather than proceeding. Field assignment is legal exactly when the
   root binding is `mut`, and a deref is a new root whose legality is the pointer's mutability.

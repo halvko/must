@@ -275,7 +275,11 @@ impl CheckCtx<'_> {
             ExprData::Block { stmts, tail } => {
                 for stmt in stmts {
                     match stmt {
-                        Stmt::Let { init, .. } => self.check_expr(*init, in_unsafe),
+                        Stmt::Let { init, .. } => {
+                            if let Some(init) = init {
+                                self.check_expr(*init, in_unsafe);
+                            }
+                        }
                         // An assignment target that is (or projects
                         // through) a deref is a deref *write*: the target's
                         // own traversal below flags it — one rule for reads

@@ -2514,6 +2514,68 @@ fn mut_hole_param_is_rejected() {
 }
 
 #[test]
+fn a_let_without_an_initializer_parses() {
+    check(
+        "static f = fn { let mut x: usize; let mut y; };",
+        expect![[r#"
+            SOURCE_FILE@0..47
+              STATIC_ITEM@0..47
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..46
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..46
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..33
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      MUT_KW@20..23 "mut"
+                      WHITESPACE@23..24 " "
+                      BIND_PAT@24..25
+                        NAME@24..25
+                          IDENT@24..25 "x"
+                      COLON@25..26 ":"
+                      WHITESPACE@26..27 " "
+                      PATH_TYPE@27..32
+                        NAME_REF@27..32
+                          IDENT@27..32 "usize"
+                      SEMICOLON@32..33 ";"
+                    WHITESPACE@33..34 " "
+                    LET_STMT@34..44
+                      LET_KW@34..37 "let"
+                      WHITESPACE@37..38 " "
+                      MUT_KW@38..41 "mut"
+                      WHITESPACE@41..42 " "
+                      BIND_PAT@42..43
+                        NAME@42..43
+                          IDENT@42..43 "y"
+                      SEMICOLON@43..44 ";"
+                    WHITESPACE@44..45 " "
+                    R_BRACE@45..46 "}"
+                SEMICOLON@46..47 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn an_immutable_let_without_a_value_is_reserved() {
+    check_errors(
+        "static f = fn { let y; };",
+        expect![[r#"
+            16..22: an immutable `let` without a value is not supported yet; write `let mut y;`
+        "#]],
+    );
+}
+
+#[test]
 fn equality_comparison_is_still_an_expr_stmt() {
     // Regression guard: `==` must not be mistaken for the assignment `=`.
     check(

@@ -363,8 +363,8 @@ impl<'db> Sites<'db> {
 /// Where a statement's last lowered part ends.
 fn stmt_end(source_map: &BodySourceMap, stmt: &Stmt) -> Option<TextSize> {
     let ptr = match stmt {
-        Stmt::Let { pat, init, .. } => source_map
-            .node_for_expr(*init)
+        Stmt::Let { pat, init, .. } => init
+            .and_then(|init| source_map.node_for_expr(init))
             .or_else(|| source_map.node_for_pat(*pat)),
         Stmt::Assign { value, .. } => source_map.node_for_expr(*value),
         Stmt::Expr(expr) => source_map.node_for_expr(*expr),

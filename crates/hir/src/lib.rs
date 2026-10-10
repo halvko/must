@@ -1070,19 +1070,12 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 // (`let mut _` parses) but never reaches here: a hole is
                 // not an assignment target, and `mut` on one is its own
                 // diagnostic.
-                InferenceDiagnostic::AssignToImmutable { binding, name, .. }
-                | InferenceDiagnostic::AddrOfMutImmutable { binding, name, .. }
-                | InferenceDiagnostic::BorrowMutImmutable { binding, name, .. } => source_map
+                InferenceDiagnostic::AssignToImmutable { binding, .. }
+                | InferenceDiagnostic::AddrOfMutImmutable { binding, .. }
+                | InferenceDiagnostic::BorrowMutImmutable { binding, .. } => source_map
                     .node_for_binding(*binding)
                     .and_then(|ptr| ast::Name::cast(ptr.to_node(&syntax_root)))
-                    .and_then(|decl| decl.mut_slot())
-                    .map(|slot| syntax::Fix {
-                        label: format!("Make `{name}` mutable"),
-                        edits: vec![syntax::TextEdit {
-                            range: TextRange::empty(slot),
-                            insert: "mut ".to_owned(),
-                        }],
-                    }),
+                    .and_then(|decl| decl.insert_mut_fix()),
                 // "Add missing match arms" — one generated arm per name in
                 // `uncovered`. An empty arm list and a partially-covered one
                 // both fall out of the same path with no special-casing (see
@@ -1252,19 +1245,11 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             if let Some(binding) = diag.binding()
                 && let Some(ptr) = source_map.node_for_binding(binding)
             {
-                // The walk tracks two kinds of value and the note says
-                // which this is. A value that merely may not be
-                // DUPLICATED — one holding a rigid parameter, or an
-                // exclusive borrow — need never be consumed at all, and
-                // telling its owner otherwise sends them looking for a
-                // disposal method that does not exist.
+                let linear = ty.is_some_and(|ty| !capability::has_forget(db, ty));
                 related.push(RelatedInfo {
                     file,
                     range: ptr.text_range(),
-                    message: diag::born_here(
-                        subject,
-                        ty.is_some_and(|ty| !capability::has_forget(db, ty)),
-                    ),
+                    message: diag.binding_note(subject, linear),
                 });
             }
             if let Some(first) = diag.related_expr()

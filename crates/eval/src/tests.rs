@@ -1055,7 +1055,10 @@ static entrypoint = (main(20));
     let hir::body::ExprData::Block { stmts, .. } = &main_body.exprs[*main_fn_block] else {
         panic!("a fn literal's body is a block");
     };
-    let hir::body::Stmt::Let { init, .. } = &stmts[0] else {
+    let hir::body::Stmt::Let {
+        init: Some(init), ..
+    } = &stmts[0]
+    else {
         panic!("main starts with a let");
     };
     let hir::body::ExprData::Bin { lhs: main_call, .. } = &main_body.exprs[*init] else {
@@ -8693,6 +8696,156 @@ static main = fn () -> () {
         expect![[r#"
             output: "unit"
             => ()
+        "#]],
+    );
+}
+
+#[test]
+fn a_deferred_binding_assigned_in_a_match_arm_runs() {
+    check_run(
+        r#"
+static main = fn () -> () {
+    let s = "abc";
+    let mut i = 0;
+    loop {
+        let mut current;
+        match s.next_char(i) {
+            ::Char(c, next) => {
+                current = c;
+                i = next;
+            },
+            ::End => {
+                break;
+            },
+        };
+        if current == 'a' { print("found a\n"); }
+    }
+};
+"#,
+        "main()",
+        expect![[r#"
+            output: "found a\n"
+            => ()
+        "#]],
+    );
+}
+
+#[test]
+fn a_deferred_binding_holds_what_was_assigned() {
+    check_run(
+        r#"
+static main = fn () -> usize {
+    let mut x: usize;
+    let mut greeting;
+    x = 1;
+    greeting = "hi";
+    print(greeting);
+    x
+};
+"#,
+        "main()",
+        expect![[r#"
+            output: "hi"
+            => 1
+        "#]],
+    );
+}
+
+#[test]
+fn a_deferred_binding_assigned_before_break_holds_the_last_value() {
+    check_run(
+        r#"
+static looped = fn (n: usize) -> usize {
+    let mut x;
+    let mut i = 0;
+    loop {
+        x = i * 2;
+        i = i + 1;
+        if i > n { break; }
+    }
+    x
+};
+"#,
+        "looped(3)",
+        expect![[r#"
+            => 6
+        "#]],
+    );
+}
+
+#[test]
+fn an_unannotated_deferred_binding_holds_every_variant_of_its_enum() {
+    check_run(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (c: bool) -> Shape {
+    let mut s;
+    s = Shape::Circle(1);
+    if c { s = ::Point; }
+    s
+};
+"#,
+        "f(true) == Shape::Point",
+        expect![[r#"
+            => true
+        "#]],
+    );
+}
+
+/// The checker refuses the read; run anyway, the read traps with that
+/// refusal rather than seeing a stale or zero value.
+#[test]
+fn a_refused_read_of_a_deferred_binding_traps_at_the_read() {
+    check_run(
+        r#"
+static f = fn (c: bool) -> usize {
+    let mut x;
+    if c { x = 1; }
+    x
+};
+"#,
+        "f(true) + f(false)",
+        expect![[r#"
+            error[Trap]: `x` is used here, but not every path to here assigns it a value
+        "#]],
+    );
+    check_run(
+        r#"
+static f = fn (n: usize) -> usize {
+    let mut total = 0;
+    let mut i = 0;
+    loop {
+        let mut x: usize;
+        if i == 0 { x = 5; }
+        total = total + x;
+        i = i + 1;
+        if i == n { break; }
+    }
+    total
+};
+"#,
+        "f(3)",
+        expect![[r#"
+            error[Trap]: `x` is used here, but not every path to here assigns it a value
+        "#]],
+    );
+}
+
+/// Assigning a field does not assign the deferred binding itself, so `p`
+/// is unassigned and the program traps.
+#[test]
+fn a_field_write_to_a_deferred_binding_traps() {
+    check_run(
+        r#"
+static f = fn () -> usize {
+    let mut p: struct { a: usize };
+    p.a = 1;
+    p.a
+};
+"#,
+        "f()",
+        expect![[r#"
+            error[Trap]: `p` is used before it is assigned a value
         "#]],
     );
 }

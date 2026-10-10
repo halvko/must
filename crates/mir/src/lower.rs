@@ -493,11 +493,13 @@ impl LowerCtx<'_> {
                 // Reported where the obligation breaks: the exit leaving a
                 // live value behind, the join or loop boundary that
                 // disagrees, the read that duplicates, the value dropped or
-                // held where nothing can consume it. Control does not pass.
+                // held where nothing can consume it, the deferred binding
+                // read before it is assigned. Control does not pass.
                 L::NotConsumed { exit: expr, .. }
                 | L::JoinDisagrees { join: expr, .. }
                 | L::LoopChangesLinear { at: expr, .. }
                 | L::AlreadyConsumed { expr, .. }
+                | L::ReadUninit { expr, .. }
                 | L::Discarded { expr }
                 | L::BorrowedTemporary { expr }
                 | L::CopiedOut { expr }
@@ -1168,20 +1170,31 @@ impl LowerCtx<'_> {
                 }
                 for (index, stmt) in stmts.iter().enumerate() {
                     let span = match stmt {
-                        Stmt::Let { init, .. } => *init,
+                        // A deferred `let mut x;` has no value to blame;
+                        // its block stands in.
+                        Stmt::Let { init, .. } => init.unwrap_or(expr),
                         Stmt::Assign { target, .. } => *target,
                         Stmt::Expr(e) => *e,
                     };
                     self.stmt_trap(b, expr, index, span);
                     match stmt {
                         Stmt::Let { pat, init, .. } => {
-                            let init_op = self.lower_expr(b, *init);
+                            // A deferred `let mut x;` declares its local
+                            // and writes nothing: a read of the unassigned
+                            // slot traps (M21).
+                            let Some(init) = *init else {
+                                if let PatData::Bind(binding) = &self.body.pats[*pat] {
+                                    self.alloc_binding_local(b, *binding);
+                                }
+                                continue;
+                            };
+                            let init_op = self.lower_expr(b, init);
                             match &self.body.pats[*pat] {
                                 // The common case, unchanged: one local,
                                 // one assignment.
                                 PatData::Bind(binding) => {
                                     let local = self.alloc_binding_local(b, *binding);
-                                    b.push_assign(local, Rvalue::Use(init_op), *init);
+                                    b.push_assign(local, Rvalue::Use(init_op), init);
                                 }
                                 // Evaluated for effects only; nothing to
                                 // bind (a hole lowers as `Bind` above, and
@@ -1198,12 +1211,12 @@ impl LowerCtx<'_> {
                                 // project from, exactly like a record
                                 // literal's fields need one to assemble.
                                 PatData::Record { .. } | PatData::Newtype { .. } => {
-                                    let local = self.operand_local(b, init_op, *init);
+                                    let local = self.operand_local(b, init_op, init);
                                     self.bind_binding_pattern(
                                         b,
                                         *pat,
                                         &Operand::Copy(local.into()),
-                                        *init,
+                                        init,
                                     );
                                 }
                                 PatData::Variant { .. } => {
