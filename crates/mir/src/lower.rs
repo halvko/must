@@ -9,7 +9,7 @@ use hir::body::{BinOp, Body, ExprData, LiteralData, MatchArm, PatData, Stmt};
 use hir::infer::{InferenceDiagnostic, InferenceResult};
 use hir::{BindingId, ExprId, ItemId, ItemLoc, PatId, Resolution, Ty};
 use la_arena::{Arena, ArenaMap};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::{
     AggregateKind, BlockData, BlockId, BodyId, Const, LocalData, LocalId, MirBody, MirDiagnostic,
@@ -147,7 +147,16 @@ impl LowerCtx<'_> {
         if let (Some(root), Some(message)) = (self.body.root, &self.body.declaration_error) {
             push_trap(&mut self.value_traps, root, message.clone());
         }
+        let mut pat_errors = Vec::new();
         for diag in inference {
+            // A pattern's error: where it traps depends on whose pattern it
+            // is (below).
+            if let Some(pat) = diag.pat()
+                && diag.severity() == hir::Severity::Error
+            {
+                pat_errors.push((pat, diag.expr(), diag.message()));
+                continue;
+            }
             match diag {
                 InferenceDiagnostic::TypeMismatch { expr, .. }
                 | InferenceDiagnostic::AllBranchesMismatch { expr, .. } => {
@@ -233,18 +242,15 @@ impl LowerCtx<'_> {
                 // well-typed — neither traps.
                 InferenceDiagnostic::UnreachableArm { .. }
                 | InferenceDiagnostic::BindShadowsVariant { .. } => {}
-                // A broken pattern means the match operation as a whole
-                // can't be judged: the arms still lower (the CFG keeps
-                // everything), then the match's value is refused.
-                InferenceDiagnostic::NonEnumScrutineeVariantPat { match_expr, .. }
-                | InferenceDiagnostic::PatNoSuchVariant { match_expr, .. }
-                | InferenceDiagnostic::PatWrongEnum { match_expr, .. }
-                | InferenceDiagnostic::PatLiteralTypeMismatch { match_expr, .. }
-                | InferenceDiagnostic::PatArity { match_expr, .. }
-                | InferenceDiagnostic::PatPathError { match_expr, .. }
-                | InferenceDiagnostic::VariantPatUnknownScrutinee { match_expr, .. } => {
-                    push_trap(&mut self.value_traps, *match_expr, diag.message());
-                }
+                // Pattern errors (`pat_errors`, above).
+                InferenceDiagnostic::NonEnumScrutineeVariantPat { .. }
+                | InferenceDiagnostic::PatNoSuchVariant { .. }
+                | InferenceDiagnostic::PatWrongEnum { .. }
+                | InferenceDiagnostic::PatLiteralTypeMismatch { .. }
+                | InferenceDiagnostic::PatArity { .. }
+                | InferenceDiagnostic::PatPathError { .. }
+                | InferenceDiagnostic::VariantPatUnknownScrutinee { .. }
+                | InferenceDiagnostic::PatIntLiteralTooLarge { .. } => {}
                 // A `break`/`continue` with no loop to go to, or a
                 // `return` with no body to leave (or one reserved inside a
                 // `const` block): there is no edge to emit, so the
@@ -259,19 +265,16 @@ impl LowerCtx<'_> {
                 | InferenceDiagnostic::ReturnInConstBlock { expr } => {
                     push_trap(&mut self.value_traps, *expr, diag.message());
                 }
-                // A `let`/parameter destructuring pattern that names an
-                // unknown field, misses required fields, unwraps the wrong
-                // named type, or can't be checked at all (no type known):
-                // the construct holding the pattern must not start, since the
-                // destructure has nothing valid to bind.
-                InferenceDiagnostic::PatUnknownField { pat, .. }
-                | InferenceDiagnostic::PatMissingFields { pat, .. }
-                | InferenceDiagnostic::PatBindingNeedsAnnotation { pat, .. }
-                | InferenceDiagnostic::PatNotRecord { pat, .. }
-                | InferenceDiagnostic::PatUnknownType { pat, .. }
-                | InferenceDiagnostic::PatNamedTypeMismatch { pat, .. } => {
-                    pat_traps.push((*pat, diag.message()));
-                }
+                // Pattern errors (`pat_errors`, above).
+                InferenceDiagnostic::PatUnknownField { .. }
+                | InferenceDiagnostic::PatMissingFields { .. }
+                | InferenceDiagnostic::PatBindingNeedsAnnotation { .. }
+                | InferenceDiagnostic::PatNotRecord { .. }
+                | InferenceDiagnostic::PatNotArray { .. }
+                | InferenceDiagnostic::PatArrayLength { .. }
+                | InferenceDiagnostic::PatUnknownType { .. }
+                | InferenceDiagnostic::PatNamedTypeMismatch { .. }
+                | InferenceDiagnostic::RefutablePattern { .. } => {}
                 // A broken generic mention: the mention's value cannot be
                 // produced — a value trap right there (checked before the
                 // `GenericApp` arm would lower an instantiation).
@@ -311,16 +314,10 @@ impl LowerCtx<'_> {
                 }
                 // A literal with no width (no defining use) or one that
                 // doesn't fit its resolved width: the value cannot be
-                // produced — a value trap right on the literal. For a
-                // PATTERN literal `expr` is the enclosing match instead
-                // (a pattern is not a value; what cannot be produced is
-                // the match's), exactly as the broken-pattern family
-                // above keys itself.
+                // produced — a value trap right on the literal. A pattern
+                // literal's is a pattern error (above).
                 InferenceDiagnostic::CannotInferNumberType { expr, .. }
-                | InferenceDiagnostic::IntLiteralOutOfRange { expr, .. }
-                | InferenceDiagnostic::PatIntLiteralTooLarge {
-                    match_expr: expr, ..
-                } => {
+                | InferenceDiagnostic::IntLiteralOutOfRange { expr, .. } => {
                     push_trap(&mut self.value_traps, *expr, diag.message());
                 }
                 // An array value in a const-arg position: like `FnConstArg`
@@ -477,6 +474,26 @@ impl LowerCtx<'_> {
                 push_trap(&mut self.const_call_traps, call, diag.message());
             }
         }
+        // A broken match-arm pattern means the match as a whole can't be
+        // judged: the arms lower (the CFG keeps everything), then the
+        // match's value is refused. Any other pattern is a `let`'s or a
+        // parameter's, and its destructure must not run.
+        if !pat_errors.is_empty() {
+            let arm_pats: FxHashSet<PatId> = (self.body.exprs.iter())
+                .filter_map(|(_, data)| match data {
+                    ExprData::Match { arms, .. } => Some(arms.iter().map(|arm| arm.pat)),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            for (pat, match_expr, message) in pat_errors {
+                if arm_pats.contains(&pat) {
+                    push_trap(&mut self.value_traps, match_expr, message);
+                } else {
+                    pat_traps.push((pat, message));
+                }
+            }
+        }
         // A borrow forced past what its signature or storage allows: the
         // value must not flow on.
         for diag in outlives {
@@ -515,8 +532,20 @@ impl LowerCtx<'_> {
                 }
             }
         }
-        for (site, message) in hir::trap_sites_for_pats(self.db, self.item, pat_traps) {
-            self.plant(site, message);
+        if !pat_traps.is_empty() {
+            // A parameter pattern's error traps on entry to its `fn`, before
+            // the destructure; a `let` pattern's traps at its site.
+            let fn_of_param = param_pats(self.body);
+            let mut let_traps = Vec::new();
+            for (pat, message) in pat_traps {
+                match fn_of_param.get(&pat) {
+                    Some(&body) => push_trap(&mut self.entry_traps, body, message),
+                    None => let_traps.push((pat, message)),
+                }
+            }
+            for (site, message) in hir::trap_sites_for_pats(self.db, self.item, let_traps) {
+                self.plant(site, message);
+            }
         }
         for (site, message) in self.range_traps {
             self.plant(*site, message.clone());
@@ -607,6 +636,14 @@ impl LowerCtx<'_> {
         with_dicts: bool,
     ) -> BodyId {
         let mut b = BodyBuilder::new(ret_ty, body_expr);
+        // An error in a parameter pattern traps before anything destructures;
+        // the body after it is dead.
+        if !params.is_empty()
+            && !self.entry_traps.is_empty()
+            && let Some(messages) = self.entry_traps.remove(&body_expr)
+        {
+            self.trap(&mut b, body_expr, messages);
+        }
         for param in params {
             let local = self.alloc_pat_slot_local(&mut b, param.pat, body_expr);
             b.params.push(local);
@@ -1197,20 +1234,19 @@ impl LowerCtx<'_> {
                                     b.push_assign(local, Rvalue::Use(init_op), init);
                                 }
                                 // Evaluated for effects only; nothing to
-                                // bind (a hole lowers as `Bind` above, and
-                                // a refutable pattern never reaches a
-                                // `let` — neither occurs in practice).
-                                PatData::Wildcard
-                                | PatData::Missing
-                                | PatData::Char(_)
-                                | PatData::Int(_) => {}
+                                // bind (a hole lowers as `Bind` above).
+                                PatData::Wildcard | PatData::Missing => {}
                                 // A destructuring pattern: stash the
                                 // initializer's value in a synthetic local,
-                                // then destructure out of it — the field
-                                // reads need an addressable operand to
-                                // project from, exactly like a record
-                                // literal's fields need one to assemble.
-                                PatData::Record { .. } | PatData::Newtype { .. } => {
+                                // then destructure out of it — the reads
+                                // need an addressable operand to project
+                                // from.
+                                PatData::Record { .. }
+                                | PatData::Newtype { .. }
+                                | PatData::Array { .. }
+                                | PatData::Variant { .. }
+                                | PatData::Char(_)
+                                | PatData::Int(_) => {
                                     let local = self.operand_local(b, init_op, init);
                                     self.bind_binding_pattern(
                                         b,
@@ -1218,10 +1254,6 @@ impl LowerCtx<'_> {
                                         &Operand::Copy(local.into()),
                                         init,
                                     );
-                                }
-                                PatData::Variant { .. } => {
-                                    // Never produced by `binding_pattern`'s
-                                    // grammar; defensive.
                                 }
                             }
                         }
@@ -1728,17 +1760,13 @@ impl LowerCtx<'_> {
         // BORROW it is, and its trap message does not move.
         let mut lens = None;
         let mut dispatch_on = self.ty(scrutinee);
-        if let Ty::Borrow {
-            mutable, referent, ..
-        } = &dispatch_on
-            && hir::dispatches_on(self.db, referent)
-        {
+        if let Some((mutable, referent)) = self.borrowed_referent(&dispatch_on) {
             lens = Some(BorrowedScrutinee {
                 local: scrut_local,
-                mutable: *mutable,
+                mutable,
                 expr: scrutinee,
             });
-            dispatch_on = referent.as_ref().clone();
+            dispatch_on = referent.clone();
         }
 
         match dispatch_on {
@@ -2159,7 +2187,9 @@ impl LowerCtx<'_> {
             },
             // `let`/parameter-only shapes; `match_pattern`'s grammar never
             // produces them. Defensive fallback.
-            PatData::Record { .. } | PatData::Newtype { .. } => ArmKind::Dead,
+            PatData::Record { .. } | PatData::Newtype { .. } | PatData::Array { .. } => {
+                ArmKind::Dead
+            }
         }
     }
 
@@ -2195,10 +2225,7 @@ impl LowerCtx<'_> {
                 // widened to its enum for a `mut` binder of a variant-typed
                 // value (`InferenceResult::widened_bindings`).
                 let local = self.alloc_binding_local(b, *binding);
-                let rvalue = match self.infer.widened_bindings.get(*binding).cloned() {
-                    Some(variant) => widen_rvalue(scrut.clone(), variant),
-                    None => Rvalue::Use(scrut.clone()),
-                };
+                let rvalue = self.bind_rvalue(*binding, Rvalue::Use(scrut.clone()), b, origin);
                 b.push_assign(local, rvalue, origin);
             }
             PatData::Variant { bindings, .. } => {
@@ -2227,10 +2254,15 @@ impl LowerCtx<'_> {
                                     ],
                                 },
                             },
-                            None => Rvalue::Field {
-                                base: scrut.clone(),
-                                index: index as u32,
-                            },
+                            None => self.bind_rvalue(
+                                binding,
+                                Rvalue::Field {
+                                    base: scrut.clone(),
+                                    index: index as u32,
+                                },
+                                b,
+                                origin,
+                            ),
                         };
                         b.push_assign(local, rvalue, origin);
                     } else {
@@ -2242,8 +2274,43 @@ impl LowerCtx<'_> {
             }
             // `let`/parameter-only shapes; `match_pattern`'s grammar never
             // produces them. Defensive fallback.
-            PatData::Record { .. } | PatData::Newtype { .. } => {}
+            PatData::Record { .. } | PatData::Newtype { .. } | PatData::Array { .. } => {}
         }
+    }
+
+    /// The flavor and referent of a borrowed scrutinee that dispatches
+    /// through its borrow, whose payloads then bind as borrows.
+    fn borrowed_referent<'t>(&self, ty: &'t Ty) -> Option<(bool, &'t Ty)> {
+        match ty {
+            Ty::Borrow {
+                mutable, referent, ..
+            } if hir::dispatches_on(self.db, referent) => Some((*mutable, referent.as_ref())),
+            _ => None,
+        }
+    }
+
+    /// What a pattern binder is assigned: `rvalue`, widened to its enum
+    /// for a `mut` binder of a variant-typed value
+    /// (`InferenceResult::widened_bindings`).
+    fn bind_rvalue(
+        &mut self,
+        binding: BindingId,
+        rvalue: Rvalue,
+        b: &mut BodyBuilder,
+        origin: ExprId,
+    ) -> Rvalue {
+        let Some(variant) = self.infer.widened_bindings.get(binding).cloned() else {
+            return rvalue;
+        };
+        let op = match rvalue {
+            Rvalue::Use(op) => op,
+            rvalue => {
+                let temp = b.temp(Ty::Variant(variant.clone()));
+                b.push_assign(temp, rvalue, origin);
+                Operand::Copy(temp.into())
+            }
+        };
+        widen_rvalue(op, variant)
     }
 
     /// Allocate (and register) the MIR local for a user binding — `let`s
@@ -2269,14 +2336,19 @@ impl LowerCtx<'_> {
     /// Allocate the MIR local(s) for one `let`/parameter pattern's value —
     /// a parameter's counterpart of a `let`'s [`Stmt::Let`] lowering (see
     /// `ExprData::Block`'s arm above). A bare name is exactly the ordinary
-    /// single local, no extra indirection; a `Record`/`Newtype` pattern
+    /// single local, no extra indirection; any other pattern
     /// additionally allocates one synthetic "whole value" local (this is
     /// the parameter's own slot — what callers' arguments line up against)
     /// and destructures every binding it introduces out of it.
     fn alloc_pat_slot_local(&mut self, b: &mut BodyBuilder, pat: PatId, origin: ExprId) -> LocalId {
         match &self.body.pats[pat] {
             PatData::Bind(binding) => self.alloc_binding_local(b, *binding),
-            PatData::Record { .. } | PatData::Newtype { .. } => {
+            PatData::Record { .. }
+            | PatData::Newtype { .. }
+            | PatData::Array { .. }
+            | PatData::Variant { .. }
+            | PatData::Char(_)
+            | PatData::Int(_) => {
                 let ty = self
                     .infer
                     .type_of_pat
@@ -2310,29 +2382,13 @@ impl LowerCtx<'_> {
                     addressable: false,
                 })
             }
-            PatData::Variant { .. } | PatData::Char(_) | PatData::Int(_) => {
-                // Refutable shapes; never produced by `binding_pattern`'s
-                // grammar. Defensive.
-                b.alloc_local(LocalData {
-                    ty: Ty::Error,
-                    name: None,
-                    binding: None,
-                    addressable: false,
-                })
-            }
         }
     }
 
-    /// Destructure `value` into every binding `pat` introduces — the
-    /// `let`/parameter counterpart of [`Self::bind_match_pattern`], minus
-    /// the enum-tag concerns (a `let`/parameter pattern is never matched
-    /// against a tagged value; there is no `Cover` to compute, every
-    /// binding here always runs). Field reads reuse the exact name→index
-    /// lookup `ExprData::Field` uses (the receiver's type is resolved at
-    /// lowering, so the field name is already gone by the time it reaches
-    /// MIR); a `Newtype` unwrap is a pure retype at runtime (see
-    /// [`hir::body::PatData::Newtype`]'s doc comment) — no MIR operation,
-    /// just a recursive call with the same operand.
+    /// Destructure `value` into the bindings of a `let`/parameter pattern,
+    /// handing variant patterns to [`Self::bind_match_pattern`]. A `let`
+    /// pattern never dispatches: one that could fail to match traps before
+    /// its `let` or `fn` starts, so every binding here runs.
     fn bind_binding_pattern(
         &mut self,
         b: &mut BodyBuilder,
@@ -2341,10 +2397,12 @@ impl LowerCtx<'_> {
         origin: ExprId,
     ) {
         match &self.body.pats[pat].clone() {
+            // A literal binds nothing.
             PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int(_) => {}
             PatData::Bind(binding) => {
                 let local = self.alloc_binding_local(b, *binding);
-                b.push_assign(local, Rvalue::Use(value.clone()), origin);
+                let rvalue = self.bind_rvalue(*binding, Rvalue::Use(value.clone()), b, origin);
+                b.push_assign(local, rvalue, origin);
             }
             PatData::Record { fields, .. } => {
                 let rec = match self.infer.type_of_pat.get(pat) {
@@ -2361,14 +2419,14 @@ impl LowerCtx<'_> {
                         .as_ref()
                         .and_then(|rec| rec.fields.iter().position(|(n, _)| *n == f.field));
                     match index {
-                        Some(index) => b.push_assign(
-                            local,
-                            Rvalue::Field {
+                        Some(index) => {
+                            let field = Rvalue::Field {
                                 base: value.clone(),
                                 index: index as u32,
-                            },
-                            origin,
-                        ),
+                            };
+                            let rvalue = self.bind_rvalue(f.binding, field, b, origin);
+                            b.push_assign(local, rvalue, origin);
+                        }
                         // Unknown field (already diagnosed): a placeholder
                         // keeps the local initialized and lowering total.
                         None => {
@@ -2380,8 +2438,40 @@ impl LowerCtx<'_> {
             PatData::Newtype { inner, .. } => {
                 self.bind_binding_pattern(b, *inner, value, origin);
             }
+            // Each element is read out by its constant index into a temp
+            // of its own, which the element's pattern destructures.
+            PatData::Array { elements } => {
+                let elem_ty = match self.infer.type_of_pat.get(pat) {
+                    Some(Ty::Array { elem, .. }) => elem.as_ref().clone(),
+                    _ => Ty::Error,
+                };
+                for (index, &element) in elements.iter().enumerate() {
+                    let index = hir::IntValue::new(hir::IntKind::Usize, index as i128)
+                        .map_or(Const::Unit, Const::Int);
+                    let temp = b.temp(elem_ty.clone());
+                    b.push_assign(
+                        temp,
+                        Rvalue::Index {
+                            base: value.clone(),
+                            index: Operand::Const(index),
+                        },
+                        origin,
+                    );
+                    self.bind_binding_pattern(b, element, &Operand::Copy(temp.into()), origin);
+                }
+            }
+            // Through a borrow the payloads bind as borrows of the
+            // referent's sub-places.
             PatData::Variant { .. } => {
-                // Never produced by `binding_pattern`'s grammar; defensive.
+                let borrowed = (self.infer.type_of_pat.get(pat))
+                    .and_then(|ty| self.borrowed_referent(ty))
+                    .map(|(mutable, _)| mutable);
+                let lens = borrowed.map(|mutable| BorrowedScrutinee {
+                    local: self.operand_local(b, value.clone(), origin),
+                    mutable,
+                    expr: origin,
+                });
+                self.bind_match_pattern(b, pat, value, origin, lens);
             }
         }
     }
@@ -3782,6 +3872,32 @@ struct BodyBuilder {
     scopes: Vec<(Scope, Vec<LocalId>)>,
     /// Origin for the placeholder terminators of fresh blocks.
     fallback_origin: ExprId,
+}
+
+/// Every parameter pattern of `body`'s `fn` literals, nested ones included,
+/// mapped to the body of the `fn` it belongs to.
+fn param_pats(body: &Body) -> FxHashMap<PatId, ExprId> {
+    let mut out = FxHashMap::default();
+    let mut stack = Vec::new();
+    for (_, data) in body.exprs.iter() {
+        if let ExprData::FnLiteral {
+            params,
+            body: fn_body,
+            ..
+        } = data
+        {
+            stack.extend(params.iter().map(|param| (param.pat, *fn_body)));
+        }
+    }
+    while let Some((pat, fn_body)) = stack.pop() {
+        out.insert(pat, fn_body);
+        match &body.pats[pat] {
+            PatData::Newtype { inner, .. } => stack.push((*inner, fn_body)),
+            PatData::Array { elements } => stack.extend(elements.iter().map(|&e| (e, fn_body))),
+            _ => {}
+        }
+    }
+    out
 }
 
 /// The variant → enum conversion of `op`, a value of type `variant`.
