@@ -5254,9 +5254,28 @@ static f: fn(Shape) -> usize = fn (s: Shape) -> usize {
             70..141 'fn (s: Shape) -> ...': fn(Shape) -> usize
             93..141 '{     match s { :...': usize
             99..139 'match s { ::Circl...': usize
-            105..106 's': Shape
             121..122 '1': usize
             136..137 '2': usize
+        "#]],
+    );
+}
+
+#[test]
+fn no_expectation_recorded_for_method_receiver() {
+    check_expectations(
+        r#"
+type A = struct { x: usize } with {
+    impl Self {
+        get = fn(a: Self) -> usize { a.x };
+    }
+};
+static f: fn(A) -> usize = fn (a: A) -> usize { a.get() };
+"#,
+        expect![[r#"
+            133..163 'fn (a: A) -> usiz...': fn(A) -> usize
+            152..163 '{ a.get() }': usize
+            154..159 'a.get': fn(A) -> usize
+            154..161 'a.get()': usize
         "#]],
     );
 }

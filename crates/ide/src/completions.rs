@@ -60,18 +60,24 @@
 //! ## Snippets
 //!
 //! A handful of candidates carry an [`InsertText::Snippet`] instead of
-//! plain text: a parameterful `fn` item/builtin/local in expression position
-//! (`name($1)`, unless the position expects the `fn` itself as a *value*,
-//! never called — then it's the bare name), a `type X = …` RHS
-//! (`struct { $1 }` / `enum { $1 }`), a payload-carrying variant pattern in
-//! a match arm (`::Circle($1)` / `Pair($1, $2)` — **one tab stop per
-//! payload**, because `check_match_pat` counts bindings against payloads
-//! and a single stop would hand a two-payload variant an arity error), a
-//! missing record-literal field (`x = $1`), and the `match` arm-list
-//! template. Every snippet carries its own plain fallback for a client
-//! without `snippetSupport` — `must-lsp::to_proto` picks between the two
-//! per client capability; `ide` itself has no notion of "the client", only
-//! the two spellings.
+//! plain text:
+//!
+//! - a parameterful `fn` item, builtin or local in expression position:
+//!   `name($1)`, or the bare name when the position expects the `fn`
+//!   itself as a value;
+//! - a `type X = …` RHS: `struct { $1 }` / `enum { $1 }`;
+//! - a payload-carrying variant pattern in a match arm: `::Circle($1)` /
+//!   `Pair($1, $2)`, one tab stop per payload, because `check_match_pat`
+//!   counts bindings against payloads;
+//! - a missing record-literal field: `x = $1`;
+//! - the block-taking keywords: `loop {$0}`, and `if $0` / `match $0`,
+//!   which write no braces;
+//! - the `match` arm-list template.
+//!
+//! Every snippet carries its own plain fallback for a client without
+//! `snippetSupport` — `must-lsp::to_proto` picks between the two per client
+//! capability; `ide` itself has no notion of "the client", only the two
+//! spellings.
 //!
 //! ## The `match` slots
 //!
@@ -153,6 +159,10 @@ pub struct CompletionItem {
     /// label most of the time, a tab-stop snippet for the handful of rules
     /// in the module doc's "Snippets" section.
     pub text_edit: CompletionTextEdit,
+    /// The insertion is a whole expression (a value, call, field or
+    /// variant), not the head of a longer one: [`space_before_block`] ends
+    /// it in a space when it heads a `match` or `if`.
+    pub(crate) whole_expr: bool,
 }
 
 /// A completion's replacement range plus what to insert there. Same shape
@@ -301,6 +311,7 @@ fn completion_item_at_tier(
         label,
         kind,
         detail,
+        whole_expr: false,
     }
 }
 
@@ -333,6 +344,7 @@ fn fn_shaped_item(
         edit_range,
     );
     item.text_edit.insert = fn_call_insert(&item.label, written_params, tier);
+    item.whole_expr = true;
     item
 }
 
@@ -533,7 +545,13 @@ pub(crate) fn completions(
     let expected_ty = expected_type_at(db, file, &real_root, offset, edit_range);
     let expected_ty = expected_ty.as_ref();
 
-    let mut items = match classify(&parent) {
+    let context = classify(&parent);
+    // The marker's `NameRef` sits directly under the expression it
+    // completes (a `PathExpr` or `FieldExpr`), whatever the context.
+    let opens_block = parent
+        .parent()
+        .is_some_and(|completed| is_brace_less_head(&completed));
+    let mut items = match context {
         Some(Context::ItemKeyword) => keyword_items(ITEM_KEYWORDS, edit_range),
         Some(Context::ItemKeywordAfterExtern) => {
             keyword_items(&[SyntaxKind::STATIC_KW], edit_range)
@@ -616,6 +634,9 @@ pub(crate) fn completions(
         ),
         None => Vec::new(),
     };
+    if opens_block {
+        space_before_block(&mut items);
+    }
     // The arm-list template is strictly ADDITIVE: the position also
     // classifies as something (an ordinary fresh statement, usually — the
     // splice detaches the marker from the arm-less `match`), and those
@@ -628,6 +649,37 @@ pub(crate) fn completions(
     }
     items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
     items
+}
+
+/// Whether `expr` is the whole head of a `match` or `if` with no `{` after
+/// it: a scrutinee (`match x˽`, `match Shape::C˽`, `match p.˽`) or a
+/// condition (`if ready˽`).
+fn is_brace_less_head(expr: &SyntaxNode) -> bool {
+    let Some(parent) = expr.parent() else {
+        return false;
+    };
+    if let Some(match_expr) = ast::MatchExpr::cast(parent.clone()) {
+        return match_expr.l_brace_token().is_none();
+    }
+    ast::IfExpr::cast(parent).is_some_and(|if_expr| {
+        if_expr.condition().is_some_and(|c| c.syntax() == expr) && if_expr.then_branch().is_none()
+    })
+}
+
+/// Appends a space to every [`CompletionItem::whole_expr`] candidate, so
+/// the next key is the block's `{`. The user types that brace rather than a
+/// snippet writing it: an editor auto-pairs (and steps over) only the
+/// braces typed into it, never the ones a completion inserts.
+fn space_before_block(items: &mut [CompletionItem]) {
+    for item in items.iter_mut().filter(|item| item.whole_expr) {
+        match &mut item.text_edit.insert {
+            InsertText::Plain(plain) => plain.push(' '),
+            InsertText::Snippet { snippet, plain } => {
+                snippet.push(' ');
+                plain.push(' ');
+            }
+        }
+    }
 }
 
 /// The two shapes the template slot can be found in — see
@@ -987,6 +1039,26 @@ fn keyword_items(words: &[SyntaxKind], edit_range: TextRange) -> Vec<CompletionI
         .collect()
 }
 
+/// A keyword item inserting `snippet`, or `plain` for a snippet-incapable
+/// client.
+fn keyword_snippet_item(
+    word: &str,
+    snippet: String,
+    plain: String,
+    edit_range: TextRange,
+) -> CompletionItem {
+    let mut item = completion_item(
+        word,
+        CompletionItemKind::Keyword,
+        Provenance::Keyword,
+        TYPE_TIER_NONE,
+        None,
+        edit_range,
+    );
+    item.text_edit.insert = InsertText::Snippet { snippet, plain };
+    item
+}
+
 /// The `type X = …` RHS keywords, snippeted: `struct { $1 }` /
 /// `enum { $1 }` — a snippet-incapable client falls back to the bare shell
 /// (`struct { }` / `enum { }`), still more than the plain keyword alone.
@@ -997,19 +1069,26 @@ fn type_item_rhs_items(edit_range: TextRange) -> Vec<CompletionItem> {
     ]
     .into_iter()
     .map(|(word, snippet, plain)| {
-        let mut item = completion_item(
-            word,
-            CompletionItemKind::Keyword,
-            Provenance::Keyword,
-            TYPE_TIER_NONE,
-            None,
-            edit_range,
-        );
-        item.text_edit.insert = InsertText::Snippet {
-            snippet: snippet.to_owned(),
-            plain: plain.to_owned(),
-        };
-        item
+        keyword_snippet_item(word, snippet.to_owned(), plain.to_owned(), edit_range)
+    })
+    .collect()
+}
+
+/// The expression keywords whose grammar always goes on to a block. `loop
+/// {$0}` opens its block on one line. `if $0` and `match $0` write no
+/// braces: the condition or scrutinee comes first, and the candidate
+/// accepted for it ends in a space ([`space_before_block`]). A
+/// snippet-incapable client gets the bare keyword.
+fn block_keyword_items(edit_range: TextRange) -> Vec<CompletionItem> {
+    [
+        (SyntaxKind::IF_KW, "if $0"),
+        (SyntaxKind::LOOP_KW, "loop {$0}"),
+        (SyntaxKind::MATCH_KW, "match $0"),
+    ]
+    .into_iter()
+    .map(|(word, snippet)| {
+        let word = word.keyword_text().expect("block keywords are keywords");
+        keyword_snippet_item(word, snippet.to_owned(), word.to_owned(), edit_range)
     })
     .collect()
 }
@@ -1132,6 +1211,7 @@ fn builtin_fn_items(
             edit_range,
         );
         insert_fn_as_call(&mut candidate, &ty, tier);
+        candidate.whole_expr = true;
         candidate
     })
     .collect()
@@ -1150,8 +1230,8 @@ fn type_item_kind(db: &RootDatabase, item: hir::ItemId<'_>) -> CompletionItemKin
 
 /// Expression-position candidates from the file's top-level items: value
 /// items (constructors excluded — not lowered yet) as
-/// `Function`/`Constant`, type items as `Struct`/`Enum` (legal as
-/// construction heads).
+/// `Function`/`Constant`, and struct type items as `Struct` (construction
+/// heads).
 fn file_value_and_type_items(
     db: &RootDatabase,
     file: SourceFile,
@@ -1190,22 +1270,25 @@ fn file_value_and_type_items(
                     edit_range,
                 );
                 insert_fn_as_call(&mut candidate, &ty, tier);
+                candidate.whole_expr = true;
                 Some(candidate)
             }
             hir::Resolution::TypeItem(loc) => {
                 let item = loc.to_id(db);
-                // A type name is not a value — there is no type to rank
-                // against the expectation (its *construction* would have
-                // one, but that's a different edit than inserting the
-                // name).
-                Some(completion_item(
-                    name,
-                    type_item_kind(db, item),
-                    Provenance::Item,
-                    TYPE_TIER_NONE,
-                    type_item_detail(db, item),
-                    edit_range,
-                ))
+                // A struct name heads a construction (`Point(...)`); an
+                // enum name is not a value, only its variants are. Neither
+                // has a type to rank against the expectation.
+                let kind = type_item_kind(db, item);
+                (kind == CompletionItemKind::Struct).then(|| {
+                    completion_item(
+                        name,
+                        kind,
+                        Provenance::Item,
+                        TYPE_TIER_NONE,
+                        type_item_detail(db, item),
+                        edit_range,
+                    )
+                })
             }
             _ => None,
         })
@@ -1254,13 +1337,17 @@ fn expression_position_items(
 ) -> Vec<CompletionItem> {
     let mut items = file_value_and_type_items(db, file, edit_range, expected, scrutinee_slot);
     items.extend(builtin_fn_items(db, edit_range, expected));
+    items.extend(block_keyword_items(edit_range));
+    items.extend(
+        keyword_items(&[SyntaxKind::TRUE_KW, SyntaxKind::FALSE_KW], edit_range)
+            .into_iter()
+            .map(|item| CompletionItem {
+                whole_expr: true,
+                ..item
+            }),
+    );
     let mut words = vec![
-        SyntaxKind::IF_KW,
-        SyntaxKind::MATCH_KW,
-        SyntaxKind::LOOP_KW,
         SyntaxKind::FN_KW,
-        SyntaxKind::TRUE_KW,
-        SyntaxKind::FALSE_KW,
         SyntaxKind::STRUCT_KW,
         SyntaxKind::CONST_KW,
         SyntaxKind::UNSAFE_KW,
@@ -1298,6 +1385,7 @@ fn expression_position_items(
                 if let Some(ty) = &local.ty {
                     insert_fn_as_call(&mut item, ty, tier);
                 }
+                item.whole_expr = true;
                 item
             }),
     );
@@ -1392,8 +1480,9 @@ fn field_items(
     let mut items: Vec<CompletionItem> = record
         .iter()
         .flat_map(|record| record.fields.iter())
-        .map(|(name, ty)| {
-            completion_item(
+        .map(|(name, ty)| CompletionItem {
+            whole_expr: true,
+            ..completion_item(
                 name.clone(),
                 CompletionItemKind::Field,
                 Provenance::Item,
@@ -1518,14 +1607,17 @@ fn variant_segment_items(
                 index: index as u32,
                 name: std::sync::Arc::from(name.as_str()),
             });
-            completion_item(
-                name.clone(),
-                CompletionItemKind::EnumMember,
-                Provenance::Item,
-                type_tier(Some(&variant_ty), expected),
-                Some(crate::hover::render_variant(name, payload)),
-                edit_range,
-            )
+            CompletionItem {
+                whole_expr: !in_type_position,
+                ..completion_item(
+                    name.clone(),
+                    CompletionItemKind::EnumMember,
+                    Provenance::Item,
+                    type_tier(Some(&variant_ty), expected),
+                    Some(crate::hover::render_variant(name, payload)),
+                    edit_range,
+                )
+            }
         })
         .collect()
 }

@@ -1165,12 +1165,13 @@ fn init_with_snippet_support(support: bool) -> lsp_types::InitializeParams {
     }
 }
 
-/// Fetches the `add` completion item at the fixed spot both snippet tests
-/// share: a fresh statement in `main`'s body, where `add` (two params) is
-/// visible as a file item.
-fn add_completion_item(
+/// Fetches the completion item labeled `label` at the fixed spot the
+/// snippet tests share: a fresh statement in `main`'s body, where `add`
+/// (two params) is visible as a file item.
+fn statement_completion_item(
     client: &mut TestClient,
     file: &lsp_types::Uri,
+    label: &str,
 ) -> lsp_types::CompletionItem {
     client.open(
         file,
@@ -1192,8 +1193,8 @@ fn add_completion_item(
     };
     items
         .into_iter()
-        .find(|it| it.label == "add")
-        .expect("`add` is offered")
+        .find(|it| it.label == label)
+        .unwrap_or_else(|| panic!("`{label}` is offered"))
 }
 
 #[test]
@@ -1201,7 +1202,7 @@ fn snippet_capable_client_receives_snippet_format_items() {
     let mut client = TestClient::start_with(init_with_snippet_support(true));
     let file = uri("file:///snippet_capable.must");
 
-    let add = add_completion_item(&mut client, &file);
+    let add = statement_completion_item(&mut client, &file, "add");
     assert_eq!(
         add.insert_text_format,
         Some(lsp_types::InsertTextFormat::SNIPPET)
@@ -1223,7 +1224,7 @@ fn snippet_incapable_client_receives_the_plain_fallback() {
     let mut client = TestClient::start_with(init_with_snippet_support(false));
     let file = uri("file:///snippet_incapable.must");
 
-    let add = add_completion_item(&mut client, &file);
+    let add = statement_completion_item(&mut client, &file, "add");
     assert_eq!(add.insert_text_format, None);
     let edit = match add.text_edit.as_ref().expect("has a text edit") {
         lsp_types::CompletionTextEdit::Edit(edit) => edit,
@@ -1232,6 +1233,41 @@ fn snippet_incapable_client_receives_the_plain_fallback() {
     // The plain fallback is still the call form (`add()`), not the bare
     // literal snippet text (`add($1)`) and not the bare name either.
     assert_eq!(edit.new_text, "add()");
+
+    drop(client);
+}
+
+#[test]
+fn snippet_capable_client_receives_the_loop_block() {
+    let mut client = TestClient::start_with(init_with_snippet_support(true));
+    let file = uri("file:///loop_capable.must");
+
+    let item = statement_completion_item(&mut client, &file, "loop");
+    assert_eq!(
+        item.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET)
+    );
+    let edit = match item.text_edit.as_ref().expect("has a text edit") {
+        lsp_types::CompletionTextEdit::Edit(edit) => edit,
+        other => panic!("expected a plain edit, got {other:?}"),
+    };
+    assert_eq!(edit.new_text, "loop {$0}");
+
+    drop(client);
+}
+
+#[test]
+fn snippet_incapable_client_receives_the_bare_loop_keyword() {
+    let mut client = TestClient::start_with(init_with_snippet_support(false));
+    let file = uri("file:///loop_incapable.must");
+
+    let item = statement_completion_item(&mut client, &file, "loop");
+    assert_eq!(item.insert_text_format, None);
+    let edit = match item.text_edit.as_ref().expect("has a text edit") {
+        lsp_types::CompletionTextEdit::Edit(edit) => edit,
+        other => panic!("expected a plain edit, got {other:?}"),
+    };
+    assert_eq!(edit.new_text, "loop");
 
     drop(client);
 }
@@ -1417,7 +1453,7 @@ fn dogfood_state_machine_example_offers_sensible_completions() {
 
     let has = |label: &str| items.iter().any(|it| it.label == label);
     assert!(has("let"), "statement-start keyword `let` is offered");
-    assert!(has("Light"), "the enum type item is offered");
+    assert!(!has("Light"), "an enum name is not a value");
     assert!(
         has("run_lights"),
         "recursion into the enclosing fn is legal"
