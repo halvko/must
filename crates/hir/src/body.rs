@@ -523,7 +523,9 @@ pub enum Stmt {
         /// [`BindingData::type_ref`] for the common bare-name case) because
         /// a destructuring pattern has no single binding to hang it on.
         type_ref: Option<TypeRef>,
-        init: ExprId,
+        /// `None` for a deferred `let mut x;`: the binding starts
+        /// uninitialized and a later whole assignment gives it a value (M21).
+        init: Option<ExprId>,
     },
     /// `target = value;`. `target` lowers as a normal expression (so its
     /// `NameRef` gets the usual source-map + resolution entries — goto-def
@@ -1165,7 +1167,8 @@ impl LowerCtx {
             .statements()
             .map(|stmt| match stmt {
                 ast::Stmt::LetStmt(it) => {
-                    let init = self.lower_opt_expr(it.initializer());
+                    // `let x = ;` is a broken initializer, not a deferred one.
+                    let init = it.eq_token().map(|_| self.lower_opt_expr(it.initializer()));
                     let type_ref = TypeRef::from_opt_ast(it.ty());
                     let pat = match it.pat() {
                         Some(pat) => self.lower_binding_pattern(pat, type_ref.clone(), it.is_mut()),

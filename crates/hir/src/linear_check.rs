@@ -32,6 +32,10 @@
 //! leaves the obligation where it was. Every mention but a whole
 //! assignment needs the value still there, so any of them after a
 //! consumption is the same use-after-move.
+//!
+//! A deferred `let mut x;` is a binding born in the moved-out state (M21),
+//! so the same fact answers definite assignment: it is tracked whatever its
+//! type, and a mention before a whole assignment on every path is refused.
 
 use base_db::Db;
 use la_arena::ArenaMap;
@@ -97,6 +101,13 @@ pub enum LinearDiagnostic {
     /// loop body — the next iteration would see a different world than the
     /// one the body was checked against.
     LoopChangesLinear { binding: BindingId, at: ExprId },
+    /// A deferred binding mentioned where some path to here (`maybe`) or
+    /// every path (`!maybe`) has not assigned it.
+    ReadUninit {
+        binding: BindingId,
+        expr: ExprId,
+        maybe: bool,
+    },
     /// An item's own value is linear. A `static` is never destroyed, so
     /// holding a linear in one is a leak with no exit path to blame.
     ItemHoldsLinear { expr: ExprId },
@@ -126,7 +137,8 @@ impl LinearDiagnostic {
             | LinearDiagnostic::CopiedOut { expr }
             | LinearDiagnostic::Repeated { expr }
             | LinearDiagnostic::ItemHoldsLinear { expr }
-            | LinearDiagnostic::ConstBlockHoldsLinear { expr } => Some(*expr),
+            | LinearDiagnostic::ConstBlockHoldsLinear { expr }
+            | LinearDiagnostic::ReadUninit { expr, .. } => Some(*expr),
             LinearDiagnostic::AssignOverLive { target, .. }
             | LinearDiagnostic::AssignOverPlace { target } => Some(*target),
             LinearDiagnostic::JoinDisagrees { join, .. } => Some(*join),
@@ -154,7 +166,8 @@ impl LinearDiagnostic {
             | LinearDiagnostic::AlreadyConsumed { binding, .. }
             | LinearDiagnostic::AssignOverLive { binding, .. }
             | LinearDiagnostic::JoinDisagrees { binding, .. }
-            | LinearDiagnostic::LoopChangesLinear { binding, .. } => Some(*binding),
+            | LinearDiagnostic::LoopChangesLinear { binding, .. }
+            | LinearDiagnostic::ReadUninit { binding, .. } => Some(*binding),
             _ => None,
         }
     }
@@ -263,6 +276,7 @@ impl LinearDiagnostic {
             LinearDiagnostic::LoopChangesLinear { .. } => root
                 .and_then(|root| diag::loop_changes_dup(subject, root))
                 .unwrap_or_else(|| diag::loop_changes_linear(subject)),
+            LinearDiagnostic::ReadUninit { maybe, .. } => diag::read_uninit(subject, *maybe),
             LinearDiagnostic::ItemHoldsLinear { .. } => diag::ITEM_HOLDS_LINEAR.to_owned(),
             // Reached through the ANNOTATION rather than through a
             // runtime binding, which a const context indeed cannot read:
@@ -388,12 +402,22 @@ enum Owed {
     /// At most once — a value that may not be duplicated, whatever its
     /// disposal story is.
     AtMostOnce,
+    /// Nothing but holding a value when read: a deferred binding of a
+    /// copyable type, whose reads consume nothing.
+    Assigned,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Status {
     Live,
-    Consumed { at: ExprId },
+    Consumed {
+        at: ExprId,
+    },
+    /// A deferred binding unassigned: on every path, or (`maybe`) on some
+    /// path into a join.
+    Uninit {
+        maybe: bool,
+    },
 }
 
 impl Status {
@@ -409,11 +433,16 @@ struct LoopFrame {
     /// scope above this.
     floor: usize,
     /// The liveness of every tracked binding at the loop's entry. The body
-    /// must leave them exactly as it found them, or the second iteration
-    /// runs against a world the first was not checked in.
+    /// must leave them as it found them, or the second iteration runs
+    /// against a world the first was not checked in (one direction is
+    /// allowed: see [`CheckCtx::check_loop_invariant`]).
     entry: FxHashMap<BindingId, bool>,
     /// The state at each `break` — the loop's exit is their join.
     breaks: Vec<State>,
+    /// Bindings not live at entry that a back edge carries live. A break in
+    /// a later iteration may see them assigned, so the exit's "unassigned"
+    /// is only a maybe.
+    revived: Vec<BindingId>,
 }
 
 struct CheckCtx<'db> {
@@ -523,19 +552,27 @@ impl CheckCtx<'_> {
 
     // ---- scopes and bindings -------------------------------------------
 
-    fn track_pat(&mut self, pat: PatId) {
+    /// Start tracking what `pat` binds. A `deferred` binding (`let mut x;`)
+    /// is tracked whatever its type, and starts out holding nothing.
+    fn track_pat(&mut self, pat: PatId, deferred: bool) {
         for binding in self.body.pat_bindings(pat) {
             let owed = self
                 .infer
                 .type_of_binding
                 .get(binding)
                 .and_then(|ty| self.owed_of(ty));
-            if let Some(owed) = owed {
-                self.state.insert(binding, Status::Live);
-                self.owed.insert(binding, owed);
-                if let Some(frame) = self.scopes.last_mut() {
-                    frame.push(binding);
-                }
+            let (owed, status) = match owed {
+                _ if deferred => (
+                    owed.unwrap_or(Owed::Assigned),
+                    Status::Uninit { maybe: false },
+                ),
+                Some(owed) => (owed, Status::Live),
+                None => continue,
+            };
+            self.state.insert(binding, status);
+            self.owed.insert(binding, owed);
+            if let Some(frame) = self.scopes.last_mut() {
+                frame.push(binding);
             }
         }
         self.check_rest_patterns(pat);
@@ -654,8 +691,19 @@ impl CheckCtx<'_> {
     fn consume(&mut self, binding: BindingId, at: ExprId) {
         match self.state.get(&binding).copied() {
             Some(Status::Live) => {
-                self.state.insert(binding, Status::Consumed { at });
+                if self.owed.get(&binding) != Some(&Owed::Assigned) {
+                    self.state.insert(binding, Status::Consumed { at });
+                }
             }
+            _ => self.require_value(binding, at),
+        }
+    }
+
+    /// A mention of `binding` that needs it to hold a value: anything but a
+    /// whole assignment. A consumed one is use-after-move, an unassigned
+    /// one a read before definite assignment.
+    fn require_value(&mut self, binding: BindingId, at: ExprId) {
+        match self.state.get(&binding).copied() {
             Some(Status::Consumed { at: first }) => {
                 self.diagnostics.push(LinearDiagnostic::AlreadyConsumed {
                     binding,
@@ -663,7 +711,14 @@ impl CheckCtx<'_> {
                     first,
                 });
             }
-            None => {}
+            Some(Status::Uninit { maybe }) => {
+                self.diagnostics.push(LinearDiagnostic::ReadUninit {
+                    binding,
+                    expr: at,
+                    maybe,
+                });
+            }
+            Some(Status::Live) | None => {}
         }
     }
 
@@ -920,7 +975,7 @@ impl CheckCtx<'_> {
                 self.body_floor = 0;
                 self.scopes.push(Vec::new());
                 for param in &params {
-                    self.track_pat(param.pat);
+                    self.track_pat(param.pat, false);
                 }
                 let flow = self.read_value(fn_body);
                 self.pop_scope(fn_body, flow);
@@ -960,14 +1015,8 @@ impl CheckCtx<'_> {
     fn walk_place(&mut self, expr: ExprId) -> Flow {
         match &self.body.exprs[expr] {
             ExprData::NameRef(_) => {
-                if let Some(Resolution::Local(binding)) = self.resolutions.get(expr).cloned()
-                    && let Some(Status::Consumed { at: first }) = self.state.get(&binding).copied()
-                {
-                    self.diagnostics.push(LinearDiagnostic::AlreadyConsumed {
-                        binding,
-                        expr,
-                        first,
-                    });
+                if let Some(Resolution::Local(binding)) = self.resolutions.get(expr).cloned() {
+                    self.require_value(binding, expr);
                 }
                 Flow::Falls
             }
@@ -1030,11 +1079,12 @@ impl CheckCtx<'_> {
         match stmt {
             Stmt::Let { pat, init, .. } => {
                 let (pat, init) = (*pat, *init);
-                let flow = self.read_value(init);
-                if flow == Flow::Diverges {
-                    return flow;
+                if let Some(init) = init
+                    && self.read_value(init) == Flow::Diverges
+                {
+                    return Flow::Diverges;
                 }
-                self.track_pat(pat);
+                self.track_pat(pat, init.is_none());
                 Flow::Falls
             }
             Stmt::Assign { target, value } => {
@@ -1148,7 +1198,7 @@ impl CheckCtx<'_> {
                             .and_then(|ty| crate::capability::blaming_param(self.db, ty)),
                     });
             }
-            self.track_pat(arm.pat);
+            self.track_pat(arm.pat, false);
             let flow = self.read_value(arm.body);
             self.pop_scope(arm.body, flow);
             branches.push((flow, std::mem::replace(&mut self.state, entry.clone())));
@@ -1173,6 +1223,7 @@ impl CheckCtx<'_> {
             floor: self.scopes.len(),
             entry,
             breaks: Vec::new(),
+            revived: Vec::new(),
         });
         let flow = self.read_value(body);
         // The back edge: falling off the body's end runs the body again.
@@ -1190,7 +1241,13 @@ impl CheckCtx<'_> {
             .into_iter()
             .map(|state| (Flow::Falls, state))
             .collect();
-        self.join(expr, branches)
+        let flow = self.join(expr, branches);
+        for binding in frame.revived {
+            if let Some(Status::Uninit { maybe }) = self.state.get_mut(&binding) {
+                *maybe = true;
+            }
+        }
+        flow
     }
 
     /// The loop's one invariant: every binding the loop could see at entry
@@ -1198,11 +1255,16 @@ impl CheckCtx<'_> {
     /// outer linear inside a loop is the case this catches — the second
     /// iteration would consume it again — and assigning a fresh value back
     /// is the way to satisfy it.
+    ///
+    /// Becoming live is allowed for a value that may be lost: the next
+    /// iteration holds a value where this one was checked holding none,
+    /// which no read or overwrite can mind (`let mut x; loop { x = f(); if
+    /// c { break } }`). A linear one would be overwritten while live.
     fn check_loop_invariant(&mut self, at: ExprId) {
         let Some(frame) = self.loops.last() else {
             return;
         };
-        let changed: Vec<BindingId> = frame
+        let (changed, revived): (Vec<BindingId>, Vec<BindingId>) = frame
             .entry
             .iter()
             .filter(|(binding, was_live)| {
@@ -1211,7 +1273,10 @@ impl CheckCtx<'_> {
                     .is_some_and(|status| status.is_live() != **was_live)
             })
             .map(|(binding, _)| *binding)
-            .collect();
+            .partition(|binding| frame.entry[binding] || self.owes_once(*binding));
+        if let Some(frame) = self.loops.last_mut() {
+            frame.revived.extend(revived);
+        }
         for binding in changed {
             self.diagnostics
                 .push(LinearDiagnostic::LoopChangesLinear { binding, at });
@@ -1242,11 +1307,19 @@ impl CheckCtx<'_> {
                 if theirs.is_live() != status.is_live() {
                     disagreed.push(*binding);
                     // Settle on "consumed" so the scope exit does not pile
-                    // a second complaint on top of this one.
-                    *status = match theirs {
-                        Status::Consumed { at } => Status::Consumed { at: *at },
-                        Status::Live => Status::Consumed { at },
+                    // a second complaint on top of this one — or on "maybe
+                    // unassigned" where a path never assigned it.
+                    *status = match (*status, theirs) {
+                        (Status::Uninit { .. }, _) | (_, Status::Uninit { .. }) => {
+                            Status::Uninit { maybe: true }
+                        }
+                        (_, Status::Consumed { at }) => Status::Consumed { at: *at },
+                        _ => Status::Consumed { at },
                     };
+                } else if let (Status::Uninit { maybe }, Status::Uninit { maybe: theirs }) =
+                    (&mut *status, theirs)
+                {
+                    *maybe |= *theirs;
                 }
             }
             // The merge above settles a disagreement on "consumed" for

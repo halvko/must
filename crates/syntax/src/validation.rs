@@ -42,6 +42,7 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             }
         } else if let Some(let_stmt) = ast::LetStmt::cast(node.clone()) {
             require_mut_names_a_binding(let_stmt.mut_token(), let_stmt.pat(), &mut errors);
+            validate_deferred_let(&let_stmt, &mut errors);
         } else if let Some(record_ty) = ast::RecordType::cast(node.clone()) {
             let names = record_ty
                 .fields()
@@ -866,6 +867,47 @@ fn require_variable_target(expr: &ast::Expr, errors: &mut Vec<SyntaxError>) {
         range: expr.syntax().text_range(),
         fix: None,
     });
+}
+
+/// A `let` with no `=` declares a binding that starts uninitialized (M21).
+/// Only a bare name may: a destructuring pattern has no single place a later
+/// assignment could fill. An immutable one is reserved (X12): it would be
+/// assigned exactly once, which the walk that checks it does not prove.
+fn validate_deferred_let(let_stmt: &ast::LetStmt, errors: &mut Vec<SyntaxError>) {
+    if let_stmt.eq_token().is_some() {
+        return;
+    }
+    match let_stmt.pat() {
+        Some(ast::Pat::BindPat(bind)) => {
+            let Some(name) = bind.name() else { return };
+            if name.is_hole() || let_stmt.is_mut() {
+                return;
+            }
+            errors.push(SyntaxError {
+                message: format!(
+                    "an immutable `let` without a value is not supported yet; \
+                     write `let mut {};`",
+                    name.text()
+                ),
+                range: let_stmt.syntax().text_range(),
+                fix: name.mut_slot().map(|slot| Fix {
+                    label: "Make the binding `mut`".to_owned(),
+                    edits: vec![TextEdit {
+                        range: TextRange::empty(slot),
+                        insert: "mut ".to_owned(),
+                    }],
+                }),
+            });
+        }
+        Some(other) => errors.push(SyntaxError {
+            message: "a destructuring `let` needs a value: only a single name can be \
+                      declared without one"
+                .to_owned(),
+            range: other.syntax().text_range(),
+            fix: None,
+        }),
+        None => {}
+    }
 }
 
 /// `mut` on a hole pattern (`let mut _ = ...` / `fn (mut _: T)`) has nothing

@@ -2129,7 +2129,7 @@ fn expected_type_at(
             if let hir::body::Stmt::Let { pat, init, .. } = stmt
                 && *pat == pat_id
             {
-                return inference.expectation_of_expr.get(*init).cloned();
+                return inference.expectation_of_expr.get((*init)?).cloned();
             }
         }
     }

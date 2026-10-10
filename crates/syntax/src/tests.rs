@@ -2514,6 +2514,57 @@ fn mut_hole_param_is_rejected() {
 }
 
 #[test]
+fn a_let_without_an_initializer_parses() {
+    check(
+        "static f = fn { let mut x: usize; let y; };",
+        expect![[r#"
+            SOURCE_FILE@0..43
+              STATIC_ITEM@0..43
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "f"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..42
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  BLOCK_EXPR@14..42
+                    L_BRACE@14..15 "{"
+                    WHITESPACE@15..16 " "
+                    LET_STMT@16..33
+                      LET_KW@16..19 "let"
+                      WHITESPACE@19..20 " "
+                      MUT_KW@20..23 "mut"
+                      WHITESPACE@23..24 " "
+                      BIND_PAT@24..25
+                        NAME@24..25
+                          IDENT@24..25 "x"
+                      COLON@25..26 ":"
+                      WHITESPACE@26..27 " "
+                      PATH_TYPE@27..32
+                        NAME_REF@27..32
+                          IDENT@27..32 "usize"
+                      SEMICOLON@32..33 ";"
+                    WHITESPACE@33..34 " "
+                    LET_STMT@34..40
+                      LET_KW@34..37 "let"
+                      WHITESPACE@37..38 " "
+                      BIND_PAT@38..39
+                        NAME@38..39
+                          IDENT@38..39 "y"
+                      SEMICOLON@39..40 ";"
+                    WHITESPACE@40..41 " "
+                    R_BRACE@41..42 "}"
+                SEMICOLON@42..43 ";"
+            error 34..40: an immutable `let` without a value is not supported yet; write `let mut y;`
+        "#]],
+    );
+}
+
+#[test]
 fn equality_comparison_is_still_an_expr_stmt() {
     // Regression guard: `==` must not be mistaken for the assignment `=`.
     check(

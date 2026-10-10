@@ -143,7 +143,15 @@
   field write are all the use-after-move, and only a whole assignment is allowed. Dynamically
   the interpreter marks a moved local uninitialized, so a read through a pointer taken before
   the move is detected UB with the move as its note. A bare `.&mut` read into a bare `let`
-  still copies (M07) and moves nothing.
+  still copies (M07) and moves nothing. A declaration without a value (`let mut x;`) is a
+  binding born in this moved-out state, so definite assignment is the same fact in the same
+  walk: a deferred binding is tracked whatever its type (a copyable one only for whether it
+  holds a value), a diverging path does not join, and paths that disagree settle on "maybe
+  unassigned", which every mention but a whole assignment refuses. Across a loop's back edge
+  the one change allowed is a value that may be lost becoming live (assigned before a
+  `break`); a linear one would be overwritten live. Dynamically the deferred local is unwritten
+  until assigned and a read of it traps. Strict first (X12): only `let mut` and a single name
+  omit the value — an immutable `let x;` is reserved, a destructuring one refused.
 - **M22** A place is pinned while it is evaluated. A deref-rooted place reads its pointer
   before its index operands run, and the access goes through that pointer; so from the read
   to the access, assigning the pointer's place or a prefix of it, or moving its root, is
@@ -265,6 +273,10 @@
   other; and the static rule is stricter than the interpreter on foreign reads, deliberately
   (the ordinary NLL rule; the tree's freeze is operational semantics for unsafe code).
   **M14 M19**
+- **An immutable deferred `let x;` is wanted** — reserved (X12); granting it means the walk
+  also proves "assigned at most once", which a second fact per binding would carry. A linear
+  value assigned on some paths only reports "consumed on some paths and not others" at the
+  join, which names the wrong half; a message of its own when that confuses. **M21**
 - **A refusal plants no trap**, so a refused program still runs. Whether `run` should refuse
   what the language refuses is open. **M14**
 - **A borrowed `str` representation lands** — copying one out of a borrow stops being a copy,

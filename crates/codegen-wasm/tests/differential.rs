@@ -266,6 +266,31 @@ static main = fn () -> usize { sum_odds_below(10) + find(3, 20) }
 }
 
 #[test]
+fn deferred_bindings_assigned_on_every_path() {
+    check(
+        r#"
+static pick = fn (c: bool) -> usize {
+    let mut x: usize;
+    if c { x = 1; } else { x = 2; }
+    x
+};
+static last_double = fn (n: usize) -> usize {
+    let mut x;
+    let mut i = 0;
+    loop {
+        x = i * 2;
+        i = i + 1;
+        if i > n { break; }
+    }
+    x
+};
+static main = fn () -> usize { pick(true) + pick(false) + last_double(3) }
+"#,
+        "main()",
+    );
+}
+
+#[test]
 fn divergence_shapes_survive() {
     // A `!`-typed callee: the call has no continuation at all.
     check(

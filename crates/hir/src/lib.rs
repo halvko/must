@@ -1717,13 +1717,18 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                 // exclusive borrow — need never be consumed at all, and
                 // telling its owner otherwise sends them looking for a
                 // disposal method that does not exist.
+                let message = if matches!(diag, linear_check::LinearDiagnostic::ReadUninit { .. }) {
+                    diag::declared_without_value(subject)
+                } else {
+                    diag::born_here(
+                        subject,
+                        ty.is_some_and(|ty| !capability::has_forget(db, ty)),
+                    )
+                };
                 related.push(RelatedInfo {
                     file,
                     range: ptr.text_range(),
-                    message: diag::born_here(
-                        subject,
-                        ty.is_some_and(|ty| !capability::has_forget(db, ty)),
-                    ),
+                    message,
                 });
             }
             if let Some(first) = diag.related_expr()

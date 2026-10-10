@@ -79,6 +79,17 @@ static alias = direct;
 "#,
     ),
     (
+        "deferred initialization",
+        r#"
+static pick = fn (c: bool) -> usize {
+    let mut x: usize;
+    let mut y;
+    if c { x = 1; y = 'a'; } else { x = 2; y = 'b'; }
+    x
+};
+"#,
+    ),
+    (
         "match patterns",
         r#"
 type Shape = enum { Circle(usize), Pair(usize, str), Point };

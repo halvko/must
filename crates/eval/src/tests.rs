@@ -1055,7 +1055,10 @@ static entrypoint = (main(20));
     let hir::body::ExprData::Block { stmts, .. } = &main_body.exprs[*main_fn_block] else {
         panic!("a fn literal's body is a block");
     };
-    let hir::body::Stmt::Let { init, .. } = &stmts[0] else {
+    let hir::body::Stmt::Let {
+        init: Some(init), ..
+    } = &stmts[0]
+    else {
         panic!("main starts with a let");
     };
     let hir::body::ExprData::Bin { lhs: main_call, .. } = &main_body.exprs[*init] else {
@@ -8135,6 +8138,127 @@ static f = fn() -> usize {
             error[UndefinedBehavior]: write through a borrow that is no longer valid: the value was borrowed again, written through another borrow, or moved away, while this borrow was still live
               note: this borrow was created here
               note: invalidated here — the value was borrowed again, written through another borrow, or moved away
+        "#]],
+    );
+}
+
+#[test]
+fn a_deferred_binding_assigned_in_a_match_arm_runs() {
+    check_run(
+        r#"
+static main = fn () -> () {
+    let s = "abc";
+    let mut i = 0;
+    loop {
+        let mut current;
+        match s.next_char(i) {
+            ::Char(c, next) => {
+                current = c;
+                i = next;
+            },
+            ::End => {
+                break;
+            },
+        };
+        if current == 'a' { print("found a\n"); }
+    }
+};
+"#,
+        "main()",
+        expect![[r#"
+            output: "found a\n"
+            => ()
+        "#]],
+    );
+}
+
+#[test]
+fn a_deferred_binding_holds_what_was_assigned() {
+    check_run(
+        r#"
+static main = fn () -> usize {
+    let mut x: usize;
+    let mut greeting;
+    x = 1;
+    greeting = "hi";
+    print(greeting);
+    x
+};
+"#,
+        "main()",
+        expect![[r#"
+            output: "hi"
+            => 1
+        "#]],
+    );
+    check_run(
+        r#"
+static looped = fn (n: usize) -> usize {
+    let mut x;
+    let mut i = 0;
+    loop {
+        x = i * 2;
+        i = i + 1;
+        if i > n { break; }
+    }
+    x
+};
+"#,
+        "looped(3)",
+        expect![[r#"
+            => 6
+        "#]],
+    );
+}
+
+/// The checker refuses the read; run anyway, the local holds nothing there
+/// and the read traps rather than seeing a stale or zero value.
+#[test]
+fn a_refused_read_of_a_deferred_binding_traps_at_the_read() {
+    check_run(
+        r#"
+static f = fn (c: bool) -> usize {
+    let mut x;
+    if c { x = 1; }
+    x
+};
+"#,
+        "f(true) + f(false)",
+        expect![[r#"
+            error[UndefinedBehavior]: read of uninitialized memory — the local was declared without a value and never assigned
+        "#]],
+    );
+    check_run(
+        r#"
+static f = fn (n: usize) -> usize {
+    let mut total = 0;
+    let mut i = 0;
+    loop {
+        let mut x: usize;
+        if i == 0 { x = 5; }
+        total = total + x;
+        i = i + 1;
+        if i == n { break; }
+    }
+    total
+};
+"#,
+        "f(3)",
+        expect![[r#"
+            error[UndefinedBehavior]: read of uninitialized memory — the local was declared without a value and never assigned
+        "#]],
+    );
+    check_run(
+        r#"
+static f = fn () -> usize {
+    let mut p: struct { a: usize };
+    p.a = 1;
+    p.a
+};
+"#,
+        "f()",
+        expect![[r#"
+            error[UndefinedBehavior]: read of uninitialized memory — the local was declared without a value and never assigned
         "#]],
     );
 }
