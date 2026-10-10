@@ -9,6 +9,7 @@ use syntax::SyntaxKind;
 use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator, Tree};
 
 mod corpus;
+mod indents;
 
 unsafe extern "C" {
     fn tree_sitter_must() -> *const ();
@@ -609,6 +610,8 @@ fn editor_query_files_compile() {
         "editors/tree-sitter-must/queries/highlights.scm",
         "editors/zed/languages/must/highlights.scm",
         "editors/zed/languages/must/brackets.scm",
+        "editors/tree-sitter-must/queries/indents.scm",
+        "editors/zed/languages/must/indents.scm",
     ] {
         if let Err(e) = Query::new(&language(), &read(&repo_root().join(path))) {
             panic!("{path} does not compile against the grammar: {e}");

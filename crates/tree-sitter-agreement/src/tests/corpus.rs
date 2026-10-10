@@ -262,4 +262,138 @@ static old = fn (s: Shape) -> usize {
 static broken = fn () -> usize { missing(nowhere) };
 "#,
     ),
+    (
+        "wrapped lines",
+        r#"
+type Shape = enum {
+    Circle(usize),
+    Pair(
+        usize,
+        str,
+    ),
+    Point,
+};
+trait Show = requires {
+    show: fn(s: Self) -> str;
+};
+type Point = struct {
+    x: usize,
+    y: usize,
+} with {
+    impl Show {
+        show = fn(p: Self) -> str {
+            "point"
+        };
+        label =
+            fn(p: Self) -> str { "p" };
+    }
+    for usize {
+        impl Show;
+    }
+    unsafe {
+        impl Show;
+    }
+};
+static pick = fn::<
+    T,
+    U,
+>(
+    first: T,
+    second: U,
+) -> T {
+    first
+};
+static norm = fn (
+    Point(struct {
+        x,
+        y,
+    }): Point,
+) -> usize {
+    x + y
+};
+type Meters = usize;
+static unwrap = fn (
+    Meters(
+        m
+    ): Meters,
+) -> usize { m };
+static wrapped =
+    fn (s: Shape, mut n: usize) -> usize {
+        let total =
+            n + 1;
+        n =
+            total;
+        let sum = n
+            + total
+            + 1;
+        let p = Point(struct {
+            x = 1,
+            y =
+                2,
+        });
+        let width = p
+            .x;
+        let xs = [
+            1,
+            2,
+        ];
+        let first = xs[
+            0
+        ];
+        let grouped = (
+            first + 1
+        );
+        let m = match s {
+            ::Circle(r) => {
+                r
+            },
+            ::Pair(
+                left,
+                _,
+            ) => {
+                left
+            },
+            ::Point =>
+                0,
+        };
+        let pt = pick::<
+            usize,
+            str,
+        >(m, "x");
+        let called = pick(
+            first,
+            grouped,
+        );
+        let q = struct {
+            x = 3,
+            y = 4,
+        };
+        let struct {
+            x,
+            y,
+        } = q;
+        let chosen = if x == y {
+            x
+        } else {
+            y
+        };
+        if m == 0 {
+            1
+        } else {
+            sum + width
+                + grouped + pt
+        }
+    };
+static field = fn (p: Point) -> usize {
+    p
+        .x
+};
+type Grid = struct {
+    cells: [
+        usize;
+        4
+    ],
+};
+"#,
+    ),
 ];
