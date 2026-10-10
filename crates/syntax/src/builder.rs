@@ -8,12 +8,15 @@ use crate::{Fix, SyntaxError, TextEdit};
 use rowan::{GreenNode, GreenNodeBuilder};
 use text_size::{TextRange, TextSize};
 
+/// The tree, the errors, and for each error the range of the node the
+/// parser was building when it reported it (`None` for the lexer's).
 pub(crate) fn build(
     text: &str,
     tokens: &[Token],
     mut events: Vec<Event>,
     mut errors: Vec<SyntaxError>,
-) -> (GreenNode, Vec<SyntaxError>) {
+) -> (GreenNode, Vec<SyntaxError>, Vec<Option<TextRange>>) {
+    let lexer_errors = errors.len();
     let mut builder = Builder {
         inner: GreenNodeBuilder::new(),
         text,
@@ -23,6 +26,9 @@ pub(crate) fn build(
         prev_token_range: TextRange::empty(TextSize::new(0)),
         depth: 0,
         errors: &mut errors,
+        open_starts: Vec::new(),
+        owners: Vec::new(),
+        unowned: Vec::new(),
     };
 
     const CONSUMED: Event = Event::Start {
@@ -72,7 +78,10 @@ pub(crate) fn build(
         }
     }
 
-    (builder.inner.finish(), errors)
+    let green = builder.inner.finish();
+    let mut owners = vec![None; lexer_errors];
+    owners.extend(builder.owners.into_iter().map(Some));
+    (green, errors, owners)
 }
 
 struct Builder<'a> {
@@ -87,6 +96,14 @@ struct Builder<'a> {
     prev_token_range: TextRange,
     depth: usize,
     errors: &'a mut Vec<SyntaxError>,
+    /// Where each open node begins, innermost last.
+    open_starts: Vec<TextSize>,
+    /// For each error this builder pushed, the range of the node it was
+    /// reported in, filled in when that node finishes.
+    owners: Vec<TextRange>,
+    /// The errors whose node is open: the node's index in
+    /// `open_starts` and the error's index in `owners`.
+    unowned: Vec<(usize, usize)>,
 }
 
 impl Builder<'_> {
@@ -99,6 +116,7 @@ impl Builder<'_> {
         }
         self.inner.start_node(kind.into());
         self.depth += 1;
+        self.open_starts.push(self.offset);
     }
 
     fn finish_node(&mut self) {
@@ -108,6 +126,18 @@ impl Builder<'_> {
             self.eat_trivia();
         }
         self.inner.finish_node();
+        let start = self.open_starts.pop().unwrap_or_default();
+        if !self.unowned.is_empty() {
+            let open = self.open_starts.len();
+            let range = TextRange::new(start, self.offset);
+            let owners = &mut self.owners;
+            self.unowned.retain(|&(node, error)| {
+                if node == open {
+                    owners[error] = range;
+                }
+                node != open
+            });
+        }
     }
 
     fn token(&mut self) {
@@ -166,11 +196,20 @@ impl Builder<'_> {
                 insert,
             }],
         });
+        // The owner is the innermost open node that began before the
+        // error: one begun AT the offending token may be the next construct.
+        let node = self
+            .open_starts
+            .iter()
+            .rposition(|&start| start < range.start())
+            .unwrap_or(0);
         self.errors.push(SyntaxError {
             message,
             range,
             fix,
         });
+        self.unowned.push((node, self.owners.len()));
+        self.owners.push(range);
     }
 
     fn eat_trivia(&mut self) {

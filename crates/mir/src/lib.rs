@@ -8,9 +8,8 @@
 //!   erroneous value would be produced, a [`TerminatorKind::Trap`] carries
 //!   an error message and structurally continues — the full CFG always
 //!   exists, so flow analyses run past errors; at runtime execution aborts
-//!   at the trap. Inference-class traps borrow the upstream diagnostic's
-//!   text verbatim; other classes are hand-written at the trap site and
-//!   kept consistent with hir's messages by convention.
+//!   at the trap. A trap for an error diagnostic carries the
+//!   diagnostic's message verbatim.
 //! - **Narrowing-readiness.** Compiler temps are minted fresh per evaluated
 //!   expression and conditions stay materialized as [`Rvalue::BinaryOp`]
 //!   statements feeding [`TerminatorKind::SwitchBool`], so a future
@@ -27,6 +26,8 @@ mod lower;
 pub mod pretty;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod trap_guard;
 
 use base_db::Db;
 use hir::body::BinOp;
@@ -482,9 +483,8 @@ pub enum TerminatorKind {
     },
     Return,
     /// A deferred error: structurally produces `dest` and continues at
-    /// `target`; at runtime, aborts with `message`. Inference-class traps
-    /// borrow the message from the upstream diagnostic; other classes are
-    /// hand-written and kept consistent with hir's messages by convention.
+    /// `target`; at runtime, aborts with `message`, the message of the error
+    /// diagnostic it stands for.
     Trap {
         message: String,
         dest: LocalId,

@@ -39,6 +39,13 @@ here; they live in `docs/design/`.
   A program lives in a `.must` file only when it ships in `examples/` and
   the test includes that file to check the shipped copy.
 
+## Diagnostics
+
+- An error diagnostic is also a trap at the code it blames, with the same
+  message: a program that reports an error runs until it reaches the
+  broken code. A new check is not done until `mir`'s `every_error_traps`
+  test passes with its program in the corpus.
+
 ## Fast path
 
 - Work that only a diagnostic needs is done where the diagnostic is

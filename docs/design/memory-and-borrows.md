@@ -265,8 +265,9 @@
   other; and the static rule is stricter than the interpreter on foreign reads, deliberately
   (the ordinary NLL rule; the tree's freeze is operational semantics for unsafe code).
   **M14 M19**
-- **A refusal plants no trap**, so a refused program still runs. Whether `run` should refuse
-  what the language refuses is open. **M14**
+- **A loan refusal plants no trap**, so a program the loan check refuses still runs past the
+  refused borrow. Outlives and linearity refusals trap where they blame; loan refusals come
+  from MIR itself, so trapping them needs a second pass (halvko/must#52). **M14**
 - **A borrowed `str` representation lands** — copying one out of a borrow stops being a copy,
   and the model needs a byte-range path element it deliberately lacks (T17). **M11**
 - **A borrowed scrutinee whose referent is unknown where the match is checked** — the lift is

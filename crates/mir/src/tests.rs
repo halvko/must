@@ -305,7 +305,10 @@ static use_it = fn { let v = name; };
             item name:
             fn b0() -> usize {
               _0: usize  // return
+              _1: usize
               bb0:
+                _1 = trap "`name` is defined multiple times" -> bb1
+              bb1:
                 _0 = 2
                 return
             }
@@ -481,11 +484,14 @@ fn missing_operand_traps() {
               _0: {error}  // return
               _1: {error}
               _2: {error}
+              _3: {error}
               bb0:
-                _1 = trap "syntax error: missing expression" -> bb1
+                _1 = trap "expected an expression" -> bb1
               bb1:
-                _2 = Add((), _1)
-                _0 = _2
+                _2 = trap "syntax error: missing expression" -> bb2
+              bb2:
+                _3 = Add((), _2)
+                _0 = _3
                 return
             }
         "#]],
