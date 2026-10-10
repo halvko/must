@@ -9607,6 +9607,72 @@ static main = fn (a: A) -> usize { a.get() };
     );
 }
 
+/// An annotated `let` whose initializer is poisoned is typed by its
+/// annotation, so later uses are judged against `char`.
+#[test]
+fn annotated_let_with_poisoned_initializer_uses_its_annotation() {
+    check_diagnostics(
+        r#"
+static main = fn () -> () {
+    let c: char = match input.next_char(0) {
+        ::Char(ch, _) => ch,
+        ::End => panic("no input"),
+    };
+    let d = c.&.to_i32();
+};
+"#,
+        expect![[r#"
+            53..58: unresolved name `input`
+            158..170: no field or member `to_i32` on `char`
+        "#]],
+    );
+}
+
+/// An unannotated `let` with a poisoned initializer reports nothing past
+/// the original error.
+#[test]
+fn unannotated_let_with_poisoned_initializer_stays_silent() {
+    check_diagnostics(
+        r#"
+static main = fn () -> () {
+    let c = match input.next_char(0) {
+        ::Char(ch, _) => ch,
+        ::End => panic("no input"),
+    };
+    let d = c.&.to_i32();
+    let e = c.&.x;
+    let f = c.&();
+    let g = struct { a = c }.b;
+};
+"#,
+        expect![[r#"
+            47..52: unresolved name `input`
+        "#]],
+    );
+}
+
+/// A destructuring `let` with a poisoned initializer is typed by its
+/// annotation.
+#[test]
+fn annotated_destructuring_let_with_poisoned_initializer_uses_its_annotation() {
+    check_infer(
+        r#"
+static main = fn () -> () {
+    let struct { x }: struct { x: usize } = nope;
+    let y = x;
+};
+"#,
+        expect![[r#"
+            15..95 'fn () -> () {    ...': fn()
+            27..95 '{     let struct ...': ()
+            46..47 'x': usize
+            73..77 'nope': {error}
+            87..88 'y': usize
+            91..92 'x': usize
+        "#]],
+    );
+}
+
 // ---- the record-literal equals-defines respell --------------------------
 
 #[test]

@@ -169,6 +169,10 @@ pub struct InferenceResult {
     /// two apart from the outside. Recorded, not re-derived (X10).
     pub loan_regions: ArenaMap<ExprId, Region>,
     pub diagnostics: Vec<InferenceDiagnostic>,
+    /// Diagnostics hidden because a type they would print contains
+    /// `{error}`; the original error is reported in its own right. MIR
+    /// seeds their traps like any other's (X06).
+    pub hidden_diagnostics: Vec<InferenceDiagnostic>,
 }
 
 impl InferenceResult {
@@ -1508,6 +1512,178 @@ impl CoveredLiteral {
 }
 
 impl InferenceDiagnostic {
+    /// Every type the diagnostic carries for its message — what `finish`
+    /// resolves and what [`InferCtx::report`] inspects for `{error}`.
+    fn for_each_ty_mut(&mut self, mut f: impl FnMut(&mut Ty)) {
+        match self {
+            InferenceDiagnostic::TypeMismatch {
+                expected, actual, ..
+            }
+            | InferenceDiagnostic::AllBranchesMismatch {
+                expected, actual, ..
+            } => {
+                f(expected);
+                f(actual);
+            }
+            InferenceDiagnostic::NotCallable { ty, .. } => {
+                f(ty);
+            }
+            // `found` is always definite (`char`, or `{number}` for an
+            // integer pattern) — resolved for symmetry, so the pair
+            // can never drift apart.
+            InferenceDiagnostic::PatLiteralTypeMismatch {
+                expected, found, ..
+            } => {
+                f(expected);
+                f(found);
+            }
+            InferenceDiagnostic::IfBranchMismatch {
+                then_ty, else_ty, ..
+            } => {
+                f(then_ty);
+                f(else_ty);
+            }
+            InferenceDiagnostic::RecordLitMissingFields { fields, .. } => {
+                for (_, ty) in fields.iter_mut() {
+                    f(ty);
+                }
+            }
+            InferenceDiagnostic::RecordLitExtraField { expected, .. } => {
+                f(expected);
+            }
+            InferenceDiagnostic::ElidedVariantNoEnum {
+                expected: Some(expected),
+                ..
+            } => {
+                f(expected);
+            }
+            InferenceDiagnostic::NoSuchField { receiver_ty, .. }
+            | InferenceDiagnostic::NoSuchMember { receiver_ty, .. }
+            | InferenceDiagnostic::MemberWantsExclusiveReceiver { receiver_ty, .. }
+            | InferenceDiagnostic::MemberCallAmbiguity { receiver_ty, .. } => {
+                f(receiver_ty);
+            }
+            InferenceDiagnostic::FieldNotCallable {
+                ty, receiver_ty, ..
+            } => {
+                f(ty);
+                f(receiver_ty);
+            }
+            InferenceDiagnostic::MatchWithoutCatchAll { scrutinee, .. }
+            | InferenceDiagnostic::NonEnumScrutineeVariantPat { scrutinee, .. }
+            | InferenceDiagnostic::PatWrongEnum { scrutinee, .. }
+            | InferenceDiagnostic::UnreachableArm {
+                reason: UnreachableReason::OtherVariant { scrutinee },
+                ..
+            } => {
+                f(scrutinee);
+            }
+            InferenceDiagnostic::PatUnknownField { record_ty, .. } => {
+                f(record_ty);
+            }
+            InferenceDiagnostic::PatMissingFields { fields, .. } => {
+                for (_, ty) in fields.iter_mut() {
+                    f(ty);
+                }
+            }
+            InferenceDiagnostic::PatNotRecord { ty, .. }
+            | InferenceDiagnostic::DerefNonPointer { ty, .. }
+            | InferenceDiagnostic::IndexNonArray { ty, .. }
+            | InferenceDiagnostic::AssignThroughShared { ty, .. }
+            | InferenceDiagnostic::DotThroughBorrow {
+                receiver_ty: ty, ..
+            }
+            | InferenceDiagnostic::BorrowMutThroughShared { ty, .. }
+            | InferenceDiagnostic::BorrowThroughRawPointer { ty, .. }
+            | InferenceDiagnostic::MoveOutOfBorrow { ty, .. }
+            | InferenceDiagnostic::AddrOfMutThroughShared { ty, .. } => {
+                f(ty);
+            }
+            InferenceDiagnostic::PatNamedTypeMismatch {
+                expected, actual, ..
+            } => {
+                f(expected);
+                f(actual);
+            }
+            InferenceDiagnostic::BuiltinExpectsRawPtr { found, .. } => {
+                f(found);
+            }
+            InferenceDiagnostic::UnsatisfiedBound { ty, .. }
+            | InferenceDiagnostic::NoTraitImpl { ty, .. } => {
+                f(ty);
+            }
+            InferenceDiagnostic::ArgCountMismatch { .. }
+            | InferenceDiagnostic::NeedsAnnotation { .. }
+            | InferenceDiagnostic::AssignToImmutable { .. }
+            | InferenceDiagnostic::AssignToItem { .. }
+            | InferenceDiagnostic::AssignToBuiltin { .. }
+            | InferenceDiagnostic::FieldOnUnknownType { .. }
+            | InferenceDiagnostic::TypeNotValue { .. }
+            | InferenceDiagnostic::TypeCtorArgCount { .. }
+            | InferenceDiagnostic::NoSuchVariant { .. }
+            | InferenceDiagnostic::ElidedVariantNoEnum { expected: None, .. }
+            | InferenceDiagnostic::NoVariantsOnStruct { .. }
+            | InferenceDiagnostic::QualifiedPathIsField { .. }
+            | InferenceDiagnostic::VariantPathOnValue { .. }
+            | InferenceDiagnostic::EnumCtorIsVariant { .. }
+            | InferenceDiagnostic::NonExhaustiveMatch { .. }
+            | InferenceDiagnostic::UnreachableArm { .. }
+            | InferenceDiagnostic::PatNoSuchVariant { .. }
+            | InferenceDiagnostic::PatArity { .. }
+            | InferenceDiagnostic::PatPathError { .. }
+            | InferenceDiagnostic::VariantPatUnknownScrutinee { .. }
+            | InferenceDiagnostic::BindShadowsVariant { .. }
+            | InferenceDiagnostic::BreakOutsideLoop { .. }
+            | InferenceDiagnostic::ContinueOutsideLoop { .. }
+            | InferenceDiagnostic::ReturnOutsideFn { .. }
+            | InferenceDiagnostic::ReturnInConstBlock { .. }
+            | InferenceDiagnostic::PatBindingNeedsAnnotation { .. }
+            | InferenceDiagnostic::PatUnknownType { .. }
+            | InferenceDiagnostic::GenericArgCount { .. }
+            | InferenceDiagnostic::NotGeneric { .. }
+            | InferenceDiagnostic::ConstArgHole { .. }
+            | InferenceDiagnostic::UnexpectedRegionArg { .. }
+            | InferenceDiagnostic::RegionArgAtMention { .. }
+            | InferenceDiagnostic::GenericArgKindMismatch { .. }
+            | InferenceDiagnostic::MissingConstArgs { .. }
+            | InferenceDiagnostic::CannotInferGenericParam { .. }
+            | InferenceDiagnostic::ForgetBoundUnsatisfied { .. }
+            | InferenceDiagnostic::AssignToConstParam { .. }
+            | InferenceDiagnostic::FnConstArg { .. }
+            | InferenceDiagnostic::TypeConstArgUnsupported { .. }
+            | InferenceDiagnostic::AddrOfNonPlace { .. }
+            | InferenceDiagnostic::AddrOfMutImmutable { .. }
+            | InferenceDiagnostic::AddrOfMutItem { .. }
+            | InferenceDiagnostic::BorrowNonPlace { .. }
+            | InferenceDiagnostic::BorrowMutImmutable { .. }
+            | InferenceDiagnostic::BorrowMutItem { .. }
+            | InferenceDiagnostic::IndexOutOfBounds { .. }
+            | InferenceDiagnostic::EmptyArrayNeedsAnnotation { .. }
+            | InferenceDiagnostic::ArrayConstArg { .. }
+            | InferenceDiagnostic::CannotInferNumberType { .. }
+            | InferenceDiagnostic::IntLiteralOutOfRange { .. }
+            | InferenceDiagnostic::PatIntLiteralTooLarge { .. }
+            | InferenceDiagnostic::BuiltinNotFirstClass { .. }
+            | InferenceDiagnostic::NotDotCallable { .. }
+            | InferenceDiagnostic::MemberWantsBorrowReceiver { .. }
+            | InferenceDiagnostic::MemberNotCalled { .. }
+            | InferenceDiagnostic::NamedGenericArg { .. }
+            | InferenceDiagnostic::QualifiedTraitMemberOnType { .. }
+            | InferenceDiagnostic::TraitNotValue { .. }
+            | InferenceDiagnostic::AssocTypeReserved { .. }
+            | InferenceDiagnostic::CannotInferSelf { .. }
+            | InferenceDiagnostic::QualifiedTraitMemberValue { .. }
+            | InferenceDiagnostic::BoundMemberValue { .. }
+            | InferenceDiagnostic::TraitHasNoMember { .. }
+            | InferenceDiagnostic::BoundFnValue { .. }
+            | InferenceDiagnostic::GenericTraitReserved { .. }
+            | InferenceDiagnostic::MemberOwnConstArgs { .. }
+            | InferenceDiagnostic::MemberGenericArgCount { .. }
+            | InferenceDiagnostic::VariantOwnGenericArgs { .. }
+            | InferenceDiagnostic::NestedBoundUse { .. } => {}
+        }
+    }
+
     /// The expression the diagnostic is reported on.
     pub fn expr(&self) -> ExprId {
         match self {
@@ -2845,15 +3021,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     if mutable && !data.mutable {
                         segments.reverse();
                         let place_text = format!("{name}{}", segments.concat());
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::BorrowMutImmutable {
-                                borrow,
-                                root,
-                                binding: *binding,
-                                name: data.name().to_owned(),
-                                place: place_text,
-                            });
+                        self.report(InferenceDiagnostic::BorrowMutImmutable {
+                            borrow,
+                            root,
+                            binding: *binding,
+                            name: data.name().to_owned(),
+                            place: place_text,
+                        });
                     }
                 }
                 Some(Resolution::Item(loc)) => {
@@ -2862,14 +3036,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             .as_ref()
                             .and_then(|it| it.kind.constness())
                             .unwrap_or(Constness::Static);
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::BorrowMutItem {
-                                borrow,
-                                root,
-                                item: loc.clone(),
-                                constness,
-                            });
+                        self.report(InferenceDiagnostic::BorrowMutItem {
+                            borrow,
+                            root,
+                            item: loc.clone(),
+                            constness,
+                        });
                     }
                 }
                 Some(resolution) => {
@@ -2878,13 +3050,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     let Some(what) = non_place_what(resolution) else {
                         return;
                     };
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::BorrowNonPlace {
-                            expr: borrow,
-                            name: name.clone(),
-                            what,
-                        });
+                    self.report(InferenceDiagnostic::BorrowNonPlace {
+                        expr: borrow,
+                        name: name.clone(),
+                        what,
+                    });
                 }
                 None => {}
             },
@@ -2908,9 +3078,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         // A `.&mut` needs the whole chain to be reachable
                         // exclusively, not merely its parent step.
                         if let Some(ty) = governing {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::BorrowMutThroughShared { borrow, ty });
+                            self.report(InferenceDiagnostic::BorrowMutThroughShared { borrow, ty });
                             return;
                         }
                         // A `.&` through a `.&mut` parent: the parent
@@ -2933,12 +3101,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         // up (`BorrowMutThroughShared`) is a different
                         // rule — that parent DOES have a region, it is
                         // just the wrong permission.
-                        self.result.diagnostics.push(
-                            InferenceDiagnostic::BorrowThroughRawPointer {
-                                borrow,
-                                ty: resolved,
-                            },
-                        );
+                        self.report(InferenceDiagnostic::BorrowThroughRawPointer {
+                            borrow,
+                            ty: resolved,
+                        });
                     }
                     _ => {}
                 }
@@ -2989,9 +3155,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             if crate::capability::is_copyable(self.db, &resolved) {
                 continue;
             }
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::MoveOutOfBorrow { expr, ty: resolved });
+            self.report(InferenceDiagnostic::MoveOutOfBorrow { expr, ty: resolved });
         }
     }
 
@@ -3013,9 +3177,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             .collect();
         for expr in sources {
             if let Some(ty) = self.shared_step_governing(expr) {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::BorrowMutThroughShared { borrow: expr, ty });
+                self.report(InferenceDiagnostic::BorrowMutThroughShared { borrow: expr, ty });
             }
         }
     }
@@ -3218,15 +3380,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 {
                     let reason = crate::capability::no_forget_reason(self.db, &resolved)
                         .unwrap_or_else(|| format!("`{}` has no `forget`", resolved.display()));
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::ForgetBoundUnsatisfied {
-                            expr: instantiation.expr,
-                            item: instantiation.item.clone(),
-                            param: param.clone(),
-                            ty: resolved.clone(),
-                            reason,
-                        });
+                    self.report(InferenceDiagnostic::ForgetBoundUnsatisfied {
+                        expr: instantiation.expr,
+                        item: instantiation.item.clone(),
+                        param: param.clone(),
+                        ty: resolved.clone(),
+                        reason,
+                    });
                     continue;
                 }
                 if !resolved.contains_infer() {
@@ -3242,15 +3402,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 if is_unresolved_number(self.table, &var) {
                     continue;
                 }
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::CannotInferGenericParam {
-                        expr: instantiation.expr,
-                        item: instantiation.item.clone(),
-                        param,
-                        owner: instantiation.owner.clone(),
-                        spelling: instantiation.spelling.clone(),
-                    });
+                self.report(InferenceDiagnostic::CannotInferGenericParam {
+                    expr: instantiation.expr,
+                    item: instantiation.item.clone(),
+                    param,
+                    owner: instantiation.owner.clone(),
+                    spelling: instantiation.spelling.clone(),
+                });
             }
         }
         // Empty array literals whose element type nothing ever pinned —
@@ -3258,9 +3416,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let pending = std::mem::take(&mut self.pending_empty_arrays);
         for (expr, elem) in pending {
             if resolve_fully(self.table, &elem).contains_infer() {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::EmptyArrayNeedsAnnotation { expr });
+                self.report(InferenceDiagnostic::EmptyArrayNeedsAnnotation { expr });
             }
         }
         // Integer literals, after every join and axiom has spoken: a pinned
@@ -3285,14 +3441,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         } else {
                             literal.value.to_string()
                         };
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::IntLiteralOutOfRange {
-                                expr: literal.expr,
-                                pat: literal.pat,
-                                literal: rendered,
-                                ty: Ty::Int(kind),
-                            });
+                        self.report(InferenceDiagnostic::IntLiteralOutOfRange {
+                            expr: literal.expr,
+                            pat: literal.pat,
+                            literal: rendered,
+                            ty: Ty::Int(kind),
+                        });
                     }
                 }
                 Ty::Infer(var)
@@ -3308,12 +3462,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     let root = self.table.find(var);
                     if !reported_number_roots.contains(&root) {
                         reported_number_roots.push(root);
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::CannotInferNumberType {
-                                expr: literal.expr,
-                                pat: literal.pat,
-                            });
+                        self.report(InferenceDiagnostic::CannotInferNumberType {
+                            expr: literal.expr,
+                            pat: literal.pat,
+                        });
                     }
                 }
                 // Poisoned (a mismatch already told the story), or some
@@ -3360,174 +3512,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             }
             result.loan_regions.insert(expr, region);
         }
-        for diag in result.diagnostics.iter_mut() {
-            match diag {
-                InferenceDiagnostic::TypeMismatch {
-                    expected, actual, ..
-                }
-                | InferenceDiagnostic::AllBranchesMismatch {
-                    expected, actual, ..
-                } => {
-                    *expected = resolve_finished(self.table, expected);
-                    *actual = resolve_finished(self.table, actual);
-                }
-                InferenceDiagnostic::NotCallable { ty, .. } => {
-                    *ty = resolve_finished(self.table, ty);
-                }
-                // `found` is always definite (`char`, or `{number}` for an
-                // integer pattern) — resolved for symmetry, so the pair
-                // can never drift apart.
-                InferenceDiagnostic::PatLiteralTypeMismatch {
-                    expected, found, ..
-                } => {
-                    *expected = resolve_finished(self.table, expected);
-                    *found = resolve_finished(self.table, found);
-                }
-                InferenceDiagnostic::IfBranchMismatch {
-                    then_ty, else_ty, ..
-                } => {
-                    *then_ty = resolve_finished(self.table, then_ty);
-                    *else_ty = resolve_finished(self.table, else_ty);
-                }
-                InferenceDiagnostic::RecordLitMissingFields { fields, .. } => {
-                    for (_, ty) in fields.iter_mut() {
-                        *ty = resolve_finished(self.table, ty);
-                    }
-                }
-                InferenceDiagnostic::RecordLitExtraField { expected, .. } => {
-                    *expected = resolve_finished(self.table, expected);
-                }
-                InferenceDiagnostic::ElidedVariantNoEnum {
-                    expected: Some(expected),
-                    ..
-                } => {
-                    *expected = resolve_finished(self.table, expected);
-                }
-                InferenceDiagnostic::NoSuchField { receiver_ty, .. }
-                | InferenceDiagnostic::NoSuchMember { receiver_ty, .. }
-                | InferenceDiagnostic::MemberWantsExclusiveReceiver { receiver_ty, .. }
-                | InferenceDiagnostic::MemberCallAmbiguity { receiver_ty, .. } => {
-                    *receiver_ty = resolve_finished(self.table, receiver_ty);
-                }
-                InferenceDiagnostic::FieldNotCallable {
-                    ty, receiver_ty, ..
-                } => {
-                    *ty = resolve_finished(self.table, ty);
-                    *receiver_ty = resolve_finished(self.table, receiver_ty);
-                }
-                InferenceDiagnostic::MatchWithoutCatchAll { scrutinee, .. }
-                | InferenceDiagnostic::NonEnumScrutineeVariantPat { scrutinee, .. }
-                | InferenceDiagnostic::PatWrongEnum { scrutinee, .. }
-                | InferenceDiagnostic::UnreachableArm {
-                    reason: UnreachableReason::OtherVariant { scrutinee },
-                    ..
-                } => {
-                    *scrutinee = resolve_finished(self.table, scrutinee);
-                }
-                InferenceDiagnostic::PatUnknownField { record_ty, .. } => {
-                    *record_ty = resolve_finished(self.table, record_ty);
-                }
-                InferenceDiagnostic::PatMissingFields { fields, .. } => {
-                    for (_, ty) in fields.iter_mut() {
-                        *ty = resolve_finished(self.table, ty);
-                    }
-                }
-                InferenceDiagnostic::PatNotRecord { ty, .. }
-                | InferenceDiagnostic::DerefNonPointer { ty, .. }
-                | InferenceDiagnostic::IndexNonArray { ty, .. }
-                | InferenceDiagnostic::AssignThroughShared { ty, .. }
-                | InferenceDiagnostic::DotThroughBorrow {
-                    receiver_ty: ty, ..
-                }
-                | InferenceDiagnostic::BorrowMutThroughShared { ty, .. }
-                | InferenceDiagnostic::BorrowThroughRawPointer { ty, .. }
-                | InferenceDiagnostic::MoveOutOfBorrow { ty, .. }
-                | InferenceDiagnostic::AddrOfMutThroughShared { ty, .. } => {
-                    *ty = resolve_finished(self.table, ty);
-                }
-                InferenceDiagnostic::PatNamedTypeMismatch {
-                    expected, actual, ..
-                } => {
-                    *expected = resolve_finished(self.table, expected);
-                    *actual = resolve_finished(self.table, actual);
-                }
-                InferenceDiagnostic::BuiltinExpectsRawPtr { found, .. } => {
-                    *found = resolve_finished(self.table, found);
-                }
-                InferenceDiagnostic::UnsatisfiedBound { ty, .. }
-                | InferenceDiagnostic::NoTraitImpl { ty, .. } => {
-                    *ty = resolve_finished(self.table, ty);
-                }
-                InferenceDiagnostic::ArgCountMismatch { .. }
-                | InferenceDiagnostic::NeedsAnnotation { .. }
-                | InferenceDiagnostic::AssignToImmutable { .. }
-                | InferenceDiagnostic::AssignToItem { .. }
-                | InferenceDiagnostic::AssignToBuiltin { .. }
-                | InferenceDiagnostic::FieldOnUnknownType { .. }
-                | InferenceDiagnostic::TypeNotValue { .. }
-                | InferenceDiagnostic::TypeCtorArgCount { .. }
-                | InferenceDiagnostic::NoSuchVariant { .. }
-                | InferenceDiagnostic::ElidedVariantNoEnum { expected: None, .. }
-                | InferenceDiagnostic::NoVariantsOnStruct { .. }
-                | InferenceDiagnostic::QualifiedPathIsField { .. }
-                | InferenceDiagnostic::VariantPathOnValue { .. }
-                | InferenceDiagnostic::EnumCtorIsVariant { .. }
-                | InferenceDiagnostic::NonExhaustiveMatch { .. }
-                | InferenceDiagnostic::UnreachableArm { .. }
-                | InferenceDiagnostic::PatNoSuchVariant { .. }
-                | InferenceDiagnostic::PatArity { .. }
-                | InferenceDiagnostic::PatPathError { .. }
-                | InferenceDiagnostic::VariantPatUnknownScrutinee { .. }
-                | InferenceDiagnostic::BindShadowsVariant { .. }
-                | InferenceDiagnostic::BreakOutsideLoop { .. }
-                | InferenceDiagnostic::ContinueOutsideLoop { .. }
-                | InferenceDiagnostic::ReturnOutsideFn { .. }
-                | InferenceDiagnostic::ReturnInConstBlock { .. }
-                | InferenceDiagnostic::PatBindingNeedsAnnotation { .. }
-                | InferenceDiagnostic::PatUnknownType { .. }
-                | InferenceDiagnostic::GenericArgCount { .. }
-                | InferenceDiagnostic::NotGeneric { .. }
-                | InferenceDiagnostic::ConstArgHole { .. }
-                | InferenceDiagnostic::UnexpectedRegionArg { .. }
-                | InferenceDiagnostic::RegionArgAtMention { .. }
-                | InferenceDiagnostic::GenericArgKindMismatch { .. }
-                | InferenceDiagnostic::MissingConstArgs { .. }
-                | InferenceDiagnostic::CannotInferGenericParam { .. }
-                | InferenceDiagnostic::ForgetBoundUnsatisfied { .. }
-                | InferenceDiagnostic::AssignToConstParam { .. }
-                | InferenceDiagnostic::FnConstArg { .. }
-                | InferenceDiagnostic::TypeConstArgUnsupported { .. }
-                | InferenceDiagnostic::AddrOfNonPlace { .. }
-                | InferenceDiagnostic::AddrOfMutImmutable { .. }
-                | InferenceDiagnostic::AddrOfMutItem { .. }
-                | InferenceDiagnostic::BorrowNonPlace { .. }
-                | InferenceDiagnostic::BorrowMutImmutable { .. }
-                | InferenceDiagnostic::BorrowMutItem { .. }
-                | InferenceDiagnostic::IndexOutOfBounds { .. }
-                | InferenceDiagnostic::EmptyArrayNeedsAnnotation { .. }
-                | InferenceDiagnostic::ArrayConstArg { .. }
-                | InferenceDiagnostic::CannotInferNumberType { .. }
-                | InferenceDiagnostic::IntLiteralOutOfRange { .. }
-                | InferenceDiagnostic::PatIntLiteralTooLarge { .. }
-                | InferenceDiagnostic::BuiltinNotFirstClass { .. }
-                | InferenceDiagnostic::NotDotCallable { .. }
-                | InferenceDiagnostic::MemberWantsBorrowReceiver { .. }
-                | InferenceDiagnostic::MemberNotCalled { .. }
-                | InferenceDiagnostic::NamedGenericArg { .. }
-                | InferenceDiagnostic::QualifiedTraitMemberOnType { .. }
-                | InferenceDiagnostic::TraitNotValue { .. }
-                | InferenceDiagnostic::AssocTypeReserved { .. }
-                | InferenceDiagnostic::CannotInferSelf { .. }
-                | InferenceDiagnostic::QualifiedTraitMemberValue { .. }
-                | InferenceDiagnostic::BoundMemberValue { .. }
-                | InferenceDiagnostic::TraitHasNoMember { .. }
-                | InferenceDiagnostic::BoundFnValue { .. }
-                | InferenceDiagnostic::GenericTraitReserved { .. }
-                | InferenceDiagnostic::MemberOwnConstArgs { .. }
-                | InferenceDiagnostic::MemberGenericArgCount { .. }
-                | InferenceDiagnostic::VariantOwnGenericArgs { .. }
-                | InferenceDiagnostic::NestedBoundUse { .. } => {}
-            }
+        for diag in result
+            .diagnostics
+            .iter_mut()
+            .chain(result.hidden_diagnostics.iter_mut())
+        {
+            diag.for_each_ty_mut(|ty| *ty = resolve_finished(self.table, ty));
         }
         for (_, ty) in result.type_of_pat.iter_mut() {
             *ty = resolve_finished(self.table, ty);
@@ -3574,11 +3564,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     // Forwarding needs the root body's dictionary
                     // parameters, out of reach from a nested body —
                     // reserved (the captured-dictionary wall).
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::NestedBoundUse {
-                            expr: obligation.key,
-                        });
+                    self.report(InferenceDiagnostic::NestedBoundUse {
+                        expr: obligation.key,
+                    });
                     return DictEntry::Error;
                 }
                 return DictEntry::Forward {
@@ -3586,38 +3574,32 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     trait_: obligation.trait_.clone(),
                 };
             }
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::UnsatisfiedBound {
-                    expr: obligation.key,
-                    param: obligation.param_name.clone(),
-                    trait_: obligation.trait_.clone(),
-                    ty: resolved,
-                });
+            self.report(InferenceDiagnostic::UnsatisfiedBound {
+                expr: obligation.key,
+                param: obligation.param_name.clone(),
+                trait_: obligation.trait_.clone(),
+                ty: resolved,
+            });
             return DictEntry::Error;
         }
         let Some(self_key) = crate::traits::SelfKey::for_ty(&resolved) else {
             // Structural types implement nothing (TR03).
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::UnsatisfiedBound {
-                    expr: obligation.key,
-                    param: obligation.param_name.clone(),
-                    trait_: obligation.trait_.clone(),
-                    ty: resolved,
-                });
+            self.report(InferenceDiagnostic::UnsatisfiedBound {
+                expr: obligation.key,
+                param: obligation.param_name.clone(),
+                trait_: obligation.trait_.clone(),
+                ty: resolved,
+            });
             return DictEntry::Error;
         };
         let impls = crate::traits::trait_impls(self.db, self.file);
         let Some(site) = impls.impl_for(&obligation.trait_, &self_key) else {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::UnsatisfiedBound {
-                    expr: obligation.key,
-                    param: obligation.param_name.clone(),
-                    trait_: obligation.trait_.clone(),
-                    ty: resolved,
-                });
+            self.report(InferenceDiagnostic::UnsatisfiedBound {
+                expr: obligation.key,
+                param: obligation.param_name.clone(),
+                trait_: obligation.trait_.clone(),
+                ty: resolved,
+            });
             return DictEntry::Error;
         };
         match crate::traits::impl_dict_members(self.db, &obligation.trait_, site) {
@@ -3761,21 +3743,17 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // construction call — is intercepted in the `Call` arm and
                 // never infers the callee, so reaching this *is* the error.
                 Some(Resolution::TypeItem(_)) => {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::TypeNotValue {
-                            expr,
-                            name: name.clone(),
-                        });
+                    self.report(InferenceDiagnostic::TypeNotValue {
+                        expr,
+                        name: name.clone(),
+                    });
                     Ty::Error
                 }
                 Some(Resolution::TraitItem(_)) => {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::TraitNotValue {
-                            expr,
-                            name: name.clone(),
-                        });
+                    self.report(InferenceDiagnostic::TraitNotValue {
+                        expr,
+                        name: name.clone(),
+                    });
                     Ty::Error
                 }
                 Some(Resolution::Local(binding)) => self
@@ -3815,12 +3793,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             // uses (an unused undetermined item is fine),
                             // so the diagnostic lives here.
                             if signature_needs_annotation(self.db, target) {
-                                self.result.diagnostics.push(
-                                    InferenceDiagnostic::NeedsAnnotation {
-                                        expr,
-                                        item: loc.clone(),
-                                    },
-                                );
+                                self.report(InferenceDiagnostic::NeedsAnnotation {
+                                    expr,
+                                    item: loc.clone(),
+                                });
                             }
                             sig
                         }
@@ -4187,7 +4163,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     .unwrap_or_else(|| self.fresh_var());
                                 let binding_cause =
                                     has_annotation.then_some(Cause::Binding(binding));
-                                let mut ty = self.infer_expr_with(*init, &declared, binding_cause);
+                                let ty = self.infer_expr_with(*init, &declared, binding_cause);
+                                let mut ty = if has_annotation {
+                                    self.trust_declared(ty, &declared)
+                                } else {
+                                    ty
+                                };
                                 // `let mut` widening: an UNANNOTATED mutable
                                 // binding initialized with a variant-typed value
                                 // widens to the enum at binding time (with the
@@ -4228,6 +4209,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                         .unwrap_or_else(|| self.fresh_var()),
                                 };
                                 let ty = self.infer_expr_with(*init, &declared, None);
+                                let ty = self.trust_declared(ty, &declared);
                                 self.check_pat(*pat, &ty, *init);
                             }
                         }
@@ -4271,14 +4253,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 Some(Resolution::Local(binding)) => {
                                     let data = &self.body.bindings[*binding];
                                     if !data.mutable {
-                                        self.result.diagnostics.push(
-                                            InferenceDiagnostic::AssignToImmutable {
-                                                target: *target,
-                                                binding: *binding,
-                                                name: data.name().to_owned(),
-                                                place: data.name().to_owned(),
-                                            },
-                                        );
+                                        self.report(InferenceDiagnostic::AssignToImmutable {
+                                            target: *target,
+                                            binding: *binding,
+                                            name: data.name().to_owned(),
+                                            place: data.name().to_owned(),
+                                        });
                                     }
                                     Some(Cause::Binding(*binding))
                                 }
@@ -4290,12 +4270,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                         .get(*index as usize)
                                         .map(|param| param.name.clone())
                                         .unwrap_or_default();
-                                    self.result.diagnostics.push(
-                                        InferenceDiagnostic::AssignToConstParam {
-                                            target: *target,
-                                            name,
-                                        },
-                                    );
+                                    self.report(InferenceDiagnostic::AssignToConstParam {
+                                        target: *target,
+                                        name,
+                                    });
                                     None
                                 }
                                 Some(Resolution::Item(loc)) => {
@@ -4303,13 +4281,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                         .as_ref()
                                         .and_then(|it| it.kind.constness())
                                         .unwrap_or(Constness::Static);
-                                    self.result.diagnostics.push(
-                                        InferenceDiagnostic::AssignToItem {
-                                            target: *target,
-                                            item: loc.clone(),
-                                            constness,
-                                        },
-                                    );
+                                    self.report(InferenceDiagnostic::AssignToItem {
+                                        target: *target,
+                                        item: loc.clone(),
+                                        constness,
+                                    });
                                     None
                                 }
                                 // The target read already reported "is a
@@ -4319,12 +4295,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 // Same for a trait name.
                                 Some(Resolution::TypeItem(_) | Resolution::TraitItem(_)) => None,
                                 Some(Resolution::Builtin(builtin)) => {
-                                    self.result.diagnostics.push(
-                                        InferenceDiagnostic::AssignToBuiltin {
-                                            target: *target,
-                                            builtin: *builtin,
-                                        },
-                                    );
+                                    self.report(InferenceDiagnostic::AssignToBuiltin {
+                                        target: *target,
+                                        builtin: *builtin,
+                                    });
                                     None
                                 }
                                 Some(Resolution::Ambiguous(_)) | None => None,
@@ -4404,12 +4378,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         .cloned()
                         .collect();
                     if !missing.is_empty() {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::RecordLitMissingFields {
-                                expr,
-                                fields: missing,
-                            });
+                        self.report(InferenceDiagnostic::RecordLitMissingFields {
+                            expr,
+                            fields: missing,
+                        });
                     }
                     let mut seen: Vec<String> = Vec::new();
                     for field in fields {
@@ -4433,13 +4405,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 // one extra name get a single diagnostic —
                                 // validation already flags the duplication.
                                 if !seen.contains(&field.name) {
-                                    self.result.diagnostics.push(
-                                        InferenceDiagnostic::RecordLitExtraField {
-                                            expr: field.value,
-                                            name: field.name.clone(),
-                                            expected: Ty::Record(expected_rec.clone()),
-                                        },
-                                    );
+                                    self.report(InferenceDiagnostic::RecordLitExtraField {
+                                        expr: field.value,
+                                        name: field.name.clone(),
+                                        expected: Ty::Record(expected_rec.clone()),
+                                    });
                                 }
                                 let expected_field = ascription.unwrap_or_else(|| self.fresh_var());
                                 self.infer_expr(field.value, &expected_field);
@@ -4633,12 +4603,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 let len = match self.try_type_const_arg_value(count) {
                     Ok(value) => value,
                     Err(is_block) => {
-                        self.result.diagnostics.push(
-                            InferenceDiagnostic::TypeConstArgUnsupported {
-                                expr: count,
-                                is_block,
-                            },
-                        );
+                        self.report(InferenceDiagnostic::TypeConstArgUnsupported {
+                            expr: count,
+                            is_block,
+                        });
                         ConstArgValue::Error
                     }
                 };
@@ -4663,13 +4631,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             && *index_value >= len_value
                         {
                             let index_value = *index_value;
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::IndexOutOfBounds {
-                                    expr,
-                                    len: len_value,
-                                    index: index_value,
-                                });
+                            self.report(InferenceDiagnostic::IndexOutOfBounds {
+                                expr,
+                                len: len_value,
+                                index: index_value,
+                            });
                         }
                         (*elem).clone()
                     }
@@ -4679,20 +4645,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     // element type can't be run backwards — ask for an
                     // annotation.
                     Ty::Infer(_) => {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::FieldOnUnknownType {
-                                expr,
-                                receiver: base,
-                            });
+                        self.report(InferenceDiagnostic::FieldOnUnknownType {
+                            expr,
+                            receiver: base,
+                        });
                         Ty::Error
                     }
                     // Errors are infectious and silent.
                     broken if broken.contains_error() => Ty::Error,
                     other => {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::IndexNonArray { expr, ty: other });
+                        self.report(InferenceDiagnostic::IndexNonArray { expr, ty: other });
                         Ty::Error
                     }
                 };
@@ -4764,17 +4726,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     // pointee can't be run backwards — ask for an
                     // annotation (same message, same recovery).
                     Ty::Infer(_) => {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::FieldOnUnknownType { expr, receiver });
+                        self.report(InferenceDiagnostic::FieldOnUnknownType { expr, receiver });
                         Ty::Error
                     }
                     // Errors are infectious and silent.
                     broken if broken.contains_error() => Ty::Error,
                     other => {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::DerefNonPointer { expr, ty: other });
+                        self.report(InferenceDiagnostic::DerefNonPointer { expr, ty: other });
                         Ty::Error
                     }
                 }
@@ -4855,7 +4813,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // nothing and its body is checked on its own. `Ty::Error` is
                 // infectious and silent there for the same reason.
                 let own_sig = Ty::fn_type(param_tys.clone(), ret.clone());
-                let reported = self.result.diagnostics.len();
+                let reported = self.reported();
                 let fn_ty = self.check(expr, own_sig.clone(), expected, cause);
                 // `check` poisons the unresolved numbers in what it was
                 // handed, so a mismatch is the whole story — but the parts
@@ -4864,7 +4822,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // once the body has run (below), or a literal that already
                 // mismatched as a whole also collects a no-defining-use
                 // diagnostic for a tail it was never going to keep.
-                let slot_mismatched = self.result.diagnostics.len() != reported;
+                let slot_mismatched = self.reported() != reported;
                 self.result.type_of_expr.insert(expr, fn_ty.clone());
                 // A parameter pattern has no per-call site to blame a broken
                 // destructure on; the whole body is the best available
@@ -5015,9 +4973,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         let fresh = self.fresh_var();
                         self.infer_expr(*value, &fresh);
                     }
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::BreakOutsideLoop { expr });
+                    self.report(InferenceDiagnostic::BreakOutsideLoop { expr });
                     Ty::Error
                 }
             },
@@ -5039,9 +4995,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         // in it must not add a no-defining-use sibling.
                         poison_unresolved_number(self.table, &ty);
                     }
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::ReturnInConstBlock { expr });
+                    self.report(InferenceDiagnostic::ReturnInConstBlock { expr });
                     Ty::Never
                 }
                 Some(ReturnTarget::Fn {
@@ -5079,9 +5033,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         let ty = self.infer_expr(*value, &fresh);
                         poison_unresolved_number(self.table, &ty);
                     }
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::ReturnOutsideFn { expr });
+                    self.report(InferenceDiagnostic::ReturnOutsideFn { expr });
                     // Unlike the const-block arm's `Ty::Never`, this is
                     // `Ty::Error`: the refusal marks a genuinely malformed
                     // program (no body encloses the `return` at all), so its
@@ -5092,9 +5044,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             },
             ExprData::Continue => {
                 if self.loop_sinks.is_empty() {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::ContinueOutsideLoop { expr });
+                    self.report(InferenceDiagnostic::ContinueOutsideLoop { expr });
                     Ty::Error
                 } else {
                     Ty::Never
@@ -5124,26 +5074,22 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // dot-call path ever falls through to this helper. A value `Self`
         // still lands here, on the callee, with this same message.
         if matches!(resolved, Ty::Borrow { .. }) {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::DotThroughBorrow {
-                    expr,
-                    name: name.to_owned(),
-                    receiver_ty: resolved,
-                });
+            self.report(InferenceDiagnostic::DotThroughBorrow {
+                expr,
+                name: name.to_owned(),
+                receiver_ty: resolved,
+            });
             return Ty::Error;
         }
         match resolved {
             Ty::Record(rec) => match rec.field_ty(name) {
                 Some(field_ty) => field_ty.clone(),
                 None => {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::NoSuchField {
-                            expr,
-                            name: name.to_owned(),
-                            receiver_ty: Ty::Record(rec),
-                        });
+                    self.report(InferenceDiagnostic::NoSuchField {
+                        expr,
+                        name: name.to_owned(),
+                        receiver_ty: Ty::Record(rec),
+                    });
                     Ty::Error
                 }
             },
@@ -5160,20 +5106,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             // dot reaching one gets the call-it hint
                             // instead of "no such field".
                             if self.member_of(&named.decl, name).is_some() {
-                                self.result.diagnostics.push(
-                                    InferenceDiagnostic::MemberNotCalled {
-                                        expr,
-                                        name: name.to_owned(),
-                                    },
-                                );
+                                self.report(InferenceDiagnostic::MemberNotCalled {
+                                    expr,
+                                    name: name.to_owned(),
+                                });
                             } else {
-                                self.result
-                                    .diagnostics
-                                    .push(InferenceDiagnostic::NoSuchField {
-                                        expr,
-                                        name: name.to_owned(),
-                                        receiver_ty: Ty::Named(named),
-                                    });
+                                self.report(InferenceDiagnostic::NoSuchField {
+                                    expr,
+                                    name: name.to_owned(),
+                                    receiver_ty: Ty::Named(named),
+                                });
                             }
                             Ty::Error
                         }
@@ -5190,20 +5132,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         // to here and is told to call what it just called.
                         if enum_variants(self.db, named.decl.to_id(self.db)).is_some() {
                             if self.member_of(&named.decl, name).is_some() {
-                                self.result.diagnostics.push(
-                                    InferenceDiagnostic::MemberNotCalled {
-                                        expr,
-                                        name: name.to_owned(),
-                                    },
-                                );
+                                self.report(InferenceDiagnostic::MemberNotCalled {
+                                    expr,
+                                    name: name.to_owned(),
+                                });
                             } else {
-                                self.result
-                                    .diagnostics
-                                    .push(InferenceDiagnostic::NoSuchField {
-                                        expr,
-                                        name: name.to_owned(),
-                                        receiver_ty: Ty::Named(named),
-                                    });
+                                self.report(InferenceDiagnostic::NoSuchField {
+                                    expr,
+                                    name: name.to_owned(),
+                                    receiver_ty: Ty::Named(named),
+                                });
                             }
                         }
                         Ty::Error
@@ -5217,22 +5155,18 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             // field name, so an undetermined receiver stays
             // undetermined: ask for the annotation.
             Ty::Infer(_) => {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::FieldOnUnknownType { expr, receiver });
+                self.report(InferenceDiagnostic::FieldOnUnknownType { expr, receiver });
                 Ty::Error
             }
             // Errors are infectious and silent — a broken
             // receiver must not cascade into field diagnostics.
             broken if broken.contains_error() => Ty::Error,
             other => {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::NoSuchField {
-                        expr,
-                        name: name.to_owned(),
-                        receiver_ty: other,
-                    });
+                self.report(InferenceDiagnostic::NoSuchField {
+                    expr,
+                    name: name.to_owned(),
+                    receiver_ty: other,
+                });
                 Ty::Error
             }
         }
@@ -5305,12 +5239,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     }
                     ret
                 } else {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::NotCallable {
-                            expr: callee,
-                            ty: Ty::UnresolvedNumber,
-                        });
+                    self.report(InferenceDiagnostic::NotCallable {
+                        expr: callee,
+                        ty: Ty::UnresolvedNumber,
+                    });
                     // The commitment contradicts what the callee's
                     // signature is already committed to: poison it
                     // so the member reports via the needs-annotation
@@ -5322,13 +5254,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             }
             Ty::Fn(f) => {
                 if f.params.len() != args.len() {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::ArgCountMismatch {
-                            expr,
-                            expected: f.params.len(),
-                            found: args.len(),
-                        });
+                    self.report(InferenceDiagnostic::ArgCountMismatch {
+                        expr,
+                        expected: f.params.len(),
+                        found: args.len(),
+                    });
                 }
                 for (i, &arg) in args.iter().enumerate() {
                     // The parameter type is an axiom: the cause is
@@ -5361,12 +5291,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 Ty::Never
             }
             other => {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::NotCallable {
-                        expr: callee,
-                        ty: other,
-                    });
+                self.report(InferenceDiagnostic::NotCallable {
+                    expr: callee,
+                    ty: other,
+                });
                 self.infer_args_broken(args);
                 Ty::Error
             }
@@ -5630,14 +5558,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     if fn_field {
                         candidates.push(MemberCandidate::Field);
                     }
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::MemberCallAmbiguity {
-                            expr,
-                            name: name.to_owned(),
-                            receiver_ty: recv_ty,
-                            candidates,
-                        });
+                    self.report(InferenceDiagnostic::MemberCallAmbiguity {
+                        expr,
+                        name: name.to_owned(),
+                        receiver_ty: recv_ty,
+                        candidates,
+                    });
                     self.result.type_of_expr.insert(callee, Ty::Error);
                     self.infer_args_broken(args);
                     return self.finish_dot_call(expr, Ty::Error, expected, cause);
@@ -5699,13 +5625,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     // through to "no such member" instead would have been
                     // a lie about a member that plainly exists.
                     if receiver_shape.is_borrow() {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::DotThroughBorrow {
-                                expr: callee,
-                                name: name.to_owned(),
-                                receiver_ty: resolved.clone(),
-                            });
+                        self.report(InferenceDiagnostic::DotThroughBorrow {
+                            expr: callee,
+                            name: name.to_owned(),
+                            receiver_ty: resolved.clone(),
+                        });
                         self.result.type_of_expr.insert(callee, Ty::Error);
                         self.infer_args_broken(args);
                         return self.finish_dot_call(expr, Ty::Error, expected, cause);
@@ -5730,13 +5654,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // plain one — still gets its own (better) story below.
                 let impl_gap = traits.iter().find(|candidate| candidate.member.is_none());
                 if let Some(candidate) = impl_gap {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::NoTraitImpl {
-                            expr,
-                            trait_: candidate.trait_.clone(),
-                            ty: recv_ty,
-                        });
+                    self.report(InferenceDiagnostic::NoTraitImpl {
+                        expr,
+                        trait_: candidate.trait_.clone(),
+                        ty: recv_ty,
+                    });
                     self.result.type_of_expr.insert(callee, Ty::Error);
                     self.infer_args_broken(args);
                     return self.finish_dot_call(expr, Ty::Error, expected, cause);
@@ -5759,16 +5681,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 &resolved,
                                 member,
                             );
-                            self.result.diagnostics.push(diagnostic);
+                            self.report(diagnostic);
                         }
                         None => {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::NoSuchMember {
-                                    expr,
-                                    name: name.to_owned(),
-                                    receiver_ty: recv_ty,
-                                });
+                            self.report(InferenceDiagnostic::NoSuchMember {
+                                expr,
+                                name: name.to_owned(),
+                                receiver_ty: recv_ty,
+                            });
                         }
                     }
                     self.result.type_of_expr.insert(callee, Ty::Error);
@@ -5797,14 +5717,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 Ty::Fn(_) | Ty::Infer(_) | Ty::Never | Ty::Error
             );
             if !callable_shaped {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::FieldNotCallable {
-                        expr,
-                        name: name.to_owned(),
-                        ty: resolved_callee,
-                        receiver_ty: resolved.clone(),
-                    });
+                self.report(InferenceDiagnostic::FieldNotCallable {
+                    expr,
+                    name: name.to_owned(),
+                    ty: resolved_callee,
+                    receiver_ty: resolved.clone(),
+                });
                 self.infer_args_broken(args);
                 return self.finish_dot_call(expr, Ty::Error, expected, cause);
             }
@@ -5951,13 +5869,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // Arity: the Self param is supplied by the receiver, so it
         // doesn't count.
         if f.params.len() != args.len() + 1 {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::ArgCountMismatch {
-                    expr,
-                    expected: f.params.len() - 1,
-                    found: args.len(),
-                });
+            self.report(InferenceDiagnostic::ArgCountMismatch {
+                expr,
+                expected: f.params.len() - 1,
+                found: args.len(),
+            });
         }
         for (i, &arg) in args.iter().enumerate() {
             let param = f.params.get(i).cloned().unwrap_or(Ty::Error);
@@ -6090,13 +6006,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             }
             GenericArgData::Const(value) => {
                 let value = *value;
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::GenericArgKindMismatch {
-                        expr: key,
-                        param: param_name.to_owned(),
-                        param_is_const: false,
-                    });
+                self.report(InferenceDiagnostic::GenericArgKindMismatch {
+                    expr: key,
+                    param: param_name.to_owned(),
+                    param_is_const: false,
+                });
                 // LOUD, unlike the quiet typing a list nobody spent gets
                 // (`drop_member_args`): this argument was matched to a
                 // slot and is being kept, so it is an expression of the
@@ -6174,12 +6088,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             .clone()
             .any(|param| matches!(param.kind, GenericParamKind::Const(_)))
         {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::MemberOwnConstArgs {
-                    expr: key,
-                    path: path.to_owned(),
-                });
+            self.report(InferenceDiagnostic::MemberOwnConstArgs {
+                expr: key,
+                path: path.to_owned(),
+            });
             self.infer_const_args_free_quiet(args);
             return None;
         }
@@ -6194,27 +6106,23 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             // the list may still have a home: the OWNER's binder, one
             // segment to the left.
             if !displaced || !kept.is_empty() {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::NotGeneric {
-                        expr: key,
-                        name: path.to_owned(),
-                        owner_list_hint: site.owner_hint.clone(),
-                    });
+                self.report(InferenceDiagnostic::NotGeneric {
+                    expr: key,
+                    name: path.to_owned(),
+                    owner_list_hint: site.owner_hint.clone(),
+                });
             }
             self.infer_const_args_free_quiet(args);
             return None;
         }
         if kept.len() != expected {
             if !displaced {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::MemberGenericArgCount {
-                        expr: key,
-                        path: path.to_owned(),
-                        expected,
-                        found: kept.len(),
-                    });
+                self.report(InferenceDiagnostic::MemberGenericArgCount {
+                    expr: key,
+                    path: path.to_owned(),
+                    expected,
+                    found: kept.len(),
+                });
             }
             self.infer_const_args_free_quiet(args);
             return None;
@@ -6535,13 +6443,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // structural test plus `receiver_takes`, so a candidate can never
         // be admitted here and refused there (or the reverse).
         if !self.member_takes_receiver(&member_loc, receiver_shape) {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::NotDotCallable {
-                    expr,
-                    name: name.to_owned(),
-                    member: member_loc,
-                });
+            self.report(InferenceDiagnostic::NotDotCallable {
+                expr,
+                name: name.to_owned(),
+                member: member_loc,
+            });
             self.result.type_of_expr.insert(callee, Ty::Error);
             self.infer_args_broken(args);
             return Ty::Error;
@@ -6661,13 +6567,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let (trait_loc, member_index) = match candidates.len() {
             1 => candidates.into_iter().next().expect("len is 1"),
             0 => {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::NoSuchMember {
-                        expr,
-                        name: name.to_owned(),
-                        receiver_ty: Ty::Param(param.clone()),
-                    });
+                self.report(InferenceDiagnostic::NoSuchMember {
+                    expr,
+                    name: name.to_owned(),
+                    receiver_ty: Ty::Param(param.clone()),
+                });
                 self.result.type_of_expr.insert(callee, Ty::Error);
                 self.infer_args_broken(args);
                 return Ty::Error;
@@ -6686,14 +6590,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         def: Some(trait_.clone()),
                     })
                     .collect();
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::MemberCallAmbiguity {
-                        expr,
-                        name: name.to_owned(),
-                        receiver_ty,
-                        candidates,
-                    });
+                self.report(InferenceDiagnostic::MemberCallAmbiguity {
+                    expr,
+                    name: name.to_owned(),
+                    receiver_ty,
+                    candidates,
+                });
                 self.result.type_of_expr.insert(callee, Ty::Error);
                 self.infer_args_broken(args);
                 return Ty::Error;
@@ -6703,9 +6605,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // parameters — out of reach from a nested fn literal or a `const`
         // block (the captured-dictionary wall, reserved).
         if self.in_nested_body() {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::NestedBoundUse { expr });
+            self.report(InferenceDiagnostic::NestedBoundUse { expr });
             self.result.type_of_expr.insert(callee, Ty::Error);
             self.infer_args_broken(args);
             return Ty::Error;
@@ -6762,7 +6662,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 resolved,
                 trait_loc,
             );
-            self.result.diagnostics.push(diagnostic);
+            self.report(diagnostic);
             self.result.type_of_expr.insert(callee, Ty::Error);
             self.infer_args_broken(args);
             return Ty::Error;
@@ -6896,12 +6796,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // A RESERVED generic trait: nothing on it may go semantically
         // live (reserved for generic traits).
         if crate::traits::trait_is_generic(self.db, &trait_loc) {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::GenericTraitReserved {
-                    expr: callee,
-                    name: trait_loc.display_name().to_owned(),
-                });
+            self.report(InferenceDiagnostic::GenericTraitReserved {
+                expr: callee,
+                name: trait_loc.display_name().to_owned(),
+            });
             self.result.type_of_expr.insert(callee, Ty::Error);
             if let Some(vp_args) = vp_args {
                 self.infer_const_args_free(vp_args);
@@ -6958,13 +6856,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             return self.finish_dot_call(expr, Ty::Error, expected, cause);
         };
         if f.params.len() != args.len() {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::ArgCountMismatch {
-                    expr,
-                    expected: f.params.len(),
-                    found: args.len(),
-                });
+            self.report(InferenceDiagnostic::ArgCountMismatch {
+                expr,
+                expected: f.params.len(),
+                found: args.len(),
+            });
         }
         // Arguments at literal-`Self` positions are RECEIVER-LIKE: they
         // are inferred freely first, `Self` is determined from them
@@ -7034,9 +6930,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     if self.in_nested_body() {
                         // The dictionary lives in the ROOT body — nested
                         // code would have to capture it (reserved).
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::NestedBoundUse { expr });
+                        self.report(InferenceDiagnostic::NestedBoundUse { expr });
                     } else {
                         self.result.bound_member_of_expr.insert(
                             expr,
@@ -7049,24 +6943,20 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         );
                     }
                 } else {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::UnsatisfiedBound {
-                            expr,
-                            param: p.name.to_string(),
-                            trait_: trait_loc,
-                            ty: self_resolved.clone(),
-                        });
+                    self.report(InferenceDiagnostic::UnsatisfiedBound {
+                        expr,
+                        param: p.name.to_string(),
+                        trait_: trait_loc,
+                        ty: self_resolved.clone(),
+                    });
                 }
             }
             Ty::Infer(_) => {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::CannotInferSelf {
-                        expr,
-                        trait_name: trait_loc.display_name().to_owned(),
-                        member: member.to_owned(),
-                    });
+                self.report(InferenceDiagnostic::CannotInferSelf {
+                    expr,
+                    trait_name: trait_loc.display_name().to_owned(),
+                    member: member.to_owned(),
+                });
             }
             concrete => {
                 // NOTE: a VARIANT-typed Self can only still appear here
@@ -7091,13 +6981,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             .insert(expr, member_loc);
                     }
                     None => {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::NoTraitImpl {
-                                expr,
-                                trait_: trait_loc,
-                                ty: concrete.clone(),
-                            });
+                        self.report(InferenceDiagnostic::NoTraitImpl {
+                            expr,
+                            trait_: trait_loc,
+                            ty: concrete.clone(),
+                        });
                     }
                 }
             }
@@ -7145,9 +7033,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             // through a pointer reassigns nothing.
             if matches!(self.body.exprs[root], ExprData::Deref { .. }) {
                 if let Some(ty) = self.shared_step_governing(root) {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::AssignThroughShared { target: root, ty });
+                    self.report(InferenceDiagnostic::AssignThroughShared { target: root, ty });
                 }
                 return None;
             }
@@ -7168,14 +7054,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             Some(Resolution::Local(binding)) => {
                 let data = &self.body.bindings[*binding];
                 if !data.mutable {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::AssignToImmutable {
-                            target: root,
-                            binding: *binding,
-                            name: data.name().to_owned(),
-                            place,
-                        });
+                    self.report(InferenceDiagnostic::AssignToImmutable {
+                        target: root,
+                        binding: *binding,
+                        name: data.name().to_owned(),
+                        place,
+                    });
                 }
                 data.type_ref.is_some().then_some(Cause::Binding(*binding))
             }
@@ -7188,9 +7072,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     .get(*index as usize)
                     .map(|param| param.name.clone())
                     .unwrap_or_default();
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::AssignToConstParam { target: root, name });
+                self.report(InferenceDiagnostic::AssignToConstParam { target: root, name });
                 None
             }
             Some(Resolution::Item(loc)) => {
@@ -7198,23 +7080,19 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     .as_ref()
                     .and_then(|it| it.kind.constness())
                     .unwrap_or(Constness::Static);
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::AssignToItem {
-                        target: root,
-                        item: loc.clone(),
-                        constness,
-                    });
+                self.report(InferenceDiagnostic::AssignToItem {
+                    target: root,
+                    item: loc.clone(),
+                    constness,
+                });
                 None
             }
             Some(Resolution::TypeItem(_) | Resolution::TraitItem(_)) => None,
             Some(Resolution::Builtin(builtin)) => {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::AssignToBuiltin {
-                        target: root,
-                        builtin: *builtin,
-                    });
+                self.report(InferenceDiagnostic::AssignToBuiltin {
+                    target: root,
+                    builtin: *builtin,
+                });
                 None
             }
             Some(Resolution::Ambiguous(_)) | None => None,
@@ -7278,15 +7156,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     Some(Resolution::Local(binding)) => {
                         let data = &self.body.bindings[*binding];
                         if mutable && !data.mutable {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::AddrOfMutImmutable {
-                                    addr_of,
-                                    root,
-                                    binding: *binding,
-                                    name: data.name().to_owned(),
-                                    place: place_str,
-                                });
+                            self.report(InferenceDiagnostic::AddrOfMutImmutable {
+                                addr_of,
+                                root,
+                                binding: *binding,
+                                name: data.name().to_owned(),
+                                place: place_str,
+                            });
                         }
                     }
                     Some(Resolution::Item(loc)) => {
@@ -7295,27 +7171,23 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 .as_ref()
                                 .and_then(|it| it.kind.constness())
                                 .unwrap_or(Constness::Static);
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::AddrOfMutItem {
-                                    addr_of,
-                                    root,
-                                    item: loc.clone(),
-                                    constness,
-                                });
+                            self.report(InferenceDiagnostic::AddrOfMutItem {
+                                addr_of,
+                                root,
+                                item: loc.clone(),
+                                constness,
+                            });
                         }
                     }
                     // Unresolved/ambiguous roots carry their own
                     // diagnostics from the read.
                     Some(resolution) => {
                         if let Some(what) = non_place_what(resolution) {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::AddrOfNonPlace {
-                                    expr: addr_of,
-                                    name: root_name.clone(),
-                                    what,
-                                });
+                            self.report(InferenceDiagnostic::AddrOfNonPlace {
+                                expr: addr_of,
+                                name: root_name.clone(),
+                                what,
+                            });
                         }
                     }
                     None => {}
@@ -7329,9 +7201,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             // write permission.
             ExprData::Deref { .. } => {
                 if let Some(ty) = governing {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::AddrOfMutThroughShared { addr_of, ty });
+                    self.report(InferenceDiagnostic::AddrOfMutThroughShared { addr_of, ty });
                 }
             }
             // Broken source: the parse error covers it.
@@ -7407,13 +7277,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     // variants" answer below is for names that genuinely
                     // aren't there.
                     if self.decl_has_field(item, variant) {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::QualifiedPathIsField {
-                                expr,
-                                item: loc.clone(),
-                                name: variant.to_owned(),
-                            });
+                        self.report(InferenceDiagnostic::QualifiedPathIsField {
+                            expr,
+                            item: loc.clone(),
+                            name: variant.to_owned(),
+                        });
                         self.infer_const_args_free(args.unwrap_or(&[]));
                         return Ty::Error;
                     }
@@ -7421,12 +7289,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         crate::type_decl(self.db, item),
                         Some(TypeDeclData::Struct { .. })
                     ) {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::NoVariantsOnStruct {
-                                expr,
-                                item: loc.clone(),
-                            });
+                        self.report(InferenceDiagnostic::NoVariantsOnStruct {
+                            expr,
+                            item: loc.clone(),
+                        });
                     }
                     self.infer_const_args_free(args.unwrap_or(&[]));
                     return Ty::Error;
@@ -7444,14 +7310,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         if has_member_args {
                             let suggest_owner_list =
                                 args.is_none() && !item_generics(self.db, item).is_empty();
-                            self.result.diagnostics.push(
-                                InferenceDiagnostic::VariantOwnGenericArgs {
-                                    expr,
-                                    owner: loc.display_name().to_owned(),
-                                    variant: variant.to_owned(),
-                                    suggest_owner_list,
-                                },
-                            );
+                            self.report(InferenceDiagnostic::VariantOwnGenericArgs {
+                                expr,
+                                owner: loc.display_name().to_owned(),
+                                variant: variant.to_owned(),
+                                suggest_owner_list,
+                            });
                             self.infer_const_args_free(args.unwrap_or(&[]));
                             return Ty::Error;
                         }
@@ -7493,13 +7357,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             );
                         }
                         if !self.push_trait_member_on_type(expr, &loc, variant) {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::NoSuchVariant {
-                                    expr,
-                                    item: loc.clone(),
-                                    name: variant.to_owned(),
-                                });
+                            self.report(InferenceDiagnostic::NoSuchVariant {
+                                expr,
+                                item: loc.clone(),
+                                name: variant.to_owned(),
+                            });
                         }
                         self.infer_const_args_free(args.unwrap_or(&[]));
                         Ty::Error
@@ -7515,12 +7377,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 let loc = loc.clone();
                 if crate::traits::trait_is_generic(self.db, &loc) {
                     // A RESERVED generic trait: nothing on it may go live.
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::GenericTraitReserved {
-                            expr,
-                            name: loc.display_name().to_owned(),
-                        });
+                    self.report(InferenceDiagnostic::GenericTraitReserved {
+                        expr,
+                        name: loc.display_name().to_owned(),
+                    });
                     self.infer_const_args_free(args.unwrap_or(&[]));
                     return Ty::Error;
                 }
@@ -7545,13 +7405,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         member_args,
                     ),
                     None => {
-                        self.result.diagnostics.push(
-                            InferenceDiagnostic::QualifiedTraitMemberValue {
-                                expr,
-                                trait_name: loc.display_name().to_owned(),
-                                member: variant.to_owned(),
-                            },
-                        );
+                        self.report(InferenceDiagnostic::QualifiedTraitMemberValue {
+                            expr,
+                            trait_name: loc.display_name().to_owned(),
+                            member: variant.to_owned(),
+                        });
                         Ty::Error
                     }
                 }
@@ -7566,9 +7424,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     ExprData::NameRef(name) => name.clone(),
                     _ => String::new(),
                 };
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::VariantPathOnValue { expr, name });
+                self.report(InferenceDiagnostic::VariantPathOnValue { expr, name });
                 self.infer_const_args_free(args.unwrap_or(&[]));
                 Ty::Error
             }
@@ -7628,13 +7484,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     Ty::Infer(_) | Ty::UnresolvedNumber => None,
                     other => Some(other.clone()),
                 };
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::ElidedVariantNoEnum {
-                        expr,
-                        variant: variant.to_owned(),
-                        expected,
-                    });
+                self.report(InferenceDiagnostic::ElidedVariantNoEnum {
+                    expr,
+                    variant: variant.to_owned(),
+                    expected,
+                });
                 return Ty::Error;
             }
         };
@@ -7644,13 +7498,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             return Ty::Error;
         };
         let Some(index) = variants.iter().position(|(name, _)| name == variant) else {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::NoSuchVariant {
-                    expr,
-                    item: named.decl.clone(),
-                    name: variant.to_owned(),
-                });
+            self.report(InferenceDiagnostic::NoSuchVariant {
+                expr,
+                item: named.decl.clone(),
+                name: variant.to_owned(),
+            });
             return Ty::Error;
         };
         let variant_ty = VariantTy {
@@ -7769,14 +7621,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         if traits.is_empty() {
             return false;
         }
-        self.result
-            .diagnostics
-            .push(InferenceDiagnostic::QualifiedTraitMemberOnType {
-                expr,
-                type_name: loc.display_name().to_owned(),
-                member: member.to_owned(),
-                traits,
-            });
+        self.report(InferenceDiagnostic::QualifiedTraitMemberOnType {
+            expr,
+            type_name: loc.display_name().to_owned(),
+            member: member.to_owned(),
+            traits,
+        });
         true
     }
 
@@ -7802,25 +7652,21 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 GenericArgData::Region(_) => {}
                 GenericArgData::Named { name, ty } if name == "Self" => {
                     if self_ref.is_some() {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::NamedGenericArg {
-                                expr,
-                                name: name.clone(),
-                                reason: NamedArgReason::Duplicate,
-                            });
+                        self.report(InferenceDiagnostic::NamedGenericArg {
+                            expr,
+                            name: name.clone(),
+                            reason: NamedArgReason::Duplicate,
+                        });
                         continue;
                     }
                     self_ref = Some(ty.clone());
                 }
                 GenericArgData::Named { name, .. } => {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::NamedGenericArg {
-                            expr,
-                            name: name.clone(),
-                            reason: NamedArgReason::NotSelf,
-                        });
+                    self.report(InferenceDiagnostic::NamedGenericArg {
+                        expr,
+                        name: name.clone(),
+                        reason: NamedArgReason::NotSelf,
+                    });
                 }
                 // A trait's OWN arguments belong to generic traits
                 // (reserved), and their reservation is reported before
@@ -7861,13 +7707,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         //   reach the failure path. Allowing it is a purely additive
         //   relaxation whenever generic impls land.
         if self_ref.contains_hole() {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::NamedGenericArg {
-                    expr,
-                    name: "Self".to_owned(),
-                    reason: NamedArgReason::Hole,
-                });
+            self.report(InferenceDiagnostic::NamedGenericArg {
+                expr,
+                name: "Self".to_owned(),
+                reason: NamedArgReason::Hole,
+            });
             // `{error}` rather than `None`: `None` means "no `Self` was
             // written", which would draw the value form's own
             // must-name-the-implementer diagnostic on top of this one.
@@ -7885,22 +7729,18 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             .iter()
             .any(|assoc| assoc == name);
         if assoc {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::AssocTypeReserved {
-                    expr,
-                    trait_: trait_loc.clone(),
-                    name: name.to_owned(),
-                });
-            return;
-        }
-        self.result
-            .diagnostics
-            .push(InferenceDiagnostic::TraitHasNoMember {
+            self.report(InferenceDiagnostic::AssocTypeReserved {
                 expr,
                 trait_: trait_loc.clone(),
                 name: name.to_owned(),
             });
+            return;
+        }
+        self.report(InferenceDiagnostic::TraitHasNoMember {
+            expr,
+            trait_: trait_loc.clone(),
+            name: name.to_owned(),
+        });
     }
 
     /// `Display::<Self = Foo>::fmt` as a VALUE — TR01's impl-specific fn
@@ -7920,13 +7760,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             return Ty::Error;
         }
         if matches!(resolved, Ty::Param(_)) {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::BoundMemberValue {
-                    expr,
-                    trait_name: trait_loc.display_name().to_owned(),
-                    member: member.to_owned(),
-                });
+            self.report(InferenceDiagnostic::BoundMemberValue {
+                expr,
+                trait_name: trait_loc.display_name().to_owned(),
+                member: member.to_owned(),
+            });
             return Ty::Error;
         }
         let requirements = crate::item_tree::trait_requirements(self.db, trait_loc.to_id(self.db));
@@ -7942,13 +7780,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 .and_then(|members| members.get(member_index).cloned())
         });
         let Some(member_loc) = member_loc else {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::NoTraitImpl {
-                    expr,
-                    trait_: trait_loc.clone(),
-                    ty: resolved,
-                });
+            self.report(InferenceDiagnostic::NoTraitImpl {
+                expr,
+                trait_: trait_loc.clone(),
+                ty: resolved,
+            });
             return Ty::Error;
         };
         let sig = signature(self.db, member_loc.to_id(self.db));
@@ -7963,12 +7799,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         if !crate::traits::bound_slots(self.db, self.file, &generics).is_empty()
             && !self.direct_callees.contains(&expr)
         {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::BoundFnValue {
-                    expr,
-                    name: format!("{}::{member}", trait_loc.display_name()),
-                });
+            self.report(InferenceDiagnostic::BoundFnValue {
+                expr,
+                name: format!("{}::{member}", trait_loc.display_name()),
+            });
             return Ty::Error;
         }
         let inst = self.instantiate_member_own_binder(
@@ -8094,17 +7928,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     None
                 } else if kept.len() != spellable.len() {
                     if !displaced {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::GenericArgCount {
-                                expr,
-                                item: loc.clone(),
-                                // The SPELLABLE slots only: telling a caller
-                                // that `fn::<@b, U>` "takes 2" would be
-                                // counting a position they may not write.
-                                expected: spellable.len(),
-                                found: kept.len(),
-                            });
+                        self.report(InferenceDiagnostic::GenericArgCount {
+                            expr,
+                            item: loc.clone(),
+                            // The SPELLABLE slots only: telling a caller
+                            // that `fn::<@b, U>` "takes 2" would be
+                            // counting a position they may not write.
+                            expected: spellable.len(),
+                            found: kept.len(),
+                        });
                     }
                     // No positional matching is trustworthy; the const-value
                     // expressions are still inferred (freely) so their
@@ -8123,12 +7955,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     .iter()
                     .any(|param| matches!(param.kind, GenericParamKind::Const(_)))
                 {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::MissingConstArgs {
-                            expr,
-                            item: loc.clone(),
-                        });
+                    self.report(InferenceDiagnostic::MissingConstArgs {
+                        expr,
+                        item: loc.clone(),
+                    });
                 }
                 None
             }
@@ -8188,13 +8018,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         }
                         Some(GenericArgData::Const(value)) => {
                             let value = *value;
-                            self.result.diagnostics.push(
-                                InferenceDiagnostic::GenericArgKindMismatch {
-                                    expr,
-                                    param: param.name.clone(),
-                                    param_is_const: false,
-                                },
-                            );
+                            self.report(InferenceDiagnostic::GenericArgKindMismatch {
+                                expr,
+                                param: param.name.clone(),
+                                param_is_const: false,
+                            });
                             let fresh = self.fresh_var();
                             self.infer_expr(value, &fresh);
                         }
@@ -8224,15 +8052,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         // builtins + records + variants).
                         let fn_valued = declared.mentions_fn();
                         if fn_valued {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::FnConstArg { expr });
+                            self.report(InferenceDiagnostic::FnConstArg { expr });
                         }
                         let array_valued = declared.mentions_array();
                         if array_valued {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::ArrayConstArg { expr });
+                            self.report(InferenceDiagnostic::ArrayConstArg { expr });
                         }
                         self.infer_expr_with(
                             value,
@@ -8260,12 +8084,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 }
                                 Err(is_block) => {
                                     if ty_mentions_const_param(&sig, &loc, index as u32) {
-                                        self.result.diagnostics.push(
-                                            InferenceDiagnostic::TypeConstArgUnsupported {
-                                                expr,
-                                                is_block,
-                                            },
-                                        );
+                                        self.report(InferenceDiagnostic::TypeConstArgUnsupported {
+                                            expr,
+                                            is_block,
+                                        });
                                     }
                                     const_subst.insert(index as u32, ConstArgValue::Error);
                                 }
@@ -8273,18 +8095,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         }
                     }
                     Some(GenericArgData::Type(TypeRef::Hole)) => {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::ConstArgHole { expr });
+                        self.report(InferenceDiagnostic::ConstArgHole { expr });
                     }
                     Some(GenericArgData::Type(_)) => {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::GenericArgKindMismatch {
-                                expr,
-                                param: param.name.clone(),
-                                param_is_const: true,
-                            });
+                        self.report(InferenceDiagnostic::GenericArgKindMismatch {
+                            expr,
+                            param: param.name.clone(),
+                            param_is_const: true,
+                        });
                     }
                     // Already reported: `MissingConstArgs` (bare mention),
                     // `GenericArgCount` (unmatchable list),
@@ -8310,12 +8128,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 self.push_bound_obligations(expr, generics, &subst);
             } else {
                 reserved_as_value = true;
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::BoundFnValue {
-                        expr,
-                        name: loc.display_name().to_owned(),
-                    });
+                self.report(InferenceDiagnostic::BoundFnValue {
+                    expr,
+                    name: loc.display_name().to_owned(),
+                });
             }
         }
         if !sig.contains_error() && !pending.is_empty() && !reserved_as_value {
@@ -8392,12 +8208,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             // runs, so reaching here IS the error, exactly like a bare
             // un-turbofished type name.
             Some(Resolution::TypeItem(_)) => {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::TypeNotValue {
-                        expr,
-                        name: base_name.clone(),
-                    });
+                self.report(InferenceDiagnostic::TypeNotValue {
+                    expr,
+                    name: base_name.clone(),
+                });
                 self.infer_const_args_free(args);
                 Ty::Error
             }
@@ -8407,19 +8221,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             // RESERVED generic trait's own reservation wins.
             Some(Resolution::TraitItem(loc)) => {
                 if crate::traits::trait_is_generic(self.db, loc) {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::GenericTraitReserved {
-                            expr,
-                            name: loc.display_name().to_owned(),
-                        });
+                    self.report(InferenceDiagnostic::GenericTraitReserved {
+                        expr,
+                        name: loc.display_name().to_owned(),
+                    });
                 } else {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::TraitNotValue {
-                            expr,
-                            name: base_name.clone(),
-                        });
+                    self.report(InferenceDiagnostic::TraitNotValue {
+                        expr,
+                        name: base_name.clone(),
+                    });
                 }
                 self.infer_const_args_free(args);
                 Ty::Error
@@ -8459,13 +8269,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             } else {
                 NamedArgReason::NotSelf
             };
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::NamedGenericArg {
-                    expr,
-                    name: name.clone(),
-                    reason,
-                });
+            self.report(InferenceDiagnostic::NamedGenericArg {
+                expr,
+                name: name.clone(),
+                reason,
+            });
         }
     }
 
@@ -8487,13 +8295,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let mut kept = Vec::with_capacity(args.len());
         for (index, arg) in args.iter().enumerate() {
             if matches!(arg, GenericArgData::Region(_)) {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::RegionArgAtMention {
-                        expr,
-                        index: index as u32,
-                        list,
-                    });
+                self.report(InferenceDiagnostic::RegionArgAtMention {
+                    expr,
+                    index: index as u32,
+                    list,
+                });
                 continue;
             }
             kept.push(index);
@@ -8532,13 +8338,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     }
 
     fn push_not_generic(&mut self, expr: ExprId, name: &str) {
-        self.result
-            .diagnostics
-            .push(InferenceDiagnostic::NotGeneric {
-                expr,
-                name: name.to_owned(),
-                owner_list_hint: None,
-            });
+        self.report(InferenceDiagnostic::NotGeneric {
+            expr,
+            name: name.to_owned(),
+            owner_list_hint: None,
+        });
     }
 
     /// A mention of a builtin, bare (`args: None`) or turbofished. The
@@ -8563,9 +8367,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             return builtin_type(builtin, self.file);
         }
         if builtin.flavor_polymorphic() {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::BuiltinNotFirstClass { expr, builtin });
+            self.report(InferenceDiagnostic::BuiltinNotFirstClass { expr, builtin });
             return Ty::Error;
         }
         builtin_type(builtin, self.file)
@@ -8594,13 +8396,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             _ => unreachable!("not a flavor-polymorphic builtin"),
         };
         if args.len() != expected_arity {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::ArgCountMismatch {
-                    expr: call,
-                    expected: expected_arity,
-                    found: args.len(),
-                });
+            self.report(InferenceDiagnostic::ArgCountMismatch {
+                expr: call,
+                expected: expected_arity,
+                found: args.len(),
+            });
             for &arg in args {
                 let fresh = self.fresh_var();
                 self.infer_expr(arg, &fresh);
@@ -8683,14 +8483,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             mutable,
                             pointee: pointee.clone(),
                         };
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::TypeMismatch {
-                                expr: args[0],
-                                expected: Ty::raw_ptr(mutable, byte),
-                                actual: found,
-                                reasons: vec![Cause::CallSite { call, arg: args[0] }],
-                            });
+                        self.report(InferenceDiagnostic::TypeMismatch {
+                            expr: args[0],
+                            expected: Ty::raw_ptr(mutable, byte),
+                            actual: found,
+                            reasons: vec![Cause::CallSite { call, arg: args[0] }],
+                        });
                     }
                 }
                 self.infer_expr_with(
@@ -8985,31 +8783,25 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             .filter(|&(i, _)| !covered[i])
                             .map(|(_, (name, _))| name.clone())
                             .collect();
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::NonExhaustiveMatch {
-                                expr,
-                                decl: named.decl.clone(),
-                                uncovered,
-                            });
+                        self.report(InferenceDiagnostic::NonExhaustiveMatch {
+                            expr,
+                            decl: named.decl.clone(),
+                            uncovered,
+                        });
                     }
                 }
                 Scrutinee::Variant(variant) => {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::NonExhaustiveMatch {
-                            expr,
-                            decl: variant.decl.clone(),
-                            uncovered: vec![variant.name.to_string()],
-                        });
+                    self.report(InferenceDiagnostic::NonExhaustiveMatch {
+                        expr,
+                        decl: variant.decl.clone(),
+                        uncovered: vec![variant.name.to_string()],
+                    });
                 }
                 Scrutinee::Other(ty) => {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::MatchWithoutCatchAll {
-                            expr,
-                            scrutinee: ty.clone(),
-                        });
+                    self.report(InferenceDiagnostic::MatchWithoutCatchAll {
+                        expr,
+                        scrutinee: ty.clone(),
+                    });
                 }
                 Scrutinee::Unknown(_) | Scrutinee::Error => {}
             }
@@ -9074,13 +8866,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     }
 
     fn push_unreachable(&mut self, match_expr: ExprId, pat: PatId, reason: UnreachableReason) {
-        self.result
-            .diagnostics
-            .push(InferenceDiagnostic::UnreachableArm {
-                match_expr,
-                pat,
-                reason,
-            });
+        self.report(InferenceDiagnostic::UnreachableArm {
+            match_expr,
+            pat,
+            reason,
+        });
     }
 
     /// One LITERAL pattern meeting its scrutinee. A literal pattern binds
@@ -9128,14 +8918,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             return true;
         }
         let expected = self.resolve_shallow(&scrut_ty);
-        self.result
-            .diagnostics
-            .push(InferenceDiagnostic::PatLiteralTypeMismatch {
-                match_expr,
-                pat,
-                expected,
-                found: renders,
-            });
+        self.report(InferenceDiagnostic::PatLiteralTypeMismatch {
+            match_expr,
+            pat,
+            expected,
+            found: renders,
+        });
         false
     }
 
@@ -9192,9 +8980,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // that reason: a literal with no value must not drag the
                 // scrutinee into the number class on its way out.
                 let Some(value) = value else {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::PatIntLiteralTooLarge { match_expr, pat });
+                    self.report(InferenceDiagnostic::PatIntLiteralTooLarge { match_expr, pat });
                     return Cover::Nothing;
                 };
                 // The number-class variable IS the assertion: adopting it
@@ -9238,14 +9024,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     && let Some(variants) = enum_variants(self.db, loc.to_id(self.db)).as_ref()
                     && variants.iter().any(|(n, _)| *n == name)
                 {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::BindShadowsVariant {
-                            match_expr,
-                            pat,
-                            item: loc.clone(),
-                            name: name.to_owned(),
-                        });
+                    self.report(InferenceDiagnostic::BindShadowsVariant {
+                        match_expr,
+                        pat,
+                        item: loc.clone(),
+                        name: name.to_owned(),
+                    });
                 }
                 let ty = match scrut {
                     Scrutinee::Enum(named) => Ty::Named(named.clone()),
@@ -9286,20 +9070,19 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         Scrutinee::Enum(named) => named.decl.clone(),
                         Scrutinee::Variant(variant) => variant.decl.clone(),
                         Scrutinee::Other(ty) => {
-                            self.result.diagnostics.push(
-                                InferenceDiagnostic::NonEnumScrutineeVariantPat {
-                                    match_expr,
-                                    pat,
-                                    scrutinee: ty.clone(),
-                                },
-                            );
+                            self.report(InferenceDiagnostic::NonEnumScrutineeVariantPat {
+                                match_expr,
+                                pat,
+                                scrutinee: ty.clone(),
+                            });
                             self.bind_error(&bindings);
                             return Cover::Nothing;
                         }
                         Scrutinee::Unknown(_) => {
-                            self.result.diagnostics.push(
-                                InferenceDiagnostic::VariantPatUnknownScrutinee { match_expr, pat },
-                            );
+                            self.report(InferenceDiagnostic::VariantPatUnknownScrutinee {
+                                match_expr,
+                                pat,
+                            });
                             self.unresolved_scrutinees.insert(match_expr);
                             self.bind_error(&bindings);
                             return Cover::Nothing;
@@ -9322,14 +9105,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     return Cover::Nothing;
                 };
                 let Some(index) = variants.iter().position(|(n, _)| *n == variant) else {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::PatNoSuchVariant {
-                            match_expr,
-                            pat,
-                            item: target.clone(),
-                            name: variant,
-                        });
+                    self.report(InferenceDiagnostic::PatNoSuchVariant {
+                        match_expr,
+                        pat,
+                        item: target.clone(),
+                        name: variant,
+                    });
                     self.bind_error(&bindings);
                     return Cover::Nothing;
                 };
@@ -9352,7 +9133,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     .map(|ty| substitute_args(ty, &target, &variant_ty.args))
                     .collect();
                 if !rest && bindings.len() != payload.len() {
-                    self.result.diagnostics.push(InferenceDiagnostic::PatArity {
+                    self.report(InferenceDiagnostic::PatArity {
                         match_expr,
                         pat,
                         variant,
@@ -9396,15 +9177,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 match scrut {
                     Scrutinee::Enum(scrut_named) => {
                         if scrut_named.decl != target {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::PatWrongEnum {
-                                    match_expr,
-                                    pat,
-                                    item: target,
-                                    variant: variant_ty.name.to_string(),
-                                    scrutinee: Ty::Named(scrut_named.clone()),
-                                });
+                            self.report(InferenceDiagnostic::PatWrongEnum {
+                                match_expr,
+                                pat,
+                                item: target,
+                                variant: variant_ty.name.to_string(),
+                                scrutinee: Ty::Named(scrut_named.clone()),
+                            });
                             Cover::Nothing
                         } else {
                             Cover::Variant(variant_ty.index)
@@ -9412,15 +9191,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     }
                     Scrutinee::Variant(scrut_variant) => {
                         if scrut_variant.decl != target {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::PatWrongEnum {
-                                    match_expr,
-                                    pat,
-                                    item: target,
-                                    variant: variant_ty.name.to_string(),
-                                    scrutinee: Ty::Variant(scrut_variant.clone()),
-                                });
+                            self.report(InferenceDiagnostic::PatWrongEnum {
+                                match_expr,
+                                pat,
+                                item: target,
+                                variant: variant_ty.name.to_string(),
+                                scrutinee: Ty::Variant(scrut_variant.clone()),
+                            });
                             Cover::Nothing
                         } else if scrut_variant.index == variant_ty.index {
                             // The scrutinee can only be this one variant:
@@ -9440,13 +9217,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     // A qualified pattern on a non-enum scrutinee: the
                     // scrutinee is the problem, same as the bare spelling.
                     Scrutinee::Other(ty) => {
-                        self.result.diagnostics.push(
-                            InferenceDiagnostic::NonEnumScrutineeVariantPat {
-                                match_expr,
-                                pat,
-                                scrutinee: ty.clone(),
-                            },
-                        );
+                        self.report(InferenceDiagnostic::NonEnumScrutineeVariantPat {
+                            match_expr,
+                            pat,
+                            scrutinee: ty.clone(),
+                        });
                         Cover::Nothing
                     }
                     // Unknown only when the pre-scan couldn't pin the
@@ -9495,13 +9270,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
             }
         };
-        self.result
-            .diagnostics
-            .push(InferenceDiagnostic::PatPathError {
-                match_expr,
-                pat,
-                message,
-            });
+        self.report(InferenceDiagnostic::PatPathError {
+            match_expr,
+            pat,
+            message,
+        });
         None
     }
 
@@ -9628,14 +9401,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     .insert(f.binding, field_ty.clone());
                             }
                             None => {
-                                self.result.diagnostics.push(
-                                    InferenceDiagnostic::PatUnknownField {
-                                        pat,
-                                        expr: anchor,
-                                        name: f.field.clone(),
-                                        record_ty: Ty::Record(rec.clone()),
-                                    },
-                                );
+                                self.report(InferenceDiagnostic::PatUnknownField {
+                                    pat,
+                                    expr: anchor,
+                                    name: f.field.clone(),
+                                    record_ty: Ty::Record(rec.clone()),
+                                });
                                 self.result.type_of_binding.insert(f.binding, Ty::Error);
                             }
                         }
@@ -9649,33 +9420,30 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             .cloned()
                             .collect();
                         if !missing.is_empty() {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::PatMissingFields {
-                                    pat,
-                                    expr: anchor,
-                                    fields: missing,
-                                });
+                            self.report(InferenceDiagnostic::PatMissingFields {
+                                pat,
+                                expr: anchor,
+                                fields: missing,
+                            });
                         }
                     }
                 }
                 Ty::Infer(_) => {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::PatBindingNeedsAnnotation { pat, expr: anchor });
+                    self.report(InferenceDiagnostic::PatBindingNeedsAnnotation {
+                        pat,
+                        expr: anchor,
+                    });
                     self.bind_error(&fields.iter().map(|f| f.binding).collect::<Vec<_>>());
                 }
                 Ty::Error => {
                     self.bind_error(&fields.iter().map(|f| f.binding).collect::<Vec<_>>());
                 }
                 other => {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::PatNotRecord {
-                            pat,
-                            expr: anchor,
-                            ty: other,
-                        });
+                    self.report(InferenceDiagnostic::PatNotRecord {
+                        pat,
+                        expr: anchor,
+                        ty: other,
+                    });
                     self.bind_error(&fields.iter().map(|f| f.binding).collect::<Vec<_>>());
                 }
             },
@@ -9688,13 +9456,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     // An empty name is broken source (the parse error
                     // covers it); anything else names no type at all.
                     if !type_name.is_empty() {
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::PatUnknownType {
-                                pat,
-                                expr: anchor,
-                                name: type_name.clone(),
-                            });
+                        self.report(InferenceDiagnostic::PatUnknownType {
+                            pat,
+                            expr: anchor,
+                            name: type_name.clone(),
+                        });
                     }
                     self.bind_pat_error(inner);
                     return;
@@ -9705,22 +9471,21 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         self.check_pat(inner, &underlying, anchor);
                     }
                     Ty::Infer(_) => {
-                        self.result.diagnostics.push(
-                            InferenceDiagnostic::PatBindingNeedsAnnotation { pat, expr: anchor },
-                        );
+                        self.report(InferenceDiagnostic::PatBindingNeedsAnnotation {
+                            pat,
+                            expr: anchor,
+                        });
                         self.bind_pat_error(inner);
                     }
                     Ty::Error => self.bind_pat_error(inner),
                     other => {
                         let expected = self.named_with_fresh_args(&target);
-                        self.result
-                            .diagnostics
-                            .push(InferenceDiagnostic::PatNamedTypeMismatch {
-                                pat,
-                                expr: anchor,
-                                expected: Ty::Named(expected),
-                                actual: other,
-                            });
+                        self.report(InferenceDiagnostic::PatNamedTypeMismatch {
+                            pat,
+                            expr: anchor,
+                            expected: Ty::Named(expected),
+                            actual: other,
+                        });
                         self.bind_pat_error(inner);
                     }
                 }
@@ -9753,12 +9518,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // enum type (that's what the user meant to produce) so downstream
         // code still checks.
         if enum_variants(self.db, loc.to_id(self.db)).is_some() {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::EnumCtorIsVariant {
-                    expr,
-                    item: loc.clone(),
-                });
+            self.report(InferenceDiagnostic::EnumCtorIsVariant {
+                expr,
+                item: loc.clone(),
+            });
             for &arg in args {
                 let fresh = self.fresh_var();
                 self.infer_expr(arg, &fresh);
@@ -9778,13 +9541,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             Ty::fn_type(vec![underlying.clone()], Ty::Named(named.clone())),
         );
         if args.len() != 1 {
-            self.result
-                .diagnostics
-                .push(InferenceDiagnostic::TypeCtorArgCount {
-                    expr,
-                    item: loc.clone(),
-                    found: args.len(),
-                });
+            self.report(InferenceDiagnostic::TypeCtorArgCount {
+                expr,
+                item: loc.clone(),
+                found: args.len(),
+            });
         }
         for (i, &arg) in args.iter().enumerate() {
             if i == 0 {
@@ -9841,14 +9602,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         }
         let matched = match written {
             Some(args) if args.len() != generics.len() => {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::GenericArgCount {
-                        expr: mention,
-                        item: loc.clone(),
-                        expected: generics.len(),
-                        found: args.len(),
-                    });
+                self.report(InferenceDiagnostic::GenericArgCount {
+                    expr: mention,
+                    item: loc.clone(),
+                    expected: generics.len(),
+                    found: args.len(),
+                });
                 self.infer_const_args_free(args);
                 None
             }
@@ -9859,12 +9618,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     .iter()
                     .any(|param| matches!(param.kind, GenericParamKind::Const(_)))
                 {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::MissingConstArgs {
-                            expr: mention,
-                            item: loc.clone(),
-                        });
+                    self.report(InferenceDiagnostic::MissingConstArgs {
+                        expr: mention,
+                        item: loc.clone(),
+                    });
                 }
                 None
             }
@@ -9896,24 +9653,20 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         }
                         Some(GenericArgData::Const(value)) => {
                             let value = *value;
-                            self.result.diagnostics.push(
-                                InferenceDiagnostic::GenericArgKindMismatch {
-                                    expr: mention,
-                                    param: param.name.clone(),
-                                    param_is_const: false,
-                                },
-                            );
+                            self.report(InferenceDiagnostic::GenericArgKindMismatch {
+                                expr: mention,
+                                param: param.name.clone(),
+                                param_is_const: false,
+                            });
                             let fresh = self.fresh_var();
                             self.infer_expr(value, &fresh);
                         }
                         Some(GenericArgData::Region(_)) => {
-                            self.result.diagnostics.push(
-                                InferenceDiagnostic::UnexpectedRegionArg {
-                                    expr: mention,
-                                    index: index as u32,
-                                    param: param.name.clone(),
-                                },
-                            );
+                            self.report(InferenceDiagnostic::UnexpectedRegionArg {
+                                expr: mention,
+                                index: index as u32,
+                                param: param.name.clone(),
+                            });
                         }
                         // Refused at the list (`reject_named_args`).
                         Some(GenericArgData::Named { .. }) | None => {}
@@ -9930,13 +9683,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 GenericParamKind::Const(declared) => {
                     let value = match arg {
                         Some(GenericArgData::Region(_)) => {
-                            self.result.diagnostics.push(
-                                InferenceDiagnostic::UnexpectedRegionArg {
-                                    expr: mention,
-                                    index: index as u32,
-                                    param: param.name.clone(),
-                                },
-                            );
+                            self.report(InferenceDiagnostic::UnexpectedRegionArg {
+                                expr: mention,
+                                index: index as u32,
+                                param: param.name.clone(),
+                            });
                             ConstArgValue::Error
                         }
                         Some(GenericArgData::Const(value)) => {
@@ -9948,15 +9699,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             // the same way.
                             let fn_valued = declared.mentions_fn();
                             if fn_valued {
-                                self.result
-                                    .diagnostics
-                                    .push(InferenceDiagnostic::FnConstArg { expr: mention });
+                                self.report(InferenceDiagnostic::FnConstArg { expr: mention });
                             }
                             let array_valued = declared.mentions_array();
                             if array_valued {
-                                self.result
-                                    .diagnostics
-                                    .push(InferenceDiagnostic::ArrayConstArg { expr: mention });
+                                self.report(InferenceDiagnostic::ArrayConstArg { expr: mention });
                             }
                             self.infer_expr_with(
                                 value,
@@ -9975,9 +9722,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             }
                         }
                         Some(GenericArgData::Type(TypeRef::Hole)) => {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::ConstArgHole { expr: mention });
+                            self.report(InferenceDiagnostic::ConstArgHole { expr: mention });
                             ConstArgValue::Error
                         }
                         // A bare `N`: a const position whose argument
@@ -10004,26 +9749,22 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     && !found.contains_error()
                                     && expected != found
                                 {
-                                    self.result.diagnostics.push(
-                                        InferenceDiagnostic::TypeMismatch {
-                                            expr: mention,
-                                            expected,
-                                            actual: found,
-                                            reasons: Vec::new(),
-                                        },
-                                    );
+                                    self.report(InferenceDiagnostic::TypeMismatch {
+                                        expr: mention,
+                                        expected,
+                                        actual: found,
+                                        reasons: Vec::new(),
+                                    });
                                 }
                             }
                             forwarded
                         }
                         Some(GenericArgData::Type(_)) => {
-                            self.result.diagnostics.push(
-                                InferenceDiagnostic::GenericArgKindMismatch {
-                                    expr: mention,
-                                    param: param.name.clone(),
-                                    param_is_const: true,
-                                },
-                            );
+                            self.report(InferenceDiagnostic::GenericArgKindMismatch {
+                                expr: mention,
+                                param: param.name.clone(),
+                                param_is_const: true,
+                            });
                             ConstArgValue::Error
                         }
                         // Already reported: `MissingConstArgs` (bare
@@ -10062,12 +9803,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         match self.try_type_const_arg_value(value) {
             Ok(value) => value,
             Err(is_block) => {
-                self.result
-                    .diagnostics
-                    .push(InferenceDiagnostic::TypeConstArgUnsupported {
-                        expr: mention,
-                        is_block,
-                    });
+                self.report(InferenceDiagnostic::TypeConstArgUnsupported {
+                    expr: mention,
+                    is_block,
+                });
                 ConstArgValue::Error
             }
         }
@@ -10246,14 +9985,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         } else {
             actual.clone()
         };
-        self.result
-            .diagnostics
-            .push(InferenceDiagnostic::TypeMismatch {
-                expr,
-                expected: expected_shown,
-                actual: actual_shown,
-                reasons,
-            });
+        self.report(InferenceDiagnostic::TypeMismatch {
+            expr,
+            expected: expected_shown,
+            actual: actual_shown,
+            reasons,
+        });
         poison_unresolved_number(self.table, &actual);
         poison_unresolved_number(self.table, expected);
         expected.clone()
@@ -10269,6 +10006,37 @@ impl<'a, 'db> InferCtx<'a, 'db> {
 
     fn resolve_shallow(&mut self, ty: &Ty) -> Ty {
         constraint::resolve_shallow(self.table, ty)
+    }
+
+    /// The type a `let` binds: its initializer's, or the declared type when
+    /// the initializer is `{error}` as a whole, so an annotation types the
+    /// binding's uses. Without an annotation, `declared` is a fresh variable
+    /// that checking the initializer bound to `{error}`, so the binding stays
+    /// poisoned.
+    fn trust_declared(&mut self, init_ty: Ty, declared: &Ty) -> Ty {
+        if matches!(self.resolve_shallow(&init_ty), Ty::Error) {
+            declared.clone()
+        } else {
+            init_ty
+        }
+    }
+
+    /// Record `diag`. One whose printed types contain `{error}` is
+    /// downstream of a diagnostic of its own: it is kept for its trap but
+    /// hidden, since showing it would only render the poison.
+    fn report(&mut self, mut diag: InferenceDiagnostic) {
+        let mut poisoned = false;
+        diag.for_each_ty_mut(|ty| poisoned |= resolve_fully(self.table, ty).contains_error());
+        if poisoned {
+            self.result.hidden_diagnostics.push(diag);
+        } else {
+            self.result.diagnostics.push(diag);
+        }
+    }
+
+    /// How many diagnostics have been recorded, hidden or not.
+    fn reported(&self) -> usize {
+        self.result.diagnostics.len() + self.result.hidden_diagnostics.len()
     }
 }
 
