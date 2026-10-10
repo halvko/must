@@ -1547,6 +1547,43 @@ fn equality_operands_must_agree() {
 }
 
 #[test]
+fn comparing_an_enum_with_another_type_says_to_match() {
+    // On the enum operand, whichever side it is on; the variant carrying
+    // the other operand's type is named when there is one, every variant
+    // otherwise.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: str, sh: Shape) {
+    let c = s.next_char(0);
+    let a = c == 'x';
+    let b = 'x' != c;
+    let d = sh == "circle";
+    let e = sh == Shape::Point;
+};
+"#,
+        expect![[r#"
+            126..129: type mismatch: expected `NextChar`, found `char` (this operand has type `NextChar` at 121..122) (`NextChar` is an enum: `match` on it — `NextChar::Char(char, usize)` carries a `char` at 121..122)
+            150..151: type mismatch: expected `char`, found `NextChar` (this operand has type `char` at 143..146) (`NextChar` is an enum: `match` on it — `NextChar::Char(char, usize)` carries a `char` at 150..151)
+            171..179: type mismatch: expected `Shape`, found `str` (this operand has type `Shape` at 165..167) (`Shape` is an enum: `match` on it to tell its variants apart (`Circle(usize)`, `Point`) at 165..167)
+        "#]],
+    );
+}
+
+#[test]
+fn comparing_a_generic_enum_names_the_instantiated_payload() {
+    check_diagnostics(
+        r#"
+type Opt = enum::<T> { Some(T), None };
+static f = fn (o: Opt::<char>) -> bool { o == 'x' };
+"#,
+        expect![[r#"
+            87..90: type mismatch: expected `Opt::<char>`, found `char` (this operand has type `Opt::<char>` at 82..83) (`Opt` is an enum: `match` on it — `Opt::Some(char)` carries a `char` at 82..83)
+        "#]],
+    );
+}
+
+#[test]
 fn item_tree_classifies_constness() {
     use crate::item_tree::{Constness, item_tree};
 

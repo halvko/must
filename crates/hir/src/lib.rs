@@ -1544,6 +1544,32 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             // already looking at it (e.g. "this call requires `str`" on the
             // very call whose argument carries the mismatch).
             related.retain(|r| !(r.file == file && r.range.contains_range(range)));
+            // `==` between an enum and something else: say how to look
+            // inside the enum. Added after the filter above, since the enum
+            // operand may be the squiggled one.
+            if let InferenceDiagnostic::TypeMismatch {
+                expected,
+                actual,
+                reasons,
+                ..
+            } = diag
+                && let Some(lhs) = reasons.iter().find_map(|r| match r {
+                    Cause::Operand(lhs) => Some(*lhs),
+                    _ => None,
+                })
+            {
+                let note = match enum_comparison_note(db, expected, actual) {
+                    Some(note) => source_map
+                        .node_for_expr(lhs)
+                        .map(|ptr| (ptr.text_range(), note)),
+                    None => enum_comparison_note(db, actual, expected).map(|note| (range, note)),
+                };
+                related.extend(note.map(|(range, message)| RelatedInfo {
+                    file,
+                    range,
+                    message,
+                }));
+            }
             let fix = match diag {
                 // Insert `mut ` where the grammar has a slot for it before
                 // this binding — a `let`, a parameter, or a record-pattern
@@ -2667,6 +2693,60 @@ fn declared_here(db: &dyn Db, loc: &ItemLoc) -> Vec<RelatedInfo> {
             }]
         })
         .unwrap_or_default()
+}
+
+/// When `enum_ty` is an enum and `other` is a different type, the note that
+/// says to `match` on it: the variants whose payload carries an `other`, or
+/// every variant when none does.
+fn enum_comparison_note(db: &dyn Db, enum_ty: &Ty, other: &Ty) -> Option<String> {
+    let Ty::Named(named) = enum_ty else {
+        return None;
+    };
+    if let Ty::Named(NamedTy { decl, .. }) | Ty::Variant(VariantTy { decl, .. }) = other
+        && *decl == named.decl
+    {
+        return None;
+    }
+    let variants = enum_variants(db, named.decl.to_id(db)).as_ref()?;
+    let name = named.decl.display_name();
+    let render = |(variant, payload): &(String, Vec<Ty>)| {
+        let payload: Vec<Ty> = payload
+            .iter()
+            .map(|p| substitute_args(p, &named.decl, &named.args))
+            .collect();
+        let carries = payload.contains(other);
+        let rendered = if payload.is_empty() {
+            variant.clone()
+        } else {
+            let payload: Vec<String> = payload.iter().map(Ty::display).collect();
+            format!("{variant}({})", payload.join(", "))
+        };
+        (carries, rendered)
+    };
+    let rendered: Vec<(bool, String)> = variants.iter().map(render).collect();
+    let carriers: Vec<String> = rendered
+        .iter()
+        .filter(|(carries, _)| *carries)
+        .map(|(_, v)| format!("`{name}::{v}`"))
+        .collect();
+    Some(if carriers.is_empty() {
+        let all: Vec<String> = rendered.iter().map(|(_, v)| format!("`{v}`")).collect();
+        format!(
+            "`{name}` is an enum: `match` on it to tell its variants apart ({})",
+            all.join(", ")
+        )
+    } else {
+        let verb = if carriers.len() == 1 {
+            "carries"
+        } else {
+            "carry"
+        };
+        format!(
+            "`{name}` is an enum: `match` on it — {} {verb} a `{}`",
+            carriers.join(" and "),
+            other.display()
+        )
+    })
 }
 
 /// The enclosing generic binder's params, read syntactically — the mirror

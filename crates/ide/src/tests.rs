@@ -1279,7 +1279,19 @@ static f = fn {
     s$0;
 };
 "#,
-        "```must\nmut s: Shape\n```",
+        "```must\nmut s: Shape\ntype Shape = enum { Circle(usize), Point }\n```",
+    );
+}
+
+#[test]
+fn hover_builtin_enum_binding_shows_its_variants() {
+    check_hover(
+        r#"
+static f = fn (s: str) {
+    let c$0 = s.next_char(0);
+};
+"#,
+        "```must\nc: NextChar\ntype NextChar = enum { Char(char, usize), End }\n```",
     );
 }
 
@@ -1525,7 +1537,7 @@ static f = fn (s: Shape) -> usize {
     }
 };
 "#,
-        "```must\nPoint: Shape\n```",
+        "```must\nPoint: Shape\ntype Shape = enum { Circle(usize), Point }\n```",
     );
 }
 

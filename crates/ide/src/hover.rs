@@ -201,8 +201,19 @@ pub(crate) fn hover(
 
     let value = value.map(|v| format!(" = {v}")).unwrap_or_default();
     let mut_prefix = if mutable { "mut " } else { "" };
+    // An enum's shape is not in its name, and it decides how the value is
+    // used (a `match`), so its declaration follows on the next line.
+    let decl = match &ty {
+        hir::Ty::Named(named) if hir::enum_variants(db, named.decl.to_id(db)).is_some() => {
+            format!("\n{}", type_item_decl(db, named.decl.to_id(db)))
+        }
+        _ => String::new(),
+    };
     Some(HoverResult {
-        markup: format!("```must\n{mut_prefix}{name}: {}{value}\n```", ty.display()),
+        markup: format!(
+            "```must\n{mut_prefix}{name}: {}{value}{decl}\n```",
+            ty.display()
+        ),
         range,
     })
 }
@@ -216,12 +227,20 @@ fn type_item_hover(
     item: hir::ItemId<'_>,
     range: TextRange,
 ) -> Option<HoverResult> {
+    Some(HoverResult {
+        markup: format!("```must\n{}\n```", type_item_decl(db, item)),
+        range,
+    })
+}
+
+/// A `type` item's declaration on one line.
+fn type_item_decl(db: &RootDatabase, item: hir::ItemId<'_>) -> String {
     let name = item.name(db);
-    let markup = if let Some(underlying) = hir::type_underlying(db, item) {
-        format!("```must\ntype {name} = {}\n```", underlying.display())
+    if let Some(underlying) = hir::type_underlying(db, item) {
+        format!("type {name} = {}", underlying.display())
     } else if let Some(variants) = hir::enum_variants(db, item) {
         format!(
-            "```must\ntype {name} = enum {{ {} }}\n```",
+            "type {name} = enum {{ {} }}",
             variants
                 .iter()
                 .map(|(name, payload)| render_variant(name, payload))
@@ -229,9 +248,8 @@ fn type_item_hover(
                 .join(", ")
         )
     } else {
-        format!("```must\ntype {name}\n```")
-    };
-    Some(HoverResult { markup, range })
+        format!("type {name}")
+    }
 }
 
 /// Hover for a `trait` item (on its declaration, a bound, an impl head or
