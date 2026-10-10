@@ -17,6 +17,7 @@ pub mod linear_check;
 pub mod outlives;
 pub mod scopes;
 pub mod traits;
+pub mod trap_sites;
 pub mod ty;
 pub mod unsafe_check;
 
@@ -45,6 +46,7 @@ pub use scopes::{
     type_scope, utf8_result_loc,
 };
 pub use traits::{BoundDotOffer, BoundSlot, bound_dot_offers, bound_slots, dict_param_count};
+pub use trap_sites::{TrapSite, range_traps, trap_site_for_pat};
 pub use ty::{
     ConstArgValue, FnTy, GenericArg, IntKind, IntValue, NamedTy, ReceiverShape, Region, RegionVar,
     SelfPosition, Ty, VariantTy, dispatches_on, enum_variants, member_self_position,
@@ -388,537 +390,8 @@ pub struct RelatedInfo {
 /// All semantic diagnostics for a file. This is the one place that converts
 /// range-free facts back into text ranges (via the source maps).
 pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
-    let mut diagnostics: Vec<Diagnostic> = parse(db, file)
-        .errors()
-        .iter()
-        .map(|err| Diagnostic {
-            range: err.range,
-            severity: Severity::Error,
-            message: err.message.clone(),
-            fix: err.fix.clone(),
-            related: Vec::new(),
-        })
-        .collect();
-
+    let mut diagnostics = range_diagnostics(db, file).clone();
     let item_name = |loc: &ItemLoc| item_source(db, loc.to_id(db)).and_then(|it| it.name());
-
-    // ---- regions: signatures elide nothing, and the type-decl reserve ----
-    //
-    // Both are SYNTACTIC judgements, so they live here rather than in
-    // inference: what is wrong with `T.&` is that a token is missing, and
-    // no amount of type information changes that. Lowering stays permissive
-    // (a region-less borrow gets `Region::Error` and checking continues),
-    // which is the house split — recovery in the lowerer, the story here.
-    //
-    // These are the TYPE-position judgements. The expression-position twin
-    // (`x.&::<@a>`, a region written on an operation) needs no binder at
-    // all — the whole list is refused whatever it holds — so it lives one
-    // layer out, in `syntax::validation`.
-    for borrow in parse(db, file)
-        .syntax_node()
-        .descendants()
-        .filter_map(ast::BorrowType::cast)
-    {
-        let anchor = borrow
-            .amp_token()
-            .map(|token| token.text_range())
-            .unwrap_or_else(|| borrow.syntax().text_range());
-        let Some(list) = borrow.generic_arg_list() else {
-            // NO turbofish at all. Elision is deferred, not absent by
-            // oversight: every region is hand-written until a corpus says
-            // which rule earns its keep, so this reports rather than
-            // guesses.
-            diagnostics.push(Diagnostic {
-                range: anchor,
-                severity: Severity::Error,
-                message: diag::BORROW_NEEDS_REGION.to_owned(),
-                fix: None,
-                related: Vec::new(),
-            });
-            continue;
-        };
-        let args: Vec<ast::GenericArg> = list.args().collect();
-        if args.len() != 1 {
-            diagnostics.push(Diagnostic {
-                range: list.syntax().text_range(),
-                severity: Severity::Error,
-                message: diag::borrow_region_arity(args.len()),
-                fix: None,
-                related: Vec::new(),
-            });
-            continue;
-        }
-        let ast::GenericArg::RegionArg(region) = &args[0] else {
-            diagnostics.push(Diagnostic {
-                range: args[0].syntax().text_range(),
-                severity: Severity::Error,
-                message: diag::BORROW_REGION_KIND.to_owned(),
-                fix: None,
-                related: Vec::new(),
-            });
-            continue;
-        };
-        // Every NAMED region must be declared by an enclosing binder. This
-        // is a syntactic question with a syntactic answer, and it has to be
-        // asked here: signature lowering resolves an unknown name to
-        // `Region::Error` and carries on, which without a diagnostic
-        // surfaced as the compiler accusing ITSELF ("this expression has
-        // type `{error}` but no error was reported") for a one-character
-        // typo. Inside a join it was worse — silently accepted, the
-        // obligation dropped.
-        let binder = enclosing_binder_info(borrow.syntax());
-        for token in region.regions() {
-            let text = token.text();
-            if text != "@_" && !binder.names_region(text) {
-                diagnostics.push(Diagnostic {
-                    range: token.text_range(),
-                    severity: Severity::Error,
-                    message: diag::unknown_region(text),
-                    fix: None,
-                    related: Vec::new(),
-                });
-            }
-        }
-        // `@_` says "there is a region here, infer it" — an answer a BODY
-        // can give and a SIGNATURE cannot, because a signature's regions
-        // are parameters, and a parameter needs the binder name that its
-        // outlives clauses and its other mentions refer to. The two
-        // positions are told apart syntactically: a signature type sits
-        // under a `PARAM` or a `RET_TYPE`.
-        if !in_signature_position(borrow.syntax()) {
-            continue;
-        }
-        for token in region.regions() {
-            if token.text() == "@_" {
-                diagnostics.push(Diagnostic {
-                    range: token.text_range(),
-                    severity: Severity::Error,
-                    message: diag::WILDCARD_REGION_IN_SIGNATURE.to_owned(),
-                    fix: None,
-                    related: Vec::new(),
-                });
-            }
-        }
-    }
-
-    // Region parameters on a TYPE declaration (`struct::<@a, T>`). Reserved,
-    // not rejected: a region-carrying declaration needs variance and
-    // well-formedness rulings this arc does not own. Reported at the
-    // declaration so a user learns it once, where they wrote it.
-    for param in parse(db, file)
-        .syntax_node()
-        .descendants()
-        .filter_map(ast::RegionParam::cast)
-    {
-        if !region_param_on_type_declaration(param.syntax()) {
-            continue;
-        }
-        diagnostics.push(Diagnostic {
-            range: param.syntax().text_range(),
-            severity: Severity::Error,
-            message: diag::REGION_ON_TYPE_DECL.to_owned(),
-            fix: None,
-            related: Vec::new(),
-        });
-    }
-
-    // ---- the cross-line block-tail lint ---------------------------------
-    //
-    // A statement whose expression ends in `}` closes itself (the grammar's
-    // brace rule), and the expression grammar stays GREEDY across that
-    // brace: `if c { } - 1` is one subtraction, not a statement and a
-    // negation. That is the accepted price of never guessing — but when the
-    // continuing token sits on a LATER LINE than the `}` it continues, the
-    // text reads as two statements and parses as one expression, and only
-    // the author knows which was meant. So: a warning, and the two ways out.
-    // A match arm is the same trap with `,` for `;` — see `SplitPoint`.
-    //
-    // It lives here rather than in `syntax::validation` for one reason —
-    // validation speaks only errors, and this is not an error. It needs
-    // nothing else this layer has: no item tree, no types, only trivia.
-    for node in parse(db, file).syntax_node().descendants() {
-        let Some((brace, op, split)) = cross_line_block_tail(&node) else {
-            continue;
-        };
-        diagnostics.push(Diagnostic {
-            range: op.text_range(),
-            severity: Severity::Warning,
-            message: diag::block_tail_continued(op.text(), split),
-            // ONE machine-applicable fix, the likelier intent: split — and
-            // only where the split reading IS a program. A `.` or a `*`
-            // cannot begin a statement, and no continuation token can begin
-            // a pattern today, so inserting the separator there would take
-            // a file that compiles to one that does not parse. The warning
-            // still stands (both readings genuinely exist); what is withheld
-            // is the button, and the message's affirm route is then the
-            // whole answer. See `SplitPoint::could_begin_one`.
-            //
-            // The other way out — affirming the expression by moving the
-            // operator up or parenthesizing — is named in the message
-            // rather than offered, because a `Diagnostic` carries one fix.
-            fix: split.could_begin_one(op.kind()).then(|| syntax::Fix {
-                label: format!("Insert `{}` after `}}`", split.separator()),
-                edits: vec![syntax::TextEdit {
-                    range: TextRange::empty(brace.text_range().end()),
-                    insert: split.separator().to_owned(),
-                }],
-            }),
-            related: Vec::new(),
-        });
-    }
-
-    // Duplicate definitions, discovered by `file_scope` (the analysis that
-    // decides first-wins also knows about the losers); only the range
-    // attachment happens here.
-    for dup in &file_scope(db, file).duplicates {
-        let Some(second) = item_name(&dup.second) else {
-            continue;
-        };
-        let related = item_name(&dup.first)
-            .map(|first| {
-                vec![RelatedInfo {
-                    file: dup.first.file,
-                    range: first.syntax().text_range(),
-                    message: "first defined here".to_owned(),
-                }]
-            })
-            .unwrap_or_default();
-        diagnostics.push(Diagnostic {
-            range: second.syntax().text_range(),
-            severity: Severity::Error,
-            message: diag::defined_multiple_times(&second.text()),
-            fix: None,
-            related,
-        });
-    }
-
-    // Bad type names, in any annotation position: unknown, naming a value
-    // item, a `::` path that names no variant, or a generic mention whose
-    // turbofish is wrong (arity, kinds, unrepresentable const args).
-    // Without this, a typo'd type lowers to a silent `{error}` — this pass
-    // is the diagnostic MIRROR of `ty`'s annotation lowering, which stays
-    // purely syntactic (const eval never runs there) and silent. Type
-    // params of an enclosing generic binder are real type names here (they
-    // lower to rigid `Ty::Param`s), EXCEPT inside the binder itself: a
-    // const param's declared type naming a type param is a dependent
-    // param, deferred (TR06) — it lowers to a silent `{error}` with the
-    // diagnostic below.
-    for path_type in parse(db, file)
-        .syntax_node()
-        .descendants()
-        .filter_map(ast::PathType::cast)
-    {
-        let Some(name_ref) = path_type.name_ref() else {
-            continue;
-        };
-        let name = name_ref.text();
-        // Inside a `with`-chain, only the semantic member contexts are
-        // judged — everything else is parse-and-reserve territory whose
-        // single reservation diagnostic already tells the story.
-        if in_reserved_with_region(path_type.syntax()) {
-            continue;
-        }
-        // Bound positions, supertrait clauses and alias RHS name TRAITS,
-        // not types — judged by the trait definition diagnostics, skipped
-        // by the type mirror.
-        if path_type.syntax().parent().is_some_and(|p| {
-            ast::TypeParam::can_cast(p.kind())
-                || ast::RequiresClause::can_cast(p.kind())
-                || ast::TraitAlias::can_cast(p.kind())
-        }) {
-            continue;
-        }
-        // A PathType sitting in a CONST-argument position of an enclosing
-        // turbofish (`Buf::<N>`'s `N` parses as a type arg) is judged by
-        // the owner's argument checks — inference for expression-position
-        // mentions, [`apply_position_diagnostics`] for annotations — never
-        // as a type of its own.
-        if in_const_arg_position(db, file, &path_type) {
-            continue;
-        }
-        let binder = enclosing_binder_info(path_type.syntax());
-        if path_type.generic_arg_list().is_some() || binder.names_const_param(&name) {
-            // A turbofish (or a const-param name in plain type position):
-            // the generic-mention checks own the whole judgement here — a
-            // binder param with args, a non-generic target with args, and
-            // every per-argument problem.
-            apply_position_diagnostics(
-                db,
-                file,
-                path_type.syntax(),
-                &name,
-                path_type.generic_arg_list().as_ref(),
-                &binder,
-                &mut diagnostics,
-            );
-            continue;
-        }
-        let message = match type_param_binding(&path_type, &name) {
-            // In scope and rigid: a use is fine, but a type param has no
-            // variants to name through `::`.
-            TypeParamBinding::Bound => path_type
-                .variant_name_ref()
-                .map(|_| format!("`{name}` has no variants (it is a type parameter)")),
-            TypeParamBinding::InOwnBinder => {
-                Some("a const parameter's type cannot mention a type parameter".to_owned())
-            }
-            TypeParamBinding::NotBound => match path_type.variant_name_ref() {
-                Some(variant) => variant_position_error(db, file, &name, &variant.text()),
-                None => type_position_error(db, file, &name),
-            },
-        };
-        if let Some(message) = message {
-            diagnostics.push(Diagnostic {
-                range: path_type.syntax().text_range(),
-                severity: Severity::Error,
-                message,
-                fix: None,
-                related: Vec::new(),
-            });
-            continue;
-        }
-        // A GENERIC type item mentioned bare: annotation lowering is
-        // syntactic, so the arity must always be spelled in type position
-        // (`Pair::<usize>`, `_` holes allowed where inference can fill
-        // them).
-        if path_type.variant_name_ref().is_none()
-            && !matches!(
-                type_param_binding(&path_type, &name),
-                TypeParamBinding::Bound | TypeParamBinding::InOwnBinder
-            )
-            && let Some(Resolution::TypeItem(loc)) = type_scope(db, file).resolve(&name)
-        {
-            let arity = decl_generics_len(db, &loc);
-            if arity > 0 {
-                diagnostics.push(Diagnostic {
-                    range: path_type.syntax().text_range(),
-                    severity: Severity::Error,
-                    message: diag::generic_arg_count(&name, arity, 0),
-                    fix: None,
-                    related: declared_here(db, &loc),
-                });
-            }
-        }
-    }
-
-    // Array-type LENGTHS in annotation position: the diagnostic MIRROR of
-    // `ty`'s array lowering, which reads the length off the syntax
-    // (eval-free, like every const arg) and stays silent about anything it
-    // can't represent. Same judgement as a turbofish's const argument
-    // against a `usize`-declared param: literals type-check by literal
-    // kind, a bare name must be an in-scope `usize` const param, and a
-    // `const { ... }` block is outside the annotation domain entirely.
-    for array_type in parse(db, file)
-        .syntax_node()
-        .descendants()
-        .filter_map(ast::ArrayType::cast)
-    {
-        let Some(len) = array_type.len() else {
-            // No length at all: the parse error covers it.
-            continue;
-        };
-        if in_reserved_with_region(array_type.syntax()) {
-            continue;
-        }
-        let binder = enclosing_binder_info(array_type.syntax());
-        if let Some(message) = array_len_annotation_error(db, file, &len, &binder) {
-            diagnostics.push(Diagnostic {
-                range: len.syntax().text_range(),
-                severity: Severity::Error,
-                message,
-                fix: None,
-                related: Vec::new(),
-            });
-        }
-    }
-
-    // One binder, one name per parameter, whatever the kind: a rigid
-    // `Ty::Param` is positional and a const param's mention resolves to the
-    // LAST declaration of the name, so a repeat leaves the earlier
-    // parameter unnameable rather than ambiguous. Reported at the second
-    // occurrence, pointing at the first. Per LIST, not per item: two
-    // binders are two namespaces, whoever owns them — which is what leaves
-    // a member's own `T` free to shadow its owner's.
-    let named = |name: ast::Name| (name.text(), name.syntax().text_range());
-    for list in parse(db, file)
-        .syntax_node()
-        .descendants()
-        .filter_map(ast::GenericParamList::cast)
-    {
-        let mut seen: Vec<(String, TextRange)> = Vec::new();
-        for param in list.params() {
-            let declared = match &param {
-                ast::GenericParam::TypeParam(it) => it.name().map(named),
-                ast::GenericParam::ConstParam(it) => it.name().map(named),
-                // A region's name carries its `@` sigil, so it collides
-                // only with another region's — except `@_`, which is the
-                // elision sigil and not a name at all. Refused here, and
-                // left out of the collision bookkeeping so a second one
-                // gets the same true answer instead of "duplicate".
-                ast::GenericParam::RegionParam(it) => match it.region_token() {
-                    Some(token) if token.text() == "@_" => {
-                        diagnostics.push(Diagnostic {
-                            range: token.text_range(),
-                            severity: Severity::Error,
-                            message: diag::WILDCARD_REGION_IN_BINDER.to_owned(),
-                            fix: None,
-                            related: Vec::new(),
-                        });
-                        continue;
-                    }
-                    token => token.map(|token| (token.text().to_owned(), token.text_range())),
-                },
-            };
-            let Some((text, range)) = declared.filter(|(text, _)| !text.is_empty()) else {
-                continue;
-            };
-            match seen.iter().find(|(seen, _)| *seen == text) {
-                Some(&(_, first)) => diagnostics.push(Diagnostic {
-                    range,
-                    severity: Severity::Error,
-                    message: format!("duplicate generic parameter `{text}`"),
-                    fix: None,
-                    related: vec![RelatedInfo {
-                        file,
-                        range: first,
-                        message: "first declared here".to_owned(),
-                    }],
-                }),
-                None => seen.push((text, range)),
-            }
-        }
-    }
-
-    // The item-level generic rule (TR06): a generic fn literal's binder
-    // signature IS the item's contract, so every param and the return type
-    // must be written — the fact is range-free (`generics` non-empty,
-    // synthesized `type_ref` absent), only the range attaches here. Const-
-    // param declared types get the enum-payload treatment: real type
-    // syntax, but nothing to infer a hole from.
-    for &item in file_item_ids(db, file) {
-        let Some(data) = item_data(db, item).as_ref() else {
-            continue;
-        };
-        if data.generics.is_empty() {
-            continue;
-        }
-        let fn_literal =
-            item_source(db, item)
-                .and_then(|it| it.body())
-                .and_then(|body| match body {
-                    ast::Expr::FnLiteral(fn_lit) => Some(fn_lit),
-                    _ => None,
-                });
-        let Some(fn_literal) = fn_literal else {
-            continue;
-        };
-        if data.type_ref.is_none() {
-            let range = fn_literal
-                .generic_param_list()
-                .map(|list| list.syntax().text_range())
-                .unwrap_or_else(|| fn_literal.syntax().text_range());
-            diagnostics.push(Diagnostic {
-                range,
-                severity: Severity::Error,
-                message: diag::GENERIC_FN_NEEDS_FULL_ANNOTATION.to_owned(),
-                fix: None,
-                related: Vec::new(),
-            });
-        }
-        for param in fn_literal
-            .generic_param_list()
-            .into_iter()
-            .flat_map(|list| list.params())
-        {
-            let ast::GenericParam::ConstParam(const_param) = param else {
-                continue;
-            };
-            let Some(ty) = const_param.ty() else {
-                // No declared type at all: the parse error covers it.
-                continue;
-            };
-            let type_ref = TypeRef::from_ast(ty.clone());
-            // Fn values are outside the const-arg domain (TR06: concrete
-            // data types only): their identity is a `BodyId` arena index,
-            // which renumbers under body edits — instance identity built
-            // on one would churn.
-            // Rejected here at the source (the declaration); inference
-            // repeats the same text at any mention that would pass one.
-            if type_ref.mentions_fn() {
-                diagnostics.push(Diagnostic {
-                    range: ty.syntax().text_range(),
-                    severity: Severity::Error,
-                    message: diag::FN_CONST_ARG.to_owned(),
-                    fix: None,
-                    related: Vec::new(),
-                });
-                continue;
-            }
-            // Array values stay outside the const-arg domain too (the
-            // ruled domain is builtins + records + variants) — same
-            // declaration-site rejection, same belt at mentions.
-            if type_ref.mentions_array() {
-                diagnostics.push(Diagnostic {
-                    range: ty.syntax().text_range(),
-                    severity: Severity::Error,
-                    message: diag::ARRAY_CONST_ARG.to_owned(),
-                    fix: None,
-                    related: Vec::new(),
-                });
-                continue;
-            }
-            if type_ref.is_fully_typed() {
-                continue;
-            }
-            diagnostics.push(Diagnostic {
-                range: ty.syntax().text_range(),
-                severity: Severity::Error,
-                message: "a const parameter's type must be a fully written type; \
-                          a declaration has nothing to infer `_` from"
-                    .to_owned(),
-                fix: None,
-                related: Vec::new(),
-            });
-        }
-    }
-
-    // `type` declarations: the RHS must be a `struct` or `enum` literal
-    // whose field values / variant payloads are types. `type_decl` reads
-    // the same shape syntactically; every `TypeRef::Error` (and every
-    // erased inference variable) it can produce has a diagnostic from here.
-    for &item in file_item_ids(db, file) {
-        let Some(ast::Item::TypeItem(decl)) = item_source(db, item) else {
-            continue;
-        };
-        let Some(rhs) = decl.body() else {
-            // No RHS at all: the parse errors cover it.
-            continue;
-        };
-        match rhs {
-            ast::Expr::RecordExpr(record) => {
-                type_decl_field_diagnostics(&record, &mut diagnostics);
-            }
-            ast::Expr::EnumExpr(en) => {
-                enum_decl_payload_diagnostics(&en, &mut diagnostics);
-            }
-            other => diagnostics.push(Diagnostic {
-                range: other.syntax().text_range(),
-                severity: Severity::Error,
-                message: "only a `struct` or `enum` literal can declare a type".to_owned(),
-                fix: None,
-                related: Vec::new(),
-            }),
-        }
-    }
-
-    // Inherent members: definition-site rules that live on the range-free
-    // member facts, with only the range attached here.
-    member_definition_diagnostics(db, file, &mut diagnostics);
-
-    // Traits: requirement rules, bound-name resolution, impl-head
-    // resolution, coherence (duplicate impls) and impl-vs-requirement
-    // matching.
-    trait_definition_diagnostics(db, file, &mut diagnostics);
 
     let syntax_root = parse(db, file).syntax_node();
     for item in all_checkable_items(db, file) {
@@ -1735,24 +1208,10 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     message: "first consumed here".to_owned(),
                 });
             }
-            // Inside a generic body the obligation can come from the
-            // BINDER rather than from any declaration: a parameter with no
-            // `forget` bound is checked as if it were linear, and so is
-            // anything CONTAINING one. Both cases name the binder, because
-            // a message that says "its type has no `forget` capability"
-            // sends the reader looking for a declaration that says so, and
-            // in a generic body there is none to find.
-            let root = ty.and_then(|ty| {
-                if diag.about_duplication() {
-                    capability::affine_root(db, ty)
-                } else {
-                    capability::blaming_param(db, ty).map(capability::Affine::Param)
-                }
-            });
             diagnostics.push(Diagnostic {
                 range,
                 severity: Severity::Error,
-                message: diag.message(subject, root.as_ref()),
+                message: diag.render(db, item),
                 fix: None,
                 related,
             });
@@ -1815,6 +1274,547 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
     }
 
     diagnostics.sort_by_key(|d| (d.range.start(), d.range.end()));
+    diagnostics
+}
+
+/// The diagnostics whose fact is a source range rather than a body node:
+/// parse and validation errors, annotation and declaration rules, and the
+/// member and trait/impl checks. [`range_traps`] turns their errors into
+/// trap sites.
+#[salsa::tracked(returns(ref))]
+pub fn range_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
+    let mut diagnostics: Vec<Diagnostic> = parse(db, file)
+        .errors()
+        .iter()
+        .map(|err| Diagnostic {
+            range: err.range,
+            severity: Severity::Error,
+            message: err.message.clone(),
+            fix: err.fix.clone(),
+            related: Vec::new(),
+        })
+        .collect();
+
+    let item_name = |loc: &ItemLoc| item_source(db, loc.to_id(db)).and_then(|it| it.name());
+
+    // ---- regions: signatures elide nothing, and the type-decl reserve ----
+    //
+    // Both are SYNTACTIC judgements, so they live here rather than in
+    // inference: what is wrong with `T.&` is that a token is missing, and
+    // no amount of type information changes that. Lowering stays permissive
+    // (a region-less borrow gets `Region::Error` and checking continues),
+    // which is the house split — recovery in the lowerer, the story here.
+    //
+    // These are the TYPE-position judgements. The expression-position twin
+    // (`x.&::<@a>`, a region written on an operation) needs no binder at
+    // all — the whole list is refused whatever it holds — so it lives one
+    // layer out, in `syntax::validation`.
+    for borrow in parse(db, file)
+        .syntax_node()
+        .descendants()
+        .filter_map(ast::BorrowType::cast)
+    {
+        let anchor = borrow
+            .amp_token()
+            .map(|token| token.text_range())
+            .unwrap_or_else(|| borrow.syntax().text_range());
+        let Some(list) = borrow.generic_arg_list() else {
+            // NO turbofish at all. Elision is deferred, not absent by
+            // oversight: every region is hand-written until a corpus says
+            // which rule earns its keep, so this reports rather than
+            // guesses.
+            diagnostics.push(Diagnostic {
+                range: anchor,
+                severity: Severity::Error,
+                message: diag::BORROW_NEEDS_REGION.to_owned(),
+                fix: None,
+                related: Vec::new(),
+            });
+            continue;
+        };
+        let args: Vec<ast::GenericArg> = list.args().collect();
+        if args.len() != 1 {
+            diagnostics.push(Diagnostic {
+                range: list.syntax().text_range(),
+                severity: Severity::Error,
+                message: diag::borrow_region_arity(args.len()),
+                fix: None,
+                related: Vec::new(),
+            });
+            continue;
+        }
+        let ast::GenericArg::RegionArg(region) = &args[0] else {
+            diagnostics.push(Diagnostic {
+                range: args[0].syntax().text_range(),
+                severity: Severity::Error,
+                message: diag::BORROW_REGION_KIND.to_owned(),
+                fix: None,
+                related: Vec::new(),
+            });
+            continue;
+        };
+        // Every NAMED region must be declared by an enclosing binder. This
+        // is a syntactic question with a syntactic answer, and it has to be
+        // asked here: signature lowering resolves an unknown name to
+        // `Region::Error` and carries on, which without a diagnostic
+        // surfaced as the compiler accusing ITSELF ("this expression has
+        // type `{error}` but no error was reported") for a one-character
+        // typo. Inside a join it was worse — silently accepted, the
+        // obligation dropped.
+        let binder = enclosing_binder_info(borrow.syntax());
+        for token in region.regions() {
+            let text = token.text();
+            if text != "@_" && !binder.names_region(text) {
+                diagnostics.push(Diagnostic {
+                    range: token.text_range(),
+                    severity: Severity::Error,
+                    message: diag::unknown_region(text),
+                    fix: None,
+                    related: Vec::new(),
+                });
+            }
+        }
+        // `@_` says "there is a region here, infer it" — an answer a BODY
+        // can give and a SIGNATURE cannot, because a signature's regions
+        // are parameters, and a parameter needs the binder name that its
+        // outlives clauses and its other mentions refer to. The two
+        // positions are told apart syntactically: a signature type sits
+        // under a `PARAM` or a `RET_TYPE`.
+        if !in_signature_position(borrow.syntax()) {
+            continue;
+        }
+        for token in region.regions() {
+            if token.text() == "@_" {
+                diagnostics.push(Diagnostic {
+                    range: token.text_range(),
+                    severity: Severity::Error,
+                    message: diag::WILDCARD_REGION_IN_SIGNATURE.to_owned(),
+                    fix: None,
+                    related: Vec::new(),
+                });
+            }
+        }
+    }
+
+    // Region parameters on a TYPE declaration (`struct::<@a, T>`). Reserved,
+    // not rejected: a region-carrying declaration needs variance and
+    // well-formedness rulings this arc does not own. Reported at the
+    // declaration so a user learns it once, where they wrote it.
+    for param in parse(db, file)
+        .syntax_node()
+        .descendants()
+        .filter_map(ast::RegionParam::cast)
+    {
+        if !region_param_on_type_declaration(param.syntax()) {
+            continue;
+        }
+        diagnostics.push(Diagnostic {
+            range: param.syntax().text_range(),
+            severity: Severity::Error,
+            message: diag::REGION_ON_TYPE_DECL.to_owned(),
+            fix: None,
+            related: Vec::new(),
+        });
+    }
+
+    // ---- the cross-line block-tail lint ---------------------------------
+    //
+    // A statement whose expression ends in `}` closes itself (the grammar's
+    // brace rule), and the expression grammar stays GREEDY across that
+    // brace: `if c { } - 1` is one subtraction, not a statement and a
+    // negation. That is the accepted price of never guessing — but when the
+    // continuing token sits on a LATER LINE than the `}` it continues, the
+    // text reads as two statements and parses as one expression, and only
+    // the author knows which was meant. So: a warning, and the two ways out.
+    // A match arm is the same trap with `,` for `;` — see `SplitPoint`.
+    //
+    // It lives here rather than in `syntax::validation` for one reason —
+    // validation speaks only errors, and this is not an error. It needs
+    // nothing else this layer has: no item tree, no types, only trivia.
+    for node in parse(db, file).syntax_node().descendants() {
+        let Some((brace, op, split)) = cross_line_block_tail(&node) else {
+            continue;
+        };
+        diagnostics.push(Diagnostic {
+            range: op.text_range(),
+            severity: Severity::Warning,
+            message: diag::block_tail_continued(op.text(), split),
+            // ONE machine-applicable fix, the likelier intent: split — and
+            // only where the split reading IS a program. A `.` or a `*`
+            // cannot begin a statement, and no continuation token can begin
+            // a pattern today, so inserting the separator there would take
+            // a file that compiles to one that does not parse. The warning
+            // still stands (both readings genuinely exist); what is withheld
+            // is the button, and the message's affirm route is then the
+            // whole answer. See `SplitPoint::could_begin_one`.
+            //
+            // The other way out — affirming the expression by moving the
+            // operator up or parenthesizing — is named in the message
+            // rather than offered, because a `Diagnostic` carries one fix.
+            fix: split.could_begin_one(op.kind()).then(|| syntax::Fix {
+                label: format!("Insert `{}` after `}}`", split.separator()),
+                edits: vec![syntax::TextEdit {
+                    range: TextRange::empty(brace.text_range().end()),
+                    insert: split.separator().to_owned(),
+                }],
+            }),
+            related: Vec::new(),
+        });
+    }
+
+    // Duplicate definitions, discovered by `file_scope` (the analysis that
+    // decides first-wins also knows about the losers); only the range
+    // attachment happens here.
+    for dup in &file_scope(db, file).duplicates {
+        let Some(second) = item_name(&dup.second) else {
+            continue;
+        };
+        let related = item_name(&dup.first)
+            .map(|first| {
+                vec![RelatedInfo {
+                    file: dup.first.file,
+                    range: first.syntax().text_range(),
+                    message: "first defined here".to_owned(),
+                }]
+            })
+            .unwrap_or_default();
+        diagnostics.push(Diagnostic {
+            range: second.syntax().text_range(),
+            severity: Severity::Error,
+            message: diag::defined_multiple_times(&second.text()),
+            fix: None,
+            related,
+        });
+    }
+
+    // Bad type names, in any annotation position: unknown, naming a value
+    // item, a `::` path that names no variant, or a generic mention whose
+    // turbofish is wrong (arity, kinds, unrepresentable const args).
+    // Without this, a typo'd type lowers to a silent `{error}` — this pass
+    // is the diagnostic MIRROR of `ty`'s annotation lowering, which stays
+    // purely syntactic (const eval never runs there) and silent. Type
+    // params of an enclosing generic binder are real type names here (they
+    // lower to rigid `Ty::Param`s), EXCEPT inside the binder itself: a
+    // const param's declared type naming a type param is a dependent
+    // param, deferred (TR06) — it lowers to a silent `{error}` with the
+    // diagnostic below.
+    for path_type in parse(db, file)
+        .syntax_node()
+        .descendants()
+        .filter_map(ast::PathType::cast)
+    {
+        let Some(name_ref) = path_type.name_ref() else {
+            continue;
+        };
+        let name = name_ref.text();
+        // Inside a `with`-chain, only the semantic member contexts are
+        // judged — everything else is parse-and-reserve territory whose
+        // single reservation diagnostic already tells the story.
+        if in_reserved_with_region(path_type.syntax()) {
+            continue;
+        }
+        // Bound positions, supertrait clauses and alias RHS name TRAITS,
+        // not types — judged by the trait definition diagnostics, skipped
+        // by the type mirror.
+        if path_type.syntax().parent().is_some_and(|p| {
+            ast::TypeParam::can_cast(p.kind())
+                || ast::RequiresClause::can_cast(p.kind())
+                || ast::TraitAlias::can_cast(p.kind())
+        }) {
+            continue;
+        }
+        // A PathType sitting in a CONST-argument position of an enclosing
+        // turbofish (`Buf::<N>`'s `N` parses as a type arg) is judged by
+        // the owner's argument checks — inference for expression-position
+        // mentions, [`apply_position_diagnostics`] for annotations — never
+        // as a type of its own.
+        if in_const_arg_position(db, file, &path_type) {
+            continue;
+        }
+        let binder = enclosing_binder_info(path_type.syntax());
+        if path_type.generic_arg_list().is_some() || binder.names_const_param(&name) {
+            // A turbofish (or a const-param name in plain type position):
+            // the generic-mention checks own the whole judgement here — a
+            // binder param with args, a non-generic target with args, and
+            // every per-argument problem.
+            apply_position_diagnostics(
+                db,
+                file,
+                path_type.syntax(),
+                &name,
+                path_type.generic_arg_list().as_ref(),
+                &binder,
+                &mut diagnostics,
+            );
+            continue;
+        }
+        let message = match type_param_binding(&path_type, &name) {
+            // In scope and rigid: a use is fine, but a type param has no
+            // variants to name through `::`.
+            TypeParamBinding::Bound => path_type
+                .variant_name_ref()
+                .map(|_| format!("`{name}` has no variants (it is a type parameter)")),
+            TypeParamBinding::InOwnBinder => {
+                Some("a const parameter's type cannot mention a type parameter".to_owned())
+            }
+            TypeParamBinding::NotBound => match path_type.variant_name_ref() {
+                Some(variant) => variant_position_error(db, file, &name, &variant.text()),
+                None => type_position_error(db, file, &name),
+            },
+        };
+        if let Some(message) = message {
+            diagnostics.push(Diagnostic {
+                range: path_type.syntax().text_range(),
+                severity: Severity::Error,
+                message,
+                fix: None,
+                related: Vec::new(),
+            });
+            continue;
+        }
+        // A GENERIC type item mentioned bare: annotation lowering is
+        // syntactic, so the arity must always be spelled in type position
+        // (`Pair::<usize>`, `_` holes allowed where inference can fill
+        // them).
+        if path_type.variant_name_ref().is_none()
+            && !matches!(
+                type_param_binding(&path_type, &name),
+                TypeParamBinding::Bound | TypeParamBinding::InOwnBinder
+            )
+            && let Some(Resolution::TypeItem(loc)) = type_scope(db, file).resolve(&name)
+        {
+            let arity = decl_generics_len(db, &loc);
+            if arity > 0 {
+                diagnostics.push(Diagnostic {
+                    range: path_type.syntax().text_range(),
+                    severity: Severity::Error,
+                    message: diag::generic_arg_count(&name, arity, 0),
+                    fix: None,
+                    related: declared_here(db, &loc),
+                });
+            }
+        }
+    }
+
+    // Array-type LENGTHS in annotation position: the diagnostic MIRROR of
+    // `ty`'s array lowering, which reads the length off the syntax
+    // (eval-free, like every const arg) and stays silent about anything it
+    // can't represent. Same judgement as a turbofish's const argument
+    // against a `usize`-declared param: literals type-check by literal
+    // kind, a bare name must be an in-scope `usize` const param, and a
+    // `const { ... }` block is outside the annotation domain entirely.
+    for array_type in parse(db, file)
+        .syntax_node()
+        .descendants()
+        .filter_map(ast::ArrayType::cast)
+    {
+        let Some(len) = array_type.len() else {
+            // No length at all: the parse error covers it.
+            continue;
+        };
+        if in_reserved_with_region(array_type.syntax()) {
+            continue;
+        }
+        let binder = enclosing_binder_info(array_type.syntax());
+        if let Some(message) = array_len_annotation_error(db, file, &len, &binder) {
+            diagnostics.push(Diagnostic {
+                range: len.syntax().text_range(),
+                severity: Severity::Error,
+                message,
+                fix: None,
+                related: Vec::new(),
+            });
+        }
+    }
+
+    // One binder, one name per parameter, whatever the kind: a rigid
+    // `Ty::Param` is positional and a const param's mention resolves to the
+    // LAST declaration of the name, so a repeat leaves the earlier
+    // parameter unnameable rather than ambiguous. Reported at the second
+    // occurrence, pointing at the first. Per LIST, not per item: two
+    // binders are two namespaces, whoever owns them — which is what leaves
+    // a member's own `T` free to shadow its owner's.
+    let named = |name: ast::Name| (name.text(), name.syntax().text_range());
+    for list in parse(db, file)
+        .syntax_node()
+        .descendants()
+        .filter_map(ast::GenericParamList::cast)
+    {
+        let mut seen: Vec<(String, TextRange)> = Vec::new();
+        for param in list.params() {
+            let declared = match &param {
+                ast::GenericParam::TypeParam(it) => it.name().map(named),
+                ast::GenericParam::ConstParam(it) => it.name().map(named),
+                // A region's name carries its `@` sigil, so it collides
+                // only with another region's — except `@_`, which is the
+                // elision sigil and not a name at all. Refused here, and
+                // left out of the collision bookkeeping so a second one
+                // gets the same true answer instead of "duplicate".
+                ast::GenericParam::RegionParam(it) => match it.region_token() {
+                    Some(token) if token.text() == "@_" => {
+                        diagnostics.push(Diagnostic {
+                            range: token.text_range(),
+                            severity: Severity::Error,
+                            message: diag::WILDCARD_REGION_IN_BINDER.to_owned(),
+                            fix: None,
+                            related: Vec::new(),
+                        });
+                        continue;
+                    }
+                    token => token.map(|token| (token.text().to_owned(), token.text_range())),
+                },
+            };
+            let Some((text, range)) = declared.filter(|(text, _)| !text.is_empty()) else {
+                continue;
+            };
+            match seen.iter().find(|(seen, _)| *seen == text) {
+                Some(&(_, first)) => diagnostics.push(Diagnostic {
+                    range,
+                    severity: Severity::Error,
+                    message: format!("duplicate generic parameter `{text}`"),
+                    fix: None,
+                    related: vec![RelatedInfo {
+                        file,
+                        range: first,
+                        message: "first declared here".to_owned(),
+                    }],
+                }),
+                None => seen.push((text, range)),
+            }
+        }
+    }
+
+    // The item-level generic rule (TR06): a generic fn literal's binder
+    // signature IS the item's contract, so every param and the return type
+    // must be written — the fact is range-free (`generics` non-empty,
+    // synthesized `type_ref` absent), only the range attaches here. Const-
+    // param declared types get the enum-payload treatment: real type
+    // syntax, but nothing to infer a hole from.
+    for &item in file_item_ids(db, file) {
+        let Some(data) = item_data(db, item).as_ref() else {
+            continue;
+        };
+        if data.generics.is_empty() {
+            continue;
+        }
+        let fn_literal =
+            item_source(db, item)
+                .and_then(|it| it.body())
+                .and_then(|body| match body {
+                    ast::Expr::FnLiteral(fn_lit) => Some(fn_lit),
+                    _ => None,
+                });
+        let Some(fn_literal) = fn_literal else {
+            continue;
+        };
+        if data.type_ref.is_none() {
+            let range = fn_literal
+                .generic_param_list()
+                .map(|list| list.syntax().text_range())
+                .unwrap_or_else(|| fn_literal.syntax().text_range());
+            diagnostics.push(Diagnostic {
+                range,
+                severity: Severity::Error,
+                message: diag::GENERIC_FN_NEEDS_FULL_ANNOTATION.to_owned(),
+                fix: None,
+                related: Vec::new(),
+            });
+        }
+        for param in fn_literal
+            .generic_param_list()
+            .into_iter()
+            .flat_map(|list| list.params())
+        {
+            let ast::GenericParam::ConstParam(const_param) = param else {
+                continue;
+            };
+            let Some(ty) = const_param.ty() else {
+                // No declared type at all: the parse error covers it.
+                continue;
+            };
+            let type_ref = TypeRef::from_ast(ty.clone());
+            // Fn values are outside the const-arg domain (TR06: concrete
+            // data types only): their identity is a `BodyId` arena index,
+            // which renumbers under body edits — instance identity built
+            // on one would churn.
+            // Rejected here at the source (the declaration); inference
+            // repeats the same text at any mention that would pass one.
+            if type_ref.mentions_fn() {
+                diagnostics.push(Diagnostic {
+                    range: ty.syntax().text_range(),
+                    severity: Severity::Error,
+                    message: diag::FN_CONST_ARG.to_owned(),
+                    fix: None,
+                    related: Vec::new(),
+                });
+                continue;
+            }
+            // Array values stay outside the const-arg domain too (the
+            // ruled domain is builtins + records + variants) — same
+            // declaration-site rejection, same belt at mentions.
+            if type_ref.mentions_array() {
+                diagnostics.push(Diagnostic {
+                    range: ty.syntax().text_range(),
+                    severity: Severity::Error,
+                    message: diag::ARRAY_CONST_ARG.to_owned(),
+                    fix: None,
+                    related: Vec::new(),
+                });
+                continue;
+            }
+            if type_ref.is_fully_typed() {
+                continue;
+            }
+            diagnostics.push(Diagnostic {
+                range: ty.syntax().text_range(),
+                severity: Severity::Error,
+                message: "a const parameter's type must be a fully written type; \
+                          a declaration has nothing to infer `_` from"
+                    .to_owned(),
+                fix: None,
+                related: Vec::new(),
+            });
+        }
+    }
+
+    // `type` declarations: the RHS must be a `struct` or `enum` literal
+    // whose field values / variant payloads are types. `type_decl` reads
+    // the same shape syntactically; every `TypeRef::Error` (and every
+    // erased inference variable) it can produce has a diagnostic from here.
+    for &item in file_item_ids(db, file) {
+        let Some(ast::Item::TypeItem(decl)) = item_source(db, item) else {
+            continue;
+        };
+        let Some(rhs) = decl.body() else {
+            // No RHS at all: the parse errors cover it.
+            continue;
+        };
+        match rhs {
+            ast::Expr::RecordExpr(record) => {
+                type_decl_field_diagnostics(&record, &mut diagnostics);
+            }
+            ast::Expr::EnumExpr(en) => {
+                enum_decl_payload_diagnostics(&en, &mut diagnostics);
+            }
+            other => diagnostics.push(Diagnostic {
+                range: other.syntax().text_range(),
+                severity: Severity::Error,
+                message: "only a `struct` or `enum` literal can declare a type".to_owned(),
+                fix: None,
+                related: Vec::new(),
+            }),
+        }
+    }
+
+    // Inherent members: definition-site rules that live on the range-free
+    // member facts, with only the range attached here.
+    member_definition_diagnostics(db, file, &mut diagnostics);
+
+    // Traits: requirement rules, bound-name resolution, impl-head
+    // resolution, coherence (duplicate impls) and impl-vs-requirement
+    // matching.
+    trait_definition_diagnostics(db, file, &mut diagnostics);
+
     diagnostics
 }
 

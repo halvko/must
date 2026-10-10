@@ -186,7 +186,13 @@ pub fn prepare(
     expr: &str,
 ) -> Result<Prepared, PrepareError> {
     let original_len = text.len();
-    let entry_prefix = format!("static {ENTRY_NAME} = (");
+    // Lengthened so the file never spells it: the entry never collides
+    // with (and is never reported as a duplicate of) a user item.
+    let mut entry_name = ENTRY_NAME.to_owned();
+    while text.contains(&entry_name) {
+        entry_name.push('_');
+    }
+    let entry_prefix = format!("static {entry_name} = (");
     let entry_item = format!("{entry_prefix}{expr});");
     let full = format!("{text}\n{entry_item}\n");
     // The appended item's own span, down to where its expression starts.
@@ -198,22 +204,14 @@ pub fn prepare(
     let entry_end = entry_start + entry_item.len();
     let file = SourceFile::new(db, path.to_owned(), full);
 
-    // The entry is the last item named `ENTRY_NAME` that starts at or after
-    // the injection point; the position test keeps a user static of the
-    // same name from hijacking `-e`. Finding none means the end of the
-    // user's file ate the injected item (an unterminated string swallows
-    // everything after it), and the honest report is the file's own syntax
-    // error, not a complaint about the entry expression.
+    // Finding no item named `entry_name` means the end of the user's file
+    // ate the injected item (an unterminated string swallows everything
+    // after it), and the honest report is the file's own syntax error, not
+    // a complaint about the entry expression.
     let entry = hir::file_item_ids(db, file)
         .iter()
         .copied()
-        .filter(|item| {
-            item.name(db) == ENTRY_NAME
-                && hir::item_source(db, *item).is_some_and(|src| {
-                    usize::from(src.syntax().text_range().start()) >= entry_start
-                })
-        })
-        .last();
+        .find(|item| *item.name(db) == entry_name);
     let Some(entry) = entry else {
         let parse = base_db::parse(db, file);
         if let Some(err) = parse

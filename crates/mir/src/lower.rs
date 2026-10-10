@@ -1,9 +1,8 @@
 //! HIR → MIR lowering. Total: it never bails and never panics on broken
 //! input — erroneous expressions become [`TerminatorKind::Trap`]s, and
 //! lowering carries on so the whole function is always present in the CFG.
-//! Inference-class traps borrow their message from the upstream diagnostic;
-//! other classes are hand-written and kept consistent with hir's messages
-//! by convention.
+//! A trap for an error diagnostic carries that diagnostic's message; the
+//! `trap_guard` test checks that every error has one.
 
 use base_db::Db;
 use hir::body::{BinOp, Body, ExprData, LiteralData, MatchArm, PatData, Stmt};
@@ -23,17 +22,24 @@ pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
     let infer = hir::infer::infer(db, item);
     let const_diagnostics = hir::const_check::const_check(db, item);
     let unsafe_diagnostics = hir::unsafe_check::unsafe_check(db, item);
+    let outlives_diagnostics = hir::outlives_check(db, item);
+    let linear_diagnostics = hir::linear_check::linear_check(db, item);
+    let range_traps = hir::range_traps(db, item);
     let own_generics = hir::item_data(db, item)
         .as_ref()
         .map(|it| it.generics.as_slice())
         .unwrap_or(&[]);
     let mut ctx = LowerCtx {
         db,
+        item,
         loc: hir::item_loc(db, item),
         body,
         infer,
         const_diagnostics,
         unsafe_diagnostics,
+        outlives_diagnostics,
+        linear_diagnostics,
+        range_traps,
         resolutions: hir::resolutions(db, item),
         own_generics,
         bodies: Arena::default(),
@@ -46,6 +52,8 @@ pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
         assign_traps: FxHashMap::default(),
         unsafe_traps: FxHashMap::default(),
         nonexhaustive_traps: FxHashMap::default(),
+        entry_traps: FxHashMap::default(),
+        stmt_traps: FxHashMap::default(),
         initializer_context: true,
         dict_locals: Vec::new(),
     };
@@ -65,6 +73,7 @@ pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
 
 struct LowerCtx<'db> {
     db: &'db dyn Db,
+    item: ItemId<'db>,
     /// The lowered item's own identity — the `item` half a forwarded
     /// const param (`ConstArgValue::Param`) must match to resolve against
     /// the executing frame's instance.
@@ -73,6 +82,9 @@ struct LowerCtx<'db> {
     infer: &'db InferenceResult,
     const_diagnostics: &'db [hir::ConstCheckDiagnostic],
     unsafe_diagnostics: &'db [hir::UnsafeCheckDiagnostic],
+    outlives_diagnostics: &'db [hir::OutlivesDiagnostic],
+    linear_diagnostics: &'db [hir::linear_check::LinearDiagnostic],
+    range_traps: &'db [(hir::TrapSite, String)],
     resolutions: &'db ArenaMap<ExprId, Resolution>,
     /// The item's own generic binder — the index space
     /// [`Resolution::ConstParam`] refers into, converted to the dense
@@ -87,32 +99,38 @@ struct LowerCtx<'db> {
     diagnostics: Vec<MirDiagnostic>,
     /// Expressions whose *value* the context can't accept (type mismatches):
     /// lowered normally for the CFG, then trapped before the value flows on.
-    value_traps: FxHashMap<ExprId, String>,
+    value_traps: FxHashMap<ExprId, Vec<String>>,
     /// Call expressions whose call *operation* is broken (wrong arity,
     /// callee not callable): callee and arguments lower, the call itself
     /// becomes a trap.
-    call_traps: FxHashMap<ExprId, String>,
+    call_traps: FxHashMap<ExprId, Vec<String>>,
     /// Call expressions const-check rejected: illegal in a const context,
     /// fine as runtime code. How they trap depends on where they lower —
     /// see the `ExprData::Call` arm.
-    const_call_traps: FxHashMap<ExprId, String>,
+    const_call_traps: FxHashMap<ExprId, Vec<String>>,
     /// Assignment *targets* inference rejected (immutable binding, item,
     /// builtin), keyed by the target expression: the write must not happen,
     /// so `lower_assign_target` traps instead of storing. The target is
     /// never lowered as a read, so unlike `value_traps` these only fire
     /// there.
-    assign_traps: FxHashMap<ExprId, String>,
+    assign_traps: FxHashMap<ExprId, Vec<String>>,
     /// Raw-pointer derefs outside any `unsafe { ... }` block, keyed by the
     /// deref expression: the operation must not execute at all (a read
     /// traps instead of loading, a write traps instead of storing), with
     /// exactly the squiggle's message.
-    unsafe_traps: FxHashMap<ExprId, String>,
+    unsafe_traps: FxHashMap<ExprId, Vec<String>>,
     /// Non-exhaustive `match` expressions, keyed by the match: the value
     /// only fails to exist when the *uncovered* case actually shows up, so
     /// this is not a value trap — it becomes the switch's otherwise-arm
     /// trap (or the whole lowering, when no arm can run), firing with
     /// exactly the squiggle's message.
     nonexhaustive_traps: FxHashMap<ExprId, String>,
+    /// Expressions that must not start at all: control reaching one traps
+    /// before any of it is evaluated.
+    entry_traps: FxHashMap<ExprId, Vec<String>>,
+    /// Statements that must not start, keyed by (block, statement index);
+    /// the index one past the last statement is the block's tail.
+    stmt_traps: FxHashMap<(ExprId, usize), Vec<String>>,
     /// True while lowering the item initializer's own const context: the
     /// root body outside any `fn` literal and outside any `const` block.
     /// That is the one const context with a runtime escape (the runner's
@@ -129,31 +147,36 @@ struct LowerCtx<'db> {
 
 impl LowerCtx<'_> {
     fn seed_traps(&mut self) {
+        let mut pat_traps = Vec::new();
         if let (Some(root), Some(message)) = (self.body.root, &self.body.declaration_error) {
-            self.value_traps.insert(root, message.clone());
+            self.value_traps
+                .entry(root)
+                .or_default()
+                .push(message.clone());
         }
         for diag in &self.infer.diagnostics {
             match diag {
                 InferenceDiagnostic::TypeMismatch { expr, .. }
                 | InferenceDiagnostic::AllBranchesMismatch { expr, .. } => {
-                    self.value_traps.insert(*expr, diag.message());
+                    self.value_traps.entry(*expr).or_default().push(diag.message());
                 }
                 InferenceDiagnostic::ArgCountMismatch { expr, .. } => {
-                    self.call_traps.insert(*expr, diag.message());
+                    self.call_traps.entry(*expr).or_default().push(diag.message());
                 }
                 // Reported on the callee; the unexecutable operation is the
                 // call around it.
                 InferenceDiagnostic::NotCallable { expr: callee, .. } => {
                     if let Some(call) = self.call_for_callee(*callee) {
-                        self.call_traps.insert(call, diag.message());
+                        self.call_traps.entry(call).or_default().push(diag.message());
                     }
                 }
                 InferenceDiagnostic::IfBranchMismatch { else_expr, .. } => {
-                    self.value_traps.insert(*else_expr, diag.message());
+                    self.value_traps.entry(*else_expr).or_default().push(diag.message());
                 }
-                // Handled where the name is lowered, which also covers
-                // signatures broken by written-but-wrong annotations.
-                InferenceDiagnostic::NeedsAnnotation { .. } => {}
+                // The mention's value cannot be produced.
+                InferenceDiagnostic::NeedsAnnotation { expr, .. } => {
+                    self.value_traps.entry(*expr).or_default().push(diag.message());
+                }
                 // Reported on the assignment's target; the operation that
                 // must not execute is the write — `lower_assign_target`
                 // looks these up by target instead of the read path's
@@ -161,7 +184,7 @@ impl LowerCtx<'_> {
                 InferenceDiagnostic::AssignToImmutable { target, .. }
                 | InferenceDiagnostic::AssignToItem { target, .. }
                 | InferenceDiagnostic::AssignToBuiltin { target, .. } => {
-                    self.assign_traps.insert(*target, diag.message());
+                    self.assign_traps.entry(*target).or_default().push(diag.message());
                 }
                 // A literal that doesn't have the record type it must have,
                 // or a field value with nowhere to go: the value must not
@@ -170,24 +193,24 @@ impl LowerCtx<'_> {
                 // trap there is the direct reconciliation.
                 InferenceDiagnostic::RecordLitMissingFields { expr, .. }
                 | InferenceDiagnostic::RecordLitExtraField { expr, .. } => {
-                    self.value_traps.insert(*expr, diag.message());
+                    self.value_traps.entry(*expr).or_default().push(diag.message());
                 }
                 // Both are reported at (or inside) the field-access
                 // expression, which is exactly the value that cannot be
                 // produced — the reconciliation is direct.
                 InferenceDiagnostic::NoSuchField { expr, .. }
                 | InferenceDiagnostic::FieldOnUnknownType { expr, .. } => {
-                    self.value_traps.insert(*expr, diag.message());
+                    self.value_traps.entry(*expr).or_default().push(diag.message());
                 }
                 // A bare type name read as a value: the name itself is the
                 // value that cannot be produced.
                 InferenceDiagnostic::TypeNotValue { expr, .. } => {
-                    self.value_traps.insert(*expr, diag.message());
+                    self.value_traps.entry(*expr).or_default().push(diag.message());
                 }
                 // A construction call with the wrong arity: like
                 // `ArgCountMismatch`, the call operation itself is broken.
                 InferenceDiagnostic::TypeCtorArgCount { expr, .. } => {
-                    self.call_traps.insert(*expr, diag.message());
+                    self.call_traps.entry(*expr).or_default().push(diag.message());
                 }
                 // A `::` path that names no variant (or no enum at all, or
                 // a FIELD — the wrong namespace): the path itself is the
@@ -199,12 +222,12 @@ impl LowerCtx<'_> {
                 | InferenceDiagnostic::NoVariantsOnStruct { expr, .. }
                 | InferenceDiagnostic::QualifiedPathIsField { expr, .. }
                 | InferenceDiagnostic::VariantPathOnValue { expr, .. } => {
-                    self.value_traps.insert(*expr, diag.message());
+                    self.value_traps.entry(*expr).or_default().push(diag.message());
                 }
                 // `Shape(...)` on an enum: the call operation is broken
                 // (an enum constructs through its variants).
                 InferenceDiagnostic::EnumCtorIsVariant { expr, .. } => {
-                    self.call_traps.insert(*expr, diag.message());
+                    self.call_traps.entry(*expr).or_default().push(diag.message());
                 }
                 // Deferred like any other error, but only on the executions
                 // that reach the uncovered case: the otherwise arm traps.
@@ -227,7 +250,7 @@ impl LowerCtx<'_> {
                 | InferenceDiagnostic::PatArity { match_expr, .. }
                 | InferenceDiagnostic::PatPathError { match_expr, .. }
                 | InferenceDiagnostic::VariantPatUnknownScrutinee { match_expr, .. } => {
-                    self.value_traps.insert(*match_expr, diag.message());
+                    self.value_traps.entry(*match_expr).or_default().push(diag.message());
                 }
                 // A `break`/`continue` with no loop to go to, or a
                 // `return` with no body to leave (or one reserved inside a
@@ -241,24 +264,21 @@ impl LowerCtx<'_> {
                 | InferenceDiagnostic::ContinueOutsideLoop { expr }
                 | InferenceDiagnostic::ReturnOutsideFn { expr }
                 | InferenceDiagnostic::ReturnInConstBlock { expr } => {
-                    self.value_traps.insert(*expr, diag.message());
+                    self.value_traps.entry(*expr).or_default().push(diag.message());
                 }
                 // A `let`/parameter destructuring pattern that names an
                 // unknown field, misses required fields, unwraps the wrong
                 // named type, or can't be checked at all (no type known):
-                // compile-time only, like `NeedsAnnotation` above — the
-                // affected bindings are already `{error}`-typed (infectious
-                // and silent), and a parameter pattern has no single
-                // per-call expression to trap (every call runs the same
-                // broken destructure, so there is no "the executions that
-                // reach it" distinction the way a non-exhaustive `match`
-                // has).
-                InferenceDiagnostic::PatUnknownField { .. }
-                | InferenceDiagnostic::PatMissingFields { .. }
-                | InferenceDiagnostic::PatBindingNeedsAnnotation { .. }
-                | InferenceDiagnostic::PatNotRecord { .. }
-                | InferenceDiagnostic::PatUnknownType { .. }
-                | InferenceDiagnostic::PatNamedTypeMismatch { .. } => {}
+                // the construct holding the pattern must not start, since the
+                // destructure has nothing valid to bind.
+                InferenceDiagnostic::PatUnknownField { pat, .. }
+                | InferenceDiagnostic::PatMissingFields { pat, .. }
+                | InferenceDiagnostic::PatBindingNeedsAnnotation { pat, .. }
+                | InferenceDiagnostic::PatNotRecord { pat, .. }
+                | InferenceDiagnostic::PatUnknownType { pat, .. }
+                | InferenceDiagnostic::PatNamedTypeMismatch { pat, .. } => {
+                    pat_traps.push((*pat, diag.message()));
+                }
                 // A broken generic mention: the mention's value cannot be
                 // produced — a value trap right there (checked before the
                 // `GenericApp` arm would lower an instantiation).
@@ -272,16 +292,16 @@ impl LowerCtx<'_> {
                 | InferenceDiagnostic::CannotInferGenericParam { expr, .. }
                 | InferenceDiagnostic::FnConstArg { expr }
                 | InferenceDiagnostic::TypeConstArgUnsupported { expr, .. } => {
-                    self.value_traps.insert(*expr, diag.message());
+                    self.value_traps.entry(*expr).or_default().push(diag.message());
                 }
                 // Reported on the assignment's target, like the arms above.
                 InferenceDiagnostic::AssignToConstParam { target, .. } => {
-                    self.assign_traps.insert(*target, diag.message());
+                    self.assign_traps.entry(*target).or_default().push(diag.message());
                 }
                 // A deref of a non-pointer: the deref's value cannot be
                 // produced.
                 InferenceDiagnostic::DerefNonPointer { expr, .. } => {
-                    self.value_traps.insert(*expr, diag.message());
+                    self.value_traps.entry(*expr).or_default().push(diag.message());
                 }
                 // Indexing a non-array, or a compile-time-known index past
                 // a compile-time-known length: the element's value cannot
@@ -289,12 +309,13 @@ impl LowerCtx<'_> {
                 // runtime bounds check would have used).
                 InferenceDiagnostic::IndexNonArray { expr, .. }
                 | InferenceDiagnostic::IndexOutOfBounds { expr, .. } => {
-                    self.value_traps.insert(*expr, diag.message());
+                    self.value_traps.entry(*expr).or_default().push(diag.message());
                 }
-                // An empty array with an unknowable element type:
-                // compile-time only, like `NeedsAnnotation` — the value
-                // itself runs fine (it has no elements to be wrong about).
-                InferenceDiagnostic::EmptyArrayNeedsAnnotation { .. } => {}
+                // An empty array with an unknowable element type: the
+                // value has no type to be produced at.
+                InferenceDiagnostic::EmptyArrayNeedsAnnotation { expr } => {
+                    self.value_traps.entry(*expr).or_default().push(diag.message());
+                }
                 // A literal with no width (no defining use) or one that
                 // doesn't fit its resolved width: the value cannot be
                 // produced — a value trap right on the literal. For a
@@ -307,54 +328,54 @@ impl LowerCtx<'_> {
                 | InferenceDiagnostic::PatIntLiteralTooLarge {
                     match_expr: expr, ..
                 } => {
-                    self.value_traps.insert(*expr, diag.message());
+                    self.value_traps.entry(*expr).or_default().push(diag.message());
                 }
                 // An array value in a const-arg position: like `FnConstArg`
                 // above, the mention's value refuses.
                 InferenceDiagnostic::ArrayConstArg { expr } => {
-                    self.value_traps.insert(*expr, diag.message());
+                    self.value_traps.entry(*expr).or_default().push(diag.message());
                 }
                 // A broken address-of: keyed on the WHOLE `.&raw` expression
                 // (the squiggle may sit on the root name inside it, but the
                 // value that cannot be produced is the pointer).
                 InferenceDiagnostic::AddrOfNonPlace { expr, .. } => {
-                    self.value_traps.insert(*expr, diag.message());
+                    self.value_traps.entry(*expr).or_default().push(diag.message());
                 }
                 InferenceDiagnostic::AddrOfMutImmutable { addr_of, .. }
                 | InferenceDiagnostic::AddrOfMutItem { addr_of, .. }
                 | InferenceDiagnostic::AddrOfMutThroughShared { addr_of, .. } => {
-                    self.value_traps.insert(*addr_of, diag.message());
+                    self.value_traps.entry(*addr_of).or_default().push(diag.message());
                 }
                 // The safe-borrow twins, keyed the same way: the value that
                 // cannot be produced is the borrow.
                 InferenceDiagnostic::DotThroughBorrow { expr, .. }
                 | InferenceDiagnostic::BorrowNonPlace { expr, .. }
                 | InferenceDiagnostic::MoveOutOfBorrow { expr, .. } => {
-                    self.value_traps.insert(*expr, diag.message());
+                    self.value_traps.entry(*expr).or_default().push(diag.message());
                 }
                 InferenceDiagnostic::BorrowMutImmutable { borrow, .. }
                 | InferenceDiagnostic::BorrowMutItem { borrow, .. }
                 | InferenceDiagnostic::BorrowMutThroughShared { borrow, .. }
                 | InferenceDiagnostic::BorrowThroughRawPointer { borrow, .. } => {
-                    self.value_traps.insert(*borrow, diag.message());
+                    self.value_traps.entry(*borrow).or_default().push(diag.message());
                 }
                 // Writes through pointers the checker rejected: keyed on
                 // the governing deref (the target itself for `p.* = v;`,
                 // the chain's outermost deref for `p.*.x = v;`), like the
                 // other assign traps.
                 InferenceDiagnostic::AssignThroughShared { target, .. } => {
-                    self.assign_traps.insert(*target, diag.message());
+                    self.assign_traps.entry(*target).or_default().push(diag.message());
                 }
                 // A flavor-polymorphic builtin (`add`/`copy`) applied
                 // to a non-pointer: the diagnostic squiggles the argument,
                 // but the operation that cannot execute is the call.
                 InferenceDiagnostic::BuiltinExpectsRawPtr { call, .. } => {
-                    self.call_traps.insert(*call, diag.message());
+                    self.call_traps.entry(*call).or_default().push(diag.message());
                 }
                 // The name itself is the value that cannot be produced,
                 // like `TypeNotValue`.
                 InferenceDiagnostic::BuiltinNotFirstClass { expr, .. } => {
-                    self.value_traps.insert(*expr, diag.message());
+                    self.value_traps.entry(*expr).or_default().push(diag.message());
                 }
                 // A broken dot-call: the call operation itself cannot
                 // execute (arguments still evaluate for effects).
@@ -366,12 +387,12 @@ impl LowerCtx<'_> {
                 | InferenceDiagnostic::MemberWantsBorrowReceiver { expr, .. }
                 | InferenceDiagnostic::MemberWantsExclusiveReceiver { expr, .. }
                 | InferenceDiagnostic::FieldNotCallable { expr, .. } => {
-                    self.call_traps.insert(*expr, diag.message());
+                    self.call_traps.entry(*expr).or_default().push(diag.message());
                 }
                 // A member reached without a call: the value cannot be
                 // produced.
                 InferenceDiagnostic::MemberNotCalled { expr, .. } => {
-                    self.value_traps.insert(*expr, diag.message());
+                    self.value_traps.entry(*expr).or_default().push(diag.message());
                 }
                 // Generic arguments written on a member or a variant —
                 // reserved (a member's own consts), miscounted, or
@@ -386,9 +407,9 @@ impl LowerCtx<'_> {
                 | InferenceDiagnostic::MemberGenericArgCount { expr, .. }
                 | InferenceDiagnostic::VariantOwnGenericArgs { expr, .. } => {
                     if matches!(self.body.exprs[*expr], ExprData::Call { .. }) {
-                        self.call_traps.insert(*expr, diag.message());
+                        self.call_traps.entry(*expr).or_default().push(diag.message());
                     } else {
-                        self.value_traps.insert(*expr, diag.message());
+                        self.value_traps.entry(*expr).or_default().push(diag.message());
                     }
                 }
                 // A bare trait name (or a member value with no implementer
@@ -403,7 +424,7 @@ impl LowerCtx<'_> {
                 | InferenceDiagnostic::QualifiedTraitMemberOnType { expr, .. }
                 | InferenceDiagnostic::TraitHasNoMember { expr, .. }
                 | InferenceDiagnostic::BoundFnValue { expr, .. } => {
-                    self.value_traps.insert(*expr, diag.message());
+                    self.value_traps.entry(*expr).or_default().push(diag.message());
                 }
                 // A use of a reserved generic trait: the referenced value/
                 // call cannot be produced (same call-vs-value split as the
@@ -424,9 +445,9 @@ impl LowerCtx<'_> {
                 | InferenceDiagnostic::GenericTraitReserved { expr, .. }
                 | InferenceDiagnostic::CannotInferSelf { expr, .. } => {
                     if matches!(self.body.exprs[*expr], ExprData::Call { .. }) {
-                        self.call_traps.insert(*expr, diag.message());
+                        self.call_traps.entry(*expr).or_default().push(diag.message());
                     } else {
-                        self.value_traps.insert(*expr, diag.message());
+                        self.value_traps.entry(*expr).or_default().push(diag.message());
                     }
                 }
             }
@@ -437,7 +458,7 @@ impl LowerCtx<'_> {
                 // operation (read or write) that must not run outside
                 // `unsafe`.
                 hir::UnsafeCheckDiagnostic::DerefOutsideUnsafe { .. } => {
-                    self.unsafe_traps.insert(diag.expr(), diag.message());
+                    self.unsafe_traps.entry(diag.expr()).or_default().push(diag.message());
                 }
                 // Unsafe-builtin findings land on the call — the call is
                 // the operation that must not execute, so it traps like
@@ -451,7 +472,7 @@ impl LowerCtx<'_> {
                 // later. Taking the value is free and lowers normally —
                 // only the call refuses.
                 | hir::UnsafeCheckDiagnostic::UnsafeFnValueCallOutsideUnsafe { call } => {
-                    self.call_traps.insert(*call, diag.message());
+                    self.call_traps.entry(*call).or_default().push(diag.message());
                 }
             }
         }
@@ -460,7 +481,75 @@ impl LowerCtx<'_> {
         // the call around it — same reconciliation as `NotCallable` above.
         for diag in self.const_diagnostics {
             if let Some(call) = self.call_for_callee(diag.expr()) {
-                self.const_call_traps.insert(call, diag.message());
+                self.const_call_traps
+                    .entry(call)
+                    .or_default()
+                    .push(diag.message());
+            }
+        }
+        // A borrow forced past what its signature or storage allows: the
+        // value must not flow on.
+        for diag in self.outlives_diagnostics {
+            self.value_traps
+                .entry(diag.expr())
+                .or_default()
+                .push(diag.message());
+        }
+        for diag in self.linear_diagnostics {
+            use hir::linear_check::LinearDiagnostic as L;
+            let message = diag.render(self.db, self.item);
+            match diag {
+                // The write would lose the live value: it must not happen.
+                L::AssignOverLive { target, .. } | L::AssignOverPlace { target } => {
+                    self.assign_traps.entry(*target).or_default().push(message);
+                }
+                // Reported where the obligation breaks: the exit leaving a
+                // live value behind, the join or loop boundary that
+                // disagrees, the read that duplicates, the value dropped or
+                // held where nothing can consume it. Control does not pass.
+                L::NotConsumed { exit: expr, .. }
+                | L::JoinDisagrees { join: expr, .. }
+                | L::LoopChangesLinear { at: expr, .. }
+                | L::AlreadyConsumed { expr, .. }
+                | L::Discarded { expr }
+                | L::BorrowedTemporary { expr }
+                | L::CopiedOut { expr }
+                | L::Repeated { expr }
+                | L::ItemHoldsLinear { expr }
+                | L::ConstBlockHoldsLinear { expr } => {
+                    self.value_traps.entry(*expr).or_default().push(message);
+                }
+                // A pattern that skips a linear field or swallows a linear
+                // scrutinee traps where the pattern runs.
+                L::RestSkipsLinear { pat, .. } | L::WildcardSkipsLinear { pat, .. } => {
+                    if let Some(site) = hir::trap_site_for_pat(self.db, self.item, *pat) {
+                        self.plant(site, message);
+                    }
+                }
+            }
+        }
+        for (pat, message) in pat_traps {
+            if let Some(site) = hir::trap_site_for_pat(self.db, self.item, pat) {
+                self.plant(site, message);
+            }
+        }
+        for (site, message) in self.range_traps {
+            self.plant(*site, message.clone());
+        }
+    }
+
+    /// Record a trap at a site found from a source position. An earlier
+    /// trap on the same site wins.
+    fn plant(&mut self, site: hir::TrapSite, message: String) {
+        match site {
+            hir::TrapSite::Expr(expr) => {
+                self.entry_traps.entry(expr).or_default().push(message);
+            }
+            hir::TrapSite::Stmt { block, index } => {
+                self.stmt_traps
+                    .entry((block, index))
+                    .or_default()
+                    .push(message);
             }
         }
     }
@@ -646,11 +735,18 @@ impl LowerCtx<'_> {
     }
 
     fn lower_expr_traps(&mut self, b: &mut BodyBuilder, expr: ExprId) -> Operand {
+        // Refused before it starts; the expression lowers after the trap,
+        // so the CFG keeps it. A body with no errors skips the lookup.
+        if !self.entry_traps.is_empty()
+            && let Some(messages) = self.entry_traps.get(&expr).cloned()
+        {
+            self.trap(b, expr, messages);
+        }
         let op = self.lower_expr_inner(b, expr);
         // A value the context can't accept: it was evaluated (the CFG keeps
         // everything), now refuse to let it flow onward.
-        if let Some(message) = self.value_traps.get(&expr).cloned() {
-            return self.trap(b, expr, message);
+        if let Some(messages) = self.value_traps.get(&expr).cloned() {
+            return self.trap(b, expr, messages);
         }
         // A widening edge: inference accepted this variant-typed value
         // where its enum was needed — the conversion (tag injection)
@@ -720,6 +816,7 @@ impl LowerCtx<'_> {
                     // wrong arity, `_` in a const position, …): the
                     // wrapper's value trap carries the better message; the
                     // placeholder is never observed.
+                    self.refused_mention_args(b, expr);
                     return Operand::Const(Const::Unit);
                 }
                 let name = match &self.body.exprs[*base] {
@@ -809,11 +906,12 @@ impl LowerCtx<'_> {
                     // const arg) was diagnosed — and value-trapped — on the
                     // CALLEE mention; the construction refuses with that
                     // exact message (args still evaluated for effects).
-                    if let Some(message) = self.value_traps.get(callee).cloned() {
+                    if let Some(messages) = self.value_traps.get(callee).cloned() {
+                        self.refused_mention_args(b, *callee);
                         for &arg in args {
                             self.lower_expr(b, arg);
                         }
-                        return self.trap(b, expr, message);
+                        return self.trap(b, expr, messages);
                     }
                     let mut arg_ops: Vec<Operand> =
                         args.iter().map(|&arg| self.lower_expr(b, arg)).collect();
@@ -821,8 +919,8 @@ impl LowerCtx<'_> {
                     // (`EnumCtorIsVariant`): inference seeded a call trap;
                     // the arguments were still evaluated for their
                     // effects, like any broken call.
-                    if let Some(message) = self.call_traps.get(&expr).cloned() {
-                        return self.trap(b, expr, message);
+                    if let Some(messages) = self.call_traps.get(&expr).cloned() {
+                        return self.trap(b, expr, messages);
                     }
                     return arg_ops.pop().unwrap_or(Operand::Const(Const::Unit));
                 }
@@ -842,8 +940,8 @@ impl LowerCtx<'_> {
                         args.iter().map(|&arg| self.lower_expr(b, arg)).collect();
                     // Wrong arity: plain `ArgCountMismatch`, seeded as a
                     // call trap like any broken call.
-                    if let Some(message) = self.call_traps.get(&expr).cloned() {
-                        return self.trap(b, expr, message);
+                    if let Some(messages) = self.call_traps.get(&expr).cloned() {
+                        return self.trap(b, expr, messages);
                     }
                     let dest = b.temp(self.ty(expr));
                     b.push_assign(
@@ -972,17 +1070,8 @@ impl LowerCtx<'_> {
                 // synthetic entry evaluates its initializer as run-mode
                 // code at const depth 0 — the one execution where the call
                 // may proceed.
-                if let Some(message) = self.const_call_traps.get(&expr).cloned() {
-                    if self.initializer_context {
-                        let target = b.new_block();
-                        b.terminate(TerminatorKind::ConstTrap { message, target }, expr);
-                        b.current = target;
-                    } else {
-                        return self.trap(b, expr, message);
-                    }
-                }
-                if let Some(message) = self.call_traps.get(&expr).cloned() {
-                    return self.trap(b, expr, message);
+                if let Some(messages) = self.call_refusal(b, expr) {
+                    return self.trap(b, expr, messages);
                 }
                 // A direct call of a bounded generic fn: the mention's
                 // dictionary operands append after the written arguments
@@ -1038,8 +1127,8 @@ impl LowerCtx<'_> {
                     // The literal's own trap (out of range, no defining
                     // use) fires here — the operand is not lowered
                     // separately.
-                    if let Some(message) = self.value_traps.get(&operand).cloned() {
-                        return self.trap(b, operand, message);
+                    if let Some(messages) = self.value_traps.get(&operand).cloned() {
+                        return self.trap(b, operand, messages);
                     }
                     return match self.ty(expr) {
                         // The range check already judged the SIGNED value, so
@@ -1112,7 +1201,13 @@ impl LowerCtx<'_> {
                 if nested {
                     b.scopes.push((Scope::Block, Vec::new()));
                 }
-                for stmt in stmts {
+                for (index, stmt) in stmts.iter().enumerate() {
+                    let span = match stmt {
+                        Stmt::Let { init, .. } => *init,
+                        Stmt::Assign { target, .. } => *target,
+                        Stmt::Expr(e) => *e,
+                    };
+                    self.stmt_trap(b, expr, index, span);
                     match stmt {
                         Stmt::Let { pat, init, .. } => {
                             let init_op = self.lower_expr(b, *init);
@@ -1162,6 +1257,7 @@ impl LowerCtx<'_> {
                         }
                     }
                 }
+                self.stmt_trap(b, expr, stmts.len(), tail.unwrap_or(expr));
                 let value = match tail {
                     Some(tail) => self.lower_expr(b, *tail),
                     None => Operand::Const(Const::Unit),
@@ -1359,6 +1455,7 @@ impl LowerCtx<'_> {
                     if self.value_traps.contains_key(&expr) {
                         // A broken mention (arity, kinds, an unusable const
                         // argument): the wrapper's trap carries the message.
+                        self.refused_mention_args(b, expr);
                         return Operand::Const(Const::Unit);
                     }
                     return self.member_value_operand(b, expr, expr, &value.member, &value.args);
@@ -1373,6 +1470,7 @@ impl LowerCtx<'_> {
                     // diagnostic's message, mirroring `lower_name_ref`.
                     None => {
                         if self.value_traps.contains_key(&expr) {
+                            self.refused_mention_args(b, expr);
                             return Operand::Const(Const::Unit);
                         }
                         let name = match &body.exprs[*base] {
@@ -1425,6 +1523,7 @@ impl LowerCtx<'_> {
             // chain's field indices.
             ExprData::AddrOf { mutable, place } => {
                 if self.value_traps.contains_key(&expr) {
+                    self.place_traps(b, *place);
                     return Operand::Const(Const::Unit);
                 }
                 self.lower_addr_of_flavored(b, expr, *mutable, *place, PtrFlavor::Raw)
@@ -1439,6 +1538,7 @@ impl LowerCtx<'_> {
             // interpreter's aliasing tree creates.
             ExprData::Borrow { mutable, place } => {
                 if self.value_traps.contains_key(&expr) {
+                    self.place_traps(b, *place);
                     return Operand::Const(Const::Unit);
                 }
                 self.lower_addr_of_flavored(b, expr, *mutable, *place, PtrFlavor::Borrow)
@@ -1452,8 +1552,8 @@ impl LowerCtx<'_> {
             // squiggle's exact message.
             ExprData::Deref { receiver } => {
                 let op = self.lower_expr(b, *receiver);
-                if let Some(message) = self.unsafe_traps.get(&expr).cloned() {
-                    return self.trap(b, expr, message);
+                if let Some(messages) = self.unsafe_traps.get(&expr).cloned() {
+                    return self.trap(b, expr, messages);
                 }
                 match self.ty(*receiver) {
                     // Both pointer flavors read the same way — one
@@ -1558,8 +1658,11 @@ impl LowerCtx<'_> {
                     // A bare `break;` carries `()` as the loop's value.
                     None => Operand::Const(Const::Unit),
                 };
+                // A refused exit (no loop, or a live linear left behind)
+                // must not leave: the `lower_expr` wrapper plants the trap
+                // here.
                 match b.loop_frames.last().copied() {
-                    Some(frame) => {
+                    Some(frame) if !self.value_traps.contains_key(&expr) => {
                         b.push_assign(frame.result, Rvalue::Use(op), expr);
                         // Leaving the loop ends the storage of every
                         // scope opened inside it.
@@ -1571,11 +1674,8 @@ impl LowerCtx<'_> {
                         b.current = b.new_block();
                         Operand::Const(Const::Unit)
                     }
-                    // Outside any loop: the outside-a-loop diagnostic
-                    // seeded a value trap on this expression — the
-                    // `lower_expr` wrapper plants it; this placeholder is
-                    // never observed.
-                    None => Operand::Const(Const::Unit),
+                    // The placeholder is never observed.
+                    _ => Operand::Const(Const::Unit),
                 }
             }
             // The function-exit path, reached early: assign the return
@@ -1614,7 +1714,7 @@ impl LowerCtx<'_> {
                 Operand::Const(Const::Unit)
             }
             ExprData::Continue => match b.loop_frames.last().copied() {
-                Some(frame) => {
+                Some(frame) if !self.value_traps.contains_key(&expr) => {
                     // The next iteration gets fresh storage.
                     b.push_storage_dead_from(frame.scope_depth, expr);
                     b.terminate(
@@ -1626,9 +1726,9 @@ impl LowerCtx<'_> {
                     b.current = b.new_block();
                     Operand::Const(Const::Unit)
                 }
-                // Same story as an outside-a-loop break: the pending value
-                // trap is the whole story.
-                None => Operand::Const(Const::Unit),
+                // Refused (no loop, or a trap on it): it does not leave, and
+                // the wrapper plants the trap here.
+                _ => Operand::Const(Const::Unit),
             },
         }
     }
@@ -2340,18 +2440,15 @@ impl LowerCtx<'_> {
                 let target = loc.to_id(self.db);
                 let sig = hir::signature(self.db, target);
                 if sig.contains_error() {
-                    // Justified by the use-site needs-annotation
-                    // diagnostic, or by the def-site diagnostics on a
-                    // written-but-broken annotation.
-                    let message = if hir::ty::signature_needs_annotation(self.db, target) {
-                        InferenceDiagnostic::NeedsAnnotation {
-                            expr,
-                            item: loc.clone(),
-                        }
-                        .message()
-                    } else {
-                        format!("cannot use `{name}`: its type annotation has errors")
-                    };
+                    // The use-site needs-annotation diagnostic is this
+                    // mention's value trap, planted by the `lower_expr`
+                    // wrapper; the placeholder is never observed. A
+                    // written-but-broken annotation is justified by its
+                    // def-site diagnostics.
+                    if hir::ty::signature_needs_annotation(self.db, target) {
+                        return Operand::Const(Const::Unit);
+                    }
+                    let message = format!("cannot use `{name}`: its type annotation has errors");
                     return self.trap(b, expr, message);
                 }
                 Operand::Const(Const::Item(loc.clone()))
@@ -2416,8 +2513,8 @@ impl LowerCtx<'_> {
         value_op: Operand,
     ) {
         // A target inference rejected: trap with the squiggle's exact text.
-        if let Some(message) = self.assign_traps.get(&target).cloned() {
-            self.trap(b, target, message);
+        if let Some(messages) = self.assign_traps.get(&target).cloned() {
+            self.trap(b, target, messages);
             return;
         }
         // Place-chain targets — field/element chains, and stores through a
@@ -2562,8 +2659,8 @@ impl LowerCtx<'_> {
             // pointer): trap with the squiggle's exact text — the write
             // must not happen. Checked BEFORE the pointer is evaluated,
             // unlike the deref's read-side judgements.
-            if let Some(message) = self.assign_traps.get(&deref).cloned() {
-                self.trap(b, deref, message);
+            if let Some(messages) = self.assign_traps.get(&deref).cloned() {
+                self.trap(b, deref, messages);
                 return;
             }
             // A broken or unguarded deref replaces the store with the
@@ -2572,8 +2669,8 @@ impl LowerCtx<'_> {
             // path's missing-index case.
             let local = match self.lower_deref_root(b, deref, receiver) {
                 DerefRoot::Local(local) => local,
-                DerefRoot::Trap(message) => {
-                    self.trap(b, deref, message);
+                DerefRoot::Trap(messages) => {
+                    self.trap(b, deref, messages);
                     return;
                 }
                 DerefRoot::Silent => return,
@@ -2582,8 +2679,8 @@ impl LowerCtx<'_> {
             // receiver, non-array base, compile-time OOB): pending value
             // traps from the target's read-typing, innermost first.
             for &link in chain.iter().rev() {
-                if let Some(message) = self.value_traps.get(&link).cloned() {
-                    self.trap(b, link, message);
+                if let Some(messages) = self.link_traps(link) {
+                    self.trap(b, link, messages);
                     return;
                 }
             }
@@ -2600,8 +2697,8 @@ impl LowerCtx<'_> {
         }
         // Inference rejected the root as an assignment target (immutable
         // binding, item, builtin): trap with the squiggle's exact text.
-        if let Some(message) = self.assign_traps.get(&root).cloned() {
-            self.trap(b, root, message);
+        if let Some(messages) = self.assign_traps.get(&root).cloned() {
+            self.trap(b, root, messages);
             return;
         }
         // A broken link, root-outward: the root read itself (a type name,
@@ -2609,8 +2706,8 @@ impl LowerCtx<'_> {
         // undetermined type) — all pending value traps seeded from the
         // target's read-typing.
         for &expr in std::iter::once(&root).chain(chain.iter().rev()) {
-            if let Some(message) = self.value_traps.get(&expr).cloned() {
-                self.trap(b, expr, message);
+            if let Some(messages) = self.link_traps(expr) {
+                self.trap(b, expr, messages);
                 return;
             }
         }
@@ -2782,7 +2879,7 @@ impl LowerCtx<'_> {
                 let receiver = *receiver;
                 match self.lower_deref_root(b, root, receiver) {
                     DerefRoot::Local(local) => local,
-                    DerefRoot::Trap(message) => return Some(self.trap(b, root, message)),
+                    DerefRoot::Trap(messages) => return Some(self.trap(b, root, messages)),
                     // Never observable: read the placeholder instead.
                     DerefRoot::Silent => return Some(Operand::Const(Const::Unit)),
                 }
@@ -2808,8 +2905,8 @@ impl LowerCtx<'_> {
         // of the read, not after it.
         let inner = std::iter::once(&root).chain(chain.iter().rev());
         for &link in inner.filter(|&&link| link != expr) {
-            if let Some(message) = self.value_traps.get(&link).cloned() {
-                return Some(self.trap(b, link, message));
+            if let Some(messages) = self.link_traps(link) {
+                return Some(self.trap(b, link, messages));
             }
         }
         let lead = matches!(&self.body.exprs[root], ExprData::Deref { .. })
@@ -2886,14 +2983,14 @@ impl LowerCtx<'_> {
             // so a broken or unguarded one traps here.
             let local = match self.lower_deref_root(b, deref, receiver) {
                 DerefRoot::Local(local) => local,
-                DerefRoot::Trap(message) => return self.trap(b, deref, message),
+                DerefRoot::Trap(messages) => return self.trap(b, deref, messages),
                 DerefRoot::Silent => return Operand::Const(Const::Unit),
             };
             // Broken links above the deref: pending value traps from the
             // operand's read-typing, innermost first.
             for &link in chain.iter().rev() {
-                if let Some(message) = self.value_traps.get(&link).cloned() {
-                    return self.trap(b, link, message);
+                if let Some(messages) = self.link_traps(link) {
+                    return self.trap(b, link, messages);
                 }
             }
             let Some(projection) =
@@ -2913,8 +3010,8 @@ impl LowerCtx<'_> {
         // non-array base): pending value traps from the operand's
         // read-typing.
         for &link in std::iter::once(&root).chain(chain.iter().rev()) {
-            if let Some(message) = self.value_traps.get(&link).cloned() {
-                return self.trap(b, link, message);
+            if let Some(messages) = self.link_traps(link) {
+                return self.trap(b, link, messages);
             }
         }
         // A materialized temporary at the root (M12): the value is lowered
@@ -3034,6 +3131,71 @@ impl LowerCtx<'_> {
         Operand::Copy(dest.into())
     }
 
+    /// Lower the const arguments written anywhere in a mention that is
+    /// refused without being lowered (`Buf::<8>(...)`, `D::<const { .. }>::n`):
+    /// the refusal pre-empts them, but each error inside has its trap.
+    fn refused_mention_args(&mut self, b: &mut BodyBuilder, mention: ExprId) {
+        let mut pending = vec![mention];
+        while let Some(expr) = pending.pop() {
+            let lists: Vec<&Vec<hir::body::GenericArgData>> = match &self.body.exprs[expr] {
+                ExprData::GenericApp { base, args } => {
+                    pending.push(*base);
+                    vec![args]
+                }
+                ExprData::VariantPath {
+                    base,
+                    args,
+                    member_args,
+                    ..
+                } => {
+                    pending.push(*base);
+                    args.iter().chain(member_args).collect()
+                }
+                // The receiver lowers on its own; only the member's list
+                // belongs to the refused path.
+                ExprData::Field { member_args, .. } => member_args.iter().collect(),
+                _ => Vec::new(),
+            };
+            let values: Vec<ExprId> = lists
+                .into_iter()
+                .flatten()
+                .filter_map(|arg| match arg {
+                    hir::body::GenericArgData::Const(value) => Some(*value),
+                    _ => None,
+                })
+                .collect();
+            for value in values {
+                self.lower_expr(b, value);
+            }
+        }
+    }
+
+    /// Emit the pending value traps along a place chain whose operation is
+    /// refused, root outward (the order its links evaluate in): the refusal
+    /// pre-empts the walk, but each error inside has its trap.
+    fn place_traps(&mut self, b: &mut BodyBuilder, place: ExprId) {
+        let (root, chain) = self.place_chain(place);
+        for &link in std::iter::once(&root).chain(chain.iter().rev()) {
+            if let Some(messages) = self.link_traps(link) {
+                self.trap(b, link, messages);
+            }
+        }
+    }
+
+    /// The traps pending on a place-chain link, which is walked rather than
+    /// lowered as a value: an error on it before it starts, then its
+    /// refused value.
+    fn link_traps(&self, link: ExprId) -> Option<Vec<String>> {
+        let entry = (!self.entry_traps.is_empty())
+            .then(|| self.entry_traps.get(&link))
+            .flatten();
+        let value = self.value_traps.get(&link);
+        if entry.is_none() && value.is_none() {
+            return None;
+        }
+        Some(entry.into_iter().chain(value).flatten().cloned().collect())
+    }
+
     /// Walk a place chain to its root: the field and index steps,
     /// OUTERMOST first, and the expression at the base (a name, a deref,
     /// or something that is no place at all). The walk stops at a deref —
@@ -3081,11 +3243,11 @@ impl LowerCtx<'_> {
         receiver: ExprId,
     ) -> DerefRoot {
         let ptr_op = self.lower_expr(b, receiver);
-        if let Some(message) = self.value_traps.get(&deref).cloned() {
-            return DerefRoot::Trap(message);
+        if let Some(messages) = self.value_traps.get(&deref).cloned() {
+            return DerefRoot::Trap(messages);
         }
-        if let Some(message) = self.unsafe_traps.get(&deref).cloned() {
-            return DerefRoot::Trap(message);
+        if let Some(messages) = self.unsafe_traps.get(&deref).cloned() {
+            return DerefRoot::Trap(messages);
         }
         if !matches!(self.ty(receiver), Ty::RawPtr { .. } | Ty::Borrow { .. }) {
             return DerefRoot::Silent;
@@ -3217,20 +3379,62 @@ impl LowerCtx<'_> {
         temp
     }
 
+    /// Emit the trap planted before statement `index` of `block`, if any,
+    /// located at `span`.
+    fn stmt_trap(&mut self, b: &mut BodyBuilder, block: ExprId, index: usize, span: ExprId) {
+        if !self.stmt_traps.is_empty()
+            && let Some(messages) = self.stmt_traps.get(&(block, index)).cloned()
+        {
+            self.trap(b, span, messages);
+        }
+    }
+
+    /// The messages a call refuses with: the const-check findings (outside
+    /// the item initializer, where they are unconditional) and the broken
+    /// call operation. At initializer level the const-check findings are
+    /// conditional [`TerminatorKind::ConstTrap`]s, emitted here.
+    fn call_refusal(&mut self, b: &mut BodyBuilder, expr: ExprId) -> Option<Vec<String>> {
+        let mut messages = Vec::new();
+        if let Some(found) = self.const_call_traps.get(&expr).cloned() {
+            if self.initializer_context {
+                self.const_traps(b, expr, found);
+            } else {
+                messages.extend(found);
+            }
+        }
+        messages.extend(self.call_traps.get(&expr).into_iter().flatten().cloned());
+        (!messages.is_empty()).then_some(messages)
+    }
+
+    /// Emit [`TerminatorKind::ConstTrap`]s guarding `expr`, one per message.
+    fn const_traps(&mut self, b: &mut BodyBuilder, expr: ExprId, messages: Vec<String>) {
+        for message in messages {
+            let target = b.new_block();
+            b.terminate(TerminatorKind::ConstTrap { message, target }, expr);
+            b.current = target;
+        }
+    }
+
     /// Emit a trap producing `expr`'s value and continue in a fresh block.
-    fn trap(&mut self, b: &mut BodyBuilder, expr: ExprId, message: String) -> Operand {
-        let dest = b.temp(self.ty(expr));
-        let target = b.new_block();
-        b.terminate(
-            TerminatorKind::Trap {
-                message,
-                dest,
-                target,
-            },
-            expr,
-        );
-        b.current = target;
-        Operand::Copy(dest.into())
+    /// Several messages blamed on one site trap in order: the first fires,
+    /// and every error has its trap.
+    fn trap(&mut self, b: &mut BodyBuilder, expr: ExprId, messages: impl Messages) -> Operand {
+        let mut op = Operand::Const(Const::Unit);
+        for message in messages.into_messages() {
+            let dest = b.temp(self.ty(expr));
+            let target = b.new_block();
+            b.terminate(
+                TerminatorKind::Trap {
+                    message,
+                    dest,
+                    target,
+                },
+                expr,
+            );
+            b.current = target;
+            op = Operand::Copy(dest.into());
+        }
+        op
     }
 
     /// Lower one turbofish const argument's value expression to its own
@@ -3313,17 +3517,20 @@ impl LowerCtx<'_> {
         mut arg_ops: Vec<Operand>,
         make_callee: impl FnOnce(&mut Self, &mut BodyBuilder) -> Result<Operand, String>,
     ) -> Operand {
-        if let Some(message) = self.const_call_traps.get(&expr).cloned() {
-            if self.initializer_context {
-                let target = b.new_block();
-                b.terminate(TerminatorKind::ConstTrap { message, target }, expr);
-                b.current = target;
-            } else {
-                return self.trap(b, expr, message);
-            }
+        // A refused member path (its turbofish, its trait): the callee is
+        // never lowered as a value, so its trap lands on the call too.
+        let callee_refusal = self.value_traps.get(&callee).cloned();
+        if callee_refusal.is_some() {
+            self.refused_mention_args(b, callee);
         }
-        if let Some(message) = self.call_traps.get(&expr).cloned() {
-            return self.trap(b, expr, message);
+        let refusal = self.call_refusal(b, expr);
+        if refusal.is_some() || callee_refusal.is_some() {
+            let messages = refusal
+                .into_iter()
+                .chain(callee_refusal)
+                .flatten()
+                .collect::<Vec<_>>();
+            return self.trap(b, expr, messages);
         }
         match self.dict_operands(expr) {
             Ok(ops) => arg_ops.extend(ops),
@@ -3520,9 +3727,9 @@ enum DerefRoot {
     /// The local the leading `Deref` projection hangs off.
     Local(LocalId),
     /// The deref is broken (a non-pointer receiver) or unguarded (a raw
-    /// deref outside `unsafe`): plant this message, in whatever shape the
-    /// caller needs.
-    Trap(String),
+    /// deref outside `unsafe`): plant these messages, in whatever shape
+    /// the caller needs.
+    Trap(Vec<String>),
     /// An `{error}`-typed receiver: nothing rooted here is ever
     /// observable, so the place is dropped and lowering stays total.
     Silent,
@@ -3719,5 +3926,22 @@ impl PtrFlavor {
             PtrFlavor::Raw => Rvalue::AddrOf { mutable, place },
             PtrFlavor::Borrow => Rvalue::Borrow { mutable, place },
         }
+    }
+}
+
+/// The message, or the messages, a trap site carries.
+trait Messages {
+    fn into_messages(self) -> Vec<String>;
+}
+
+impl Messages for String {
+    fn into_messages(self) -> Vec<String> {
+        vec![self]
+    }
+}
+
+impl Messages for Vec<String> {
+    fn into_messages(self) -> Vec<String> {
+        self
     }
 }
