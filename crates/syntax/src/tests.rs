@@ -4453,6 +4453,136 @@ static f = fn (s: Shape) -> usize {
 }
 
 #[test]
+fn match_arm_semicolon_before_comma_is_one_error() {
+    check(
+        r#"
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Point => 0;,
+        _ => 1,
+    }
+}
+"#,
+        expect![[r#"
+            SOURCE_FILE@0..98
+              WHITESPACE@0..1 "\n"
+              STATIC_ITEM@1..97
+                ITEM_HEAD@1..7
+                  STATIC_KW@1..7 "static"
+                WHITESPACE@7..8 " "
+                NAME@8..9
+                  IDENT@8..9 "f"
+                WHITESPACE@9..10 " "
+                EQ@10..11 "="
+                WHITESPACE@11..12 " "
+                FN_LITERAL@12..97
+                  FN_KW@12..14 "fn"
+                  WHITESPACE@14..15 " "
+                  PARAM_LIST@15..25
+                    L_PAREN@15..16 "("
+                    PARAM@16..24
+                      BIND_PAT@16..17
+                        NAME@16..17
+                          IDENT@16..17 "s"
+                      COLON@17..18 ":"
+                      WHITESPACE@18..19 " "
+                      PATH_TYPE@19..24
+                        NAME_REF@19..24
+                          IDENT@19..24 "Shape"
+                    R_PAREN@24..25 ")"
+                  WHITESPACE@25..26 " "
+                  RET_TYPE@26..34
+                    THIN_ARROW@26..28 "->"
+                    WHITESPACE@28..29 " "
+                    PATH_TYPE@29..34
+                      NAME_REF@29..34
+                        IDENT@29..34 "usize"
+                  WHITESPACE@34..35 " "
+                  BLOCK_EXPR@35..97
+                    L_BRACE@35..36 "{"
+                    WHITESPACE@36..41 "\n    "
+                    MATCH_EXPR@41..95
+                      MATCH_KW@41..46 "match"
+                      WHITESPACE@46..47 " "
+                      PATH_EXPR@47..48
+                        NAME_REF@47..48
+                          IDENT@47..48 "s"
+                      WHITESPACE@48..49 " "
+                      L_BRACE@49..50 "{"
+                      WHITESPACE@50..59 "\n        "
+                      MATCH_ARM@59..73
+                        VARIANT_PAT@59..66
+                          COLON2@59..61 "::"
+                          NAME_REF@61..66
+                            IDENT@61..66 "Point"
+                        WHITESPACE@66..67 " "
+                        FAT_ARROW@67..69 "=>"
+                        WHITESPACE@69..70 " "
+                        LITERAL@70..71
+                          INT_NUMBER@70..71 "0"
+                        ERROR@71..72
+                          SEMICOLON@71..72 ";"
+                        COMMA@72..73 ","
+                      WHITESPACE@73..82 "\n        "
+                      MATCH_ARM@82..89
+                        WILDCARD_PAT@82..83
+                          HOLE@82..83 "_"
+                        WHITESPACE@83..84 " "
+                        FAT_ARROW@84..86 "=>"
+                        WHITESPACE@86..87 " "
+                        LITERAL@87..88
+                          INT_NUMBER@87..88 "1"
+                        COMMA@88..89 ","
+                      WHITESPACE@89..94 "\n    "
+                      R_BRACE@94..95 "}"
+                    WHITESPACE@95..96 "\n"
+                    R_BRACE@96..97 "}"
+              WHITESPACE@97..98 "\n"
+            error 71..72: remove this `;`: a match arm's body is an expression, not a statement
+        "#]],
+    );
+}
+
+/// Each `;` after an arm's body is exactly one error, on the `;`, whose fix
+/// leaves a program that parses cleanly.
+#[test]
+fn match_arm_semicolon_fix_leaves_a_clean_parse() {
+    let cases = [
+        (
+            "static f = fn (s: Shape) -> usize { match s { ::Point => 0;, _ => 1 } }",
+            "Remove `;`",
+            "static f = fn (s: Shape) -> usize { match s { ::Point => 0, _ => 1 } }",
+        ),
+        (
+            "static f = fn (s: Shape) -> usize { match s { ::Point => 0, _ => 1; } }",
+            "Remove `;`",
+            "static f = fn (s: Shape) -> usize { match s { ::Point => 0, _ => 1 } }",
+        ),
+        (
+            "static f = fn (s: Shape) -> usize { match s { ::Point => 0; _ => 1 } }",
+            "Replace `;` with `,`",
+            "static f = fn (s: Shape) -> usize { match s { ::Point => 0, _ => 1 } }",
+        ),
+        (
+            "static f = fn (s: Shape) -> usize { match s { ::Point => { 0 }; _ => 1 } }",
+            "Replace `;` with `,`",
+            "static f = fn (s: Shape) -> usize { match s { ::Point => { 0 }, _ => 1 } }",
+        ),
+    ];
+    for (text, label, fixed) in cases {
+        let parse = crate::parse(text);
+        let [err] = parse.errors() else {
+            panic!("expected one error for {text:?}: {:?}", parse.errors());
+        };
+        assert_eq!(&text[err.range], ";", "{text:?}");
+        let fix = err.fix.as_ref().expect("expected a fix");
+        assert_eq!(fix.label, label);
+        assert_eq!(apply_fix(text, fix), fixed);
+        assert!(crate::parse(fixed).errors().is_empty(), "{fixed:?}");
+    }
+}
+
+#[test]
 fn match_recovery_missing_fat_arrow() {
     check(
         r#"

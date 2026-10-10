@@ -982,6 +982,11 @@ fn match_arm(p: &mut Parser<'_>) {
     }
     p.expect(FAT_ARROW, "`=>`");
     expr(p);
+    if p.at(SEMICOLON) {
+        stray_arm_semicolon(p);
+        m.complete(p, MATCH_ARM);
+        return;
+    }
     // Brace rule, as for items: an arm whose body ends in `}` doesn't need
     // the `,`. A trailing comma before the closing `}` is fine.
     if !p.at(R_BRACE) {
@@ -992,6 +997,29 @@ fn match_arm(p: &mut Parser<'_>) {
         }
     }
     m.complete(p, MATCH_ARM);
+}
+
+/// A `;` after an arm's body (`::End => break;`). The body is an
+/// expression and `,` ends the arm, so the `;` is the one error: removed
+/// when a `,` or the list's `}` follows, else it stands in for the `,`.
+fn stray_arm_semicolon(p: &mut Parser<'_>) {
+    let e = p.start();
+    if matches!(p.nth(1), COMMA | R_BRACE) {
+        p.error_replacing_current(
+            "remove this `;`: a match arm's body is an expression, not a statement",
+            "Remove `;`",
+            "",
+        );
+    } else {
+        p.error_replacing_current(
+            "match arms are separated by `,`, not `;`",
+            "Replace `;` with `,`",
+            ",",
+        );
+    }
+    p.bump(SEMICOLON);
+    e.complete(p, ERROR);
+    p.eat(COMMA);
 }
 
 /// Skip what is left of an arm whose pattern read nothing, up to the next
