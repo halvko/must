@@ -293,15 +293,7 @@ module.exports = grammar({
       ')',
     ),
 
-    fn_type_param: $ => choice(
-      seq(
-        optional('mut'),
-        field('pattern', $._param_pattern),
-        ':',
-        field('type', $._type),
-      ),
-      field('type', $._type),
-    ),
+    fn_type_param: $ => field('type', $._type),
 
     ret_type: $ => seq('->', $._type),
 

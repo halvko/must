@@ -1571,7 +1571,7 @@ static s = Measured::size::<usize>;
     // shown.
     check_mir(
         r#"
-trait Counted = requires { step: fn::<const N: usize>(s: Self) -> usize; } with {
+trait Counted = requires { step: fn::<const N: usize>(Self) -> usize; } with {
     impl usize { step = fn::<const N: usize>(s: usize) -> usize { N }; }
 };
 static s = fn(n: usize) -> usize { Counted::step::<3>(n) };
@@ -6427,7 +6427,7 @@ fn a_borrowed_rigid_receiver_reaches_its_bounds() {
         r#"
 type Cell = struct { n: usize };
 trait Pass = requires {
-    pass: fn::<@b>(p: usize.&::<@b>, s: Self.&::<@b>) -> usize.&::<@b>;
+    pass: fn::<@b>(usize.&::<@b>, Self.&::<@b>) -> usize.&::<@b>;
 } with {
     impl Cell { pass = fn::<@b>(p: usize.&::<@b>, s: Self.&::<@b>) -> usize.&::<@b> { p }; }
 };
@@ -6438,8 +6438,8 @@ static leak = fn::<@z, T: Pass>(c: T.&::<@z>) -> usize.&::<@z> {
 };
 "#,
         expect![[r#"
-            427..430: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@z`, which outlives the body
-              note at 432..433: the storage ends here, where the body returns
+            421..424: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@z`, which outlives the body
+              note at 426..427: the storage ends here, where the body returns
         "#]],
     );
 }
@@ -6452,7 +6452,7 @@ fn a_requirements_own_region_bound_travels_to_the_call_site() {
         r#"
 type Cell = struct { n: usize };
 trait Widen = requires {
-    widen: fn::<@b, @c: @b>(p: usize.&::<@c>, s: Self.&::<@b>) -> usize.&::<@b>;
+    widen: fn::<@b, @c: @b>(usize.&::<@c>, Self.&::<@b>) -> usize.&::<@b>;
 } with {
     impl Cell {
         widen = fn::<@b, @c: @b>(p: usize.&::<@c>, s: Cell.&::<@b>) -> usize.&::<@b> { p };
@@ -6468,10 +6468,10 @@ static qualified = fn::<@z>(c: Cell.&::<@z>) -> usize.&::<@z> {
 };
 "#,
         expect![[r#"
-            376..379: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@z`, which outlives the body
-              note at 381..382: the storage ends here, where the body returns
-            487..490: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@z`, which outlives the body
-              note at 495..496: the storage ends here, where the body returns
+            370..373: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@z`, which outlives the body
+              note at 375..376: the storage ends here, where the body returns
+            481..484: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@z`, which outlives the body
+              note at 489..490: the storage ends here, where the body returns
         "#]],
     );
 }

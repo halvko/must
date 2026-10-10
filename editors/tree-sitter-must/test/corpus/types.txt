@@ -105,7 +105,7 @@ static f = fn::<@a, @b: @a, T>(x: T.&::<@a + @b>, p: T.&raw mut, q: T.&mut.&raw)
 Arrays and function types
 ==================
 
-static f = fn::<const N: usize>(a: [usize; N], b: [u8; const { 2 }], g: fn(usize, name: str) -> ()) { };
+static f = fn::<const N: usize>(a: [usize; N], b: [u8; const { 2 }], g: fn(usize, str) -> ()) { };
 
 ---
 
@@ -148,8 +148,6 @@ static f = fn::<const N: usize>(a: [usize; N], b: [u8; const { 2 }], g: fn(usize
                 (path_type
                   (identifier)))
               (param
-                (bind_pat
-                  (param_name))
                 (path_type
                   (identifier))))
             (ret_type

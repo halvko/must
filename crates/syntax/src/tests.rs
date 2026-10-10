@@ -12073,14 +12073,14 @@ fn colon_declared_member_rejected() {
         r#"
 type A = struct { x: usize } with {
     impl Self {
-        len: fn(a: Self) -> usize;
+        len: fn(Self) -> usize;
     }
 };
 "#,
         expect![[r#"
-            SOURCE_FILE@0..97
+            SOURCE_FILE@0..94
               WHITESPACE@0..1 "\n"
-              TYPE_ITEM@1..96
+              TYPE_ITEM@1..93
                 ITEM_HEAD@1..5
                   TYPE_KW@1..5 "type"
                 WHITESPACE@5..6 " "
@@ -12105,12 +12105,12 @@ type A = struct { x: usize } with {
                   WHITESPACE@27..28 " "
                   R_BRACE@28..29 "}"
                 WHITESPACE@29..30 " "
-                WITH_GROUP@30..95
+                WITH_GROUP@30..92
                   WITH_KW@30..34 "with"
                   WHITESPACE@34..35 " "
                   L_BRACE@35..36 "{"
                   WHITESPACE@36..41 "\n    "
-                  IMPL_ELEMENT@41..93
+                  IMPL_ELEMENT@41..90
                     IMPL_KW@41..45 "impl"
                     WHITESPACE@45..46 " "
                     PATH_TYPE@46..50
@@ -12119,40 +12119,35 @@ type A = struct { x: usize } with {
                     WHITESPACE@50..51 " "
                     L_BRACE@51..52 "{"
                     WHITESPACE@52..61 "\n        "
-                    MEMBER@61..87
+                    MEMBER@61..84
                       NAME@61..64
                         IDENT@61..64 "len"
                       COLON@64..65 ":"
                       WHITESPACE@65..66 " "
-                      FN_TYPE@66..86
+                      FN_TYPE@66..83
                         FN_KW@66..68 "fn"
-                        PARAM_LIST@68..77
+                        PARAM_LIST@68..74
                           L_PAREN@68..69 "("
-                          PARAM@69..76
-                            BIND_PAT@69..70
-                              NAME@69..70
-                                IDENT@69..70 "a"
-                            COLON@70..71 ":"
-                            WHITESPACE@71..72 " "
-                            PATH_TYPE@72..76
-                              NAME_REF@72..76
-                                IDENT@72..76 "Self"
-                          R_PAREN@76..77 ")"
-                        WHITESPACE@77..78 " "
-                        RET_TYPE@78..86
-                          THIN_ARROW@78..80 "->"
-                          WHITESPACE@80..81 " "
-                          PATH_TYPE@81..86
-                            NAME_REF@81..86
-                              IDENT@81..86 "usize"
-                      SEMICOLON@86..87 ";"
-                    WHITESPACE@87..92 "\n    "
-                    R_BRACE@92..93 "}"
-                  WHITESPACE@93..94 "\n"
-                  R_BRACE@94..95 "}"
-                SEMICOLON@95..96 ";"
-              WHITESPACE@96..97 "\n"
-            error 61..87: a declare-only inherent member is an unimplementable promise; define it: `name = fn(...) -> ... { ... };`
+                          PARAM@69..73
+                            PATH_TYPE@69..73
+                              NAME_REF@69..73
+                                IDENT@69..73 "Self"
+                          R_PAREN@73..74 ")"
+                        WHITESPACE@74..75 " "
+                        RET_TYPE@75..83
+                          THIN_ARROW@75..77 "->"
+                          WHITESPACE@77..78 " "
+                          PATH_TYPE@78..83
+                            NAME_REF@78..83
+                              IDENT@78..83 "usize"
+                      SEMICOLON@83..84 ";"
+                    WHITESPACE@84..89 "\n    "
+                    R_BRACE@89..90 "}"
+                  WHITESPACE@90..91 "\n"
+                  R_BRACE@91..92 "}"
+                SEMICOLON@92..93 ";"
+              WHITESPACE@93..94 "\n"
+            error 61..84: a declare-only inherent member is an unimplementable promise; define it: `name = fn(...) -> ... { ... };`
         "#]],
     );
 }
@@ -13499,13 +13494,13 @@ fn trait_decl_requires_parses() {
     check(
         r#"
 trait Write = requires {
-    push: fn(s: str, w: Self) -> Self;
+    push: fn(str, Self) -> Self;
 };
 "#,
         expect![[r#"
-            SOURCE_FILE@0..68
+            SOURCE_FILE@0..62
               WHITESPACE@0..1 "\n"
-              TRAIT_ITEM@1..67
+              TRAIT_ITEM@1..61
                 ITEM_HEAD@1..6
                   TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
@@ -13514,53 +13509,43 @@ trait Write = requires {
                 WHITESPACE@12..13 " "
                 EQ@13..14 "="
                 WHITESPACE@14..15 " "
-                REQUIRES_DEF@15..66
+                REQUIRES_DEF@15..60
                   REQUIRES_KW@15..23 "requires"
                   WHITESPACE@23..24 " "
                   L_BRACE@24..25 "{"
                   WHITESPACE@25..30 "\n    "
-                  MEMBER@30..64
+                  MEMBER@30..58
                     NAME@30..34
                       IDENT@30..34 "push"
                     COLON@34..35 ":"
                     WHITESPACE@35..36 " "
-                    FN_TYPE@36..63
+                    FN_TYPE@36..57
                       FN_KW@36..38 "fn"
-                      PARAM_LIST@38..55
+                      PARAM_LIST@38..49
                         L_PAREN@38..39 "("
-                        PARAM@39..45
-                          BIND_PAT@39..40
-                            NAME@39..40
-                              IDENT@39..40 "s"
-                          COLON@40..41 ":"
-                          WHITESPACE@41..42 " "
-                          PATH_TYPE@42..45
-                            NAME_REF@42..45
-                              IDENT@42..45 "str"
-                        COMMA@45..46 ","
-                        WHITESPACE@46..47 " "
-                        PARAM@47..54
-                          BIND_PAT@47..48
-                            NAME@47..48
-                              IDENT@47..48 "w"
-                          COLON@48..49 ":"
-                          WHITESPACE@49..50 " "
-                          PATH_TYPE@50..54
-                            NAME_REF@50..54
-                              IDENT@50..54 "Self"
-                        R_PAREN@54..55 ")"
-                      WHITESPACE@55..56 " "
-                      RET_TYPE@56..63
-                        THIN_ARROW@56..58 "->"
-                        WHITESPACE@58..59 " "
-                        PATH_TYPE@59..63
-                          NAME_REF@59..63
-                            IDENT@59..63 "Self"
-                    SEMICOLON@63..64 ";"
-                  WHITESPACE@64..65 "\n"
-                  R_BRACE@65..66 "}"
-                SEMICOLON@66..67 ";"
-              WHITESPACE@67..68 "\n"
+                        PARAM@39..42
+                          PATH_TYPE@39..42
+                            NAME_REF@39..42
+                              IDENT@39..42 "str"
+                        COMMA@42..43 ","
+                        WHITESPACE@43..44 " "
+                        PARAM@44..48
+                          PATH_TYPE@44..48
+                            NAME_REF@44..48
+                              IDENT@44..48 "Self"
+                        R_PAREN@48..49 ")"
+                      WHITESPACE@49..50 " "
+                      RET_TYPE@50..57
+                        THIN_ARROW@50..52 "->"
+                        WHITESPACE@52..53 " "
+                        PATH_TYPE@53..57
+                          NAME_REF@53..57
+                            IDENT@53..57 "Self"
+                    SEMICOLON@57..58 ";"
+                  WHITESPACE@58..59 "\n"
+                  R_BRACE@59..60 "}"
+                SEMICOLON@60..61 ";"
+              WHITESPACE@61..62 "\n"
         "#]],
     );
 }
@@ -13570,13 +13555,13 @@ fn trait_decl_generic_requirement_with_bound_parses() {
     check(
         r#"
 trait Display = requires {
-    fmt: fn::<W: Write>(w: W, x: Self) -> W;
+    fmt: fn::<W: Write>(W, Self) -> W;
 };
 "#,
         expect![[r#"
-            SOURCE_FILE@0..76
+            SOURCE_FILE@0..70
               WHITESPACE@0..1 "\n"
-              TRAIT_ITEM@1..75
+              TRAIT_ITEM@1..69
                 ITEM_HEAD@1..6
                   TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
@@ -13585,17 +13570,17 @@ trait Display = requires {
                 WHITESPACE@14..15 " "
                 EQ@15..16 "="
                 WHITESPACE@16..17 " "
-                REQUIRES_DEF@17..74
+                REQUIRES_DEF@17..68
                   REQUIRES_KW@17..25 "requires"
                   WHITESPACE@25..26 " "
                   L_BRACE@26..27 "{"
                   WHITESPACE@27..32 "\n    "
-                  MEMBER@32..72
+                  MEMBER@32..66
                     NAME@32..35
                       IDENT@32..35 "fmt"
                     COLON@35..36 ":"
                     WHITESPACE@36..37 " "
-                    FN_TYPE@37..71
+                    FN_TYPE@37..65
                       FN_KW@37..39 "fn"
                       GENERIC_PARAM_LIST@39..51
                         COLON2@39..41 "::"
@@ -13609,41 +13594,31 @@ trait Display = requires {
                             NAME_REF@45..50
                               IDENT@45..50 "Write"
                         R_ANGLE@50..51 ">"
-                      PARAM_LIST@51..66
+                      PARAM_LIST@51..60
                         L_PAREN@51..52 "("
-                        PARAM@52..56
-                          BIND_PAT@52..53
-                            NAME@52..53
-                              IDENT@52..53 "w"
-                          COLON@53..54 ":"
-                          WHITESPACE@54..55 " "
-                          PATH_TYPE@55..56
-                            NAME_REF@55..56
-                              IDENT@55..56 "W"
-                        COMMA@56..57 ","
-                        WHITESPACE@57..58 " "
-                        PARAM@58..65
-                          BIND_PAT@58..59
-                            NAME@58..59
-                              IDENT@58..59 "x"
-                          COLON@59..60 ":"
-                          WHITESPACE@60..61 " "
-                          PATH_TYPE@61..65
-                            NAME_REF@61..65
-                              IDENT@61..65 "Self"
-                        R_PAREN@65..66 ")"
-                      WHITESPACE@66..67 " "
-                      RET_TYPE@67..71
-                        THIN_ARROW@67..69 "->"
-                        WHITESPACE@69..70 " "
-                        PATH_TYPE@70..71
-                          NAME_REF@70..71
-                            IDENT@70..71 "W"
-                    SEMICOLON@71..72 ";"
-                  WHITESPACE@72..73 "\n"
-                  R_BRACE@73..74 "}"
-                SEMICOLON@74..75 ";"
-              WHITESPACE@75..76 "\n"
+                        PARAM@52..53
+                          PATH_TYPE@52..53
+                            NAME_REF@52..53
+                              IDENT@52..53 "W"
+                        COMMA@53..54 ","
+                        WHITESPACE@54..55 " "
+                        PARAM@55..59
+                          PATH_TYPE@55..59
+                            NAME_REF@55..59
+                              IDENT@55..59 "Self"
+                        R_PAREN@59..60 ")"
+                      WHITESPACE@60..61 " "
+                      RET_TYPE@61..65
+                        THIN_ARROW@61..63 "->"
+                        WHITESPACE@63..64 " "
+                        PATH_TYPE@64..65
+                          NAME_REF@64..65
+                            IDENT@64..65 "W"
+                    SEMICOLON@65..66 ";"
+                  WHITESPACE@66..67 "\n"
+                  R_BRACE@67..68 "}"
+                SEMICOLON@68..69 ";"
+              WHITESPACE@69..70 "\n"
         "#]],
     );
 }
@@ -13685,13 +13660,13 @@ fn trait_requires_reserved_forms() {
     // and carry precise reservations.
     check(
         r#"
-trait Alloc = requires::<T> { alloc: fn(n: usize, s: Self) -> usize; };
+trait Alloc = requires::<T> { alloc: fn(usize, Self) -> usize; };
 trait TrustedLen = unsafe requires Self: Iterator { };
 "#,
         expect![[r#"
-            SOURCE_FILE@0..128
+            SOURCE_FILE@0..122
               WHITESPACE@0..1 "\n"
-              TRAIT_ITEM@1..72
+              TRAIT_ITEM@1..66
                 ITEM_HEAD@1..6
                   TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
@@ -13700,7 +13675,7 @@ trait TrustedLen = unsafe requires Self: Iterator { };
                 WHITESPACE@12..13 " "
                 EQ@13..14 "="
                 WHITESPACE@14..15 " "
-                REQUIRES_DEF@15..71
+                REQUIRES_DEF@15..65
                   REQUIRES_KW@15..23 "requires"
                   GENERIC_PARAM_LIST@23..28
                     COLON2@23..25 "::"
@@ -13712,79 +13687,69 @@ trait TrustedLen = unsafe requires Self: Iterator { };
                   WHITESPACE@28..29 " "
                   L_BRACE@29..30 "{"
                   WHITESPACE@30..31 " "
-                  MEMBER@31..69
+                  MEMBER@31..63
                     NAME@31..36
                       IDENT@31..36 "alloc"
                     COLON@36..37 ":"
                     WHITESPACE@37..38 " "
-                    FN_TYPE@38..68
+                    FN_TYPE@38..62
                       FN_KW@38..40 "fn"
-                      PARAM_LIST@40..59
+                      PARAM_LIST@40..53
                         L_PAREN@40..41 "("
-                        PARAM@41..49
-                          BIND_PAT@41..42
-                            NAME@41..42
-                              IDENT@41..42 "n"
-                          COLON@42..43 ":"
-                          WHITESPACE@43..44 " "
-                          PATH_TYPE@44..49
-                            NAME_REF@44..49
-                              IDENT@44..49 "usize"
-                        COMMA@49..50 ","
-                        WHITESPACE@50..51 " "
-                        PARAM@51..58
-                          BIND_PAT@51..52
-                            NAME@51..52
-                              IDENT@51..52 "s"
-                          COLON@52..53 ":"
-                          WHITESPACE@53..54 " "
-                          PATH_TYPE@54..58
-                            NAME_REF@54..58
-                              IDENT@54..58 "Self"
-                        R_PAREN@58..59 ")"
-                      WHITESPACE@59..60 " "
-                      RET_TYPE@60..68
-                        THIN_ARROW@60..62 "->"
-                        WHITESPACE@62..63 " "
-                        PATH_TYPE@63..68
-                          NAME_REF@63..68
-                            IDENT@63..68 "usize"
-                    SEMICOLON@68..69 ";"
-                  WHITESPACE@69..70 " "
-                  R_BRACE@70..71 "}"
-                SEMICOLON@71..72 ";"
-              WHITESPACE@72..73 "\n"
-              TRAIT_ITEM@73..127
-                ITEM_HEAD@73..78
-                  TRAIT_KW@73..78 "trait"
-                WHITESPACE@78..79 " "
-                NAME@79..89
-                  IDENT@79..89 "TrustedLen"
-                WHITESPACE@89..90 " "
-                EQ@90..91 "="
-                WHITESPACE@91..92 " "
-                REQUIRES_DEF@92..126
-                  UNSAFE_KW@92..98 "unsafe"
-                  WHITESPACE@98..99 " "
-                  REQUIRES_KW@99..107 "requires"
-                  WHITESPACE@107..108 " "
-                  REQUIRES_CLAUSE@108..122
-                    NAME_REF@108..112
-                      IDENT@108..112 "Self"
-                    COLON@112..113 ":"
-                    WHITESPACE@113..114 " "
-                    PATH_TYPE@114..122
-                      NAME_REF@114..122
-                        IDENT@114..122 "Iterator"
-                  WHITESPACE@122..123 " "
-                  L_BRACE@123..124 "{"
-                  WHITESPACE@124..125 " "
-                  R_BRACE@125..126 "}"
-                SEMICOLON@126..127 ";"
-              WHITESPACE@127..128 "\n"
+                        PARAM@41..46
+                          PATH_TYPE@41..46
+                            NAME_REF@41..46
+                              IDENT@41..46 "usize"
+                        COMMA@46..47 ","
+                        WHITESPACE@47..48 " "
+                        PARAM@48..52
+                          PATH_TYPE@48..52
+                            NAME_REF@48..52
+                              IDENT@48..52 "Self"
+                        R_PAREN@52..53 ")"
+                      WHITESPACE@53..54 " "
+                      RET_TYPE@54..62
+                        THIN_ARROW@54..56 "->"
+                        WHITESPACE@56..57 " "
+                        PATH_TYPE@57..62
+                          NAME_REF@57..62
+                            IDENT@57..62 "usize"
+                    SEMICOLON@62..63 ";"
+                  WHITESPACE@63..64 " "
+                  R_BRACE@64..65 "}"
+                SEMICOLON@65..66 ";"
+              WHITESPACE@66..67 "\n"
+              TRAIT_ITEM@67..121
+                ITEM_HEAD@67..72
+                  TRAIT_KW@67..72 "trait"
+                WHITESPACE@72..73 " "
+                NAME@73..83
+                  IDENT@73..83 "TrustedLen"
+                WHITESPACE@83..84 " "
+                EQ@84..85 "="
+                WHITESPACE@85..86 " "
+                REQUIRES_DEF@86..120
+                  UNSAFE_KW@86..92 "unsafe"
+                  WHITESPACE@92..93 " "
+                  REQUIRES_KW@93..101 "requires"
+                  WHITESPACE@101..102 " "
+                  REQUIRES_CLAUSE@102..116
+                    NAME_REF@102..106
+                      IDENT@102..106 "Self"
+                    COLON@106..107 ":"
+                    WHITESPACE@107..108 " "
+                    PATH_TYPE@108..116
+                      NAME_REF@108..116
+                        IDENT@108..116 "Iterator"
+                  WHITESPACE@116..117 " "
+                  L_BRACE@117..118 "{"
+                  WHITESPACE@118..119 " "
+                  R_BRACE@119..120 "}"
+                SEMICOLON@120..121 ";"
+              WHITESPACE@121..122 "\n"
             error 23..28: generic traits are not supported yet
-            error 92..98: `unsafe` traits are not supported yet
-            error 108..122: supertrait clauses are not supported yet
+            error 86..92: `unsafe` traits are not supported yet
+            error 102..116: supertrait clauses are not supported yet
         "#]],
     );
 }
@@ -13799,14 +13764,14 @@ trait T = requires {
     d = fn(x: usize) -> usize { 1 };
     type Item;
     const N: usize;
-    f: unsafe fn(x: Self) -> usize;
+    f: unsafe fn(Self) -> usize;
     g;
 };
 "#,
         expect![[r#"
-            SOURCE_FILE@0..140
+            SOURCE_FILE@0..137
               WHITESPACE@0..1 "\n"
-              TRAIT_ITEM@1..139
+              TRAIT_ITEM@1..136
                 ITEM_HEAD@1..6
                   TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
@@ -13815,7 +13780,7 @@ trait T = requires {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                REQUIRES_DEF@11..138
+                REQUIRES_DEF@11..135
                   REQUIRES_KW@11..19 "requires"
                   WHITESPACE@19..20 " "
                   L_BRACE@20..21 "{"
@@ -13876,49 +13841,44 @@ trait T = requires {
                         IDENT@87..92 "usize"
                     SEMICOLON@92..93 ";"
                   WHITESPACE@93..98 "\n    "
-                  MEMBER@98..129
+                  MEMBER@98..126
                     NAME@98..99
                       IDENT@98..99 "f"
                     COLON@99..100 ":"
                     WHITESPACE@100..101 " "
-                    FN_TYPE@101..128
+                    FN_TYPE@101..125
                       UNSAFE_KW@101..107 "unsafe"
                       WHITESPACE@107..108 " "
                       FN_KW@108..110 "fn"
-                      PARAM_LIST@110..119
+                      PARAM_LIST@110..116
                         L_PAREN@110..111 "("
-                        PARAM@111..118
-                          BIND_PAT@111..112
-                            NAME@111..112
-                              IDENT@111..112 "x"
-                          COLON@112..113 ":"
-                          WHITESPACE@113..114 " "
-                          PATH_TYPE@114..118
-                            NAME_REF@114..118
-                              IDENT@114..118 "Self"
-                        R_PAREN@118..119 ")"
-                      WHITESPACE@119..120 " "
-                      RET_TYPE@120..128
-                        THIN_ARROW@120..122 "->"
-                        WHITESPACE@122..123 " "
-                        PATH_TYPE@123..128
-                          NAME_REF@123..128
-                            IDENT@123..128 "usize"
-                    SEMICOLON@128..129 ";"
-                  WHITESPACE@129..134 "\n    "
-                  MEMBER@134..136
-                    NAME@134..135
-                      IDENT@134..135 "g"
-                    SEMICOLON@135..136 ";"
-                  WHITESPACE@136..137 "\n"
-                  R_BRACE@137..138 "}"
-                SEMICOLON@138..139 ";"
-              WHITESPACE@139..140 "\n"
+                        PARAM@111..115
+                          PATH_TYPE@111..115
+                            NAME_REF@111..115
+                              IDENT@111..115 "Self"
+                        R_PAREN@115..116 ")"
+                      WHITESPACE@116..117 " "
+                      RET_TYPE@117..125
+                        THIN_ARROW@117..119 "->"
+                        WHITESPACE@119..120 " "
+                        PATH_TYPE@120..125
+                          NAME_REF@120..125
+                            IDENT@120..125 "usize"
+                    SEMICOLON@125..126 ";"
+                  WHITESPACE@126..131 "\n    "
+                  MEMBER@131..133
+                    NAME@131..132
+                      IDENT@131..132 "g"
+                    SEMICOLON@132..133 ";"
+                  WHITESPACE@133..134 "\n"
+                  R_BRACE@134..135 "}"
+                SEMICOLON@135..136 ";"
+              WHITESPACE@136..137 "\n"
             error 28..57: default members are not supported yet; a trait declares requirements (`name: fn(...) -> ...;`)
             error 63..67: associated types are not supported yet
             error 78..83: associated consts are not supported yet
             error 101..107: `unsafe` trait members are not supported yet
-            error 134..136: a requirement declares its signature: `name: fn(...) -> ...;`
+            error 131..133: a requirement declares its signature: `name: fn(...) -> ...;`
         "#]],
     );
 }
@@ -13926,7 +13886,8 @@ trait T = requires {
 #[test]
 fn trait_requirement_param_is_not_mut() {
     // A requirement declares a signature; `mut` is a binding mode, which
-    // only a body has.
+    // only a body has. Its parameters are a fn TYPE's, so the fn type's
+    // own refusal says so.
     check(
         "trait T = requires { m: fn(mut n: usize) -> usize; };",
         expect![[r#"
@@ -13957,9 +13918,7 @@ fn trait_requirement_param_is_not_mut() {
                         PARAM@27..39
                           MUT_KW@27..30 "mut"
                           WHITESPACE@30..31 " "
-                          BIND_PAT@31..32
-                            NAME@31..32
-                              IDENT@31..32 "n"
+                          IDENT@31..32 "n"
                           COLON@32..33 ":"
                           WHITESPACE@33..34 " "
                           PATH_TYPE@34..39
@@ -13977,7 +13936,7 @@ fn trait_requirement_param_is_not_mut() {
                   WHITESPACE@50..51 " "
                   R_BRACE@51..52 "}"
                 SEMICOLON@52..53 ";"
-            error 27..32: a requirement's parameter is a plain `name: Type`
+            error 27..30: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
         "#]],
     );
 }
@@ -14014,12 +13973,12 @@ fn trait_requirement_param_is_not_a_pattern() {
                       PARAM_LIST@26..43
                         L_PAREN@26..27 "("
                         PARAM@27..42
-                          RECORD_PAT@27..39
+                          RECORD_TYPE@27..39
                             STRUCT_KW@27..33 "struct"
                             WHITESPACE@33..34 " "
                             L_BRACE@34..35 "{"
                             WHITESPACE@35..36 " "
-                            RECORD_PAT_FIELD@36..37
+                            RECORD_TYPE_FIELD@36..37
                               NAME@36..37
                                 IDENT@36..37 "a"
                             WHITESPACE@37..38 " "
@@ -14041,7 +14000,68 @@ fn trait_requirement_param_is_not_a_pattern() {
                   WHITESPACE@53..54 " "
                   R_BRACE@54..55 "}"
                 SEMICOLON@55..56 ";"
-            error 27..39: a requirement's parameter is a plain `name: Type`
+            error 38..39: expected `:` followed by the field's type
+            error 39..40: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
+        "#]],
+    );
+}
+
+#[test]
+fn trait_requirement_params_are_bare_types() {
+    // A requirement's bare parameter types and its binder, regions
+    // included, parse clean.
+    check_errors(
+        r#"
+trait Write = requires { push: fn(str, Self) -> Self; };
+trait Display = requires {
+    fmt: fn::<@a, @b, W: Write>(W.&mut::<@a>, Self.&::<@b>) -> ();
+};
+"#,
+        expect![[r#""#]],
+    );
+    check(
+        "trait T = requires { m: fn(usize) -> usize; };",
+        expect![[r#"
+            SOURCE_FILE@0..46
+              TRAIT_ITEM@0..46
+                ITEM_HEAD@0..5
+                  TRAIT_KW@0..5 "trait"
+                WHITESPACE@5..6 " "
+                NAME@6..7
+                  IDENT@6..7 "T"
+                WHITESPACE@7..8 " "
+                EQ@8..9 "="
+                WHITESPACE@9..10 " "
+                REQUIRES_DEF@10..45
+                  REQUIRES_KW@10..18 "requires"
+                  WHITESPACE@18..19 " "
+                  L_BRACE@19..20 "{"
+                  WHITESPACE@20..21 " "
+                  MEMBER@21..43
+                    NAME@21..22
+                      IDENT@21..22 "m"
+                    COLON@22..23 ":"
+                    WHITESPACE@23..24 " "
+                    FN_TYPE@24..42
+                      FN_KW@24..26 "fn"
+                      PARAM_LIST@26..33
+                        L_PAREN@26..27 "("
+                        PARAM@27..32
+                          PATH_TYPE@27..32
+                            NAME_REF@27..32
+                              IDENT@27..32 "usize"
+                        R_PAREN@32..33 ")"
+                      WHITESPACE@33..34 " "
+                      RET_TYPE@34..42
+                        THIN_ARROW@34..36 "->"
+                        WHITESPACE@36..37 " "
+                        PATH_TYPE@37..42
+                          NAME_REF@37..42
+                            IDENT@37..42 "usize"
+                    SEMICOLON@42..43 ";"
+                  WHITESPACE@43..44 " "
+                  R_BRACE@44..45 "}"
+                SEMICOLON@45..46 ";"
         "#]],
     );
 }
@@ -14053,7 +14073,7 @@ fn an_unsafe_fn_type_nested_in_a_requirement_is_live() {
     // `unsafe fn` type, which is live in every other type position. A
     // requirement may therefore take one as a parameter.
     check_errors(
-        "trait T = requires { go: fn(f: unsafe fn()) -> (); };",
+        "trait T = requires { go: fn(unsafe fn()) -> (); };",
         expect![[r#""#]],
     );
     check_errors(
@@ -14276,7 +14296,7 @@ fn bound_shape_rules() {
 fn type_side_trait_impl_is_live() {
     check(
         r#"
-trait Show = requires { show: fn(x: Self) -> str; };
+trait Show = requires { show: fn(Self) -> str; };
 type P = struct { a: usize } with {
     impl Show {
         show = fn(x: Self) -> str { "p" };
@@ -14284,9 +14304,9 @@ type P = struct { a: usize } with {
 };
 "#,
         expect![[r#"
-            SOURCE_FILE@0..158
+            SOURCE_FILE@0..155
               WHITESPACE@0..1 "\n"
-              TRAIT_ITEM@1..53
+              TRAIT_ITEM@1..50
                 ITEM_HEAD@1..6
                   TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
@@ -14295,123 +14315,118 @@ type P = struct { a: usize } with {
                 WHITESPACE@11..12 " "
                 EQ@12..13 "="
                 WHITESPACE@13..14 " "
-                REQUIRES_DEF@14..52
+                REQUIRES_DEF@14..49
                   REQUIRES_KW@14..22 "requires"
                   WHITESPACE@22..23 " "
                   L_BRACE@23..24 "{"
                   WHITESPACE@24..25 " "
-                  MEMBER@25..50
+                  MEMBER@25..47
                     NAME@25..29
                       IDENT@25..29 "show"
                     COLON@29..30 ":"
                     WHITESPACE@30..31 " "
-                    FN_TYPE@31..49
+                    FN_TYPE@31..46
                       FN_KW@31..33 "fn"
-                      PARAM_LIST@33..42
+                      PARAM_LIST@33..39
                         L_PAREN@33..34 "("
-                        PARAM@34..41
-                          BIND_PAT@34..35
-                            NAME@34..35
-                              IDENT@34..35 "x"
-                          COLON@35..36 ":"
-                          WHITESPACE@36..37 " "
-                          PATH_TYPE@37..41
-                            NAME_REF@37..41
-                              IDENT@37..41 "Self"
-                        R_PAREN@41..42 ")"
-                      WHITESPACE@42..43 " "
-                      RET_TYPE@43..49
-                        THIN_ARROW@43..45 "->"
-                        WHITESPACE@45..46 " "
-                        PATH_TYPE@46..49
-                          NAME_REF@46..49
-                            IDENT@46..49 "str"
-                    SEMICOLON@49..50 ";"
-                  WHITESPACE@50..51 " "
-                  R_BRACE@51..52 "}"
-                SEMICOLON@52..53 ";"
-              WHITESPACE@53..54 "\n"
-              TYPE_ITEM@54..157
-                ITEM_HEAD@54..58
-                  TYPE_KW@54..58 "type"
-                WHITESPACE@58..59 " "
-                NAME@59..60
-                  IDENT@59..60 "P"
-                WHITESPACE@60..61 " "
-                EQ@61..62 "="
-                WHITESPACE@62..63 " "
-                RECORD_EXPR@63..82
-                  STRUCT_KW@63..69 "struct"
-                  WHITESPACE@69..70 " "
-                  L_BRACE@70..71 "{"
-                  WHITESPACE@71..72 " "
-                  RECORD_EXPR_FIELD@72..80
-                    NAME_REF@72..73
-                      IDENT@72..73 "a"
-                    COLON@73..74 ":"
-                    WHITESPACE@74..75 " "
-                    PATH_TYPE@75..80
-                      NAME_REF@75..80
-                        IDENT@75..80 "usize"
-                  WHITESPACE@80..81 " "
-                  R_BRACE@81..82 "}"
-                WHITESPACE@82..83 " "
-                WITH_GROUP@83..156
-                  WITH_KW@83..87 "with"
-                  WHITESPACE@87..88 " "
-                  L_BRACE@88..89 "{"
-                  WHITESPACE@89..94 "\n    "
-                  IMPL_ELEMENT@94..154
-                    IMPL_KW@94..98 "impl"
-                    WHITESPACE@98..99 " "
-                    PATH_TYPE@99..103
-                      NAME_REF@99..103
-                        IDENT@99..103 "Show"
-                    WHITESPACE@103..104 " "
-                    L_BRACE@104..105 "{"
-                    WHITESPACE@105..114 "\n        "
-                    MEMBER@114..148
-                      NAME@114..118
-                        IDENT@114..118 "show"
-                      WHITESPACE@118..119 " "
-                      EQ@119..120 "="
-                      WHITESPACE@120..121 " "
-                      FN_LITERAL@121..147
-                        FN_KW@121..123 "fn"
-                        PARAM_LIST@123..132
-                          L_PAREN@123..124 "("
-                          PARAM@124..131
-                            BIND_PAT@124..125
-                              NAME@124..125
-                                IDENT@124..125 "x"
-                            COLON@125..126 ":"
-                            WHITESPACE@126..127 " "
-                            PATH_TYPE@127..131
-                              NAME_REF@127..131
-                                IDENT@127..131 "Self"
-                          R_PAREN@131..132 ")"
-                        WHITESPACE@132..133 " "
-                        RET_TYPE@133..139
-                          THIN_ARROW@133..135 "->"
-                          WHITESPACE@135..136 " "
-                          PATH_TYPE@136..139
-                            NAME_REF@136..139
-                              IDENT@136..139 "str"
-                        WHITESPACE@139..140 " "
-                        BLOCK_EXPR@140..147
-                          L_BRACE@140..141 "{"
-                          WHITESPACE@141..142 " "
-                          LITERAL@142..145
-                            STRING@142..145 "\"p\""
-                          WHITESPACE@145..146 " "
-                          R_BRACE@146..147 "}"
-                      SEMICOLON@147..148 ";"
-                    WHITESPACE@148..153 "\n    "
-                    R_BRACE@153..154 "}"
-                  WHITESPACE@154..155 "\n"
-                  R_BRACE@155..156 "}"
-                SEMICOLON@156..157 ";"
-              WHITESPACE@157..158 "\n"
+                        PARAM@34..38
+                          PATH_TYPE@34..38
+                            NAME_REF@34..38
+                              IDENT@34..38 "Self"
+                        R_PAREN@38..39 ")"
+                      WHITESPACE@39..40 " "
+                      RET_TYPE@40..46
+                        THIN_ARROW@40..42 "->"
+                        WHITESPACE@42..43 " "
+                        PATH_TYPE@43..46
+                          NAME_REF@43..46
+                            IDENT@43..46 "str"
+                    SEMICOLON@46..47 ";"
+                  WHITESPACE@47..48 " "
+                  R_BRACE@48..49 "}"
+                SEMICOLON@49..50 ";"
+              WHITESPACE@50..51 "\n"
+              TYPE_ITEM@51..154
+                ITEM_HEAD@51..55
+                  TYPE_KW@51..55 "type"
+                WHITESPACE@55..56 " "
+                NAME@56..57
+                  IDENT@56..57 "P"
+                WHITESPACE@57..58 " "
+                EQ@58..59 "="
+                WHITESPACE@59..60 " "
+                RECORD_EXPR@60..79
+                  STRUCT_KW@60..66 "struct"
+                  WHITESPACE@66..67 " "
+                  L_BRACE@67..68 "{"
+                  WHITESPACE@68..69 " "
+                  RECORD_EXPR_FIELD@69..77
+                    NAME_REF@69..70
+                      IDENT@69..70 "a"
+                    COLON@70..71 ":"
+                    WHITESPACE@71..72 " "
+                    PATH_TYPE@72..77
+                      NAME_REF@72..77
+                        IDENT@72..77 "usize"
+                  WHITESPACE@77..78 " "
+                  R_BRACE@78..79 "}"
+                WHITESPACE@79..80 " "
+                WITH_GROUP@80..153
+                  WITH_KW@80..84 "with"
+                  WHITESPACE@84..85 " "
+                  L_BRACE@85..86 "{"
+                  WHITESPACE@86..91 "\n    "
+                  IMPL_ELEMENT@91..151
+                    IMPL_KW@91..95 "impl"
+                    WHITESPACE@95..96 " "
+                    PATH_TYPE@96..100
+                      NAME_REF@96..100
+                        IDENT@96..100 "Show"
+                    WHITESPACE@100..101 " "
+                    L_BRACE@101..102 "{"
+                    WHITESPACE@102..111 "\n        "
+                    MEMBER@111..145
+                      NAME@111..115
+                        IDENT@111..115 "show"
+                      WHITESPACE@115..116 " "
+                      EQ@116..117 "="
+                      WHITESPACE@117..118 " "
+                      FN_LITERAL@118..144
+                        FN_KW@118..120 "fn"
+                        PARAM_LIST@120..129
+                          L_PAREN@120..121 "("
+                          PARAM@121..128
+                            BIND_PAT@121..122
+                              NAME@121..122
+                                IDENT@121..122 "x"
+                            COLON@122..123 ":"
+                            WHITESPACE@123..124 " "
+                            PATH_TYPE@124..128
+                              NAME_REF@124..128
+                                IDENT@124..128 "Self"
+                          R_PAREN@128..129 ")"
+                        WHITESPACE@129..130 " "
+                        RET_TYPE@130..136
+                          THIN_ARROW@130..132 "->"
+                          WHITESPACE@132..133 " "
+                          PATH_TYPE@133..136
+                            NAME_REF@133..136
+                              IDENT@133..136 "str"
+                        WHITESPACE@136..137 " "
+                        BLOCK_EXPR@137..144
+                          L_BRACE@137..138 "{"
+                          WHITESPACE@138..139 " "
+                          LITERAL@139..142
+                            STRING@139..142 "\"p\""
+                          WHITESPACE@142..143 " "
+                          R_BRACE@143..144 "}"
+                      SEMICOLON@144..145 ";"
+                    WHITESPACE@145..150 "\n    "
+                    R_BRACE@150..151 "}"
+                  WHITESPACE@151..152 "\n"
+                  R_BRACE@152..153 "}"
+                SEMICOLON@153..154 ";"
+              WHITESPACE@154..155 "\n"
         "#]],
     );
 }
@@ -14420,16 +14435,16 @@ type P = struct { a: usize } with {
 fn trait_side_impl_is_live() {
     check(
         r#"
-trait Show = requires { show: fn(x: Self) -> str; } with {
+trait Show = requires { show: fn(Self) -> str; } with {
     impl usize {
         show = fn(x: usize) -> str { "n" };
     }
 };
 "#,
         expect![[r#"
-            SOURCE_FILE@0..130
+            SOURCE_FILE@0..127
               WHITESPACE@0..1 "\n"
-              TRAIT_ITEM@1..129
+              TRAIT_ITEM@1..126
                 ITEM_HEAD@1..6
                   TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
@@ -14438,97 +14453,92 @@ trait Show = requires { show: fn(x: Self) -> str; } with {
                 WHITESPACE@11..12 " "
                 EQ@12..13 "="
                 WHITESPACE@13..14 " "
-                REQUIRES_DEF@14..52
+                REQUIRES_DEF@14..49
                   REQUIRES_KW@14..22 "requires"
                   WHITESPACE@22..23 " "
                   L_BRACE@23..24 "{"
                   WHITESPACE@24..25 " "
-                  MEMBER@25..50
+                  MEMBER@25..47
                     NAME@25..29
                       IDENT@25..29 "show"
                     COLON@29..30 ":"
                     WHITESPACE@30..31 " "
-                    FN_TYPE@31..49
+                    FN_TYPE@31..46
                       FN_KW@31..33 "fn"
-                      PARAM_LIST@33..42
+                      PARAM_LIST@33..39
                         L_PAREN@33..34 "("
-                        PARAM@34..41
-                          BIND_PAT@34..35
-                            NAME@34..35
-                              IDENT@34..35 "x"
-                          COLON@35..36 ":"
-                          WHITESPACE@36..37 " "
-                          PATH_TYPE@37..41
-                            NAME_REF@37..41
-                              IDENT@37..41 "Self"
-                        R_PAREN@41..42 ")"
-                      WHITESPACE@42..43 " "
-                      RET_TYPE@43..49
-                        THIN_ARROW@43..45 "->"
-                        WHITESPACE@45..46 " "
-                        PATH_TYPE@46..49
-                          NAME_REF@46..49
-                            IDENT@46..49 "str"
-                    SEMICOLON@49..50 ";"
-                  WHITESPACE@50..51 " "
-                  R_BRACE@51..52 "}"
-                WHITESPACE@52..53 " "
-                WITH_GROUP@53..128
-                  WITH_KW@53..57 "with"
-                  WHITESPACE@57..58 " "
-                  L_BRACE@58..59 "{"
-                  WHITESPACE@59..64 "\n    "
-                  IMPL_ELEMENT@64..126
-                    IMPL_KW@64..68 "impl"
-                    WHITESPACE@68..69 " "
-                    PATH_TYPE@69..74
-                      NAME_REF@69..74
-                        IDENT@69..74 "usize"
-                    WHITESPACE@74..75 " "
-                    L_BRACE@75..76 "{"
-                    WHITESPACE@76..85 "\n        "
-                    MEMBER@85..120
-                      NAME@85..89
-                        IDENT@85..89 "show"
-                      WHITESPACE@89..90 " "
-                      EQ@90..91 "="
-                      WHITESPACE@91..92 " "
-                      FN_LITERAL@92..119
-                        FN_KW@92..94 "fn"
-                        PARAM_LIST@94..104
-                          L_PAREN@94..95 "("
-                          PARAM@95..103
-                            BIND_PAT@95..96
-                              NAME@95..96
-                                IDENT@95..96 "x"
-                            COLON@96..97 ":"
-                            WHITESPACE@97..98 " "
-                            PATH_TYPE@98..103
-                              NAME_REF@98..103
-                                IDENT@98..103 "usize"
-                          R_PAREN@103..104 ")"
-                        WHITESPACE@104..105 " "
-                        RET_TYPE@105..111
-                          THIN_ARROW@105..107 "->"
-                          WHITESPACE@107..108 " "
-                          PATH_TYPE@108..111
-                            NAME_REF@108..111
-                              IDENT@108..111 "str"
-                        WHITESPACE@111..112 " "
-                        BLOCK_EXPR@112..119
-                          L_BRACE@112..113 "{"
-                          WHITESPACE@113..114 " "
-                          LITERAL@114..117
-                            STRING@114..117 "\"n\""
-                          WHITESPACE@117..118 " "
-                          R_BRACE@118..119 "}"
-                      SEMICOLON@119..120 ";"
-                    WHITESPACE@120..125 "\n    "
-                    R_BRACE@125..126 "}"
-                  WHITESPACE@126..127 "\n"
-                  R_BRACE@127..128 "}"
-                SEMICOLON@128..129 ";"
-              WHITESPACE@129..130 "\n"
+                        PARAM@34..38
+                          PATH_TYPE@34..38
+                            NAME_REF@34..38
+                              IDENT@34..38 "Self"
+                        R_PAREN@38..39 ")"
+                      WHITESPACE@39..40 " "
+                      RET_TYPE@40..46
+                        THIN_ARROW@40..42 "->"
+                        WHITESPACE@42..43 " "
+                        PATH_TYPE@43..46
+                          NAME_REF@43..46
+                            IDENT@43..46 "str"
+                    SEMICOLON@46..47 ";"
+                  WHITESPACE@47..48 " "
+                  R_BRACE@48..49 "}"
+                WHITESPACE@49..50 " "
+                WITH_GROUP@50..125
+                  WITH_KW@50..54 "with"
+                  WHITESPACE@54..55 " "
+                  L_BRACE@55..56 "{"
+                  WHITESPACE@56..61 "\n    "
+                  IMPL_ELEMENT@61..123
+                    IMPL_KW@61..65 "impl"
+                    WHITESPACE@65..66 " "
+                    PATH_TYPE@66..71
+                      NAME_REF@66..71
+                        IDENT@66..71 "usize"
+                    WHITESPACE@71..72 " "
+                    L_BRACE@72..73 "{"
+                    WHITESPACE@73..82 "\n        "
+                    MEMBER@82..117
+                      NAME@82..86
+                        IDENT@82..86 "show"
+                      WHITESPACE@86..87 " "
+                      EQ@87..88 "="
+                      WHITESPACE@88..89 " "
+                      FN_LITERAL@89..116
+                        FN_KW@89..91 "fn"
+                        PARAM_LIST@91..101
+                          L_PAREN@91..92 "("
+                          PARAM@92..100
+                            BIND_PAT@92..93
+                              NAME@92..93
+                                IDENT@92..93 "x"
+                            COLON@93..94 ":"
+                            WHITESPACE@94..95 " "
+                            PATH_TYPE@95..100
+                              NAME_REF@95..100
+                                IDENT@95..100 "usize"
+                          R_PAREN@100..101 ")"
+                        WHITESPACE@101..102 " "
+                        RET_TYPE@102..108
+                          THIN_ARROW@102..104 "->"
+                          WHITESPACE@104..105 " "
+                          PATH_TYPE@105..108
+                            NAME_REF@105..108
+                              IDENT@105..108 "str"
+                        WHITESPACE@108..109 " "
+                        BLOCK_EXPR@109..116
+                          L_BRACE@109..110 "{"
+                          WHITESPACE@110..111 " "
+                          LITERAL@111..114
+                            STRING@111..114 "\"n\""
+                          WHITESPACE@114..115 " "
+                          R_BRACE@115..116 "}"
+                      SEMICOLON@116..117 ";"
+                    WHITESPACE@117..122 "\n    "
+                    R_BRACE@122..123 "}"
+                  WHITESPACE@123..124 "\n"
+                  R_BRACE@124..125 "}"
+                SEMICOLON@125..126 ";"
+              WHITESPACE@126..127 "\n"
         "#]],
     );
 }
@@ -14644,7 +14654,7 @@ type P = struct { a: usize } with {
 fn trait_impl_on_generic_type_reserved() {
     check(
         r#"
-trait Show = requires { show: fn(x: Self) -> str; };
+trait Show = requires { show: fn(Self) -> str; };
 type V = struct::<T> { a: T } with {
     impl Show {
         show = fn(x: Self) -> str { "v" };
@@ -14652,9 +14662,9 @@ type V = struct::<T> { a: T } with {
 };
 "#,
         expect![[r#"
-            SOURCE_FILE@0..159
+            SOURCE_FILE@0..156
               WHITESPACE@0..1 "\n"
-              TRAIT_ITEM@1..53
+              TRAIT_ITEM@1..50
                 ITEM_HEAD@1..6
                   TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
@@ -14663,131 +14673,126 @@ type V = struct::<T> { a: T } with {
                 WHITESPACE@11..12 " "
                 EQ@12..13 "="
                 WHITESPACE@13..14 " "
-                REQUIRES_DEF@14..52
+                REQUIRES_DEF@14..49
                   REQUIRES_KW@14..22 "requires"
                   WHITESPACE@22..23 " "
                   L_BRACE@23..24 "{"
                   WHITESPACE@24..25 " "
-                  MEMBER@25..50
+                  MEMBER@25..47
                     NAME@25..29
                       IDENT@25..29 "show"
                     COLON@29..30 ":"
                     WHITESPACE@30..31 " "
-                    FN_TYPE@31..49
+                    FN_TYPE@31..46
                       FN_KW@31..33 "fn"
-                      PARAM_LIST@33..42
+                      PARAM_LIST@33..39
                         L_PAREN@33..34 "("
-                        PARAM@34..41
-                          BIND_PAT@34..35
-                            NAME@34..35
-                              IDENT@34..35 "x"
-                          COLON@35..36 ":"
-                          WHITESPACE@36..37 " "
-                          PATH_TYPE@37..41
-                            NAME_REF@37..41
-                              IDENT@37..41 "Self"
-                        R_PAREN@41..42 ")"
-                      WHITESPACE@42..43 " "
-                      RET_TYPE@43..49
-                        THIN_ARROW@43..45 "->"
-                        WHITESPACE@45..46 " "
-                        PATH_TYPE@46..49
-                          NAME_REF@46..49
-                            IDENT@46..49 "str"
-                    SEMICOLON@49..50 ";"
-                  WHITESPACE@50..51 " "
-                  R_BRACE@51..52 "}"
-                SEMICOLON@52..53 ";"
-              WHITESPACE@53..54 "\n"
-              TYPE_ITEM@54..158
-                ITEM_HEAD@54..58
-                  TYPE_KW@54..58 "type"
-                WHITESPACE@58..59 " "
-                NAME@59..60
-                  IDENT@59..60 "V"
-                WHITESPACE@60..61 " "
-                EQ@61..62 "="
-                WHITESPACE@62..63 " "
-                RECORD_EXPR@63..83
-                  STRUCT_KW@63..69 "struct"
-                  GENERIC_PARAM_LIST@69..74
-                    COLON2@69..71 "::"
-                    L_ANGLE@71..72 "<"
-                    TYPE_PARAM@72..73
-                      NAME@72..73
-                        IDENT@72..73 "T"
-                    R_ANGLE@73..74 ">"
-                  WHITESPACE@74..75 " "
-                  L_BRACE@75..76 "{"
-                  WHITESPACE@76..77 " "
-                  RECORD_EXPR_FIELD@77..81
-                    NAME_REF@77..78
-                      IDENT@77..78 "a"
-                    COLON@78..79 ":"
-                    WHITESPACE@79..80 " "
-                    PATH_TYPE@80..81
-                      NAME_REF@80..81
-                        IDENT@80..81 "T"
-                  WHITESPACE@81..82 " "
-                  R_BRACE@82..83 "}"
-                WHITESPACE@83..84 " "
-                WITH_GROUP@84..157
-                  WITH_KW@84..88 "with"
-                  WHITESPACE@88..89 " "
-                  L_BRACE@89..90 "{"
-                  WHITESPACE@90..95 "\n    "
-                  IMPL_ELEMENT@95..155
-                    IMPL_KW@95..99 "impl"
-                    WHITESPACE@99..100 " "
-                    PATH_TYPE@100..104
-                      NAME_REF@100..104
-                        IDENT@100..104 "Show"
-                    WHITESPACE@104..105 " "
-                    L_BRACE@105..106 "{"
-                    WHITESPACE@106..115 "\n        "
-                    MEMBER@115..149
-                      NAME@115..119
-                        IDENT@115..119 "show"
-                      WHITESPACE@119..120 " "
-                      EQ@120..121 "="
-                      WHITESPACE@121..122 " "
-                      FN_LITERAL@122..148
-                        FN_KW@122..124 "fn"
-                        PARAM_LIST@124..133
-                          L_PAREN@124..125 "("
-                          PARAM@125..132
-                            BIND_PAT@125..126
-                              NAME@125..126
-                                IDENT@125..126 "x"
-                            COLON@126..127 ":"
-                            WHITESPACE@127..128 " "
-                            PATH_TYPE@128..132
-                              NAME_REF@128..132
-                                IDENT@128..132 "Self"
-                          R_PAREN@132..133 ")"
-                        WHITESPACE@133..134 " "
-                        RET_TYPE@134..140
-                          THIN_ARROW@134..136 "->"
-                          WHITESPACE@136..137 " "
-                          PATH_TYPE@137..140
-                            NAME_REF@137..140
-                              IDENT@137..140 "str"
-                        WHITESPACE@140..141 " "
-                        BLOCK_EXPR@141..148
-                          L_BRACE@141..142 "{"
-                          WHITESPACE@142..143 " "
-                          LITERAL@143..146
-                            STRING@143..146 "\"v\""
-                          WHITESPACE@146..147 " "
-                          R_BRACE@147..148 "}"
-                      SEMICOLON@148..149 ";"
-                    WHITESPACE@149..154 "\n    "
-                    R_BRACE@154..155 "}"
-                  WHITESPACE@155..156 "\n"
-                  R_BRACE@156..157 "}"
-                SEMICOLON@157..158 ";"
-              WHITESPACE@158..159 "\n"
-            error 100..104: trait impls on generic types are not supported yet
+                        PARAM@34..38
+                          PATH_TYPE@34..38
+                            NAME_REF@34..38
+                              IDENT@34..38 "Self"
+                        R_PAREN@38..39 ")"
+                      WHITESPACE@39..40 " "
+                      RET_TYPE@40..46
+                        THIN_ARROW@40..42 "->"
+                        WHITESPACE@42..43 " "
+                        PATH_TYPE@43..46
+                          NAME_REF@43..46
+                            IDENT@43..46 "str"
+                    SEMICOLON@46..47 ";"
+                  WHITESPACE@47..48 " "
+                  R_BRACE@48..49 "}"
+                SEMICOLON@49..50 ";"
+              WHITESPACE@50..51 "\n"
+              TYPE_ITEM@51..155
+                ITEM_HEAD@51..55
+                  TYPE_KW@51..55 "type"
+                WHITESPACE@55..56 " "
+                NAME@56..57
+                  IDENT@56..57 "V"
+                WHITESPACE@57..58 " "
+                EQ@58..59 "="
+                WHITESPACE@59..60 " "
+                RECORD_EXPR@60..80
+                  STRUCT_KW@60..66 "struct"
+                  GENERIC_PARAM_LIST@66..71
+                    COLON2@66..68 "::"
+                    L_ANGLE@68..69 "<"
+                    TYPE_PARAM@69..70
+                      NAME@69..70
+                        IDENT@69..70 "T"
+                    R_ANGLE@70..71 ">"
+                  WHITESPACE@71..72 " "
+                  L_BRACE@72..73 "{"
+                  WHITESPACE@73..74 " "
+                  RECORD_EXPR_FIELD@74..78
+                    NAME_REF@74..75
+                      IDENT@74..75 "a"
+                    COLON@75..76 ":"
+                    WHITESPACE@76..77 " "
+                    PATH_TYPE@77..78
+                      NAME_REF@77..78
+                        IDENT@77..78 "T"
+                  WHITESPACE@78..79 " "
+                  R_BRACE@79..80 "}"
+                WHITESPACE@80..81 " "
+                WITH_GROUP@81..154
+                  WITH_KW@81..85 "with"
+                  WHITESPACE@85..86 " "
+                  L_BRACE@86..87 "{"
+                  WHITESPACE@87..92 "\n    "
+                  IMPL_ELEMENT@92..152
+                    IMPL_KW@92..96 "impl"
+                    WHITESPACE@96..97 " "
+                    PATH_TYPE@97..101
+                      NAME_REF@97..101
+                        IDENT@97..101 "Show"
+                    WHITESPACE@101..102 " "
+                    L_BRACE@102..103 "{"
+                    WHITESPACE@103..112 "\n        "
+                    MEMBER@112..146
+                      NAME@112..116
+                        IDENT@112..116 "show"
+                      WHITESPACE@116..117 " "
+                      EQ@117..118 "="
+                      WHITESPACE@118..119 " "
+                      FN_LITERAL@119..145
+                        FN_KW@119..121 "fn"
+                        PARAM_LIST@121..130
+                          L_PAREN@121..122 "("
+                          PARAM@122..129
+                            BIND_PAT@122..123
+                              NAME@122..123
+                                IDENT@122..123 "x"
+                            COLON@123..124 ":"
+                            WHITESPACE@124..125 " "
+                            PATH_TYPE@125..129
+                              NAME_REF@125..129
+                                IDENT@125..129 "Self"
+                          R_PAREN@129..130 ")"
+                        WHITESPACE@130..131 " "
+                        RET_TYPE@131..137
+                          THIN_ARROW@131..133 "->"
+                          WHITESPACE@133..134 " "
+                          PATH_TYPE@134..137
+                            NAME_REF@134..137
+                              IDENT@134..137 "str"
+                        WHITESPACE@137..138 " "
+                        BLOCK_EXPR@138..145
+                          L_BRACE@138..139 "{"
+                          WHITESPACE@139..140 " "
+                          LITERAL@140..143
+                            STRING@140..143 "\"v\""
+                          WHITESPACE@143..144 " "
+                          R_BRACE@144..145 "}"
+                      SEMICOLON@145..146 ";"
+                    WHITESPACE@146..151 "\n    "
+                    R_BRACE@151..152 "}"
+                  WHITESPACE@152..153 "\n"
+                  R_BRACE@153..154 "}"
+                SEMICOLON@154..155 ";"
+              WHITESPACE@155..156 "\n"
+            error 97..101: trait impls on generic types are not supported yet
         "#]],
     );
 }
@@ -14796,7 +14801,7 @@ type V = struct::<T> { a: T } with {
 fn generic_binder_allowed_on_trait_impl_member() {
     check(
         r#"
-trait D = requires { fmt: fn::<W>(w: W, x: Self) -> W; };
+trait D = requires { fmt: fn::<W>(W, Self) -> W; };
 type P = struct { a: usize } with {
     impl D {
         fmt = fn::<W>(w: W, x: Self) -> W { w };
@@ -14804,9 +14809,9 @@ type P = struct { a: usize } with {
 };
 "#,
         expect![[r#"
-            SOURCE_FILE@0..166
+            SOURCE_FILE@0..160
               WHITESPACE@0..1 "\n"
-              TRAIT_ITEM@1..58
+              TRAIT_ITEM@1..52
                 ITEM_HEAD@1..6
                   TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
@@ -14815,17 +14820,17 @@ type P = struct { a: usize } with {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                REQUIRES_DEF@11..57
+                REQUIRES_DEF@11..51
                   REQUIRES_KW@11..19 "requires"
                   WHITESPACE@19..20 " "
                   L_BRACE@20..21 "{"
                   WHITESPACE@21..22 " "
-                  MEMBER@22..55
+                  MEMBER@22..49
                     NAME@22..25
                       IDENT@22..25 "fmt"
                     COLON@25..26 ":"
                     WHITESPACE@26..27 " "
-                    FN_TYPE@27..54
+                    FN_TYPE@27..48
                       FN_KW@27..29 "fn"
                       GENERIC_PARAM_LIST@29..34
                         COLON2@29..31 "::"
@@ -14834,141 +14839,131 @@ type P = struct { a: usize } with {
                           NAME@32..33
                             IDENT@32..33 "W"
                         R_ANGLE@33..34 ">"
-                      PARAM_LIST@34..49
+                      PARAM_LIST@34..43
                         L_PAREN@34..35 "("
-                        PARAM@35..39
-                          BIND_PAT@35..36
-                            NAME@35..36
-                              IDENT@35..36 "w"
-                          COLON@36..37 ":"
-                          WHITESPACE@37..38 " "
-                          PATH_TYPE@38..39
-                            NAME_REF@38..39
-                              IDENT@38..39 "W"
-                        COMMA@39..40 ","
-                        WHITESPACE@40..41 " "
-                        PARAM@41..48
-                          BIND_PAT@41..42
-                            NAME@41..42
-                              IDENT@41..42 "x"
-                          COLON@42..43 ":"
-                          WHITESPACE@43..44 " "
-                          PATH_TYPE@44..48
-                            NAME_REF@44..48
-                              IDENT@44..48 "Self"
-                        R_PAREN@48..49 ")"
-                      WHITESPACE@49..50 " "
-                      RET_TYPE@50..54
-                        THIN_ARROW@50..52 "->"
-                        WHITESPACE@52..53 " "
-                        PATH_TYPE@53..54
-                          NAME_REF@53..54
-                            IDENT@53..54 "W"
-                    SEMICOLON@54..55 ";"
-                  WHITESPACE@55..56 " "
-                  R_BRACE@56..57 "}"
-                SEMICOLON@57..58 ";"
-              WHITESPACE@58..59 "\n"
-              TYPE_ITEM@59..165
-                ITEM_HEAD@59..63
-                  TYPE_KW@59..63 "type"
-                WHITESPACE@63..64 " "
-                NAME@64..65
-                  IDENT@64..65 "P"
-                WHITESPACE@65..66 " "
-                EQ@66..67 "="
-                WHITESPACE@67..68 " "
-                RECORD_EXPR@68..87
-                  STRUCT_KW@68..74 "struct"
-                  WHITESPACE@74..75 " "
-                  L_BRACE@75..76 "{"
-                  WHITESPACE@76..77 " "
-                  RECORD_EXPR_FIELD@77..85
-                    NAME_REF@77..78
-                      IDENT@77..78 "a"
-                    COLON@78..79 ":"
-                    WHITESPACE@79..80 " "
-                    PATH_TYPE@80..85
-                      NAME_REF@80..85
-                        IDENT@80..85 "usize"
-                  WHITESPACE@85..86 " "
-                  R_BRACE@86..87 "}"
-                WHITESPACE@87..88 " "
-                WITH_GROUP@88..164
-                  WITH_KW@88..92 "with"
-                  WHITESPACE@92..93 " "
-                  L_BRACE@93..94 "{"
-                  WHITESPACE@94..99 "\n    "
-                  IMPL_ELEMENT@99..162
-                    IMPL_KW@99..103 "impl"
-                    WHITESPACE@103..104 " "
-                    PATH_TYPE@104..105
-                      NAME_REF@104..105
-                        IDENT@104..105 "D"
-                    WHITESPACE@105..106 " "
-                    L_BRACE@106..107 "{"
-                    WHITESPACE@107..116 "\n        "
-                    MEMBER@116..156
-                      NAME@116..119
-                        IDENT@116..119 "fmt"
-                      WHITESPACE@119..120 " "
-                      EQ@120..121 "="
-                      WHITESPACE@121..122 " "
-                      FN_LITERAL@122..155
-                        FN_KW@122..124 "fn"
-                        GENERIC_PARAM_LIST@124..129
-                          COLON2@124..126 "::"
-                          L_ANGLE@126..127 "<"
-                          TYPE_PARAM@127..128
-                            NAME@127..128
-                              IDENT@127..128 "W"
-                          R_ANGLE@128..129 ">"
-                        PARAM_LIST@129..144
-                          L_PAREN@129..130 "("
-                          PARAM@130..134
+                        PARAM@35..36
+                          PATH_TYPE@35..36
+                            NAME_REF@35..36
+                              IDENT@35..36 "W"
+                        COMMA@36..37 ","
+                        WHITESPACE@37..38 " "
+                        PARAM@38..42
+                          PATH_TYPE@38..42
+                            NAME_REF@38..42
+                              IDENT@38..42 "Self"
+                        R_PAREN@42..43 ")"
+                      WHITESPACE@43..44 " "
+                      RET_TYPE@44..48
+                        THIN_ARROW@44..46 "->"
+                        WHITESPACE@46..47 " "
+                        PATH_TYPE@47..48
+                          NAME_REF@47..48
+                            IDENT@47..48 "W"
+                    SEMICOLON@48..49 ";"
+                  WHITESPACE@49..50 " "
+                  R_BRACE@50..51 "}"
+                SEMICOLON@51..52 ";"
+              WHITESPACE@52..53 "\n"
+              TYPE_ITEM@53..159
+                ITEM_HEAD@53..57
+                  TYPE_KW@53..57 "type"
+                WHITESPACE@57..58 " "
+                NAME@58..59
+                  IDENT@58..59 "P"
+                WHITESPACE@59..60 " "
+                EQ@60..61 "="
+                WHITESPACE@61..62 " "
+                RECORD_EXPR@62..81
+                  STRUCT_KW@62..68 "struct"
+                  WHITESPACE@68..69 " "
+                  L_BRACE@69..70 "{"
+                  WHITESPACE@70..71 " "
+                  RECORD_EXPR_FIELD@71..79
+                    NAME_REF@71..72
+                      IDENT@71..72 "a"
+                    COLON@72..73 ":"
+                    WHITESPACE@73..74 " "
+                    PATH_TYPE@74..79
+                      NAME_REF@74..79
+                        IDENT@74..79 "usize"
+                  WHITESPACE@79..80 " "
+                  R_BRACE@80..81 "}"
+                WHITESPACE@81..82 " "
+                WITH_GROUP@82..158
+                  WITH_KW@82..86 "with"
+                  WHITESPACE@86..87 " "
+                  L_BRACE@87..88 "{"
+                  WHITESPACE@88..93 "\n    "
+                  IMPL_ELEMENT@93..156
+                    IMPL_KW@93..97 "impl"
+                    WHITESPACE@97..98 " "
+                    PATH_TYPE@98..99
+                      NAME_REF@98..99
+                        IDENT@98..99 "D"
+                    WHITESPACE@99..100 " "
+                    L_BRACE@100..101 "{"
+                    WHITESPACE@101..110 "\n        "
+                    MEMBER@110..150
+                      NAME@110..113
+                        IDENT@110..113 "fmt"
+                      WHITESPACE@113..114 " "
+                      EQ@114..115 "="
+                      WHITESPACE@115..116 " "
+                      FN_LITERAL@116..149
+                        FN_KW@116..118 "fn"
+                        GENERIC_PARAM_LIST@118..123
+                          COLON2@118..120 "::"
+                          L_ANGLE@120..121 "<"
+                          TYPE_PARAM@121..122
+                            NAME@121..122
+                              IDENT@121..122 "W"
+                          R_ANGLE@122..123 ">"
+                        PARAM_LIST@123..138
+                          L_PAREN@123..124 "("
+                          PARAM@124..128
+                            BIND_PAT@124..125
+                              NAME@124..125
+                                IDENT@124..125 "w"
+                            COLON@125..126 ":"
+                            WHITESPACE@126..127 " "
+                            PATH_TYPE@127..128
+                              NAME_REF@127..128
+                                IDENT@127..128 "W"
+                          COMMA@128..129 ","
+                          WHITESPACE@129..130 " "
+                          PARAM@130..137
                             BIND_PAT@130..131
                               NAME@130..131
-                                IDENT@130..131 "w"
+                                IDENT@130..131 "x"
                             COLON@131..132 ":"
                             WHITESPACE@132..133 " "
-                            PATH_TYPE@133..134
-                              NAME_REF@133..134
-                                IDENT@133..134 "W"
-                          COMMA@134..135 ","
-                          WHITESPACE@135..136 " "
-                          PARAM@136..143
-                            BIND_PAT@136..137
-                              NAME@136..137
-                                IDENT@136..137 "x"
-                            COLON@137..138 ":"
-                            WHITESPACE@138..139 " "
-                            PATH_TYPE@139..143
-                              NAME_REF@139..143
-                                IDENT@139..143 "Self"
-                          R_PAREN@143..144 ")"
-                        WHITESPACE@144..145 " "
-                        RET_TYPE@145..149
-                          THIN_ARROW@145..147 "->"
+                            PATH_TYPE@133..137
+                              NAME_REF@133..137
+                                IDENT@133..137 "Self"
+                          R_PAREN@137..138 ")"
+                        WHITESPACE@138..139 " "
+                        RET_TYPE@139..143
+                          THIN_ARROW@139..141 "->"
+                          WHITESPACE@141..142 " "
+                          PATH_TYPE@142..143
+                            NAME_REF@142..143
+                              IDENT@142..143 "W"
+                        WHITESPACE@143..144 " "
+                        BLOCK_EXPR@144..149
+                          L_BRACE@144..145 "{"
+                          WHITESPACE@145..146 " "
+                          PATH_EXPR@146..147
+                            NAME_REF@146..147
+                              IDENT@146..147 "w"
                           WHITESPACE@147..148 " "
-                          PATH_TYPE@148..149
-                            NAME_REF@148..149
-                              IDENT@148..149 "W"
-                        WHITESPACE@149..150 " "
-                        BLOCK_EXPR@150..155
-                          L_BRACE@150..151 "{"
-                          WHITESPACE@151..152 " "
-                          PATH_EXPR@152..153
-                            NAME_REF@152..153
-                              IDENT@152..153 "w"
-                          WHITESPACE@153..154 " "
-                          R_BRACE@154..155 "}"
-                      SEMICOLON@155..156 ";"
-                    WHITESPACE@156..161 "\n    "
-                    R_BRACE@161..162 "}"
-                  WHITESPACE@162..163 "\n"
-                  R_BRACE@163..164 "}"
-                SEMICOLON@164..165 ";"
-              WHITESPACE@165..166 "\n"
+                          R_BRACE@148..149 "}"
+                      SEMICOLON@149..150 ";"
+                    WHITESPACE@150..155 "\n    "
+                    R_BRACE@155..156 "}"
+                  WHITESPACE@156..157 "\n"
+                  R_BRACE@157..158 "}"
+                SEMICOLON@158..159 ";"
+              WHITESPACE@159..160 "\n"
         "#]],
     );
 }
@@ -14977,17 +14972,17 @@ type P = struct { a: usize } with {
 fn colon_declared_member_in_impl_rejected() {
     check(
         r#"
-trait D = requires { fmt: fn(x: Self) -> str; };
+trait D = requires { fmt: fn(Self) -> str; };
 type P = struct { a: usize } with {
     impl D {
-        fmt: fn(x: Self) -> str;
+        fmt: fn(Self) -> str;
     }
 };
 "#,
         expect![[r#"
-            SOURCE_FILE@0..141
+            SOURCE_FILE@0..135
               WHITESPACE@0..1 "\n"
-              TRAIT_ITEM@1..49
+              TRAIT_ITEM@1..46
                 ITEM_HEAD@1..6
                   TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
@@ -14996,115 +14991,105 @@ type P = struct { a: usize } with {
                 WHITESPACE@8..9 " "
                 EQ@9..10 "="
                 WHITESPACE@10..11 " "
-                REQUIRES_DEF@11..48
+                REQUIRES_DEF@11..45
                   REQUIRES_KW@11..19 "requires"
                   WHITESPACE@19..20 " "
                   L_BRACE@20..21 "{"
                   WHITESPACE@21..22 " "
-                  MEMBER@22..46
+                  MEMBER@22..43
                     NAME@22..25
                       IDENT@22..25 "fmt"
                     COLON@25..26 ":"
                     WHITESPACE@26..27 " "
-                    FN_TYPE@27..45
+                    FN_TYPE@27..42
                       FN_KW@27..29 "fn"
-                      PARAM_LIST@29..38
+                      PARAM_LIST@29..35
                         L_PAREN@29..30 "("
-                        PARAM@30..37
-                          BIND_PAT@30..31
-                            NAME@30..31
-                              IDENT@30..31 "x"
-                          COLON@31..32 ":"
-                          WHITESPACE@32..33 " "
-                          PATH_TYPE@33..37
-                            NAME_REF@33..37
-                              IDENT@33..37 "Self"
-                        R_PAREN@37..38 ")"
-                      WHITESPACE@38..39 " "
-                      RET_TYPE@39..45
-                        THIN_ARROW@39..41 "->"
-                        WHITESPACE@41..42 " "
-                        PATH_TYPE@42..45
-                          NAME_REF@42..45
-                            IDENT@42..45 "str"
-                    SEMICOLON@45..46 ";"
-                  WHITESPACE@46..47 " "
-                  R_BRACE@47..48 "}"
-                SEMICOLON@48..49 ";"
-              WHITESPACE@49..50 "\n"
-              TYPE_ITEM@50..140
-                ITEM_HEAD@50..54
-                  TYPE_KW@50..54 "type"
-                WHITESPACE@54..55 " "
-                NAME@55..56
-                  IDENT@55..56 "P"
-                WHITESPACE@56..57 " "
-                EQ@57..58 "="
-                WHITESPACE@58..59 " "
-                RECORD_EXPR@59..78
-                  STRUCT_KW@59..65 "struct"
-                  WHITESPACE@65..66 " "
-                  L_BRACE@66..67 "{"
-                  WHITESPACE@67..68 " "
-                  RECORD_EXPR_FIELD@68..76
-                    NAME_REF@68..69
-                      IDENT@68..69 "a"
-                    COLON@69..70 ":"
-                    WHITESPACE@70..71 " "
-                    PATH_TYPE@71..76
-                      NAME_REF@71..76
-                        IDENT@71..76 "usize"
-                  WHITESPACE@76..77 " "
-                  R_BRACE@77..78 "}"
-                WHITESPACE@78..79 " "
-                WITH_GROUP@79..139
-                  WITH_KW@79..83 "with"
-                  WHITESPACE@83..84 " "
-                  L_BRACE@84..85 "{"
-                  WHITESPACE@85..90 "\n    "
-                  IMPL_ELEMENT@90..137
-                    IMPL_KW@90..94 "impl"
-                    WHITESPACE@94..95 " "
-                    PATH_TYPE@95..96
-                      NAME_REF@95..96
-                        IDENT@95..96 "D"
-                    WHITESPACE@96..97 " "
-                    L_BRACE@97..98 "{"
-                    WHITESPACE@98..107 "\n        "
-                    MEMBER@107..131
-                      NAME@107..110
-                        IDENT@107..110 "fmt"
-                      COLON@110..111 ":"
-                      WHITESPACE@111..112 " "
-                      FN_TYPE@112..130
-                        FN_KW@112..114 "fn"
-                        PARAM_LIST@114..123
-                          L_PAREN@114..115 "("
-                          PARAM@115..122
-                            BIND_PAT@115..116
-                              NAME@115..116
-                                IDENT@115..116 "x"
-                            COLON@116..117 ":"
-                            WHITESPACE@117..118 " "
-                            PATH_TYPE@118..122
-                              NAME_REF@118..122
-                                IDENT@118..122 "Self"
-                          R_PAREN@122..123 ")"
-                        WHITESPACE@123..124 " "
-                        RET_TYPE@124..130
-                          THIN_ARROW@124..126 "->"
-                          WHITESPACE@126..127 " "
-                          PATH_TYPE@127..130
-                            NAME_REF@127..130
-                              IDENT@127..130 "str"
-                      SEMICOLON@130..131 ";"
-                    WHITESPACE@131..136 "\n    "
-                    R_BRACE@136..137 "}"
-                  WHITESPACE@137..138 "\n"
-                  R_BRACE@138..139 "}"
-                SEMICOLON@139..140 ";"
-              WHITESPACE@140..141 "\n"
-            error 107..131: an impl member is defined with `=`; the colon-declared requirement form belongs in the trait declaration
+                        PARAM@30..34
+                          PATH_TYPE@30..34
+                            NAME_REF@30..34
+                              IDENT@30..34 "Self"
+                        R_PAREN@34..35 ")"
+                      WHITESPACE@35..36 " "
+                      RET_TYPE@36..42
+                        THIN_ARROW@36..38 "->"
+                        WHITESPACE@38..39 " "
+                        PATH_TYPE@39..42
+                          NAME_REF@39..42
+                            IDENT@39..42 "str"
+                    SEMICOLON@42..43 ";"
+                  WHITESPACE@43..44 " "
+                  R_BRACE@44..45 "}"
+                SEMICOLON@45..46 ";"
+              WHITESPACE@46..47 "\n"
+              TYPE_ITEM@47..134
+                ITEM_HEAD@47..51
+                  TYPE_KW@47..51 "type"
+                WHITESPACE@51..52 " "
+                NAME@52..53
+                  IDENT@52..53 "P"
+                WHITESPACE@53..54 " "
+                EQ@54..55 "="
+                WHITESPACE@55..56 " "
+                RECORD_EXPR@56..75
+                  STRUCT_KW@56..62 "struct"
+                  WHITESPACE@62..63 " "
+                  L_BRACE@63..64 "{"
+                  WHITESPACE@64..65 " "
+                  RECORD_EXPR_FIELD@65..73
+                    NAME_REF@65..66
+                      IDENT@65..66 "a"
+                    COLON@66..67 ":"
+                    WHITESPACE@67..68 " "
+                    PATH_TYPE@68..73
+                      NAME_REF@68..73
+                        IDENT@68..73 "usize"
+                  WHITESPACE@73..74 " "
+                  R_BRACE@74..75 "}"
+                WHITESPACE@75..76 " "
+                WITH_GROUP@76..133
+                  WITH_KW@76..80 "with"
+                  WHITESPACE@80..81 " "
+                  L_BRACE@81..82 "{"
+                  WHITESPACE@82..87 "\n    "
+                  IMPL_ELEMENT@87..131
+                    IMPL_KW@87..91 "impl"
+                    WHITESPACE@91..92 " "
+                    PATH_TYPE@92..93
+                      NAME_REF@92..93
+                        IDENT@92..93 "D"
+                    WHITESPACE@93..94 " "
+                    L_BRACE@94..95 "{"
+                    WHITESPACE@95..104 "\n        "
+                    MEMBER@104..125
+                      NAME@104..107
+                        IDENT@104..107 "fmt"
+                      COLON@107..108 ":"
+                      WHITESPACE@108..109 " "
+                      FN_TYPE@109..124
+                        FN_KW@109..111 "fn"
+                        PARAM_LIST@111..117
+                          L_PAREN@111..112 "("
+                          PARAM@112..116
+                            PATH_TYPE@112..116
+                              NAME_REF@112..116
+                                IDENT@112..116 "Self"
+                          R_PAREN@116..117 ")"
+                        WHITESPACE@117..118 " "
+                        RET_TYPE@118..124
+                          THIN_ARROW@118..120 "->"
+                          WHITESPACE@120..121 " "
+                          PATH_TYPE@121..124
+                            NAME_REF@121..124
+                              IDENT@121..124 "str"
+                      SEMICOLON@124..125 ";"
+                    WHITESPACE@125..130 "\n    "
+                    R_BRACE@130..131 "}"
+                  WHITESPACE@131..132 "\n"
+                  R_BRACE@132..133 "}"
+                SEMICOLON@133..134 ";"
+              WHITESPACE@134..135 "\n"
+            error 104..125: an impl member is defined with `=`; the colon-declared requirement form belongs in the trait declaration
         "#]],
     );
 }
@@ -15856,14 +15841,14 @@ fn impls_in_generic_trait_chain_reserved() {
     // carries its own reservation (no silent semantics).
     check(
         r#"
-trait Gen = requires::<T> { get: fn(x: Self) -> usize; } with {
+trait Gen = requires::<T> { get: fn(Self) -> usize; } with {
     impl usize { get = fn(x: usize) -> usize { x }; }
 };
 "#,
         expect![[r#"
-            SOURCE_FILE@0..122
+            SOURCE_FILE@0..119
               WHITESPACE@0..1 "\n"
-              TRAIT_ITEM@1..121
+              TRAIT_ITEM@1..118
                 ITEM_HEAD@1..6
                   TRAIT_KW@1..6 "trait"
                 WHITESPACE@6..7 " "
@@ -15872,7 +15857,7 @@ trait Gen = requires::<T> { get: fn(x: Self) -> usize; } with {
                 WHITESPACE@10..11 " "
                 EQ@11..12 "="
                 WHITESPACE@12..13 " "
-                REQUIRES_DEF@13..57
+                REQUIRES_DEF@13..54
                   REQUIRES_KW@13..21 "requires"
                   GENERIC_PARAM_LIST@21..26
                     COLON2@21..23 "::"
@@ -15884,95 +15869,90 @@ trait Gen = requires::<T> { get: fn(x: Self) -> usize; } with {
                   WHITESPACE@26..27 " "
                   L_BRACE@27..28 "{"
                   WHITESPACE@28..29 " "
-                  MEMBER@29..55
+                  MEMBER@29..52
                     NAME@29..32
                       IDENT@29..32 "get"
                     COLON@32..33 ":"
                     WHITESPACE@33..34 " "
-                    FN_TYPE@34..54
+                    FN_TYPE@34..51
                       FN_KW@34..36 "fn"
-                      PARAM_LIST@36..45
+                      PARAM_LIST@36..42
                         L_PAREN@36..37 "("
-                        PARAM@37..44
-                          BIND_PAT@37..38
-                            NAME@37..38
-                              IDENT@37..38 "x"
-                          COLON@38..39 ":"
-                          WHITESPACE@39..40 " "
-                          PATH_TYPE@40..44
-                            NAME_REF@40..44
-                              IDENT@40..44 "Self"
-                        R_PAREN@44..45 ")"
-                      WHITESPACE@45..46 " "
-                      RET_TYPE@46..54
-                        THIN_ARROW@46..48 "->"
-                        WHITESPACE@48..49 " "
-                        PATH_TYPE@49..54
-                          NAME_REF@49..54
-                            IDENT@49..54 "usize"
-                    SEMICOLON@54..55 ";"
-                  WHITESPACE@55..56 " "
-                  R_BRACE@56..57 "}"
-                WHITESPACE@57..58 " "
-                WITH_GROUP@58..120
-                  WITH_KW@58..62 "with"
-                  WHITESPACE@62..63 " "
-                  L_BRACE@63..64 "{"
-                  WHITESPACE@64..69 "\n    "
-                  IMPL_ELEMENT@69..118
-                    IMPL_KW@69..73 "impl"
-                    WHITESPACE@73..74 " "
-                    PATH_TYPE@74..79
-                      NAME_REF@74..79
-                        IDENT@74..79 "usize"
-                    WHITESPACE@79..80 " "
-                    L_BRACE@80..81 "{"
-                    WHITESPACE@81..82 " "
-                    MEMBER@82..116
-                      NAME@82..85
-                        IDENT@82..85 "get"
-                      WHITESPACE@85..86 " "
-                      EQ@86..87 "="
-                      WHITESPACE@87..88 " "
-                      FN_LITERAL@88..115
-                        FN_KW@88..90 "fn"
-                        PARAM_LIST@90..100
-                          L_PAREN@90..91 "("
-                          PARAM@91..99
-                            BIND_PAT@91..92
-                              NAME@91..92
-                                IDENT@91..92 "x"
-                            COLON@92..93 ":"
-                            WHITESPACE@93..94 " "
-                            PATH_TYPE@94..99
-                              NAME_REF@94..99
-                                IDENT@94..99 "usize"
-                          R_PAREN@99..100 ")"
-                        WHITESPACE@100..101 " "
-                        RET_TYPE@101..109
-                          THIN_ARROW@101..103 "->"
-                          WHITESPACE@103..104 " "
-                          PATH_TYPE@104..109
-                            NAME_REF@104..109
-                              IDENT@104..109 "usize"
-                        WHITESPACE@109..110 " "
-                        BLOCK_EXPR@110..115
-                          L_BRACE@110..111 "{"
-                          WHITESPACE@111..112 " "
-                          PATH_EXPR@112..113
-                            NAME_REF@112..113
-                              IDENT@112..113 "x"
-                          WHITESPACE@113..114 " "
-                          R_BRACE@114..115 "}"
-                      SEMICOLON@115..116 ";"
-                    WHITESPACE@116..117 " "
-                    R_BRACE@117..118 "}"
-                  WHITESPACE@118..119 "\n"
-                  R_BRACE@119..120 "}"
-                SEMICOLON@120..121 ";"
-              WHITESPACE@121..122 "\n"
+                        PARAM@37..41
+                          PATH_TYPE@37..41
+                            NAME_REF@37..41
+                              IDENT@37..41 "Self"
+                        R_PAREN@41..42 ")"
+                      WHITESPACE@42..43 " "
+                      RET_TYPE@43..51
+                        THIN_ARROW@43..45 "->"
+                        WHITESPACE@45..46 " "
+                        PATH_TYPE@46..51
+                          NAME_REF@46..51
+                            IDENT@46..51 "usize"
+                    SEMICOLON@51..52 ";"
+                  WHITESPACE@52..53 " "
+                  R_BRACE@53..54 "}"
+                WHITESPACE@54..55 " "
+                WITH_GROUP@55..117
+                  WITH_KW@55..59 "with"
+                  WHITESPACE@59..60 " "
+                  L_BRACE@60..61 "{"
+                  WHITESPACE@61..66 "\n    "
+                  IMPL_ELEMENT@66..115
+                    IMPL_KW@66..70 "impl"
+                    WHITESPACE@70..71 " "
+                    PATH_TYPE@71..76
+                      NAME_REF@71..76
+                        IDENT@71..76 "usize"
+                    WHITESPACE@76..77 " "
+                    L_BRACE@77..78 "{"
+                    WHITESPACE@78..79 " "
+                    MEMBER@79..113
+                      NAME@79..82
+                        IDENT@79..82 "get"
+                      WHITESPACE@82..83 " "
+                      EQ@83..84 "="
+                      WHITESPACE@84..85 " "
+                      FN_LITERAL@85..112
+                        FN_KW@85..87 "fn"
+                        PARAM_LIST@87..97
+                          L_PAREN@87..88 "("
+                          PARAM@88..96
+                            BIND_PAT@88..89
+                              NAME@88..89
+                                IDENT@88..89 "x"
+                            COLON@89..90 ":"
+                            WHITESPACE@90..91 " "
+                            PATH_TYPE@91..96
+                              NAME_REF@91..96
+                                IDENT@91..96 "usize"
+                          R_PAREN@96..97 ")"
+                        WHITESPACE@97..98 " "
+                        RET_TYPE@98..106
+                          THIN_ARROW@98..100 "->"
+                          WHITESPACE@100..101 " "
+                          PATH_TYPE@101..106
+                            NAME_REF@101..106
+                              IDENT@101..106 "usize"
+                        WHITESPACE@106..107 " "
+                        BLOCK_EXPR@107..112
+                          L_BRACE@107..108 "{"
+                          WHITESPACE@108..109 " "
+                          PATH_EXPR@109..110
+                            NAME_REF@109..110
+                              IDENT@109..110 "x"
+                          WHITESPACE@110..111 " "
+                          R_BRACE@111..112 "}"
+                      SEMICOLON@112..113 ";"
+                    WHITESPACE@113..114 " "
+                    R_BRACE@114..115 "}"
+                  WHITESPACE@115..116 "\n"
+                  R_BRACE@116..117 "}"
+                SEMICOLON@117..118 ";"
+              WHITESPACE@118..119 "\n"
             error 21..26: generic traits are not supported yet
-            error 74..79: impls in a generic trait's `with`-chain are not supported yet (generic traits are reserved)
+            error 71..76: impls in a generic trait's `with`-chain are not supported yet (generic traits are reserved)
         "#]],
     );
 }
@@ -16349,7 +16329,7 @@ fn region_params_come_first_in_a_binder() {
     // is checked by the same node, and nothing else reserves that shape, so
     // the ordering error is the only one it produces.
     check_errors(
-        "trait D = requires { size: fn::<T, @a>(x: T.&::<@a>, s: Self) -> usize; };",
+        "trait D = requires { size: fn::<T, @a>(T.&::<@a>, Self) -> usize; };",
         expect![[r#"
             35..37: region parameters come first in a binder; move `@a` before `T`
         "#]],
@@ -16598,10 +16578,10 @@ fn an_extern_item_is_a_declaration_with_no_initializer() {
     // no `=` at all, and the signature is an ordinary `unsafe fn` TYPE in
     // annotation position (named parameters and all).
     check(
-        "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;",
+        "extern static read: unsafe fn(u8.&raw mut, usize) -> isize;",
         expect![[r#"
-            SOURCE_FILE@0..69
-              STATIC_ITEM@0..69
+            SOURCE_FILE@0..59
+              STATIC_ITEM@0..59
                 ITEM_HEAD@0..13
                   EXTERN_KW@0..6 "extern"
                   WHITESPACE@6..7 " "
@@ -16611,56 +16591,46 @@ fn an_extern_item_is_a_declaration_with_no_initializer() {
                   IDENT@14..18 "read"
                 COLON@18..19 ":"
                 WHITESPACE@19..20 " "
-                FN_TYPE@20..68
+                FN_TYPE@20..58
                   UNSAFE_KW@20..26 "unsafe"
                   WHITESPACE@26..27 " "
                   FN_KW@27..29 "fn"
-                  PARAM_LIST@29..59
+                  PARAM_LIST@29..49
                     L_PAREN@29..30 "("
-                    PARAM@30..46
-                      NAME@30..33
-                        IDENT@30..33 "buf"
-                      COLON@33..34 ":"
-                      WHITESPACE@34..35 " "
-                      RAW_PTR_TYPE@35..46
-                        PATH_TYPE@35..37
-                          NAME_REF@35..37
-                            IDENT@35..37 "u8"
-                        DOT@37..38 "."
-                        AMP@38..39 "&"
-                        RAW_KW@39..42 "raw"
-                        WHITESPACE@42..43 " "
-                        MUT_KW@43..46 "mut"
-                    COMMA@46..47 ","
-                    WHITESPACE@47..48 " "
-                    PARAM@48..58
-                      NAME@48..51
-                        IDENT@48..51 "len"
-                      COLON@51..52 ":"
-                      WHITESPACE@52..53 " "
-                      PATH_TYPE@53..58
-                        NAME_REF@53..58
-                          IDENT@53..58 "usize"
-                    R_PAREN@58..59 ")"
-                  WHITESPACE@59..60 " "
-                  RET_TYPE@60..68
-                    THIN_ARROW@60..62 "->"
-                    WHITESPACE@62..63 " "
-                    PATH_TYPE@63..68
-                      NAME_REF@63..68
-                        IDENT@63..68 "isize"
-                SEMICOLON@68..69 ";"
+                    PARAM@30..41
+                      RAW_PTR_TYPE@30..41
+                        PATH_TYPE@30..32
+                          NAME_REF@30..32
+                            IDENT@30..32 "u8"
+                        DOT@32..33 "."
+                        AMP@33..34 "&"
+                        RAW_KW@34..37 "raw"
+                        WHITESPACE@37..38 " "
+                        MUT_KW@38..41 "mut"
+                    COMMA@41..42 ","
+                    WHITESPACE@42..43 " "
+                    PARAM@43..48
+                      PATH_TYPE@43..48
+                        NAME_REF@43..48
+                          IDENT@43..48 "usize"
+                    R_PAREN@48..49 ")"
+                  WHITESPACE@49..50 " "
+                  RET_TYPE@50..58
+                    THIN_ARROW@50..52 "->"
+                    WHITESPACE@52..53 " "
+                    PATH_TYPE@53..58
+                      NAME_REF@53..58
+                        IDENT@53..58 "isize"
+                SEMICOLON@58..59 ";"
             error 0..6: declaring an `extern` item is a VOUCH: write `unsafe extern static`
         "#]],
     );
 }
 
 #[test]
-fn a_fn_type_may_name_its_parameters() {
-    // The named list is the same `PARAM_LIST` a colon-declared member's
-    // signature writes — one tree shape for one thing. Names are
-    // documentation: nothing below the syntax layer keeps them, and the
-    // unnamed spelling still parses to bare child types.
+fn a_fn_type_parameter_name_is_refused() {
+    // A name is refused where it stands and consumed, so the parameter keeps
+    // its type and the item parses on.
     check(
         "static f: fn(x: usize) -> usize = fn(n: usize) -> usize { n };",
         expect![[r#"
@@ -16678,8 +16648,7 @@ fn a_fn_type_may_name_its_parameters() {
                   PARAM_LIST@12..22
                     L_PAREN@12..13 "("
                     PARAM@13..21
-                      NAME@13..14
-                        IDENT@13..14 "x"
+                      IDENT@13..14 "x"
                       COLON@14..15 ":"
                       WHITESPACE@15..16 " "
                       PATH_TYPE@16..21
@@ -16727,6 +16696,7 @@ fn a_fn_type_may_name_its_parameters() {
                     WHITESPACE@59..60 " "
                     R_BRACE@60..61 "}"
                 SEMICOLON@61..62 ";"
+            error 13..14: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
         "#]],
     );
 }
@@ -16734,26 +16704,26 @@ fn a_fn_type_may_name_its_parameters() {
 #[test]
 fn extern_static_error_forms() {
     check_errors(
-        "unsafe extern static a: unsafe fn(n: i64) -> i64 = 1;\n\
+        "unsafe extern static a: unsafe fn(i64) -> i64 = 1;\n\
          unsafe extern static c: usize;\n\
          unsafe extern static d;\n\
          unsafe extern const e: unsafe fn() -> ();\n\
          unsafe extern type F = usize;\n\
-         unsafe extern static g: unsafe fn::<T>(n: T) -> i64;\n\
-         unsafe extern static i: unsafe fn(n: _) -> _;\n\
-         unsafe extern static j: unsafe fn(n: _) -> i64 = fn(n: i64) -> i64 { n };\n\
+         unsafe extern static g: unsafe fn::<T>(T) -> i64;\n\
+         unsafe extern static i: unsafe fn(_) -> _;\n\
+         unsafe extern static j: unsafe fn(_) -> i64 = fn(n: i64) -> i64 { n };\n\
          static h: usize;\n",
         expect![[r#"
-            49..52: an `extern static` has no initializer: the declaration is the whole contract, and an `extern` item sets nothing to anything
-            78..83: `extern` data is not supported yet — an `extern` item must have a function type
-            106..107: an `extern` item must declare its type: `unsafe extern static name: fn(...) -> T;`
-            116..122: only a `static` can be `extern`: an `extern` item declares one name with one type
-            151..157: only an `extern static` can be `unsafe`: the marker vouches for an `extern` item's declared signature, and nothing else declares one
-            214..219: an `extern` item cannot be generic: it has exactly one machine signature, and there is nothing to monomorphize it into
-            271..272: an `extern` item's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
-            277..278: an `extern` item's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
-            327..352: an `extern static` has no initializer: the declaration is the whole contract, and an `extern` item sets nothing to anything
-            369..370: expected `=` followed by the item's value
+            46..49: an `extern static` has no initializer: the declaration is the whole contract, and an `extern` item sets nothing to anything
+            75..80: `extern` data is not supported yet — an `extern` item must have a function type
+            103..104: an `extern` item must declare its type: `unsafe extern static name: fn(...) -> T;`
+            113..119: only a `static` can be `extern`: an `extern` item declares one name with one type
+            148..154: only an `extern static` can be `unsafe`: the marker vouches for an `extern` item's declared signature, and nothing else declares one
+            211..216: an `extern` item cannot be generic: it has exactly one machine signature, and there is nothing to monomorphize it into
+            262..263: an `extern` item's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
+            268..269: an `extern` item's type must be written in full: the declaration is the whole contract, and there is no body for `_` to be inferred from
+            315..340: an `extern static` has no initializer: the declaration is the whole contract, and an `extern` item sets nothing to anything
+            357..358: expected `=` followed by the item's value
         "#]],
     );
 }
@@ -16763,7 +16733,7 @@ fn a_vouched_extern_item_may_be_declared_safe_to_call() {
     // A plain `fn` type is accepted: the item vouches, the type says calls are safe.
     for source in [
         "unsafe extern static now: fn() -> i64;",
-        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;",
+        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;",
         "unsafe extern static tick: fn() -> ();",
     ] {
         assert_eq!(
@@ -16777,7 +16747,7 @@ fn a_vouched_extern_item_may_be_declared_safe_to_call() {
 #[test]
 fn an_unmarked_extern_item_names_the_vouch_and_offers_it() {
     // Missing `unsafe` is reported with a fix, never inserted silently.
-    let source = "extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;";
+    let source = "extern static read: unsafe fn(u8.&raw mut, usize) -> isize;";
     let parse = crate::parse(source);
     let [err] = parse.errors() else {
         panic!("expected exactly one error, got {:?}", parse.errors());
@@ -16790,7 +16760,7 @@ fn an_unmarked_extern_item_names_the_vouch_and_offers_it() {
     let fixed = apply_fix(source, fix);
     assert_eq!(
         fixed,
-        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;"
+        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;"
     );
     assert_eq!(crate::parse(&fixed).errors(), &[]);
 }
@@ -16799,9 +16769,9 @@ fn an_unmarked_extern_item_names_the_vouch_and_offers_it() {
 fn the_markers_come_first_unsafe_before_extern() {
     // A head in any other order parses as the same item; the fix rewrites it.
     for source in [
-        "extern unsafe static read: unsafe fn(n: i64) -> i64;",
-        "static unsafe extern read: unsafe fn(n: i64) -> i64;",
-        "unsafe static extern read: unsafe fn(n: i64) -> i64;",
+        "extern unsafe static read: unsafe fn(i64) -> i64;",
+        "static unsafe extern read: unsafe fn(i64) -> i64;",
+        "unsafe static extern read: unsafe fn(i64) -> i64;",
     ] {
         let parse = crate::parse(source);
         let [err] = parse.errors() else {
@@ -16816,10 +16786,7 @@ fn the_markers_come_first_unsafe_before_extern() {
         );
         let fix = err.fix.as_ref().expect("the rewrite is offered");
         let fixed = apply_fix(source, fix);
-        assert_eq!(
-            fixed,
-            "unsafe extern static read: unsafe fn(n: i64) -> i64;"
-        );
+        assert_eq!(fixed, "unsafe extern static read: unsafe fn(i64) -> i64;");
         assert_eq!(crate::parse(&fixed).errors(), &[]);
     }
 }
@@ -16974,7 +16941,7 @@ fn a_written_value_takes_an_extern_statics_annotation_out_of_the_extern_rules() 
     // filled from the body written on the same line. Only the initializer
     // is refused, and none of the contract rules (which would each be a
     // sentence that is not true of this program) fire.
-    let source = "unsafe extern static j: unsafe fn(n: _) -> i64 = fn(n: i64) -> i64 { n };";
+    let source = "unsafe extern static j: unsafe fn(_) -> i64 = fn(n: i64) -> i64 { n };";
     let messages: Vec<_> = crate::parse(source)
         .errors()
         .iter()
@@ -16991,21 +16958,22 @@ fn a_written_value_takes_an_extern_statics_annotation_out_of_the_extern_rules() 
 }
 
 #[test]
-fn a_fn_types_parameters_are_named_or_bare_at_every_index() {
-    // Decided PER PARAMETER, not per list: neither position changes what
-    // the other means, so all four mixtures are the same type written four
-    // ways — and none of them derails the item.
-    for source in [
-        "static f: fn(usize, usize) -> usize = g;",
-        "static f: fn(x: usize, y: usize) -> usize = g;",
-        "static f: fn(usize, y: usize) -> usize = g;",
-        "static f: fn(x: usize, usize) -> usize = g;",
-        "static f: fn(_: usize, usize) -> usize = g;",
+fn a_fn_types_parameter_name_is_refused_at_every_index() {
+    // One error per name, at the name, and none of them derails the item.
+    for (source, names) in [
+        ("static f: fn(x: usize, y: usize) -> usize = g;", 2),
+        ("static f: fn(usize, y: usize) -> usize = g;", 1),
+        ("static f: fn(x: usize, usize) -> usize = g;", 1),
+        ("static f: fn(_: usize, usize) -> usize = g;", 1),
     ] {
-        assert_eq!(
-            crate::parse(source).errors(),
-            &[],
-            "`{source}` must parse clean"
+        let parse = crate::parse(source);
+        let errors = parse.errors();
+        assert_eq!(errors.len(), names, "`{source}`: {errors:?}");
+        assert!(
+            errors.iter().all(|e| e
+                .message
+                .starts_with("a function type's parameters are bare types")),
+            "`{source}`: {errors:?}"
         );
     }
 }
@@ -17013,17 +16981,16 @@ fn a_fn_types_parameters_are_named_or_bare_at_every_index() {
 #[test]
 fn a_fn_type_admits_no_patterns() {
     // A fn LITERAL's parameters are patterns and they BIND; a fn type's
-    // name binds nothing, so the pattern grammar is not admitted at all
-    // (Rust draws the same line at fn-pointer types). Refused where it is
-    // written — never reinterpreted as something else.
+    // are bare types, so the pattern grammar is not admitted at all.
+    // Refused where it is written, never reinterpreted as something else.
     check_errors(
         "static a: fn(mut x: usize) -> usize = g;\n\
          static b: fn(struct { x: usize }: usize) -> usize = g;\n\
          static c: fn(x:) -> usize = g;\n",
         expect![[r#"
-            13..16: a function type's parameters are not patterns: write `name: Type` or `Type`
-            73..74: a function type's parameters are not patterns: write `name: Type` or `Type`
-            109..111: this parameter has no type: a function type's parameters are `name: Type` or `Type`
+            13..16: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
+            73..74: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
+            109..110: a function type's parameters are bare types, not patterns: write `fn(usize, str)`
             111..112: expected a type
         "#]],
     );
@@ -17034,7 +17001,7 @@ fn removing_an_extern_statics_initializer_keeps_the_declaration() {
     // The fix cuts the VALUE, not the contract: an `extern` item with its type
     // taken away would be a second error where there was one, and the type
     // is the whole of what the declaration says.
-    let source = "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize = f;";
+    let source = "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize = f;";
     let parse = crate::parse(source);
     let err = parse
         .errors()
@@ -17048,7 +17015,7 @@ fn removing_an_extern_statics_initializer_keeps_the_declaration() {
     let fixed = apply_fix(source, fix);
     assert_eq!(
         fixed,
-        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;"
+        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;"
     );
     assert_eq!(crate::parse(&fixed).errors(), &[]);
 }
@@ -17148,7 +17115,7 @@ fn only_clause_misplacements_and_unknown_capabilities() {
     // is one sentence rather than a parse cascade.
     check_errors(
         "static x = 5 only move;\n\
-         extern static ex: unsafe fn(n: usize) -> isize only move;\n\
+         extern static ex: unsafe fn(usize) -> isize only move;\n\
          trait T = requires {} only move;\n\
          type A = struct {} only leak;\n\
          type B = struct {} only send;\n\
@@ -17158,13 +17125,13 @@ fn only_clause_misplacements_and_unknown_capabilities() {
         expect![[r#"
             13..17: a capability ceiling belongs on a `type` declaration; an item has whatever ceiling its type has
             24..30: declaring an `extern` item is a VOUCH: write `unsafe extern static`
-            71..75: a capability ceiling belongs on a `type` declaration; an item has whatever ceiling its type has
-            104..108: a capability ceiling belongs on a `type` declaration, not on a `trait`
-            139..143: unknown capability `leak`; `move` is the only ceiling that can be written
-            169..173: the `send` capability does not exist yet; `move` is the only ceiling that can be written
-            199..205: `forget` is the default ceiling: a type whose values may be dropped on the floor needs no `only` clause
-            231..237: the `access` capability does not exist yet; `move` is the only ceiling that can be written
-            262..263: expected a capability name after `only` (`only move`)
+            68..72: a capability ceiling belongs on a `type` declaration; an item has whatever ceiling its type has
+            101..105: a capability ceiling belongs on a `type` declaration, not on a `trait`
+            136..140: unknown capability `leak`; `move` is the only ceiling that can be written
+            166..170: the `send` capability does not exist yet; `move` is the only ceiling that can be written
+            196..202: `forget` is the default ceiling: a type whose values may be dropped on the floor needs no `only` clause
+            228..234: the `access` capability does not exist yet; `move` is the only ceiling that can be written
+            259..260: expected a capability name after `only` (`only move`)
         "#]],
     );
 }

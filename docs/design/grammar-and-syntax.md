@@ -174,7 +174,7 @@
   fn LITERAL: the value's type carries the fact, so that spelling could only sugar an
   annotation.
 - **G22** An `extern` item is a declaration:
-  `unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;`. A type in
+  `unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;`. A type in
   annotation position, no `=`, no value, because nothing is being set to anything. TWO
   markers lead the item, one obligation each: `extern` says the name comes from outside,
   `unsafe` VOUCHES that the signature written here is what the host really provides — a
@@ -188,10 +188,8 @@
   a missing type, a type not written in full (`_` has no body to be inferred from). A written
   initializer means it is not an `extern` item: the value wins and the markers are dropped, since
   keeping them would turn a visible syntax error into a run-time refusal at a boundary the
-  program never crossed. An unwritten return type means `()`. Fn types may name
-  their parameters, decided per parameter, with the name dropped below syntax so both
-  spellings are one type. A fn type's parameters are not patterns: `mut` and destructuring
-  belong to a fn literal, whose parameters bind. CALLING is a separate question from
+  program never crossed. An unwritten return type means `()`. A fn type's parameters are bare types: names,
+  `mut` and destructuring belong to a fn literal, whose parameters bind. CALLING is a separate question from
   declaring, answered by the fn type's own `unsafe` alone (T19): an `extern` item declared
   `fn(...)` is vouched for but free to call, direct or through a binding, exactly as any
   other safe function is — an `extern` item is not "unsafe to call because it is `extern`".

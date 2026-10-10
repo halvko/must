@@ -26,10 +26,10 @@ fn compile(source: &str, entry: &str) -> codegen_wasm::Artifact {
 
 const TRAITS: &str = r#"
 trait Write = requires {
-    push: fn(s: str, w: Self) -> Self;
+    push: fn(str, Self) -> Self;
 };
 trait Display = requires {
-    fmt: fn::<W: Write>(w: W, x: Self) -> W;
+    fmt: fn::<W: Write>(W, Self) -> W;
 } with {
     impl str {
         fmt = fn::<W: Write>(w: W, x: str) -> W { w.push(x) };
@@ -129,7 +129,7 @@ fn a_dictionary_parameter_has_no_runtime_representation() {
     let artifact = compile(
         r#"
 trait Display = requires {
-    fmt: fn(x: Self) -> str;
+    fmt: fn(Self) -> str;
 } with {
     impl str {
         fmt = fn (x: str) -> str { x };
@@ -341,7 +341,7 @@ fn a_declared_extern_item_becomes_a_real_wasm_import_and_is_called_through() {
     // `print`'s sibling), it lands in the import section, and the call
     // goes through it. Nothing here is `read`-specific — `read` itself
     // needs a raw pointer, which this backend refuses by name.
-    let source = "unsafe extern static host_tick: unsafe fn(n: i64) -> i64;\n\
+    let source = "unsafe extern static host_tick: unsafe fn(i64) -> i64;\n\
                   static main = fn () -> i64 { unsafe { host_tick(7) } };";
     let artifact = compile(source, "main()");
     let engine = wasmi::Engine::default();
@@ -382,7 +382,7 @@ fn a_declared_extern_item_becomes_a_real_wasm_import_and_is_called_through() {
 fn a_safe_typed_extern_item_reaches_the_same_wasm_import_with_no_call_site_marker() {
     // An extern function is callable in a safe context unless it has an
     // `unsafe fn` type.
-    let source = "unsafe extern static host_tick: fn(n: i64) -> i64;\n\
+    let source = "unsafe extern static host_tick: fn(i64) -> i64;\n\
                   static main = fn () -> i64 { host_tick(7) };";
     let artifact = compile(source, "main()");
     let engine = wasmi::Engine::default();
@@ -424,7 +424,7 @@ fn an_extern_item_whose_signature_has_no_wasm_shape_is_refused_by_name() {
     // names the ITEM — which boundary is unavailable is the useful half.
     let message = harness::on_budget(|| {
         let db = RootDatabase::default();
-        let source = "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> i64;\n\
+        let source = "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> i64;\n\
                       static main = fn () -> i64 {\n\
                           let mut b: u8 = 0;\n\
                           unsafe { read(b.&raw mut, 1) }\n\
@@ -457,13 +457,13 @@ fn a_bound_extern_item_compiles_but_a_stored_one_is_refused_by_name() {
     // the tracker CANNOT follow — stored in a record, or merged from
     // branches that disagree — is refused BY NAME rather than miscompiled.
     let db = RootDatabase::default();
-    let bound = "unsafe extern static tick: unsafe fn(n: i64) -> i64;\n\
+    let bound = "unsafe extern static tick: unsafe fn(i64) -> i64;\n\
                  static main = fn () -> i64 { let f = tick; unsafe { f(1) } };";
     let loc = harness::prepare(&db, bound, "main()");
     codegen_wasm::compile(&db, &loc).expect("a bound `extern` item is still a direct call");
 
     let db = RootDatabase::default();
-    let stored = "unsafe extern static tick: unsafe fn(n: i64) -> i64;\n\
+    let stored = "unsafe extern static tick: unsafe fn(i64) -> i64;\n\
                   static main = fn () -> i64 { \
                       let h = struct { go = tick }; unsafe { h.go(1) } \
                   };";
@@ -492,7 +492,7 @@ fn an_extern_item_may_not_claim_a_name_the_compiler_already_imports() {
     // call that collects the program's imports.
     let (message, named) = harness::on_budget(|| {
         let db = RootDatabase::default();
-        let source = "unsafe extern static print: unsafe fn(offset: i64, len: i64) -> ();\n\
+        let source = "unsafe extern static print: unsafe fn(i64, i64) -> ();\n\
                       static main = fn () -> () { unsafe { print(0, 0) }; };";
         let loc = harness::prepare(&db, source, "main()");
         let Err(err) = codegen_wasm::compile(&db, &loc) else {

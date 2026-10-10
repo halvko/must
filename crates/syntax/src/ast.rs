@@ -1436,16 +1436,12 @@ impl FnType {
     pub fn ret_type(&self) -> Option<RetType> {
         child(&self.syntax)
     }
-    /// The parameter list. Every parameter is one `PARAM`, named
-    /// (`buf: u8.&raw mut` — documentation) or bare (`usize`), whichever
-    /// each one wrote; a colon-declared member's signature parses its own
-    /// (pattern-shaped) list into the same slot.
+    /// The parameter list: one `PARAM` per parameter, each a bare type.
     pub fn param_list(&self) -> Option<ParamList> {
         child(&self.syntax)
     }
-    /// The parameter TYPES in order — the names are documentation and
-    /// nothing below the syntax layer keeps them. `None` for a parameter
-    /// with no type written (a mistake with its own diagnostic).
+    /// The parameter types in order. `None` for a parameter with no type
+    /// written (a mistake with its own diagnostic).
     pub fn params_types(&self) -> Vec<Option<Type>> {
         match self.param_list() {
             Some(list) => list.params().map(|p| p.ty()).collect(),

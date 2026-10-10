@@ -202,7 +202,7 @@ fn hover_shows_the_unsafe_marker_on_a_fn_type() {
     // The one-token difference is the whole of what a reader needs to know
     // about a value here, so hover shows it exactly where it is written.
     check_hover(
-        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;\n\
+        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;\n\
          static main = fn { let g$0 = read; };",
         "```must\ng: unsafe fn(u8.&raw mut, usize) -> isize\n```",
     );
@@ -213,7 +213,7 @@ fn hover_on_an_extern_declaration_shows_its_type() {
     // The declaration has no value expression at all, so hover must answer
     // from the DECLARATION — which is the whole contract anyway.
     check_hover(
-        "unsafe extern static read$0: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;",
+        "unsafe extern static read$0: unsafe fn(u8.&raw mut, usize) -> isize;",
         "```must\nread: unsafe fn(u8.&raw mut, usize) -> isize\n```",
     );
 }
@@ -510,14 +510,9 @@ fn highlights_mutable_param_declaration_and_uses() {
 }
 
 #[test]
-fn highlights_a_fn_types_parameter_names() {
-    // A fn TYPE's parameter names bind nothing — they are the signature's
-    // spelling — but they READ as parameters, which is what a declaration a
-    // reader must be able to read needs from an editor. The name sits
-    // directly under `PARAM` here (no pattern wraps it), the one place a
-    // parameter is spelled that way.
+fn highlights_a_fn_types_parameters_as_types() {
     check_highlights(
-        "unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;",
+        "unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;",
         expect_test::expect![[r#"
             0..6 "unsafe" Keyword
             7..13 "extern" Keyword
@@ -525,15 +520,13 @@ fn highlights_a_fn_types_parameter_names() {
             21..25 "read" Function.declaration.static
             27..33 "unsafe" Keyword
             34..36 "fn" Keyword
-            37..40 "buf" Parameter.declaration
-            42..44 "u8" Type.defaultLibrary
-            45..46 "&" Operator
-            46..49 "raw" Keyword
-            50..53 "mut" Keyword
-            55..58 "len" Parameter.declaration
-            60..65 "usize" Type.defaultLibrary
-            67..69 "->" Operator
-            70..75 "isize" Type.defaultLibrary
+            37..39 "u8" Type.defaultLibrary
+            40..41 "&" Operator
+            41..44 "raw" Keyword
+            45..48 "mut" Keyword
+            50..55 "usize" Type.defaultLibrary
+            57..59 "->" Operator
+            60..65 "isize" Type.defaultLibrary
         "#]],
     );
 }
@@ -4411,7 +4404,7 @@ static use_it = fn() -> usize { A(struct { x = 1 }).get() };
 fn hover_on_bound_shows_the_trait() {
     check_hover(
         r#"
-trait Display = requires { fmt: fn(x: Self) -> str; };
+trait Display = requires { fmt: fn(Self) -> str; };
 static f = fn::<T: Disp$0lay>(x: T) -> usize { 1 };
 "#,
         "```must\ntrait Display = requires { fmt: fn(Self) -> str; }\n```",
@@ -4422,7 +4415,7 @@ static f = fn::<T: Disp$0lay>(x: T) -> usize { 1 };
 fn hover_on_trait_decl_name() {
     check_hover(
         r#"
-trait Disp$0lay = requires { fmt: fn(x: Self) -> str; };
+trait Disp$0lay = requires { fmt: fn(Self) -> str; };
 "#,
         "```must\ntrait Display = requires { fmt: fn(Self) -> str; }\n```",
     );
@@ -4432,7 +4425,7 @@ trait Disp$0lay = requires { fmt: fn(x: Self) -> str; };
 fn hover_on_impl_head_shows_the_trait() {
     check_hover(
         r#"
-trait Show = requires { show: fn(x: Self) -> str; };
+trait Show = requires { show: fn(Self) -> str; };
 type P = struct { a: usize } with {
     impl Sh$0ow { show = fn(x: Self) -> str { "p" }; }
 };
@@ -4445,7 +4438,7 @@ type P = struct { a: usize } with {
 fn hover_on_trait_member_dot_call_shows_instantiated_signature() {
     check_hover(
         r#"
-trait D = requires { m: fn(x: Self) -> str; } with {
+trait D = requires { m: fn(Self) -> str; } with {
     impl usize { m = fn(x: usize) -> str { "n" }; }
 };
 static f = fn(n: usize) -> str { n.m$0() };
@@ -4455,10 +4448,33 @@ static f = fn(n: usize) -> str { n.m$0() };
 }
 
 #[test]
+fn hover_on_a_requirement_with_bare_param_types() {
+    check_hover(
+        r#"
+trait Sh$0ow = requires { show: fn(usize, Self) -> str; };
+"#,
+        r#"```must
+trait Show = requires { show: fn(usize, Self) -> str; }
+```"#,
+    );
+    check_hover(
+        r#"
+trait D = requires { m: fn(Self, usize) -> str; } with {
+    impl usize { m = fn(x: usize, y: usize) -> str { "n" }; }
+};
+static f = fn(n: usize) -> str { n.m$0(1) };
+"#,
+        r#"```must
+m: fn(usize, usize) -> str
+```"#,
+    );
+}
+
+#[test]
 fn hover_on_qualified_call_base_shows_the_trait() {
     check_hover(
         r#"
-trait D = requires { m: fn(x: Self) -> str; } with {
+trait D = requires { m: fn(Self) -> str; } with {
     impl usize { m = fn(x: usize) -> str { "n" }; }
 };
 static f = fn(n: usize) -> str { D$0::m(n) };
@@ -4471,7 +4487,7 @@ static f = fn(n: usize) -> str { D$0::m(n) };
 fn hover_on_trait_impl_member_name_shows_signature() {
     check_hover(
         r#"
-trait D = requires { m: fn(x: Self) -> str; } with {
+trait D = requires { m: fn(Self) -> str; } with {
     impl usize { m$0 = fn(x: usize) -> str { "n" }; }
 };
 "#,
@@ -4483,7 +4499,7 @@ trait D = requires { m: fn(x: Self) -> str; } with {
 fn goto_bound_lands_on_the_trait_decl() {
     check_goto(
         r#"
-trait Display = requires { fmt: fn(x: Self) -> str; };
+trait Display = requires { fmt: fn(Self) -> str; };
 static f = fn::<T: Displ$0ay>(x: T) -> usize { 1 };
 "#,
         "Display",
@@ -4495,7 +4511,7 @@ static f = fn::<T: Displ$0ay>(x: T) -> usize { 1 };
 fn goto_impl_head_lands_on_the_trait_decl() {
     check_goto(
         r#"
-trait Show = requires { show: fn(x: Self) -> str; };
+trait Show = requires { show: fn(Self) -> str; };
 type P = struct { a: usize } with {
     impl Sh$0ow { show = fn(x: Self) -> str { "p" }; }
 };
@@ -4509,7 +4525,7 @@ type P = struct { a: usize } with {
 fn goto_impl_directed_dot_call_lands_on_the_impl_member() {
     check_goto(
         r#"
-trait D = requires { mem: fn(x: Self) -> str; } with {
+trait D = requires { mem: fn(Self) -> str; } with {
     impl usize { mem = fn(x: usize) -> str { "n" }; }
 };
 static f = fn(n: usize) -> str { n.mem$0() };
@@ -4524,7 +4540,7 @@ static f = fn(n: usize) -> str { n.mem$0() };
 fn goto_bound_directed_dot_call_lands_on_the_requirement() {
     check_goto(
         r#"
-trait D = requires { m: fn(x: Self) -> str; };
+trait D = requires { m: fn(Self) -> str; };
 static f = fn::<T: D>(x: T) -> str { x.m$0() };
 "#,
         "m",
@@ -4536,7 +4552,7 @@ static f = fn::<T: D>(x: T) -> str { x.m$0() };
 fn goto_qualified_member_lands_on_the_impl_member() {
     check_goto(
         r#"
-trait D = requires { mem: fn(x: Self) -> str; } with {
+trait D = requires { mem: fn(Self) -> str; } with {
     impl usize { mem = fn(x: usize) -> str { "n" }; }
 };
 static f = fn(n: usize) -> str { D::mem$0(n) };
@@ -4550,7 +4566,7 @@ static f = fn(n: usize) -> str { D::mem$0(n) };
 fn goto_qualified_call_base_lands_on_the_trait() {
     check_goto(
         r#"
-trait D = requires { m: fn(x: Self) -> str; } with {
+trait D = requires { m: fn(Self) -> str; } with {
     impl usize { m = fn(x: usize) -> str { "n" }; }
 };
 static f = fn(n: usize) -> str { D$0::m(n) };
@@ -4629,7 +4645,8 @@ fn highlights_trait_declaration_and_requirements() {
     check_highlights(
         r#"
 trait Show = requires {
-    show: fn(x: Self) -> str;
+    show: fn(Self) -> str;
+    bare: fn(Self) -> str;
 };
 "#,
         expect_test::expect![[r#"
@@ -4639,10 +4656,14 @@ trait Show = requires {
             14..22 "requires" Keyword
             29..33 "show" Function.declaration
             35..37 "fn" Keyword
-            38..39 "x" Parameter.declaration
-            41..45 "Self" Type
-            47..49 "->" Operator
-            50..53 "str" Type.defaultLibrary
+            38..42 "Self" Type
+            44..46 "->" Operator
+            47..50 "str" Type.defaultLibrary
+            56..60 "bare" Function.declaration
+            62..64 "fn" Keyword
+            65..69 "Self" Type
+            71..73 "->" Operator
+            74..77 "str" Type.defaultLibrary
         "#]],
     );
 }
@@ -4656,7 +4677,7 @@ fn highlights_trait_names_at_every_occurrence() {
     check_highlights(
         r#"
 trait Show = requires {
-    show: fn(x: Self) -> str;
+    show: fn(Self) -> str;
 } with {
     impl usize {
         show = fn(x: usize) -> str { "n" };
@@ -4676,53 +4697,52 @@ static render = fn::<T: Show>(v: T) -> str { v.show() };
             14..22 "requires" Keyword
             29..33 "show" Function.declaration
             35..37 "fn" Keyword
-            38..39 "x" Parameter.declaration
-            41..45 "Self" Type
-            47..49 "->" Operator
-            50..53 "str" Type.defaultLibrary
-            57..61 "with" Keyword
-            68..72 "impl" Keyword
-            73..78 "usize" Type.defaultLibrary
-            89..93 "show" Function.declaration
-            94..95 "=" Operator
-            96..98 "fn" Keyword
-            99..100 "x" Parameter.declaration
-            102..107 "usize" Type.defaultLibrary
-            109..111 "->" Operator
-            112..115 "str" Type.defaultLibrary
-            118..121 "\"n\"" String
-            134..138 "type" Keyword
-            139..142 "Tag" Type.declaration
-            143..144 "=" Operator
-            145..151 "struct" Keyword
-            157..162 "usize" Type.defaultLibrary
-            165..169 "with" Keyword
-            176..180 "impl" Keyword
-            181..185 "Show" Trait
-            196..200 "show" Function.declaration
-            201..202 "=" Operator
-            203..205 "fn" Keyword
-            206..207 "x" Parameter.declaration
-            209..213 "Self" Type
-            215..217 "->" Operator
-            218..221 "str" Type.defaultLibrary
-            224..228 "Show" Trait
-            230..234 "show" Function
-            235..236 "x" Parameter
-            252..258 "static" Keyword
-            259..265 "render" Function.declaration.static
-            266..267 "=" Operator
-            268..270 "fn" Keyword
-            272..273 "<" Operator
-            273..274 "T" TypeParameter.declaration
-            276..280 "Show" Trait
-            280..281 ">" Operator
-            282..283 "v" Parameter.declaration
-            285..286 "T" TypeParameter
-            288..290 "->" Operator
-            291..294 "str" Type.defaultLibrary
-            297..298 "v" Parameter
-            299..303 "show" Function
+            38..42 "Self" Type
+            44..46 "->" Operator
+            47..50 "str" Type.defaultLibrary
+            54..58 "with" Keyword
+            65..69 "impl" Keyword
+            70..75 "usize" Type.defaultLibrary
+            86..90 "show" Function.declaration
+            91..92 "=" Operator
+            93..95 "fn" Keyword
+            96..97 "x" Parameter.declaration
+            99..104 "usize" Type.defaultLibrary
+            106..108 "->" Operator
+            109..112 "str" Type.defaultLibrary
+            115..118 "\"n\"" String
+            131..135 "type" Keyword
+            136..139 "Tag" Type.declaration
+            140..141 "=" Operator
+            142..148 "struct" Keyword
+            154..159 "usize" Type.defaultLibrary
+            162..166 "with" Keyword
+            173..177 "impl" Keyword
+            178..182 "Show" Trait
+            193..197 "show" Function.declaration
+            198..199 "=" Operator
+            200..202 "fn" Keyword
+            203..204 "x" Parameter.declaration
+            206..210 "Self" Type
+            212..214 "->" Operator
+            215..218 "str" Type.defaultLibrary
+            221..225 "Show" Trait
+            227..231 "show" Function
+            232..233 "x" Parameter
+            249..255 "static" Keyword
+            256..262 "render" Function.declaration.static
+            263..264 "=" Operator
+            265..267 "fn" Keyword
+            269..270 "<" Operator
+            270..271 "T" TypeParameter.declaration
+            273..277 "Show" Trait
+            277..278 ">" Operator
+            279..280 "v" Parameter.declaration
+            282..283 "T" TypeParameter
+            285..287 "->" Operator
+            288..291 "str" Type.defaultLibrary
+            294..295 "v" Parameter
+            296..300 "show" Function
         "#]],
     );
 }
@@ -4891,7 +4911,7 @@ fn qualified_member_paths_highlight_as_functions() {
     // by `highlights_trait_names_at_every_occurrence`.)
     check_highlights(
         r#"
-trait D = requires { m: fn(x: Self) -> usize; } with {
+trait D = requires { m: fn(Self) -> usize; } with {
     impl usize { m = fn(x: usize) -> usize { x }; }
 };
 type P = struct { v: usize } with {
@@ -4906,57 +4926,56 @@ static a = fn(p: P) -> usize { D::<Self = usize>::m(1) + P::len(p) };
             11..19 "requires" Keyword
             22..23 "m" Function.declaration
             25..27 "fn" Keyword
-            28..29 "x" Parameter.declaration
-            31..35 "Self" Type
-            37..39 "->" Operator
-            40..45 "usize" Type.defaultLibrary
-            49..53 "with" Keyword
-            60..64 "impl" Keyword
-            65..70 "usize" Type.defaultLibrary
-            73..74 "m" Function.declaration
-            75..76 "=" Operator
-            77..79 "fn" Keyword
-            80..81 "x" Parameter.declaration
-            83..88 "usize" Type.defaultLibrary
-            90..92 "->" Operator
-            93..98 "usize" Type.defaultLibrary
-            101..102 "x" Parameter
-            111..115 "type" Keyword
-            116..117 "P" Type.declaration
-            118..119 "=" Operator
-            120..126 "struct" Keyword
-            132..137 "usize" Type.defaultLibrary
-            140..144 "with" Keyword
-            151..155 "impl" Keyword
-            156..160 "Self" Type
-            163..166 "len" Function.declaration
-            167..168 "=" Operator
-            169..171 "fn" Keyword
-            172..173 "p" Parameter.declaration
-            175..179 "Self" Type
-            181..183 "->" Operator
-            184..189 "usize" Type.defaultLibrary
-            192..193 "p" Parameter
-            204..210 "static" Keyword
-            211..212 "a" Function.declaration.static
-            213..214 "=" Operator
-            215..217 "fn" Keyword
-            218..219 "p" Parameter.declaration
-            221..222 "P" Type
-            224..226 "->" Operator
-            227..232 "usize" Type.defaultLibrary
-            235..236 "D" Trait
-            238..239 "<" Operator
-            239..243 "Self" Type
-            244..245 "=" Operator
-            246..251 "usize" Type.defaultLibrary
-            251..252 ">" Operator
-            254..255 "m" Function
-            256..257 "1" Number
-            259..260 "+" Operator
-            261..262 "P" Type
-            264..267 "len" Function
-            268..269 "p" Parameter
+            28..32 "Self" Type
+            34..36 "->" Operator
+            37..42 "usize" Type.defaultLibrary
+            46..50 "with" Keyword
+            57..61 "impl" Keyword
+            62..67 "usize" Type.defaultLibrary
+            70..71 "m" Function.declaration
+            72..73 "=" Operator
+            74..76 "fn" Keyword
+            77..78 "x" Parameter.declaration
+            80..85 "usize" Type.defaultLibrary
+            87..89 "->" Operator
+            90..95 "usize" Type.defaultLibrary
+            98..99 "x" Parameter
+            108..112 "type" Keyword
+            113..114 "P" Type.declaration
+            115..116 "=" Operator
+            117..123 "struct" Keyword
+            129..134 "usize" Type.defaultLibrary
+            137..141 "with" Keyword
+            148..152 "impl" Keyword
+            153..157 "Self" Type
+            160..163 "len" Function.declaration
+            164..165 "=" Operator
+            166..168 "fn" Keyword
+            169..170 "p" Parameter.declaration
+            172..176 "Self" Type
+            178..180 "->" Operator
+            181..186 "usize" Type.defaultLibrary
+            189..190 "p" Parameter
+            201..207 "static" Keyword
+            208..209 "a" Function.declaration.static
+            210..211 "=" Operator
+            212..214 "fn" Keyword
+            215..216 "p" Parameter.declaration
+            218..219 "P" Type
+            221..223 "->" Operator
+            224..229 "usize" Type.defaultLibrary
+            232..233 "D" Trait
+            235..236 "<" Operator
+            236..240 "Self" Type
+            241..242 "=" Operator
+            243..248 "usize" Type.defaultLibrary
+            248..249 ">" Operator
+            251..252 "m" Function
+            253..254 "1" Number
+            256..257 "+" Operator
+            258..259 "P" Type
+            261..264 "len" Function
+            265..266 "p" Parameter
         "#]],
     );
 }
@@ -5102,7 +5121,7 @@ static f = fn::<@a>(s: Shape.&::<@a>, t: str) {
 /// The owner's shape: a `Write`-bounded writer, borrowed exclusively.
 const BOUND_FIXTURE_HEAD: &str = r#"
 trait Write = requires {
-    push: fn::<@r>(c: char, w: Self.&mut::<@r>) -> ();
+    push: fn::<@r>(char, Self.&mut::<@r>) -> ();
 };
 "#;
 
@@ -5157,7 +5176,7 @@ fn dot_completions_snippet_bound_requirement_call_without_params() {
     assert_eq!(
         completion_insert(
             r#"
-trait Show = requires { show: fn(s: Self) -> str; };
+trait Show = requires { show: fn(Self) -> str; };
 static f = fn::<T: Show>(t: T) -> str { t.$0 };
 "#,
             "show",
@@ -5213,8 +5232,8 @@ fn multiple_bounds_union_their_requirements_on_the_dot() {
     // same order resolution walks when it looks for a name.)
     check_completions(
         r#"
-trait Show = requires { show: fn(s: Self) -> str; };
-trait Size = requires { size: fn(s: Self) -> usize; len: fn(s: Self) -> usize; };
+trait Show = requires { show: fn(Self) -> str; };
+trait Size = requires { size: fn(Self) -> usize; len: fn(Self) -> usize; };
 static f = fn::<T: Show + Size>(t: T) -> str { t.$0 };
 "#,
         expect_test::expect![[r#"
@@ -5234,9 +5253,9 @@ fn a_requirement_without_the_dot_callable_shape_is_not_offered() {
     check_completions(
         r#"
 trait Mk = requires {
-    make: fn(n: usize) -> Self;
-    first: fn(s: Self, n: usize) -> usize;
-    take: fn(n: usize, s: Self) -> usize;
+    make: fn(usize) -> Self;
+    first: fn(Self, usize) -> usize;
+    take: fn(usize, Self) -> usize;
 };
 static f = fn::<T: Mk>(t: T) -> usize { t.$0 };
 "#,
@@ -5262,13 +5281,13 @@ fn the_receiver_shape_filters_the_bounds_offer_both_ways() {
     // A value-`Self` requirement is the mirror: the owned receiver takes
     // it, and the borrowed one does not (that would be auto-deref).
     let by_value = r#"
-trait Show = requires { show: fn(s: Self) -> str; };
+trait Show = requires { show: fn(Self) -> str; };
 static f = fn::<S: Show>(s: S) -> str { s.$0 };
 "#;
     check_has_completion(by_value, "show");
     check_no_completion(
         r#"
-trait Show = requires { show: fn(s: Self) -> str; };
+trait Show = requires { show: fn(Self) -> str; };
 static f = fn::<@a, S: Show>(s: S.&::<@a>) -> str { s.$0 };
 "#,
         "show",
@@ -5289,7 +5308,7 @@ fn the_forget_capability_bound_contributes_nothing_to_the_dot() {
     // requirements exactly as they were.
     check_completions(
         r#"
-trait Show = requires { show: fn(s: Self) -> str; };
+trait Show = requires { show: fn(Self) -> str; };
 static f = fn::<T: Show + forget>(t: T) -> str { t.$0 };
 "#,
         expect_test::expect![[r#"
@@ -5333,7 +5352,7 @@ fn a_bound_naming_a_non_trait_offers_nothing() {
 
 #[test]
 fn a_requirement_without_a_full_signature_is_not_offered() {
-    // `n`'s first parameter has no type annotation, so its signature isn't
+    // `n`'s first parameter is a hole, so its signature isn't
     // fully written — the trait declaration carries that diagnostic, and
     // `lower_requirement_sig` returns `None` for it. `Self` is deliberately
     // placed in `n`'s SECOND parameter (not dropped) so this isolates the
@@ -5344,8 +5363,8 @@ fn a_requirement_without_a_full_signature_is_not_offered() {
     check_completions(
         r#"
 trait D = requires {
-    m: fn(x: Self) -> usize;
-    n: fn(x, y: Self) -> usize;
+    m: fn(Self) -> usize;
+    n: fn(_, Self) -> usize;
 };
 static f = fn::<T: D>(t: T) -> () { t.$0 };
 "#,
@@ -5366,9 +5385,9 @@ fn completions_do_not_panic_anywhere_in_a_bound_shaped_document() {
     // the number in this sentence.
     let source = r#"
 trait Write = requires {
-    push: fn::<@r>(c: char, w: Self.&mut::<@r>) -> ();
+    push: fn::<@r>(char, Self.&mut::<@r>) -> ();
 };
-trait Show = requires { show: fn(s: Self) -> str; };
+trait Show = requires { show: fn(Self) -> str; };
 static fmt_usize = fn::<@a, W: Write>(w: W.&mut::<@a>, n: usize) -> () {
     w.push('x')
 };
@@ -5398,10 +5417,10 @@ static both = fn::<@a, T: Show + forget, W: Write>(t: T, w: W.&mut::<@a>) -> str
 /// them fits the exclusive borrow this receiver is.
 const AMBIGUOUS_SHAPES_HEAD: &str = r#"
 trait A = requires {
-    push: fn::<@r>(c: char, w: Self.&mut::<@r>) -> ();
-    grow: fn::<@r>(w: Self.&mut::<@r>) -> ();
+    push: fn::<@r>(char, Self.&mut::<@r>) -> ();
+    grow: fn::<@r>(Self.&mut::<@r>) -> ();
 };
-trait B = requires { push: fn(c: char, w: Self) -> (); };
+trait B = requires { push: fn(char, Self) -> (); };
 "#;
 
 #[test]
@@ -5454,8 +5473,8 @@ fn two_bounds_of_the_same_shape_do_not_double_a_row() {
     // `check_no_completion` — one row and two rows are different bugs.
     let (analysis, _file, pos) = fixture(
         r#"
-trait A = requires { push: fn(c: char, w: Self) -> (); };
-trait B = requires { push: fn(c: char, w: Self) -> (); };
+trait A = requires { push: fn(char, Self) -> (); };
+trait B = requires { push: fn(char, Self) -> (); };
 static f = fn::<T: A + B>(t: T) -> () { t.$0 };
 "#,
     );
@@ -5480,7 +5499,7 @@ fn a_nested_body_is_still_offered_its_enclosing_bounds() {
     // correct.
     check_has_completion(
         r#"
-trait Show = requires { show: fn(s: Self) -> str; };
+trait Show = requires { show: fn(Self) -> str; };
 static f = fn::<T: Show>(t: T) -> str {
     let g = fn(x: T) -> str { x.$0 };
     g(t)

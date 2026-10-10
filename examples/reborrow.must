@@ -160,7 +160,7 @@ static main = fn() -> usize {
 type Counter = struct { n: usize };
 
 trait Counted = requires {
-    count: fn::<@r>(s: Self.&::<@r>) -> usize;
+    count: fn::<@r>(Self.&::<@r>) -> usize;
 } with {
     impl Counter {
         count = fn::<@r>(s: Counter.&::<@r>) -> usize { s.*.n };

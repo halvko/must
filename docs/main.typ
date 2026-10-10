@@ -598,7 +598,7 @@ cannot be named as a value or written where a type is expected.
 
 ```
 trait Write = requires {
-    push: fn(s: str, w: Self) -> Self;
+    push: fn(str, Self) -> Self;
 };
 ```
 
@@ -624,7 +624,7 @@ scalar, which has no declaration of its own to host a chain:
 
 ```
 trait Display = requires {
-    fmt: fn::<W: Write>(w: W, x: Self) -> W;
+    fmt: fn::<W: Write>(W, Self) -> W;
 } with {
     impl usize {
         fmt = fn::<W: Write>(w: W, x: usize) -> W { w.push("n") };
@@ -637,9 +637,9 @@ second impl, in either home, is an error naming both sites. A requirement's
 binder may carry bounds of its own, composed with `+` like any other bound
 list — `Display`'s `fmt` is generic over its sink, `W: Write`, independent
 of the trait's own (here absent) generic parameters. A requirement declares
-a signature and no body, so each of its parameters is a plain `name: Type`:
-`mut` and destructuring patterns are refused there and belong to the impl
-that supplies the body.
+a signature and no body: it is a function *type*, so its parameters are
+bare types, as in any function type. Names belong to the impl that supplies
+the body. Every parameter's type and the return type must be written.
 
 Inside a generic body, a bound re-opens exactly the bounded trait's
 members on the rigid receiver — an ordinary structural dot-call, "bound-
@@ -2370,7 +2370,7 @@ program can also declare an `extern` item of its own, and the compiler learns
 nothing at all about what it does:
 
 ```must
-unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
+unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;
 ```
 
 Read that as what it is: a DECLARATION. There is no `=` and no value,
@@ -2481,7 +2481,7 @@ The host provides one primitive, POSIX's `read`, declared by the program
 itself:
 
 ```must
-unsafe extern static read: unsafe fn(buf: u8.&raw mut, len: usize) -> isize;
+unsafe extern static read: unsafe fn(u8.&raw mut, usize) -> isize;
 ```
 
 Fill a caller-owned buffer with at most `len` bytes; answer how many, `0` at
