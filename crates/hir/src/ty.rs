@@ -1560,13 +1560,37 @@ pub fn receiver_takes(receiver: ReceiverShape, position: SelfPosition) -> bool {
     }
 }
 
+/// How the dot after a receiver of some shape reaches a member: as written,
+/// or only once the user spells a borrow first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DotReach {
+    /// [`receiver_takes`] admits the call: `c.get()`.
+    Direct,
+    /// An OWNED receiver meeting a borrow `Self`: never auto-ref'd (G14),
+    /// but `c.&.get()` / `c.&mut.get()` is the licensed borrow-receiver case.
+    WrittenBorrow { mutable: bool },
+}
+
+/// Whether, and how, a receiver of this shape reaches a member with this
+/// `Self` position — [`receiver_takes`] plus the one refusal a written
+/// borrow turns into an acceptance. A borrow receiver meeting a value
+/// `Self` stays unreachable: that would take a written deref.
+pub fn dot_reach(receiver: ReceiverShape, position: SelfPosition) -> Option<DotReach> {
+    match (receiver, position) {
+        _ if receiver_takes(receiver, position) => Some(DotReach::Direct),
+        (ReceiverShape::Owned, SelfPosition::Borrow { mutable }) => {
+            Some(DotReach::WrittenBorrow { mutable })
+        }
+        _ => None,
+    }
+}
+
 /// The structural test whole: whether a member with this SIGNATURE takes a
 /// dot-call from a receiver of this shape, given the type standing for its
 /// `Self`. [`self_position_of`] and [`receiver_takes`] are the two halves;
 /// this is their composition, used only where no [`ItemId`] exists yet to
 /// go through [`member_self_position`] instead — a trait requirement's
-/// freshly-lowered signature, judged for bound-directed resolution and for
-/// completion's offers.
+/// freshly-lowered signature, judged for bound-directed resolution.
 pub fn dot_callable(sig: &Ty, self_ty: &Ty, receiver: ReceiverShape) -> bool {
     self_position_of(sig, self_ty).is_some_and(|position| receiver_takes(receiver, position))
 }

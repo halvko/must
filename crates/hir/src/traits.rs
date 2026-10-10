@@ -532,7 +532,8 @@ pub(crate) fn binders_match(
 ///
 /// A candidate is a NAME and a declaration, nothing more — whether the
 /// receiver can actually take the call is G14's structural question, asked
-/// of the requirement's lowered signature by [`crate::ty::dot_callable`].
+/// of the requirement's lowered signature by [`crate::ty::self_position_of`]
+/// and [`crate::ty::dot_reach`].
 #[derive(Debug)]
 pub(crate) struct BoundDotCandidate<'db> {
     /// The bound's trait.
@@ -653,17 +654,20 @@ pub struct BoundDotOffer {
     /// lowering the trait's hover renders, so the shape offered and the
     /// shape shown are one text.
     pub sig: Ty,
+    /// Whether the receiver must be borrowed in writing first.
+    pub reach: crate::ty::DotReach,
 }
 
 /// What a receiver of type `receiver_ty` may be offered after the dot,
 /// when it is rigid — the bounds of the param it resolves to, narrowed by
 /// resolution's own rule ([`narrow_by_name`]) and filtered by G14's
-/// structural shape test.
+/// structural shape test — widened by [`crate::ty::dot_reach`] to the
+/// borrow-`Self` requirements an owned receiver reaches through `.&`.
 ///
 /// Reads the receiver exactly as `infer_dot_call` reads it: a BORROW
 /// reaches the referent's bounds (inside a generic body `T.&mut::<@z>` is
 /// the very shape a `Self.&mut`-taking requirement is called on), and the
-/// borrow's mutability is the receiver shape [`crate::ty::dot_callable`]
+/// borrow's mutability is the receiver shape [`crate::ty::dot_reach`]
 /// judges against. `owner` is the body being edited — a param of any other
 /// binder cannot occur in it, and gets nothing rather than a guess.
 ///
@@ -727,10 +731,13 @@ pub fn bound_dot_offers<'db>(
         let Some(sig) = lower_requirement_sig(db, trait_, req, trait_, self_ty.clone()) else {
             continue;
         };
-        if crate::ty::dot_callable(&sig, &self_ty, receiver_shape) {
+        let reach = crate::ty::self_position_of(&sig, &self_ty)
+            .and_then(|position| crate::ty::dot_reach(receiver_shape, position));
+        if let Some(reach) = reach {
             out.push(BoundDotOffer {
                 name: candidate.name.to_owned(),
                 sig,
+                reach,
             });
         }
     }
