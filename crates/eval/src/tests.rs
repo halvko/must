@@ -1984,6 +1984,318 @@ static f = fn (point: bool) -> usize {
 }
 
 #[test]
+fn nested_mut_binders_of_a_variant_value_widen_to_its_enum() {
+    // Each binder starts as the `Circle` it was given and can be
+    // reassigned to `Point`.
+    check_run(
+        r#"
+type Shape = enum { Circle(usize), Point };
+type Pair = enum { Two(Shape::Circle, usize) };
+static size = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(n) => n,
+        ::Point => 7,
+    }
+};
+static f = fn (point: bool) -> usize {
+    let struct { mut a } = struct { a = Shape::Circle(1) };
+    let [mut c] = [Shape::Circle(2)];
+    if point { a = Shape::Point; c = Shape::Point; }
+    match Pair::Two(Shape::Circle(3), 0) {
+        ::Two(mut e, _) => {
+            if point { e = Shape::Point; }
+            size(a) * 100 + size(c) * 10 + size(e)
+        },
+    }
+};
+"#,
+        "f(false) * 1000 + f(true)",
+        expect![[r#"
+            => 123777
+        "#]],
+    );
+}
+
+#[test]
+fn array_let_patterns_bind_each_element() {
+    check_run(
+        r#"
+static f = fn () -> usize {
+    let [a, mut b, _] = [1, 2, 3];
+    b = b * 10;
+    let [[p, q], [r, s]]: [[usize; 2]; 2] = [[1, 2], [3, 4]];
+    a + b + p * 1000 + q * 100 + r * 10 + s
+};
+"#,
+        "f()",
+        expect![[r#"
+            => 1255
+        "#]],
+    );
+}
+
+#[test]
+fn variant_let_patterns_bind_the_payloads() {
+    check_run(
+        r#"
+type Only = enum { One(usize, usize) };
+static f = fn (o: Only) -> usize {
+    let ::One(x, mut y) = o;
+    y = y + 1;
+    let Only::One(z, _) = o;
+    x * 100 + y * 10 + z
+};
+"#,
+        "f(Only::One(1, 2))",
+        expect![[r#"
+            => 131
+        "#]],
+    );
+}
+
+#[test]
+fn nested_let_patterns_bind_through_every_level() {
+    check_run(
+        r#"
+type Opt = enum { Some(usize), None };
+type Pair = struct { lo: usize, hi: usize };
+static f = fn (v: Opt::Some, w: Opt::Some) -> usize {
+    let [::Some(n), ::Some(m)] = [v, w];
+    let [Pair(struct { lo, hi }), _] = [Pair(struct { lo = 5, hi = 6 }), Pair(struct { lo = 7, hi = 8 })];
+    n * 1000 + m * 100 + lo * 10 + hi
+};
+"#,
+        "f(Opt::Some(1), Opt::Some(2))",
+        expect![[r#"
+            => 1256
+        "#]],
+    );
+}
+
+#[test]
+fn a_variant_let_pattern_through_a_mut_borrow_binds_mut_borrows() {
+    // Writing through `x` changes `o`.
+    check_run(
+        r#"
+type Only = enum { One(usize, usize) };
+static f = fn (mut o: Only) -> usize {
+    let r = o.&mut;
+    let ::One(x, y) = r;
+    x.* = 100;
+    let v = y.*;
+    match o {
+        ::One(a, _) => a + v,
+    }
+};
+"#,
+        "f(Only::One(1, 2))",
+        expect![[r#"
+            => 102
+        "#]],
+    );
+}
+
+#[test]
+fn parameter_patterns_bind_the_parts_of_each_argument() {
+    check_run(
+        r#"
+type Only = enum { One(usize, usize) };
+static f = fn ([a, b]: [usize; 2], ::One(c, d): Only) -> usize {
+    a * 1000 + b * 100 + c * 10 + d
+};
+"#,
+        "f([1, 2], Only::One(3, 4))",
+        expect![[r#"
+            => 1234
+        "#]],
+    );
+}
+
+#[test]
+fn a_refutable_let_pattern_traps_with_the_diagnostic_message() {
+    check_run(
+        r#"
+type Opt = enum { Some(usize), None };
+static f = fn (o: Opt) -> usize {
+    let ::Some(n) = o;
+    n
+};
+"#,
+        "f(Opt::Some(1))",
+        expect![[r#"
+            error[Trap]: this pattern can fail to match; use `match`
+        "#]],
+    );
+}
+
+#[test]
+fn a_let_pattern_naming_another_variant_traps_instead_of_binding() {
+    // The `Circle`'s payload is never read as the `Label`'s `str`.
+    let text = r#"
+type Shape = enum { Circle(usize), Label(str) };
+static owned = fn (c: Shape::Circle) -> str {
+    let ::Label(s) = c;
+    s
+};
+static borrowed = fn (c: Shape::Circle) -> str {
+    let ::Label(s) = c.&;
+    s.*
+};
+"#;
+    check_run(
+        text,
+        "owned(Shape::Circle(1))",
+        expect![[r#"
+            error[Trap]: this pattern can fail to match; use `match`
+        "#]],
+    );
+    check_run(
+        text,
+        "borrowed(Shape::Circle(1))",
+        expect![[r#"
+            error[Trap]: this pattern can fail to match; use `match`
+        "#]],
+    );
+}
+
+#[test]
+fn a_let_pattern_on_a_value_of_unknown_type_traps_instead_of_binding() {
+    // Error recovery: `Nope` names no type, so nothing says `c` is a
+    // `Label`, and the `Circle`'s payload must not be read as a `str`.
+    check_run(
+        r#"
+type Shape = enum { Circle(usize), Label(str) };
+static f = fn (c: Shape) -> str {
+    let Shape::Label(s): Nope = c;
+    s
+};
+"#,
+        "f(Shape::Circle(7))",
+        expect![[r#"
+            error[Trap]: this pattern can fail to match; use `match`
+        "#]],
+    );
+}
+
+#[test]
+fn a_variant_pattern_on_a_value_of_unknown_type_reads_no_payload() {
+    // Error recovery: `Nope` names no type, so `g()` and the parameter are
+    // `{error}`. The `Circle`'s payload is never read as a `str`.
+    let text = r#"
+type Shape = enum { Circle(usize), Label(str) };
+static g = fn () -> Nope { Shape::Circle(7) };
+static from_call = fn () -> str {
+    let Shape::Label(s) = g();
+    s
+};
+static from_param = fn (Shape::Label(s): Nope) -> str { s };
+"#;
+    check_run(
+        text,
+        "from_call()",
+        expect![[r#"
+        error[Trap]: cannot use `g`: its type annotation has errors
+    "#]],
+    );
+    check_run(
+        text,
+        "from_param(Shape::Circle(7))",
+        expect![[r#"
+        error[Trap]: cannot use `from_param`: its type annotation has errors
+    "#]],
+    );
+}
+
+#[test]
+fn a_refutable_parameter_pattern_traps_before_it_reads_the_argument() {
+    let text = r#"
+type S = enum { A(usize), B(usize, usize) };
+static owned = fn (::B(x, y): S) -> usize { x + y };
+static borrowed = fn::<@a>(::B(x, y): S.&::<@a>) -> usize { x.* + y.* };
+static nested = fn ([::B(x, y)]: [S; 1]) -> usize { x + y };
+"#;
+    check_run(
+        text,
+        "owned(S::A(1))",
+        expect![[r#"
+            error[Trap]: this pattern can fail to match; use `match`
+        "#]],
+    );
+    check_run(
+        text,
+        "{ let s: S = S::A(1); borrowed(s.&) }",
+        expect![[r#"
+            error[Trap]: this pattern can fail to match; use `match`
+        "#]],
+    );
+    check_run(
+        text,
+        "nested([S::A(1)])",
+        expect![[r#"
+            error[Trap]: this pattern can fail to match; use `match`
+        "#]],
+    );
+}
+
+#[test]
+fn a_parameter_pattern_with_too_many_payloads_traps_before_it_reads_the_argument() {
+    check_run(
+        r#"
+type S = enum { A(usize), B(usize, usize) };
+static f = fn (::A(x, y): S) -> usize { x + y };
+"#,
+        "f(S::A(1))",
+        expect![[r#"
+            error[Trap]: `A` has 1 payload, this pattern names 2
+        "#]],
+    );
+}
+
+#[test]
+fn a_parameter_pattern_naming_a_missing_field_traps_before_it_reads_the_argument() {
+    check_run(
+        r#"
+type R = struct { a: usize };
+static f = fn (R(struct { a, b }): R) -> usize { a + b };
+"#,
+        "f(R(struct { a = 1 }))",
+        expect![[r#"
+            error[Trap]: no field `b` on `struct { a: usize }`
+        "#]],
+    );
+}
+
+#[test]
+fn a_parameter_pattern_longer_than_its_array_traps_before_it_reads_the_argument() {
+    check_run(
+        r#"
+static f = fn ([a, b, c]: [usize; 2]) -> usize { a + b + c };
+"#,
+        "f([1, 2])",
+        expect![[r#"
+            error[Trap]: this pattern has 3 elements, but the array has length 2
+        "#]],
+    );
+}
+
+#[test]
+fn a_qualified_variant_let_pattern_binds_through_a_borrow() {
+    check_run(
+        r#"
+type Only = enum { One(usize, usize) };
+static f = fn (o: Only) -> usize {
+    let Only::One(a, b) = o.&;
+    a.* + b.*
+};
+"#,
+        "f(Only::One(40, 2))",
+        expect![[r#"
+            => 42
+        "#]],
+    );
+}
+
+#[test]
 fn nonexhaustive_match_traps_with_the_diagnostic_message() {
     // Reaching the uncovered variant crashes with exactly the text the
     // squiggle shows; the covered variant still runs fine.

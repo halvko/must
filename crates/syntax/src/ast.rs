@@ -175,8 +175,8 @@ ast_node!(
     WildcardPat: WILDCARD_PAT
 );
 ast_node!(
-    /// A bare name as a whole pattern: a binding — unless hir reinterprets
-    /// it as a payload-less variant of the scrutinee's enum.
+    /// `mut? name`: a binding, as a whole pattern or one position of a
+    /// larger one.
     BindPat: BIND_PAT
 );
 ast_node!(
@@ -200,6 +200,11 @@ ast_node!(
     /// `Name(pattern)` — unwraps a newtype and destructures its underlying
     /// shape, construction's mirror image (`Name(struct { ... })`).
     NewtypePat: NEWTYPE_PAT
+);
+ast_node!(
+    /// `[a, b, c]` — destructures a fixed-length array, one pattern per
+    /// element. A `let`/parameter pattern.
+    ArrayPat: ARRAY_PAT
 );
 ast_node!(
     /// `loop { ... }` — an infinite loop; its value is carried by `break`.
@@ -439,17 +444,18 @@ ast_enum!(
 );
 ast_enum!(
     /// A pattern: a match-arm pattern (`VariantPat`/`LiteralPat`/
-    /// `WildcardPat`/`RestPat`) or a `let`/parameter binding pattern
-    /// (`BindPat`/`RecordPat`/`NewtypePat`) — the grammar keeps the two
-    /// vocabularies mostly disjoint (see `crate::grammar`'s `match_pattern`
-    /// vs `binding_pattern`), but both lower through the same `Pat` arena.
+    /// `WildcardPat`/`RestPat`/`BindPat`) or a `let`/parameter pattern,
+    /// which takes `RecordPat`/`NewtypePat`/`ArrayPat` too (see
+    /// `crate::grammar`'s `binding_pattern`). Both lower through the same
+    /// `Pat` arena.
     Pat: VariantPat,
     LiteralPat,
     WildcardPat,
     BindPat,
     RestPat,
     RecordPat,
-    NewtypePat
+    NewtypePat,
+    ArrayPat
 );
 ast_enum!(
     Type: FnType,
@@ -775,10 +781,9 @@ impl Name {
         token(&self.syntax, HOLE).is_some()
     }
 
-    /// Where the insert-`mut` fix writes `mut`: the name's start for let,
-    /// parameter, match-arm and payload bindings, the field name's start
-    /// for a record-pattern field; `None` for a hole and inside a newtype
-    /// pattern.
+    /// Where the insert-`mut` fix writes `mut`: the name's start for any
+    /// `BIND_PAT`, the field name's start for a record-pattern field;
+    /// `None` for a hole.
     pub fn mut_slot(&self) -> Option<TextSize> {
         if self.is_hole() {
             return None;
@@ -786,14 +791,7 @@ impl Name {
         let parent = self.syntax.parent()?;
         let slot = match parent.kind() {
             RECORD_PAT_FIELD => RecordPatField::cast(parent)?.field_name()?.syntax,
-            BIND_PAT
-                if matches!(
-                    parent.parent()?.kind(),
-                    LET_STMT | PARAM | MATCH_ARM | VARIANT_PAT
-                ) =>
-            {
-                self.syntax.clone()
-            }
+            BIND_PAT => self.syntax.clone(),
             _ => return None,
         };
         Some(slot.text_range().start())
@@ -1388,6 +1386,12 @@ impl RecordPatField {
     /// itself.
     pub fn bound_name(&self) -> Option<Name> {
         self.rename().or_else(|| self.field_name())
+    }
+}
+
+impl ArrayPat {
+    pub fn pats(&self) -> impl Iterator<Item = Pat> + use<> {
+        children(&self.syntax)
     }
 }
 

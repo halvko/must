@@ -646,6 +646,11 @@ impl CheckCtx<'_> {
                 let inner = *inner;
                 self.check_rest_patterns(inner);
             }
+            PatData::Array { elements } => {
+                for element in elements.clone() {
+                    self.check_rest_patterns(element);
+                }
+            }
             _ => {}
         }
     }

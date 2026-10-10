@@ -26,6 +26,8 @@ function commaSep(rule) {
  * The binding patterns under the rule names `names`, a bound name being
  * `bound`. A parameter's patterns are a second copy whose bound names are
  * `param_name` nodes, so a query tells a parameter at any nesting depth.
+ * A whole pattern's `mut` belongs to its `let` or parameter, so only a
+ * nested binding (`names.nested`) spells its own.
  */
 function bindingPatterns(names, bound) {
   const node = ($, kind) =>
@@ -35,9 +37,21 @@ function bindingPatterns(names, bound) {
       node($, 'bind_pat'),
       node($, 'record_pat'),
       node($, 'newtype_pat'),
+      node($, 'array_pat'),
+      alias($._qualified_variant_pat, $.variant_pat),
+      $.literal_pat,
+    ),
+
+    [names.nested]: $ => choice(
+      $[names.pattern],
+      alias($[names.mut_bind_pat], $.bind_pat),
     ),
 
     [names.bind_pat]: $ => bound($),
+
+    [names.mut_bind_pat]: $ => seq('mut', bound($)),
+
+    [names.array_pat]: $ => seq('[', commaSep($[names.nested]), ']'),
 
     [names.record_pat]: $ => seq(
       'struct',
@@ -58,7 +72,7 @@ function bindingPatterns(names, bound) {
     [names.newtype_pat]: $ => prec(1, seq(
       field('type', $.identifier),
       '(',
-      $[names.pattern],
+      $[names.nested],
       ')',
     )),
   };
@@ -378,6 +392,9 @@ module.exports = grammar({
       record_pat: 'record_pat',
       record_pat_field: 'record_pat_field',
       newtype_pat: 'newtype_pat',
+      array_pat: 'array_pat',
+      nested: '_nested_binding_pattern',
+      mut_bind_pat: '_mut_bind_pat',
     }, $ => $._name),
 
     ...bindingPatterns({
@@ -386,6 +403,9 @@ module.exports = grammar({
       record_pat: '_param_record_pat',
       record_pat_field: '_param_record_pat_field',
       newtype_pat: '_param_newtype_pat',
+      array_pat: '_param_array_pat',
+      nested: '_param_nested_pattern',
+      mut_bind_pat: '_param_mut_bind_pat',
     }, $ => choice(alias($.identifier, $.param_name), '_')),
 
     rest_pat: _ => '..',
@@ -407,14 +427,16 @@ module.exports = grammar({
     _payload_bind_pat: $ => seq(optional('mut'), $._name),
 
     variant_pat: $ => choice(
-      seq(
-        optional(field('type', $.identifier)),
-        '::',
-        field('variant', $.identifier),
-        optional($._pattern_binding_list),
-      ),
+      $._qualified_variant_pat,
       $._retired_unqualified_variant_pat,
     ),
+
+    _qualified_variant_pat: $ => prec.right(1, seq(
+      optional(field('type', $.identifier)),
+      '::',
+      field('variant', $.identifier),
+      optional($._pattern_binding_list),
+    )),
 
     _pattern_binding_list: $ => seq(
       '(',

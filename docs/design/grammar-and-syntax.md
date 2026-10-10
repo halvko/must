@@ -117,15 +117,25 @@
   spelling across token kinds: in `&'a T` the `&` fires its own migration and the freed
   `'` is an ordinary unterminated character literal. That recovery is diagnostics-layer
   work.
-- **G27** `mut` before a binding name in a match pattern (`::Char(mut c, _)`, `mut x =>`)
-  marks that one binding assignable, exactly as `let mut` and a `mut` parameter do. It is
-  about the binding, not the matched data's shape, so it changes neither dispatch nor
-  coverage, and `mut _` is refused as a hole that can never be assigned. An unannotated
-  `mut` bind of a variant-typed scrutinee widens it to its enum, as `let mut` does.
+- **G27** `mut` before a binding name in a pattern (`::Char(mut c, _)`, `mut x =>`,
+  `[a, mut b]`) marks that one binding assignable, exactly as `let mut` and a `mut` parameter
+  do. It is about the binding, not the matched data's shape, so it changes neither dispatch
+  nor coverage, and `mut _` is refused as a hole that can never be assigned. An unannotated
+  `mut` binding of a variant-typed value widens to its enum, as `let mut` does: a whole match
+  arm, a payload, and a binding nested in a `let` or parameter pattern alike (only an owned
+  value; through a borrow a payload binds the borrow).
 - **G28** The unit value is spelled `()`, like the unit type, so a value and its type read
   the same. `( )` with only trivia inside is the unit value, never an empty group; the unit
   value otherwise comes from an empty block, a bare `break` or `return`, and an `if` with no
   `else`. If tuples land, `()` is the empty tuple. **G07**
+- **G29** A `let` or parameter pattern is a one-arm `match` that must be exhaustive. It takes
+  `mut? name`, `_`, records, newtypes, arrays (`[a, b]`, exactly the array's length) and the
+  match-arm variant and literal patterns, nested in arrays and newtypes. A variant pattern is
+  checked exactly as a match arm is, and passes only when it covers every value: the
+  value is that variant, or its enum has one variant. A pattern that can fail to match is an
+  error on the pattern, which says to use `match`. Like any broken pattern it traps with the
+  same message before reading the value: before its `let` runs, or on entry to its `fn`.
+  Through a borrow the payloads bind as borrows, as in a match arm (M13).
 - **G21** `only` is the capability ceiling clause (T20). One production, one home:
 
   ```
