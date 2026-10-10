@@ -617,6 +617,16 @@ pub struct VariantTy {
     pub name: std::sync::Arc<str>,
 }
 
+impl VariantTy {
+    /// The enum this variant belongs to, with the same generic arguments.
+    pub fn enum_ty(&self) -> Ty {
+        Ty::Named(NamedTy {
+            decl: self.decl.clone(),
+            args: self.args.clone(),
+        })
+    }
+}
+
 /// The implicit-conversion lattice as a PREDICATE — "would a value of
 /// `actual` be accepted where `expected` is wanted, other than by being the
 /// same type". Three edges, and they are the whole list:

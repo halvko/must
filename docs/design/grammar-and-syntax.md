@@ -117,6 +117,11 @@
   spelling across token kinds: in `&'a T` the `&` fires its own migration and the freed
   `'` is an ordinary unterminated character literal. That recovery is diagnostics-layer
   work.
+- **G27** `mut` before a binding name in a match pattern (`::Char(mut c, _)`, `mut x =>`)
+  marks that one binding assignable, exactly as `let mut` and a `mut` parameter do. It is
+  about the binding, not the matched data's shape, so it changes neither dispatch nor
+  coverage, and `mut _` is refused as a hole that can never be assigned. An unannotated
+  `mut` bind of a variant-typed scrutinee widens it to its enum, as `let mut` does.
 - **G21** `only` is the capability ceiling clause (T20). One production, one home:
 
   ```

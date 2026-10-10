@@ -1947,11 +1947,7 @@ fn assign_to_immutable_param_offers_a_make_mutable_fix() {
 }
 
 #[test]
-fn variant_payload_binding_assign_offers_no_fix() {
-    // A variant payload has no `mut` slot (`pattern_binding_list` parses
-    // `IDENT | HOLE` only), so `ast::Name::mut_slot` is `None` and the
-    // insert-`mut` fix stays away; the diagnostic and its "declared
-    // without `mut` here" note still fire.
+fn variant_payload_binding_assign_offers_a_make_mutable_fix() {
     let text = r#"
 type Shape = enum { Circle(usize), Point };
 static f = fn (s: Shape) -> usize {
@@ -1968,22 +1964,17 @@ static f = fn (s: Shape) -> usize {
         .iter()
         .find(|d| d.message.starts_with("cannot assign to `r`"))
         .unwrap_or_else(|| panic!("no assign-to-immutable diagnostic in {diagnostics:?}"));
-    assert_eq!(
-        diag.message,
-        "cannot assign to `r`: it is not declared `mut`"
-    );
-    assert!(diag.fix.is_none(), "expected no fix, got {:?}", diag.fix);
-    assert_eq!(diag.related.len(), 1, "related: {:?}", diag.related);
-    assert_eq!(
-        diag.related[0].message,
-        "`r` is declared without `mut` here"
-    );
+    let fix = diag.fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Make `r` mutable");
+    assert_eq!(fix.edits.len(), 1);
+    assert_eq!(fix.edits[0].insert, "mut ");
+    // Immediately before the payload's name: `::Circle(mut r)`.
+    let r = text.find("Circle(r)").unwrap() + "Circle(".len();
+    assert_eq!(usize::from(fix.edits[0].range.start()), r);
 }
 
 #[test]
-fn match_arm_bind_assign_offers_no_fix() {
-    // A bare match-arm bind (`n => …`) has no `mut` slot either —
-    // `match_pattern`'s `BIND_PAT` arm never eats `MUT_KW`.
+fn match_arm_bind_assign_offers_a_make_mutable_fix() {
     let text = r#"
 static f = fn (x: usize) -> usize {
     match x {
@@ -1998,15 +1989,62 @@ static f = fn (x: usize) -> usize {
         .iter()
         .find(|d| d.message.starts_with("cannot assign to `n`"))
         .unwrap_or_else(|| panic!("no assign-to-immutable diagnostic in {diagnostics:?}"));
-    assert_eq!(
-        diag.message,
-        "cannot assign to `n`: it is not declared `mut`"
+    let fix = diag.fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Make `n` mutable");
+    assert_eq!(fix.edits[0].insert, "mut ");
+    // Immediately before the arm's name: `mut n => ...`.
+    let n = text.find("n =>").unwrap();
+    assert_eq!(usize::from(fix.edits[0].range.start()), n);
+}
+
+#[test]
+fn mut_match_bindings_are_assignable() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(mut r) => { r = r + 1; r },
+        mut other => { other = Shape::Point; 0 },
+    }
+};
+"#,
+        expect![[""]],
     );
-    assert!(diag.fix.is_none(), "expected no fix, got {:?}", diag.fix);
-    assert_eq!(diag.related.len(), 1, "related: {:?}", diag.related);
-    assert_eq!(
-        diag.related[0].message,
-        "`n` is declared without `mut` here"
+}
+
+#[test]
+fn mut_match_bind_of_a_variant_scrutinee_takes_the_enum() {
+    // A `mut` binder of a variant-typed scrutinee (`Shape::Circle`) takes
+    // the enum (G27), so reassigning it to another variant is accepted.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn () -> usize {
+    let c = Shape::Circle(1);
+    match c { mut o => { o = Shape::Point; 0 } }
+};
+"#,
+        expect![[""]],
+    );
+}
+
+#[test]
+fn mut_on_a_match_hole_is_refused() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn (s: Shape) -> usize {
+    match s {
+        ::Circle(mut _) => 1,
+        mut _ => 0,
+    }
+};
+"#,
+        expect![[r#"
+            112..117: `mut` has no effect on `_`: a hole can never be assigned
+            133..138: `mut` has no effect on `_`: a hole can never be assigned
+        "#]],
     );
 }
 

@@ -56,7 +56,6 @@
 ; A name bound anywhere inside a parameter's pattern is a `param_name`.
 (bind_pat (identifier) @variable)
 (bind_pat (param_name) @variable.parameter)
-(variant_pat binding: (identifier) @variable)
 
 ; With a rename the first name is the field, not a binding.
 (record_pat_field name: (identifier) @variable !rename)
