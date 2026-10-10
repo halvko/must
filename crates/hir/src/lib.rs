@@ -46,7 +46,10 @@ pub use scopes::{
     type_scope, utf8_result_loc,
 };
 pub use traits::{BoundDotOffer, BoundSlot, bound_dot_offers, bound_slots, dict_param_count};
-pub use trap_sites::{TrapSite, range_traps, trap_site_for_pat};
+pub use trap_sites::{
+    DeclarationErrors, TrapSite, declaration_errors, declaration_is_named, range_traps,
+    trap_site_for_pat,
+};
 pub use ty::{
     ConstArgValue, FnTy, GenericArg, IntKind, IntValue, NamedTy, ReceiverShape, Region, RegionVar,
     SelfPosition, Ty, VariantTy, dispatches_on, enum_variants, member_self_position,

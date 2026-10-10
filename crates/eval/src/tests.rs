@@ -2589,7 +2589,10 @@ fn generic_frame_shows_const_params_as_named_locals() {
 #[test]
 fn generic_record_constructs_and_projects() {
     check_run(
-        "type Pair = struct::<T> { a: T, b: T };\n\\\n         static main = fn () -> usize { let p = Pair::<usize>(struct { a = 1, b = 2 }); p.a + p.b };",
+        r#"
+type Pair = struct::<T> { a: T, b: T };
+static main = fn () -> usize { let p = Pair::<usize>(struct { a = 1, b = 2 }); p.a + p.b };
+"#,
         "main()",
         expect![[r#"
             => 3
@@ -2636,7 +2639,10 @@ static main = fn () -> Option::<usize> { Option::Some(3) };
 #[test]
 fn const_param_type_constructs_and_evaluates() {
     check_run(
-        "type Buf = struct::<const N: usize> { len: usize };\n\\\n         static main = fn () -> usize { let b: Buf::<8> = Buf::<8>(struct { len = 3 }); b.len };",
+        r#"
+type Buf = struct::<const N: usize> { len: usize };
+static main = fn () -> usize { let b: Buf::<8> = Buf::<8>(struct { len = 3 }); b.len };
+"#,
         "main()",
         expect![[r#"
             => 3
@@ -8328,6 +8334,162 @@ static f = fn() {
         expect![[r#"
             output: "a;"
             error[Trap]: unexpected character `$`
+        "#]],
+    );
+}
+
+/// An error in a `type` declaration traps where the type is named, not
+/// before.
+#[test]
+fn a_broken_type_traps_where_it_is_named() {
+    check_run(
+        r#"
+type P = struct { x: usize, pub y: usize };
+static f = fn() -> usize {
+    print("before;");
+    let p = P(struct { x = 1, y = 2 });
+    p.x
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: field visibility is not supported yet
+        "#]],
+    );
+}
+
+/// An item that never names a broken declaration runs normally.
+#[test]
+fn an_item_that_does_not_name_a_broken_type_runs() {
+    check_run(
+        r#"
+type P = struct { x: usize, pub y: usize };
+static f = fn() -> usize { 3 };
+"#,
+        "f()",
+        expect![[r#"
+            => 3
+        "#]],
+    );
+}
+
+/// An error in a trait traps a function bounded by it when the function's
+/// value is read.
+#[test]
+fn a_broken_trait_traps_a_function_bounded_by_it() {
+    check_run(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; m: fn(x: Self) -> usize; } with {
+    impl usize { m = fn(x: usize) -> usize { x }; }
+};
+static g = fn::<T: D>(t: T) -> usize { 1 };
+static f = fn() -> usize {
+    print("before;");
+    let n: usize = 5;
+    g(n)
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: duplicate requirement `m`
+        "#]],
+    );
+}
+
+/// A missing impl member traps where the implementing type is named.
+#[test]
+fn a_missing_impl_member_traps_where_the_type_is_named() {
+    check_run(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; };
+type P = struct { x: usize } with { impl D { } };
+static f = fn() -> usize {
+    print("before;");
+    P(struct { x = 1 }).x
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: this impl of `D` is missing the member `m`
+        "#]],
+    );
+}
+
+/// An error outside every item traps every item's value.
+#[test]
+fn an_error_outside_every_item_traps_every_item() {
+    check_run(
+        r#"
+static f = fn() -> usize { 3 };
+\
+"#,
+        "f()",
+        expect![[r#"
+            error[Trap]: unexpected character `\`
+        "#]],
+    );
+}
+
+/// A `static` with no value traps where it is read.
+#[test]
+fn a_static_without_a_value_traps_where_it_is_read() {
+    check_run(
+        r#"
+static s: usize;
+static f = fn() -> usize {
+    print("before;");
+    s + 1
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: expected `=` followed by the item's value
+        "#]],
+    );
+}
+
+/// A broken enum traps at a variant path naming it.
+#[test]
+fn a_broken_enum_traps_at_a_variant_path() {
+    check_run(
+        r#"
+type E = enum { A, B(_) };
+static f = fn() -> usize {
+    print("before;");
+    let e = E::A;
+    1
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: a variant payload must be a fully written type; a declaration has nothing to infer `_` from
+        "#]],
+    );
+}
+
+/// A broken trait traps at a qualified call through it.
+#[test]
+fn a_broken_trait_traps_at_a_qualified_call() {
+    check_run(
+        r#"
+trait D = requires { m: fn(x: Self) -> usize; m: fn(x: Self) -> usize; } with {
+    impl usize { m = fn(x: usize) -> usize { x }; }
+};
+static f = fn() -> usize {
+    print("before;");
+    let n: usize = 5;
+    D::m(n)
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: duplicate requirement `m`
         "#]],
     );
 }

@@ -10,7 +10,9 @@ use expect_test::expect;
 
 use crate::TerminatorKind;
 
-/// The error messages of `text` that no trap in the file carries.
+/// The error messages of `text` that no trap in the file carries. An error
+/// in a declaration nothing names, or outside every item in a file where no
+/// item has a body, traps nowhere and is not counted.
 fn untrapped(text: &str) -> Vec<String> {
     let db = RootDatabase::default();
     let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
@@ -39,6 +41,18 @@ fn untrapped(text: &str) -> Vec<String> {
                 }
             }
         }
+    }
+    let owned = hir::declaration_errors(&db, file);
+    for (loc, messages) in &owned.decls {
+        if !hir::declaration_is_named(&db, file, loc) {
+            traps.extend(messages.iter().cloned());
+        }
+    }
+    let runs = hir::all_checkable_items(&db, file)
+        .into_iter()
+        .any(|item| hir::body::body(&db, item).root.is_some());
+    if !runs {
+        traps.extend(owned.outside.iter().cloned());
     }
     errors.retain(|message| !traps.contains(message));
     errors
@@ -119,71 +133,9 @@ fn every_error_traps() {
         gaps.extend(untrapped(text));
     }
     let rendered: String = gaps.iter().map(|message| format!("{message}\n")).collect();
-    // TODO: halvko/must#52 — errors in a declaration with no body (a
-    // `type`, a `trait`, an impl head), errors outside every item, and loan
-    // errors do not trap. This list may only shrink.
+    // TODO: halvko/must#52 — loan errors do not trap. This list may only
+    // shrink.
     expect![[r#"
-        `D` is a trait; an impl in a trait's `with`-chain names the IMPLEMENTING type
-        `Gen` is a reserved generic trait (generic traits are not supported yet); it cannot be implemented
-        `N` is a const parameter, not a type
-        `Pair` takes 1 generic argument, found 0
-        `five` is not a type
-        `forget` is the default ceiling: a type whose values may be dropped on the floor needs no `only` clause
-        `move` and `forget` are rungs of the same ladder — a declaration ceils one ladder once
-        `move` is already this declaration's ceiling
-        `unsafe` trait members are not supported yet
-        `usize` is not a trait
-        `with T: ...` constrained groups are not supported yet
-        `x` is not a type
-        a `const { ... }` block cannot parameterize a type; pass the value through a generic function's const parameter instead
-        a `type` declaration's field declares a type, not a value
-        a `type` declaration's parameters carry no capability bounds: a container is linear when what it holds is
-        a capability ceiling belongs on a `type` declaration, not on a `trait`
-        a capability clause has no place on a const parameter: a const parameter's values are always plain data
-        a capability clause has no place on a region parameter: a region names a duration, not a value, so it has no capability to speak of
-        a declare-only inherent member is an unimplementable promise; define it: `name = fn(...) -> ... { ... };`
-        a field's type must be a fully written type; a declaration has nothing to infer `_` from
-        a safe borrow must name its region (`T.&::<@a>`); regions are not elided in a signature yet
-        a type's const argument must be a literal or a const parameter name
-        a variant payload must be a fully written type; a declaration has nothing to infer `_` from
-        associated types are not supported yet
-        borrow types are spelled postfix: `T.&` / `T.&mut`
         borrowed value does not live long enough: this borrows a local, but the borrow is still live when the body returns and the local is gone by then
-        bounds on a `type` declaration's binder are not supported yet
-        duplicate generic parameter `T`
-        duplicate impl of `D` for `P`
-        duplicate impl of `D` for `usize`
-        duplicate requirement `m`
-        expected `=` followed by the item's value
-        expected `extern static` after `unsafe`: the marker vouches for an `extern` item's declared signature, and only an `extern` item declares one
-        expected `}`
-        expected a capability name after `only` (`only move`)
-        expected a type
-        expected a type for field `b`: `name: Type`
-        expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)
-        field visibility is not supported yet
-        generic traits are not supported yet
-        impls for generic types are not supported yet
-        only a `static` can be `extern`: an `extern` item declares one name with one type
-        only a `struct` or `enum` literal can declare a type
-        only an `extern static` can be `unsafe`: the marker vouches for an `extern` item's declared signature, and nothing else declares one
-        record fields are defined with `=` (`name = value`); `:` annotates a type
-        region parameters come first in a binder; move `@a` before `T`
-        region parameters on type declarations are not supported yet
-        requirement `go` must spell its full signature: every parameter and the return type
-        requirement `n` must spell its full signature: every parameter and the return type
-        the `access` capability does not exist yet; `move` is the only ceiling that can be written
-        the `send` capability does not exist yet; `move` is the only ceiling that can be written
-        the `without` clause is retired: write the ceiling instead (`only move` where you wrote `without forget`)
-        this impl of `D` is missing the member `m`
-        unexpected character `\`
-        unknown capability `leak`; `move` is the only ceiling that can be written
-        unknown trait `Display`
-        unknown trait `Missing`
-        unknown type `Missing`
-        unknown type `Unknown`
-        unknown type `missing`
-        unterminated block comment: expected a closing `*/`
-        unterminated character literal: expected a closing `'`
     "#]].assert_eq(&rendered);
 }
