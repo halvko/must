@@ -160,9 +160,9 @@ fn classify_ident(
         // A fn TYPE's parameter name (`unsafe fn(buf: u8.&raw mut, ...)`).
         // It binds nothing — it is a signature's spelling — but it is a
         // parameter name all the same, and reading it unstyled next to
-        // every other `fn`'s parameters is just a hole. (A colon-declared
-        // member's signature reaches the same class through `BIND_PAT`
-        // below, for the same reason.)
+        // every other `fn`'s parameters is just a hole. A trait
+        // requirement's signature is a fn type too (`push: fn(s: str, w:
+        // Self) -> Self;`), so its names land here.
         (NAME, PARAM) => Some((HlTag::Parameter, HlMods(HlMods::DECLARATION))),
         // A variant declared inside an `enum` literal.
         (NAME, ENUM_VARIANT) => Some((HlTag::EnumMember, HlMods(HlMods::DECLARATION))),
@@ -196,11 +196,10 @@ fn classify_ident(
                 ))
             });
             let Some((item, binding)) = binding else {
-                // No binding behind it: a requirement signature's parameter
-                // names (`push: fn(s: str, w: Self);`) are a signature's
-                // spelling, not a body's bindings — but they are parameter
-                // names all the same, and reading them unstyled next to
-                // every other `fn`'s parameters is just a hole.
+                // No binding behind it (no lowered body to own one): a
+                // pattern under a `PARAM` is a parameter name all the same,
+                // and reading it unstyled next to every other `fn`'s
+                // parameters is just a hole.
                 return is_param.then_some((HlTag::Parameter, HlMods(HlMods::DECLARATION)));
             };
             let (body, _) = hir::body_with_source_map(db, item);

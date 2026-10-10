@@ -2133,10 +2133,10 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
                 continue;
             }
             seen.push(name.clone());
-            // The fully-annotated rule: a requirement is a contract — every
-            // parameter and the return type must be written. (Reserved
-            // shapes — `unsafe fn`, non-fn signatures — carry validation's
-            // own story.)
+            // The fully-annotated rule: a requirement is a contract, so every
+            // parameter's type and the return type are written; parameter
+            // names are optional. Reserved shapes (`unsafe fn`, non-fn
+            // signatures) are validation's to report.
             if let Some(ast::Type::FnType(fn_type)) = member.ty()
                 && fn_type.unsafe_token().is_none()
             {
@@ -2148,7 +2148,7 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
                         range,
                         format!(
                             "requirement `{name}` must spell its full signature: \
-                             every parameter and the return type"
+                             every parameter's type and the return type"
                         ),
                     ));
                 }

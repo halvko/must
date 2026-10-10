@@ -10045,18 +10045,64 @@ static main = fn() -> () {
 }
 
 #[test]
+fn requirement_param_names_are_optional() {
+    // A requirement's signature is a type position: the parameter names
+    // are documentation, so leaving them out declares the same contract.
+    // Impl conformance, `Self`-parameter receiver detection (both the
+    // concrete and the bound-directed dot-call) and the region binder all
+    // read the types alone.
+    check_diagnostics(
+        r#"
+trait Write = requires { push: fn(str, Self) -> Self; };
+trait Display = requires {
+    fmt: fn::<@a, @b, W: Write>(W.&mut::<@a>, Self.&::<@b>) -> ();
+} with {
+    impl usize {
+        fmt = fn::<@a, @b, W: Write>(w: W.&mut::<@a>, x: usize.&::<@b>) -> () {};
+    }
+};
+type Sink = struct { n: usize } with {
+    impl Write {
+        push = fn(s: str, w: Self) -> Self { Sink(struct { n = w.n + 1 }) };
+    }
+};
+static direct = fn(s: Sink) -> Sink { s.push("x") };
+static generic = fn::<W: Write>(w: W) -> W { Write::push("x", w) };
+static shown = fn::<@z, @y, T: Display>(w: Sink.&mut::<@z>, t: T.&::<@y>) -> () {
+    t.fmt(w)
+};
+"#,
+        expect![[r#""#]],
+    );
+    // Conformance compares the types position by position.
+    check_diagnostics(
+        r#"
+trait Write = requires { push: fn(str, Self) -> Self; };
+type Sink = struct { n: usize } with {
+    impl Write { push = fn(s: usize, w: Self) -> Self { w }; }
+};
+"#,
+        expect![[r#"
+            114..118: member `push` does not match `Write`'s requirement: expected `fn(str, Sink) -> Sink`, found `fn(usize, Sink) -> Sink` (required by the trait here at 26..30)
+        "#]],
+    );
+}
+
+#[test]
 fn requirement_rules() {
     check_diagnostics(
         r#"
 trait D = requires {
     m: fn(x: Self) -> usize;
     m: fn(x: Self) -> str;
-    n: fn(x, y: usize) -> usize;
+    n: fn(_, y: usize) -> usize;
+    o: fn(Self);
 };
 "#,
         expect![[r#"
             55..56: duplicate requirement `m`
-            82..83: requirement `n` must spell its full signature: every parameter and the return type
+            82..83: requirement `n` must spell its full signature: every parameter's type and the return type
+            115..116: requirement `o` must spell its full signature: every parameter's type and the return type
         "#]],
     );
 }

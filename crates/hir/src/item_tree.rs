@@ -1246,11 +1246,9 @@ pub fn trait_assoc_types<'db>(db: &'db dyn Db, item: crate::ItemId<'db>) -> Vec<
 }
 
 /// Synthesize a [`TypeRef::Fn`] from a colon-declared member signature
-/// (`fn::<W: Write>(w: W, x: Self) -> W` — NAMED params, so the types
-/// come from the param list, not from bare child types). `None` unless
-/// every param is annotated and the return type is written (declarations
-/// have nothing to infer from), or when the signature carries the
-/// reserved `unsafe` marker.
+/// (`fn::<W: Write>(w: W) -> W` or `fn::<W: Write>(W) -> W`), reading only
+/// the parameter types. `None` when a parameter type or the return type is
+/// missing or holds a hole, or the signature carries the `unsafe` marker.
 fn type_ref_from_decl_signature(fn_type: &ast::FnType) -> Option<TypeRef> {
     if fn_type.unsafe_token().is_some() {
         return None;
