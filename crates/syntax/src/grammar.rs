@@ -1024,12 +1024,13 @@ fn skip_arm_body(p: &mut Parser<'_>) {
 }
 
 /// A match-arm pattern — deliberately flat in v1: `_`, a plain binding
-/// name, and a variant pattern in one of three spellings — qualified
-/// `Enum::Variant(bindings...)`, elided `::Variant(bindings...)` (the
-/// scrutinee's enum, enum segment dropped), and the retired unqualified
-/// `Name(bindings...)` (still parsed as a `VARIANT_PAT` so `validation`
-/// can hand back an honest "write `::Name(...)`" error — patterns have no
-/// calls). Plus a LITERAL pattern (`'(' =>`, `0 =>`), and the *reserved* `..`
+/// name (`mut` allowed), and a variant pattern in one of three
+/// spellings — qualified `Enum::Variant(bindings...)`, elided
+/// `::Variant(bindings...)` (the scrutinee's enum, enum segment dropped),
+/// and the retired unqualified `Name(bindings...)` (parsed as a
+/// `VARIANT_PAT` so `validation` can hand back an honest "write
+/// `::Name(...)`" error — patterns have no calls). Plus a LITERAL pattern
+/// (`'(' =>`, `0 =>`), and the *reserved* `..`
 /// (parses, validation rejects it). A bare name with no `::` and no parens
 /// is *always* a binding now — never reinterpreted type-directed as a
 /// variant (see `infer.rs`'s `check_match_pat` `PatData::Bind` arm). No
@@ -1102,25 +1103,31 @@ fn match_pattern(p: &mut Parser<'_>) {
                 }
                 m.complete(p, VARIANT_PAT);
             } else {
-                let m = p.start();
-                let nm = p.start();
-                p.bump(IDENT);
-                nm.complete(p, NAME);
-                m.complete(p, BIND_PAT);
+                bind_pat(p);
             }
         }
+        MUT_KW => bind_pat(p),
         _ => p.error("expected a pattern"),
     }
 }
 
-/// The positional bindings of a variant pattern: names, `_` holes, and the
-/// reserved `..` rest marker.
+/// `mut? name` — one binding of a match pattern, a `BIND_PAT` either way
+/// (G27).
+fn bind_pat(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.eat(MUT_KW);
+    pattern(p, "expected a binding name");
+    m.complete(p, BIND_PAT);
+}
+
+/// The positional bindings of a variant pattern: `mut? name`, `_` holes,
+/// and the reserved `..` rest marker.
 fn pattern_binding_list(p: &mut Parser<'_>) {
     p.bump(L_PAREN);
     while !p.at(R_PAREN) && !p.at(EOF) {
         let before = p.pos();
         match p.current() {
-            IDENT | HOLE => pattern(p, "expected a binding name"),
+            MUT_KW | IDENT | HOLE => bind_pat(p),
             DOT2 => {
                 let m = p.start();
                 p.bump(DOT2);

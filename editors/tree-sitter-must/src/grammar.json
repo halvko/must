@@ -2897,8 +2897,47 @@
       "value": "_"
     },
     "_match_bind_pat": {
-      "type": "SYMBOL",
-      "name": "identifier"
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "identifier"
+        },
+        {
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "mut"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "_name"
+            }
+          ]
+        }
+      ]
+    },
+    "_payload_bind_pat": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "mut"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_name"
+        }
+      ]
     },
     "variant_pat": {
       "type": "CHOICE",
@@ -2971,12 +3010,13 @@
                   "type": "CHOICE",
                   "members": [
                     {
-                      "type": "FIELD",
-                      "name": "binding",
+                      "type": "ALIAS",
                       "content": {
                         "type": "SYMBOL",
-                        "name": "_name"
-                      }
+                        "name": "_payload_bind_pat"
+                      },
+                      "named": true,
+                      "value": "bind_pat"
                     },
                     {
                       "type": "SYMBOL",
@@ -2997,12 +3037,13 @@
                         "type": "CHOICE",
                         "members": [
                           {
-                            "type": "FIELD",
-                            "name": "binding",
+                            "type": "ALIAS",
                             "content": {
                               "type": "SYMBOL",
-                              "name": "_name"
-                            }
+                              "name": "_payload_bind_pat"
+                            },
+                            "named": true,
+                            "value": "bind_pat"
                           },
                           {
                             "type": "SYMBOL",

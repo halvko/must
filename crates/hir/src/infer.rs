@@ -51,6 +51,11 @@ pub struct InferenceResult {
     /// check site, and the precise variant where it happened at a deferred
     /// join edge.
     pub widened: ArenaMap<ExprId, VariantTy>,
+    /// Every unannotated `mut` whole-value binder in a match pattern on a
+    /// variant-typed scrutinee, mapped to the variant the scrutinee was.
+    /// The binding's type is the enum (G27), and MIR plants the
+    /// `WidenToEnum` op where it binds the value.
+    pub widened_bindings: ArenaMap<BindingId, VariantTy>,
     /// Resolution of every `Enum::Variant` path expression that named a
     /// real variant — the type-directed second-segment resolution (`::`
     /// paths resolve against the enum's declaration during inference, not
@@ -3339,6 +3344,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // needs the pinned args) and for value-determinism (an unresolved
         // canonical variable index would break backdating).
         for (_, variant) in result.widened.iter_mut() {
+            variant.args = resolve_args_fully(self.table, &variant.args);
+        }
+        for (_, variant) in result.widened_bindings.iter_mut() {
             variant.args = resolve_args_fully(self.table, &variant.args);
         }
         for (_, variant) in result.variant_of_expr.iter_mut() {
@@ -9249,6 +9257,21 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
                 let ty = match scrut {
                     Scrutinee::Enum(named) => Ty::Named(named.clone()),
+                    // `mut` widening (G27): an owned `mut` binder of a
+                    // variant-typed value takes the enum, so it can be
+                    // reassigned across variants; the conversion is recorded
+                    // for MIR.
+                    Scrutinee::Variant(variant)
+                        if lens.is_none() && self.body.bindings[binding].mutable =>
+                    {
+                        self.result
+                            .widened_bindings
+                            .insert(binding, variant.clone());
+                        Ty::Named(NamedTy {
+                            decl: variant.decl.clone(),
+                            args: variant.args.clone(),
+                        })
+                    }
                     Scrutinee::Variant(variant) => Ty::Variant(variant.clone()),
                     Scrutinee::Other(ty) | Scrutinee::Unknown(ty) => ty.clone(),
                     Scrutinee::Error => Ty::Error,

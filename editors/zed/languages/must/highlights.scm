@@ -34,7 +34,6 @@
 (record_type_field name: (identifier) @property)
 (bind_pat (identifier) @variable)
 (bind_pat (param_name) @variable.parameter)
-(variant_pat binding: (identifier) @variable)
 (record_pat_field name: (identifier) @variable !rename)
 (record_pat_field name: (param_name) @variable.parameter)
 (record_pat_field name: (identifier) @property rename: (_))

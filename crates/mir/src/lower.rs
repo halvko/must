@@ -2131,9 +2131,20 @@ impl LowerCtx<'_> {
             PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int(_) => {}
             PatData::Bind(binding) => {
                 // A bare bind always binds the whole scrutinee (never
-                // narrowed to a variant), so it just aliases the value.
+                // narrowed to a variant), so it just aliases the value —
+                // widened to its enum for a `mut` binder of a variant-typed
+                // value (`InferenceResult::widened_bindings`).
                 let local = self.alloc_binding_local(b, *binding);
-                b.push_assign(local, Rvalue::Use(scrut.clone()), origin);
+                let rvalue = match self.infer.widened_bindings.get(*binding).cloned() {
+                    Some(variant) => Rvalue::WidenToEnum {
+                        op: scrut.clone(),
+                        decl: variant.decl,
+                        index: variant.index,
+                        variant: variant.name.to_string(),
+                    },
+                    None => Rvalue::Use(scrut.clone()),
+                };
+                b.push_assign(local, rvalue, origin);
             }
             PatData::Variant { bindings, .. } => {
                 let payloads = self

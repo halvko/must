@@ -5024,20 +5024,6 @@
     "type": "variant_pat",
     "named": true,
     "fields": {
-      "binding": {
-        "multiple": true,
-        "required": false,
-        "types": [
-          {
-            "type": "_",
-            "named": false
-          },
-          {
-            "type": "identifier",
-            "named": true
-          }
-        ]
-      },
       "type": {
         "multiple": false,
         "required": false,
@@ -5063,6 +5049,10 @@
       "multiple": true,
       "required": false,
       "types": [
+        {
+          "type": "bind_pat",
+          "named": true
+        },
         {
           "type": "rest_pat",
           "named": true

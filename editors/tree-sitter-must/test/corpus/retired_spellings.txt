@@ -106,7 +106,8 @@ static f = fn () { match s { Circle(r) => r } };
             (match_arm
               (variant_pat
                 (identifier)
-                (identifier))
+                (bind_pat
+                  (identifier)))
               (path_expr
                 (identifier)))))))))
 

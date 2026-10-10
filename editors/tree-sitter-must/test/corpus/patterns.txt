@@ -93,13 +93,16 @@ static f = fn () { match s { Shape::Circle(r, _) => r, ::Pair(a, ..) => a, 0 => 
               (variant_pat
                 (identifier)
                 (identifier)
-                (identifier))
+                (bind_pat
+                  (identifier))
+                (bind_pat))
               (path_expr
                 (identifier)))
             (match_arm
               (variant_pat
                 (identifier)
-                (identifier)
+                (bind_pat
+                  (identifier))
                 (rest_pat))
               (path_expr
                 (identifier)))
@@ -119,6 +122,38 @@ static f = fn () { match s { Shape::Circle(r, _) => r, ::Pair(a, ..) => a, 0 => 
             (match_arm
               (wildcard_pat)
               (integer))
+            (match_arm
+              (bind_pat
+                (identifier))
+              (path_expr
+                (identifier)))))))))
+
+==================
+Mutable match bindings
+==================
+
+static f = fn () { match s { ::Char(mut c, _) => c, mut other => other } };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_literal
+      (param_list)
+      (block_expr
+        (expr_stmt
+          (match_expr
+            (path_expr
+              (identifier))
+            (match_arm
+              (variant_pat
+                (identifier)
+                (bind_pat
+                  (identifier))
+                (bind_pat))
+              (path_expr
+                (identifier)))
             (match_arm
               (bind_pat
                 (identifier))
