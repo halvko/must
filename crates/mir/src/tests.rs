@@ -499,6 +499,163 @@ fn missing_operand_traps() {
 }
 
 #[test]
+fn digit_group_commas_trap_instead_of_running_the_first_group() {
+    check_mir(
+        r#"
+static a: i64 = 1,000;
+static b = fn () -> i64 { -2,147 };
+static c = fn () -> i64 { 2,147 };
+"#,
+        expect![[r#"
+            item a:
+            item b:
+            fn b0() -> i64 {
+              _0: i64  // return
+              _1: {error}
+              _2: {error}
+              bb0:
+                _1 = trap "digit groups cannot be separated by `,`; use `_`" -> bb1
+              bb1:
+                _2 = trap "syntax error: missing expression" -> bb2
+              bb2:
+                _0 = ()
+                return
+            }
+            fn b1() -> fn() -> i64 {
+              _0: fn() -> i64  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item c:
+            fn b0() -> i64 {
+              _0: i64  // return
+              _1: {error}
+              _2: {error}
+              bb0:
+                _1 = trap "digit groups cannot be separated by `,`; use `_`" -> bb1
+              bb1:
+                _2 = trap "syntax error: missing expression" -> bb2
+              bb2:
+                _0 = _2
+                return
+            }
+            fn b1() -> fn() -> i64 {
+              _0: fn() -> i64  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn digit_group_commas_in_a_return_or_break_value_trap() {
+    check_mir(
+        r#"
+static f = fn () -> () { return 1,000; };
+static g = fn () -> () { loop { break 1,000; } };
+"#,
+        expect![[r#"
+            item f:
+            fn b0() -> () {
+              _0: ()  // return
+              _1: !
+              _2: {error}
+              bb0:
+                _1 = trap "digit groups cannot be separated by `,`; use `_`" -> bb1
+              bb1:
+                _2 = trap "syntax error: missing expression" -> bb2
+              bb2:
+                _0 = _2
+                return
+              bb3:
+                _0 = ()
+                return
+            }
+            fn b1() -> fn() {
+              _0: fn()  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item g:
+            fn b0() -> () {
+              _0: ()  // return
+              _1: {error}
+              _2: !
+              _3: {error}
+              bb0:
+                goto -> bb1
+              bb1:
+                _2 = trap "digit groups cannot be separated by `,`; use `_`" -> bb3
+              bb2:
+                _0 = _1
+                return
+              bb3:
+                _3 = trap "syntax error: missing expression" -> bb4
+              bb4:
+                _1 = _3
+                goto -> bb2
+              bb5:
+                goto -> bb1
+            }
+            fn b1() -> fn() {
+              _0: fn()  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
+fn a_stray_token_at_a_block_end_leaves_no_tail() {
+    check_mir(
+        r#"
+static f = fn () -> () {};
+static g = fn () -> () { f(); ) };
+"#,
+        expect![[r#"
+            item f:
+            fn b0() -> () {
+              _0: ()  // return
+              bb0:
+                _0 = ()
+                return
+            }
+            fn b1() -> fn() {
+              _0: fn()  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+            item g:
+            fn b0() -> () {
+              _0: ()  // return
+              _1: ()
+              _2: ()
+              bb0:
+                _1 = call item f() -> bb1
+              bb1:
+                _2 = trap "expected an expression" -> bb2
+              bb2:
+                _0 = ()
+                return
+            }
+            fn b1() -> fn() {
+              _0: fn()  // return
+              bb0:
+                _0 = fn b0
+                return
+            }
+        "#]],
+    );
+}
+
+#[test]
 fn annotation_recovered_never_does_not_make_a_returning_call_diverge() {
     // Inference recovers `g()` as `!` (trusting the annotation); the call
     // must still get a return target — the mismatch is the trap after it.

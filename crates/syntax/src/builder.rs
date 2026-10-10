@@ -75,6 +75,7 @@ pub(crate) fn build(
                 after_prev,
                 fix,
             } => builder.error(msg, after_prev, fix),
+            Event::DigitGroupCommas { tokens } => builder.digit_group_commas(tokens),
         }
     }
 
@@ -196,20 +197,51 @@ impl Builder<'_> {
                 insert,
             }],
         });
-        // The owner is the innermost open node that began before the
-        // error: one begun AT the offending token may be the next construct.
-        let node = self
-            .open_starts
-            .iter()
-            .rposition(|&start| start < range.start())
-            .unwrap_or(0);
-        self.errors.push(SyntaxError {
+        self.push_error(SyntaxError {
             message,
             range,
             fix,
         });
+    }
+
+    /// Record `error` with its owner: the innermost open node that began
+    /// before it, since one begun AT the offending token may be the next
+    /// construct.
+    fn push_error(&mut self, error: SyntaxError) {
+        let node = self
+            .open_starts
+            .iter()
+            .rposition(|&start| start < error.range.start())
+            .unwrap_or(0);
         self.unowned.push((node, self.owners.len()));
-        self.owners.push(range);
+        self.owners.push(error.range);
+        self.errors.push(error);
+    }
+
+    /// `2,147,483,647`: the literal is the previous token (the event sits
+    /// right after it), its groups the next `tokens` raw tokens (the parser
+    /// only takes groups with no trivia between them).
+    fn digit_group_commas(&mut self, tokens: usize) {
+        let len = self.tokens[self.raw_pos..][..tokens]
+            .iter()
+            .map(|token| token.len)
+            .sum::<TextSize>();
+        let range = TextRange::new(
+            self.prev_token_range.start(),
+            self.prev_token_range.end() + len,
+        );
+        let joined = self.text[range].replace(',', "_");
+        self.push_error(SyntaxError {
+            message: "digit groups cannot be separated by `,`; use `_`".to_owned(),
+            range,
+            fix: Some(Fix {
+                label: format!("Write `{joined}`"),
+                edits: vec![TextEdit {
+                    range,
+                    insert: joined,
+                }],
+            }),
+        });
     }
 
     fn eat_trivia(&mut self) {
