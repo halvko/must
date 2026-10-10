@@ -10,14 +10,15 @@ env:
   # label still does, and starts a fresh budget.
   MAX_ROUNDS: 3
 
-# A newer run on the same PR supersedes the running review. Other labels get a
-# group of their own, so adding one does not cancel a review in progress.
+# One round per PR at a time. A round in progress finishes, so every reviewer
+# posts its summary; a newer event waits, replacing any older one waiting.
+# Other labels get a group of their own, so they never wait or replace.
 concurrency:
   group: >-
     review-${{ github.event.pull_request.number }}${{
     github.event.action == 'labeled' && github.event.label.name != 'review'
     && format('-{0}', github.run_id) || '' }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   roles:
