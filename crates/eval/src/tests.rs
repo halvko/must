@@ -4884,6 +4884,43 @@ static main = fn() -> usize {
 }
 
 #[test]
+fn trait_dispatch_through_requirements_without_param_names() {
+    // A requirement's parameter names are documentation: the same
+    // dispatch runs when they are left out.
+    check_run(
+        r#"
+trait Write = requires { push: fn(str, Self) -> Self; };
+trait Display = requires { fmt: fn::<W: Write>(W, Self) -> W; } with {
+    impl usize {
+        fmt = fn::<W: Write>(w: W, x: usize) -> W { w.push("num") };
+    }
+};
+type Sink = struct { pushes: usize } with {
+    impl Write {
+        push = fn(s: str, w: Self) -> Self {
+            print(s);
+            Sink(struct { pushes = w.pushes + 1 })
+        };
+    }
+};
+static show = fn::<T: Display>(x: T) -> usize {
+    let s = x.fmt(Sink(struct { pushes = 0 }));
+    s.pushes
+};
+static main = fn() -> usize {
+    let n: usize = 2;
+    show::<usize>(7) + Display::fmt(Sink(struct { pushes = 1 }), n).pushes
+};
+"#,
+        "main()",
+        expect![[r#"
+            output: "numnum"
+            => 3
+        "#]],
+    );
+}
+
+#[test]
 fn dictionary_forwarding_through_recursion() {
     // `fmt_usize` recurses (forwarding its own dictionary) and is called
     // from an impl member (forwarding the member's binder dictionary).

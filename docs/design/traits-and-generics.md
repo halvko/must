@@ -3,7 +3,8 @@
 ## Conclusions
 
 - **TR01** Trait and impl syntax, sealed; non-generic traits are live end to end. `trait N =
-  requires { ... };` declares a set of named, fully-signatured requirements; aliases are a
+  requires { ... };` declares a set of named, fully-signatured requirements, each signature a
+  fn type (its parameter names optional documentation, as in any fn type); aliases are a
   committed second constructor, still reserved. Impls attach as `impl`-keyword elements inside
   a required `with`-chain, at one of three homes: the trait's declaration, the self-type's
   head, or, via a `for`-head covering `Self`, an anchor type in the self-type's arguments —

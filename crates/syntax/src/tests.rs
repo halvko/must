@@ -11736,9 +11736,8 @@ type A = struct { x: usize } with {
                         PARAM_LIST@68..77
                           L_PAREN@68..69 "("
                           PARAM@69..76
-                            BIND_PAT@69..70
-                              NAME@69..70
-                                IDENT@69..70 "a"
+                            NAME@69..70
+                              IDENT@69..70 "a"
                             COLON@70..71 ":"
                             WHITESPACE@71..72 " "
                             PATH_TYPE@72..76
@@ -13136,9 +13135,8 @@ trait Write = requires {
                       PARAM_LIST@38..55
                         L_PAREN@38..39 "("
                         PARAM@39..45
-                          BIND_PAT@39..40
-                            NAME@39..40
-                              IDENT@39..40 "s"
+                          NAME@39..40
+                            IDENT@39..40 "s"
                           COLON@40..41 ":"
                           WHITESPACE@41..42 " "
                           PATH_TYPE@42..45
@@ -13147,9 +13145,8 @@ trait Write = requires {
                         COMMA@45..46 ","
                         WHITESPACE@46..47 " "
                         PARAM@47..54
-                          BIND_PAT@47..48
-                            NAME@47..48
-                              IDENT@47..48 "w"
+                          NAME@47..48
+                            IDENT@47..48 "w"
                           COLON@48..49 ":"
                           WHITESPACE@49..50 " "
                           PATH_TYPE@50..54
@@ -13219,9 +13216,8 @@ trait Display = requires {
                       PARAM_LIST@51..66
                         L_PAREN@51..52 "("
                         PARAM@52..56
-                          BIND_PAT@52..53
-                            NAME@52..53
-                              IDENT@52..53 "w"
+                          NAME@52..53
+                            IDENT@52..53 "w"
                           COLON@53..54 ":"
                           WHITESPACE@54..55 " "
                           PATH_TYPE@55..56
@@ -13230,9 +13226,8 @@ trait Display = requires {
                         COMMA@56..57 ","
                         WHITESPACE@57..58 " "
                         PARAM@58..65
-                          BIND_PAT@58..59
-                            NAME@58..59
-                              IDENT@58..59 "x"
+                          NAME@58..59
+                            IDENT@58..59 "x"
                           COLON@59..60 ":"
                           WHITESPACE@60..61 " "
                           PATH_TYPE@61..65
@@ -13329,9 +13324,8 @@ trait TrustedLen = unsafe requires Self: Iterator { };
                       PARAM_LIST@40..59
                         L_PAREN@40..41 "("
                         PARAM@41..49
-                          BIND_PAT@41..42
-                            NAME@41..42
-                              IDENT@41..42 "n"
+                          NAME@41..42
+                            IDENT@41..42 "n"
                           COLON@42..43 ":"
                           WHITESPACE@43..44 " "
                           PATH_TYPE@44..49
@@ -13340,9 +13334,8 @@ trait TrustedLen = unsafe requires Self: Iterator { };
                         COMMA@49..50 ","
                         WHITESPACE@50..51 " "
                         PARAM@51..58
-                          BIND_PAT@51..52
-                            NAME@51..52
-                              IDENT@51..52 "s"
+                          NAME@51..52
+                            IDENT@51..52 "s"
                           COLON@52..53 ":"
                           WHITESPACE@53..54 " "
                           PATH_TYPE@54..58
@@ -13495,9 +13488,8 @@ trait T = requires {
                       PARAM_LIST@110..119
                         L_PAREN@110..111 "("
                         PARAM@111..118
-                          BIND_PAT@111..112
-                            NAME@111..112
-                              IDENT@111..112 "x"
+                          NAME@111..112
+                            IDENT@111..112 "x"
                           COLON@112..113 ":"
                           WHITESPACE@113..114 " "
                           PATH_TYPE@114..118
@@ -13533,7 +13525,8 @@ trait T = requires {
 #[test]
 fn trait_requirement_param_is_not_mut() {
     // A requirement declares a signature; `mut` is a binding mode, which
-    // only a body has.
+    // only a body has. Its parameters are a fn TYPE's, so the fn type's
+    // own refusal says so.
     check(
         "trait T = requires { m: fn(mut n: usize) -> usize; };",
         expect![[r#"
@@ -13564,9 +13557,8 @@ fn trait_requirement_param_is_not_mut() {
                         PARAM@27..39
                           MUT_KW@27..30 "mut"
                           WHITESPACE@30..31 " "
-                          BIND_PAT@31..32
-                            NAME@31..32
-                              IDENT@31..32 "n"
+                          NAME@31..32
+                            IDENT@31..32 "n"
                           COLON@32..33 ":"
                           WHITESPACE@33..34 " "
                           PATH_TYPE@34..39
@@ -13584,7 +13576,7 @@ fn trait_requirement_param_is_not_mut() {
                   WHITESPACE@50..51 " "
                   R_BRACE@51..52 "}"
                 SEMICOLON@52..53 ";"
-            error 27..32: a requirement's parameter is a plain `name: Type`
+            error 27..30: a function type's parameters are not patterns: write `name: Type` or `Type`
         "#]],
     );
 }
@@ -13621,12 +13613,12 @@ fn trait_requirement_param_is_not_a_pattern() {
                       PARAM_LIST@26..43
                         L_PAREN@26..27 "("
                         PARAM@27..42
-                          RECORD_PAT@27..39
+                          RECORD_TYPE@27..39
                             STRUCT_KW@27..33 "struct"
                             WHITESPACE@33..34 " "
                             L_BRACE@34..35 "{"
                             WHITESPACE@35..36 " "
-                            RECORD_PAT_FIELD@36..37
+                            RECORD_TYPE_FIELD@36..37
                               NAME@36..37
                                 IDENT@36..37 "a"
                             WHITESPACE@37..38 " "
@@ -13648,7 +13640,70 @@ fn trait_requirement_param_is_not_a_pattern() {
                   WHITESPACE@53..54 " "
                   R_BRACE@54..55 "}"
                 SEMICOLON@55..56 ";"
-            error 27..39: a requirement's parameter is a plain `name: Type`
+            error 38..39: expected `:` followed by the field's type
+            error 39..40: a function type's parameters are not patterns: write `name: Type` or `Type`
+        "#]],
+    );
+}
+
+#[test]
+fn trait_requirement_param_names_are_optional() {
+    // A requirement's signature is a type position: each parameter is
+    // `Type` or `name: Type`, decided per parameter like any fn type's,
+    // and the binder (regions included) stays live.
+    check_errors(
+        r#"
+trait Write = requires { push: fn(str, Self) -> Self; };
+trait Mixed = requires { m: fn(usize, y: Self) -> usize; };
+trait Display = requires {
+    fmt: fn::<@a, @b, W: Write>(W.&mut::<@a>, Self.&::<@b>) -> ();
+};
+"#,
+        expect![[r#""#]],
+    );
+    check(
+        "trait T = requires { m: fn(usize) -> usize; };",
+        expect![[r#"
+            SOURCE_FILE@0..46
+              TRAIT_ITEM@0..46
+                ITEM_HEAD@0..5
+                  TRAIT_KW@0..5 "trait"
+                WHITESPACE@5..6 " "
+                NAME@6..7
+                  IDENT@6..7 "T"
+                WHITESPACE@7..8 " "
+                EQ@8..9 "="
+                WHITESPACE@9..10 " "
+                REQUIRES_DEF@10..45
+                  REQUIRES_KW@10..18 "requires"
+                  WHITESPACE@18..19 " "
+                  L_BRACE@19..20 "{"
+                  WHITESPACE@20..21 " "
+                  MEMBER@21..43
+                    NAME@21..22
+                      IDENT@21..22 "m"
+                    COLON@22..23 ":"
+                    WHITESPACE@23..24 " "
+                    FN_TYPE@24..42
+                      FN_KW@24..26 "fn"
+                      PARAM_LIST@26..33
+                        L_PAREN@26..27 "("
+                        PARAM@27..32
+                          PATH_TYPE@27..32
+                            NAME_REF@27..32
+                              IDENT@27..32 "usize"
+                        R_PAREN@32..33 ")"
+                      WHITESPACE@33..34 " "
+                      RET_TYPE@34..42
+                        THIN_ARROW@34..36 "->"
+                        WHITESPACE@36..37 " "
+                        PATH_TYPE@37..42
+                          NAME_REF@37..42
+                            IDENT@37..42 "usize"
+                    SEMICOLON@42..43 ";"
+                  WHITESPACE@43..44 " "
+                  R_BRACE@44..45 "}"
+                SEMICOLON@45..46 ";"
         "#]],
     );
 }
@@ -13917,9 +13972,8 @@ type P = struct { a: usize } with {
                       PARAM_LIST@33..42
                         L_PAREN@33..34 "("
                         PARAM@34..41
-                          BIND_PAT@34..35
-                            NAME@34..35
-                              IDENT@34..35 "x"
+                          NAME@34..35
+                            IDENT@34..35 "x"
                           COLON@35..36 ":"
                           WHITESPACE@36..37 " "
                           PATH_TYPE@37..41
@@ -14060,9 +14114,8 @@ trait Show = requires { show: fn(x: Self) -> str; } with {
                       PARAM_LIST@33..42
                         L_PAREN@33..34 "("
                         PARAM@34..41
-                          BIND_PAT@34..35
-                            NAME@34..35
-                              IDENT@34..35 "x"
+                          NAME@34..35
+                            IDENT@34..35 "x"
                           COLON@35..36 ":"
                           WHITESPACE@36..37 " "
                           PATH_TYPE@37..41
@@ -14285,9 +14338,8 @@ type V = struct::<T> { a: T } with {
                       PARAM_LIST@33..42
                         L_PAREN@33..34 "("
                         PARAM@34..41
-                          BIND_PAT@34..35
-                            NAME@34..35
-                              IDENT@34..35 "x"
+                          NAME@34..35
+                            IDENT@34..35 "x"
                           COLON@35..36 ":"
                           WHITESPACE@36..37 " "
                           PATH_TYPE@37..41
@@ -14444,9 +14496,8 @@ type P = struct { a: usize } with {
                       PARAM_LIST@34..49
                         L_PAREN@34..35 "("
                         PARAM@35..39
-                          BIND_PAT@35..36
-                            NAME@35..36
-                              IDENT@35..36 "w"
+                          NAME@35..36
+                            IDENT@35..36 "w"
                           COLON@36..37 ":"
                           WHITESPACE@37..38 " "
                           PATH_TYPE@38..39
@@ -14455,9 +14506,8 @@ type P = struct { a: usize } with {
                         COMMA@39..40 ","
                         WHITESPACE@40..41 " "
                         PARAM@41..48
-                          BIND_PAT@41..42
-                            NAME@41..42
-                              IDENT@41..42 "x"
+                          NAME@41..42
+                            IDENT@41..42 "x"
                           COLON@42..43 ":"
                           WHITESPACE@43..44 " "
                           PATH_TYPE@44..48
@@ -14618,9 +14668,8 @@ type P = struct { a: usize } with {
                       PARAM_LIST@29..38
                         L_PAREN@29..30 "("
                         PARAM@30..37
-                          BIND_PAT@30..31
-                            NAME@30..31
-                              IDENT@30..31 "x"
+                          NAME@30..31
+                            IDENT@30..31 "x"
                           COLON@31..32 ":"
                           WHITESPACE@32..33 " "
                           PATH_TYPE@33..37
@@ -14688,9 +14737,8 @@ type P = struct { a: usize } with {
                         PARAM_LIST@114..123
                           L_PAREN@114..115 "("
                           PARAM@115..122
-                            BIND_PAT@115..116
-                              NAME@115..116
-                                IDENT@115..116 "x"
+                            NAME@115..116
+                              IDENT@115..116 "x"
                             COLON@116..117 ":"
                             WHITESPACE@117..118 " "
                             PATH_TYPE@118..122
@@ -15501,9 +15549,8 @@ trait Gen = requires::<T> { get: fn(x: Self) -> usize; } with {
                       PARAM_LIST@36..45
                         L_PAREN@36..37 "("
                         PARAM@37..44
-                          BIND_PAT@37..38
-                            NAME@37..38
-                              IDENT@37..38 "x"
+                          NAME@37..38
+                            IDENT@37..38 "x"
                           COLON@38..39 ":"
                           WHITESPACE@39..40 " "
                           PATH_TYPE@40..44

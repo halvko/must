@@ -1407,8 +1407,7 @@ impl FnType {
     }
     /// The parameter list. Every parameter is one `PARAM`, named
     /// (`buf: u8.&raw mut` — documentation) or bare (`usize`), whichever
-    /// each one wrote; a colon-declared member's signature parses its own
-    /// (pattern-shaped) list into the same slot.
+    /// each one wrote.
     pub fn param_list(&self) -> Option<ParamList> {
         child(&self.syntax)
     }

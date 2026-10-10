@@ -555,9 +555,19 @@ second impl, in either home, is an error naming both sites. A requirement's
 binder may carry bounds of its own, composed with `+` like any other bound
 list — `Display`'s `fmt` is generic over its sink, `W: Write`, independent
 of the trait's own (here absent) generic parameters. A requirement declares
-a signature and no body, so each of its parameters is a plain `name: Type`:
-`mut` and destructuring patterns are refused there and belong to the impl
-that supplies the body.
+a signature and no body: it is a function *type*, so each parameter is
+`name: Type` or just `Type`, and the names are documentation. `Write`
+above declares the same requirement written without them:
+
+```
+trait Write = requires {
+    push: fn(str, Self) -> Self;
+};
+```
+
+Every parameter type and the return type must still be written. `mut` and
+destructuring patterns are refused there, as in any function type, and
+belong to the impl that supplies the body.
 
 Inside a generic body, a bound re-opens exactly the bounded trait's
 members on the rigid receiver — an ordinary structural dot-call, "bound-

@@ -4373,6 +4373,27 @@ static f = fn(n: usize) -> str { n.m$0() };
 }
 
 #[test]
+fn hover_on_a_requirement_without_param_names() {
+    // The names are documentation: a requirement written without them
+    // renders, and instantiates, exactly like one written with them.
+    check_hover(
+        r#"
+trait Sh$0ow = requires { show: fn(usize, Self) -> str; };
+"#,
+        "```must\ntrait Show = requires { show: fn(usize, Self) -> str; }\n```",
+    );
+    check_hover(
+        r#"
+trait D = requires { m: fn(Self, usize) -> str; } with {
+    impl usize { m = fn(x: usize, y: usize) -> str { "n" }; }
+};
+static f = fn(n: usize) -> str { n.m$0(1) };
+"#,
+        "```must\nm: fn(usize, usize) -> str\n```",
+    );
+}
+
+#[test]
 fn hover_on_qualified_call_base_shows_the_trait() {
     check_hover(
         r#"
@@ -4548,6 +4569,7 @@ fn highlights_trait_declaration_and_requirements() {
         r#"
 trait Show = requires {
     show: fn(x: Self) -> str;
+    bare: fn(Self) -> str;
 };
 "#,
         expect_test::expect![[r#"
@@ -4561,6 +4583,11 @@ trait Show = requires {
             41..45 "Self" Type
             47..49 "->" Operator
             50..53 "str" Type.defaultLibrary
+            59..63 "bare" Function.declaration
+            65..67 "fn" Keyword
+            68..72 "Self" Type
+            74..76 "->" Operator
+            77..80 "str" Type.defaultLibrary
         "#]],
     );
 }
@@ -5251,7 +5278,7 @@ fn a_bound_naming_a_non_trait_offers_nothing() {
 
 #[test]
 fn a_requirement_without_a_full_signature_is_not_offered() {
-    // `n`'s first parameter has no type annotation, so its signature isn't
+    // `n`'s first parameter is a hole, so its signature isn't
     // fully written — the trait declaration carries that diagnostic, and
     // `lower_requirement_sig` returns `None` for it. `Self` is deliberately
     // placed in `n`'s SECOND parameter (not dropped) so this isolates the
@@ -5263,7 +5290,7 @@ fn a_requirement_without_a_full_signature_is_not_offered() {
         r#"
 trait D = requires {
     m: fn(x: Self) -> usize;
-    n: fn(x, y: Self) -> usize;
+    n: fn(_, y: Self) -> usize;
 };
 static f = fn::<T: D>(t: T) -> () { t.$0 };
 "#,

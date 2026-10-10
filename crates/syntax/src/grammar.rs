@@ -449,39 +449,6 @@ fn impl_element(p: &mut Parser<'_>) {
     m.complete(p, IMPL_ELEMENT);
 }
 
-/// A colon-declared member's fn signature: like a fn literal's head
-/// (named, annotated params; optional binder; return type) with no body —
-/// wrapped in `FN_TYPE` so it sits in the tree as the annotation it is.
-///
-/// What is left distinguishing it from [`anon_fn_type`], now that a plain
-/// fn type takes `name: Type` parameters too, is the parameter GRAMMAR: a
-/// requirement is written as the signature it is, every parameter named
-/// ([`param_list`], so hir can refuse a half-written one), while a fn
-/// type's names are optional documentation. Routed through the fn-type
-/// list instead, `m: fn(x, y: usize) -> R;` would stop being a
-/// half-written signature and silently become a parameter of type `x` —
-/// so the two productions stay apart until the requirement form is ruled
-/// on its own.
-fn member_decl_fn_signature(p: &mut Parser<'_>) {
-    let m = p.start();
-    // `dealloc: unsafe fn(...)` — an unsafe-to-call requirement; parses
-    // into the FN_TYPE (reserved: validation rejects it for now).
-    p.eat(UNSAFE_KW);
-    p.bump(FN_KW);
-    if p.at(COLON2) && p.nth(1) == L_ANGLE {
-        generic_param_list(p);
-    }
-    if p.at(L_PAREN) {
-        param_list(p);
-    } else {
-        p.error("expected `(`");
-    }
-    if p.at(THIN_ARROW) {
-        ret_type(p);
-    }
-    m.complete(p, FN_TYPE);
-}
-
 /// One member, the shared member grammar: equals-defines (`name =
 /// fn(...) -> R { ... };` — an impl-body member, or a reserved default in
 /// a requires body), colon-declares (`name: fn(...);` — a trait's
@@ -508,14 +475,12 @@ fn member(p: &mut Parser<'_>) {
     }
     pattern(p, "expected a member name");
     if p.eat(COLON) {
-        // The sealed colon-declare form spells NAMED params
-        // (`alloc: fn(n: usize, v: Self) -> R;`), which the plain fn TYPE
-        // grammar doesn't accept — parse a signature-shaped fn instead.
-        if p.at(FN_KW) || (p.at(UNSAFE_KW) && p.nth(1) == FN_KW) {
-            member_decl_fn_signature(p);
-        } else {
-            type_(p);
-        }
+        // A requirement's signature sits in a TYPE position: a plain fn type
+        // ([`anon_fn_type`]) whose parameters are `Type` or `name: Type`, the
+        // names documentation, so `push: fn(str, Self) -> Self;` and
+        // `push: fn(s: str, w: Self) -> Self;` declare one requirement. It
+        // may carry a binder: `fn::<W: Write>(W) -> W`.
+        type_(p);
     }
     if p.eat(EQ) {
         expr(p);
@@ -2230,16 +2195,17 @@ fn borrow_op_generic_args(p: &mut Parser<'_>) {
 /// read off the token.
 ///
 /// Parameters may be NAMED (`unsafe fn(buf: u8.&raw mut, len: usize) ->
-/// isize`), which is how an `extern` item's declaration spells its contract —
-/// a signature a reader must be able to read. The names are documentation:
-/// no call passes arguments by name, and hir keeps only the types.
+/// isize`), which is how an `extern` item's declaration or a trait
+/// requirement may spell its contract — a signature a reader must be able
+/// to read. The names are documentation: no call passes arguments by name,
+/// and hir keeps only the types.
 fn anon_fn_type(p: &mut Parser<'_>) -> CompletedMarker {
     let m = p.start();
     p.eat(UNSAFE_KW);
     p.bump(FN_KW);
     // A generic binder on a fn TYPE: superset (the colon-declared member
-    // signature is the one place it means something — see
-    // [`member_decl_fn_signature`]), refused by validation everywhere else
+    // signature is the one place it means something — a trait requirement
+    // may be a generic fn, see [`member`]), refused by validation everywhere else
     // with the reason, rather than by a bare "expected `(`".
     if p.at(COLON2) && p.nth(1) == L_ANGLE {
         generic_param_list(p);
