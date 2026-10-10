@@ -67,11 +67,12 @@
 //! a match arm (`::Circle($1)` / `Pair($1, $2)` — **one tab stop per
 //! payload**, because `check_match_pat` counts bindings against payloads
 //! and a single stop would hand a two-payload variant an arity error), a
-//! missing record-literal field (`x = $1`), and the `match` arm-list
-//! template. Every snippet carries its own plain fallback for a client
-//! without `snippetSupport` — `must-lsp::to_proto` picks between the two
-//! per client capability; `ide` itself has no notion of "the client", only
-//! the two spellings.
+//! missing record-literal field (`x = $1`), the block-taking expression
+//! keywords (`if $1 { $0 }`, `loop { $0 }`, `match $1 {$0}`), and the
+//! `match` arm-list template. Every snippet carries its own plain fallback
+//! for a client without `snippetSupport` — `must-lsp::to_proto` picks
+//! between the two per client capability; `ide` itself has no notion of
+//! "the client", only the two spellings.
 //!
 //! ## The `match` slots
 //!
@@ -997,6 +998,39 @@ fn type_item_rhs_items(edit_range: TextRange) -> Vec<CompletionItem> {
     .collect()
 }
 
+/// The expression keywords whose grammar always goes on to a block, with
+/// that block written: `if $1 { $0 }` and `loop { $0 }` over three lines,
+/// indented absolutely (P12), and `match $1 {$0}`, kept tight because that
+/// is the arm-list template's slot ([`ArmListShape::EmptyBraces`]). A
+/// snippet-incapable client gets the bare keyword.
+fn block_keyword_items(real_text: &str, edit_range: TextRange) -> Vec<CompletionItem> {
+    let indent = syntax::line_indent(real_text, edit_range.start());
+    let body = format!("{{\n{indent}{}$0\n{indent}}}", syntax::INDENT_UNIT);
+    [
+        (SyntaxKind::IF_KW, format!("if $1 {body}")),
+        (SyntaxKind::LOOP_KW, format!("loop {body}")),
+        (SyntaxKind::MATCH_KW, "match $1 {$0}".to_owned()),
+    ]
+    .into_iter()
+    .map(|(word, snippet)| {
+        let word = word.keyword_text().expect("block keywords are keywords");
+        let mut item = completion_item(
+            word,
+            CompletionItemKind::Keyword,
+            Provenance::Keyword,
+            TYPE_TIER_NONE,
+            None,
+            edit_range,
+        );
+        item.text_edit.insert = InsertText::Snippet {
+            snippet,
+            plain: word.to_owned(),
+        };
+        item
+    })
+    .collect()
+}
+
 /// The integer types plus `str`/`string`/`bool`/`char` — the nameable
 /// builtin types (mirrors [`hir::ty::builtin_type_by_name`]'s name set).
 /// Rendered with the keyword kind (they're not declarations to navigate to)
@@ -1243,10 +1277,8 @@ fn expression_position_items(
 ) -> Vec<CompletionItem> {
     let mut items = file_value_and_type_items(db, file, edit_range, expected, scrutinee_slot);
     items.extend(builtin_fn_items(file, edit_range, expected));
+    items.extend(block_keyword_items(file.text(db), edit_range));
     let mut words = vec![
-        SyntaxKind::IF_KW,
-        SyntaxKind::MATCH_KW,
-        SyntaxKind::LOOP_KW,
         SyntaxKind::FN_KW,
         SyntaxKind::TRUE_KW,
         SyntaxKind::FALSE_KW,

@@ -2981,6 +2981,75 @@ fn completions_snippet_type_item_rhs_struct_and_enum() {
 }
 
 #[test]
+fn completions_snippet_block_keywords_write_their_block() {
+    let fixture_text = r#"
+static main = fn {
+    $0
+};
+"#;
+    assert_eq!(
+        completion_insert(fixture_text, "loop"),
+        crate::InsertText::Snippet {
+            snippet: "loop {\n        $0\n    }".to_owned(),
+            plain: "loop".to_owned(),
+        }
+    );
+    assert_eq!(
+        completion_insert(fixture_text, "if"),
+        crate::InsertText::Snippet {
+            snippet: "if $1 {\n        $0\n    }".to_owned(),
+            plain: "if".to_owned(),
+        }
+    );
+    assert_eq!(
+        completion_insert(fixture_text, "match"),
+        crate::InsertText::Snippet {
+            snippet: "match $1 {$0}".to_owned(),
+            plain: "match".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn completions_snippet_block_keyword_indents_from_the_cursor_line() {
+    // A typed prefix in a nested initializer: the block's closing brace
+    // lines up with the `let` line, its body one unit deeper.
+    assert_eq!(
+        completion_insert(
+            r#"
+static main = fn {
+    loop {
+        let x: usize = i$0
+    }
+};
+"#,
+            "if",
+        ),
+        crate::InsertText::Snippet {
+            snippet: "if $1 {\n            $0\n        }".to_owned(),
+            plain: "if".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn completions_keywords_without_a_block_stay_plain() {
+    let fixture_text = r#"
+static main = fn {
+    loop {
+        $0
+    }
+};
+"#;
+    for word in ["break", "continue", "true", "let"] {
+        assert_eq!(
+            completion_insert(fixture_text, word),
+            crate::InsertText::Plain(word.to_owned()),
+        );
+    }
+}
+
+#[test]
 fn completions_snippet_match_arm_payload_variant_qualified_context() {
     // Past an already-typed qualifier, a payload-carrying variant inserts
     // just the bare name plus its own tab-stopped parens; a payload-less
@@ -3616,6 +3685,21 @@ static f = fn () {
 "#;
     assert_eq!(completion_sort_text(CHAR_SCRUTINEE, "c"), "2_00_c");
     assert_eq!(completion_sort_text(CHAR_SCRUTINEE, "s"), "2_10_s");
+}
+
+#[test]
+fn completions_match_scrutinee_slot_holds_with_braces_written() {
+    // `match $1 {$0}` puts the cursor in the scrutinee slot between written
+    // braces; the slot is recognised there.
+    const BRACED_SCRUTINEE: &str = r#"
+static f = fn () {
+    let s = "x";
+    let c = 'x';
+    match $0 {}
+};
+"#;
+    assert_eq!(completion_sort_text(BRACED_SCRUTINEE, "c"), "2_00_c");
+    assert_eq!(completion_sort_text(BRACED_SCRUTINEE, "s"), "2_10_s");
 }
 
 #[test]

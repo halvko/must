@@ -177,8 +177,10 @@
   holds only on the `read_line` path today, so the note can precede a newline-less prompt
   written before a `read(buf, len)` call. **P09 P03**
 - **The editor extension gains an `indents.scm`** — the client then
-  re-indents multi-line snippet bodies and the template's absolute indentation
-  doubles. One function to fix; recorded because nobody would connect the
+  re-indents multi-line snippet bodies and the absolute indentation of the
+  match-arm template and the block-keyword snippets doubles. Fix:
+  `match_template` and `block_keyword_items` (both indent from
+  `syntax::line_indent`); recorded because nobody would connect the
   trigger to completions. The extension has a grammar and highlight queries
   but no indents query, which is assumed to leave the shift at zero: check the
   match-arm template in a live Zed once the grammar is installed. **P12**
