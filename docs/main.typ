@@ -487,8 +487,10 @@ type Vecish = struct { len: usize } with {
 There is no auto-deref and no auto-ref. A receiver's type must *be* the
 member's `Self`, with one exception: a borrow receiver reborrows into a
 member whose `Self` is itself a borrow, and nothing else is ever inserted.
-A *raw* pointer to a type with members still never dot-calls them; write
-the deref yourself.
+An owned receiver calling a member that takes `Self.&` is an error: write the
+borrow yourself, as in `c.&.get()`; the error offers it as a quick fix. A *raw*
+pointer to a type with members still never dot-calls them; write the deref
+yourself.
 
 The owner's generic binder is in scope in member signatures and bodies, and
 a dot-call never spells the OWNER's arguments — the receiver's type supplies

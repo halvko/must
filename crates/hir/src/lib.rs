@@ -1576,6 +1576,31 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     decl,
                     uncovered,
                 } => match_arms_fix(db, item, &syntax_root, source_map, *expr, decl, uncovered),
+                // Write the borrow the message asks for: `.&` (or `.&mut`)
+                // right before the dot-call's own `.`, so `c.get()` becomes
+                // `c.&.get()` — a postfix chain whatever the receiver is.
+                InferenceDiagnostic::MemberWantsBorrowReceiver {
+                    expr,
+                    name,
+                    mutable,
+                    ..
+                } => source_map
+                    .node_for_expr(*expr)
+                    .and_then(|ptr| ast::CallExpr::cast(ptr.to_node(&syntax_root)))
+                    .and_then(|call| match call.callee()? {
+                        ast::Expr::FieldExpr(field) => field.dot_token(),
+                        _ => None,
+                    })
+                    .map(|dot| {
+                        let borrow = if *mutable { ".&mut" } else { ".&" };
+                        syntax::Fix {
+                            label: format!("Insert `{borrow}` before `.{name}`"),
+                            edits: vec![syntax::TextEdit {
+                                range: TextRange::empty(dot.text_range().start()),
+                                insert: borrow.to_owned(),
+                            }],
+                        }
+                    }),
                 _ => None,
             };
             diagnostics.push(Diagnostic {

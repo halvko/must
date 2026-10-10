@@ -1773,6 +1773,9 @@ impl FieldExpr {
     pub fn receiver(&self) -> Option<Expr> {
         child(&self.syntax)
     }
+    pub fn dot_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, DOT)
+    }
     /// The field being accessed.
     pub fn name_ref(&self) -> Option<NameRef> {
         child(&self.syntax)
