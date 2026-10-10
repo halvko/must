@@ -2060,6 +2060,23 @@ fn mut_on_hole_offers_a_remove_mut_fix() {
 }
 
 #[test]
+fn an_immutable_deferred_let_offers_an_insert_mut_fix() {
+    let text = "static f = fn { let x: usize; };";
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Make the binding `mut`");
+    assert_eq!(fix.edits.len(), 1);
+    assert_eq!(fix.edits[0].insert, "mut ");
+    assert_eq!(
+        usize::from(fix.edits[0].range.start()),
+        text.find('x').unwrap()
+    );
+}
+
+#[test]
 fn assignment_to_an_unresolved_name_does_not_panic() {
     // The target is a plain variable syntactically (so validation has
     // nothing to say), but it doesn't resolve to any binding — reported
@@ -17421,6 +17438,222 @@ static f = fn() -> usize { get(mk().a.&) };
             193..197 'mk()': Pair
             193..199 'mk().a': usize
             193..201 'mk().a.&': usize.&
+        "#]],
+    );
+}
+
+// ---- deferred initialization (`let mut x;`) ---------------------------------
+
+#[test]
+fn a_deferred_binding_assigned_on_every_path_before_its_read_is_clean() {
+    check_diagnostics(
+        r#"
+static main = fn () -> () {
+    let s = "abc";
+    let mut i = 0;
+    loop {
+        let mut current;
+        match s.next_char(i) {
+            ::Char(c, next) => {
+                current = c;
+                i = next;
+            },
+            ::End => {
+                break;
+            },
+        };
+        if current == 'a' { print("found a\n"); }
+    }
+};
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn a_deferred_binding_takes_its_type_from_the_annotation_or_the_assignment() {
+    check_infer(
+        r#"
+static main = fn () -> usize {
+    let mut x: usize;
+    let mut y;
+    y = 'c';
+    x = 1;
+    x
+};
+"#,
+        expect![[r#"
+            15..100 'fn () -> usize { ...': fn() -> usize
+            30..100 '{     let mut x: ...': usize
+            44..45 'x': usize
+            66..67 'y': char
+            73..74 'y': char
+            77..80 ''c'': char
+            86..87 'x': usize
+            90..91 '1': usize
+            97..98 'x': usize
+        "#]],
+    );
+}
+
+#[test]
+fn a_deferred_binding_assigned_in_a_loop_before_its_break_is_clean() {
+    check_diagnostics(
+        r#"
+static main = fn (n: usize) -> usize {
+    let mut x;
+    let mut i = 0;
+    loop {
+        x = i * 2;
+        i = i + 1;
+        if i > n { break; }
+    }
+    x
+};
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn reading_a_deferred_binding_before_any_assignment_is_refused() {
+    check_diagnostics(
+        r#"
+static main = fn () -> usize {
+    let mut x: usize;
+    let y = x;
+    let p = x.&;
+    x = 1;
+    y + x
+};
+"#,
+        expect![[r#"
+            66..67: `x` is used before it is assigned a value (`x` is declared here without a value at 44..45)
+            81..82: `x` is used before it is assigned a value (`x` is declared here without a value at 44..45)
+        "#]],
+    );
+}
+
+#[test]
+fn reading_a_deferred_binding_assigned_on_some_paths_only_is_refused() {
+    check_diagnostics(
+        r#"
+static branch = fn (c: bool) -> usize {
+    let mut x;
+    if c { x = 1; }
+    x
+};
+static after_loop = fn (n: usize) -> usize {
+    let mut x;
+    let mut i = 0;
+    loop {
+        if i > n { break; }
+        x = i;
+        i = i + 1;
+    }
+    x
+};
+static diverging = fn (c: bool) -> usize {
+    let mut x;
+    if c { x = 1; } else { return 0; }
+    x
+};
+"#,
+        expect![[r#"
+            80..81: `x` is used here, but not every path to here assigns it a value (`x` is declared here without a value at 53..54)
+            247..248: `x` is used here, but not every path to here assigns it a value (`x` is declared here without a value at 142..143)
+        "#]],
+    );
+}
+
+#[test]
+fn an_immutable_let_without_an_initializer_is_reserved() {
+    check_diagnostics(
+        r#"
+static main = fn () -> usize {
+    let x;
+    let _;
+    0
+};
+"#,
+        expect![[r#"
+            36..42: an immutable `let` without a value is not supported yet; write `let mut x;`
+        "#]],
+    );
+}
+
+#[test]
+fn a_destructuring_let_without_an_initializer_is_refused() {
+    check_diagnostics(
+        r#"
+type Point = struct { x: usize, y: usize };
+static main = fn () -> () {
+    let struct { x, y };
+    let Point(struct { x as a, y as b }): Point;
+};
+"#,
+        expect![[r#"
+            81..96: a destructuring `let` needs a value: only a single name can be declared without one
+            106..138: a destructuring `let` needs a value: only a single name can be declared without one
+        "#]],
+    );
+}
+
+#[test]
+fn an_unannotated_deferred_binding_assigned_a_variant_needs_an_annotation() {
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point };
+static refused = fn () -> () {
+    let mut s;
+    s = Shape::Circle(1);
+    s = Shape::Circle(2);
+};
+static annotated = fn () -> Shape {
+    let mut s: Shape;
+    s = Shape::Circle(1);
+    s = ::Point;
+    s
+};
+"#,
+        expect![[r#"
+            99..115: the type of `s` is ambiguous: it is declared without a value and first assigned a `Shape::Circle`, which could mean `Shape` or `Shape::Circle`; add a type annotation (`let mut s: Shape;`)
+        "#]],
+    );
+}
+
+#[test]
+fn a_deferred_linear_owes_its_consumption_once_assigned() {
+    check_linear(
+        r#"
+static clean = fn () -> () {
+    let mut r;
+    r = make(1);
+    r.drop();
+};
+static leaked = fn () -> () {
+    let mut r: Res;
+    r = make(1);
+};
+static some_paths = fn (c: bool) -> () {
+    let mut r;
+    if c { r = make(1); }
+    r.drop();
+};
+static every_iteration = fn (c: bool) -> () {
+    let mut r;
+    loop {
+        r = make(1);
+        if c { break; }
+    }
+    r.drop();
+};
+"#,
+        expect![[r#"
+            442..482: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`r` is born here and must be consumed at 456..457)
+            544..565: `r` is consumed on some paths through this expression and not on others (`r` is born here and must be consumed at 537..538)
+            570..571: `r` is used here, but not every path to here assigns it a value (`r` is declared here without a value at 537..538)
+            653..705: `r` is left in a different state than the loop found it in; the next iteration would run against a world this body was not checked in (`r` is born here and must be consumed at 641..642)
         "#]],
     );
 }

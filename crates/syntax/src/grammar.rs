@@ -2164,10 +2164,10 @@ fn let_stmt(p: &mut Parser<'_>) {
     if p.eat(COLON) {
         type_(p);
     }
+    // The initializer is optional (deferred initialization, M21); which
+    // `let`s may leave it out is validation's call.
     if p.eat(EQ) {
         expr(p);
-    } else {
-        p.error("expected `=` followed by an initializer");
     }
     p.expect_after_prev(SEMICOLON);
     m.complete(p, LET_STMT);

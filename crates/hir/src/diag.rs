@@ -397,6 +397,30 @@ pub fn not_consumed_param(subject: Option<&BindingKind>, param: &str) -> String 
     )
 }
 
+/// A deferred binding (`let mut x;`) used before a whole assignment gave
+/// it a value, on every path to the use or (`maybe`) on some.
+pub fn read_uninit(subject: Option<&BindingKind>, maybe: bool) -> String {
+    if maybe {
+        format!(
+            "{} is used here, but not every path to here assigns it a value",
+            linear_subject(subject)
+        )
+    } else {
+        format!(
+            "{} is used before it is assigned a value",
+            linear_subject(subject)
+        )
+    }
+}
+
+/// The related note on a deferred binding's declaration.
+pub fn declared_without_value(subject: Option<&BindingKind>) -> String {
+    format!(
+        "{} is declared here without a value",
+        linear_subject(subject)
+    )
+}
+
 /// Use-after-consume — which for a linear type is also disposal twice.
 /// Named after what the user did, with the earlier site as a related note.
 pub fn already_consumed(subject: Option<&BindingKind>) -> String {

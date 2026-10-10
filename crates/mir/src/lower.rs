@@ -295,6 +295,11 @@ impl LowerCtx<'_> {
                 // compile-time only, like `NeedsAnnotation` — the value
                 // itself runs fine (it has no elements to be wrong about).
                 InferenceDiagnostic::EmptyArrayNeedsAnnotation { .. } => {}
+                // A variant assigned to an unannotated deferred binding:
+                // the value whose type could not be settled is refused.
+                InferenceDiagnostic::DeferredVariantNeedsAnnotation { expr, .. } => {
+                    self.value_traps.insert(*expr, diag.message());
+                }
                 // A literal with no width (no defining use) or one that
                 // doesn't fit its resolved width: the value cannot be
                 // produced — a value trap right on the literal. For a
@@ -1115,13 +1120,22 @@ impl LowerCtx<'_> {
                 for stmt in stmts {
                     match stmt {
                         Stmt::Let { pat, init, .. } => {
-                            let init_op = self.lower_expr(b, *init);
+                            // A deferred `let mut x;` declares its local
+                            // and writes nothing: a read of the unassigned
+                            // slot traps (M21).
+                            let Some(init) = *init else {
+                                if let PatData::Bind(binding) = &self.body.pats[*pat] {
+                                    self.alloc_binding_local(b, *binding);
+                                }
+                                continue;
+                            };
+                            let init_op = self.lower_expr(b, init);
                             match &self.body.pats[*pat] {
                                 // The common case, unchanged: one local,
                                 // one assignment.
                                 PatData::Bind(binding) => {
                                     let local = self.alloc_binding_local(b, *binding);
-                                    b.push_assign(local, Rvalue::Use(init_op), *init);
+                                    b.push_assign(local, Rvalue::Use(init_op), init);
                                 }
                                 // Evaluated for effects only; nothing to
                                 // bind (a hole lowers as `Bind` above, and
@@ -1138,12 +1152,12 @@ impl LowerCtx<'_> {
                                 // project from, exactly like a record
                                 // literal's fields need one to assemble.
                                 PatData::Record { .. } | PatData::Newtype { .. } => {
-                                    let local = self.operand_local(b, init_op, *init);
+                                    let local = self.operand_local(b, init_op, init);
                                     self.bind_binding_pattern(
                                         b,
                                         *pat,
                                         &Operand::Copy(local.into()),
-                                        *init,
+                                        init,
                                     );
                                 }
                                 PatData::Variant { .. } => {

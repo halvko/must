@@ -111,7 +111,9 @@ fn compute_expr_scopes(body: &Body, scopes: &mut ExprScopes, expr: ExprId, scope
                         // child scope per `let`, entered with every binding
                         // the pattern introduces (one for a bare name, any
                         // number for a destructuring pattern).
-                        compute_expr_scopes(body, scopes, *init, scope);
+                        if let Some(init) = init {
+                            compute_expr_scopes(body, scopes, *init, scope);
+                        }
                         scope = scopes.scopes.alloc(ScopeData {
                             parent: Some(scope),
                             entries: body.pat_scope_entries(*pat),

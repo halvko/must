@@ -217,6 +217,11 @@ const UNINIT_READ: &str = "read of uninitialized memory — this element was nev
 /// its storage stays allocated and holds nothing until a whole write.
 const MOVED_READ: &str = "read of uninitialized memory — the local's value was moved out";
 
+/// The read message for a deferred `let mut x;` read before any
+/// assignment: its local was declared and never written.
+const UNASSIGNED_READ: &str =
+    "read of uninitialized memory — the local was declared without a value and never assigned";
+
 /// One Must call frame.
 pub struct Frame {
     pub loc: ItemLoc,
@@ -1069,10 +1074,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             None => frame.and_then(|frame| frame.locals.get(local)),
         };
         let Some(mut current) = root else {
-            return Err(self.internal_error(
-                format!("read of uninitialized {}", local_name(body, local)),
-                Some((loc.clone(), origin)),
-            ));
+            return Err(self.unwritten_local_read(body, local, loc, origin));
         };
         // `(tag, allocation, path)` per deref stepped through — checked
         // against the aliasing tree once the walk's borrow of memory is
@@ -1436,6 +1438,30 @@ impl<'db, M: Mode> Machine<'db, M> {
         }
     }
 
+    /// A read of a local no statement has written. A binding's local is a
+    /// deferred `let mut x;` read before its assignment: detected UB. Any
+    /// other one is a lowering bug.
+    fn unwritten_local_read(
+        &self,
+        body: &MirBody,
+        local: LocalId,
+        loc: &ItemLoc,
+        origin: ExprId,
+    ) -> EvalError {
+        if body.locals[local].binding.is_none() {
+            return self.internal_error(
+                format!("read of uninitialized {}", local_name(body, local)),
+                Some((loc.clone(), origin)),
+            );
+        }
+        EvalError {
+            kind: EvalErrorKind::UndefinedBehavior,
+            message: UNASSIGNED_READ.to_owned(),
+            origin: Some((loc.clone(), origin)),
+            notes: Vec::new(),
+        }
+    }
+
     /// The tracked-uninit gate's error — detected UB, one message
     /// everywhere ([`UNINIT_READ`]).
     fn uninit_read(&self, loc: &ItemLoc, origin: ExprId) -> EvalError {
@@ -1563,6 +1589,10 @@ impl<'db, M: Mode> Machine<'db, M> {
             return Ok(());
         }
         match frame.locals.get_mut(local) {
+            // Stepping into a deferred local's never-written structure.
+            None if body.locals[local].binding.is_some() => {
+                Err(self.unwritten_local_read(body, local, loc, origin))
+            }
             None => Err(self.internal_error(
                 format!("write through uninitialized {}", local_name(body, local)),
                 Some((loc.clone(), origin)),
@@ -1885,14 +1915,18 @@ impl<'db, M: Mode> Machine<'db, M> {
         if let Some(&alloc) = frame.promoted.get(&local) {
             return Ok(alloc);
         }
-        let Some(value) = frame.locals.remove(local) else {
-            // `.&raw` of a local no `let` initialized: unreachable from real
-            // programs (a `let` always initializes); loud like other reads
-            // of uninitialized slots.
-            return Err(self.internal_error(
-                format!("address of uninitialized {}", local_name(body, local)),
-                Some((loc.clone(), origin)),
-            ));
+        // A deferred `let mut x;` local has no value to take: its
+        // allocation starts uninitialized. Any other unwritten local is a
+        // lowering bug.
+        let value = match frame.locals.remove(local) {
+            Some(value) => value,
+            None if body.locals[local].binding.is_some() => Value::Uninit,
+            None => {
+                return Err(self.internal_error(
+                    format!("address of uninitialized {}", local_name(body, local)),
+                    Some((loc.clone(), origin)),
+                ));
+            }
         };
         let alloc = self.fresh_alloc(Allocation {
             value,
@@ -2212,10 +2246,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                 match frame.and_then(|frame| frame.locals.get(place.local)) {
                     Some(Value::Uninit) => Err(self.uninit_read_in(None, loc, origin)),
                     Some(value) => Ok(value.clone()),
-                    None => Err(self.internal_error(
-                        format!("read of uninitialized {}", local_name(body, place.local)),
-                        Some((loc.clone(), origin)),
-                    )),
+                    None => Err(self.unwritten_local_read(body, place.local, loc, origin)),
                 }
             }
             // A MOVE reads exactly what a copy reads, and then says so to

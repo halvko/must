@@ -990,6 +990,9 @@ impl LetStmt {
     pub fn initializer(&self) -> Option<Expr> {
         child(&self.syntax)
     }
+    pub fn eq_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, EQ)
+    }
 }
 
 impl AssignStmt {

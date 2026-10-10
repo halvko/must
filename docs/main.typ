@@ -302,6 +302,53 @@ A rejected assignment is a check-time diagnostic, and — like every deferred
 error — running code that reaches one crashes at exactly the place the
 checker complained about, with the same message the squiggle showed.
 
+=== Declaring without a value
+
+A `let mut` may leave out its initializer. The binding then starts out
+holding nothing, and the first assignment gives it its value — useful when
+the value is decided in the branches of a `match` or `if`:
+
+```must
+static first_char = fn (s: str) -> char {
+    let mut c;
+    match s.next_char(0) {
+        ::Char(first, _) => { c = first; },
+        ::End => { c = ' '; },
+    };
+    c
+};
+```
+
+The checker follows every path: a binding may be read only where every path
+that reaches the read has assigned it. A path that leaves with `return`,
+`break` or a panic does not count, so assigning in one arm and breaking out
+of the other is fine, and so is assigning inside a loop before its `break`:
+
+```must
+static last_even_below = fn (n: usize) -> usize {
+    let mut last;
+    let mut i = 0;
+    loop {
+        last = i;
+        i = i + 2;
+        if i >= n { break; }
+    }
+    last
+};
+```
+
+Reading it anywhere else — before any assignment, or after an `if` that
+assigned it on one branch only — is refused, and running the program anyway
+crashes at that read.
+
+The type comes from the annotation (`let mut x: usize;`) or else from the
+assignments. A variant needs the annotation: an unannotated `let mut` widens
+a variant to its enum when it is bound (see "Enums and variants"), and a
+declaration has no value there to widen, so write `let mut s: Shape;` (or
+`let mut s: Shape::Circle;` to keep the variant). Only `let mut` and a single
+name may leave the value out: an immutable `let x;` is not supported yet, and
+a destructuring pattern always needs its value.
+
 == Statics and consts are accessible in their declarations
 
 ```must

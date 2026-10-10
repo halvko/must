@@ -889,6 +889,16 @@ pub enum InferenceDiagnostic {
         /// The empty array literal.
         expr: ExprId,
     },
+    /// An unannotated deferred `let mut x;` whose first assignment is a
+    /// variant value. An unannotated `let mut` widens to the enum at
+    /// binding time (T04), and a deferred one has no value there to widen.
+    DeferredVariantNeedsAnnotation {
+        /// The first assigned value (carries the squiggle and the trap).
+        expr: ExprId,
+        name: String,
+        variant: Ty,
+        enum_ty: Ty,
+    },
     /// A const argument in a position whose declared type mentions an
     /// array: array VALUES stay outside the const-arg domain for now (the
     /// ruled domain is builtins + records + variants). The mention-side
@@ -1550,6 +1560,7 @@ impl InferenceDiagnostic {
             | InferenceDiagnostic::IndexNonArray { expr, .. }
             | InferenceDiagnostic::IndexOutOfBounds { expr, .. }
             | InferenceDiagnostic::EmptyArrayNeedsAnnotation { expr }
+            | InferenceDiagnostic::DeferredVariantNeedsAnnotation { expr, .. }
             | InferenceDiagnostic::ArrayConstArg { expr }
             | InferenceDiagnostic::BuiltinNotFirstClass { expr, .. }
             | InferenceDiagnostic::NoSuchMember { expr, .. }
@@ -2127,6 +2138,18 @@ impl InferenceDiagnostic {
             InferenceDiagnostic::EmptyArrayNeedsAnnotation { .. } => {
                 "cannot infer the element type of an empty array; add a type annotation".to_owned()
             }
+            InferenceDiagnostic::DeferredVariantNeedsAnnotation {
+                name,
+                variant,
+                enum_ty,
+                ..
+            } => format!(
+                "the type of `{name}` is ambiguous: it is declared without a value and first \
+                 assigned a `{variant}`, which could mean `{enum_ty}` or `{variant}`; add a type \
+                 annotation (`let mut {name}: {enum_ty};`)",
+                enum_ty = enum_ty.display(),
+                variant = variant.display(),
+            ),
             InferenceDiagnostic::ArrayConstArg { .. } => crate::diag::ARRAY_CONST_ARG.to_owned(),
             InferenceDiagnostic::BuiltinExpectsRawPtr { builtin, found, .. } => {
                 format!(
@@ -2521,6 +2544,9 @@ pub(crate) struct InferCtx<'a, 'db> {
     /// stays quiet about it rather than saying it twice — the arms are two
     /// symptoms, the missing annotation is one fact.
     unresolved_scrutinees: rustc_hash::FxHashSet<ExprId>,
+    /// Each unannotated deferred `let mut x;`. [`Self::finish`] refuses a
+    /// variant type there ([`InferenceDiagnostic::DeferredVariantNeedsAnnotation`]).
+    deferred_unannotated: Vec<BindingId>,
     /// Literals directly under a unary minus (`-5`): their range check
     /// applies the sign (`-128` fits `i8`; plain `128` does not). Filled by
     /// the [`crate::body::ExprData::Neg`] arm before its operand is
@@ -2696,6 +2722,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             pending_empty_arrays: Vec::new(),
             pending_number_literals: Vec::new(),
             unresolved_scrutinees: rustc_hash::FxHashSet::default(),
+            deferred_unannotated: Vec::new(),
             negated_literals: rustc_hash::FxHashSet::default(),
             pending_obligations: Vec::new(),
             const_block_depth: 0,
@@ -3180,6 +3207,29 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         self.result.diagnostics.extend(diagnostics);
     }
 
+    /// The value of the first whole assignment to `binding` in source
+    /// order. A target is lowered before its value, so the smallest target
+    /// id is the outermost, earliest assignment.
+    fn first_assigned_value(&self, binding: BindingId) -> Option<ExprId> {
+        self.body
+            .exprs
+            .iter()
+            .filter_map(|(_, data)| match data {
+                ExprData::Block { stmts, .. } => Some(stmts),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|stmt| match stmt {
+                Stmt::Assign { target, value } => Some((*target, *value)),
+                _ => None,
+            })
+            .filter(|(target, _)| {
+                matches!(self.resolutions.get(*target), Some(Resolution::Local(it)) if *it == binding)
+            })
+            .min_by_key(|(target, _)| *target)
+            .map(|(_, value)| value)
+    }
+
     fn finish(mut self) -> InferenceResult {
         self.solve();
         // Bound obligations, after every join and axiom has spoken: each
@@ -3319,6 +3369,29 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // Poisoned (a mismatch already told the story), or some
                 // other broken resolution: silent.
                 _ => {}
+            }
+        }
+        for binding in std::mem::take(&mut self.deferred_unannotated) {
+            if let Ty::Variant(variant) = resolve_finished(
+                self.table,
+                self.result
+                    .type_of_binding
+                    .get(binding)
+                    .unwrap_or(&Ty::Error),
+            ) && let Some(first) = self.first_assigned_value(binding)
+            {
+                let enum_ty = Ty::Named(NamedTy {
+                    decl: variant.decl.clone(),
+                    args: variant.args.clone(),
+                });
+                self.result
+                    .diagnostics
+                    .push(InferenceDiagnostic::DeferredVariantNeedsAnnotation {
+                        expr: first,
+                        name: self.body.bindings[binding].name().to_owned(),
+                        variant: Ty::Variant(variant),
+                        enum_ty,
+                    });
             }
         }
         // Reborrows are final now, so the two deferred judgements can
@@ -3505,6 +3578,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 | InferenceDiagnostic::BorrowMutItem { .. }
                 | InferenceDiagnostic::IndexOutOfBounds { .. }
                 | InferenceDiagnostic::EmptyArrayNeedsAnnotation { .. }
+                | InferenceDiagnostic::DeferredVariantNeedsAnnotation { .. }
                 | InferenceDiagnostic::ArrayConstArg { .. }
                 | InferenceDiagnostic::CannotInferNumberType { .. }
                 | InferenceDiagnostic::IntLiteralOutOfRange { .. }
@@ -4187,6 +4261,19 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     .unwrap_or_else(|| self.fresh_var());
                                 let binding_cause =
                                     has_annotation.then_some(Cause::Binding(binding));
+                                // A deferred `let mut x;` takes its type
+                                // from the annotation, or else from the
+                                // assignments that give it a value.
+                                let Some(init) = init else {
+                                    if !has_annotation {
+                                        self.deferred_unannotated.push(binding);
+                                    }
+                                    self.result
+                                        .type_of_binding
+                                        .insert(binding, declared.clone());
+                                    self.result.type_of_pat.insert(*pat, declared);
+                                    continue;
+                                };
                                 let mut ty = self.infer_expr_with(*init, &declared, binding_cause);
                                 // `let mut` widening: an UNANNOTATED mutable
                                 // binding initialized with a variant-typed value
@@ -4226,6 +4313,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     None => self
                                         .declared_type_for_pat(*pat)
                                         .unwrap_or_else(|| self.fresh_var()),
+                                };
+                                // A destructuring `let` without an
+                                // initializer: validation refuses it.
+                                let Some(init) = init else {
+                                    self.bind_error(&self.body.pat_bindings(*pat));
+                                    continue;
                                 };
                                 let ty = self.infer_expr_with(*init, &declared, None);
                                 self.check_pat(*pat, &ty, *init);
