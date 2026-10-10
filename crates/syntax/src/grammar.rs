@@ -2109,6 +2109,9 @@ fn const_block_expr(p: &mut Parser<'_>) -> CompletedMarker {
 fn expr_stmt_or_tail(p: &mut Parser<'_>) {
     let m = p.start();
     let parsed = expr(p);
+    // No `,` continues a statement, so `2,147` here is one number with
+    // digit groups — a tail expression's as much as a statement's.
+    p.eat_digit_group_commas();
     // Superset-parse any expression as the assignment target; validation
     // rejects anything but a plain variable. The RHS is parsed with `expr`,
     // which stops before a following `=` (it isn't a binary operator), so

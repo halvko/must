@@ -69,6 +69,7 @@ pub(crate) fn build(
                 after_prev,
                 fix_insert,
             } => builder.error(msg, after_prev, fix_insert),
+            Event::DigitGroupCommas { tokens } => builder.digit_group_commas(tokens),
         }
     }
 
@@ -170,6 +171,32 @@ impl Builder<'_> {
             message,
             range,
             fix,
+        });
+    }
+
+    /// `2,147,483,647`: the literal is the previous token, its groups the
+    /// next `tokens` raw tokens (the parser only takes groups with no
+    /// trivia between them).
+    fn digit_group_commas(&mut self, tokens: usize) {
+        let len = self.tokens[self.raw_pos..][..tokens]
+            .iter()
+            .map(|token| token.len)
+            .sum::<TextSize>();
+        let range = TextRange::new(
+            self.prev_token_range.start(),
+            self.prev_token_range.end() + len,
+        );
+        let joined = self.text[range].replace(',', "_");
+        self.errors.push(SyntaxError {
+            message: "digit groups cannot be separated by `,`; use `_`".to_owned(),
+            range,
+            fix: Some(Fix {
+                label: format!("Write `{joined}`"),
+                edits: vec![TextEdit {
+                    range,
+                    insert: joined,
+                }],
+            }),
         });
     }
 

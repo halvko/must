@@ -23,16 +23,19 @@ pub(crate) enum Event {
         /// becomes a quick fix.
         fix_insert: Option<String>,
     },
+    /// The number literal just consumed continues into `,`-separated digit
+    /// groups over the next `tokens` tokens: one error spanning them all,
+    /// with a fix that joins the groups with `_`.
+    DigitGroupCommas {
+        tokens: usize,
+    },
 }
 
 pub(crate) struct Parser<'t> {
     tokens: &'t [SyntaxKind],
     /// The source text of each token in [`Self::tokens`], same indexing.
-    /// The parser is KIND-driven everywhere but one place: a RETIRED
-    /// spelling lexes as an ordinary identifier, and the only way to
-    /// refuse it by name — instead of desyncing on tokens that are each
-    /// individually fine — is to look at the word (see
-    /// [`Parser::at_word`]).
+    /// Read only where kinds can't tell: a retired spelling
+    /// ([`Parser::at_word`]) and `,` digit groups ([`Parser::nth_joined`]).
     texts: &'t [&'t str],
     pos: usize,
     events: Vec<Event>,
@@ -55,6 +58,25 @@ impl<'t> Parser<'t> {
     /// without a keyword to go with it.
     pub(crate) fn at_word(&self, word: &str) -> bool {
         self.at(IDENT) && self.texts.get(self.pos).is_some_and(|t| *t == word)
+    }
+
+    /// The source text of the `n`th token ahead; empty at the end.
+    fn nth_text(&self, n: usize) -> &'t str {
+        self.texts.get(self.pos + n).copied().unwrap_or("")
+    }
+
+    /// Whether the `n`th token ahead touches the token before it, with no
+    /// trivia between. Every text is a slice of the one source, so two
+    /// tokens touch exactly when one's end address is the other's start.
+    fn nth_joined(&self, n: usize) -> bool {
+        let i = self.pos + n;
+        match (
+            i.checked_sub(1).and_then(|j| self.texts.get(j)),
+            self.texts.get(i),
+        ) {
+            (Some(a), Some(b)) => a.as_ptr().wrapping_add(a.len()) == b.as_ptr(),
+            _ => false,
+        }
     }
 
     pub(crate) fn finish(self) -> Vec<Event> {
@@ -129,6 +151,9 @@ impl<'t> Parser<'t> {
         if self.eat(kind) {
             return true;
         }
+        if kind == SEMICOLON && self.eat_digit_group_commas() {
+            return self.expect_after_prev(kind);
+        }
         self.error_after_prev(kind);
         false
     }
@@ -147,6 +172,58 @@ impl<'t> Parser<'t> {
             after_prev: true,
             fix_insert: Some(insert.to_owned()),
         });
+    }
+
+    /// `2,147,483,647` where a `;` is owed, so no `,` can continue what came
+    /// before: the number literal just consumed and every `,ddd` group
+    /// touching it become one error. Only 1–3 digits then exact 3-digit
+    /// groups, all unspaced, so `1, 234` and `3,14` keep their usual errors.
+    pub(crate) fn eat_digit_group_commas(&mut self) -> bool {
+        let digits = |text: &str, len: std::ops::RangeInclusive<usize>| {
+            len.contains(&text.len()) && text.bytes().all(|b| b.is_ascii_digit())
+        };
+        let Some(lit) = self.pos.checked_sub(1).map(|i| self.texts[i]) else {
+            return false;
+        };
+        if self.prev() != Some(INT_NUMBER) || !digits(lit, 1..=3) {
+            return false;
+        }
+        let mut n = 0;
+        while self.nth(n) == COMMA
+            && self.nth(n + 1) == INT_NUMBER
+            && self.nth_joined(n)
+            && self.nth_joined(n + 1)
+            && digits(self.nth_text(n + 1), 3..=3)
+        {
+            n += 2;
+        }
+        if n == 0 {
+            return false;
+        }
+        self.err_digit_group_commas(n);
+        true
+    }
+
+    /// Report the digit groups over the next `tokens` tokens (see
+    /// [`Event::DigitGroupCommas`]) and wrap them in an `ERROR` node.
+    fn err_digit_group_commas(&mut self, tokens: usize) {
+        // The number's own node becomes an `ERROR` too, so the expression it
+        // stood for lowers as missing and traps (X06) instead of running as
+        // its first group.
+        if let Some(number) = self.events.iter().rposition(|e| matches!(e, Event::Token))
+            && let Some(Event::Start {
+                kind: kind @ LITERAL,
+                ..
+            }) = number.checked_sub(1).map(|i| &mut self.events[i])
+        {
+            *kind = ERROR;
+        }
+        let m = self.start();
+        self.events.push(Event::DigitGroupCommas { tokens });
+        for _ in 0..tokens {
+            self.bump_any();
+        }
+        m.complete(self, ERROR);
     }
 
     /// Report an error and wrap the offending token in an `ERROR` node.
