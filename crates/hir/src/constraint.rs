@@ -1003,8 +1003,9 @@ impl Constraints {
         table: &mut InPlaceUnificationTable<TyVar>,
         diagnostics: &mut Vec<InferenceDiagnostic>,
     ) {
-        // The type every witness must have, and the causes explaining why.
-        let (expected, expected_causes) = match resolve_fully(table, &join.result) {
+        // The type every witness must have, and what decided it (the
+        // causes explaining why are composed only when a witness disagrees).
+        let (expected, basis) = match resolve_fully(table, &join.result) {
             // Errors are infectious and silent.
             Ty::Error => {
                 for witness in &join.witnesses {
@@ -1065,10 +1066,9 @@ impl Constraints {
                     return;
                 }
                 let family = tally.iter().find(|&&(_, n)| n == max).unwrap().0.clone();
-                let members: Vec<&Ty> = leaves
-                    .iter()
+                let winners: Vec<(ExprId, Ty)> = leaves
+                    .into_iter()
                     .filter(|(_, ty)| family_of(ty) == family)
-                    .map(|(_, ty)| ty)
                     .collect();
                 // Identical leaves keep their exact type; anything mixed is
                 // only possible in a nominal family, whose args disagree.
@@ -1076,9 +1076,9 @@ impl Constraints {
                 // key is: differing regions are not differing types, so
                 // they must not send this down the nominal path (which
                 // would be unreachable for a borrow family).
-                let winner = if members
+                let winner = if winners
                     .iter()
-                    .all(|&ty| ty.erase_regions() == members[0].erase_regions())
+                    .all(|(_, ty)| ty.erase_regions() == winners[0].1.erase_regions())
                 {
                     // A voted BORROW result gets a FRESH region, not the
                     // first branch's. `if c { p } else { q }` produces a
@@ -1094,7 +1094,7 @@ impl Constraints {
                     // branch's regions just as directly, and privileging
                     // the first branch is the shape that was wrong for
                     // bare borrows too.
-                    let winner = members[0].clone();
+                    let winner = winners[0].1.clone();
                     if winner.contains_borrow() {
                         self.freshen_regions(&winner)
                     } else {
@@ -1107,28 +1107,16 @@ impl Constraints {
                     // The first member: the remaining members' args unify
                     // against it in the witness pass below (an arg
                     // disagreement is an ordinary culprit).
-                    members[0].clone()
+                    winners[0].1.clone()
                 };
-                // The winning leaves are the causes: "this branch has type
-                // …" hints, wherever in the nesting those leaves sit.
-                let voters = leaves
-                    .iter()
-                    .filter(|(_, ty)| family_of(ty) == family)
-                    .map(|&(blame, _)| Cause::Branch(blame))
-                    .collect();
-                (winner, voters)
+                (winner, Basis::Vote(winners))
             }
-            concrete => {
-                let causes = match &join.result {
-                    Ty::Infer(var) => self
-                        .causes
-                        .get(&table.find(*var))
-                        .cloned()
-                        .unwrap_or_default(),
-                    _ => Vec::new(),
-                };
-                (concrete, causes)
-            }
+            // A resolved class is never re-rooted or given new causes, so
+            // its root keys the same causes after the witness loop.
+            concrete => match &join.result {
+                Ty::Infer(var) => (concrete, Basis::Var(table.find(*var))),
+                _ => (concrete, Basis::Fixed),
+            },
         };
 
         // Witnesses that agree become "this branch has type …" hints; free
@@ -1224,9 +1212,17 @@ impl Constraints {
             }
         }
 
-        let reasons = compose_reasons(&expected_causes, &siblings);
-
         if !culprits.is_empty() {
+            let expected_causes: Vec<Cause> = match basis {
+                // The winning leaves are the causes: "this branch has type
+                // …" hints, wherever in the nesting those leaves sit.
+                Basis::Vote(winners) => winners
+                    .iter()
+                    .map(|&(blame, _)| Cause::Branch(blame))
+                    .collect(),
+                Basis::Var(root) => self.causes.get(&root).cloned().unwrap_or_default(),
+                Basis::Fixed => Vec::new(),
+            };
             // Unanimous means *every* witness is a culprit of the same
             // type. A vote can't end up here unanimously (its winner comes
             // from a witness), so a unanimous conflict always has an axiom
@@ -1250,6 +1246,7 @@ impl Constraints {
                     reasons: compose_reasons(&expected_causes, &[]),
                 });
             } else {
+                let reasons = compose_reasons(&expected_causes, &siblings);
                 for (witness, actual) in culprits {
                     // Render nested unpinned numbers as `{number}` first,
                     // then poison them: this mismatch is their whole story.
@@ -1266,6 +1263,14 @@ impl Constraints {
         }
         self.adopt(table, &join.result, &expected, None);
     }
+}
+
+/// What decided a join's expected type: the winning leaves of a vote, the
+/// root of the resolved result variable, or a result that was never a variable.
+enum Basis {
+    Vote(Vec<(ExprId, Ty)>),
+    Var(TyVar),
+    Fixed,
 }
 
 /// Which "family" a join leaf votes for. `Named` leaves of one declaration
