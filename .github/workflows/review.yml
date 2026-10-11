@@ -227,7 +227,9 @@ jobs:
 
             Do not post anything yourself; once every reviewer is done, the
             workflow posts all findings as one review and all summaries as one
-            comment. With the Write tool, in the current directory:
+            comment. Always write both of these files with the Write tool, in
+            the current directory, even when you find nothing or a command is
+            refused:
 
             - `review-findings.json`: a JSON array with one object per new
               finding, `{"path": "<repo-relative file>", "line": <line in the
@@ -237,6 +239,7 @@ jobs:
               are none.
             - `review-summary.md`: the findings in a sentence each, then any
               earlier findings still open, or one line saying there are none.
+              No heading; the workflow adds one.
 
             Your brief:
 
@@ -245,6 +248,14 @@ jobs:
             ${{ steps.brief.outputs.model_arg }}
             --allowedTools "Edit(./review-findings.json),Write(./review-findings.json),Edit(./review-summary.md),Write(./review-summary.md),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*)"
 
+      # The action hides the reviewer's output; its refused tool calls are
+      # what to look at when a reviewer writes no summary.
+      - if: always()
+        run: |
+          out="$RUNNER_TEMP/claude-execution-output.json"
+          [ -f "$out" ] || exit 0
+          jq -r '.. | .permission_denials? // empty | .[]
+            | "refused: \(.tool_name) \(.tool_input | tostring | .[:300])"' "$out" || true
       - uses: actions/upload-artifact@v4
         with:
           name: review-summary-${{ matrix.role }}
