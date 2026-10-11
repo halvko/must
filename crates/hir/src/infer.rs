@@ -1510,15 +1510,25 @@ pub enum UnreachableReason {
 /// day two spellings of one value render differently, or two values render
 /// alike, the warning would go wrong SILENTLY. Written literals already
 /// normalize before they reach here (`1_0` and `007` are the same `u128`),
-/// and the first grant that would break a rendered key is already named —
-/// negative literals, where `-0` and `0` are one value and two strings.
+/// and [`CoveredLiteral::int`] drops the sign of a zero (`-0` is `0`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CoveredLiteral {
     Char(char),
-    Int(u128),
+    /// Sign and magnitude, so a magnitude past `i128::MAX` still keys.
+    Int {
+        magnitude: u128,
+        negative: bool,
+    },
 }
 
 impl CoveredLiteral {
+    fn int(magnitude: u128, negative: bool) -> Self {
+        CoveredLiteral::Int {
+            magnitude,
+            negative: negative && magnitude != 0,
+        }
+    }
+
     /// How the value reads inside the unreachable-arm message —
     /// backticked like every other name that family quotes (a covered
     /// VARIANT reads `` `Circle` ``, so a covered value reads `` `0` ``
@@ -1526,7 +1536,10 @@ impl CoveredLiteral {
     fn render(&self) -> String {
         match self {
             CoveredLiteral::Char(value) => format!("`{value:?}`"),
-            CoveredLiteral::Int(value) => format!("`{value}`"),
+            CoveredLiteral::Int {
+                magnitude,
+                negative,
+            } => format!("`{}{magnitude}`", if *negative { "-" } else { "" }),
         }
     }
 }
@@ -2655,8 +2668,8 @@ struct PendingNumberLiteral {
     pat: Option<PatId>,
     /// The literal's magnitude as written.
     value: u128,
-    /// Whether a direct unary minus negates it. Always `false` for a
-    /// pattern: negative literal patterns don't parse (reserved).
+    /// Whether a direct unary minus negates it — for a pattern, its
+    /// written leading `-`.
     negated: bool,
     /// The literal's NUMBER-CLASS variable.
     var: Ty,
@@ -3340,11 +3353,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         for literal in pending {
             match constraint::resolve_shallow(self.table, &literal.var) {
                 Ty::Int(kind) => {
-                    let fits = i128::try_from(literal.value)
-                        .ok()
-                        .map(|value| if literal.negated { -value } else { value })
-                        .and_then(|value| IntValue::new(kind, value))
-                        .is_some();
+                    let fits =
+                        IntValue::from_literal(kind, literal.value, literal.negated).is_some();
                     if !fits {
                         let rendered = if literal.negated {
                             format!("-{}", literal.value)
@@ -9026,7 +9036,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 Cover::Literal => {
                     let value = match self.body.pats[arm.pat] {
                         PatData::Char(value) => Some(CoveredLiteral::Char(value)),
-                        PatData::Int(Some(value)) => Some(CoveredLiteral::Int(value)),
+                        PatData::Int {
+                            value: Some(value),
+                            negative,
+                        } => Some(CoveredLiteral::int(value, negative)),
                         _ => None,
                     };
                     if let Some(value) = value {
@@ -9341,7 +9354,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             // then exactly the machinery an expression literal uses — one
             // pending literal, one post-traversal answer, no suffixes and
             // no default width.
-            PatData::Int(value) => {
+            PatData::Int { value, negative } => {
                 // A magnitude no integer type could hold names no matchable
                 // value. It asserts nothing, so it pins nothing and there is
                 // nothing to range-check — checked BEFORE agreement for
@@ -9364,8 +9377,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     expr: match_expr,
                     pat: Some(pat),
                     value,
-                    // Reserved: a negative literal pattern does not parse.
-                    negated: false,
+                    negated: negative,
                     var: var.clone(),
                 });
                 // MIR reads the width back from here to build the constant
@@ -9749,7 +9761,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     fn bind_pat_error(&mut self, pat: PatId) {
         self.result.type_of_pat.insert(pat, Ty::Error);
         match self.body.pats[pat].clone() {
-            PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int(_) => {}
+            PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int { .. } => {}
             PatData::Bind(binding) => {
                 self.result.type_of_binding.insert(binding, Ty::Error);
             }
@@ -9822,7 +9834,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             }
             // A one-arm match that must be exhaustive: what the arm covers
             // decides.
-            PatData::Variant { .. } | PatData::Char(_) | PatData::Int(_) => {
+            PatData::Variant { .. } | PatData::Char(_) | PatData::Int { .. } => {
                 let (scrut, lens) = self.classify_scrutinee(ty, anchor);
                 let exhaustive = match self.check_match_pat(anchor, pat, &scrut, lens.as_ref()) {
                     // A refused pattern is already an error, and a value

@@ -185,6 +185,20 @@ macro_rules! declare_int_value {
                 })
             }
 
+            /// A written integer literal at `kind`: its magnitude, negated
+            /// when a `-` precedes it, or `None` when the signed value does
+            /// not fit. Every literal range check and every constant built
+            /// from a literal go through here, so a literal that passes the
+            /// check always has a constant.
+            pub fn from_literal(kind: IntKind, magnitude: u128, negative: bool) -> Option<IntValue> {
+                let value = if negative {
+                    0i128.checked_sub_unsigned(magnitude)?
+                } else {
+                    i128::try_from(magnitude).ok()?
+                };
+                IntValue::new(kind, value)
+            }
+
             /// `-self`, or `None` on overflow (every non-zero unsigned
             /// operand, and the signed minimum) — the checked negation the
             /// machine's unary `-` runs.

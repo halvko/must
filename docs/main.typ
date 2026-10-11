@@ -907,7 +907,10 @@ There are no suffixes and no default width: the same written `0` is a `u8`
 in one match and an `i64` in the next, and a literal the scrutinee's type
 cannot hold is the ordinary out-of-range error (`300` matched against a
 `u8`). A match on a value whose own type nothing pins gets the ordinary
-"no defining use" answer on the pattern — nothing defaults.
+"no defining use" answer on the pattern — nothing defaults. An integer
+pattern may carry a leading `-` (`-1 =>`): the sign is part of the
+pattern, not an operator, and only an integer takes it. `-0` and `0` are
+one value, so an arm repeating either is unreachable.
 
 ```must
 static classify = fn (d: usize) -> str {
@@ -920,9 +923,7 @@ static classify = fn (d: usize) -> str {
 ```
 
 Not in v1 (landing later as one coherent pattern-language feature): nested
-patterns, or-patterns (`0 | 1`), guards, *negative* literals (`-1` is an
-operator applied to a literal, so taking it here would be the first step
-of a pattern *expression* grammar), *ranges* (`0..=9` — a separate
+patterns, or-patterns (`0 | 1`), guards, *ranges* (`0..=9` — a separate
 question, and a deeper one: it asks what order a scalar has, and whether
 listing ranges could exhaust a type and so retire the `_` arm), literal
 patterns of the *other* kinds (string, boolean — they parse, so the error

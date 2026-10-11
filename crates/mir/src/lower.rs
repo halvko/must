@@ -796,9 +796,7 @@ impl LowerCtx<'_> {
                 // returns `None`); such a literal already carries a value trap
                 // (`IntLiteralOutOfRange`), so this placeholder is never
                 // observed.
-                Ty::Int(kind) => i128::try_from(*value)
-                    .ok()
-                    .and_then(|value| hir::IntValue::new(kind, value))
+                Ty::Int(kind) => hir::IntValue::from_literal(kind, *value, false)
                     .map(|iv| Operand::Const(Const::Int(iv)))
                     .unwrap_or(Operand::Const(Const::Unit)),
                 _ => Operand::Const(Const::Unit),
@@ -1139,10 +1137,7 @@ impl LowerCtx<'_> {
                         // the negated result fits by construction; an
                         // unrepresentable leftover is value-trapped upstream
                         // and the placeholder never observed.
-                        Ty::Int(kind) => i128::try_from(*value)
-                            .ok()
-                            .map(|v| -v)
-                            .and_then(|value| hir::IntValue::new(kind, value))
+                        Ty::Int(kind) => hir::IntValue::from_literal(kind, *value, true)
                             .map(|iv| Operand::Const(Const::Int(iv)))
                             .unwrap_or(Operand::Const(Const::Unit)),
                         // Diagnosed and trapped by the wrapper.
@@ -1246,7 +1241,7 @@ impl LowerCtx<'_> {
                                 | PatData::Array { .. }
                                 | PatData::Variant { .. }
                                 | PatData::Char(_)
-                                | PatData::Int(_) => {
+                                | PatData::Int { .. } => {
                                     let local = self.operand_local(b, init_op, init);
                                     self.bind_binding_pattern(
                                         b,
@@ -2169,11 +2164,9 @@ impl LowerCtx<'_> {
             // pattern-side map. An unresolved or out-of-range one already
             // carries a value trap on the match, so a dead arm here is
             // never the whole story.
-            PatData::Int(value) => {
+            PatData::Int { value, negative } => {
                 let iv = value.and_then(|value| match self.infer.type_of_pat.get(pat) {
-                    Some(&Ty::Int(kind)) => i128::try_from(value)
-                        .ok()
-                        .and_then(|value| hir::IntValue::new(kind, value)),
+                    Some(&Ty::Int(kind)) => hir::IntValue::from_literal(kind, value, *negative),
                     _ => None,
                 });
                 match iv {
@@ -2218,7 +2211,7 @@ impl LowerCtx<'_> {
         match &self.body.pats[pat].clone() {
             // A literal pattern binds nothing: the test IS the whole
             // pattern (see `lower_match_literals`).
-            PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int(_) => {}
+            PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int { .. } => {}
             PatData::Bind(binding) => {
                 // A bare bind always binds the whole scrutinee (never
                 // narrowed to a variant), so it just aliases the value —
@@ -2348,7 +2341,7 @@ impl LowerCtx<'_> {
             | PatData::Array { .. }
             | PatData::Variant { .. }
             | PatData::Char(_)
-            | PatData::Int(_) => {
+            | PatData::Int { .. } => {
                 let ty = self
                     .infer
                     .type_of_pat
@@ -2398,7 +2391,7 @@ impl LowerCtx<'_> {
     ) {
         match &self.body.pats[pat].clone() {
             // A literal binds nothing.
-            PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int(_) => {}
+            PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int { .. } => {}
             PatData::Bind(binding) => {
                 let local = self.alloc_binding_local(b, *binding);
                 let rvalue = self.bind_rvalue(*binding, Rvalue::Use(value.clone()), b, origin);

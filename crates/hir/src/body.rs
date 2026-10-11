@@ -412,10 +412,11 @@ pub enum PatData {
     /// nothing. Unlike [`PatData::Char`] it has NO type of its own — the
     /// SCRUTINEE decides it, exactly as context decides an integer
     /// literal's type in expression position; a literal that cannot
-    /// inhabit that type gets the ordinary out-of-range diagnostic. `None`
-    /// when the magnitude doesn't fit `u128`, the same partial reading
-    /// [`LiteralData::Int`] keeps and for the same reason.
-    Int(Option<u128>),
+    /// inhabit that type gets the ordinary out-of-range diagnostic.
+    /// `value` is the magnitude, `None` when it doesn't fit `u128` (as in
+    /// [`LiteralData::Int`]); `negative` is a leading `-` (`-1 =>`), applied
+    /// once the width is known.
+    Int { value: Option<u128>, negative: bool },
     /// `Circle(r)` / `Shape::Circle(r)`: a variant pattern, construction's
     /// mirror image. The variant resolves against the scrutinee's enum
     /// (bare) or the named enum (qualified) during inference.
@@ -489,7 +490,7 @@ impl Body {
 
     fn collect_pat_bindings(&self, pat: PatId, out: &mut Vec<BindingId>) {
         match &self.pats[pat] {
-            PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int(_) => {}
+            PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int { .. } => {}
             PatData::Bind(binding) => out.push(*binding),
             PatData::Variant { bindings, .. } => {
                 out.extend(bindings.iter().copied());
@@ -1087,7 +1088,10 @@ impl LowerCtx {
                         .map_or(PatData::Missing, PatData::Char),
                     Some(ast::LiteralKind::Int(token)) => {
                         let text = token.text().replace('_', "");
-                        PatData::Int(text.parse().ok())
+                        PatData::Int {
+                            value: text.parse().ok(),
+                            negative: it.minus_token().is_some(),
+                        }
                     }
                     _ => PatData::Missing,
                 };

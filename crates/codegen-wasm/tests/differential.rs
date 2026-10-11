@@ -609,6 +609,43 @@ static main = fn () -> bool {
 }
 
 #[test]
+fn negative_integer_literal_patterns_dispatch() {
+    // The sign folds into the arm's constant at the scrutinee's width, so
+    // `-1` on an `i8` is the narrow all-ones byte and `-128` its minimum,
+    // and on an `i64` the wide value past 32 bits must survive too.
+    check(
+        r#"
+static narrow = fn (b: i8) -> usize {
+    match b {
+        -1 => 1,
+        -128 => 2,
+        1 => 3,
+        _ => 0,
+    }
+};
+static wide = fn (d: i64) -> usize {
+    match d {
+        -4294967296 => 10,
+        -1 => 20,
+        _ => 0,
+    }
+};
+static main = fn () -> bool {
+    if narrow(-1) == 1 { print("minus one\n") } else { print("bad\n") };
+    if narrow(-128) == 2 { print("min\n") } else { print("bad\n") };
+    if narrow(1) == 3 { print("plus one\n") } else { print("bad\n") };
+    if narrow(127) == 0 { print("other\n") } else { print("bad\n") };
+    if wide(-4294967296) == 10 { print("past 32 bits\n") } else { print("bad\n") };
+    if wide(-1) == 20 { print("wide minus one\n") } else { print("bad\n") };
+    if wide(4294967296) == 0 { print("wide other\n") } else { print("bad\n") };
+    narrow(-1) == 1
+}
+"#,
+        "main()",
+    );
+}
+
+#[test]
 fn character_const_arguments_monomorphize() {
     // `char` reaches the const-argument domain through the same machinery
     // `usize`/`str`/`bool` use, which means it also reaches the INSTANCE

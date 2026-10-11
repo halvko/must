@@ -521,6 +521,7 @@ fn binding_pattern(p: &mut Parser<'_>, msg: &str) {
         }
         L_BRACKET => array_pat(p),
         INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW => literal_pat(p),
+        MINUS if sign_begins_literal_pat(p.nth(1)) => literal_pat(p),
         _ => p.error(msg),
     }
 }
@@ -1049,6 +1050,7 @@ fn skip_arm_body(p: &mut Parser<'_>) {
 fn match_pattern(p: &mut Parser<'_>) {
     match p.current() {
         INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW => literal_pat(p),
+        MINUS if sign_begins_literal_pat(p.nth(1)) => literal_pat(p),
         HOLE => {
             let m = p.start();
             p.bump(HOLE);
@@ -1074,13 +1076,23 @@ fn match_pattern(p: &mut Parser<'_>) {
     }
 }
 
+/// Whether a `-` followed by `next` begins a literal pattern: only an
+/// integer takes a sign. The one rule for both pattern grammars, and for
+/// any caller asking whether a `-` line could start a pattern.
+pub fn sign_begins_literal_pat(next: SyntaxKind) -> bool {
+    next == INT_NUMBER
+}
+
 /// A literal pattern. EVERY literal kind parses here, not just the two
 /// scalars that have semantics: `match s { "a" => ... }` is a thing people
 /// write, and the superset parse lets `validation` name the kind instead
 /// of the parser's blank "expected a pattern".
-// TODO: negative integer literals (`-1`) (halvko/must#98).
+///
+/// An integer may carry a leading `-` (`-1 =>`), which sits in the
+/// `LITERAL_PAT` beside the `LITERAL` (see [`sign_begins_literal_pat`]).
 fn literal_pat(p: &mut Parser<'_>) {
     let m = p.start();
+    p.eat(MINUS);
     let lit = p.start();
     p.bump_any();
     lit.complete(p, LITERAL);

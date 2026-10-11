@@ -8370,25 +8370,69 @@ static f = fn::<@a>(d: usize.&::<@a>) -> usize {
 }
 
 #[test]
-fn a_negative_literal_pattern_is_refused_whole() {
-    // The USER-VISIBLE answer for the reserved spelling, pinned at the
-    // layer that produces it: the parser's refusal, and nothing invented
-    // on top of it. `-1` is an operator applied to a literal, so the
-    // pattern reads no tokens; an arm whose pattern read nothing does not
-    // go on to read a body (`grammar::match_arm`), so no stray `1` lands
-    // in the match's join to be range-checked against a type the user
-    // never wrote.
+fn a_negative_integer_pattern_is_range_checked_with_its_sign() {
+    // The sign folds in where the width is known: `-128` fits `i8` and
+    // `-129` does not, and on an unsigned scrutinee every negative value
+    // but `-0` is out of range.
     check_diagnostics(
         r#"
-static f = fn (n: usize) -> usize {
+static f = fn (b: i8) -> usize {
+    match b {
+        -128 => 1,
+        -129 => 2,
+        _ => 0,
+    }
+};
+static g = fn (n: usize) -> usize {
     match n {
         -1 => 1,
+        -0 => 2,
         _ => 0,
     }
 };
 "#,
         expect![[r#"
-            59..60: expected a pattern
+            75..79: `-129` does not fit in `i8`
+            169..171: `-1` does not fit in `usize`
+        "#]],
+    );
+}
+
+#[test]
+fn a_negative_literal_let_pattern_is_refutable() {
+    // A negative literal in a `let` or parameter pattern can fail to match,
+    // like any literal there.
+    check_diagnostics(
+        r#"
+static f = fn (n: i64) -> usize {
+    let -1 = n;
+    0
+};
+"#,
+        expect![[r#"
+            43..45: this pattern can fail to match; use `match`
+        "#]],
+    );
+}
+
+#[test]
+fn minus_zero_and_zero_are_one_covered_value() {
+    // The duplicate-arm key is the VALUE: `-0` is `0` spelled differently,
+    // so the second arm can never run. `-1` and `1` are two values.
+    check_diagnostics(
+        r#"
+static f = fn (n: i64) -> usize {
+    match n {
+        0 => 1,
+        -0 => 2,
+        -1 => 3,
+        1 => 4,
+        _ => 0,
+    }
+};
+"#,
+        expect![[r#"
+            73..75: unreachable arm: `0` is already covered by a previous arm
         "#]],
     );
 }
@@ -17281,18 +17325,24 @@ fn the_warning_carries_the_split_fix_at_the_brace() {
 }
 
 #[test]
-fn a_match_arm_warning_offers_no_fix_because_no_continuation_begins_a_pattern() {
+fn a_match_arm_warning_offers_no_fix_when_the_line_is_no_arm() {
     // The gate, arm side. The separator between arms is `,`, and the
-    // message says so — but no CONTINUATION token can begin a pattern today,
-    // so inserting that `,` would leave `- 1` where a pattern is owed and
-    // turn a program that compiles into one that does not parse. Every arm
-    // firing today is therefore a deliberate multi-line body, and the affirm
-    // route the message names is the whole answer.
+    // message says so — but `- 1,` is no arm: a negative literal pattern
+    // is owed its `=>`, so inserting that `,` would turn a program that
+    // compiles into one that does not parse. The affirm route the message
+    // names is the whole answer.
     //
     // This is the same standard the `;`-between-arms objection already
     // answered, applied one step further: a fix must not hand back a worse
-    // program than it found. It changes when negative literal patterns land.
-    let text = "static f = fn (n: usize) -> usize {\n    match n {\n        _ => { 1 }\n        - 1,\n    }\n}\n";
+    // program than it found.
+    let text = r#"
+static f = fn (n: usize) -> usize {
+    match n {
+        _ => { 1 }
+        - 1,
+    }
+}
+"#;
     let diagnostic = only_diagnostic(text);
     assert!(diagnostic.message.contains("write `,` after that `}`"));
     assert!(
@@ -17300,6 +17350,38 @@ fn a_match_arm_warning_offers_no_fix_because_no_continuation_begins_a_pattern() 
         "an arm-position warning must offer no split fix, got {:?}",
         diagnostic.fix
     );
+}
+
+#[test]
+fn a_match_arm_warning_offers_the_split_when_the_line_is_a_negative_pattern_arm() {
+    // `-1 =>` on its own line is the next arm, a negative literal pattern,
+    // so the `,` after the `}` is the fix, and the split reading compiles
+    // cleanly.
+    let text = r#"
+static f = fn (n: i64) -> usize {
+    match n {
+        0 => { 1 }
+        -1 => 2,
+        _ => 0,
+    }
+}
+"#;
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    let diagnostic = diagnostics
+        .iter()
+        .find(|d| d.message.contains("continues the expression"))
+        .expect("the continuation warning fires");
+    assert_eq!(&text[diagnostic.range], "-");
+    let fix = diagnostic.fix.as_ref().expect("the warning carries a fix");
+    assert_eq!(fix.label, "Insert `,` after `}`");
+    let [edit] = &fix.edits[..] else {
+        panic!("expected one edit");
+    };
+    let mut fixed = text.to_owned();
+    fixed.insert_str(edit.range.start().into(), &edit.insert);
+    expect![[r#""#]].assert_eq(&render_diagnostics(&fixed));
 }
 
 #[test]

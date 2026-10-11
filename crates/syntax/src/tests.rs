@@ -4737,9 +4737,8 @@ static f = fn (s: Shape) -> usize {
 
 #[test]
 fn match_arm_whose_pattern_reads_nothing_skips_its_body() {
-    // `-1` is not a pattern (a negative literal is an operator applied to
-    // a literal, reserved with the rest of the pattern language), and the
-    // refusal consumes nothing. Reading a body after it would take `1` as
+    // `-x` is not a pattern (only an integer literal takes a sign), and
+    // the refusal consumes nothing. Reading a body after it would take `1` as
     // the arm's value and judge it against the match's RESULT type — a
     // second error about a type the user never wrote — so the rest of the
     // arm is ERROR and the next arm is where parsing resumes.
@@ -4747,7 +4746,7 @@ fn match_arm_whose_pattern_reads_nothing_skips_its_body() {
         r#"
 static f = fn (n: usize) -> usize {
     match n {
-        -1 => 1,
+        -x => 1,
         _ => 0,
     }
 }
@@ -4802,7 +4801,7 @@ static f = fn (n: usize) -> usize {
                       MATCH_ARM@59..67
                         ERROR@59..66
                           MINUS@59..60 "-"
-                          INT_NUMBER@60..61 "1"
+                          IDENT@60..61 "x"
                           WHITESPACE@61..62 " "
                           FAT_ARROW@62..64 "=>"
                           WHITESPACE@64..65 " "
@@ -4839,7 +4838,7 @@ fn a_skipped_arm_body_does_not_close_the_arm_list_on_its_own_brace() {
         r#"
 static f = fn (n: usize) -> usize {
     match n {
-        -1 => { 1 },
+        -x => { 1 },
         _ => 0,
     }
 }
@@ -4894,7 +4893,7 @@ static f = fn (n: usize) -> usize {
                       MATCH_ARM@59..71
                         ERROR@59..70
                           MINUS@59..60 "-"
-                          INT_NUMBER@60..61 "1"
+                          IDENT@60..61 "x"
                           WHITESPACE@61..62 " "
                           FAT_ARROW@62..64 "=>"
                           WHITESPACE@64..65 " "
@@ -4926,7 +4925,7 @@ static f = fn (n: usize) -> usize {
     // counted, `[1, 2]` is one body; uncounted, the arm would end at the
     // array's own comma and `2]` would be handed to the arm list.
     let parse =
-        crate::parse("static f = fn (n: usize) -> usize { match n { -1 => [1, 2], _ => 0, } }");
+        crate::parse("static f = fn (n: usize) -> usize { match n { -x => [1, 2], _ => 0, } }");
     let msgs: Vec<_> = parse.errors().iter().map(|e| e.message.clone()).collect();
     assert_eq!(msgs, ["expected a pattern"], "{msgs:?}");
 }
@@ -4941,7 +4940,7 @@ fn a_skipped_arm_body_stops_at_an_item_keyword() {
     check(
         r#"
 static f = fn (n: usize) -> usize { match n {
-    -1 => 1
+    -x => 1
 type T = usize;
 "#,
         expect![[r#"
@@ -4995,7 +4994,7 @@ type T = usize;
                         MATCH_ARM@51..58
                           ERROR@51..58
                             MINUS@51..52 "-"
-                            INT_NUMBER@52..53 "1"
+                            IDENT@52..53 "x"
                             WHITESPACE@53..54 " "
                             FAT_ARROW@54..56 "=>"
                             WHITESPACE@56..57 " "
@@ -5022,7 +5021,7 @@ type T = usize;
     // Trait declarations join the item set, and the skip follows with no
     // second edit of its own — that is the point of asking the predicate.
     let parse = crate::parse(
-        "static f = fn (n: usize) -> usize { match n {\n    -1 => 1\ntrait T = requires { };\n",
+        "static f = fn (n: usize) -> usize { match n {\n    -x => 1\ntrait T = requires { };\n",
     );
     let msgs: Vec<_> = parse.errors().iter().map(|e| e.message.clone()).collect();
     assert_eq!(msgs, ["expected a pattern", "expected `}`"], "{msgs:?}");
@@ -5033,7 +5032,7 @@ type T = usize;
     );
     // Same for the `extern` marker, which leads its item.
     let parse = crate::parse(
-        "static f = fn (n: usize) -> usize { match n {\n    -1 => 1\nunsafe extern static g: unsafe fn() -> usize;\n",
+        "static f = fn (n: usize) -> usize { match n {\n    -x => 1\nunsafe extern static g: unsafe fn() -> usize;\n",
     );
     let msgs: Vec<_> = parse.errors().iter().map(|e| e.message.clone()).collect();
     assert_eq!(msgs, ["expected a pattern", "expected `}`"], "{msgs:?}");
@@ -10483,14 +10482,90 @@ fn non_scalar_literal_patterns_are_refused_by_kind() {
 }
 
 #[test]
-fn a_negative_literal_pattern_does_not_parse() {
-    // Negative literals are reserved (G19), and deliberately outside the
-    // superset parse, so the parser's own "expected a pattern" is the
-    // whole answer — pinned so granting them is a decision, not a drift.
-    check_errors(
+fn a_negative_integer_is_a_literal_pattern() {
+    // The `-` belongs to the pattern, beside its literal, not to an
+    // operator expression around it.
+    check(
         "static x = fn (n) { match n { -1 => 1, _ => 0, } };",
         expect![[r#"
+            SOURCE_FILE@0..51
+              STATIC_ITEM@0..51
+                ITEM_HEAD@0..6
+                  STATIC_KW@0..6 "static"
+                WHITESPACE@6..7 " "
+                NAME@7..8
+                  IDENT@7..8 "x"
+                WHITESPACE@8..9 " "
+                EQ@9..10 "="
+                WHITESPACE@10..11 " "
+                FN_LITERAL@11..50
+                  FN_KW@11..13 "fn"
+                  WHITESPACE@13..14 " "
+                  PARAM_LIST@14..17
+                    L_PAREN@14..15 "("
+                    PARAM@15..16
+                      BIND_PAT@15..16
+                        NAME@15..16
+                          IDENT@15..16 "n"
+                    R_PAREN@16..17 ")"
+                  WHITESPACE@17..18 " "
+                  BLOCK_EXPR@18..50
+                    L_BRACE@18..19 "{"
+                    WHITESPACE@19..20 " "
+                    MATCH_EXPR@20..48
+                      MATCH_KW@20..25 "match"
+                      WHITESPACE@25..26 " "
+                      PATH_EXPR@26..27
+                        NAME_REF@26..27
+                          IDENT@26..27 "n"
+                      WHITESPACE@27..28 " "
+                      L_BRACE@28..29 "{"
+                      WHITESPACE@29..30 " "
+                      MATCH_ARM@30..38
+                        LITERAL_PAT@30..32
+                          MINUS@30..31 "-"
+                          LITERAL@31..32
+                            INT_NUMBER@31..32 "1"
+                        WHITESPACE@32..33 " "
+                        FAT_ARROW@33..35 "=>"
+                        WHITESPACE@35..36 " "
+                        LITERAL@36..37
+                          INT_NUMBER@36..37 "1"
+                        COMMA@37..38 ","
+                      WHITESPACE@38..39 " "
+                      MATCH_ARM@39..46
+                        WILDCARD_PAT@39..40
+                          HOLE@39..40 "_"
+                        WHITESPACE@40..41 " "
+                        FAT_ARROW@41..43 "=>"
+                        WHITESPACE@43..44 " "
+                        LITERAL@44..45
+                          INT_NUMBER@44..45 "0"
+                        COMMA@45..46 ","
+                      WHITESPACE@46..47 " "
+                      R_BRACE@47..48 "}"
+                    WHITESPACE@48..49 " "
+                    R_BRACE@49..50 "}"
+                SEMICOLON@50..51 ";"
+        "#]],
+    );
+}
+
+#[test]
+fn a_negative_integer_binding_pattern_parses() {
+    // `let`/parameter patterns share the literal pattern.
+    check_errors("static x = fn () { let -1 = 0; };", expect![[r#""#]]);
+}
+
+#[test]
+fn only_an_integer_takes_a_minus_in_a_pattern() {
+    // A sign before anything else is still no pattern, so the parser's own
+    // "expected a pattern" is the whole answer.
+    check_errors(
+        "static x = fn (n) { match n { -'a' => 1, -x => 2, _ => 0, } };",
+        expect![[r#"
             30..31: expected a pattern
+            41..42: expected a pattern
         "#]],
     );
 }

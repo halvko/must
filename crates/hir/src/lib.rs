@@ -1482,9 +1482,9 @@ pub fn range_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             message: diag::block_tail_continued(op.text(), split),
             // ONE machine-applicable fix, the likelier intent: split — and
             // only where the split reading IS a program. A `.` or a `*`
-            // cannot begin a statement, and no continuation token can begin
-            // a pattern today, so inserting the separator there would take
-            // a file that compiles to one that does not parse. The warning
+            // cannot begin a statement, and only `- <integer> =>` begins an
+            // arm, so inserting the separator anywhere else would take a
+            // file that compiles to one that does not parse. The warning
             // still stands (both readings genuinely exist); what is withheld
             // is the button, and the message's affirm route is then the
             // whole answer. See `SplitPoint::could_begin_one`.
@@ -1492,7 +1492,7 @@ pub fn range_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             // The other way out — affirming the expression by moving the
             // operator up or parenthesizing — is named in the message
             // rather than offered, because a `Diagnostic` carries one fix.
-            fix: split.could_begin_one(op.kind()).then(|| syntax::Fix {
+            fix: split.could_begin_one(&op).then(|| syntax::Fix {
                 label: format!("Insert `{}` after `}}`", split.separator()),
                 edits: vec![syntax::TextEdit {
                     range: TextRange::empty(brace.text_range().end()),
@@ -3049,10 +3049,7 @@ fn const_annotation_arg_error(
                     let expected = ty::lower_decl_ty(db, target.file, declared);
                     return match expected {
                         Ty::Int(kind) => {
-                            let fits = i128::try_from(value)
-                                .ok()
-                                .and_then(|v| IntValue::new(kind, v))
-                                .is_some();
+                            let fits = IntValue::from_literal(kind, value, false).is_some();
                             (!fits).then(|| format!("`{value}` does not fit in `{}`", kind.name()))
                         }
                         expected if expected.contains_error() => None,
@@ -3527,16 +3524,27 @@ impl SplitPoint {
     ///
     /// Statement position admits exactly the design's named price list:
     /// `-` (negation), `(` (a parenthesized expression), `[` (an array
-    /// literal). Arm position admits NOTHING today — no continuation token
-    /// can begin a pattern — so every arm firing is a deliberate multi-line
-    /// body and the message's affirm route is the only honest answer. That
-    /// changes when negative literal patterns land (see
-    /// `grammar-and-syntax.md`'s Re-evaluate when).
-    pub(crate) fn could_begin_one(self, continuation: syntax::SyntaxKind) -> bool {
+    /// literal). Arm position admits one continuation, and only in one
+    /// shape: `-` begins a negative integer literal pattern, so the split
+    /// is a program exactly when the line reads `- <integer> =>`. Any
+    /// other arm firing (`- 1,`, `* 2`) is a deliberate multi-line body,
+    /// and the message's affirm route is the only honest answer there.
+    pub(crate) fn could_begin_one(self, continuation: &syntax::SyntaxToken) -> bool {
         use syntax::SyntaxKind::*;
         match self {
-            SplitPoint::Statement => matches!(continuation, MINUS | L_PAREN | L_BRACKET),
-            SplitPoint::Arm => false,
+            SplitPoint::Statement => matches!(continuation.kind(), MINUS | L_PAREN | L_BRACKET),
+            SplitPoint::Arm => {
+                let mut after =
+                    std::iter::successors(continuation.next_token(), |token| token.next_token())
+                        .filter(|token| !token.kind().is_trivia())
+                        .map(|token| token.kind());
+                continuation.kind() == MINUS
+                    && after.next().is_some_and(syntax::sign_begins_literal_pat)
+                    // A literal pattern is one token (`grammar::literal_pat`),
+                    // so `=>` follows directly; guards or or-patterns would
+                    // change that.
+                    && after.next() == Some(FAT_ARROW)
+            }
         }
     }
 }
@@ -3550,15 +3558,15 @@ impl SplitPoint {
 /// A match arm is here because the identical trap lives there one level
 /// over: `match n { _ => { 1 }` newline `- 1, }` is ONE arm whose body is
 /// `{ 1 } - 1`, not an arm and a stray `- 1`, and the `,` that would have
-/// split them is exactly the `;`'s counterpart. (It also stands where
-/// negative literal patterns will land.) The item and member levels are
-/// deliberately NOT here, each for its own reason: what can follow an item
-/// value is another item, and every item starts with a keyword; what can
-/// follow a member's value is another member's NAME (or a reserved
-/// `type`/`const` member's keyword), the impl's `}`, and after that the
-/// group's next element head — `impl`, `unsafe` or `for` — or the group's
-/// own `}`. None of them is a continuation token, so no reader there can
-/// be misled.
+/// split them is exactly the `;`'s counterpart. (A `- 1 =>` line, though,
+/// really is the next arm: a negative literal pattern.) The item and member
+/// levels are deliberately NOT here, each for its own reason: what can
+/// follow an item value is another item, and every item starts with a
+/// keyword; what can follow a member's value is another member's NAME (or a
+/// reserved `type`/`const` member's keyword), the impl's `}`, and after
+/// that the group's next element head — `impl`, `unsafe` or `for` — or the
+/// group's own `}`. None of them is a continuation token, so no reader
+/// there can be misled.
 ///
 /// In a value position (`let x = if c { }` newline `- 1;`) the continuation
 /// is the only reading there is, and an operator-led continuation line is

@@ -165,7 +165,11 @@
   an unreachable-arm warning keyed on the value, not on its rendering. An integer literal
   pattern is scrutinee-typed: no suffix, no default, so the scrutinee is its defining use and
   out-of-range reuses the expression side's check. Every literal kind parses into the pattern
-  node; validation names the kinds not supported yet.
+  node; validation names the kinds not supported yet. An integer pattern may carry a leading
+  `-`, owned by the pattern node rather than an operator, and folded into the value where the
+  width is known; nothing else takes a sign, so this is no pattern-expression grammar. The
+  G03/G04 collision is answered by G04's lint: in arm position its `,` split is offered exactly
+  when the next line reads `- <integer> =>`.
 - **G23** `unsafe fn(...)` is a type, not a modifier (T19): the same modifier slot on a fn type
   that `const` rides on a fn literal, so both spellings are one `FN_TYPE` node. The type
   grammar claims the keyword outright, since no other type can begin with `unsafe`, so a bare
@@ -252,9 +256,7 @@
   declared `fn(...)` is free to call, direct or through a binding — a boundary owes two
   obligations, and each one now has its own spelling, so neither has to borrow the other's.
   **G22 T19**
-- **Negative literal patterns** — `-1` is an operator applied to a literal, so taking it is
-  the first step toward a pattern-expression grammar; and it collides with G03/G04:
-  `_ => { 1 }` newline `- 1,` already parses as one arm. **Ranges** — they ask what order a
+- **Ranges** in patterns — they ask what order a
   scalar has and whether listing can exhaust a type, which is exhaustiveness work, not
   spelling. **G19**
 - **A null literal** — abstract memory has no address zero to spell. **Pointer ordering** —
@@ -291,8 +293,6 @@
   grouping (`(...)` is unit). Inherent to the design; for now the retired prefix spelling
   still builds such a type, and its migration reports without offering the rewrite, since
   no postfix text means the same thing. **G08 G26**
-- **Negative integer literal patterns land** — revisit G04's arm-position fix gate, because a
-  token could then begin a pattern. **G04 G19**
 - **`only` as a global keyword becomes a problem** — it cannot be an identifier anywhere,
   though the language reads it in one slot; the contextual alternative is one line, at the
   cost of a clause head that lexes as an identifier. **G21**
