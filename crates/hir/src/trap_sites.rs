@@ -1,16 +1,18 @@
 //! Where an error that carries only a source range traps when the code it
 //! sits in runs: at the innermost expression or statement containing it, or
-//! on the item's value when it lies outside the body.
+//! on the item's value when it lies outside the body. An error in a
+//! declaration with no body traps wherever the declaration is named, and an
+//! error outside every item traps every item's value.
 
 use base_db::{Db, SourceFile, parse};
 use rustc_hash::FxHashMap;
 use syntax::ast::AstNode as _;
-use syntax::{SyntaxNode, SyntaxNodePtr, TextRange, TextSize};
+use syntax::{SyntaxKind, SyntaxNode, SyntaxNodePtr, TextRange, TextSize};
 
 use crate::body::{Body, BodySourceMap, ExprData, Stmt};
 use crate::{
-    ExprId, ItemId, ItemLoc, PatId, Severity, body_with_source_map, checkable_item_at, item_loc,
-    item_source, range_diagnostics,
+    ExprId, ItemId, ItemLoc, PatId, Resolution, Severity, body_with_source_map, checkable_item_at,
+    file_scope, item_loc, item_source, range_diagnostics, resolutions,
 };
 
 /// A point in an item's body where control traps with an error's message.
@@ -24,25 +26,55 @@ pub enum TrapSite {
 }
 
 /// The trap site and message of every parse error and [`range_diagnostics`]
-/// error that lies in `item`'s own syntax. An item with no body (a `type` or `trait`) has
-/// none: its errors trap nowhere.
+/// error that traps in `item`: those in its own syntax, those outside every item, and
+/// those of each bodiless declaration it names, at the name. An item with no
+/// body has none.
 #[salsa::tracked(returns(ref))]
 pub fn range_traps<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<(TrapSite, String)> {
     let file = item.file(db);
+    let owners = error_owners(db, file);
     let loc = item_loc(db, item);
-    let Some((_, errors)) = body_errors(db, file)
-        .iter()
-        .find(|(owner, _)| *owner == loc)
-    else {
+    let own = owners.bodies.iter().find(|(owner, _)| *owner == loc);
+    if own.is_none() && owners.decls.is_empty() && owners.outside.is_empty() {
         return Vec::new();
-    };
+    }
     let Some(sites) = Sites::new(db, item) else {
         return Vec::new();
     };
-    errors
-        .iter()
+    let mut traps: Vec<(TrapSite, String)> = own
+        .into_iter()
+        .flat_map(|(_, errors)| errors)
         .map(|error| (sites.site(error.blame, error.at), error.message.clone()))
-        .collect()
+        .collect();
+    traps.extend(
+        owners
+            .outside
+            .iter()
+            .map(|message| (TrapSite::Expr(sites.root), message.clone())),
+    );
+    if !owners.decls.is_empty() {
+        for (loc, range) in declaration_mentions(db, item, &sites.decl, sites.source_map) {
+            let Some((_, messages)) = owners.decls.iter().find(|(named, _)| *named == loc) else {
+                continue;
+            };
+            let site = sites.site(range, range.start());
+            traps.extend(messages.iter().map(|message| (site, message.clone())));
+        }
+    }
+    traps
+}
+
+/// Every parse error and [`range_diagnostics`] error of a file, by the code
+/// that owns it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, salsa::Update)]
+pub struct ErrorOwners {
+    /// Errors inside an item or member that has a body, by that item.
+    pub bodies: Vec<(ItemLoc, Vec<BodyError>)>,
+    /// Errors in a top-level declaration with no body (a `type`, a
+    /// `trait`, a `static` without a value), outside its members' bodies.
+    pub decls: Vec<(ItemLoc, Vec<String>)>,
+    /// Errors outside every item.
+    pub outside: Vec<String>,
 }
 
 /// An error inside a body: the range it is blamed on, its own position, and
@@ -54,10 +86,8 @@ pub struct BodyError {
     pub message: String,
 }
 
-/// Every parse error and [`range_diagnostics`] error inside a body, by the
-/// item or member whose body it is.
 #[salsa::tracked(returns(ref))]
-pub fn body_errors(db: &dyn Db, file: SourceFile) -> Vec<(ItemLoc, Vec<BodyError>)> {
+pub fn error_owners(db: &dyn Db, file: SourceFile) -> ErrorOwners {
     let parse = parse(db, file);
     // A parse error belongs to the construct the parser was building,
     // which can end before the token it points at.
@@ -67,7 +97,7 @@ pub fn body_errors(db: &dyn Db, file: SourceFile) -> Vec<(ItemLoc, Vec<BodyError
         .filter(|diag| diag.severity == Severity::Error)
         .map(|diag| (diag.range, diag.range, &diag.message));
     let tree = parse.syntax_node();
-    let mut owned = Vec::new();
+    let mut owners = ErrorOwners::default();
     for (blame, range, message) in parse_errors.chain(range_errors) {
         let element = tree.covering_element(blame);
         let node = element
@@ -75,19 +105,30 @@ pub fn body_errors(db: &dyn Db, file: SourceFile) -> Vec<(ItemLoc, Vec<BodyError
             .into_node()
             .or_else(|| element.into_token()?.parent());
         let Some(owner) = node.and_then(|node| checkable_item_at(db, file, &node)) else {
+            owners.outside.push(message.clone());
             continue;
         };
-        if crate::body::body(db, owner).root.is_none() {
-            continue;
+        // An error in code with a body traps in that body. Code without a
+        // body never runs, so its error traps wherever its top-level
+        // declaration is named: a bodiless member's error belongs to the
+        // type or trait it is declared in.
+        if crate::body::body(db, owner).root.is_some() {
+            let error = BodyError {
+                blame,
+                at: range.start(),
+                message: message.clone(),
+            };
+            push_owned(&mut owners.bodies, item_loc(db, owner), error);
+        } else {
+            let decl = ItemLoc::top_level(
+                file,
+                owner.name(db).as_str().into(),
+                owner.disambiguator(db),
+            );
+            push_owned(&mut owners.decls, decl, message.clone());
         }
-        let error = BodyError {
-            blame,
-            at: range.start(),
-            message: message.clone(),
-        };
-        push_owned(&mut owned, item_loc(db, owner), error);
     }
-    owned
+    owners
 }
 
 fn push_owned<T>(owned: &mut Vec<(ItemLoc, Vec<T>)>, loc: ItemLoc, error: T) {
@@ -95,6 +136,111 @@ fn push_owned<T>(owned: &mut Vec<(ItemLoc, Vec<T>)>, loc: ItemLoc, error: T) {
         Some((_, errors)) => errors.push(error),
         None => owned.push((loc, vec![error])),
     }
+}
+
+/// Every place `item` names a top-level declaration, with the range of the
+/// name: a path in an expression, a type, a bound or an impl head, or the
+/// type a pattern names.
+fn declaration_mentions(
+    db: &dyn Db,
+    item: ItemId<'_>,
+    decl: &SyntaxNode,
+    source_map: &BodySourceMap,
+) -> Vec<(ItemLoc, TextRange)> {
+    let file = item.file(db);
+    let scope = file_scope(db, file);
+    let resolved = resolutions(db, item);
+    let mut mentions = Vec::new();
+    for name_ref in decl
+        .descendants()
+        .filter(|n| n.kind() == SyntaxKind::NAME_REF)
+    {
+        let Some(parent) = name_ref.parent() else {
+            continue;
+        };
+        let is_base = parent
+            .children()
+            .find(|child| child.kind() == SyntaxKind::NAME_REF)
+            .is_some_and(|first| first == name_ref);
+        if !is_base {
+            continue;
+        }
+        let resolution = match parent.kind() {
+            SyntaxKind::PATH_EXPR => {
+                let Some(expr) = source_map
+                    .expr_for_node(SyntaxNodePtr::new(&name_ref))
+                    .or_else(|| source_map.expr_for_node(SyntaxNodePtr::new(&parent)))
+                else {
+                    continue;
+                };
+                resolved.get(expr).cloned()
+            }
+            SyntaxKind::PATH_TYPE | SyntaxKind::VARIANT_PAT | SyntaxKind::NEWTYPE_PAT => {
+                let name = syntax::ast::NameRef::cast(name_ref.clone())
+                    .map_or_else(String::new, |it| it.text());
+                if binder_names(&name_ref).any(|param| param == name) {
+                    continue;
+                }
+                scope.resolve(&name)
+            }
+            _ => continue,
+        };
+        let loc = match resolution {
+            Some(
+                Resolution::Item(loc)
+                | Resolution::TypeItem(loc)
+                | Resolution::TraitItem(loc)
+                | Resolution::Ambiguous(loc),
+            ) => loc,
+            _ => continue,
+        };
+        mentions.push((loc, name_ref.text_range()));
+    }
+    // A member call reaches its owner and the trait it implements without
+    // spelling either.
+    let inference = crate::infer::infer(db, item);
+    let members = inference
+        .member_of_expr
+        .iter()
+        .chain(inference.qualified_member_of_expr.iter());
+    for (call, member) in members {
+        let Some(range) = source_map.node_for_expr(call).map(|ptr| ptr.text_range()) else {
+            continue;
+        };
+        let owner = ItemLoc::top_level(member.file, member.name.clone(), member.disambiguator);
+        // A trait-impl member is named `head::member`, `head` being the
+        // impl's trait or implementer.
+        let head = member
+            .member
+            .as_ref()
+            .and_then(|(name, _)| name.split_once("::"))
+            .map(|(head, _)| head);
+        if let Some(Resolution::TraitItem(trait_)) = head.and_then(|head| scope.resolve(head)) {
+            mentions.push((trait_, range));
+        }
+        mentions.push((owner, range));
+    }
+    for (call, bound) in inference.bound_member_of_expr.iter() {
+        if let Some(ptr) = source_map.node_for_expr(call) {
+            mentions.push((bound.trait_.clone(), ptr.text_range()));
+        }
+    }
+    mentions
+}
+
+/// The generic parameter names in scope at `node`.
+fn binder_names(node: &SyntaxNode) -> impl Iterator<Item = String> {
+    node.ancestors()
+        .flat_map(|ancestor| ancestor.children())
+        .filter(|child| child.kind() == SyntaxKind::GENERIC_PARAM_LIST)
+        .flat_map(|list| list.children())
+        .filter_map(|param| {
+            param
+                .descendants_with_tokens()
+                .filter_map(|element| element.into_token())
+                .find(|token| token.kind() == SyntaxKind::IDENT)
+                .map(|token| token.text().to_owned())
+        })
 }
 
 /// The trap site of each finding reported on one of `item`'s patterns: the
