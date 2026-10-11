@@ -207,7 +207,7 @@ fn collect_extern_imports(
                 name,
                 params,
                 results,
-                decl,
+                site,
             } = target
             {
                 // A name the compiler already imports under is RESERVED.
@@ -225,7 +225,7 @@ fn collect_extern_imports(
                              imports `{IMPORT_MODULE}.{name}` for the builtin of that name, \
                              and a module cannot import one name twice"
                         ),
-                        origin: Some(decl.clone()),
+                        origin: Some(site.blame(mono.db)),
                     });
                 }
                 if !seen.iter().any(|(known, _, _)| known == name) {
