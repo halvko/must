@@ -2,9 +2,9 @@
 
 Each `*.md` file here (other than this one) is one Claude reviewer. On every
 pull request that is opened, reopened or marked ready for review, the
-`Review` workflow runs one job per file, in parallel. Each reviewer leaves
-its findings as inline comments, and the workflow keeps one summary comment
-on the PR with a section per reviewer, rewritten in place each round.
+`Review` workflow runs one job per file, in parallel. Once all are done, it
+posts their findings as one review of inline comments, and keeps one summary
+comment on the PR with a section per reviewer, rewritten in place each round.
 
 Each push that changes the PR's patch starts another round (a rebase
 alone does not), as do reopening it and marking it ready, until three
