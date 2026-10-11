@@ -24,7 +24,7 @@
 "fn" @keyword.function
 ["static" "const" "type" "struct" "enum" "trait" "let"] @keyword.storage.type
 ["mut" "pub" "raw" "unsafe" "extern"] @keyword.storage.modifier
-["as" "with" "only" "impl" "for" "requires"] @keyword
+["as" "use" "with" "only" "impl" "for" "requires"] @keyword
 
 ; ---- operators and punctuation --------------------------------------------
 

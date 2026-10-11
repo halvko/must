@@ -2110,6 +2110,7 @@ fn completions_top_level_offers_exactly_the_item_keywords() {
             trait Keyword
             type Keyword
             unsafe Keyword
+            use Keyword
         "#]],
     );
 }
@@ -2150,6 +2151,7 @@ fn completions_empty_file_top_level() {
             trait Keyword
             type Keyword
             unsafe Keyword
+            use Keyword
         "#]],
     );
 }

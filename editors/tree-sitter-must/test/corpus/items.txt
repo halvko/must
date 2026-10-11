@@ -190,3 +190,27 @@ static f = fn () { g() h() }
             (path_expr
               (identifier))
             (arg_list)))))))
+
+==================
+Imports
+==================
+
+use helpers::double;
+use sub::shapes::{Pair, area as size,};
+
+---
+
+(source_file
+  (use_item
+    (identifier)
+    (use_name
+      (identifier)))
+  (use_item
+    (identifier)
+    (identifier)
+    (use_list
+      (use_name
+        (identifier))
+      (use_name
+        (identifier)
+        (identifier)))))

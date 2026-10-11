@@ -100,7 +100,22 @@ module.exports = grammar({
 
     // ---- items ----------------------------------------------------------
 
-    _item: $ => choice($.static_item, $.type_item, $.trait_item),
+    _item: $ => choice($.static_item, $.type_item, $.trait_item, $.use_item),
+
+    // `use dir::file::name;` or `use file::{a, b as c};`
+    use_item: $ => seq(
+      'use',
+      repeat1(seq(field('segment', $.identifier), '::')),
+      choice($.use_name, $.use_list),
+      ';',
+    ),
+
+    use_list: $ => seq('{', commaSep($.use_name), '}'),
+
+    use_name: $ => seq(
+      field('name', $.identifier),
+      optional(seq('as', field('rename', $.identifier))),
+    ),
 
     // `unsafe extern static` declares an `extern` item. Markers go on either
     // side of the first keyword, which fixes the item's kind; markers and

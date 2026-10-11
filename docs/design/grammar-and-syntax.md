@@ -196,6 +196,11 @@
   declaring, answered by the fn type's own `unsafe` alone (T19): an `extern` item declared
   `fn(...)` is vouched for but free to call, direct or through a binding, exactly as any
   other safe function is — an `extern` item is not "unsafe to call because it is `extern`".
+- **G30** An import is an item: `use file::name;`, `use dir::file::name;`, or a braced list
+  `use file::{a, b as c};` (trailing comma tolerated, G02). Everything before the imported
+  names is a file path (directories, then the file), each segment ending in `::`; the imported
+  names follow, each optionally renamed with `as`. There is no glob: `use file::*` would bring
+  in names nobody wrote down. What an import resolves to is a module rule (`modules.md`).
 
 ## Discarded
 

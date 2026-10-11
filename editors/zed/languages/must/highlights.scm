@@ -16,7 +16,7 @@
 "fn" @keyword
 ["static" "const" "type" "struct" "enum" "trait" "let"] @keyword
 ["mut" "pub" "raw" "unsafe" "extern"] @keyword
-["as" "with" "only" "impl" "for" "requires"] @keyword
+["as" "use" "with" "only" "impl" "for" "requires"] @keyword
 ["+" "-" "*" "/" "==" "!=" "<" ">" "<=" ">=" "=" "&" "->" "=>"] @operator
 ["(" ")" "{" "}" "[" "]"] @punctuation.bracket
 ["," ";" ":" "::" "." "..."] @punctuation.delimiter

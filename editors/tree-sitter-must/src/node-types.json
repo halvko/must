@@ -4655,6 +4655,10 @@
         {
           "type": "type_item",
           "named": true
+        },
+        {
+          "type": "use_item",
+          "named": true
         }
       ]
     }
@@ -5209,6 +5213,77 @@
     }
   },
   {
+    "type": "use_item",
+    "named": true,
+    "fields": {
+      "segment": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "use_list",
+          "named": true
+        },
+        {
+          "type": "use_name",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "use_list",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "use_name",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "use_name",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "rename": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "variant_pat",
     "named": true,
     "fields": {
@@ -5602,6 +5677,10 @@
   },
   {
     "type": "unsafe",
+    "named": false
+  },
+  {
+    "type": "use",
     "named": false
   },
   {
