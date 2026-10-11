@@ -144,9 +144,6 @@ impl LowerCtx<'_> {
             linear,
         } = self.findings;
         let mut pat_traps = Vec::new();
-        if let (Some(root), Some(message)) = (self.body.root, &self.body.declaration_error) {
-            push_trap(&mut self.value_traps, root, message.clone());
-        }
         let mut pat_errors = Vec::new();
         for diag in inference {
             // A pattern's error: where it traps depends on whose pattern it

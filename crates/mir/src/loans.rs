@@ -286,15 +286,16 @@ impl LoanDiagnostic {
     /// Where the squiggle goes: the blamed expression's node, except that
     /// a storage end sits where the block is left — its closing brace, or
     /// the `break`/`continue` that exits it — not on the whole block.
-    pub fn range(&self, source_map: &hir::BodySourceMap) -> Option<TextRange> {
+    pub fn range(&self, db: &dyn Db, item: ItemId<'_>) -> Option<TextRange> {
         let expr = self.expr();
         if let LoanDiagnostic::Invalidated {
             kind: AccessKind::StorageEnd(_),
             ..
         } = self
         {
-            return source_map.exit_range_for_expr(expr);
+            return hir::body::exit_range(db, item, expr);
         }
+        let (_, source_map) = hir::body_with_source_map(db, item);
         Some(source_map.node_for_expr(expr)?.text_range())
     }
 
@@ -303,7 +304,8 @@ impl LoanDiagnostic {
     /// static refusal and the dynamic detection read as one story told at
     /// two different times. A storage end is located like the squiggle of
     /// one: where its scope is left.
-    pub fn related(&self, source_map: &hir::BodySourceMap) -> Vec<(TextRange, &'static str)> {
+    pub fn related(&self, db: &dyn Db, item: ItemId<'_>) -> Vec<(TextRange, &'static str)> {
+        let (_, source_map) = hir::body_with_source_map(db, item);
         let at = |expr: ExprId| Some(source_map.node_for_expr(expr)?.text_range());
         let notes = match self {
             LoanDiagnostic::Invalidated {
@@ -332,7 +334,7 @@ impl LoanDiagnostic {
                     Scope::Arm => "the storage ends here, where the arm is left",
                     Scope::Frame => "the storage ends here, where the body returns",
                 };
-                vec![(source_map.exit_range_for_expr(*exit), note)]
+                vec![(hir::body::exit_range(db, item, *exit), note)]
             }
         };
         notes

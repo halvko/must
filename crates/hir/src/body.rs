@@ -33,8 +33,6 @@ pub struct Body {
     pub pats: Arena<PatData>,
     /// The item's initializer expression (usually a `fn` literal).
     pub root: Option<ExprId>,
-    /// An error in the item's declaration; its value traps with it.
-    pub declaration_error: Option<String>,
     /// Borrowed values that are not places, keyed by the root of the
     /// borrowed place, each mapped to the anonymous local holding it
     /// (`docs/design/memory-and-borrows.md`, M12).
@@ -554,22 +552,26 @@ pub struct BodySourceMap {
     expr_map_back: ArenaMap<ExprId, SyntaxNodePtr>,
     binding_map: FxHashMap<SyntaxNodePtr, BindingId>,
     binding_map_back: ArenaMap<BindingId, SyntaxNodePtr>,
-    /// Maps a binding to the syntax node of its type annotation, when present.
-    binding_annotation_back: ArenaMap<BindingId, SyntaxNodePtr>,
     pat_map: FxHashMap<SyntaxNodePtr, PatId>,
-    pat_map_back: ArenaMap<PatId, SyntaxNodePtr>,
-    /// The closing brace of a block.
-    exit_back: ArenaMap<ExprId, TextRange>,
+}
+
+/// Where control leaves `expr`: the closing brace when it is a block, else
+/// `expr` itself.
+pub fn exit_range(db: &dyn Db, item: ItemId<'_>, expr: ExprId) -> Option<TextRange> {
+    let (body, source_map) = body_with_source_map(db, item);
+    let ptr = source_map.node_for_expr(expr)?;
+    if matches!(body.exprs[expr], ExprData::Block { .. }) {
+        let root = base_db::parse(db, item.file(db)).syntax_node();
+        if let Some(brace) =
+            ast::BlockExpr::cast(ptr.to_node(&root)).and_then(|b| b.r_brace_token())
+        {
+            return Some(brace.text_range());
+        }
+    }
+    Some(ptr.text_range())
 }
 
 impl BodySourceMap {
-    /// The closing brace when `expr` is a block, else `expr` itself.
-    pub fn exit_range_for_expr(&self, expr: ExprId) -> Option<TextRange> {
-        self.exit_back
-            .get(expr)
-            .copied()
-            .or_else(|| Some(self.node_for_expr(expr)?.text_range()))
-    }
     pub fn expr_for_node(&self, ptr: SyntaxNodePtr) -> Option<ExprId> {
         self.expr_map.get(&ptr).copied()
     }
@@ -582,14 +584,39 @@ impl BodySourceMap {
     pub fn node_for_binding(&self, binding: BindingId) -> Option<SyntaxNodePtr> {
         self.binding_map_back.get(binding).copied()
     }
-    pub fn annotation_for_binding(&self, binding: BindingId) -> Option<SyntaxNodePtr> {
-        self.binding_annotation_back.get(binding).copied()
+    /// The type annotation of a `let` or parameter whose whole pattern is
+    /// `binding`.
+    pub fn annotation_for_binding(
+        &self,
+        binding: BindingId,
+        root: &syntax::SyntaxNode,
+    ) -> Option<SyntaxNodePtr> {
+        let node = self.node_for_binding(binding)?.to_node(root);
+        let pat = node.ancestors().find_map(ast::BindPat::cast)?;
+        let owner = pat.syntax().parent()?;
+        let ty = match ast::LetStmt::cast(owner.clone()) {
+            Some(it) => it.ty(),
+            None => ast::Param::cast(owner)?.ty(),
+        }?;
+        Some(SyntaxNodePtr::new(ty.syntax()))
     }
     pub fn pat_for_node(&self, ptr: SyntaxNodePtr) -> Option<PatId> {
         self.pat_map.get(&ptr).copied()
     }
+    /// A linear search; to look up many patterns, build
+    /// [`Self::pat_nodes`] once.
     pub fn node_for_pat(&self, pat: PatId) -> Option<SyntaxNodePtr> {
-        self.pat_map_back.get(pat).copied()
+        self.pat_map
+            .iter()
+            .find_map(|(&ptr, &id)| (id == pat).then_some(ptr))
+    }
+    /// Every pattern's node; rebuilt on each call.
+    pub fn pat_nodes(&self) -> ArenaMap<PatId, SyntaxNodePtr> {
+        let mut nodes = ArenaMap::default();
+        for (&ptr, &pat) in &self.pat_map {
+            nodes.insert(pat, ptr);
+        }
+        nodes
     }
 }
 
@@ -602,7 +629,6 @@ pub fn body_with_source_map<'db>(db: &'db dyn Db, item: ItemId<'db>) -> (Body, B
     // body is its defining fn literal (the BODY side of the name-keyed
     // signature/body split: editing it dirties only this member's own
     // checks).
-    let mut declaration_error = None;
     let root = if item.member(db).is_some() {
         crate::item_tree::member_source(db, item)
             .and_then(|member| member.value())
@@ -620,10 +646,6 @@ pub fn body_with_source_map<'db>(db: &'db dyn Db, item: ItemId<'db>) -> (Body, B
             // expression id on a TYPE, and every "what is at this cursor?"
             // walk would be free to believe it.
             Some(syntax::ast::Item::StaticItem(it)) => {
-                declaration_error = syntax::static_item_errors(&it)
-                    .into_iter()
-                    .next()
-                    .map(|err| err.message);
                 if it.declares_extern() {
                     Some(ctx.exprs.alloc(ExprData::ExternItem))
                 } else {
@@ -641,7 +663,6 @@ pub fn body_with_source_map<'db>(db: &'db dyn Db, item: ItemId<'db>) -> (Body, B
             bindings: ctx.bindings,
             pats: ctx.pats,
             root,
-            declaration_error,
             temps: ctx.temps,
         },
         ctx.source_map,
@@ -677,7 +698,6 @@ impl LowerCtx {
         let id = self.pats.alloc(data);
         let ptr = SyntaxNodePtr::new(node);
         self.source_map.pat_map.insert(ptr, id);
-        self.source_map.pat_map_back.insert(id, ptr);
         id
     }
 
@@ -1037,14 +1057,6 @@ impl LowerCtx {
                                     ),
                                     None => self.pats.alloc(PatData::Missing),
                                 };
-                                if let Some(ty) = param.ty()
-                                    && let PatData::Bind(binding) = &self.pats[pat]
-                                {
-                                    let binding = *binding;
-                                    self.source_map
-                                        .binding_annotation_back
-                                        .insert(binding, SyntaxNodePtr::new(ty.syntax()));
-                                }
                                 Param { pat, type_ref }
                             })
                             .collect()
@@ -1197,14 +1209,6 @@ impl LowerCtx {
                         Some(pat) => self.lower_binding_pattern(pat, type_ref.clone(), it.is_mut()),
                         None => self.pats.alloc(PatData::Missing),
                     };
-                    if let Some(ty) = it.ty()
-                        && let PatData::Bind(binding) = &self.pats[pat]
-                    {
-                        let binding = *binding;
-                        self.source_map
-                            .binding_annotation_back
-                            .insert(binding, SyntaxNodePtr::new(ty.syntax()));
-                    }
                     Stmt::Let {
                         pat,
                         type_ref,
@@ -1220,11 +1224,7 @@ impl LowerCtx {
             })
             .collect();
         let tail = self.lower_opt_value(block.tail_expr(), block.syntax());
-        let id = self.alloc_expr(ExprData::Block { stmts, tail }, block.syntax());
-        if let Some(brace) = block.r_brace_token() {
-            self.source_map.exit_back.insert(id, brace.text_range());
-        }
-        id
+        self.alloc_expr(ExprData::Block { stmts, tail }, block.syntax())
     }
 
     /// Lower the operand of a borrow. An operand that is not a place gets

@@ -4,7 +4,10 @@
 //! declaration with no body traps wherever the declaration is named, and an
 //! error outside every item traps every item's value.
 
+use std::cell::OnceCell;
+
 use base_db::{Db, SourceFile, parse};
+use la_arena::ArenaMap;
 use rustc_hash::FxHashMap;
 use syntax::ast::AstNode as _;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxNodePtr, TextRange, TextSize};
@@ -271,7 +274,7 @@ pub fn trap_sites_for_pats(
     findings
         .into_iter()
         .filter_map(|(pat, message)| {
-            let range = sites.source_map.node_for_pat(pat)?.text_range();
+            let range = sites.pat_node(pat)?.text_range();
             Some((sites.site(range, range.start()), message))
         })
         .collect()
@@ -296,6 +299,8 @@ struct Sites<'db> {
     /// Each head's construction: the call a callee belongs to, the path or
     /// turbofish a base belongs to.
     heads: FxHashMap<ExprId, ExprId>,
+    /// Each pattern's node, built when first asked.
+    pats: OnceCell<ArenaMap<PatId, SyntaxNodePtr>>,
 }
 
 impl<'db> Sites<'db> {
@@ -322,7 +327,15 @@ impl<'db> Sites<'db> {
             source_map,
             root,
             heads,
+            pats: OnceCell::new(),
         })
+    }
+
+    fn pat_node(&self, pat: PatId) -> Option<SyntaxNodePtr> {
+        self.pats
+            .get_or_init(|| self.source_map.pat_nodes())
+            .get(pat)
+            .copied()
     }
 
     /// The site for an error blamed on `range`: the innermost expression
@@ -347,9 +360,7 @@ impl<'db> Sites<'db> {
                 if let ExprData::Block { stmts, .. } = &self.body.exprs[expr] {
                     let index = stmts
                         .iter()
-                        .position(|stmt| {
-                            stmt_end(self.source_map, stmt).is_some_and(|end| end > at)
-                        })
+                        .position(|stmt| self.stmt_end(stmt).is_some_and(|end| end > at))
                         .unwrap_or(stmts.len());
                     return TrapSite::Stmt { block: expr, index };
                 }
@@ -370,16 +381,16 @@ impl<'db> Sites<'db> {
         }
         expr
     }
-}
 
-/// Where a statement's last lowered part ends.
-fn stmt_end(source_map: &BodySourceMap, stmt: &Stmt) -> Option<TextSize> {
-    let ptr = match stmt {
-        Stmt::Let { pat, init, .. } => init
-            .and_then(|init| source_map.node_for_expr(init))
-            .or_else(|| source_map.node_for_pat(*pat)),
-        Stmt::Assign { value, .. } => source_map.node_for_expr(*value),
-        Stmt::Expr(expr) => source_map.node_for_expr(*expr),
-    };
-    ptr.map(|ptr| ptr.text_range().end())
+    /// Where a statement's last lowered part ends.
+    fn stmt_end(&self, stmt: &Stmt) -> Option<TextSize> {
+        let ptr = match stmt {
+            Stmt::Let { pat, init, .. } => init
+                .and_then(|init| self.source_map.node_for_expr(init))
+                .or_else(|| self.pat_node(*pat)),
+            Stmt::Assign { value, .. } => self.source_map.node_for_expr(*value),
+            Stmt::Expr(expr) => self.source_map.node_for_expr(*expr),
+        };
+        ptr.map(|ptr| ptr.text_range().end())
+    }
 }
