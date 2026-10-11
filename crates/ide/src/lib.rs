@@ -179,14 +179,7 @@ impl Analysis {
         // findings travel with the query value, only ranges attach here.
         // Lives above hir because hir can't see mir.
         for item in hir::all_checkable_items(&self.db, file) {
-            // TODO: report members' lowering diagnostics too; `map` in
-            // `examples/option.must` captures `f` (halvko/must#94).
             let lowered = &mir::mir_lowered(&self.db, item).diagnostics[..];
-            let lowered = if lowered.is_empty() || item.member(&self.db).is_none() {
-                lowered
-            } else {
-                &[]
-            };
             let loans = mir::loan_check(&self.db, item);
             let moves = mir::move_check(&self.db, item);
             let unused = mir::unused_check(&self.db, item);

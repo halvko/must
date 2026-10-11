@@ -41,10 +41,10 @@ const SUPPORTED: &[(&str, &str)] = &[
     ("loops.must", "find_even_multiple(3, 20)"),
     ("loops.must", "find_even_multiple(5, 4)"),
     ("loops.must", "find_even_multiple(0, 20)"),
-    // `option.must`'s three owned-receiver `Run:` lines: a tagged-enum
+    // `option.must`'s four owned-receiver `Run:` lines: a tagged-enum
     // payload out through a consuming member (both the `::Some` and the
     // `::None`-traps-on-`panic` path), and a `fn`-value argument threaded
-    // through a generic member. Its borrowing member (`is_some`) is not
+    // through two generic members. Its borrowing member (`is_some`) is not
     // here — see `UNSUPPORTED` below.
     (
         "option.must",
@@ -57,6 +57,10 @@ const SUPPORTED: &[(&str, &str)] = &[
     (
         "option.must",
         "Option::Some(1).flat_map(fn(x: usize) -> Option::<usize> { Option::Some(x + 1) }).unwrap()",
+    ),
+    (
+        "option.must",
+        "Option::Some(1).map(fn(x: usize) -> usize { x + 1 }).unwrap()",
     ),
     ("records.must", "sum_pair"),
     ("records.must", "moved"),
