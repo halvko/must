@@ -2,13 +2,14 @@
 
 Each `*.md` file here (other than this one) is one Claude reviewer. On every
 pull request that is opened, reopened or marked ready for review, the
-`Review` workflow runs one job per file, in parallel, and that reviewer
-leaves inline comments plus a summary comment headed with its name.
+`Review` workflow runs one job per file, in parallel. Each reviewer leaves
+its findings as inline comments, and the workflow keeps one summary comment
+on the PR with a section per reviewer, rewritten in place each round.
 
 Each push that changes the PR's patch starts another round (a rebase
 alone does not), as do reopening it and marking it ready, until three
-rounds have run (`MAX_ROUNDS` in the workflow); then the workflow posts once
-that the PR needs a human look. Adding the `review` label asks for a round
+rounds have run (`MAX_ROUNDS` in the workflow); then the summary comment
+says the PR needs a human look. Adding the `review` label asks for a round
 at any time and starts a fresh budget of three, counting that round; it is
 meant for humans, and comes off again when the round ends.
 
