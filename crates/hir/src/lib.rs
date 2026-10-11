@@ -2065,30 +2065,11 @@ fn match_arms_fix<'db>(
 fn member_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut Vec<Diagnostic>) {
     for &owner in file_item_ids(db, file) {
         let members = item_tree::type_members(db, owner);
-        if members.is_empty() {
-            continue;
-        }
-        let Some(decl) = item_source(db, owner) else {
-            continue;
-        };
-        let sources = item_tree::semantic_member_sources(&decl);
-        let member_name_range = |name: &str, dis: u32| {
-            sources
-                .iter()
-                .find(|source| source.name == name && source.disambiguator == dis)
-                .map(|source| {
-                    source
-                        .member
-                        .name()
-                        .map(|n| n.syntax().text_range())
-                        .unwrap_or_else(|| source.member.syntax().text_range())
-                })
-        };
+        let ranges = MemberNameRanges::new(db, owner);
         for member in members {
-            let Some(range) = member_name_range(&member.name, member.disambiguator) else {
-                continue;
-            };
-            if member.type_ref.is_none() {
+            if member.type_ref.is_none()
+                && let Some(range) = ranges.get(&member.name, member.disambiguator)
+            {
                 diagnostics.push(Diagnostic {
                     range,
                     severity: Severity::Error,
@@ -2101,8 +2082,11 @@ fn member_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mu
                     related: Vec::new(),
                 });
             }
-            if member.disambiguator > 0 {
-                let related = member_name_range(&member.name, 0)
+            if member.disambiguator > 0
+                && let Some(range) = ranges.get(&member.name, member.disambiguator)
+            {
+                let related = ranges
+                    .get(&member.name, 0)
                     .map(|first| {
                         vec![RelatedInfo {
                             file,
@@ -2120,6 +2104,44 @@ fn member_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mu
                 });
             }
         }
+    }
+}
+
+/// Name ranges of `owner`'s members, read from its syntax on the first
+/// lookup (a full with-chain walk) and reused after.
+struct MemberNameRanges<'db> {
+    db: &'db dyn Db,
+    owner: ItemId<'db>,
+    sources: std::cell::OnceCell<Vec<item_tree::MemberSource>>,
+}
+
+impl<'db> MemberNameRanges<'db> {
+    fn new(db: &'db dyn Db, owner: ItemId<'db>) -> Self {
+        Self {
+            db,
+            owner,
+            sources: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// The name range of member `name` (qualified for trait-impl members)
+    /// with disambiguator `dis`, or the whole member's when it has no name.
+    fn get(&self, name: &str, dis: u32) -> Option<TextRange> {
+        self.sources
+            .get_or_init(|| {
+                item_source(self.db, self.owner)
+                    .map(|decl| item_tree::semantic_member_sources(&decl))
+                    .unwrap_or_default()
+            })
+            .iter()
+            .find(|source| source.name == name && source.disambiguator == dis)
+            .map(|source| {
+                source
+                    .member
+                    .name()
+                    .map(|n| n.syntax().text_range())
+                    .unwrap_or_else(|| source.member.syntax().text_range())
+            })
     }
 }
 
@@ -2315,13 +2337,17 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
     // Impl sites: head resolution, member coverage and matching.
     let impls = traits::trait_impls(db, file);
     for site in &impls.sites {
-        let Some(element) = traits::impl_site_source(db, site) else {
-            continue;
+        let head_slot = std::cell::OnceCell::new();
+        let head_range = || {
+            *head_slot.get_or_init(|| {
+                traits::impl_site_source(db, site).map(|element| {
+                    element
+                        .head()
+                        .map(|head| head.syntax().text_range())
+                        .unwrap_or_else(|| element.syntax().text_range())
+                })
+            })
         };
-        let head_range = element
-            .head()
-            .map(|head| head.syntax().text_range())
-            .unwrap_or_else(|| element.syntax().text_range());
         if site.type_side && site.trait_.is_none() {
             let message = match file_scope(db, file).resolve(&site.head) {
                 // Resolvable, but reserved: the impl must not go live.
@@ -2343,8 +2369,8 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
                     }
                 }
             };
-            if let Some(message) = message {
-                diagnostics.push(simple_error(head_range, message));
+            if let (Some(message), Some(range)) = (message, head_range()) {
+                diagnostics.push(simple_error(range, message));
             }
             continue;
         }
@@ -2366,8 +2392,8 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
                     None => Some(format!("unknown type `{}`", site.head)),
                 },
             };
-            if let Some(message) = message {
-                diagnostics.push(simple_error(head_range, message));
+            if let (Some(message), Some(range)) = (message, head_range()) {
+                diagnostics.push(simple_error(range, message));
             }
             continue;
         }
@@ -2383,25 +2409,15 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
                 |m| matches!(&m.home, item_tree::MemberHome::TraitImpl { head } if *head == site.head),
             )
             .collect();
-        let member_name_range = |qualified: &str, dis: u32| {
-            item_source(db, owner_id)
-                .map(|decl| item_tree::semantic_member_sources(&decl))
-                .unwrap_or_default()
-                .into_iter()
-                .find(|source| source.name == qualified && source.disambiguator == dis)
-                .map(|source| {
-                    source
-                        .member
-                        .name()
-                        .map(|n| n.syntax().text_range())
-                        .unwrap_or_else(|| source.member.syntax().text_range())
-                })
-        };
+        let member_ranges = MemberNameRanges::new(db, owner_id);
         for req in requirements {
             let qualified = format!("{}::{}", site.head, req.name);
             let Some(member) = site_members.iter().find(|m| m.name == qualified) else {
+                let Some(range) = head_range() else {
+                    continue;
+                };
                 diagnostics.push(Diagnostic {
-                    range: head_range,
+                    range,
                     severity: Severity::Error,
                     message: format!(
                         "this impl of `{}` is missing the member `{}`",
@@ -2418,10 +2434,11 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
             if member.type_ref.is_none() {
                 continue;
             }
-            let Some(range) = member_name_range(&member.name, member.disambiguator) else {
-                continue;
-            };
+            let range = || member_ranges.get(&member.name, member.disambiguator);
             if !traits::binders_match(db, file, &req.generics, &member.generics) {
+                let Some(range) = range() else {
+                    continue;
+                };
                 diagnostics.push(Diagnostic {
                     range,
                     severity: Severity::Error,
@@ -2455,6 +2472,9 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
             };
             let actual = ty::signature(db, member_loc.to_id(db));
             if expected != actual && !expected.contains_error() && !actual.contains_error() {
+                let Some(range) = range() else {
+                    continue;
+                };
                 diagnostics.push(Diagnostic {
                     range,
                     severity: Severity::Error,
@@ -2476,7 +2496,7 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
                 .iter()
                 .any(|req| req.name == member.bare_name())
             {
-                let Some(range) = member_name_range(&member.name, member.disambiguator) else {
+                let Some(range) = member_ranges.get(&member.name, member.disambiguator) else {
                     continue;
                 };
                 diagnostics.push(Diagnostic {
