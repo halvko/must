@@ -1684,9 +1684,10 @@ interpreter tells when it catches one at run time, told earlier.
 The interpreter's aliasing check is *depth*, not the fence. It runs the same
 rule dynamically, and it reaches what the static rule cannot see: raw
 pointers, freed allocations, and the places the checker approximates. A
-refused program is not stopped from running — no trap is planted for a
-refusal — and when it runs, this is what catches it. Its limits, and the
-checker's, are worth stating plainly rather than leaving to be discovered.
+refused program still runs, like any program with errors, and stops where
+the refused operation would run, with the checker's own message; what the
+checker cannot see, this catches. Its limits, and the checker's, are worth
+stating plainly rather than leaving to be discovered.
 
 It reports a violation only on a path that actually runs. A branch never
 taken is never checked, and a program that passes on one input says
@@ -2006,18 +2007,16 @@ static stale = fn () -> usize {
     let r = make(1);
     let b = r.&;
     r.drop();
-    b.*.id        // undefined behavior, detected
+    b.*.id        // refused: `b` is still live across the move
 };
 ```
 
 The aliasing model's event is "the storage no longer holds what the borrow
 was taken of", and *moving* a value is that event as surely as writing over
-it. The trap names both sites — where the borrow was created, and where it
-stopped being good.
-
-That check is dynamic, like every aliasing check today: the signature
-discipline is what makes borrows *shaped* correctly, and the interpreter is
-what catches a program that got the shape right and the order wrong.
+it. The loan checker refuses the move, and a run stops there with its
+message; the interpreter's own check, which names both sites — where the
+borrow was created, and where it stopped being good — catches the same
+event wherever the checker cannot see it.
 
 None of this reaches the generated code. A program using values that must be
 consumed compiles to exactly the same bytes as the same program without

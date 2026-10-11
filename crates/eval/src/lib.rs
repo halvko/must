@@ -511,7 +511,7 @@ pub fn const_block_values<'db>(
 ) -> Vec<(ExprId, Result<Value, EvalError>)> {
     let loc = hir::item_loc(db, item);
     let mut machine = Machine::for_const(db);
-    mir::mir_lowered(db, item)
+    mir::mir_checked(db, item)
         .const_blocks
         .iter()
         .map(|&(expr, body)| (expr, machine.force_const_block(&loc, body, Vec::new())))
@@ -533,7 +533,7 @@ pub fn const_arg_values<'db>(
 ) -> Vec<(ExprId, Result<Value, EvalError>)> {
     let loc = hir::item_loc(db, item);
     let mut machine = Machine::for_const(db);
-    mir::mir_lowered(db, item)
+    mir::mir_checked(db, item)
         .const_args
         .iter()
         .map(|&(expr, body)| (expr, machine.force_const_block(&loc, body, Vec::new())))

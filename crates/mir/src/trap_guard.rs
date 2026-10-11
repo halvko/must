@@ -1,7 +1,7 @@
 //! Every error traps: for each error the toolchain reports on a corpus of
 //! programs, some MIR body of the file carries a trap with exactly that
 //! message. The corpus is `examples/` plus every program the hir and syntax
-//! diagnostic tests check.
+//! diagnostic tests and mir's loan tests check.
 
 use std::collections::BTreeSet;
 
@@ -32,7 +32,7 @@ fn untrapped(text: &str) -> Vec<String> {
                 .iter()
                 .map(|diag| diag.message()),
         );
-        for (_, body) in lowered.bodies.iter() {
+        for (_, body) in crate::mir_checked(&db, item).bodies.iter() {
             for (_, block) in body.blocks.iter() {
                 match &block.terminator.kind {
                     TerminatorKind::Trap { message, .. }
@@ -173,14 +173,11 @@ fn every_error_traps() {
         include_str!("../../syntax/src/tests.rs"),
         "check_errors(",
     ));
+    corpus.extend(programs(include_str!("tests.rs"), "check_loans("));
     let mut gaps = BTreeSet::new();
     for text in &corpus {
         gaps.extend(untrapped(text));
     }
     let rendered: String = gaps.iter().map(|message| format!("{message}\n")).collect();
-    // TODO: halvko/must#52 — loan errors do not trap. This list may only
-    // shrink.
-    expect![[r#"
-        borrowed value does not live long enough: this borrows a local, but the borrow is still live when the body returns and the local is gone by then
-    "#]].assert_eq(&rendered);
+    expect![[r#""#]].assert_eq(&rendered);
 }

@@ -329,6 +329,10 @@ enum AllocKind {
 pub struct Machine<'db, M> {
     db: &'db dyn Db,
     pub mode: M,
+    /// Whether to run the MIR with the loan checker's traps
+    /// ([`mir::mir_checked`]). Only tests turn it off, to reach the aliasing
+    /// tree's own detection.
+    pub(crate) loan_traps: bool,
     frames: Vec<Frame>,
     /// Items currently being forced (cycle detection), innermost last.
     forcing: Vec<ItemLoc>,
@@ -412,6 +416,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         Machine {
             db,
             mode,
+            loan_traps: true,
             frames: Vec::new(),
             forcing: Vec::new(),
             forced: FxHashMap::default(),
@@ -699,7 +704,12 @@ impl<'db, M: Mode> Machine<'db, M> {
     }
 
     fn lowered(&self, loc: &ItemLoc) -> &'db MirLowered {
-        mir::mir_lowered(self.db, loc.to_id(self.db))
+        let item = loc.to_id(self.db);
+        if self.loan_traps {
+            mir::mir_checked(self.db, item)
+        } else {
+            mir::mir_lowered(self.db, item)
+        }
     }
 
     fn push_frame(

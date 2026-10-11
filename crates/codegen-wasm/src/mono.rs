@@ -277,7 +277,7 @@ impl<'db> Mono<'db> {
     }
 
     fn body(&self, loc: &ItemLoc, body: BodyId) -> &'db MirBody {
-        &mir::mir_lowered(self.db, loc.to_id(self.db)).bodies[body]
+        &mir::mir_checked(self.db, loc.to_id(self.db)).bodies[body]
     }
 
     /// The item's generic binder, or an empty binder for a plain item.
