@@ -3615,11 +3615,11 @@ fn check_loans(text: &str, expect: Expect) {
     for item in hir::all_checkable_items(&db, file) {
         let (_, source_map) = hir::body_with_source_map(&db, item);
         for diag in crate::loan_check(&db, item) {
-            let Some(range) = diag.range(source_map) else {
+            let Some(range) = diag.range(&db, item) else {
                 continue;
             };
             rendered.push_str(&format!("{range:?}: {}\n", diag.message()));
-            for (range, note) in diag.related(source_map) {
+            for (range, note) in diag.related(&db, item) {
                 rendered.push_str(&format!("  note at {range:?}: {note}\n"));
             }
         }

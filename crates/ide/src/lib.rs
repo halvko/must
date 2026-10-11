@@ -213,11 +213,11 @@ impl Analysis {
             // refusal and the dynamic detection read as one story told at
             // two different times.
             for diag in loans {
-                let Some(range) = diag.range(source_map) else {
+                let Some(range) = diag.range(&self.db, item) else {
                     continue;
                 };
                 let related = diag
-                    .related(source_map)
+                    .related(&self.db, item)
                     .into_iter()
                     .filter(|(at, _)| *at != range)
                     .map(|(at, message)| RelatedInfo {

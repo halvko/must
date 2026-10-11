@@ -230,17 +230,6 @@ pub enum MemberContext {
 /// territory (modifier heads, non-plain groups, generic-owner trait
 /// impls, requirement bodies — a requirement member is not an impl
 /// member).
-/// The errors validation reports on a `static` item's own declaration: its
-/// markers and an `extern` signature.
-pub fn static_item_errors(item: &ast::StaticItem) -> Vec<SyntaxError> {
-    let mut errors = Vec::new();
-    if let Some(head) = item.head() {
-        validate_item_head(&head, &mut errors);
-    }
-    validate_extern_static(item, &mut errors);
-    errors
-}
-
 pub fn semantic_member_context(node: &SyntaxNode) -> Option<MemberContext> {
     let impl_element = node.ancestors().find_map(ast::ImplElement::cast)?;
     let group = impl_element

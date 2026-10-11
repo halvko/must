@@ -351,9 +351,7 @@ fn locate(
     let item = loc.to_id(db);
     let range = match anchor {
         NoteAnchor::Expr => expr_range(db, item, expr)?,
-        NoteAnchor::Exit => hir::body_with_source_map(db, item)
-            .1
-            .exit_range_for_expr(expr)?,
+        NoteAnchor::Exit => hir::body::exit_range(db, item, expr)?,
     };
     // The synthetic entry line isn't part of the user's file; a location
     // there would point past its end.

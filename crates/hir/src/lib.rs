@@ -598,7 +598,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                     let render_reason = |r: &Cause| -> Vec<RelatedInfo> {
                         match r {
                             Cause::Binding(binding) => source_map
-                                .annotation_for_binding(*binding)
+                                .annotation_for_binding(*binding, &syntax_root)
                                 .map(|ptr| RelatedInfo {
                                     file,
                                     range: ptr.text_range(),
