@@ -60,7 +60,7 @@
 //! ## Snippets
 //!
 //! A handful of candidates carry an [`InsertText::Snippet`] instead of
-//! plain text: a parameterful `fn` item/builtin in expression position
+//! plain text: a parameterful `fn` item/builtin/local in expression position
 //! (`name($1)`, unless the position expects the `fn` itself as a *value*,
 //! never called — then it's the bare name), a `type X = …` RHS
 //! (`struct { $1 }` / `enum { $1 }`), a payload-carrying variant pattern in
@@ -336,8 +336,8 @@ fn fn_shaped_item(
     item
 }
 
-/// The fn-call snippet for a `fn`-typed candidate (a file item, a
-/// builtin, or an inherent member): `name($1)` when it takes parameters,
+/// The fn-call snippet for a `fn`-typed candidate (a file item, a local,
+/// a builtin, or an inherent member): `name($1)` when it takes parameters,
 /// `name()` when it's zero-arity — except when `tier` is 0, meaning the
 /// candidate's own type (not its return type) matched the expectation: the
 /// position wants the `fn` itself as a *value* (passed, not called), so the
@@ -357,6 +357,14 @@ fn fn_call_insert(name: &str, written_params: usize, tier: u8) -> InsertText {
             snippet: format!("{name}($1)"),
             plain,
         }
+    }
+}
+
+/// Inserts a `fn`-typed value candidate as a call ([`fn_call_insert`]);
+/// any other type keeps its plain label.
+fn insert_fn_as_call(item: &mut CompletionItem, ty: &hir::Ty, tier: u8) {
+    if let hir::Ty::Fn(f) = ty {
+        item.text_edit.insert = fn_call_insert(&item.label, f.params.len(), tier);
     }
 }
 
@@ -1123,9 +1131,7 @@ fn builtin_fn_items(
             Some(detail),
             edit_range,
         );
-        if let hir::Ty::Fn(f) = &ty {
-            candidate.text_edit.insert = fn_call_insert(&candidate.label, f.params.len(), tier);
-        }
+        insert_fn_as_call(&mut candidate, &ty, tier);
         candidate
     })
     .collect()
@@ -1183,10 +1189,7 @@ fn file_value_and_type_items(
                     Some(ty.display()),
                     edit_range,
                 );
-                if let hir::Ty::Fn(f) = &ty {
-                    candidate.text_edit.insert =
-                        fn_call_insert(&candidate.label, f.params.len(), tier);
-                }
+                insert_fn_as_call(&mut candidate, &ty, tier);
                 Some(candidate)
             }
             hir::Resolution::TypeItem(loc) => {
@@ -1283,14 +1286,19 @@ fn expression_position_items(
                     }
                     _ => Provenance::Local as u8,
                 };
-                completion_item_at_tier(
+                let tier = type_tier(local.ty.as_ref(), expected);
+                let mut item = completion_item_at_tier(
                     local.name,
                     CompletionItemKind::Variable,
                     provenance,
-                    type_tier(local.ty.as_ref(), expected),
+                    tier,
                     local_detail(local.ty.as_ref(), local.mutable),
                     edit_range,
-                )
+                );
+                if let Some(ty) = &local.ty {
+                    insert_fn_as_call(&mut item, ty, tier);
+                }
+                item
             }),
     );
     items
