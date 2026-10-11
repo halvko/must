@@ -171,7 +171,7 @@ ast_node!(
     LiteralPat: LITERAL_PAT
 );
 ast_node!(
-    /// `_` as a whole pattern.
+    /// `_` as a whole pattern, in a match arm and a `let`/parameter alike.
     WildcardPat: WILDCARD_PAT
 );
 ast_node!(
@@ -180,9 +180,8 @@ ast_node!(
     BindPat: BIND_PAT
 );
 ast_node!(
-    /// `..` in pattern position — legal inside a [`RecordPat`] ("don't bind
-    /// the rest"); reserved (validation rejects it) everywhere else a
-    /// pattern can appear.
+    /// `..` inside a [`RecordPat`]: "don't bind the rest". It is no pattern
+    /// of its own anywhere.
     RestPat: REST_PAT
 );
 ast_node!(
@@ -444,15 +443,13 @@ ast_enum!(
 );
 ast_enum!(
     /// A pattern: a match-arm pattern (`VariantPat`/`LiteralPat`/
-    /// `WildcardPat`/`RestPat`/`BindPat`) or a `let`/parameter pattern,
-    /// which takes `RecordPat`/`NewtypePat`/`ArrayPat` too (see
-    /// `crate::grammar`'s `binding_pattern`). Both lower through the same
-    /// `Pat` arena.
+    /// `WildcardPat`/`BindPat`) or a `let`/parameter pattern, which takes
+    /// `RecordPat`/`NewtypePat`/`ArrayPat` too (see `crate::grammar`'s
+    /// `binding_pattern`). Both lower through the same `Pat` arena.
     Pat: VariantPat,
     LiteralPat,
     WildcardPat,
     BindPat,
-    RestPat,
     RecordPat,
     NewtypePat,
     ArrayPat
@@ -1331,10 +1328,6 @@ impl VariantPat {
     /// The positional payload bindings (holes included), in source order.
     pub fn bindings(&self) -> impl Iterator<Item = BindPat> + use<> {
         children(&self.syntax)
-    }
-    /// The reserved `..` rest marker, if written.
-    pub fn rest_pat(&self) -> Option<RestPat> {
-        child(&self.syntax)
     }
 }
 

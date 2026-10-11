@@ -614,6 +614,21 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                                 })
                                 .into_iter()
                                 .collect(),
+                            Cause::LetAnnotation(pat) => source_map
+                                .node_for_pat(*pat)
+                                .and_then(|ptr| ptr.to_node(&syntax_root).parent())
+                                .and_then(ast::LetStmt::cast)
+                                .and_then(|let_stmt| let_stmt.ty())
+                                .map(|ty| RelatedInfo {
+                                    file,
+                                    range: ty.syntax().text_range(),
+                                    message: format!(
+                                        "expected `{}` because of this annotation",
+                                        expected.display()
+                                    ),
+                                })
+                                .into_iter()
+                                .collect(),
                             Cause::ItemAnnotation => item_source(db, item)
                                 .and_then(|it| it.ty())
                                 .map(|ty| RelatedInfo {

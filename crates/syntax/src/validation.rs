@@ -117,22 +117,6 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
                 enum_expr.syntax(),
                 &mut errors,
             );
-        } else if let Some(rest) = ast::RestPat::cast(node.clone()) {
-            // `..` in a record pattern means "ignore the remaining fields" —
-            // legal. Everywhere else a pattern can appear (a variant
-            // pattern's positional payload, in v1) it stays reserved: it
-            // parses, but is rejected here.
-            if !rest
-                .syntax()
-                .parent()
-                .is_some_and(|p| ast::RecordPat::can_cast(p.kind()))
-            {
-                errors.push(SyntaxError {
-                    message: "`..` in patterns is not supported yet".to_owned(),
-                    range: rest.syntax().text_range(),
-                    fix: None,
-                });
-            }
         } else if let Some(literal_pat) = ast::LiteralPat::cast(node.clone()) {
             reject_reserved_literal_pat(&literal_pat, &mut errors);
         } else if let Some(record_pat) = ast::RecordPat::cast(node.clone()) {
@@ -848,6 +832,8 @@ fn validate_deferred_let(let_stmt: &ast::LetStmt, errors: &mut Vec<SyntaxError>)
         return;
     }
     match let_stmt.pat() {
+        // Nothing is declared, so nothing waits on a value.
+        Some(ast::Pat::WildcardPat(_)) => {}
         Some(ast::Pat::BindPat(bind)) => {
             let Some(name) = bind.name() else { return };
             if name.is_hole() || let_stmt.is_mut() {
@@ -891,7 +877,10 @@ fn require_mut_names_a_binding(
     let Some(mut_token) = mut_token else {
         return;
     };
-    match pat {
+    // The `_` itself: a whole `_` pattern, or a hole written in a binding
+    // position (`::Some(mut _)`).
+    let hole = match pat {
+        Some(ast::Pat::WildcardPat(wildcard)) => wildcard.syntax().clone(),
         Some(ast::Pat::BindPat(bind)) => {
             let Some(name) = bind.name() else {
                 return;
@@ -899,20 +888,7 @@ fn require_mut_names_a_binding(
             if !name.is_hole() {
                 return;
             }
-            errors.push(SyntaxError {
-                message: "`mut` has no effect on `_`: a hole can never be assigned".to_owned(),
-                range: mut_token.text_range().cover(name.syntax().text_range()),
-                fix: Some(Fix {
-                    label: "Remove `mut`".to_owned(),
-                    edits: vec![TextEdit {
-                        range: TextRange::new(
-                            mut_token.text_range().start(),
-                            name.syntax().text_range().start(),
-                        ),
-                        insert: String::new(),
-                    }],
-                }),
-            });
+            name.syntax().clone()
         }
         Some(other) => {
             errors.push(SyntaxError {
@@ -921,9 +897,21 @@ fn require_mut_names_a_binding(
                 range: mut_token.text_range().cover(other.syntax().text_range()),
                 fix: None,
             });
+            return;
         }
-        None => {}
-    }
+        None => return,
+    };
+    errors.push(SyntaxError {
+        message: "`mut` has no effect on `_`: a hole can never be assigned".to_owned(),
+        range: mut_token.text_range().cover(hole.text_range()),
+        fix: Some(Fix {
+            label: "Remove `mut`".to_owned(),
+            edits: vec![TextEdit {
+                range: TextRange::new(mut_token.text_range().start(), hole.text_range().start()),
+                insert: String::new(),
+            }],
+        }),
+    });
 }
 
 /// `pub` superset-parses on any record-type/record-literal field (reserving

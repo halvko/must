@@ -4344,7 +4344,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                         .declared_type_for_pat(*pat)
                                         .unwrap_or_else(|| self.fresh_var()),
                                 };
-                                let ty = self.infer_expr_with(*init, &declared, None);
+                                let cause =
+                                    type_ref.is_some().then_some(Cause::LetAnnotation(*pat));
+                                let ty = self.infer_expr_with(*init, &declared, cause);
                                 let ty = if variant {
                                     if matches!(self.resolve_shallow(&ty), Ty::Infer(_))
                                         && let Some(enum_ty) = self.declared_type_for_pat(*pat)
@@ -9448,7 +9450,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 enum_name,
                 variant,
                 bindings,
-                rest,
             } => {
                 // Which enum the variant name resolves against: the named
                 // one (qualified spelling), or the scrutinee's (bare).
@@ -9535,7 +9536,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     .iter()
                     .map(|ty| substitute_args(ty, &target, &variant_ty.args))
                     .collect();
-                if !rest && bindings.len() != payload.len() {
+                if bindings.len() != payload.len() {
                     self.result.diagnostics.push(InferenceDiagnostic::PatArity {
                         match_expr,
                         pat,

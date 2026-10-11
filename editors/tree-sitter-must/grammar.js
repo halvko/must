@@ -24,16 +24,19 @@ function commaSep(rule) {
 
 /**
  * The binding patterns under the rule names `names`, a bound name being
- * `bound`. A parameter's patterns are a second copy whose bound names are
- * `param_name` nodes, so a query tells a parameter at any nesting depth.
- * A whole pattern's `mut` belongs to its `let` or parameter, so only a
- * nested binding (`names.nested`) spells its own.
+ * `bound` and a bare name pattern `named` (`bound` minus `_`, which is a
+ * `wildcard_pat`). A parameter's patterns are a
+ * second copy whose bound names are `param_name` nodes, so a query tells a
+ * parameter at any nesting depth. A whole pattern's `mut` belongs to its
+ * `let` or parameter, so only a nested binding (`names.nested`) spells its
+ * own.
  */
-function bindingPatterns(names, bound) {
+function bindingPatterns(names, bound, named) {
   const node = ($, kind) =>
     names[kind] === kind ? $[kind] : alias($[names[kind]], $[kind]);
   return {
     [names.pattern]: $ => choice(
+      $.wildcard_pat,
       node($, 'bind_pat'),
       node($, 'record_pat'),
       node($, 'newtype_pat'),
@@ -47,7 +50,7 @@ function bindingPatterns(names, bound) {
       alias($[names.mut_bind_pat], $.bind_pat),
     ),
 
-    [names.bind_pat]: $ => bound($),
+    [names.bind_pat]: $ => named($),
 
     [names.mut_bind_pat]: $ => seq('mut', bound($)),
 
@@ -387,7 +390,7 @@ module.exports = grammar({
       array_pat: 'array_pat',
       nested: '_nested_binding_pattern',
       mut_bind_pat: '_mut_bind_pat',
-    }, $ => $._name),
+    }, $ => $._name, $ => $.identifier),
 
     ...bindingPatterns({
       pattern: '_param_pattern',
@@ -398,14 +401,14 @@ module.exports = grammar({
       array_pat: '_param_array_pat',
       nested: '_param_nested_pattern',
       mut_bind_pat: '_param_mut_bind_pat',
-    }, $ => choice(alias($.identifier, $.param_name), '_')),
+    }, $ => choice(alias($.identifier, $.param_name), '_'),
+    $ => alias($.identifier, $.param_name)),
 
     rest_pat: _ => '..',
 
     _match_pattern: $ => choice(
       $.literal_pat,
       $.wildcard_pat,
-      $.rest_pat,
       $.variant_pat,
       alias($._match_bind_pat, $.bind_pat),
     ),
@@ -432,7 +435,7 @@ module.exports = grammar({
 
     _pattern_binding_list: $ => seq(
       '(',
-      commaSep(choice(alias($._payload_bind_pat, $.bind_pat), $.rest_pat)),
+      commaSep(alias($._payload_bind_pat, $.bind_pat)),
       ')',
     ),
 

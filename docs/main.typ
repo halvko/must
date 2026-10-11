@@ -929,7 +929,8 @@ listing ranges could exhaust a type and so retire the `_` arm), literal
 patterns of the *other* kinds (string, boolean — they parse, so the error
 names the kind that was written rather than shrugging), `if match`,
 `match ... else`, the statement form `match x => pat;`, and record
-patterns — though `..` is already reserved in pattern position for them.
+patterns in a match arm. Outside a record pattern, `..` is neither a
+pattern nor a payload binding; it stays free for range patterns.
 Nested patterns are the one whose absence is visible above: reaching into
 nested data through a borrow is spelled as two matches until they land.
 

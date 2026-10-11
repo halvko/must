@@ -24,7 +24,7 @@ static f = fn (Meters(struct { x, mut y as z, .. }): Meters, _: usize) { let Wra
           (path_type
             (identifier)))
         (param
-          (bind_pat)
+          (wildcard_pat)
           (path_type
             (identifier))))
       (block_expr
@@ -75,7 +75,7 @@ static f = fn (C(B(A(struct { x as y, z }))): C, mut w) { };
 Match patterns
 ==================
 
-static f = fn () { match s { Shape::Circle(r, _) => r, ::Pair(a, ..) => a, 0 => 1, 'x' => 2, true => 3, _ => 4, other => other } };
+static f = fn () { match s { Shape::Circle(r, _) => r, ::Pair(a, b) => a, 0 => 1, 'x' => 2, true => 3, _ => 4, other => other } };
 
 ---
 
@@ -103,7 +103,8 @@ static f = fn () { match s { Shape::Circle(r, _) => r, ::Pair(a, ..) => a, 0 => 
                 (identifier)
                 (bind_pat
                   (identifier))
-                (rest_pat))
+                (bind_pat
+                  (identifier)))
               (path_expr
                 (identifier)))
             (match_arm
@@ -192,7 +193,7 @@ static f = fn ([a, mut b]: [usize; 2]) { let [x, [mut y, _]] = v; let ::Char(c, 
             (array_pat
               (bind_pat
                 (identifier))
-              (bind_pat)))
+              (wildcard_pat)))
           (path_expr
             (identifier)))
         (let_stmt

@@ -26,7 +26,7 @@ use la_arena::ArenaMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ItemLoc;
-use crate::body::{BindingId, ExprId};
+use crate::body::{BindingId, ExprId, PatId};
 use crate::infer::InferenceDiagnostic;
 use crate::ty::{ConstArgValue, GenericArg, NamedTy, Region, Ty, TyVar, TyVarValue, VariantTy};
 
@@ -38,6 +38,9 @@ use crate::ty::{ConstArgValue, GenericArg, NamedTy, Region, Ty, TyVar, TyVarValu
 pub enum Cause {
     /// Axiom: a `let` binding's type annotation established the type.
     Binding(BindingId),
+    /// Axiom: the type annotation of a `let` whose pattern is no bare name
+    /// (`let _: T = ...`, `let struct { x }: T = ...`).
+    LetAnnotation(PatId),
     /// Axiom: the enclosing item's written type annotation.
     ItemAnnotation,
     /// Axiom: a function literal's written return type. Carries the

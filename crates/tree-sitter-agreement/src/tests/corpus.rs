@@ -122,8 +122,8 @@ static describe = fn (s: Shape, n: usize, c: char, b: bool) -> usize {
 type Shape = enum { Pair(usize, str), Point };
 static reserved = fn (s: Shape, t: str) -> usize {
     let a = match s {
-        ::Pair(first, ..) => first,
-        .. => 0,
+        ::Pair(first, _) => first,
+        ::Point => 0,
     };
     match t {
         "one" => a,
