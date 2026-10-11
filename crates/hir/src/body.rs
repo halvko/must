@@ -512,6 +512,8 @@ pub enum LiteralData {
     /// literal names no value at all, whereas an over-long integer still
     /// names a number the checker can talk about.
     Char(char),
+    /// `()`, the one value of the unit type.
+    Unit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -745,6 +747,9 @@ impl LowerCtx {
                     None => return self.missing_expr(),
                 };
                 self.alloc_expr(ExprData::Literal(data), it.syntax())
+            }
+            ast::Expr::UnitExpr(it) => {
+                self.alloc_expr(ExprData::Literal(LiteralData::Unit), it.syntax())
             }
             ast::Expr::PathExpr(it) => {
                 let Some(name_ref) = it.name_ref() else {

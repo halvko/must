@@ -44,6 +44,16 @@ tag) — anonymous and structural, matched by shape alone. Enums have no
 anonymous form: every enum lives behind a `type` item (see "Enums and
 variants" below).
 
+== The unit type
+
+`()` is the unit type, and `()` is also its one value: a function that has
+nothing to return returns `()`, and an unwritten return type means `()`.
+
+```must
+static nothing: () = ();
+static log = fn (s: str) -> () { print(s); () }
+```
+
 == String literals
 
 Strings are multiline — a literal newline inside a string literal is legal — and

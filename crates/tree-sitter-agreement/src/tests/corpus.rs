@@ -257,6 +257,13 @@ static old = fn (s: Shape) -> usize {
 "#,
     ),
     (
+        "unit value",
+        r#"
+static unit: () = ();
+static spaced = fn (u: ()) -> () { ( ) };
+"#,
+    ),
+    (
         "unresolved names",
         r#"
 static broken = fn () -> usize { missing(nowhere) };

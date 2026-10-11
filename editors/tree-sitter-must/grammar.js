@@ -429,6 +429,7 @@ module.exports = grammar({
       $.path_expr,
       $.elided_variant_expr,
       $.paren_expr,
+      $.unit_expr,
       $.block_expr,
       $.const_block_expr,
       $.unsafe_block_expr,
@@ -493,6 +494,8 @@ module.exports = grammar({
     elided_variant_expr: $ => seq('::', field('variant', $.identifier)),
 
     paren_expr: $ => seq('(', $._expr, ')'),
+
+    unit_expr: _ => seq('(', ')'),
 
     const_block_expr: $ => seq('const', $.block_expr),
 

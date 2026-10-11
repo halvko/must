@@ -8678,3 +8678,21 @@ static f = fn() -> usize {
         "#]],
     );
 }
+
+#[test]
+fn unit_value_runs() {
+    check_run(
+        r#"
+static id = fn (u: ()) -> () { u };
+static main = fn () -> () {
+    if id(()) == () { print("unit") };
+    ()
+};
+"#,
+        "main()",
+        expect![[r#"
+            output: "unit"
+            => ()
+        "#]],
+    );
+}

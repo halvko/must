@@ -44,6 +44,33 @@ static f = fn () { p.*.next.&raw mut.*.n; x.&mut; a[0][1].len::<usize>(); };
             (arg_list)))))))
 
 ==================
+Unit value
+==================
+
+static u = ();
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (unit_expr)))
+
+==================
+Parenthesised unit value
+==================
+
+static u = (());
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (paren_expr
+      (unit_expr))))
+
+==================
 Precedence
 ==================
 

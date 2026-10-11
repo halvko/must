@@ -770,6 +770,7 @@ impl LowerCtx<'_> {
             }
             ExprData::Literal(LiteralData::Str(s)) => Operand::Const(Const::Str(s.clone())),
             ExprData::Literal(LiteralData::Bool(v)) => Operand::Const(Const::Bool(*v)),
+            ExprData::Literal(LiteralData::Unit) => Operand::Const(Const::Unit),
             // No width to resolve and no range to check: a character
             // literal that lowers at all already names its value (a
             // malformed one lowers as `Missing`, upstream in hir).

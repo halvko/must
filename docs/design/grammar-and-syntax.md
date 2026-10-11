@@ -122,6 +122,10 @@
   about the binding, not the matched data's shape, so it changes neither dispatch nor
   coverage, and `mut _` is refused as a hole that can never be assigned. An unannotated
   `mut` bind of a variant-typed scrutinee widens it to its enum, as `let mut` does.
+- **G28** The unit value is spelled `()`, like the unit type, so a value and its type read
+  the same. `( )` with only trivia inside is the unit value, never an empty group; the unit
+  value otherwise comes from an empty block, a bare `break` or `return`, and an `if` with no
+  `else`. If tuples land, `()` is the empty tuple. **G07**
 - **G21** `only` is the capability ceiling clause (T20). One production, one home:
 
   ```

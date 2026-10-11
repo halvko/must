@@ -100,6 +100,8 @@ pub enum SyntaxKind {
     CALL_EXPR,
     ARG_LIST,
     PAREN_EXPR,
+    /// `()`, the unit value.
+    UNIT_EXPR,
     BIN_EXPR,
     IF_EXPR,
     LITERAL,

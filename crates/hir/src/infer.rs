@@ -3777,6 +3777,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             }
             ExprData::Literal(LiteralData::Str(_)) => Ty::Str,
             ExprData::Literal(LiteralData::Bool(_)) => Ty::Bool,
+            ExprData::Literal(LiteralData::Unit) => Ty::Unit,
             // Definite, unlike an integer literal: there is one character
             // type, so `'x'` has no defining-use question to leave open and
             // never mints a variable.

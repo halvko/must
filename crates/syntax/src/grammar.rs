@@ -838,6 +838,12 @@ fn primary_expr(p: &mut Parser<'_>) -> Option<CompletedMarker> {
             }
             m.complete(p, PATH_EXPR)
         }
+        L_PAREN if p.nth(1) == R_PAREN => {
+            let m = p.start();
+            p.bump(L_PAREN);
+            p.bump(R_PAREN);
+            m.complete(p, UNIT_EXPR)
+        }
         L_PAREN => {
             let m = p.start();
             p.bump(L_PAREN);

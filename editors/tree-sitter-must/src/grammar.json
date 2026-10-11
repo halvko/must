@@ -3100,6 +3100,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "unit_expr"
+        },
+        {
+          "type": "SYMBOL",
           "name": "block_expr"
         },
         {
@@ -3417,6 +3421,19 @@
         {
           "type": "SYMBOL",
           "name": "_expr"
+        },
+        {
+          "type": "STRING",
+          "value": ")"
+        }
+      ]
+    },
+    "unit_expr": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "("
         },
         {
           "type": "STRING",
