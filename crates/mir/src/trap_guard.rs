@@ -13,8 +13,9 @@ use syntax::{SyntaxKind, SyntaxNode};
 use crate::TerminatorKind;
 
 /// The error messages of `text` that no trap in the file carries. An error
-/// in a declaration nothing names, or outside every item in a file where no
-/// item has a body, traps nowhere and is not counted.
+/// in a declaration nothing names, in a `use` whose names nothing names, or
+/// outside every item in a file where no item has a body, traps nowhere and
+/// is not counted.
 fn untrapped(text: &str) -> Vec<String> {
     let db = RootDatabase::default();
     let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
@@ -46,8 +47,13 @@ fn untrapped(text: &str) -> Vec<String> {
     }
     let owned = hir::error_owners(&db, file);
     for (loc, messages) in &owned.decls {
-        if !spelled(&db, file, loc) {
+        if !declaration_spelled(&db, file, loc) {
             traps.extend(messages.iter().cloned());
+        }
+    }
+    for named in &owned.named {
+        if !named.names.iter().any(|name| name_spelled(&db, file, name)) {
+            traps.insert(named.message.clone());
         }
     }
     let runs = hir::all_checkable_items(&db, file)
@@ -64,7 +70,7 @@ fn untrapped(text: &str) -> Vec<String> {
 /// anywhere, or one of its members' names after a `.`. Read off the syntax
 /// alone, apart from the walk that plants the traps, so a mention that walk
 /// misses fails the guard instead of exempting the error.
-fn spelled(db: &RootDatabase, file: SourceFile, loc: &hir::ItemLoc) -> bool {
+fn declaration_spelled(db: &RootDatabase, file: SourceFile, loc: &hir::ItemLoc) -> bool {
     let Some(decl) = hir::item_source(db, loc.to_id(db)) else {
         return false;
     };
@@ -74,6 +80,25 @@ fn spelled(db: &RootDatabase, file: SourceFile, loc: &hir::ItemLoc) -> bool {
         .filter(|node| node.kind() == SyntaxKind::MEMBER)
         .filter_map(|member| first_ident(&member))
         .collect();
+    spelled_names(db, file).any(|(text, name_ref)| {
+        *text == *loc.name
+            || (name_ref
+                .parent()
+                .is_some_and(|parent| parent.kind() == SyntaxKind::FIELD_EXPR)
+                && members.contains(&text))
+    })
+}
+
+/// Whether an item with a body spells `name` anywhere.
+fn name_spelled(db: &RootDatabase, file: SourceFile, name: &str) -> bool {
+    spelled_names(db, file).any(|(text, _)| text == name)
+}
+
+/// Every name an item with a body spells, with its `NAME_REF`.
+fn spelled_names(
+    db: &RootDatabase,
+    file: SourceFile,
+) -> impl Iterator<Item = (String, SyntaxNode)> {
     hir::all_checkable_items(db, file)
         .into_iter()
         .filter(|&item| hir::body::body(db, item).root.is_some())
@@ -81,19 +106,9 @@ fn spelled(db: &RootDatabase, file: SourceFile, loc: &hir::ItemLoc) -> bool {
             Some(_) => hir::item_tree::member_source(db, item).map(|it| it.syntax().clone()),
             None => hir::item_source(db, item).map(|it| it.syntax().clone()),
         })
-        .any(|syntax| {
-            syntax
-                .descendants()
-                .filter(|node| node.kind() == SyntaxKind::NAME_REF)
-                .filter_map(|name_ref| Some((first_ident(&name_ref)?, name_ref)))
-                .any(|(text, name_ref)| {
-                    *text == *loc.name
-                        || (name_ref
-                            .parent()
-                            .is_some_and(|parent| parent.kind() == SyntaxKind::FIELD_EXPR)
-                            && members.contains(&text))
-                })
-        })
+        .flat_map(|syntax| syntax.descendants())
+        .filter(|node| node.kind() == SyntaxKind::NAME_REF)
+        .filter_map(|name_ref| Some((first_ident(&name_ref)?, name_ref)))
 }
 
 fn first_ident(node: &SyntaxNode) -> Option<String> {

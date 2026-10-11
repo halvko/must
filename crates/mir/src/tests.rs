@@ -298,20 +298,14 @@ static use_it = fn { let v = name; };
             item name:
             fn b0() -> usize {
               _0: usize  // return
-              _1: usize
               bb0:
-                _1 = trap "`name` is defined multiple times" -> bb1
-              bb1:
                 _0 = 1
                 return
             }
             item name:
             fn b0() -> usize {
               _0: usize  // return
-              _1: usize
               bb0:
-                _1 = trap "`name` is defined multiple times" -> bb1
-              bb1:
                 _0 = 2
                 return
             }

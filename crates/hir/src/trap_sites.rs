@@ -1,8 +1,8 @@
-//! Where an error that carries only a source range traps when the code it
-//! sits in runs: at the innermost expression or statement containing it, or
-//! on the item's value when it lies outside the body. An error in a
-//! declaration with no body traps wherever the declaration is named, and an
-//! error outside every item traps every item's value.
+//! Where an error that carries only a source range traps: at the innermost
+//! expression or statement containing it, or on the item's value. An error in
+//! a bodiless declaration traps wherever it is named, one in a `use` or a
+//! clash wherever its file names the name, and one outside every item on
+//! every item of its file and wherever another file names one of its items.
 
 use std::cell::OnceCell;
 
@@ -13,6 +13,8 @@ use syntax::ast::AstNode as _;
 use syntax::{SyntaxKind, SyntaxNode, SyntaxNodePtr, TextRange, TextSize};
 
 use crate::body::{Body, BodySourceMap, ExprData, Stmt};
+use crate::library::{LibraryId, library_of};
+use crate::scopes::NameOrigin;
 use crate::{
     ExprId, ItemId, ItemLoc, PatId, Resolution, Severity, body_with_source_map, checkable_item_at,
     file_scope, item_loc, item_source, range_diagnostics, resolutions,
@@ -28,43 +30,94 @@ pub enum TrapSite {
     Stmt { block: ExprId, index: usize },
 }
 
-/// The trap site and message of every parse error and [`range_diagnostics`]
-/// error that traps in `item`: those in its own syntax, those outside every item, and
-/// those of each bodiless declaration it names, at the name. An item with no
-/// body has none.
+/// The trap site and message of every error that traps in `item`: those in
+/// its own syntax and outside every item of its file; at the name, those of
+/// each bodiless declaration it names and outside every item of that
+/// declaration's file; and its file's named errors, at each mention. An item
+/// with no body has none.
 #[salsa::tracked(returns(ref))]
 pub fn range_traps<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<(TrapSite, String)> {
     let file = item.file(db);
-    let owners = error_owners(db, file);
+    let library_errors = library_errors(db, library_of(db, file));
     let loc = item_loc(db, item);
+    let owners = error_owners(db, file);
     let own = owners.bodies.iter().find(|(owner, _)| *owner == loc);
-    if own.is_none() && owners.decls.is_empty() && owners.outside.is_empty() {
+    if own.is_none()
+        && library_errors.decls.is_empty()
+        && library_errors.outside.is_empty()
+        && owners.named.is_empty()
+    {
         return Vec::new();
     }
     let Some(sites) = Sites::new(db, item) else {
         return Vec::new();
     };
-    let mut traps: Vec<(TrapSite, String)> = own
-        .into_iter()
-        .flat_map(|(_, errors)| errors)
-        .map(|error| (sites.site(error.blame, error.at), error.message.clone()))
-        .collect();
+    let mut traps: Vec<(TrapSite, String)> = Vec::new();
+    let mentions = if !library_errors.decls.is_empty()
+        || !library_errors.outside.is_empty()
+        || !owners.named.is_empty()
+    {
+        declaration_mentions(db, item, &sites.decl, sites.source_map)
+    } else {
+        Default::default()
+    };
+    // Ahead of the item's own errors: a name a broken `use` failed to bring
+    // in is also an unresolved name at the mention, and the `use` says why.
+    for (name, range, ambiguous) in &mentions.names {
+        let site = sites.site(*range, range.start());
+        traps.extend(
+            (owners.named.iter())
+                .filter(|named| named.names.contains(name) && !(named.clash && *ambiguous))
+                .map(|named| (site, named.message.clone())),
+        );
+    }
     traps.extend(
-        owners
-            .outside
-            .iter()
-            .map(|message| (TrapSite::Expr(sites.root), message.clone())),
+        own.into_iter()
+            .flat_map(|(_, errors)| errors)
+            .map(|error| (sites.site(error.blame, error.at), error.message.clone())),
     );
-    if !owners.decls.is_empty() {
-        for (loc, range) in declaration_mentions(db, item, &sites.decl, sites.source_map) {
-            let Some((_, messages)) = owners.decls.iter().find(|(named, _)| *named == loc) else {
-                continue;
-            };
-            let site = sites.site(range, range.start());
+    traps.extend(
+        (owners.outside.iter()).map(|message| (TrapSite::Expr(sites.root), message.clone())),
+    );
+    for (loc, range) in &mentions.decls {
+        let site = sites.site(*range, range.start());
+        if let Some(messages) = library_errors.decls.get(loc) {
+            traps.extend(messages.iter().map(|message| (site, message.clone())));
+        }
+        if loc.file != file
+            && let Some(messages) = library_errors.outside.get(&loc.file)
+        {
             traps.extend(messages.iter().map(|message| (site, message.clone())));
         }
     }
+    // One error can reach a site more than one way (two declarations of
+    // one file); it traps once.
+    let mut seen = rustc_hash::FxHashSet::default();
+    traps.retain(|trap| seen.insert(trap.clone()));
     traps
+}
+
+/// The errors of a library that trap in another file than their own.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LibraryErrors {
+    /// The errors of each bodiless declaration, by the declaration.
+    pub decls: FxHashMap<ItemLoc, Vec<String>>,
+    /// The errors outside every item, by file.
+    pub outside: FxHashMap<SourceFile, Vec<String>>,
+}
+
+/// The [`LibraryErrors`] of `library`, merged over its files.
+#[salsa::tracked(returns(ref))]
+pub fn library_errors<'db>(db: &'db dyn Db, library: LibraryId<'db>) -> LibraryErrors {
+    let mut errors = LibraryErrors::default();
+    for member in library.files(db) {
+        let owners = error_owners(db, member);
+        errors.decls.extend(owners.decls.iter().cloned());
+        if !owners.outside.is_empty() {
+            errors.outside.insert(member, owners.outside.clone());
+        }
+    }
+    errors
 }
 
 /// Every parse error and [`range_diagnostics`] error of a file, by the code
@@ -76,8 +129,23 @@ pub struct ErrorOwners {
     /// Errors in a top-level declaration with no body (a `type`, a
     /// `trait`, a `static` without a value), outside its members' bodies.
     pub decls: Vec<(ItemLoc, Vec<String>)>,
-    /// Errors outside every item.
+    /// Errors that trap where the file names a name: one per clash, and
+    /// those in a `use`.
+    pub named: Vec<NamedError>,
+    /// Errors outside every item, and in a `use` the parse left no names.
     pub outside: Vec<String>,
+}
+
+/// An error in a `use`, or a clash. It traps wherever the file names one of
+/// `names`: what the `use` imports (only the failing name, when the error is
+/// in one), or the clashing name.
+#[derive(Debug, Clone, PartialEq, Eq, salsa::Update)]
+pub struct NamedError {
+    pub names: Vec<String>,
+    pub message: String,
+    /// A clash. Not applied at an ambiguous expression, which traps by
+    /// itself.
+    pub clash: bool,
 }
 
 /// An error inside a body: the range it is blamed on, its own position, and
@@ -100,17 +168,77 @@ pub fn error_owners(db: &dyn Db, file: SourceFile) -> ErrorOwners {
         .filter(|diag| diag.severity == Severity::Error)
         .map(|diag| (diag.range, diag.range, &diag.message));
     let tree = parse.syntax_node();
+    let scope = file_scope(db, file);
     let mut owners = ErrorOwners::default();
+    // A clash is about this file's namespace, not any one place the name
+    // comes from: its error traps where this file names it, once, and never
+    // in a file importing one of the items. Each place reports it, at a
+    // `use` or at an item's name, and those reports are skipped below.
+    let clash_messages: Vec<(String, &crate::scopes::NameClash)> = (scope.clashes.iter())
+        .map(|clash| (crate::diag::defined_multiple_times(&clash.name), clash))
+        .collect();
+    for (message, clash) in &clash_messages {
+        owners.named.push(NamedError {
+            names: vec![clash.name.clone()],
+            message: message.clone(),
+            clash: true,
+        });
+    }
+    // At a `use` (`None`) or at the item `at`.
+    let is_clash_report = |message: &str, at: Option<&ItemLoc>| {
+        (clash_messages.iter()).any(|(clash_message, clash)| {
+            clash_message == message
+                && (clash.origins.iter()).any(|origin| match (origin, at) {
+                    (NameOrigin::Import(_), None) => true,
+                    (NameOrigin::Item(item), Some(at)) => item == at,
+                    _ => false,
+                })
+        })
+    };
     for (blame, range, message) in parse_errors.chain(range_errors) {
         let element = tree.covering_element(blame);
         let node = element
             .clone()
             .into_node()
             .or_else(|| element.into_token()?.parent());
+        if let Some(use_item) = node
+            .as_ref()
+            .and_then(|node| node.ancestors().find_map(syntax::ast::UseItem::cast))
+        {
+            if is_clash_report(message, None) {
+                continue;
+            }
+            let names = use_item
+                .names()
+                .filter(|name| name.syntax().text_range().contains_range(blame))
+                .collect::<Vec<_>>();
+            let names = if names.is_empty() {
+                use_item.names().collect()
+            } else {
+                names
+            };
+            let names: Vec<String> = names.iter().filter_map(imported_as).collect();
+            // Nothing can name what a `use` with no names imports; the error
+            // traps as one outside every item does.
+            if names.is_empty() {
+                owners.outside.push(message.clone());
+            } else {
+                owners.named.push(NamedError {
+                    names,
+                    message: message.clone(),
+                    clash: false,
+                });
+            }
+            continue;
+        }
         let Some(owner) = node.and_then(|node| checkable_item_at(db, file, &node)) else {
             owners.outside.push(message.clone());
             continue;
         };
+        let loc = item_loc(db, owner);
+        if is_clash_report(message, Some(&loc)) {
+            continue;
+        }
         // An error in code with a body traps in that body. Code without a
         // body never runs, so its error traps wherever its top-level
         // declaration is named: a bodiless member's error belongs to the
@@ -121,7 +249,7 @@ pub fn error_owners(db: &dyn Db, file: SourceFile) -> ErrorOwners {
                 at: range.start(),
                 message: message.clone(),
             };
-            push_owned(&mut owners.bodies, item_loc(db, owner), error);
+            push_owned(&mut owners.bodies, loc, error);
         } else {
             let decl = ItemLoc::top_level(
                 file,
@@ -134,6 +262,14 @@ pub fn error_owners(db: &dyn Db, file: SourceFile) -> ErrorOwners {
     owners
 }
 
+/// The name a `use` gives the file for `name`: its rename, or the name.
+fn imported_as(name: &syntax::ast::UseName) -> Option<String> {
+    match name.rename() {
+        Some(rename) => Some(rename.text()),
+        None => Some(name.name_ref()?.text()),
+    }
+}
+
 fn push_owned<T>(owned: &mut Vec<(ItemLoc, Vec<T>)>, loc: ItemLoc, error: T) {
     match owned.iter_mut().find(|(owner, _)| *owner == loc) {
         Some((_, errors)) => errors.push(error),
@@ -141,19 +277,28 @@ fn push_owned<T>(owned: &mut Vec<(ItemLoc, Vec<T>)>, loc: ItemLoc, error: T) {
     }
 }
 
-/// Every place `item` names a top-level declaration, with the range of the
-/// name: a path in an expression, a type, a bound or an impl head, or the
-/// type a pattern names.
+/// Where an item names things, each with the range of the name.
+#[derive(Default)]
+struct Mentions {
+    /// Every top-level declaration the item names: a path in an expression,
+    /// a type, a bound or an impl head, the type a pattern names, or what a
+    /// member call reaches.
+    decls: Vec<(ItemLoc, TextRange)>,
+    /// Every name the item reads from its file's top level, resolved or not,
+    /// and whether it is an ambiguous expression, which traps by itself.
+    names: Vec<(String, TextRange, bool)>,
+}
+
 fn declaration_mentions(
     db: &dyn Db,
     item: ItemId<'_>,
     decl: &SyntaxNode,
     source_map: &BodySourceMap,
-) -> Vec<(ItemLoc, TextRange)> {
+) -> Mentions {
     let file = item.file(db);
     let scope = file_scope(db, file);
     let resolved = resolutions(db, item);
-    let mut mentions = Vec::new();
+    let mut mentions = Mentions::default();
     for name_ref in decl
         .descendants()
         .filter(|n| n.kind() == SyntaxKind::NAME_REF)
@@ -168,6 +313,8 @@ fn declaration_mentions(
         if !is_base {
             continue;
         }
+        let name =
+            syntax::ast::NameRef::cast(name_ref.clone()).map_or_else(String::new, |it| it.text());
         let resolution = match parent.kind() {
             SyntaxKind::PATH_EXPR => {
                 let Some(expr) = source_map
@@ -179,8 +326,6 @@ fn declaration_mentions(
                 resolved.get(expr).cloned()
             }
             SyntaxKind::PATH_TYPE | SyntaxKind::VARIANT_PAT | SyntaxKind::NEWTYPE_PAT => {
-                let name = syntax::ast::NameRef::cast(name_ref.clone())
-                    .map_or_else(String::new, |it| it.text());
                 if binder_names(&name_ref).any(|param| param == name) {
                     continue;
                 }
@@ -188,6 +333,11 @@ fn declaration_mentions(
             }
             _ => continue,
         };
+        let range = name_ref.text_range();
+        // An ambiguous name in an expression lowers to its own trap, so a
+        // clash is not added again there.
+        let ambiguous = parent.kind() == SyntaxKind::PATH_EXPR
+            && matches!(resolution, Some(Resolution::Ambiguous(_)));
         let loc = match resolution {
             Some(
                 Resolution::Item(loc)
@@ -195,9 +345,14 @@ fn declaration_mentions(
                 | Resolution::TraitItem(loc)
                 | Resolution::Ambiguous(loc),
             ) => loc,
+            None => {
+                mentions.names.push((name, range, false));
+                continue;
+            }
             _ => continue,
         };
-        mentions.push((loc, name_ref.text_range()));
+        mentions.names.push((name, range, ambiguous));
+        mentions.decls.push((loc, range));
     }
     // A member call reaches its owner and the trait it implements without
     // spelling either.
@@ -221,13 +376,15 @@ fn declaration_mentions(
         let impl_scope = file_scope(db, member.file);
         if let Some(Resolution::TraitItem(trait_)) = head.and_then(|head| impl_scope.resolve(head))
         {
-            mentions.push((trait_, range));
+            mentions.decls.push((trait_, range));
         }
-        mentions.push((owner, range));
+        mentions.decls.push((owner, range));
     }
     for (call, bound) in inference.bound_member_of_expr.iter() {
         if let Some(ptr) = source_map.node_for_expr(call) {
-            mentions.push((bound.trait_.clone(), ptr.text_range()));
+            mentions
+                .decls
+                .push((bound.trait_.clone(), ptr.text_range()));
         }
     }
     // A bound resolved at an instantiation reaches the implementer's impl
@@ -238,7 +395,7 @@ fn declaration_mentions(
         };
         for entry in entries {
             if let crate::infer::DictEntry::BrokenImpl { owner } = entry {
-                mentions.push((owner.clone(), range));
+                mentions.decls.push((owner.clone(), range));
             }
         }
     }

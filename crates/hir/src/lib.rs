@@ -2498,19 +2498,20 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
                     continue;
                 }
             }
-            let error = match file_scope(db, file).resolve(&name) {
+            let error = match reject_ambiguous(file_scope(db, file).resolve(&name), &name) {
+                Err(error) => Some(error),
                 // A RESERVED generic trait must not go semantically live
                 // through a bound (reserved for generic traits).
-                Some(Resolution::TraitItem(loc)) => traits::trait_is_generic(db, &loc).then(|| {
-                    NameError::new(format!(
-                        "`{name}` is a reserved generic trait \
+                Ok(Some(Resolution::TraitItem(loc))) => {
+                    traits::trait_is_generic(db, &loc).then(|| {
+                        NameError::new(format!(
+                            "`{name}` is a reserved generic trait \
                          (generic traits are not supported yet); it cannot be a bound"
-                    ))
-                }),
-                // Duplicate definitions carry the diagnostics.
-                Some(Resolution::Ambiguous(_)) => None,
-                Some(_) => Some(NameError::new(format!("`{name}` is not a trait"))),
-                None => {
+                        ))
+                    })
+                }
+                Ok(Some(_)) => Some(NameError::new(format!("`{name}` is not a trait"))),
+                Ok(None) => {
                     if ty::builtin_type_by_name(&name).is_some() {
                         Some(NameError::new(format!("`{name}` is not a trait")))
                     } else {
@@ -2540,16 +2541,17 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
             })
         };
         if site.type_side && site.trait_.is_none() {
-            let error = match file_scope(db, file).resolve(&site.head) {
+            let error = match reject_ambiguous(file_scope(db, file).resolve(&site.head), &site.head)
+            {
+                Err(error) => Some(error),
                 // Resolvable, but reserved: the impl must not go live.
-                Some(Resolution::TraitItem(_)) => Some(NameError::new(format!(
+                Ok(Some(Resolution::TraitItem(_))) => Some(NameError::new(format!(
                     "`{}` is a reserved generic trait \
                      (generic traits are not supported yet); it cannot be implemented",
                     site.head
                 ))),
-                Some(Resolution::Ambiguous(_)) => None,
-                Some(_) => Some(NameError::new(format!("`{}` is not a trait", site.head))),
-                None => {
+                Ok(Some(_)) => Some(NameError::new(format!("`{}` is not a trait", site.head))),
+                Ok(None) => {
                     // A builtin TYPE name in a type-side head (`impl usize`
                     // in a type's chain): not a trait — say so, matching
                     // the bound-position wording.
@@ -2567,27 +2569,32 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
             continue;
         }
         if !site.type_side && site.self_key.is_none() {
-            let error = match type_scope(db, file).resolve(&site.head) {
-                Some(Resolution::TypeItem(_)) => {
+            let error = match reject_ambiguous(type_scope(db, file).resolve(&site.head), &site.head)
+            {
+                Err(error) => Some(error),
+                Ok(Some(Resolution::TypeItem(_))) => {
                     // Resolvable but generic: reserved (generic-type impls).
                     Some(NameError::new(
                         "impls for generic types are not supported yet".to_owned(),
                     ))
                 }
-                Some(Resolution::Ambiguous(_)) => None,
-                Some(_) | None => match file_scope(db, file).resolve(&site.head) {
-                    Some(Resolution::TraitItem(_)) => Some(NameError::new(format!(
-                        "`{}` is a trait; an impl in a trait's `with`-chain names the \
+                Ok(_) => {
+                    match reject_ambiguous(file_scope(db, file).resolve(&site.head), &site.head) {
+                        Err(error) => Some(error),
+                        Ok(Some(Resolution::TraitItem(_))) => Some(NameError::new(format!(
+                            "`{}` is a trait; an impl in a trait's `with`-chain names the \
                          IMPLEMENTING type",
-                        site.head
-                    ))),
-                    Some(Resolution::Ambiguous(_)) => None,
-                    Some(_) => Some(NameError::new(format!("`{}` is not a type", site.head))),
-                    None => {
-                        let message = format!("unknown type `{}`", site.head);
-                        Some(NameError::unknown(db, file, &site.head, message, is_type))
+                            site.head
+                        ))),
+                        Ok(Some(_)) => {
+                            Some(NameError::new(format!("`{}` is not a type", site.head)))
+                        }
+                        Ok(None) => {
+                            let message = format!("unknown type `{}`", site.head);
+                            Some(NameError::unknown(db, file, &site.head, message, is_type))
+                        }
                     }
-                },
+                }
             };
             if let (Some(error), Some(range)) = (error, head_range()) {
                 diagnostics.push(error.at(range));
@@ -3205,11 +3212,14 @@ fn apply_position_diagnostics(
         ));
         return;
     }
-    let target = match type_scope(db, file).resolve(name) {
-        Some(Resolution::TypeItem(loc)) => loc,
-        // Ambiguous: the duplicate definitions carry the diagnostics.
-        Some(_) => return,
-        None => {
+    let target = match reject_ambiguous(type_scope(db, file).resolve(name), name) {
+        Ok(Some(Resolution::TypeItem(loc))) => loc,
+        Err(error) => {
+            diagnostics.push(error.at(whole));
+            return;
+        }
+        Ok(Some(_)) => return,
+        Ok(None) => {
             if ty::builtin_type_by_name(name).is_some() {
                 if list.is_some() {
                     diagnostics.push(simple(whole, diag::takes_no_generic_args(name)));
@@ -3478,12 +3488,24 @@ fn const_param_agreement_error(
     ))
 }
 
+/// `resolution` of `name` where a type, bound or impl head spells it. An
+/// ambiguous name names nothing there: an error at every spelling, as well as
+/// at the definitions, so a declaration spelling it traps where it is named.
+fn reject_ambiguous(
+    resolution: Option<Resolution>,
+    name: &str,
+) -> Result<Option<Resolution>, NameError> {
+    match resolution {
+        Some(Resolution::Ambiguous(_)) => Err(NameError::new(diag::defined_multiple_times(name))),
+        resolution => Ok(resolution),
+    }
+}
+
 fn type_position_error(db: &dyn Db, file: SourceFile, name: &str) -> Option<NameError> {
-    match type_scope(db, file).resolve(name) {
-        // A type item; or a duplicate name, whose definitions already
-        // carry the diagnostics.
-        Some(_) => None,
-        None => {
+    match reject_ambiguous(type_scope(db, file).resolve(name), name) {
+        Err(error) => Some(error),
+        Ok(Some(_)) => None,
+        Ok(None) => {
             if ty::builtin_type_by_name(name).is_some() {
                 return None;
             }
@@ -3523,8 +3545,9 @@ fn variant_position_error(
 ) -> Option<NameError> {
     let variant = &variant_ref.text();
     let message = |message: String| Some(NameError::new(message));
-    match type_scope(db, file).resolve(base) {
-        Some(Resolution::TypeItem(loc)) => {
+    match reject_ambiguous(type_scope(db, file).resolve(base), base) {
+        Err(error) => Some(error),
+        Ok(Some(Resolution::TypeItem(loc))) => {
             let item = loc.to_id(db);
             match ty::enum_variants(db, item) {
                 Some(variants) => {
@@ -3570,9 +3593,8 @@ fn variant_position_error(
                 }
             }
         }
-        // The duplicate definitions carry the diagnostics.
-        Some(_) => None,
-        None => {
+        Ok(Some(_)) => None,
+        Ok(None) => {
             if ty::builtin_type_by_name(base).is_some() {
                 return message(format!("`{base}` has no variants (it is a builtin type)"));
             }
