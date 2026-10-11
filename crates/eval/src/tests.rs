@@ -5746,13 +5746,11 @@ static f = fn () -> usize {
 #[test]
 fn a_nested_literal_frame_escape_is_caught_dynamically() {
     // A borrow returned at `@_` from a nested literal never reaches a
-    // universal of the ENCLOSING item, so the outlives module's escape
-    // check has nothing to reject (hir's
-    // `a_nested_fn_literals_own_frame_escape_is_not_the_escape_checks_finding`);
-    // the loan checker refuses it, because the loan is live where the
-    // literal's body returns. Run regardless, the interpreter catches it
-    // too: the borrowed local's storage really is gone once the nested
-    // literal's own frame returns.
+    // universal of the ENCLOSING item; the loan checker refuses it because
+    // the loan is live where the literal's body returns (mir's
+    // `a_nested_literal_borrow_of_its_own_local_cannot_escape`). Run
+    // regardless, the interpreter catches it too: the borrowed local's
+    // storage really is gone once the nested literal's own frame returns.
     check_run_past_the_loan_checker(
         r#"
 static main = fn () -> usize {

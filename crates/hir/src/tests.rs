@@ -12852,100 +12852,6 @@ fn a_region_name_must_be_declared() {
     );
 }
 
-/// The trade the ruling makes, both halves in one place.
-///
-/// The expression-side region argument was NOT inert — it became the
-/// borrow's region outright, and `x.&::<@a>` over a local reported the
-/// escape. It is refused anyway, because the ANNOTATION is the same
-/// assertion written where regions belong: `let r: usize.&::<@a> = n.&;`
-/// reports that escape, at that site, with no argument on the operation.
-/// Nothing was lost, which is what makes the refusal a spelling cut rather
-/// than a semantic one — and this test fails the day that stops being
-/// true.
-#[test]
-fn an_annotation_is_what_pins_a_borrows_region_now() {
-    // Refused, and the region is not read: the escape is NOT reported,
-    // because the borrow got a fresh existential as if nothing had been
-    // written.
-    check_diagnostics(
-        "static f = fn::<@a>() -> () { let n: usize = 1; let r = n.&::<@a>; };",
-        expect![[r#"
-            59..65: regions are inferred at a borrow, never written: drop this argument — a region belongs in a type position, so assert it with an annotation (`let r: _.&::<@a> = x.&;`)
-        "#]],
-    );
-    // The replacement, carrying the very obligation the argument used to.
-    check_diagnostics(
-        "static f = fn::<@a>() -> () { let n: usize = 1; let r: usize.&::<@a> = n.&; };",
-        expect![[r#"
-            71..74: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
-        "#]],
-    );
-    // And with no assertion at either site, the borrow is just a borrow.
-    check_diagnostics(
-        "static f = fn::<@a>() -> () { let n: usize = 1; let r = n.&; };",
-        expect![[r#""#]],
-    );
-}
-
-/// `_.&::<@a>` — a HOLE referent under a written region — is the GENERAL
-/// form of the assertion, and the one to reach for. Spelling the referent
-/// out is the special case that happens to work for simple types.
-///
-/// Three things pinned here, because each was found by trying and each
-/// would be silently lost:
-///
-/// 1. it reports the escape over a plain local, which is the ordinary case;
-/// 2. it is the ONLY spelling that works for an fn-typed value —
-///    `(fn() -> usize).&::<@a>` does not parse (`(...)` is unit, and a
-///    postfix borrow of a fn type is unspellable — G08) and
-///    `fn() -> usize.&::<@a>` glues the region to the RETURN type, which
-///    describes a different type entirely and mismatches instead;
-/// 3. it gives ARGUMENT position an in-place form through a block, so the
-///    refusal cost no expressiveness there either.
-#[test]
-fn a_hole_referent_is_the_general_region_assertion() {
-    // 1. The ordinary case: the assertion bites.
-    check_diagnostics(
-        "static f = fn::<@a>() -> () { let n: usize = 1; let q: _.&::<@a> = n.&; };",
-        expect![[r#"
-            67..70: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
-        "#]],
-    );
-    // 2. An fn-typed value, where no spelled-out referent is available.
-    check_diagnostics(
-        "static f = fn::<@a>() -> () {\n\
-             let g = fn() -> usize { 1 };\n\
-             let q: _.&::<@a> = g.&;\n\
-         };",
-        expect![[r#"
-            78..81: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
-        "#]],
-    );
-    // The long form does NOT mean this — the region binds the RETURN type,
-    // so it describes a `fn` returning a borrow and mismatches.
-    check_diagnostics(
-        "static f = fn::<@a>() -> () {\n\
-             let g = fn() -> usize { 1 };\n\
-             let q: fn() -> usize.&::<@a> = g.&;\n\
-         };",
-        expect![[r#"
-            90..93: type mismatch: expected `fn() -> usize.&::<@a>`, found `fn() -> usize.&` (expected `fn() -> usize.&::<@a>` because of this annotation at 66..87)
-        "#]],
-    );
-    // 3. Argument position, in place — the cost the ruling first recorded
-    // as "no in-place form", which was wrong.
-    check_diagnostics(
-        "static take = fn::<@a>(r: usize.&::<@a>) -> usize { r.* };\n\
-         static f = fn::<@a>() -> usize {\n\
-             let n: usize = 1;\n\
-             take({ let q: _.&::<@a> = n.&; q })\n\
-         };",
-        expect![[r#"
-            136..139: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
-        "#]],
-    );
-}
-
 #[test]
 fn regions_on_type_declarations_are_reserved() {
     check_diagnostics(
@@ -13038,16 +12944,6 @@ fn a_callees_declared_bound_still_binds_an_elided_call() {
 }
 
 #[test]
-fn a_borrow_of_a_local_cannot_escape_the_body() {
-    check_diagnostics(
-        "static f = fn::<@a>() -> usize.&::<@a> { let n: usize = 5; n.& };",
-        expect![[r#"
-            59..62: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
-        "#]],
-    );
-}
-
-#[test]
 fn an_explicit_shared_reborrow_needs_the_parents_region_to_outlive_it() {
     // `x.*.&` is a WRITTEN reborrow, not a use-site coercion — it must
     // incur the same outlives edge the implicit path does. Without it
@@ -13085,25 +12981,6 @@ fn an_explicit_reborrow_with_a_named_region_still_needs_the_bound() {
         "static f = fn::<@a, @b>(x: usize.&::<@b>) -> usize.&::<@a> { let r: _.&::<@a> = x.*.&; r };",
         expect![[r#"
             80..85: using this borrow where a longer-lived one is expected needs `@b` to outlive `@a`, which this signature does not declare; add `@b: @a` to the binder
-        "#]],
-    );
-}
-
-#[test]
-fn a_two_step_escape_through_an_explicit_reborrow_is_rejected() {
-    // `n.&` alone would be caught directly by the escape check (it names
-    // `n` as its root). Going through `r.*.&` first used to defeat that
-    // check entirely, because the reborrow it performs recorded no edge —
-    // the escape then had to be re-derived from a region that was already
-    // free of the local it came from.
-    check_diagnostics(
-        "static f = fn::<@a>() -> usize.&::<@a> {\n\
-             let n: usize = 5;\n\
-             let r = n.&;\n\
-             r.*.&\n\
-         };",
-        expect![[r#"
-            67..70: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
         "#]],
     );
 }
@@ -13591,72 +13468,6 @@ static generic = fn::<@z, T: Readable>(t: T.&::<@z>) -> usize { t.read() };
 }
 
 #[test]
-fn a_borrowed_rigid_receiver_reaches_its_bounds() {
-    // The bound-directed path is routed off the referent, so `T.&::<@z>`
-    // reaches the same bounds a bare `T` does. Before, it fell past the
-    // rigid branch to the concrete path and got `write .*.pass` — advice
-    // that would move out of a borrow, on the one shape a `Self.&`
-    // requirement is actually called on.
-    //
-    // The obligation flows through the dictionary path too: the escaping
-    // form is rejected for ESCAPING, which is the proof the region edge is
-    // emitted and not laundered by the indirection.
-    check_diagnostics(
-        r#"
-type Cell = struct { n: usize };
-trait Pass = requires {
-    pass: fn::<@b>(p: usize.&::<@b>, s: Self.&::<@b>) -> usize.&::<@b>;
-} with {
-    impl Cell { pass = fn::<@b>(p: usize.&::<@b>, s: Self.&::<@b>) -> usize.&::<@b> { p }; }
-};
-static ok = fn::<@z, T: Pass>(c: T.&::<@z>, p: usize.&::<@z>) -> usize.&::<@z> { c.pass(p) };
-static leak = fn::<@z, T: Pass>(c: T.&::<@z>) -> usize.&::<@z> {
-    let n: usize = 7;
-    c.pass(n.&)
-};
-"#,
-        expect![[r#"
-            427..430: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@z`, which outlives the body
-        "#]],
-    );
-}
-
-#[test]
-fn a_requirements_own_region_bound_travels_to_the_call_site() {
-    // A requirement carrying its own region binder (`fn::<@b, @c: @b>`)
-    // reaches a call for the first time here, so the bound it declares has
-    // to reach it too: a requirement's binder is instantiated like any
-    // other, and its outlives bounds become obligations between the fresh
-    // regions. Without them both trait spellings launder the bound — the
-    // escaping calls below check clean while their free-fn twin is
-    // rejected.
-    check_diagnostics(
-        r#"
-type Cell = struct { n: usize };
-trait Widen = requires {
-    widen: fn::<@b, @c: @b>(p: usize.&::<@c>, s: Self.&::<@b>) -> usize.&::<@b>;
-} with {
-    impl Cell {
-        widen = fn::<@b, @c: @b>(p: usize.&::<@c>, s: Cell.&::<@b>) -> usize.&::<@b> { p };
-    }
-};
-static bound_directed = fn::<@z, T: Widen>(t: T.&::<@z>) -> usize.&::<@z> {
-    let n: usize = 7;
-    t.widen(n.&)
-};
-static qualified = fn::<@z>(c: Cell.&::<@z>) -> usize.&::<@z> {
-    let n: usize = 7;
-    Widen::widen(n.&, c)
-};
-"#,
-        expect![[r#"
-            376..379: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@z`, which outlives the body
-            487..490: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@z`, which outlives the body
-        "#]],
-    );
-}
-
-#[test]
 fn the_receiver_shape_table_is_the_same_on_a_rigid_receiver() {
     // One table, one set of messages, whether `Self` is nominal or rigid —
     // which is the point of routing both paths through
@@ -13958,24 +13769,6 @@ fn a_join_cannot_launder_an_outlives_obligation() {
 }
 
 #[test]
-fn a_join_cannot_launder_an_escaping_borrow() {
-    // The escaping-borrow shape of the same rule: both branches return a
-    // borrow of a body-local, so the joined form must be rejected too —
-    // not left for the interpreter's dangling-pointer check alone to
-    // catch.
-    check_diagnostics(
-        "static leak = fn::<@a>(c: bool) -> usize.&::<@a> {\n\
-             let x: usize = 7;\n\
-             if c { x.& } else { x.& }\n\
-         };",
-        expect![[r#"
-            76..79: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
-            89..92: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
-        "#]],
-    );
-}
-
-#[test]
 fn a_meet_in_the_shorter_position_constrains() {
     // `@b + @c` names the OVERLAP of two universals, and the only way
     // another universal can be known to cover it is to cover a member —
@@ -13991,23 +13784,6 @@ fn a_meet_in_the_shorter_position_constrains() {
     check_diagnostics(
         "static f = fn::<@a: @b, @b, @c>(x: usize.&::<@a>) -> usize.&::<@b + @c> { x };",
         expect![[r#""#]],
-    );
-}
-
-#[test]
-fn the_escape_check_sees_join_regions() {
-    // The escape check must also catch a borrow whose region is a join,
-    // not only a plain region — a join is not itself a solver node, so a
-    // body-local borrow returned at `@b + @c` needs no helper function to
-    // reach it.
-    check_diagnostics(
-        "static leak = fn::<@b, @c>() -> usize.&::<@b + @c> {\n\
-             let n: usize = 7;\n\
-             n.&\n\
-         };",
-        expect![[r#"
-            71..74: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@b`, which outlives the body
-        "#]],
     );
 }
 
@@ -14066,26 +13842,6 @@ fn a_nested_fn_literal_may_infer_its_regions() {
         expect![[r#"
             28..30: `@_` cannot be used in a signature — declare the region in the binder (`fn::<@a>`) and name it here
         "#]],
-    );
-}
-
-#[test]
-fn a_nested_fn_literals_own_frame_escape_is_not_the_escape_checks_finding() {
-    // The escape check measures a borrow's reach only against the
-    // ENCLOSING ITEM's universals (see `in_signature_position`). A borrow
-    // returned at `@_` from a nested literal escapes that literal's OWN
-    // frame without ever reaching a universal of the outer item, so it is
-    // clean HERE. It is the loan checker's finding instead: the loan is
-    // live where the literal's body returns (mir's
-    // `a_nested_literal_borrow_of_its_own_local_cannot_escape`), and eval's
-    // `a_nested_literal_frame_escape_is_caught_dynamically` is the trap it
-    // hits when run regardless.
-    check_diagnostics(
-        "static main = fn () -> usize {\n\
-             let f = fn () -> usize.&::<@_> { let mut n = 7; n.& };\n\
-             f().*\n\
-         };",
-        expect![[r#""#]],
     );
 }
 
@@ -14216,66 +13972,8 @@ fn no_context_shape_launders_a_region_obligation() {
              }};"
         ),
     );
-    // The MEMBER-CALL shape. A dot-call's receiver is checked against
-    // the member's `Self` parameter through the same `check`, so it must
-    // incur the same obligation the plain call does — and the member's own
-    // `@b` must be a fresh existential at the call, not a rigid param that
-    // the outlives solver would read as whichever universal of the CALLER
-    // sits at the same binder index.
-    let cell = "type Cell = struct { n: usize } with {\n\
-                    impl Self {\n\
-                        pass = fn::<@b>(p: usize.&::<@b>, m: Self.&::<@b>) -> usize.&::<@b> { p };\n\
-                    }\n\
-                };\n";
-    check_wrapping_changes_nothing(
-        &format!(
-            "{cell}static m1 = fn::<@a>(c: Cell.&::<@a>) -> usize.&::<@a> {{\n\
-                 let local: usize = 5;\n\
-                 Cell::pass(local.&, c)\n\
-             }};"
-        ),
-        &format!(
-            "{cell}static m1 = fn::<@a>(c: Cell.&::<@a>) -> usize.&::<@a> {{\n\
-                 let local: usize = 5;\n\
-                 c.pass(local.&)\n\
-             }};"
-        ),
-    );
-}
-
-#[test]
-fn an_array_literal_of_borrows_cannot_launder_an_escape() {
-    // r01/r02/r03. The eager array fast path agreed its elements with
-    // region-blind unification and committed, so the join solver — the one
-    // thing that reborrows a leaf into its context — never ran. A
-    // body-local escaped through it and only the interpreter's
-    // dangling-pointer check stopped the program built on it.
-    check_diagnostics(
-        "static leak = fn::<@a>(p: usize.&::<@a>) -> usize.&::<@a> {\n\
-             let n: usize = 7;\n\
-             let arr = [p, n.&];\n\
-             arr[1]\n\
-         };",
-        expect![[r#"
-            92..95: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
-        "#]],
-    );
-}
-
-#[test]
-fn a_joined_record_of_borrows_cannot_launder_an_escape() {
-    // r15. The aggregate-leaf half of the same class.
-    check_diagnostics(
-        "static getx = fn::<@x>(s: struct { x: usize.&::<@x> }) -> usize.&::<@x> { s.x };\n\
-         static leak = fn::<@z>(c: bool) -> usize.&::<@z> {\n\
-             let n: usize = 7;\n\
-             getx(if c { struct { x = n.& } } else { struct { x = n.& } })\n\
-         };",
-        expect![[r#"
-            175..178: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@z`, which outlives the body
-            203..206: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@z`, which outlives the body
-        "#]],
-    );
+    // The member-call shape incurs an escape, which `mir::loans` refuses
+    // (`a_member_call_cannot_launder_an_escape`).
 }
 
 // ---- match projects through borrows -------------------------------------
@@ -14532,26 +14230,6 @@ fn a_declared_bound_makes_the_projection_legal() {
              }};"
         ),
         expect![[r#""#]],
-    );
-}
-
-#[test]
-fn a_payload_borrow_of_a_local_cannot_escape_the_body() {
-    // The escape check, reached THROUGH the projection: the scrutinee
-    // borrows a body-local, the payload borrow is returned, and the chain
-    // `@local ⊇ @payload ⊇ @a` makes the local's loan reach a universal's
-    // end. Blamed at the borrow, which is the operation that cannot be
-    // honored.
-    check_diagnostics(
-        &format!(
-            "{OPT}static leak = fn::<@a>() -> usize.&::<@a> {{\n\
-                 let o: Opt::<usize> = Opt::<usize>::Some(5);\n\
-                 match o.& {{ ::Some(t) => t, ::None => panic(\"none\") }}\n\
-             }};"
-        ),
-        expect![[r#"
-            135..138: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
-        "#]],
     );
 }
 
@@ -17739,26 +17417,6 @@ static main = fn() -> usize {
 };
 "#,
         expect![""],
-    );
-}
-
-/// A body handing back a borrow of a temporary it built is refused, and
-/// the message says "temporary".
-///
-/// The shapes that stay inside the body are `mir::loans`' refusals, at
-/// the exit of the block that ends the temporary's storage.
-#[test]
-fn a_borrow_of_a_temporary_that_outlives_the_body_is_refused() {
-    check_diagnostics(
-        r#"
-static mk = fn() -> usize { 7 };
-static leak = fn::<@a>() -> usize.&::<@a> { mk().& };
-static leak_named = fn::<@a>() -> usize.&::<@a> { let n = mk(); n.& };
-"#,
-        expect![[r#"
-            78..84: borrowed value does not live long enough: this borrows a temporary, which lives no longer than the block that creates it, but the borrow has to last for `@a`, which outlives the body
-            152..155: borrowed value does not live long enough: this borrows a local, but the borrow has to last for `@a`, which outlives the body
-        "#]],
     );
 }
 

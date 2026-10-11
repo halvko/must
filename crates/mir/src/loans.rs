@@ -129,7 +129,10 @@
 //! A [`StatementKind::StorageDead`] is the last shallow write of the whole
 //! local ([`AccessKind::StorageEnd`]): a loan of the local's own storage
 //! still live there is refused, blamed at the exit; a loan through it
-//! passes.
+//! passes. A loan whose region covers a universal is the exception to the
+//! blame: nothing in the body is left to point at, so it is blamed at the
+//! borrow, the operation that cannot be honored, with the exit as its
+//! note ([`LoanDiagnostic::Escapes`]).
 //!
 //! # Coarse, and known
 //!
@@ -142,11 +145,10 @@
 //!
 //! # Escapes
 //!
-//! `Return` is the storage end of every local. A loan of a local's own
-//! storage that is still live there escapes the body; `hir::outlives`
-//! already reports the ones forced to a universal's end, and this pass
-//! reports the rest — a nested literal returning a borrow of its own local
-//! at `@_`, which reaches no universal of the enclosing item.
+//! `Return` is the frame's storage end ([`Scope::Frame`]). A loan of a
+//! local's own storage still live there escapes the body, whether it covers
+//! a universal (and so is live at every point after it flows there) or is
+//! merely live at the return of a nested literal at `@_`.
 //!
 //! # Traps
 //!
@@ -201,10 +203,18 @@ pub enum LoanDiagnostic {
         /// The access that still goes through the old pointer.
         used: ExprId,
     },
-    /// A loan of a local's own storage is still live where the body
-    /// returns — the storage is gone by then.
+    /// A loan of a local's own storage is still live where that storage
+    /// ends. No later use in this body is left to blame, so the borrow is
+    /// blamed, with `exit` as the note.
     Escapes {
         borrow: ExprId,
+        /// Where the storage ends.
+        exit: ExprId,
+        /// The scope that `exit` leaves.
+        scope: Scope,
+        /// The caller's region the borrow has to last for, when it covers
+        /// one; `None` when it is merely live at the return.
+        region: Option<String>,
         /// Whether the storage is a materialized temporary (M12).
         temporary: bool,
     },
@@ -290,17 +300,19 @@ impl LoanDiagnostic {
     /// The companion sites, with the note each carries. The vocabulary is
     /// the interpreter's own ("this borrow was created here"), so the
     /// static refusal and the dynamic detection read as one story told at
-    /// two different times.
-    pub fn related(&self) -> Vec<(ExprId, &'static str)> {
-        match self {
+    /// two different times. A storage end is located like the squiggle of
+    /// one: where its scope is left.
+    pub fn related(&self, source_map: &hir::BodySourceMap) -> Vec<(TextRange, &'static str)> {
+        let at = |expr: ExprId| Some(source_map.node_for_expr(expr)?.text_range());
+        let notes = match self {
             LoanDiagnostic::Invalidated {
                 borrow, still_used, ..
             } => {
-                let mut notes = vec![(*borrow, "this borrow was created here")];
+                let mut notes = vec![(at(*borrow), "this borrow was created here")];
                 match still_used {
-                    StillUsed::Later(at) => notes.push((*at, "and it is still used here")),
-                    StillUsed::NextIteration(at) => notes.push((
-                        *at,
+                    StillUsed::Later(used) => notes.push((at(*used), "and it is still used here")),
+                    StillUsed::NextIteration(used) => notes.push((
+                        at(*used),
                         "and the loop brings control back round to this use of it",
                     )),
                     StillUsed::AtTheAccess | StillUsed::HandedBack => {}
@@ -308,10 +320,24 @@ impl LoanDiagnostic {
                 notes
             }
             LoanDiagnostic::Repointed { used, .. } => {
-                vec![(*used, "the place is accessed here, through the old pointer")]
+                vec![(
+                    at(*used),
+                    "the place is accessed here, through the old pointer",
+                )]
             }
-            LoanDiagnostic::Escapes { .. } => Vec::new(),
-        }
+            LoanDiagnostic::Escapes { exit, scope, .. } => {
+                let note = match scope {
+                    Scope::Block => "the storage ends here, where the block is left",
+                    Scope::Arm => "the storage ends here, where the arm is left",
+                    Scope::Frame => "the storage ends here, where the body returns",
+                };
+                vec![(source_map.exit_range_for_expr(*exit), note)]
+            }
+        };
+        notes
+            .into_iter()
+            .filter_map(|(range, note)| Some((range?, note)))
+            .collect()
     }
 
     pub fn message(&self) -> String {
@@ -394,6 +420,22 @@ impl LoanDiagnostic {
                 )
             }
             LoanDiagnostic::Escapes {
+                region: Some(region),
+                temporary: true,
+                ..
+            } => format!(
+                "borrowed value does not live long enough: this borrows a temporary, \
+                 which lives no longer than the block that creates it, but the borrow \
+                 has to last for `{region}`, which outlives the body"
+            ),
+            LoanDiagnostic::Escapes {
+                region: Some(region),
+                ..
+            } => format!(
+                "borrowed value does not live long enough: this borrows a local, \
+                 but the borrow has to last for `{region}`, which outlives the body"
+            ),
+            LoanDiagnostic::Escapes {
                 temporary: true, ..
             } => "borrowed value does not live long enough: this borrows a temporary, \
                   which lives no longer than the block that creates it, but the borrow \
@@ -474,10 +516,9 @@ struct Loan {
     mint: Point,
     mutable: bool,
     place: Place,
-    /// Whether the region covers a universal — what the escape check in
-    /// `hir::outlives` measures, so a loan of a local's storage with this
-    /// set is already reported there.
-    reaches_universal: bool,
+    /// The lowest universal the region covers: the caller's region the
+    /// borrow has to last for, which no storage of this body outlives.
+    universal: Option<u32>,
     /// The region graph nodes the loan's region covers, sorted.
     covers: Vec<u32>,
     /// Points at which the loan flows into a universal: from each of them
@@ -597,6 +638,9 @@ struct BodyCheck<'a> {
     /// of a local that cannot be duplicated is a move.
     local_copyable: Vec<bool>,
     loans: Vec<Loan>,
+    /// The locals some loan borrows from, sorted: whose storage `Return`
+    /// ends.
+    loaned_locals: Vec<LocalId>,
     /// Per block, per point (statements then terminator): the locals live
     /// there — used at that point, or later on some path.
     live_before: Vec<Vec<BitSet>>,
@@ -629,6 +673,7 @@ impl<'a> BodyCheck<'a> {
             local_regions: Vec::new(),
             local_copyable: Vec::new(),
             loans: Vec::new(),
+            loaned_locals: Vec::new(),
             live_before: Vec::new(),
             reach: Vec::new(),
             live_regions: Vec::new(),
@@ -647,6 +692,9 @@ impl<'a> BodyCheck<'a> {
         check.local_copyable = copyable;
         check.reach = check.compute_reach();
         check.loans = check.collect_loans();
+        check.loaned_locals = check.loans.iter().map(|loan| loan.place.local).collect();
+        check.loaned_locals.sort_unstable();
+        check.loaned_locals.dedup();
         check.live_before = check.compute_liveness();
         check.live_regions = check.compute_live_regions();
         check.live_loans = check.compute_live_loans();
@@ -975,7 +1023,7 @@ impl<'a> BodyCheck<'a> {
                     mint: Point { block, index },
                     mutable: *mutable,
                     place: self.resolve(place),
-                    reaches_universal: covers.iter().any(|&n| self.cover.is_universal(n)),
+                    universal: covers.iter().copied().find(|&n| self.cover.is_universal(n)),
                     covers,
                     flow_points,
                     flows_everywhere,
@@ -1368,8 +1416,16 @@ impl<'a> BodyCheck<'a> {
                     place: (*dest).into(),
                     shallow: true,
                 }),
-                TerminatorKind::Return
-                | TerminatorKind::Goto { .. }
+                // The frame's storage end: every local's, as one shallow
+                // write each, like a block's `StorageDead`.
+                TerminatorKind::Return => {
+                    out.extend(self.loaned_locals.iter().map(|&local| Access {
+                        kind: AccessKind::StorageEnd(Scope::Frame),
+                        place: local.into(),
+                        shallow: true,
+                    }));
+                }
+                TerminatorKind::Goto { .. }
                 | TerminatorKind::ConstTrap { .. }
                 | TerminatorKind::Unreachable => {}
             },
@@ -1472,7 +1528,7 @@ impl<'a> BodyCheck<'a> {
         // loan each access kills, and never twice for one origin.
         let mut reported: FxHashSet<(ExprId, usize)> = FxHashSet::default();
         let mut repointed: FxHashSet<ExprId> = FxHashSet::default();
-        for (block, data) in self.body.blocks.iter() {
+        for (block, _) in self.body.blocks.iter() {
             let mut scope = scope_in[Self::block_index(block)].clone();
             for point in self.points_of(block) {
                 self.step(point, &mut scope, |access, scope| {
@@ -1489,15 +1545,29 @@ impl<'a> BodyCheck<'a> {
                             })
                         });
                     }
-                    // A loan of dying storage that reaches a universal is
-                    // `hir::outlives`' escape finding already, as it is
-                    // at the return below.
-                    // TODO: refuse it here instead (halvko/must#27).
+                    // A caller's region outlives every point of this body,
+                    // so a loan covering one outlives any storage end here,
+                    // as does every loan live at the return: the borrow is
+                    // what cannot be honored.
+                    let escapes = |loan: &Loan| match access.kind {
+                        AccessKind::StorageEnd(exit) => {
+                            exit == Scope::Frame || loan.universal.is_some()
+                        }
+                        _ => false,
+                    };
+                    if let AccessKind::StorageEnd(exit) = access.kind {
+                        for index in scope.iter() {
+                            let loan = &self.loans[index];
+                            if escapes(loan) && self.conflicts(access, loan) {
+                                out.report(loan.mint, &mut escaped, loan.origin, || {
+                                    Some(self.escape(loan, origin, exit))
+                                });
+                            }
+                        }
+                    }
                     let victim = scope.iter().find(|&index| {
                         let loan = &self.loans[index];
-                        self.conflicts(access, loan)
-                            && !(matches!(access.kind, AccessKind::StorageEnd(_))
-                                && loan.reaches_universal)
+                        !escapes(loan) && self.conflicts(access, loan)
                     });
                     let Some(index) = victim else {
                         return;
@@ -1516,26 +1586,6 @@ impl<'a> BodyCheck<'a> {
                         })
                     });
                 });
-                if matches!(data.terminator.kind, TerminatorKind::Return)
-                    && point.index == data.statements.len()
-                {
-                    // Every loan still in scope here is live at the
-                    // return, `step` having dropped the rest.
-                    for index in scope.iter() {
-                        let loan = &self.loans[index];
-                        let of_storage =
-                            !matches!(loan.place.projection.first(), Some(ProjElem::Deref));
-                        if !of_storage || loan.reaches_universal {
-                            continue;
-                        }
-                        out.report(loan.mint, &mut escaped, loan.origin, || {
-                            Some(LoanDiagnostic::Escapes {
-                                borrow: loan.origin,
-                                temporary: self.is_temporary(loan.place.local),
-                            })
-                        });
-                    }
-                }
             }
         }
     }
@@ -1688,6 +1738,18 @@ impl<'a> BodyCheck<'a> {
             self.hir_body.exprs[origin],
             hir::body::ExprData::Borrow { .. }
         ) && matches!(access.place.projection.last(), Some(ProjElem::Deref))
+    }
+
+    fn escape(&self, loan: &Loan, exit: ExprId, scope: Scope) -> LoanDiagnostic {
+        LoanDiagnostic::Escapes {
+            borrow: loan.origin,
+            exit,
+            scope,
+            region: loan
+                .universal
+                .map(|node| self.cover.universal_name(node).to_owned()),
+            temporary: self.is_temporary(loan.place.local),
+        }
     }
 
     /// Whether a local is a materialized temporary (M12).

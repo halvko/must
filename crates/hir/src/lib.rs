@@ -3406,13 +3406,6 @@ fn capability_bound(name: &str) -> CapabilityBound {
 /// instantiate it independently, and `@_` says exactly the true thing
 /// about them. The alternative was to reserve the whole shape by name,
 /// which buys a worse message for the same expressiveness.
-///
-/// The outlives module's escape check (`outlives.rs`) measures a borrow's
-/// reach only against the ENCLOSING ITEM's universals, so a borrow that
-/// escapes a nested literal's own frame — without reaching any universal
-/// of the item — is invisible to it. Loan liveness (`mir::loans`) refuses
-/// it instead: `Return` is the storage end of every local, and such a loan
-/// is live there.
 fn in_signature_position(node: &syntax::SyntaxNode) -> bool {
     let mut in_param_or_ret = false;
     for ancestor in node.ancestors() {

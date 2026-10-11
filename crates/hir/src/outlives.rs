@@ -19,26 +19,22 @@
 //! that from a region-erased later IR; it consumes the record (X10:
 //! record, don't re-derive).
 //!
-//! Given those edges it computes each region's VALUE and checks two things:
-//!
-//! 1. **The universal-region check.** A signature's regions are UNIVERSAL —
-//!    parameters, opaque to the body, chosen by the caller. If the body
-//!    forces `@a` to cover `@b` and the signature never said `@a: @b`, the
-//!    body is asking the caller for a guarantee it never made. Rejected,
-//!    blamed at the obligation's origin.
-//! 2. **The escape check.** A borrow of a body-local mints a region. If
-//!    that region has to reach a universal's end, the borrow outlives the
-//!    storage it points at — the local is gone by then.
+//! Given those edges it computes each region's VALUE and checks one thing,
+//! **the universal-region check.** A signature's regions are UNIVERSAL —
+//! parameters, opaque to the body, chosen by the caller. If the body
+//! forces `@a` to cover `@b` and the signature never said `@a: @b`, the
+//! body is asking the caller for a guarantee it never made. Rejected,
+//! blamed at the obligation's origin.
 //!
 //! # Where the CFG-free half ends
 //!
 //! Under NLL a region's value is `points ∪ free regions`, propagated by
 //! subset — and subset propagation can never turn a point element into a
 //! free-region element. So the free-region half of every region's value,
-//! which is *exactly* what both checks above ask about, is computed here
-//! precisely without a point set and without reading the CFG: for these
-//! two questions the CFG cannot change an answer, so this module does not
-//! consult it.
+//! which is *exactly* what the check above asks about, is computed here
+//! precisely without a point set and without reading the CFG: the check
+//! compares signature regions only, so program points cannot change its
+//! answer.
 //!
 //! Points are the OTHER half of borrow checking — how long each loan is
 //! live, and therefore which accesses conflict with it. That half is
@@ -49,22 +45,18 @@
 //! region it covers is live, and everywhere if it covers a universal".
 //! One graph definition ([`build_solver`]), read by both halves.
 //!
-//! Storage death inside the body is MIR's: a block end is a `StorageDead`,
-//! and `mir::loans` refuses a borrow still live there. This module refuses
-//! escape from the body as a whole, and `mir::loans` leaves a loan that
-//! reaches a universal to it.
-//!
-//! TODO: the frame exit as a storage death like any other, replacing the
-//! escape check here (halvko/must#27).
+//! Storage death is MIR's, the frame's included: a block end is a
+//! `StorageDead`, the frame's end is `Return`, and `mir::loans` refuses a
+//! borrow of a body-local still live at either. A borrow forced to a
+//! universal's end is live everywhere after it gets there, so that one rule
+//! is also "borrowed value does not live long enough".
 
 use base_db::Db;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ItemId;
-use crate::body::ExprData;
 use crate::constraint::{RegionConstraint, RegionConstraintReason};
 use crate::item_tree::GenericParamKind;
-use crate::scopes::Resolution;
 use crate::ty::{Region, RegionVar};
 
 /// One finding. Carries the expression to blame and everything the message
@@ -83,22 +75,12 @@ pub enum OutlivesDiagnostic {
         shorter: String,
         reason: RegionConstraintReason,
     },
-    /// A borrow of a local escaped the body.
-    BorrowEscapes {
-        expr: crate::body::ExprId,
-        /// The region the borrow was forced to reach.
-        region: String,
-        /// Whether the storage is a materialized temporary (M12). Only the
-        /// message reads it: there is no declaration to call "a local".
-        temporary: bool,
-    },
 }
 
 impl OutlivesDiagnostic {
     pub fn expr(&self) -> crate::body::ExprId {
         match self {
-            OutlivesDiagnostic::UndeclaredOutlives { expr, .. }
-            | OutlivesDiagnostic::BorrowEscapes { expr, .. } => *expr,
+            OutlivesDiagnostic::UndeclaredOutlives { expr, .. } => *expr,
         }
     }
 
@@ -161,19 +143,6 @@ impl OutlivesDiagnostic {
                      to the binder"
                 )
             }
-            OutlivesDiagnostic::BorrowEscapes {
-                region,
-                temporary: true,
-                ..
-            } => format!(
-                "borrowed value does not live long enough: this borrows a temporary, \
-                 which lives no longer than the block that creates it, but the borrow \
-                 has to last for `{region}`, which outlives the body"
-            ),
-            OutlivesDiagnostic::BorrowEscapes { region, .. } => format!(
-                "borrowed value does not live long enough: this borrows a local, \
-                 but the borrow has to last for `{region}`, which outlives the body"
-            ),
         }
     }
 }
@@ -462,31 +431,6 @@ impl Solver {
             })
             .collect()
     }
-
-    /// The lowest-numbered universal whose end this region has to cover, if
-    /// any — the escape check's whole question.
-    ///
-    /// A JOIN is decomposed rather than skipped. `@b + @c` is not a node
-    /// (it is the overlap of two), but a borrow that has to survive that
-    /// overlap has to survive into the caller just the same, so a member
-    /// reaching a universal's end is enough. Skipping it instead was a hole
-    /// with no ceremony at all: a function returning `usize.&::<@b + @c>`
-    /// could hand back a borrow of its own local and check clean.
-    fn reaches_universal(&self, region: &Region) -> Option<u32> {
-        match region {
-            Region::Join(parts) => parts
-                .iter()
-                .filter_map(|part| self.reaches_universal(part))
-                .min(),
-            region => {
-                let node = self.node(region)?;
-                self.values[node.0 as usize]
-                    .iter()
-                    .map(|RegionElement::End(index)| *index)
-                    .min()
-            }
-        }
-    }
 }
 
 /// Close a declared-bounds relation under transitivity — `@a: @b` and
@@ -580,6 +524,8 @@ fn build_solver<'db>(
 pub struct RegionCover {
     universal_count: u32,
     covers: Vec<Vec<u32>>,
+    /// Display name per universal, sigil included.
+    universal_names: Vec<String>,
 }
 
 impl RegionCover {
@@ -602,6 +548,13 @@ impl RegionCover {
     pub fn is_universal(&self, node: u32) -> bool {
         node < self.universal_count
     }
+
+    /// A universal's name as the signature spells it, sigil included.
+    pub fn universal_name(&self, node: u32) -> &str {
+        self.universal_names
+            .get(node as usize)
+            .map_or("", String::as_str)
+    }
 }
 
 #[salsa::tracked(returns(ref))]
@@ -610,6 +563,7 @@ pub fn region_cover<'db>(db: &'db dyn Db, item: ItemId<'db>) -> RegionCover {
     RegionCover {
         universal_count: solver.universal_count,
         covers: solver.cover(),
+        universal_names: solver.universal_names,
     }
 }
 
@@ -697,64 +651,5 @@ pub fn outlives_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<OutlivesDi
         });
     }
 
-    // 2. The escape check: a borrow whose place roots in a body-local, with
-    //    a region forced to reach some universal's end. The local's storage
-    //    is gone by then — this is "borrowed value does not live long
-    //    enough", caught at the borrow rather than at the return, because
-    //    the borrow is the operation that cannot be honored.
-    let body = crate::body::body(db, item);
-    let resolutions = crate::scopes::resolutions(db, item);
-    for (expr, data) in body.exprs.iter() {
-        let ExprData::Borrow { place, .. } = data else {
-            continue;
-        };
-        let Some(root) = local_root(body, resolutions, *place) else {
-            continue;
-        };
-        let Some(crate::ty::Ty::Borrow { region, .. }) = infer.type_of_expr.get(expr) else {
-            continue;
-        };
-        // A borrow taken AT a universal region by explicit annotation is
-        // the user asking for exactly this; the reach is still an error,
-        // and naming the region they wrote is the clearest message.
-        let Some(first) = solver.reaches_universal(region) else {
-            continue;
-        };
-        diagnostics.push(OutlivesDiagnostic::BorrowEscapes {
-            expr,
-            region: solver.universal_names[first as usize].clone(),
-            temporary: root == LocalRoot::Temporary,
-        });
-    }
-
     diagnostics
-}
-
-/// The body-local storage a borrow's place bottoms out in, or `None` when
-/// the storage is not this body's: a deref-rooted place borrows through
-/// its pointer, and a `static` item's storage outlives every body.
-fn local_root(
-    body: &crate::body::Body,
-    resolutions: &la_arena::ArenaMap<crate::body::ExprId, Resolution>,
-    place: crate::body::ExprId,
-) -> Option<LocalRoot> {
-    let mut root = place;
-    loop {
-        match &body.exprs[root] {
-            ExprData::Field { receiver, .. } => root = *receiver,
-            ExprData::Index { base, .. } => root = *base,
-            _ => break,
-        }
-    }
-    if body.temp_local(root).is_some() {
-        return Some(LocalRoot::Temporary);
-    }
-    matches!(resolutions.get(root), Some(Resolution::Local(_))).then_some(LocalRoot::Binding)
-}
-
-/// Which body-local storage a borrow roots in. Only the message reads it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LocalRoot {
-    Binding,
-    Temporary,
 }

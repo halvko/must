@@ -195,11 +195,14 @@ pub enum StatementKind {
     StorageDead { local: LocalId, scope: Scope },
 }
 
-/// The kind of scope a [`StatementKind::StorageDead`] leaves.
+/// The kind of scope a storage end leaves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
     Block,
     Arm,
+    /// The body's outermost scope, left by its `Return`. No `StorageDead`
+    /// names it.
+    Frame,
 }
 
 impl Scope {
@@ -207,6 +210,7 @@ impl Scope {
         match self {
             Scope::Block => "block",
             Scope::Arm => "arm",
+            Scope::Frame => "body",
         }
     }
 }
