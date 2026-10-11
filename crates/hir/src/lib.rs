@@ -389,6 +389,29 @@ pub struct RelatedInfo {
     pub message: String,
 }
 
+/// The findings of the per-item checkers: inference, const, unsafe, outlives
+/// and linearity. [`file_diagnostics`] reports them and MIR lowering traps on
+/// them; both destructure this without `..`, so a checker added here fails
+/// to compile until both handle it.
+#[derive(Clone, Copy)]
+pub struct BodyFindings<'db> {
+    pub inference: &'db [InferenceDiagnostic],
+    pub const_check: &'db [ConstCheckDiagnostic],
+    pub unsafe_check: &'db [UnsafeCheckDiagnostic],
+    pub outlives: &'db [OutlivesDiagnostic],
+    pub linear: &'db [linear_check::LinearDiagnostic],
+}
+
+pub fn body_findings<'db>(db: &'db dyn Db, item: ItemId<'db>) -> BodyFindings<'db> {
+    BodyFindings {
+        inference: &infer::infer(db, item).diagnostics,
+        const_check: const_check::const_check(db, item),
+        unsafe_check: unsafe_check::unsafe_check(db, item),
+        outlives: outlives::outlives_check(db, item),
+        linear: linear_check::linear_check(db, item),
+    }
+}
+
 /// All semantic diagnostics for a file. This is the one place that converts
 /// range-free facts back into text ranges (via the source maps).
 pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
@@ -408,6 +431,13 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 
     let syntax_root = parse(db, file).syntax_node();
     for item in all_checkable_items(db, file) {
+        let BodyFindings {
+            inference,
+            const_check,
+            unsafe_check,
+            outlives,
+            linear,
+        } = body_findings(db, item);
         let (body, source_map) = body_with_source_map(db, item);
         let resolutions = resolutions(db, item);
         for (expr, data) in body.exprs.iter() {
@@ -434,7 +464,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             });
         }
 
-        for diag in &infer::infer(db, item).diagnostics {
+        for diag in inference {
             let Some(ptr) = source_map.node_for_expr(diag.expr()) else {
                 continue;
             };
@@ -1101,7 +1131,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         // The outlives module — the borrow checker's first shipped stage.
         // Aggregated exactly like every other analysis: findings travel
         // with the query value, only ranges attach here.
-        for diag in outlives::outlives_check(db, item) {
+        for diag in outlives {
             let Some(ptr) = source_map.node_for_expr(diag.expr()) else {
                 continue;
             };
@@ -1119,7 +1149,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         // callee is an unsafe builtin, an `extern` item, or any value of
         // `unsafe fn` type. Messages render in
         // `UnsafeCheckDiagnostic::message` (shared with MIR's traps).
-        for diag in unsafe_check::unsafe_check(db, item) {
+        for diag in unsafe_check {
             let Some(ptr) = source_map.node_for_expr(diag.expr()) else {
                 continue;
             };
@@ -1132,7 +1162,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             });
         }
 
-        for diag in const_check::const_check(db, item) {
+        for diag in const_check {
             let Some(ptr) = source_map.node_for_expr(diag.expr()) else {
                 continue;
             };
@@ -1204,7 +1234,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         // the obligation started" is the sentence a reader needs, and the
         // squiggle sits on the path that broke it instead.
         let types = infer::infer(db, item);
-        for diag in linear_check::linear_check(db, item) {
+        for diag in linear {
             let range = match (diag.expr(), diag.pat()) {
                 (Some(expr), _) => source_map.node_for_expr(expr).map(|p| p.text_range()),
                 (None, Some(pat)) => source_map.node_for_pat(pat).map(|p| p.text_range()),

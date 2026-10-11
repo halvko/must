@@ -20,11 +20,6 @@ use crate::{
 pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
     let body = hir::body::body(db, item);
     let infer = hir::infer::infer(db, item);
-    let const_diagnostics = hir::const_check::const_check(db, item);
-    let unsafe_diagnostics = hir::unsafe_check::unsafe_check(db, item);
-    let outlives_diagnostics = hir::outlives_check(db, item);
-    let linear_diagnostics = hir::linear_check::linear_check(db, item);
-    let range_traps = hir::range_traps(db, item);
     let own_generics = hir::item_data(db, item)
         .as_ref()
         .map(|it| it.generics.as_slice())
@@ -35,11 +30,8 @@ pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
         loc: hir::item_loc(db, item),
         body,
         infer,
-        const_diagnostics,
-        unsafe_diagnostics,
-        outlives_diagnostics,
-        linear_diagnostics,
-        range_traps,
+        findings: hir::body_findings(db, item),
+        range_traps: hir::range_traps(db, item),
         resolutions: hir::resolutions(db, item),
         own_generics,
         bodies: Arena::default(),
@@ -80,10 +72,7 @@ struct LowerCtx<'db> {
     loc: ItemLoc,
     body: &'db Body,
     infer: &'db InferenceResult,
-    const_diagnostics: &'db [hir::ConstCheckDiagnostic],
-    unsafe_diagnostics: &'db [hir::UnsafeCheckDiagnostic],
-    outlives_diagnostics: &'db [hir::OutlivesDiagnostic],
-    linear_diagnostics: &'db [hir::linear_check::LinearDiagnostic],
+    findings: hir::BodyFindings<'db>,
     range_traps: &'db [(hir::TrapSite, String)],
     resolutions: &'db ArenaMap<ExprId, Resolution>,
     /// The item's own generic binder — the index space
@@ -147,11 +136,18 @@ struct LowerCtx<'db> {
 
 impl LowerCtx<'_> {
     fn seed_traps(&mut self) {
+        let hir::BodyFindings {
+            inference,
+            const_check,
+            unsafe_check,
+            outlives,
+            linear,
+        } = self.findings;
         let mut pat_traps = Vec::new();
         if let (Some(root), Some(message)) = (self.body.root, &self.body.declaration_error) {
             push_trap(&mut self.value_traps, root, message.clone());
         }
-        for diag in &self.infer.diagnostics {
+        for diag in inference {
             match diag {
                 InferenceDiagnostic::TypeMismatch { expr, .. }
                 | InferenceDiagnostic::AllBranchesMismatch { expr, .. } => {
@@ -449,7 +445,7 @@ impl LowerCtx<'_> {
                 }
             }
         }
-        for diag in self.unsafe_diagnostics {
+        for diag in unsafe_check {
             match diag {
                 // Deref findings land on the deref expression itself — the
                 // operation (read or write) that must not run outside
@@ -476,17 +472,17 @@ impl LowerCtx<'_> {
         // Const-check diagnostics are reported on the *callee* (the
         // squiggle sits there), but the operation that must not execute is
         // the call around it — same reconciliation as `NotCallable` above.
-        for diag in self.const_diagnostics {
+        for diag in const_check {
             if let Some(call) = self.call_for_callee(diag.expr()) {
                 push_trap(&mut self.const_call_traps, call, diag.message());
             }
         }
         // A borrow forced past what its signature or storage allows: the
         // value must not flow on.
-        for diag in self.outlives_diagnostics {
+        for diag in outlives {
             push_trap(&mut self.value_traps, diag.expr(), diag.message());
         }
-        for diag in self.linear_diagnostics {
+        for diag in linear {
             use hir::linear_check::LinearDiagnostic as L;
             let message = diag.render(self.db, self.item);
             match diag {
