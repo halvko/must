@@ -1106,12 +1106,21 @@ impl Constraints {
                     .map(|witness| (witness.blame, resolve_fully(table, &witness.ty)))
                     .collect();
                 let mut tally: Vec<(Family, usize)> = Vec::new();
+                // A leaf with a poisoned part votes only when no clean leaf
+                // does: `{error}` matches any family, but two poisoned leaves
+                // of different shapes disagree.
+                let clean_vote = leaves
+                    .iter()
+                    .any(|(_, ty)| !ty.contains_infer() && !ty.contains_error());
                 for (_, ty) in &leaves {
                     // A leaf with ANY undetermined part doesn't vote: two
                     // `[{number}; 2]`s must end up unified (the tie-them-
                     // together path below), never counted as two distinct
                     // families.
-                    if ty.contains_infer() || matches!(ty, Ty::Error) {
+                    if ty.contains_infer()
+                        || matches!(ty, Ty::Error)
+                        || (clean_vote && ty.contains_error())
+                    {
                         continue;
                     }
                     let family = family_of(ty);
