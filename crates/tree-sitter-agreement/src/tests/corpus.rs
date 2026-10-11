@@ -30,6 +30,13 @@ pub(super) fn samples() -> Vec<Sample> {
 
 const SNIPPETS: &[(&str, &str)] = &[
     (
+        "imports",
+        r#"
+use helpers::double;
+use sub::shapes::{Pair, area as size,};
+"#,
+    ),
+    (
         "reserved element and member forms",
         r#"
 trait Eq = requires { eq: fn(Self, Self) -> bool; };

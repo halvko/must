@@ -87,6 +87,8 @@ ast_node!(
     /// `unsafe extern static`: an item's markers and its keyword.
     ItemHead: ITEM_HEAD
 );
+ast_node!(UseItem: USE_ITEM);
+ast_node!(UseName: USE_NAME);
 ast_node!(Name: NAME);
 ast_node!(NameRef: NAME_REF);
 ast_node!(FnLiteral: FN_LITERAL);
@@ -476,6 +478,33 @@ ast_enum!(
 impl SourceFile {
     pub fn items(&self) -> impl Iterator<Item = Item> + use<> {
         children(&self.syntax)
+    }
+    /// The file's `use` items, in source order.
+    pub fn use_items(&self) -> impl Iterator<Item = UseItem> + use<> {
+        children(&self.syntax)
+    }
+}
+
+impl UseItem {
+    /// The path to the imported file: any directory names, then the file
+    /// name.
+    pub fn segments(&self) -> impl Iterator<Item = NameRef> + use<> {
+        children(&self.syntax)
+    }
+    /// The imported names, braced or not.
+    pub fn names(&self) -> impl Iterator<Item = UseName> + use<> {
+        children(&self.syntax)
+    }
+}
+
+impl UseName {
+    /// The name in the imported file.
+    pub fn name_ref(&self) -> Option<NameRef> {
+        child(&self.syntax)
+    }
+    /// The `as` rename, if any.
+    pub fn rename(&self) -> Option<Name> {
+        child(&self.syntax)
     }
 }
 

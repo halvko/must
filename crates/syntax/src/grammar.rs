@@ -23,6 +23,7 @@ fn at_expr_recovery(p: &Parser<'_>) -> bool {
             | TYPE_KW
             | TRAIT_KW
             | EXTERN_KW
+            | USE_KW
             | LET_KW
             | ELSE_KW
             | WITH_KW
@@ -59,8 +60,9 @@ pub(crate) fn source_file(p: &mut Parser<'_>) {
     while !p.at(EOF) {
         match p.current() {
             STATIC_KW | CONST_KW | TYPE_KW | TRAIT_KW | EXTERN_KW | UNSAFE_KW => item(p),
+            USE_KW => use_item(p),
             _ => p.err_and_bump(
-                "expected an item (`static`, `const`, `type`, `trait`, `extern` or `unsafe`)",
+                "expected an item (`static`, `const`, `type`, `trait`, `extern`, `unsafe` or `use`)",
             ),
         }
     }
@@ -129,6 +131,59 @@ fn item(p: &mut Parser<'_>) {
         p.eat(SEMICOLON);
     }
     m.complete(p, node);
+}
+
+/// `use dir::file::name;` or `use file::{a, b as c};`
+fn use_item(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.bump(USE_KW);
+    let mut segments = 0;
+    while p.at(IDENT) && p.nth(1) == COLON2 {
+        name_ref(p);
+        p.bump(COLON2);
+        segments += 1;
+    }
+    if segments == 0 {
+        p.error("expected a file to import from, followed by `::`");
+    }
+    if p.at(L_BRACE) {
+        p.bump(L_BRACE);
+        let ends_list =
+            |p: &Parser<'_>| p.at(EOF) || p.at(R_BRACE) || p.at(SEMICOLON) || at_item_recovery(p);
+        while !ends_list(p) {
+            if p.at(IDENT) {
+                use_name(p);
+            } else {
+                p.err_and_bump("expected a name to import");
+            }
+            if !ends_list(p) {
+                p.expect(COMMA, "`,` or `}`");
+            }
+        }
+        p.expect_after_prev(R_BRACE);
+    } else if p.at(IDENT) {
+        use_name(p);
+    } else if segments > 0 {
+        p.error("expected a name to import, or `{` and a list of them");
+    }
+    p.expect_after_prev(SEMICOLON);
+    m.complete(p, USE_ITEM);
+}
+
+/// `name` or `name as other`.
+fn use_name(p: &mut Parser<'_>) {
+    let m = p.start();
+    name_ref(p);
+    if p.eat(AS_KW) {
+        if p.at(IDENT) {
+            let nm = p.start();
+            p.bump(IDENT);
+            nm.complete(p, NAME);
+        } else {
+            p.error("expected a name after `as`");
+        }
+    }
+    m.complete(p, USE_NAME);
 }
 
 /// The clauses that trail an item's head: attachment `with`-chains
@@ -368,7 +423,7 @@ fn item_head(p: &mut Parser<'_>) -> ParsedHead {
 fn at_item_recovery(p: &Parser<'_>) -> bool {
     matches!(
         p.current(),
-        STATIC_KW | TYPE_KW | TRAIT_KW | LET_KW | CONST_KW | EXTERN_KW
+        STATIC_KW | TYPE_KW | TRAIT_KW | LET_KW | CONST_KW | EXTERN_KW | USE_KW
     ) || (p.at(UNSAFE_KW) && p.nth(1) == EXTERN_KW)
 }
 
@@ -950,7 +1005,7 @@ fn match_expr(p: &mut Parser<'_>) -> CompletedMarker {
             // `unsafe` too: no pattern starts with it.
             if matches!(
                 p.current(),
-                STATIC_KW | TYPE_KW | TRAIT_KW | EXTERN_KW | UNSAFE_KW
+                STATIC_KW | TYPE_KW | TRAIT_KW | EXTERN_KW | UNSAFE_KW | USE_KW
             ) || (p.at(CONST_KW) && !matches!(p.nth(1), FN_KW | L_BRACE))
             {
                 break;
@@ -2022,10 +2077,10 @@ fn block_expr(p: &mut Parser<'_>) -> CompletedMarker {
             // Recover at the enclosing item: don't consume, and leave the
             // "expected `}`" report to the expect below. `const fn` and
             // `const {` are expressions, not a misplaced item, so only bail
-            // here when the lookahead rules those out. `type`
-            // and `trait` never start an expression, so they always mean
-            // an item.
-            STATIC_KW | TYPE_KW | TRAIT_KW | EXTERN_KW => break,
+            // here when the lookahead rules those out. `type`,
+            // `trait` and `use` never start an expression, so they always
+            // mean an item.
+            STATIC_KW | TYPE_KW | TRAIT_KW | EXTERN_KW | USE_KW => break,
             CONST_KW if !at_fn_literal(p) && p.nth(1) != L_BRACE => break,
             // `unsafe extern` starts an item; any other `unsafe` is an expression.
             UNSAFE_KW if p.nth(1) == EXTERN_KW => break,

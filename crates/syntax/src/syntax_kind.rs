@@ -79,6 +79,7 @@ pub enum SyntaxKind {
     TRAIT_KW,
     REQUIRES_KW,
     EXTERN_KW,
+    USE_KW,
     ERROR_TOKEN,
 
     // Nodes
@@ -177,6 +178,10 @@ pub enum SyntaxKind {
     REQUIRES_DEF,
     REQUIRES_CLAUSE,
     TRAIT_ALIAS,
+    /// `use file::name;` or `use file::{a, b as c};`
+    USE_ITEM,
+    /// One imported name, with its optional `as` rename.
+    USE_NAME,
     ERROR,
 }
 
@@ -303,6 +308,7 @@ keywords! {
     "trait" => TRAIT_KW,
     "requires" => REQUIRES_KW,
     "extern" => EXTERN_KW,
+    "use" => USE_KW,
 }
 
 impl From<SyntaxKind> for rowan::SyntaxKind {

@@ -1019,6 +1019,7 @@ const ITEM_KEYWORDS: &[SyntaxKind] = &[
     SyntaxKind::TRAIT_KW,
     SyntaxKind::EXTERN_KW,
     SyntaxKind::UNSAFE_KW,
+    SyntaxKind::USE_KW,
 ];
 
 /// The keywords that spell a TYPE where a type is expected: an `fn` type,
