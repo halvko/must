@@ -20,4 +20,3 @@ language sound.
   function type, as the design requires?
 
 Give each finding a concrete program or input that shows the failure.
-Leave naming, comments and wording to the other reviewers.
