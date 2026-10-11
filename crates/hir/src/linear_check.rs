@@ -38,14 +38,17 @@ pub enum LinearDiagnostic {
     RestSkipsLinear {
         pat: PatId,
         field: String,
-        param: Option<String>,
+        param: Option<std::sync::Arc<str>>,
     },
     /// A `_` pattern on an OWNED linear value: a match arm's (the match
     /// consumed the scrutinee), a `let`'s, or a parameter's, at any depth
     /// of a destructuring pattern. The value has nowhere to go. `param` is
     /// the binder to blame when the skipped value's type is linear only
     /// because a rigid parameter is.
-    WildcardSkipsLinear { pat: PatId, param: Option<String> },
+    WildcardSkipsLinear {
+        pat: PatId,
+        param: Option<std::sync::Arc<str>>,
+    },
     /// An item's own value is linear. A `static` is never destroyed, so
     /// holding a linear in one is a leak with no exit path to blame.
     ItemHoldsLinear { expr: ExprId },
@@ -145,7 +148,7 @@ impl LinearDiagnostic {
     /// an ITEM's own value, which is never inside a generic body's scope.
     pub fn message(&self, root: Option<&Affine>) -> String {
         let param = match root {
-            Some(Affine::Param(param)) => Some(param.as_str()),
+            Some(Affine::Param(param)) => Some(&**param),
             _ => None,
         };
         match self {

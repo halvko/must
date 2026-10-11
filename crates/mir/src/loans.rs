@@ -476,7 +476,7 @@ pub fn loan_findings<'db>(db: &'db dyn Db, item: ItemId<'db>) -> LoanFindings {
     let message = |diag: &LoanDiagnostic| diag.message();
     for (body_id, body) in lowered.bodies.iter() {
         let mut out = Findings::new(&mut findings.diagnostics, &message);
-        BodyCheck::new(db, body, hir_body, infer, cover).run(&mut out);
+        BodyCheck::new(db, item, body, hir_body, infer, cover).run(&mut out);
         findings.traps.extend(out.traps(body_id));
     }
     findings
@@ -519,6 +519,7 @@ struct Access {
 
 struct BodyCheck<'a> {
     db: &'a dyn Db,
+    item: ItemId<'a>,
     body: &'a MirBody,
     hir_body: &'a hir::Body,
     infer: &'a InferenceResult,
@@ -553,6 +554,7 @@ struct BodyCheck<'a> {
 impl<'a> BodyCheck<'a> {
     fn new(
         db: &'a dyn Db,
+        item: ItemId<'a>,
         body: &'a MirBody,
         hir_body: &'a hir::Body,
         infer: &'a InferenceResult,
@@ -560,6 +562,7 @@ impl<'a> BodyCheck<'a> {
     ) -> BodyCheck<'a> {
         let mut check = BodyCheck {
             db,
+            item,
             body,
             hir_body,
             infer,
@@ -1431,7 +1434,7 @@ impl<'a> BodyCheck<'a> {
             scope,
             region: loan
                 .universal
-                .map(|node| self.cover.universal_name(node).to_owned()),
+                .map(|node| hir::outlives::universal_name(self.db, self.item, node)),
             temporary: self.is_temporary(loan.place.local),
         }
     }
