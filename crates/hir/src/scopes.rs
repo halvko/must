@@ -624,19 +624,20 @@ impl Builtin {
     }
 }
 
-/// The disambiguator reserved for compiler-provided declarations —
-/// [`crate::file_item_ids`] numbers real items 0.., so no source item can
-/// ever collide with it, and an [`ItemLoc`] carrying it round-trips through
-/// interning like any other (its item-tree queries answer the builtin
-/// shape; its *source* queries answer the empty case).
+/// The [`ItemLoc`] of the compiler-provided declaration `name`, in the
+/// prelude file ([`base_db::prelude_file`]). The prelude file has no source,
+/// so its locations round-trip through interning like any other while their
+/// item-tree queries answer the builtin shape and their *source* queries
+/// answer the empty case.
 ///
-/// TWO kinds of compiler-provided declaration share this reserved namespace,
-/// keyed only by name: the ENUMS ([`synthetic_decls`]) and the generic
-/// builtin FUNCTIONS, whose schemes are keyed the same way
-/// (`infer::builtin_scheme`). A collision is unconstructible today —
-/// builtins are `snake_case` names and the enums are `CamelCase` ones — but
-/// it is a naming convention holding it up, not a type.
-pub const BUILTIN_DISAMBIGUATOR: u32 = u32::MAX;
+/// TWO kinds of compiler-provided declaration share this namespace, keyed
+/// only by name: the ENUMS ([`synthetic_decls`]) and the generic builtin
+/// FUNCTIONS, whose schemes are keyed here too (`infer::builtin_scheme`). A
+/// collision is unconstructible: builtins are `snake_case` names and the
+/// enums are `CamelCase` ones. A naming convention holds that up, not a type.
+pub fn prelude_loc(db: &dyn Db, name: &str) -> ItemLoc {
+    ItemLoc::top_level(base_db::prelude_file(db), std::sync::Arc::from(name), 0)
+}
 
 /// The result-shaped return of `alloc_array` (and the library convention
 /// for fallible allocators built over it): a compiler-provided generic enum
@@ -694,11 +695,10 @@ pub const NEXT_CHAR_NAME: &str = "NextChar";
 pub const UTF8_RESULT_NAME: &str = "Utf8Result";
 
 /// A declaration the compiler provides without source: the result enum some
-/// builtin returns. Provided per FILE — resolution is per-file today, so
-/// each file sees "its" declaration; the identity scheme is the ordinary
-/// [`ItemLoc`] one with the reserved [`BUILTIN_DISAMBIGUATOR`], which keeps
-/// every downstream consumer (patterns, match lowering, widening, the
-/// runtime tag) on the completely ordinary nominal-enum machinery.
+/// builtin returns. It lives in the prelude file ([`prelude_loc`]), so every
+/// file names the same declaration. Its identity is an ordinary [`ItemLoc`],
+/// which keeps every downstream consumer (patterns, match lowering,
+/// widening, the runtime tag) on the ordinary nominal-enum machinery.
 pub struct SyntheticDecl {
     /// Its file-scope name. A file's own declaration of the name shadows
     /// it, the `print` precedent, and is never reported as a duplicate.
@@ -837,38 +837,37 @@ pub fn synthetic_decl_named(name: &str) -> Option<&'static SyntheticDecl> {
     synthetic_decls().iter().find(|decl| decl.name == name)
 }
 
-/// The [`ItemLoc`] of `file`'s copy of the synthetic declaration `name`.
+/// The [`ItemLoc`] of the synthetic declaration `name`, in the prelude file.
 ///
 /// `name` must BE a row's: a reserved-disambiguator location for a name no
 /// table row declares is a stale id nothing will ever answer for — a typo,
 /// not a case to handle.
-pub fn synthetic_decl_loc(file: SourceFile, name: &str) -> ItemLoc {
+pub fn synthetic_decl_loc(db: &dyn Db, name: &str) -> ItemLoc {
     debug_assert!(
         synthetic_decl_named(name).is_some(),
         "`{name}` is not a compiler-provided declaration (see `synthetic_decls`)"
     );
-    ItemLoc::top_level(file, std::sync::Arc::from(name), BUILTIN_DISAMBIGUATOR)
+    prelude_loc(db, name)
 }
 
-/// The [`ItemLoc`] of `file`'s compiler-provided [`ALLOC_RESULT_NAME`] enum.
-pub fn alloc_result_loc(file: SourceFile) -> ItemLoc {
-    synthetic_decl_loc(file, ALLOC_RESULT_NAME)
+/// The [`ItemLoc`] of the compiler-provided [`ALLOC_RESULT_NAME`] enum.
+pub fn alloc_result_loc(db: &dyn Db) -> ItemLoc {
+    synthetic_decl_loc(db, ALLOC_RESULT_NAME)
 }
 
-/// The [`ItemLoc`] of `file`'s compiler-provided [`READ_LINE_RESULT_NAME`]
-/// enum.
-pub fn read_line_result_loc(file: SourceFile) -> ItemLoc {
-    synthetic_decl_loc(file, READ_LINE_RESULT_NAME)
+/// The [`ItemLoc`] of the compiler-provided [`READ_LINE_RESULT_NAME`] enum.
+pub fn read_line_result_loc(db: &dyn Db) -> ItemLoc {
+    synthetic_decl_loc(db, READ_LINE_RESULT_NAME)
 }
 
-/// The [`ItemLoc`] of `file`'s compiler-provided [`NEXT_CHAR_NAME`] enum.
-pub fn next_char_loc(file: SourceFile) -> ItemLoc {
-    synthetic_decl_loc(file, NEXT_CHAR_NAME)
+/// The [`ItemLoc`] of the compiler-provided [`NEXT_CHAR_NAME`] enum.
+pub fn next_char_loc(db: &dyn Db) -> ItemLoc {
+    synthetic_decl_loc(db, NEXT_CHAR_NAME)
 }
 
-/// The [`ItemLoc`] of `file`'s compiler-provided [`UTF8_RESULT_NAME`] enum.
-pub fn utf8_result_loc(file: SourceFile) -> ItemLoc {
-    synthetic_decl_loc(file, UTF8_RESULT_NAME)
+/// The [`ItemLoc`] of the compiler-provided [`UTF8_RESULT_NAME`] enum.
+pub fn utf8_result_loc(db: &dyn Db) -> ItemLoc {
+    synthetic_decl_loc(db, UTF8_RESULT_NAME)
 }
 
 /// Top-level names of a file, *including* what's wrong with them: the scope
@@ -1015,7 +1014,7 @@ pub fn type_scope(db: &dyn Db, file: SourceFile) -> TypeScope {
         scope.entries.insert(
             decl.name.to_owned(),
             TypeScopeEntry {
-                loc: synthetic_decl_loc(file, decl.name),
+                loc: synthetic_decl_loc(db, decl.name),
                 ambiguous: false,
             },
         );
@@ -1073,7 +1072,7 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
         scope.entries.insert(
             decl.name.to_owned(),
             ScopeEntry {
-                loc: synthetic_decl_loc(file, decl.name),
+                loc: synthetic_decl_loc(db, decl.name),
                 kind: ItemKind::Type,
                 ambiguous: false,
             },

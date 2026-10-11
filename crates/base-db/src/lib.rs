@@ -21,13 +21,32 @@ pub struct SourceFile {
     pub text: String,
 }
 
+/// The file the compiler-provided declarations belong to: one per
+/// database, so every file that names `ReadLineResult` names the same
+/// declaration. It has no text; its declarations come from hir's table.
+#[salsa::input(singleton)]
+pub struct Prelude {
+    pub file: SourceFile,
+}
+
 #[salsa::db]
 pub trait Db: salsa::Database {}
 
+/// The prelude file of `db`.
+pub fn prelude_file(db: &dyn Db) -> SourceFile {
+    Prelude::get(db).file(db)
+}
+
 #[salsa::db]
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RootDatabase {
     storage: salsa::Storage<Self>,
+}
+
+impl Default for RootDatabase {
+    fn default() -> Self {
+        RootDatabase::with_storage(salsa::Storage::default())
+    }
 }
 
 impl RootDatabase {
@@ -36,9 +55,14 @@ impl RootDatabase {
     pub fn with_event_callback(
         callback: Box<dyn Fn(salsa::Event) + Send + Sync + 'static>,
     ) -> Self {
-        RootDatabase {
-            storage: salsa::Storage::new(Some(callback)),
-        }
+        RootDatabase::with_storage(salsa::Storage::new(Some(callback)))
+    }
+
+    fn with_storage(storage: salsa::Storage<Self>) -> Self {
+        let db = RootDatabase { storage };
+        let file = SourceFile::new(&db, "<prelude>".to_owned(), String::new());
+        Prelude::new(&db, file);
+        db
     }
 }
 

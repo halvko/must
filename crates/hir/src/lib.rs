@@ -39,11 +39,10 @@ pub use item_tree::{
 };
 pub use outlives::{OutlivesDiagnostic, outlives_check};
 pub use scopes::{
-    ALLOC_RESULT_NAME, BUILTIN_DISAMBIGUATOR, Builtin, ConstLegality, Duplicate, ExprScopes,
-    FileScope, NEXT_CHAR_NAME, READ_LINE_RESULT_NAME, Resolution, SyntheticDecl, TypeScope,
-    UTF8_RESULT_NAME, alloc_result_loc, expr_scopes, file_scope, next_char_loc,
-    read_line_result_loc, resolutions, synthetic_decl_loc, synthetic_decl_named, synthetic_decls,
-    type_scope, utf8_result_loc,
+    ALLOC_RESULT_NAME, Builtin, ConstLegality, Duplicate, ExprScopes, FileScope, NEXT_CHAR_NAME,
+    READ_LINE_RESULT_NAME, Resolution, SyntheticDecl, TypeScope, UTF8_RESULT_NAME,
+    alloc_result_loc, expr_scopes, file_scope, next_char_loc, read_line_result_loc, resolutions,
+    synthetic_decl_loc, synthetic_decl_named, synthetic_decls, type_scope, utf8_result_loc,
 };
 pub use traits::{BoundDotOffer, BoundSlot, bound_dot_offers, bound_slots, dict_param_count};
 pub use trap_sites::{
@@ -217,12 +216,12 @@ pub fn item_index(db: &dyn Db, item: ItemId<'_>) -> Option<usize> {
 /// shape; source-level queries ([`item_source`], [`item_index`]) answer the
 /// empty case, exactly like a stale id.
 ///
-/// The name is enough because the reserved disambiguator is: no source item
-/// can carry it ([`BUILTIN_DISAMBIGUATOR`]), and a file that declares the
-/// name itself never gets the builtin into its scope in the first place —
-/// that is where shadowing happens.
+/// The name is enough because the prelude file holds nothing else
+/// ([`scopes::prelude_loc`]), and a file that declares the name itself never
+/// gets the builtin into its scope in the first place — that is where
+/// shadowing happens.
 pub fn synthetic_decl(db: &dyn Db, item: ItemId<'_>) -> Option<&'static scopes::SyntheticDecl> {
-    if item.disambiguator(db) != BUILTIN_DISAMBIGUATOR {
+    if item.file(db) != base_db::prelude_file(db) {
         return None;
     }
     scopes::synthetic_decl_named(item.name(db))

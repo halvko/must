@@ -28,8 +28,8 @@
   argument's own type, never the position itself) does not widen; a variant that reaches
   there lands on the sound `NoTraitImpl` rather than silently picking its enum's impl.
 - **T23** The compiler-provided enums (`AllocResult`, `ReadLineResult`, `NextChar`,
-  `Utf8Result`) are the prelude Must cannot write yet: ordinary declarations minted per file
-  from one table, user-shadowable and never duplicate-flagged; the table's order is the
+  `Utf8Result`) are the prelude Must cannot write yet: ordinary declarations in the one prelude
+  file, minted from one table, user-shadowable and never duplicate-flagged; the table's order is the
   variant index. It goes away when modules land.
 - **T07** Mutability. `let mut` declares a mutable binding, with or without an initializer
   (`let mut x;` starts uninitialized, M21); its type is the annotation's or the assignments';

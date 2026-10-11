@@ -6144,7 +6144,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             callee,
             receiver,
             receiver_ty,
-            builtin_type(builtin, self.file),
+            builtin_type(self.db, builtin),
             callee_expectation,
             args,
         )
@@ -8691,12 +8691,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         args: Option<&[GenericArgData]>,
     ) -> Ty {
         if let Some(generics) = builtin_generics(builtin) {
-            let (loc, sig) = builtin_scheme(builtin, self.file);
+            let (loc, sig) = builtin_scheme(self.db, builtin);
             return self.instantiate_mention(expr, loc, sig, &generics, args);
         }
         if let Some(args) = args {
             self.refuse_item_args(expr, builtin.name(), args);
-            return builtin_type(builtin, self.file);
+            return builtin_type(self.db, builtin);
         }
         if builtin.flavor_polymorphic() {
             self.result
@@ -8704,7 +8704,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 .push(InferenceDiagnostic::BuiltinNotFirstClass { expr, builtin });
             return Ty::Error;
         }
-        builtin_type(builtin, self.file)
+        builtin_type(self.db, builtin)
     }
 
     /// A direct call of a flavor-polymorphic builtin — the checker special
@@ -8836,7 +8836,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 );
                 match builtin {
                     Builtin::StrFromUtf8 => {
-                        Ty::Named(NamedTy::plain(crate::utf8_result_loc(self.file)))
+                        Ty::Named(NamedTy::plain(crate::utf8_result_loc(self.db)))
                     }
                     _ => Ty::Str,
                 }
@@ -10680,8 +10680,8 @@ fn peel_blocks(body: &Body, mut expr: ExprId) -> ExprId {
 
 /// The type of a builtin, the one resolution and checking use. `pub` so the
 /// editor's dot-completions render exactly what a call would check against.
-pub fn builtin_type(builtin: Builtin, file: SourceFile) -> Ty {
-    priced(builtin, builtin_type_unpriced(builtin, file))
+pub fn builtin_type(db: &dyn Db, builtin: Builtin) -> Ty {
+    priced(builtin, builtin_type_unpriced(db, builtin))
 }
 
 /// Stamp the safety flag onto a builtin's fn type from the ONE home for the
@@ -10699,26 +10699,20 @@ fn priced(builtin: Builtin, ty: Ty) -> Ty {
     }
 }
 
-fn builtin_type_unpriced(builtin: Builtin, file: SourceFile) -> Ty {
+fn builtin_type_unpriced(db: &dyn Db, builtin: Builtin) -> Ty {
     match builtin {
         Builtin::Print => Ty::fn_type(vec![Ty::Str], Ty::Unit),
         Builtin::Panic => Ty::fn_type(vec![Ty::Str], Ty::Never),
-        // `read_line()` — monomorphic and nullary, like `print`/`panic`,
-        // but its return type needs `file` to name the per-file
-        // `ReadLineResult` declaration (the same trick `alloc_array`'s
-        // scheme uses for `AllocResult`, except this builtin has no
-        // generic binder of its own to route through `builtin_scheme`).
         Builtin::ReadLine => Ty::fn_type(
             Vec::new(),
-            Ty::Named(NamedTy::plain(crate::read_line_result_loc(file))),
+            Ty::Named(NamedTy::plain(crate::read_line_result_loc(db))),
         ),
         // `s.next_char(i)` — a DOT-CALLABLE shape, so its `str` parameter
         // is LAST, which is what makes it reachable through the dot at all
         // (TR01 is structural, and it does not have one rule for builtins).
-        // The same `file` trick names the per-file `NextChar` declaration.
         Builtin::NextChar => Ty::fn_type(
             vec![Ty::Int(IntKind::Usize), Ty::Str],
-            Ty::Named(NamedTy::plain(crate::next_char_loc(file))),
+            Ty::Named(NamedTy::plain(crate::next_char_loc(db))),
         ),
         // `s.len()` — the receiver is the only parameter, so `next_char`'s
         // receiver-LAST shape is the whole signature here.
@@ -10787,16 +10781,11 @@ fn builtin_generics(builtin: Builtin) -> Option<Vec<GenericParamData>> {
 
 /// The scheme of a generic builtin, exactly as [`signature`] would present
 /// a generic item's: a `Ty::Fn` whose rigid [`crate::ty::ParamTy`]s are
-/// keyed by the builtin's own reserved [`ItemLoc`] (same file-scoped
-/// identity trick as [`crate::alloc_result_loc`]), so
+/// keyed by the builtin's own [`ItemLoc`] in the prelude file, so
 /// [`InferCtx::instantiate_mention`] substitutes them with zero special
 /// cases.
-fn builtin_scheme(builtin: Builtin, file: SourceFile) -> (ItemLoc, Ty) {
-    let loc = ItemLoc::top_level(
-        file,
-        std::sync::Arc::from(builtin.name()),
-        crate::BUILTIN_DISAMBIGUATOR,
-    );
+fn builtin_scheme(db: &dyn Db, builtin: Builtin) -> (ItemLoc, Ty) {
+    let loc = crate::scopes::prelude_loc(db, builtin.name());
     let t = Ty::Param(crate::ty::ParamTy {
         item: loc.clone(),
         index: 0,
@@ -10809,7 +10798,7 @@ fn builtin_scheme(builtin: Builtin, file: SourceFile) -> (ItemLoc, Ty) {
         Builtin::AllocArray => Ty::fn_type(
             vec![Ty::Int(IntKind::Usize)],
             Ty::Named(NamedTy {
-                decl: crate::alloc_result_loc(file),
+                decl: crate::alloc_result_loc(db),
                 args: vec![GenericArg::Ty(t)],
             }),
         ),

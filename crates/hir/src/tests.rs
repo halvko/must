@@ -7647,6 +7647,22 @@ static f = fn (
 }
 
 #[test]
+fn every_file_names_the_same_compiler_provided_declarations() {
+    let db = RootDatabase::default();
+    let a = SourceFile::new(&db, "a.must".to_owned(), String::new());
+    let b = SourceFile::new(&db, "b.must".to_owned(), String::new());
+    for decl in crate::scopes::synthetic_decls() {
+        let prelude = Some(crate::Resolution::TypeItem(crate::synthetic_decl_loc(
+            &db, decl.name,
+        )));
+        for file in [a, b] {
+            assert_eq!(crate::type_scope(&db, file).resolve(decl.name), prelude);
+            assert_eq!(crate::file_scope(&db, file).resolve(decl.name), prelude);
+        }
+    }
+}
+
+#[test]
 fn every_table_row_is_registered_and_declared() {
     // The addition half of the table's contract, at the Rust level so that
     // it covers ROWS and not four hand-named enums: whatever
@@ -7664,7 +7680,7 @@ fn every_table_row_is_registered_and_declared() {
     let table = crate::scopes::synthetic_decls();
     assert!(!table.is_empty(), "the table is what this test is about");
     for decl in table.iter() {
-        let loc = crate::synthetic_decl_loc(file, decl.name);
+        let loc = crate::synthetic_decl_loc(&db, decl.name);
         assert_eq!(
             crate::type_scope(&db, file).resolve(decl.name),
             Some(crate::Resolution::TypeItem(loc.clone())),
@@ -7742,7 +7758,7 @@ static count_lines = fn () -> usize {
 
 #[test]
 fn read_line_is_a_nullary_first_class_function() {
-    // Bare mention (no call): `read_line`'s type names the per-file
+    // Bare mention (no call): `read_line`'s type names the prelude's
     // `ReadLineResult` decl, exactly like `print`'s bare mention names its
     // fixed `fn(str) -> ()`.
     check_infer(
@@ -8362,7 +8378,7 @@ static f = fn (n: usize) -> usize {
 fn next_char_is_a_builtin_member_of_str() {
     // Reached through the dot on a `str` receiver, so its type has the
     // dot-callable shape every member has — `str` last (TR01) — and it
-    // answers the per-file `NextChar` decl, the way `read_line` answers
+    // answers the prelude's `NextChar` decl, the way `read_line` answers
     // `ReadLineResult`.
     check_infer(
         r#"
