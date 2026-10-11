@@ -88,6 +88,7 @@ fn launch_session_runs_the_program() {
     let init = &responses_for(&messages, "initialize")[0];
     assert_eq!(init["success"], true);
     assert_eq!(init["body"]["supportsConfigurationDoneRequest"], true);
+    assert_eq!(init["body"]["supportsTerminateRequest"], true);
     assert_eq!(events(&messages, "initialized").len(), 1);
 
     // Every request got exactly one successful response, launch included
@@ -1022,6 +1023,117 @@ fn array_local_expands_into_elements() {
     assert_eq!(evals[0]["body"]["result"], "50");
 
     assert_eq!(events(&messages, "exited")[0]["body"]["exitCode"], 0);
+
+    let _ = std::fs::remove_file(program);
+}
+
+const TWO_PRINTS: &str = r#"
+static main = fn {
+    print("start\n");
+    print("end\n");
+};
+"#;
+
+fn stdout(messages: &[Value]) -> String {
+    events(messages, "output")
+        .iter()
+        .filter(|e| e["body"]["category"] == "stdout")
+        .map(|e| e["body"]["output"].as_str().unwrap())
+        .collect()
+}
+
+#[test]
+fn terminate_at_a_breakpoint_stops_the_program() {
+    let program = fixture("terminate", TWO_PRINTS);
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        ("launch", json!({ "program": program.to_str().unwrap() })),
+        // Line 4 is the second `print`.
+        ("setBreakpoints", json!({ "breakpoints": [{ "line": 4 }] })),
+        ("configurationDone", json!({})),
+        ("terminate", json!({})),
+        ("disconnect", json!({})),
+    ]);
+
+    assert_eq!(
+        events(&messages, "stopped")[0]["body"]["reason"],
+        "breakpoint"
+    );
+    let terminate = responses_for(&messages, "terminate");
+    assert_eq!(terminate.len(), 1);
+    assert_eq!(terminate[0]["success"], true);
+    // A stopped program has no exit code: `terminated` alone, and the
+    // second `print` never runs.
+    assert_eq!(events(&messages, "terminated").len(), 1);
+    assert!(events(&messages, "exited").is_empty());
+    assert_eq!(stdout(&messages), "start\n");
+    assert_eq!(responses_for(&messages, "disconnect")[0]["success"], true);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
+fn the_session_outlives_terminate() {
+    let program = fixture("terminate-session", TWO_PRINTS);
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        ("launch", json!({ "program": program.to_str().unwrap() })),
+        ("setBreakpoints", json!({ "breakpoints": [{ "line": 4 }] })),
+        ("configurationDone", json!({})),
+        ("terminate", json!({})),
+        ("threads", json!({})),
+        ("continue", json!({ "threadId": 1 })),
+        ("disconnect", json!({})),
+    ]);
+
+    // Requests after `terminate` are answered; resuming finds nothing to
+    // run.
+    assert_eq!(responses_for(&messages, "threads")[0]["success"], true);
+    assert_eq!(responses_for(&messages, "continue")[0]["success"], false);
+    assert_eq!(responses_for(&messages, "disconnect")[0]["success"], true);
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
+fn terminate_before_configuration_done_answers_the_launch() {
+    let program = fixture("terminate-early", TWO_PRINTS);
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        ("launch", json!({ "program": program.to_str().unwrap() })),
+        ("terminate", json!({})),
+        ("configurationDone", json!({})),
+        ("disconnect", json!({})),
+    ]);
+
+    // The parked launch gets its one response, a failure, and the program
+    // never starts, not even at `configurationDone`.
+    let launch = responses_for(&messages, "launch");
+    assert_eq!(launch.len(), 1);
+    assert_eq!(launch[0]["success"], false);
+    assert_eq!(responses_for(&messages, "terminate")[0]["success"], true);
+    assert_eq!(events(&messages, "terminated").len(), 1);
+    assert!(events(&messages, "exited").is_empty());
+    assert_eq!(stdout(&messages), "");
+
+    let _ = std::fs::remove_file(program);
+}
+
+#[test]
+fn terminate_after_the_program_ended_sends_nothing_more() {
+    let program = fixture("terminate-late", TWO_PRINTS);
+    let messages = run_session(&[
+        ("initialize", json!({})),
+        ("launch", json!({ "program": program.to_str().unwrap() })),
+        ("configurationDone", json!({})),
+        ("terminate", json!({})),
+        ("disconnect", json!({})),
+    ]);
+
+    assert_eq!(stdout(&messages), "start\nend\n");
+    assert_eq!(responses_for(&messages, "terminate")[0]["success"], true);
+    assert_eq!(events(&messages, "exited").len(), 1);
+    assert_eq!(events(&messages, "terminated").len(), 1);
 
     let _ = std::fs::remove_file(program);
 }
