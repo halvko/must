@@ -2942,6 +2942,61 @@ static main = fn {
 }
 
 #[test]
+fn completions_snippet_fn_local_under_its_return_type_inserts_a_call() {
+    // A `fn`-valued local completes as a call when the position wants what
+    // it returns.
+    assert_eq!(
+        completion_insert(
+            r#"
+static main = fn() -> () {
+    let xfun = fn { 11 };
+    let xtra: usize = 1;
+    let y = 11 + xf$0;
+};
+"#,
+            "xfun",
+        ),
+        crate::InsertText::Plain("xfun()".to_owned())
+    );
+}
+
+#[test]
+fn completions_snippet_fn_local_with_params_inserts_a_snippet() {
+    assert_eq!(
+        completion_insert(
+            r#"
+static main = fn {
+    let add = fn (a: usize) -> usize { a };
+    let y: usize = a$0;
+};
+"#,
+            "add",
+        ),
+        crate::InsertText::Snippet {
+            snippet: "add($1)".to_owned(),
+            plain: "add()".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn completions_snippet_fn_local_under_a_fn_expectation_is_bare() {
+    // The position wants the `fn` itself: pass it, don't call it.
+    assert_eq!(
+        completion_insert(
+            r#"
+static main = fn {
+    let helper = fn () -> usize { 1 };
+    let f: fn() -> usize = h$0;
+};
+"#,
+            "helper",
+        ),
+        crate::InsertText::Plain("helper".to_owned())
+    );
+}
+
+#[test]
 fn completions_snippet_builtin_fn_call_with_params() {
     // Builtins go through the same snippet rule as file items — `print`
     // takes one param.
