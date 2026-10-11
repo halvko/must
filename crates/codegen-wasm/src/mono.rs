@@ -66,6 +66,27 @@ impl Refusal {
     }
 }
 
+/// A call of the `extern` item `decl`, at `call` in `caller`'s body.
+#[derive(Debug, Clone)]
+pub struct ExternSite {
+    pub decl: ItemLoc,
+    pub caller: ItemLoc,
+    pub call: ExprId,
+}
+
+impl ExternSite {
+    /// The site to blame for a diagnostic about the `extern` item: its
+    /// declaration. If `decl` has no initializer it is broken and already
+    /// carries its own error, so blame `call` in `caller` instead of pairing
+    /// `decl` with an expression from another item's body.
+    pub(crate) fn blame(&self, db: &dyn Db) -> (ItemLoc, ExprId) {
+        match hir::body::body(db, self.decl.to_id(db)).root {
+            Some(root) => (self.decl.clone(), root),
+            None => (self.caller.clone(), self.call),
+        }
+    }
+}
+
 /// An `extern` item whose signature has no wasm representation, refused BY
 /// THE ITEM'S NAME with the layout rule as the parenthetical. Which boundary is
 /// unavailable is the useful half; which layout rule objected is the detail.
@@ -145,12 +166,9 @@ pub enum CallTarget {
         name: String,
         params: Vec<ValType>,
         results: Vec<ValType>,
-        /// Where the `extern` item is DECLARED — the caret for a refusal raised
-        /// while the import section is being built, long after this. A
-        /// declaration is what such a refusal asks the user to change, so
-        /// the call that reached it is not the useful site (and stands in
-        /// only when the declaring item is too broken to have one).
-        decl: (ItemLoc, ExprId),
+        /// Blamed when a refusal is raised while the import section is
+        /// being built.
+        site: ExternSite,
     },
     Refused(Refusal),
 }
@@ -625,33 +643,30 @@ impl<'db> Mono<'db> {
             // rule said so.
             StaticVal::ExternFn { decl, sig } => {
                 let name = decl.display_name().to_owned();
-                // Every diagnostic about an `extern` item belongs on its
-                // declaration, so resolve that site once here. An item with
-                // no initializer expression is broken and already carries
-                // its own error; fall back to the call rather than pair an
-                // item with an expression out of another item's body.
-                let decl = match hir::body::body(self.db, decl.to_id(self.db)).root {
-                    Some(root) => (decl, root),
-                    None => (key.func.value.item.clone(), origin),
+                let site = ExternSite {
+                    decl,
+                    caller: key.func.value.item.clone(),
+                    call: origin,
                 };
+                let refuse = |err| extern_refusal(&name, &site.blame(self.db), err);
                 let mut params = Vec::new();
                 for ty in &sig.params {
                     match layout::slots(self.db, ty) {
                         Ok(count) => {
                             params.extend(std::iter::repeat_n(ValType::I64, count as usize))
                         }
-                        Err(err) => return extern_refusal(&name, &decl, err),
+                        Err(err) => return refuse(err),
                     }
                 }
                 let results = match layout::slots(self.db, &sig.ret) {
                     Ok(count) => vec![ValType::I64; count as usize],
-                    Err(err) => return extern_refusal(&name, &decl, err),
+                    Err(err) => return refuse(err),
                 };
                 return CallTarget::Extern {
                     name,
                     params,
                     results,
-                    decl,
+                    site,
                 };
             }
             StaticVal::Fn(func) => func,

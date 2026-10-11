@@ -1413,7 +1413,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
                             index,
                             expected,
                             results,
-                            "a function",
+                            format_args!("a function"),
                         )?;
                     }
                     // An `extern` item: ordinary arguments, ordinary `call`,
@@ -1433,7 +1433,6 @@ impl<'a, 'db> Emitter<'a, 'db> {
                                 origin,
                             ));
                         };
-                        let what = format!("the `extern` item `{name}`");
                         self.direct_call(
                             ctx,
                             args,
@@ -1442,7 +1441,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
                             index,
                             params.len() as u32,
                             results.len() as u32,
-                            &what,
+                            format_args!("the `extern` item `{name}`"),
                         )?;
                     }
                     Some(CallTarget::Refused(refusal)) => return Err(refusal),
@@ -1525,7 +1524,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
         index: u32,
         expected: u32,
         results: u32,
-        callee: &str,
+        callee: std::fmt::Arguments<'_>,
     ) -> Result<(), Refusal> {
         let mut pushed = 0;
         for op in args {
