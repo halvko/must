@@ -8,7 +8,7 @@ on:
 env:
   # Once this many rounds have run, pushes no longer start one; the `review`
   # label still does, and starts a fresh budget.
-  MAX_ROUNDS: 3
+  MAX_ROUNDS: 5
 
 # One round per PR at a time. A round in progress finishes, so every reviewer
 # gets into the summary; a newer event waits, replacing any older one waiting.
@@ -74,7 +74,7 @@ jobs:
           comments=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
             --jq '.[] | select(.user.type == "Bot") | .body')
           markers=$(printf '%s\n' "$comments" \
-            | { grep -E '^<!-- review-round: [^ ]+ [0-9a-f]{40} (label|auto) -->$' || true; })
+            | { grep -E '^<!-- review-round: [^ ]+ [0-9a-f]{40} (label|auto)( findings)? -->$' || true; })
           # A labelled round starts a fresh budget for every reviewer, including
           # one that wrote no summary in it, and counts as its first round.
           rounds=$(printf '%s\n' "$markers" | awk '
@@ -96,6 +96,15 @@ jobs:
             fi
           fi
           if [ "$rounds" -ge "$MAX_ROUNDS" ]; then
+            # A reviewer whose latest round raised findings still reviews the
+            # change that answers them.
+            again=$(printf '%s\n' "$markers" | awk 'NF { last[$3] = $6 }
+              END { for (r in last) if (last[r] == "findings") print r }' \
+              | sort | jq -Rnc '[inputs]')
+            if [ "$again" != "[]" ]; then
+              echo "only=$again" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
             echo "skip=true" >> "$GITHUB_OUTPUT"
             # The notice goes into the summary comment, once per budget: the
             # next round rewrites that comment without it.
@@ -120,9 +129,14 @@ jobs:
           fi
       - id: list
         if: steps.current.outputs.skip != 'true' && steps.gate.outputs.skip != 'true'
+        env:
+          ONLY: ${{ steps.gate.outputs.only }}
         run: |
           roles=$(find .github/reviewers -maxdepth 1 -name '*.md' ! -name README.md \
             -printf '%f\n' | sed 's/\.md$//' | sort | jq -Rnc '[inputs]')
+          if [ -n "$ONLY" ]; then
+            roles=$(jq -c --argjson only "$ONLY" 'map(select(IN($only[])))' <<< "$roles")
+          fi
           echo "roles=$roles" >> "$GITHUB_OUTPUT"
 
   review:
@@ -171,26 +185,41 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           ROLE: ${{ matrix.role }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           comments=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
             --jq '.[] | select(.user.type == "Bot") | .body')
-          if printf '%s\n' "$comments" | awk -v r="$ROLE" '
-            $1 == "<!--" && $2 == "review-round:" && $3 == r { f = 1 }
-            END { exit !f }'; then
-            delim="LATER_$(openssl rand -hex 16)"
-            {
-              echo "text<<$delim"
-              echo "You have reviewed this PR before, so this is a later round: judge"
-              echo "what changed since then, and whether your earlier findings were"
-              echo "addressed. On code that has not changed, raise only real defects,"
-              echo "not points an earlier round could have raised, and never add a"
-              echo "second finding on a line where you already have one. Where someone"
-              echo "has answered one of your findings and you still disagree, or the"
-              echo "answer raises something new, reply in that thread instead. If"
-              echo "nothing new reaches that bar, say \"No new findings\" in one line."
-              echo "$delim"
-            } >> "$GITHUB_OUTPUT"
+          last=$(printf '%s\n' "$comments" | awk -v r="$ROLE" '
+            $1 == "<!--" && $2 == "review-round:" && $3 == r && $4 ~ /^[0-9a-f]{40}$/ { s = $4 }
+            END { print s }')
+          [ -n "$last" ] || exit 0
+          # A rebase or force-push can leave the reviewed commit on no branch.
+          since=""
+          if git cat-file -e "$last^{commit}" 2>/dev/null \
+            || git fetch -q origin "$last" 2>/dev/null; then
+            old=$(git merge-base "$BASE" "$last")
+            new=$(git merge-base "$BASE" "$HEAD")
+            if [ "$old" = "$new" ]; then
+              since="\`git diff $last $HEAD\` shows what changed since."
+            else
+              since="The PR was rebased since, so \`git range-diff $old..$last $new..$HEAD\` shows what changed, commit by commit."
+            fi
           fi
+          delim="LATER_$(openssl rand -hex 16)"
+          {
+            echo "text<<$delim"
+            echo "You have reviewed this PR before, at $last, so this is a later round. $since"
+            echo "Do both: check whether each of your earlier findings was fixed, and review"
+            echo "what changed since then for new problems, including ones the fixes brought."
+            echo "Where a fix falls short, or someone answered a finding and you still"
+            echo "disagree, reply in that thread rather than opening a new one. On code"
+            echo "that has not changed, raise only real defects, not points an earlier"
+            echo "round could have raised, and never add a second finding on a line where"
+            echo "you already have one. If nothing new reaches that bar, say \"No new"
+            echo "findings\" in one line."
+            echo "$delim"
+          } >> "$GITHUB_OUTPUT"
       # Files checked into the PR are not the reviewer's output.
       - run: rm -f review-findings.json review-summary.md
       - id: claude
@@ -247,7 +276,7 @@ jobs:
             ${{ steps.brief.outputs.text }}
           claude_args: |
             ${{ steps.brief.outputs.model_arg }}
-            --allowedTools "Edit(./review-findings.json),Write(./review-findings.json),Edit(./review-summary.md),Write(./review-summary.md),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*)"
+            --allowedTools "Edit(./review-findings.json),Write(./review-findings.json),Edit(./review-summary.md),Write(./review-summary.md),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git range-diff:*)"
 
       # The action hides the reviewer's output; its refused tool calls are
       # what to look at when a reviewer writes no summary.
@@ -285,7 +314,7 @@ jobs:
           claude_args: |
             ${{ steps.brief.outputs.model_arg }}
             --resume ${{ steps.claude.outputs.session_id }}
-            --allowedTools "Edit(./review-findings.json),Write(./review-findings.json),Edit(./review-summary.md),Write(./review-summary.md),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*)"
+            --allowedTools "Edit(./review-findings.json),Write(./review-findings.json),Edit(./review-summary.md),Write(./review-summary.md),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*),Bash(git range-diff:*)"
       - if: always() && steps.retry.outcome != 'skipped'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -341,8 +370,13 @@ jobs:
             {
               printf '%s\n' "$old" | { grep -E '^<!-- review-round: ' || true; }
               for role in $(jq -r '.[]' <<< "$ROLES"); do
-                if [ -s "summaries/review-summary-$role/review-summary.md" ]; then
-                  echo "<!-- review-round: $role $SHA $TRIGGER -->"
+                d="summaries/review-summary-$role"
+                if [ -s "$d/review-summary.md" ]; then
+                  # A round with new findings is marked, so the gate can let a
+                  # reviewer check their fix past the cap.
+                  found=$(jq -r 'if [.[]? | objects | select(has("path"))] | length > 0
+                    then " findings" else "" end' "$d/review-findings.json" 2>/dev/null || true)
+                  echo "<!-- review-round: $role $SHA $TRIGGER$found -->"
                 fi
               done
             } | awk '!seen[$0]++'
