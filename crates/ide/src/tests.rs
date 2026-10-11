@@ -601,6 +601,33 @@ fn diagnostics_include_mir_findings() {
     assert_eq!(u32::from(diagnostics[0].range.start()), 64);
 }
 
+/// A member's loan findings are reported with the file's diagnostics.
+#[test]
+fn diagnostics_include_members_loan_findings() {
+    let src = r#"
+type Cell = struct { n: usize } with {
+    impl Self {
+        leak = fn::<@a>() -> usize.&::<@a> { let n: usize = 5; n.& };
+    }
+};
+"#;
+    let (analysis, file, _pos) = fixture(&format!("{src}$0"));
+    let diagnostics = analysis.diagnostics(file);
+    let errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::Severity::Error)
+        .map(|d| (&src[d.range], d.message.as_str()))
+        .collect();
+    assert_eq!(
+        errors,
+        [(
+            "n.&",
+            "borrowed value does not live long enough: this borrows a local, but the borrow \
+             has to last for `@a`, which outlives the body"
+        )]
+    );
+}
+
 #[test]
 fn diagnostics_include_const_check_findings() {
     // Item initializers are const contexts; `double` is a plain `fn`, so

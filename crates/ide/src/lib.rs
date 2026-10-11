@@ -162,14 +162,22 @@ impl Analysis {
         // liveness half of the borrow checker). Same aggregator pattern:
         // findings travel with the query value, only ranges attach here.
         // Lives above hir because hir can't see mir.
-        for &item in hir::file_item_ids(&self.db, file) {
-            let lowered = mir::mir_lowered(&self.db, item);
+        let top_level = hir::file_item_ids(&self.db, file);
+        for item in hir::all_checkable_items(&self.db, file) {
+            // TODO: report members' lowering diagnostics too; `map` in
+            // `examples/option.must` captures `f` (halvko/must#94).
+            let lowered = &mir::mir_lowered(&self.db, item).diagnostics[..];
+            let lowered = if top_level.contains(&item) {
+                lowered
+            } else {
+                &[]
+            };
             let loans = mir::loan_check(&self.db, item);
-            if lowered.diagnostics.is_empty() && loans.is_empty() {
+            if lowered.is_empty() && loans.is_empty() {
                 continue;
             }
             let (_, source_map) = hir::body_with_source_map(&self.db, item);
-            for diag in &lowered.diagnostics {
+            for diag in lowered {
                 let Some(ptr) = source_map.node_for_expr(diag.expr()) else {
                     continue;
                 };
@@ -191,15 +199,13 @@ impl Analysis {
                     continue;
                 };
                 let related = diag
-                    .related()
+                    .related(source_map)
                     .into_iter()
-                    .filter_map(|(expr, message)| {
-                        let ptr = source_map.node_for_expr(expr)?;
-                        (ptr.text_range() != range).then(|| RelatedInfo {
-                            file,
-                            range: ptr.text_range(),
-                            message: message.to_owned(),
-                        })
+                    .filter(|(at, _)| *at != range)
+                    .map(|(at, message)| RelatedInfo {
+                        file,
+                        range: at,
+                        message: message.to_owned(),
                     })
                     .collect();
                 diagnostics.push(Diagnostic {

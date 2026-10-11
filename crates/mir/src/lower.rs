@@ -1159,8 +1159,8 @@ impl LowerCtx<'_> {
                 Operand::Copy(dest.into())
             }
             // A nested block opens a storage scope; the body's own block
-            // is the frame and opens none.
-            // TODO: unify (halvko/must#27).
+            // is the frame and opens none: its exit is `Return`, which
+            // `mir::loans` treats as the storage end of every local.
             ExprData::Block { stmts, tail } => {
                 let nested = expr != b.body_expr;
                 if nested {

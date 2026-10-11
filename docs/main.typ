@@ -1602,10 +1602,12 @@ enough`.
 
 The borrow checker has two halves, and both are static. The outlives
 module collects each body's outlives obligations, solves for every region's
-value, and rejects an undeclared relation between signature regions and a
-borrow of a local that escapes. Loan liveness runs over the lowered
-control-flow graph and rejects a borrow that is still needed after the
-value it borrows was touched behind its back. Both are pure per-body
+value, and rejects an undeclared relation between signature regions. Loan
+liveness runs over the lowered control-flow graph and rejects a borrow that
+is still needed after the value it borrows was touched behind its back, or
+after its storage ended. A body's return ends the storage of its locals
+just as a block's exit ends the storage of the block's, so a borrow of a
+local that escapes the body is that same refusal, blamed at the borrow. Both are pure per-body
 queries whose entire output is diagnostics; nothing they compute is
 consumed by lowering, layout or selection.
 
@@ -1722,9 +1724,7 @@ that returns the borrow it found and inserts otherwise is ordinary code.
 
 A nested function literal that returns a borrow of its own local at `@_` is
 refused as well: the borrow is still live where the literal's body returns,
-and the local is gone by then. That is the loan checker's finding rather
-than the escape check's, which measures a borrow's reach against the
-enclosing item's signature only.
+and the local is gone by then.
 
 Finally, the reborrow is minted only where the position *wants* a borrow. A
 borrow-typed place read into a position with no borrow-typed expectation — a

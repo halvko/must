@@ -25,10 +25,13 @@
   consumer so they share one semantics. Lowering is total: an ill-typed body still lowers,
   with traps that borrow a diagnostic an upstream analysis already reported, so flow
   analyses run past errors. MIR is decl-keyed, erased, and not SSA.
-- **X07** Outlives — the universal-region and escape checks — is CFG-free, computed over the
-  obligations inference recorded, because the CFG cannot change those answers. Loan liveness
-  is the flow-sensitive half of the borrow checker and is a MIR dataflow (X06), consuming
-  regions by provenance from the same recorded graph.
+- **X07** The universal-region check (does the body need `@a: @b` between two signature
+  regions that the signature never declared?) is CFG-free, computed over the obligations
+  inference recorded: it relates signature regions only, so program points cannot change
+  its answer. Everything about how long a loan lasts is loan liveness, the flow-sensitive
+  half of the borrow checker and a MIR dataflow (X06) that reads regions from the same
+  recorded graph. That includes escapes: the frame's return ends its locals as a block's
+  exit ends the block's, so a borrow escaping the body is a storage-death conflict.
 - **X08** One interpreter serves const eval, `run` and the debugger: same MIR, same machine,
   same UB findings.
 - **X09** The interpreter is an oracle, not a spec. A detected-UB stop is a property of the
