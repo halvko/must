@@ -18,23 +18,27 @@ if ! jq -e 'type == "array"' review-findings.json > /dev/null 2>&1; then
 fi
 
 # Every line a review comment can go on: the head side of each hunk. If the
-# diff cannot be read, lines are not checked.
-lines=null
+# diff cannot be read, lines are not checked. Both lists go to jq as files: a
+# large diff is past the limit for one argument.
+lines=$(mktemp)
+threads=$(mktemp)
+echo null > "$lines"
+echo null > "$threads"
 if diff=$(gh pr diff "$PR" --repo "$REPO"); then
-  lines=$(printf '%s\n' "$diff" | awk '
+  printf '%s\n' "$diff" | awk '
     /^diff --git / { hdr = 1; file = ""; next }
     hdr && /^\+\+\+ / { file = substr($0, 5); sub(/^b\//, "", file); next }
     /^@@ / { hdr = 0; match($0, /\+[0-9]+/); n = substr($0, RSTART + 1, RLENGTH - 1) + 0; next }
     hdr || file == "/dev/null" { next }
-    /^[ +]/ { print file ":" n; n++ }' | jq -Rn '[inputs]')
+    /^[ +]/ { print file ":" n; n++ }' | jq -Rn '[inputs]' > "$lines"
 fi
-threads=null
 if ids=$(gh api --paginate "repos/$REPO/pulls/$PR/comments" --jq '.[].id'); then
-  threads=$(printf '%s\n' "$ids" | jq -Rn '[inputs | select(length > 0) | tonumber]')
+  printf '%s\n' "$ids" | jq -Rn '[inputs | select(length > 0) | tonumber]' > "$threads"
 fi
 
-jq -r --argjson lines "$lines" --argjson threads "$threads" '
-  to_entries[] | .key as $i | .value as $f
+jq -r --slurpfile lines "$lines" --slurpfile threads "$threads" '
+  $lines[0] as $lines | $threads[0] as $threads
+  | to_entries[] | .key as $i | .value as $f
   | "Entry \($i) in review-findings.json " as $at
   | if ($f | type) != "object" or ($f.body | type) != "string" or $f.body == "" then
       $at + "needs an object with a non-empty string \"body\"."
