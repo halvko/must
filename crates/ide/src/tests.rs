@@ -1832,6 +1832,14 @@ static main = fn {
             Shape Struct (struct { r: usize })
             area Function (fn(usize) -> usize)
             main Function (fn())
+            AllocResult::Err EnumMember (Err)
+            AllocResult::Ok EnumMember (Ok(T.&raw mut))
+            NextChar::Char EnumMember (Char(char, usize))
+            NextChar::End EnumMember (End)
+            ReadLineResult::End EnumMember (End)
+            ReadLineResult::Line EnumMember (Line(str))
+            Utf8Result::Err EnumMember (Err)
+            Utf8Result::Ok EnumMember (Ok(str))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
@@ -1871,6 +1879,14 @@ static main = fn {
         expect_test::expect![[r#"
             x Variable (mut usize)
             main Function (fn())
+            AllocResult::Err EnumMember (Err)
+            AllocResult::Ok EnumMember (Ok(T.&raw mut))
+            NextChar::Char EnumMember (Char(char, usize))
+            NextChar::End EnumMember (End)
+            ReadLineResult::End EnumMember (End)
+            ReadLineResult::Line EnumMember (Line(str))
+            Utf8Result::Err EnumMember (Err)
+            Utf8Result::Ok EnumMember (Ok(str))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
@@ -2567,6 +2583,14 @@ static main = fn (s: str, n: usize) {
             panic Function (fn(str) -> !)
             n Variable (usize)
             main Function (fn(str, usize))
+            AllocResult::Err EnumMember (Err)
+            AllocResult::Ok EnumMember (Ok(T.&raw mut))
+            NextChar::Char EnumMember (Char(char, usize))
+            NextChar::End EnumMember (End)
+            ReadLineResult::End EnumMember (End)
+            ReadLineResult::Line EnumMember (Line(str))
+            Utf8Result::Err EnumMember (Err)
+            Utf8Result::Ok EnumMember (Ok(str))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
@@ -2608,6 +2632,14 @@ static main = fn {
             panic Function (fn(str) -> !)
             get_n Function (fn() -> usize)
             main Function (fn())
+            AllocResult::Err EnumMember (Err)
+            AllocResult::Ok EnumMember (Ok(T.&raw mut))
+            NextChar::Char EnumMember (Char(char, usize))
+            NextChar::End EnumMember (End)
+            ReadLineResult::End EnumMember (End)
+            ReadLineResult::Line EnumMember (Line(str))
+            Utf8Result::Err EnumMember (Err)
+            Utf8Result::Ok EnumMember (Ok(str))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
@@ -2650,6 +2682,14 @@ static main = fn {
             panic Function (fn(str) -> !)
             main Function (fn())
             other Function (fn(usize) -> str)
+            AllocResult::Err EnumMember (Err)
+            AllocResult::Ok EnumMember (Ok(T.&raw mut))
+            NextChar::Char EnumMember (Char(char, usize))
+            NextChar::End EnumMember (End)
+            ReadLineResult::End EnumMember (End)
+            ReadLineResult::Line EnumMember (Line(str))
+            Utf8Result::Err EnumMember (Err)
+            Utf8Result::Ok EnumMember (Ok(str))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
@@ -2689,6 +2729,14 @@ static main = fn {
             helper Function (fn() -> usize)
             panic Function (fn(str) -> !)
             main Function (fn())
+            AllocResult::Err EnumMember (Err)
+            AllocResult::Ok EnumMember (Ok(T.&raw mut))
+            NextChar::Char EnumMember (Char(char, usize))
+            NextChar::End EnumMember (End)
+            ReadLineResult::End EnumMember (End)
+            ReadLineResult::Line EnumMember (Line(str))
+            Utf8Result::Err EnumMember (Err)
+            Utf8Result::Ok EnumMember (Ok(str))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
@@ -2731,6 +2779,14 @@ static main = fn (p: Point, n: usize) {
             n Variable (usize)
             Point Struct (struct { x: usize })
             main Function (fn(Point, usize))
+            AllocResult::Err EnumMember (Err)
+            AllocResult::Ok EnumMember (Ok(T.&raw mut))
+            NextChar::Char EnumMember (Char(char, usize))
+            NextChar::End EnumMember (End)
+            ReadLineResult::End EnumMember (End)
+            ReadLineResult::Line EnumMember (Line(str))
+            Utf8Result::Err EnumMember (Err)
+            Utf8Result::Ok EnumMember (Ok(str))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
@@ -2838,6 +2894,14 @@ static main = fn {
         expect_test::expect![[r#"
             s Variable (str)
             main Function (fn())
+            AllocResult::Err EnumMember (Err)
+            AllocResult::Ok EnumMember (Ok(T.&raw mut))
+            NextChar::Char EnumMember (Char(char, usize))
+            NextChar::End EnumMember (End)
+            ReadLineResult::End EnumMember (End)
+            ReadLineResult::Line EnumMember (Line(str))
+            Utf8Result::Err EnumMember (Err)
+            Utf8Result::Ok EnumMember (Ok(str))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
@@ -3201,6 +3265,69 @@ static f = fn (p: P) {
             "s",
         ),
         crate::InsertText::Plain("s ".to_owned())
+    );
+}
+
+/// An enum's variants are values, offered by their full paths: under the
+/// enum's expectation they follow the enum-typed locals and the fns
+/// producing one.
+#[test]
+fn completions_offer_variants_by_path_below_enum_typed_values() {
+    let fixture_text = r#"
+type Shape = enum { Circle(usize), Point };
+static make = fn () -> Shape { Shape::Point };
+static f = fn (s: Shape, n: usize) {
+    let t: Shape = $0;
+};
+"#;
+    let (analysis, _file, pos) = fixture(fixture_text);
+    let labels: Vec<String> = analysis
+        .completions(pos)
+        .into_iter()
+        .map(|item| item.label)
+        .collect();
+    let at = |label: &str| labels.iter().position(|l| l == label).unwrap();
+    assert!(at("s") < at("make"), "{labels:?}");
+    assert!(at("make") < at("Shape::Circle"), "{labels:?}");
+    assert!(at("Shape::Circle") < at("Shape::Point"), "{labels:?}");
+    assert!(at("Shape::Point") < at("n"), "{labels:?}");
+    assert_eq!(
+        completion_insert(fixture_text, "Shape::Circle"),
+        crate::InsertText::Snippet {
+            snippet: "Shape::Circle($1)".to_owned(),
+            plain: "Shape::Circle".to_owned(),
+        }
+    );
+    assert_eq!(
+        completion_insert(fixture_text, "Shape::Point"),
+        crate::InsertText::Plain("Shape::Point".to_owned()),
+    );
+}
+
+/// A variant inserted by its full path after a brace-less `match` ends in a
+/// space, and keeps its ordinary rank: a variant is a pointless scrutinee.
+#[test]
+fn completions_brace_less_scrutinee_variant_path_ends_in_a_space() {
+    let fixture_text = r#"
+type Shape = enum { Circle(usize), Point };
+static f = fn () {
+    match $0
+};
+"#;
+    assert_eq!(
+        completion_insert(fixture_text, "Shape::Point"),
+        crate::InsertText::Plain("Shape::Point ".to_owned())
+    );
+    assert_eq!(
+        completion_insert(fixture_text, "Shape::Circle"),
+        crate::InsertText::Snippet {
+            snippet: "Shape::Circle($1) ".to_owned(),
+            plain: "Shape::Circle ".to_owned(),
+        }
+    );
+    assert_eq!(
+        completion_sort_text(fixture_text, "Shape::Point"),
+        "2_25_Shape::Point"
     );
 }
 
@@ -3589,6 +3716,16 @@ static f = fn (s: Shape) {
             match arms Snippet (all 2 variants of Shape)
             s Variable (Shape)
             f Function (fn(Shape) -> !)
+            AllocResult::Err EnumMember (Err)
+            AllocResult::Ok EnumMember (Ok(T.&raw mut))
+            NextChar::Char EnumMember (Char(char, usize))
+            NextChar::End EnumMember (End)
+            ReadLineResult::End EnumMember (End)
+            ReadLineResult::Line EnumMember (Line(str))
+            Shape::Circle EnumMember (Circle(usize))
+            Shape::Point EnumMember (Point)
+            Utf8Result::Err EnumMember (Err)
+            Utf8Result::Ok EnumMember (Ok(str))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
@@ -3859,6 +3996,37 @@ static f = fn (param: Shape) {
 };
 "#;
 
+/// A `fn` whose call is a scrutinee, local or item, ranks after every
+/// enum-typed value, and a variant path ranks below every local.
+#[test]
+fn completions_match_scrutinee_ranks_a_producer_above_a_plain_local() {
+    const PRODUCERS: &str = r#"
+type Shape = enum { Circle(usize), Point };
+static make = fn () -> Shape { Shape::Point };
+static label = fn () -> str { "x" };
+static f = fn (s: Shape) {
+    let mk = fn () -> Shape { Shape::Point };
+    let noise: str = "x";
+    SLOT
+};
+"#;
+    let in_scrutinee = PRODUCERS.replace("SLOT", "match $0");
+    let elsewhere = PRODUCERS.replace("SLOT", "let v = $0;");
+    assert_eq!(completion_sort_text(&in_scrutinee, "s"), "2_02_s");
+    assert_eq!(completion_sort_text(&in_scrutinee, "mk"), "2_09_mk");
+    assert_eq!(completion_sort_text(&in_scrutinee, "make"), "2_09_make");
+    assert_eq!(completion_sort_text(&in_scrutinee, "noise"), "2_10_noise");
+    assert_eq!(
+        completion_sort_text(&in_scrutinee, "Shape::Point"),
+        "2_25_Shape::Point"
+    );
+    // A `fn` yielding no enum, and any slot but the scrutinee, keep the
+    // ordinary tiers.
+    assert_eq!(completion_sort_text(&in_scrutinee, "label"), "2_20_label");
+    assert_eq!(completion_sort_text(&elsewhere, "mk"), "2_10_mk");
+    assert_eq!(completion_sort_text(&elsewhere, "make"), "2_20_make");
+}
+
 #[test]
 fn completions_match_scrutinee_ranks_by_definition_scope_distance() {
     // Nearest definition scope first, all the way out: this scope's `let`,
@@ -3955,6 +4123,16 @@ fn completions_match_scrutinee_does_not_suppress_the_normal_set() {
             ambient Constant (Shape)
             noise Variable (str)
             f Function (fn(Shape) -> !)
+            AllocResult::Err EnumMember (Err)
+            AllocResult::Ok EnumMember (Ok(T.&raw mut))
+            NextChar::Char EnumMember (Char(char, usize))
+            NextChar::End EnumMember (End)
+            ReadLineResult::End EnumMember (End)
+            ReadLineResult::Line EnumMember (Line(str))
+            Shape::Circle EnumMember (Circle(usize))
+            Shape::Point EnumMember (Point)
+            Utf8Result::Err EnumMember (Err)
+            Utf8Result::Ok EnumMember (Ok(str))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
@@ -4421,6 +4599,16 @@ static main = fn(o: Option::<usize>, wide: fn(usize) -> bool) -> bool {
             panic Function (fn(str) -> !)
             o Variable (Option::<usize>)
             main Function (fn(Option::<usize>, fn(usize) -> bool) -> bool)
+            AllocResult::Err EnumMember (Err)
+            AllocResult::Ok EnumMember (Ok(T.&raw mut))
+            NextChar::Char EnumMember (Char(char, usize))
+            NextChar::End EnumMember (End)
+            Option::None EnumMember (None)
+            Option::Some EnumMember (Some(T))
+            ReadLineResult::End EnumMember (End)
+            ReadLineResult::Line EnumMember (Line(str))
+            Utf8Result::Err EnumMember (Err)
+            Utf8Result::Ok EnumMember (Ok(str))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
@@ -5987,6 +6175,14 @@ static main = fn () -> () {
             panic Function (fn(str) -> !)
             main Function (fn())
             show Function (fn(usize))
+            AllocResult::Err EnumMember (Err)
+            AllocResult::Ok EnumMember (Ok(T.&raw mut))
+            NextChar::Char EnumMember (Char(char, usize))
+            NextChar::End EnumMember (End)
+            ReadLineResult::End EnumMember (End)
+            ReadLineResult::Line EnumMember (Line(str))
+            Utf8Result::Err EnumMember (Err)
+            Utf8Result::Ok EnumMember (Ok(str))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
@@ -6026,6 +6222,14 @@ static f = fn (p: usize) {
             s Variable (usize)
             panic Function (fn(str) -> !)
             f Function (fn(usize))
+            AllocResult::Err EnumMember (Err)
+            AllocResult::Ok EnumMember (Ok(T.&raw mut))
+            NextChar::Char EnumMember (Char(char, usize))
+            NextChar::End EnumMember (End)
+            ReadLineResult::End EnumMember (End)
+            ReadLineResult::Line EnumMember (Line(str))
+            Utf8Result::Err EnumMember (Err)
+            Utf8Result::Ok EnumMember (Ok(str))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
@@ -6117,6 +6321,14 @@ static f = fn {
             panic Function (fn(str) -> !)
             xf Variable (fn(usize))
             f Function (fn())
+            AllocResult::Err EnumMember (Err)
+            AllocResult::Ok EnumMember (Ok(T.&raw mut))
+            NextChar::Char EnumMember (Char(char, usize))
+            NextChar::End EnumMember (End)
+            ReadLineResult::End EnumMember (End)
+            ReadLineResult::Line EnumMember (Line(str))
+            Utf8Result::Err EnumMember (Err)
+            Utf8Result::Ok EnumMember (Ok(str))
             add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
             alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
             copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
