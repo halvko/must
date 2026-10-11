@@ -535,9 +535,72 @@ impl MirDiagnostic {
     }
 }
 
+/// The item's MIR as lowering built it, which the CFG checkers analyse.
 #[salsa::tracked(returns(ref))]
 pub fn mir_lowered<'db>(db: &'db dyn Db, item: ItemId<'db>) -> MirLowered {
     lower::lower_item(db, item)
 }
 
-pub use loans::{AccessKind, LoanDiagnostic, StillUsed, loan_check};
+/// The item's MIR as it runs: every loan refusal trapped where its refused
+/// operation runs. The loan checker reads [`mir_lowered`], so its traps
+/// are planted on a copy of it.
+pub fn mir_checked<'db>(db: &'db dyn Db, item: ItemId<'db>) -> &'db MirLowered {
+    if loans::loan_findings(db, item).traps.is_empty() {
+        mir_lowered(db, item)
+    } else {
+        mir_trapped(db, item)
+    }
+}
+
+#[salsa::tracked(returns(ref))]
+fn mir_trapped<'db>(db: &'db dyn Db, item: ItemId<'db>) -> MirLowered {
+    let mut checked = mir_lowered(db, item).clone();
+    let mut traps: Vec<&LoanTrap> = loans::loan_findings(db, item).traps.iter().collect();
+    // Back to front within a block, so each split leaves the indices of
+    // the traps still to plant in it where they were.
+    traps.sort_by_key(|trap| {
+        (
+            u32::from(trap.body.into_raw()),
+            u32::from(trap.block.into_raw()),
+            std::cmp::Reverse(trap.index),
+        )
+    });
+    for trap in traps {
+        plant_trap(&mut checked.bodies[trap.body], trap);
+    }
+    checked
+}
+
+/// Split `trap.block` before `trap.index`: the statements from there on and
+/// the old terminator move to a new block, and the first half ends in a
+/// trap that continues there.
+fn plant_trap(body: &mut MirBody, trap: &LoanTrap) {
+    let dest = body.locals.alloc(LocalData {
+        ty: Ty::Unit,
+        name: None,
+        binding: None,
+        addressable: false,
+    });
+    let data = &mut body.blocks[trap.block];
+    let origin = data
+        .statements
+        .get(trap.index)
+        .map_or(data.terminator.origin, |stmt| stmt.origin);
+    let rest = BlockData {
+        statements: data.statements.split_off(trap.index),
+        terminator: data.terminator.clone(),
+    };
+    let target = body.blocks.alloc(rest);
+    body.blocks[trap.block].terminator = Terminator {
+        kind: TerminatorKind::Trap {
+            message: trap.message.clone(),
+            dest,
+            target,
+        },
+        origin,
+    };
+}
+
+pub use loans::{
+    AccessKind, LoanDiagnostic, LoanFindings, LoanTrap, StillUsed, loan_check, loan_findings,
+};

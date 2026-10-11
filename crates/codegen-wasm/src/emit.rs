@@ -133,7 +133,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
         key: &InstanceKey,
     ) -> Result<(Vec<ValType>, Vec<ValType>), Refusal> {
         let analysis = self.mono.analyze(key);
-        let mir = &mir::mir_lowered(self.db(), key.func.value.item.to_id(self.db())).bodies
+        let mir = &mir::mir_checked(self.db(), key.func.value.item.to_id(self.db())).bodies
             [key.func.value.body];
         let entry_expr = mir.blocks[mir.entry].terminator.origin;
         let mut params = Vec::new();
@@ -152,7 +152,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
     pub fn emit(&mut self, key: &InstanceKey) -> Result<FuncBody, Refusal> {
         let analysis = self.mono.analyze(key);
         let loc = key.func.value.item.clone();
-        let mir = &mir::mir_lowered(self.db(), loc.to_id(self.db())).bodies[key.func.value.body];
+        let mir = &mir::mir_checked(self.db(), loc.to_id(self.db())).bodies[key.func.value.body];
         let entry_expr = mir.blocks[mir.entry].terminator.origin;
 
         let count = mir.locals.len();

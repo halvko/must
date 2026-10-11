@@ -148,8 +148,11 @@
 //! reports the rest — a nested literal returning a borrow of its own local
 //! at `@_`, which reaches no universal of the enclosing item.
 //!
-//! Nothing here plants a trap: a refused program still runs, and the
-//! interpreter's detection is what stops it.
+//! # Traps
+//!
+//! Every refusal names the point its refused operation runs at — the
+//! access for a stale loan or a repointed place, the borrow for an escape
+//! — and [`crate::mir_checked`] traps there with the refusal's message.
 
 use base_db::Db;
 use hir::infer::InferenceResult;
@@ -160,8 +163,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use syntax::TextRange;
 
 use crate::{
-    BlockId, LocalId, MirBody, Operand, Place, ProjElem, Rvalue, Scope, Statement, StatementKind,
-    TerminatorKind, paths_overlap,
+    BlockId, BodyId, LocalId, MirBody, Operand, Place, ProjElem, Rvalue, Scope, Statement,
+    StatementKind, TerminatorKind, paths_overlap,
 };
 
 /// One finding. Carries the expressions to blame and everything the
@@ -405,20 +408,54 @@ impl LoanDiagnostic {
     }
 }
 
+/// The loan checker's findings on one item: what it reports, and where the
+/// refused operations sit in the lowered MIR.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LoanFindings {
+    pub diagnostics: Vec<LoanDiagnostic>,
+    /// Every point a refused operation runs at, with the message of the
+    /// diagnostic that refuses it: one per point, not one per report.
+    pub traps: Vec<LoanTrap>,
+}
+
+/// One trap the checker plants: before statement `index` of `block` in
+/// `body`, or before the terminator when `index` is the statement count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoanTrap {
+    pub body: BodyId,
+    pub block: BlockId,
+    pub index: usize,
+    pub message: String,
+}
+
 /// Loan-check every body lowered from one item. Keyed by item because the
 /// bodies share the item's one inference result and region numbering;
 /// each body is analysed on its own CFG.
 #[salsa::tracked(returns(ref))]
-pub fn loan_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<LoanDiagnostic> {
+pub fn loan_findings<'db>(db: &'db dyn Db, item: ItemId<'db>) -> LoanFindings {
     let lowered = crate::mir_lowered(db, item);
     let hir_body = hir::body::body(db, item);
     let infer = hir::infer::infer(db, item);
     let cover = hir::outlives::region_cover(db, item);
-    let mut diagnostics = Vec::new();
-    for (_, body) in lowered.bodies.iter() {
-        BodyCheck::new(db, body, hir_body, infer, cover).run(&mut diagnostics);
+    let mut findings = LoanFindings::default();
+    for (body_id, body) in lowered.bodies.iter() {
+        let mut traps = Vec::new();
+        BodyCheck::new(db, body, hir_body, infer, cover).run(&mut findings.diagnostics, &mut traps);
+        findings
+            .traps
+            .extend(traps.into_iter().map(|(point, message)| LoanTrap {
+                body: body_id,
+                block: point.block,
+                index: point.index,
+                message,
+            }));
     }
-    diagnostics
+    findings
+}
+
+/// The loan checker's diagnostics on one item.
+pub fn loan_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> &'db [LoanDiagnostic] {
+    &loan_findings(db, item).diagnostics
 }
 
 /// A location in one body: before statement `index` of `block`, or before
@@ -506,6 +543,40 @@ impl BitSet {
                 .filter(move |bit| word & (1 << bit) != 0)
                 .map(move |bit| w * 64 + bit)
         })
+    }
+}
+
+/// Where [`BodyCheck::run`] reports: each refusal's diagnostic once per
+/// key, and its trap once per point.
+struct Findings<'a> {
+    diagnostics: &'a mut Vec<LoanDiagnostic>,
+    traps: &'a mut Vec<(Point, String)>,
+    trapped: FxHashSet<Point>,
+}
+
+impl Findings<'_> {
+    /// Report the refusal `build` describes, trapped at `point` and keyed
+    /// by `key` in `seen`. `build` runs only when the trap or the report
+    /// is new; `None` means there is nothing to refuse.
+    fn report<K: Eq + std::hash::Hash>(
+        &mut self,
+        point: Point,
+        seen: &mut FxHashSet<K>,
+        key: K,
+        build: impl FnOnce() -> Option<LoanDiagnostic>,
+    ) {
+        if self.trapped.contains(&point) && seen.contains(&key) {
+            return;
+        }
+        let Some(diag) = build() else {
+            return;
+        };
+        if self.trapped.insert(point) {
+            self.traps.push((point, diag.message()));
+        }
+        if seen.insert(key) {
+            self.diagnostics.push(diag);
+        }
     }
 }
 
@@ -1387,8 +1458,15 @@ impl<'a> BodyCheck<'a> {
 
     // ---- reporting --------------------------------------------------------
 
-    fn run(&self, diagnostics: &mut Vec<LoanDiagnostic>) {
+    /// Report every refusal into `diagnostics` and the point it traps at
+    /// into `traps`.
+    fn run(&self, diagnostics: &mut Vec<LoanDiagnostic>, traps: &mut Vec<(Point, String)>) {
         let scope_in = self.compute_scope();
+        let mut out = Findings {
+            diagnostics,
+            traps,
+            trapped: FxHashSet::default(),
+        };
         let mut escaped: FxHashSet<ExprId> = FxHashSet::default();
         // One report per (access expression, loan): the earliest-minted
         // loan each access kills, and never twice for one origin.
@@ -1398,21 +1476,18 @@ impl<'a> BodyCheck<'a> {
             let mut scope = scope_in[Self::block_index(block)].clone();
             for point in self.points_of(block) {
                 self.step(point, &mut scope, |access, scope| {
+                    let origin = self.origin_at(point);
                     if let Some(temp) = self.pinned_by(point, access) {
-                        let origin = self.origin_at(point);
-                        let used = self
-                            .nearest_after(point, |at| self.uses_at(at).contains(&temp))
-                            .map(|at| self.origin_at(at));
-                        if let Some(used) = used
-                            && repointed.insert(origin)
-                        {
-                            diagnostics.push(LoanDiagnostic::Repointed {
+                        out.report(point, &mut repointed, origin, || {
+                            let used =
+                                self.nearest_after(point, |at| self.uses_at(at).contains(&temp))?;
+                            Some(LoanDiagnostic::Repointed {
                                 access: origin,
                                 kind: access.kind,
                                 place: self.render_place(&access.place, false),
-                                used,
-                            });
-                        }
+                                used: self.origin_at(used),
+                            })
+                        });
                     }
                     // A loan of dying storage that reaches a universal is
                     // `hir::outlives`' escape finding already, as it is
@@ -1427,18 +1502,18 @@ impl<'a> BodyCheck<'a> {
                     let Some(index) = victim else {
                         return;
                     };
-                    let origin = self.origin_at(point);
-                    if !reported.insert((origin, index)) {
-                        return;
-                    }
-                    let loan = &self.loans[index];
-                    diagnostics.push(LoanDiagnostic::Invalidated {
-                        access: origin,
-                        kind: access.kind,
-                        place: self
-                            .render_place(&access.place, self.is_inserted_reborrow(origin, access)),
-                        borrow: loan.origin,
-                        still_used: self.still_used(point, loan),
+                    out.report(point, &mut reported, (origin, index), || {
+                        let loan = &self.loans[index];
+                        Some(LoanDiagnostic::Invalidated {
+                            access: origin,
+                            kind: access.kind,
+                            place: self.render_place(
+                                &access.place,
+                                self.is_inserted_reborrow(origin, access),
+                            ),
+                            borrow: loan.origin,
+                            still_used: self.still_used(point, loan),
+                        })
                     });
                 });
                 if matches!(data.terminator.kind, TerminatorKind::Return)
@@ -1450,12 +1525,15 @@ impl<'a> BodyCheck<'a> {
                         let loan = &self.loans[index];
                         let of_storage =
                             !matches!(loan.place.projection.first(), Some(ProjElem::Deref));
-                        if of_storage && !loan.reaches_universal && escaped.insert(loan.origin) {
-                            diagnostics.push(LoanDiagnostic::Escapes {
+                        if !of_storage || loan.reaches_universal {
+                            continue;
+                        }
+                        out.report(loan.mint, &mut escaped, loan.origin, || {
+                            Some(LoanDiagnostic::Escapes {
                                 borrow: loan.origin,
                                 temporary: self.is_temporary(loan.place.local),
-                            });
-                        }
+                            })
+                        });
                     }
                 }
             }

@@ -6225,3 +6225,84 @@ static double = fn() -> usize {
         "#]],
     );
 }
+
+/// Where `mir_checked` plants each loan trap: the operation the trap's
+/// target block starts with must be the one the finding names in the
+/// lowered MIR, for every trap, including two in one block.
+fn check_loan_traps(text: &str, expect: Expect) {
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let operation = |block: &crate::BlockData, index: usize| match block.statements.get(index) {
+        Some(stmt) => ("statement", stmt.origin),
+        None => ("terminator", block.terminator.origin),
+    };
+    let mut rendered = String::new();
+    for &item in hir::file_item_ids(&db, file) {
+        let (_, source_map) = hir::body_with_source_map(&db, item);
+        let lowered = crate::mir_lowered(&db, item);
+        let mut named: Vec<_> = crate::loan_findings(&db, item)
+            .traps
+            .iter()
+            .map(|trap| {
+                let (kind, origin) =
+                    operation(&lowered.bodies[trap.body].blocks[trap.block], trap.index);
+                (trap.message.clone(), kind, origin)
+            })
+            .collect();
+        let messages: Vec<&String> = named.iter().map(|(message, ..)| message).collect();
+        let mut planted = Vec::new();
+        for (_, body) in crate::mir_checked(&db, item).bodies.iter() {
+            for (_, block) in body.blocks.iter() {
+                if let crate::TerminatorKind::Trap {
+                    message, target, ..
+                } = &block.terminator.kind
+                    && messages.contains(&message)
+                {
+                    let (kind, origin) = operation(&body.blocks[*target], 0);
+                    planted.push((message.clone(), kind, origin));
+                }
+            }
+        }
+        named.sort_by_key(|(message, _, origin)| (message.clone(), u32::from(origin.into_raw())));
+        planted.sort_by_key(|(message, _, origin)| (message.clone(), u32::from(origin.into_raw())));
+        assert_eq!(named, planted, "a trap sits before the wrong operation");
+        for (message, kind, origin) in planted {
+            let range = source_map.node_for_expr(origin).map(|ptr| ptr.text_range());
+            rendered.push_str(&format!("{range:?} {kind}: {message}\n"));
+        }
+    }
+    expect.assert_eq(&rendered);
+}
+
+#[test]
+fn loan_traps_sit_before_the_refused_operation() {
+    // Two refused reads in one block, which splits it twice.
+    check_loan_traps(
+        r#"
+static f = fn() -> usize {
+    let mut n: usize = 1;
+    let r = n.&mut;
+    let a = n;
+    let b = n;
+    r.* = 2;
+    a + b
+};
+"#,
+        expect![[r#"
+            Some(86..87) statement: reading `n` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
+            Some(101..102) statement: reading `n` here invalidates an exclusive borrow of it that is still live: a `.&mut` is the only way to the value while it lasts, and this one is used after this point
+        "#]],
+    );
+    // An escape, trapped at the borrow.
+    check_loan_traps(
+        r#"
+static main = fn () -> usize {
+    let f = fn () -> usize.&::<@_> { let mut n = 7; n.& };
+    f().*
+};
+"#,
+        expect![[r#"
+            Some(84..87) statement: borrowed value does not live long enough: this borrows a local, but the borrow is still live when the body returns and the local is gone by then
+        "#]],
+    );
+}

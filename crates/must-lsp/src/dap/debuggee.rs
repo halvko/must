@@ -633,7 +633,7 @@ fn executable_positions(
     let mut positions: HashMap<u32, BTreeSet<u32>> = HashMap::new();
     for &item in hir::file_item_ids(db, file) {
         let loc = hir::item_loc(db, item);
-        let lowered = mir::mir_lowered(db, item);
+        let lowered = mir::mir_checked(db, item);
         for (_, body) in lowered.bodies.iter() {
             for (_, block) in body.blocks.iter() {
                 let origins = block

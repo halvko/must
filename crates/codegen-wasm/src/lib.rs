@@ -281,7 +281,7 @@ pub const STACK_BUDGET: usize = 8 * 1024 * 1024;
 /// (whose const-args-only key omits the type-argument widths a backend
 /// needs; see that type's doc).
 pub fn compile(db: &dyn Db, entry: &ItemLoc) -> Result<Artifact, CompileError> {
-    let lowered = mir::mir_lowered(db, entry.to_id(db));
+    let lowered = mir::mir_checked(db, entry.to_id(db));
     let Some(root) = lowered.root else {
         return Err(CompileError::NoEntry(format!(
             "`{}` has no value to run",
