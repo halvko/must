@@ -630,11 +630,9 @@ pub fn forget_bound_unsatisfied(param: &str, ty: &str, reason: &str) -> String {
     )
 }
 
-/// A match-arm `_` on a value that must be consumed. The match already
-/// consumed the scrutinee, and `_` bound nothing to consume it with — the
-/// same sentence [`rest_skips_linear`] says about a record field, and the
-/// same one the unnamed `let _ =` binding gets through
-/// [`linear_subject`].
+/// A `_` pattern on a value that must be consumed: a match arm's (the match
+/// already consumed the scrutinee), a `let`'s or a parameter's. `_` bound
+/// nothing to consume it with.
 pub const WILDCARD_SKIPS_LINEAR: &str = "`_` matches the value without binding it, and it must be consumed; \
      give it a name so it has somewhere to go";
 

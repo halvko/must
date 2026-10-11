@@ -1687,9 +1687,8 @@ fn let_hole_pattern() {
                     LET_STMT@16..26
                       LET_KW@16..19 "let"
                       WHITESPACE@19..20 " "
-                      BIND_PAT@20..21
-                        NAME@20..21
-                          HOLE@20..21 "_"
+                      WILDCARD_PAT@20..21
+                        HOLE@20..21 "_"
                       WHITESPACE@21..22 " "
                       EQ@22..23 "="
                       WHITESPACE@23..24 " "
@@ -1724,9 +1723,8 @@ fn param_hole_pattern() {
                   PARAM_LIST@14..24
                     L_PAREN@14..15 "("
                     PARAM@15..23
-                      BIND_PAT@15..16
-                        NAME@15..16
-                          HOLE@15..16 "_"
+                      WILDCARD_PAT@15..16
+                        HOLE@15..16 "_"
                       COLON@16..17 ":"
                       WHITESPACE@17..18 " "
                       PATH_TYPE@18..23
@@ -2453,9 +2451,8 @@ fn let_mut_hole_pattern_is_rejected() {
                       WHITESPACE@19..20 " "
                       MUT_KW@20..23 "mut"
                       WHITESPACE@23..24 " "
-                      BIND_PAT@24..25
-                        NAME@24..25
-                          HOLE@24..25 "_"
+                      WILDCARD_PAT@24..25
+                        HOLE@24..25 "_"
                       WHITESPACE@25..26 " "
                       EQ@26..27 "="
                       WHITESPACE@27..28 " "
@@ -2493,9 +2490,8 @@ fn mut_hole_param_is_rejected() {
                     PARAM@15..27
                       MUT_KW@15..18 "mut"
                       WHITESPACE@18..19 " "
-                      BIND_PAT@19..20
-                        NAME@19..20
-                          HOLE@19..20 "_"
+                      WILDCARD_PAT@19..20
+                        HOLE@19..20 "_"
                       COLON@20..21 ":"
                       WHITESPACE@21..22 " "
                       PATH_TYPE@22..27
@@ -4295,7 +4291,7 @@ static f = fn (s: Shape) -> usize {
 }
 
 #[test]
-fn match_rest_pattern_parses_and_is_rejected() {
+fn dotdot_is_no_match_pattern_and_no_payload_binding() {
     check(
         r#"
 static f = fn (s: Shape) -> usize {
@@ -4363,7 +4359,7 @@ static f = fn (s: Shape) -> usize {
                               IDENT@68..69 "r"
                           COMMA@69..70 ","
                           WHITESPACE@70..71 " "
-                          REST_PAT@71..73
+                          ERROR@71..73
                             DOT2@71..73 ".."
                           R_PAREN@73..74 ")"
                         WHITESPACE@74..75 " "
@@ -4375,7 +4371,7 @@ static f = fn (s: Shape) -> usize {
                         COMMA@79..80 ","
                       WHITESPACE@80..89 "\n        "
                       MATCH_ARM@89..97
-                        REST_PAT@89..91
+                        ERROR@89..91
                           DOT2@89..91 ".."
                         WHITESPACE@91..92 " "
                         FAT_ARROW@92..94 "=>"
@@ -4388,8 +4384,8 @@ static f = fn (s: Shape) -> usize {
                     WHITESPACE@103..104 "\n"
                     R_BRACE@104..105 "}"
               WHITESPACE@105..106 "\n"
-            error 71..73: `..` in patterns is not supported yet
-            error 89..91: `..` in patterns is not supported yet
+            error 71..73: `..` is only allowed in a record pattern (`struct { x, .. }`)
+            error 89..91: `..` is only allowed in a record pattern (`struct { x, .. }`)
         "#]],
     );
 }
@@ -10156,9 +10152,8 @@ fn let_takes_a_pattern() {
                               IDENT@29..30 "b"
                           COMMA@30..31 ","
                           WHITESPACE@31..32 " "
-                          BIND_PAT@32..33
-                            NAME@32..33
-                              HOLE@32..33 "_"
+                          WILDCARD_PAT@32..33
+                            HOLE@32..33 "_"
                           R_BRACKET@33..34 "]"
                         R_BRACKET@34..35 "]"
                       WHITESPACE@35..36 " "

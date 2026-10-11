@@ -91,11 +91,11 @@ pub enum LinearDiagnostic {
         field: String,
         param: Option<String>,
     },
-    /// A match-arm `_` on an OWNED linear scrutinee. The match consumed the
-    /// value and the arm bound nothing, so it has nowhere to go — the
-    /// match-arm twin of [`Self::RestSkipsLinear`], and of the `let _ =`
-    /// case (which is caught as an unnamed binding). `param` is that twin's
-    /// too, for the SCRUTINEE's type.
+    /// A `_` pattern on an OWNED linear value: a match arm's (the match
+    /// consumed the scrutinee), a `let`'s, or a parameter's, at any depth
+    /// of a destructuring pattern. The value has nowhere to go. `param` is
+    /// the binder to blame when the skipped value's type is linear only
+    /// because a rigid parameter is.
     WildcardSkipsLinear { pat: PatId, param: Option<String> },
     /// A binding's liveness differs between the start and the end of a
     /// loop body — the next iteration would see a different world than the
@@ -607,15 +607,22 @@ impl CheckCtx<'_> {
                 frame.push(binding);
             }
         }
-        self.check_rest_patterns(pat);
+        if !deferred {
+            self.check_skipping_patterns(pat);
+        }
     }
 
-    /// A `..` that would skip a linear field. The rest marker means "don't
-    /// bind the others", which for a forgettable field is exactly right and
-    /// for a linear one is a leak with no name to report it under — so it is
-    /// refused at the pattern instead.
-    fn check_rest_patterns(&mut self, pat: PatId) {
+    /// A `..` that would skip a linear field, or a `_` that would skip a
+    /// linear value. Both mean "don't bind this", which for a forgettable
+    /// value is exactly right and for a linear one is a leak with no name to
+    /// report it under — so it is refused at the pattern instead.
+    fn check_skipping_patterns(&mut self, pat: PatId) {
         match &self.body.pats[pat] {
+            PatData::Wildcard => {
+                if let Some(ty) = self.infer.type_of_pat.get(pat).cloned() {
+                    self.check_wildcard(pat, &ty);
+                }
+            }
             PatData::Record { fields, rest: true } => {
                 let Some(ty) = self.infer.type_of_pat.get(pat) else {
                     return;
@@ -644,14 +651,25 @@ impl CheckCtx<'_> {
             }
             PatData::Newtype { inner, .. } => {
                 let inner = *inner;
-                self.check_rest_patterns(inner);
+                self.check_skipping_patterns(inner);
             }
             PatData::Array { elements } => {
                 for element in elements.clone() {
-                    self.check_rest_patterns(element);
+                    self.check_skipping_patterns(element);
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A `_` that would skip a linear value of type `ty`.
+    fn check_wildcard(&mut self, pat: PatId, ty: &Ty) {
+        if self.is_linear(ty) {
+            self.diagnostics
+                .push(LinearDiagnostic::WildcardSkipsLinear {
+                    pat,
+                    param: crate::capability::blaming_param(self.db, ty),
+                });
         }
     }
 
@@ -1213,29 +1231,20 @@ impl CheckCtx<'_> {
         if self.read_value(scrutinee) == Flow::Diverges {
             return Flow::Diverges;
         }
-        // A match on an OWNED linear consumed it, so every arm has to name
-        // it. `_` names nothing — the match-arm twin of a `..` that skips a
-        // linear field, and it has to be refused for the same reason: the
-        // value was consumed by the match and the arm gave it nowhere to
-        // go. (Through a BORROW nothing was consumed, so nothing is owed.)
-        let owned_linear = self.is_linear_expr(scrutinee);
         let entry = self.state.clone();
         let mut branches = Vec::new();
         for arm in arms {
             self.state = entry.clone();
             self.scopes.push(Vec::new());
-            if owned_linear && matches!(self.body.pats[arm.pat], PatData::Wildcard) {
-                self.diagnostics
-                    .push(LinearDiagnostic::WildcardSkipsLinear {
-                        pat: arm.pat,
-                        param: self
-                            .infer
-                            .type_of_expr
-                            .get(scrutinee)
-                            .and_then(|ty| crate::capability::blaming_param(self.db, ty)),
-                    });
+            // An arm's whole `_` binds nothing and has the scrutinee's type:
+            // an owned linear one is refused, a borrowed one owes nothing.
+            if matches!(self.body.pats[arm.pat], PatData::Wildcard) {
+                if let Some(ty) = self.infer.type_of_expr.get(scrutinee).cloned() {
+                    self.check_wildcard(arm.pat, &ty);
+                }
+            } else {
+                self.track_pat(arm.pat, false);
             }
-            self.track_pat(arm.pat, false);
             let flow = self.read_value(arm.body);
             self.pop_scope(arm.body, flow);
             branches.push((flow, std::mem::replace(&mut self.state, entry.clone())));

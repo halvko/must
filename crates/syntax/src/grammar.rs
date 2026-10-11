@@ -503,11 +503,11 @@ fn pattern(p: &mut Parser<'_>, msg: &str) {
     }
 }
 
-/// A `let`/parameter pattern: `mut? name` or `_` (`BIND_PAT`), a
-/// `struct { ... }` record (`RECORD_PAT`), `Name(pattern)` unwrapping a
-/// newtype (`NEWTYPE_PAT`), an array (`ARRAY_PAT`), and variant and literal
-/// patterns, which `hir` refuses where they can fail to match. `..` is no
-/// pattern here.
+/// A `let`/parameter pattern: `mut? name` (`BIND_PAT`), `_`
+/// (`WILDCARD_PAT`), a `struct { ... }` record
+/// (`RECORD_PAT`), `Name(pattern)` unwrapping a newtype (`NEWTYPE_PAT`), an
+/// array (`ARRAY_PAT`), and variant and literal patterns, which `hir`
+/// refuses where they can fail to match. `..` is no pattern here.
 fn binding_pattern(p: &mut Parser<'_>, msg: &str) {
     match p.current() {
         IDENT if p.nth(1) == L_PAREN => {
@@ -515,7 +515,8 @@ fn binding_pattern(p: &mut Parser<'_>, msg: &str) {
         }
         IDENT if p.nth(1) == COLON2 => variant_pat(p),
         COLON2 => variant_pat(p),
-        IDENT | HOLE | MUT_KW => bind_pat(p, msg),
+        HOLE => wildcard_pat(p),
+        IDENT | MUT_KW => bind_pat(p, msg),
         STRUCT_KW if p.nth(1) == L_BRACE => {
             record_pat(p);
         }
@@ -1042,28 +1043,17 @@ fn skip_arm_body(p: &mut Parser<'_>) {
 /// and the retired unqualified `Name(bindings...)` (parsed as a
 /// `VARIANT_PAT` so `validation` can hand back an honest "write
 /// `::Name(...)`" error — patterns have no calls). Plus a LITERAL pattern
-/// (`'(' =>`, `0 =>`), and the *reserved* `..`
-/// (parses, validation rejects it). A bare name with no `::` and no parens
-/// is *always* a binding now — never reinterpreted type-directed as a
-/// variant (see `infer.rs`'s `check_match_pat` `PatData::Bind` arm). No
-/// nesting, or-patterns or guards yet.
+/// (`'(' =>`, `0 =>`). A bare name with no `::` and no parens is *always* a
+/// binding — never reinterpreted type-directed as a variant (see
+/// `infer.rs`'s `check_match_pat` `PatData::Bind` arm). Patterns do not
+/// nest, and there are no or-patterns or guards. `..` is no pattern here.
 fn match_pattern(p: &mut Parser<'_>) {
     match p.current() {
         INT_NUMBER | STRING | CHAR | TRUE_KW | FALSE_KW => literal_pat(p),
         MINUS if sign_begins_literal_pat(p.nth(1)) => literal_pat(p),
-        HOLE => {
-            let m = p.start();
-            p.bump(HOLE);
-            m.complete(p, WILDCARD_PAT);
-        }
-        // Reserved for record patterns (`Foo(struct { x, .. })` and
-        // friends): the token parses wherever a pattern does, validation
-        // rejects it for now.
-        DOT2 => {
-            let m = p.start();
-            p.bump(DOT2);
-            m.complete(p, REST_PAT);
-        }
+        HOLE => wildcard_pat(p),
+        // Eaten so the arm's `=>` and body parse.
+        DOT2 => p.err_and_bump(DOT2_OUTSIDE_RECORD_PATTERN),
         COLON2 => variant_pat(p),
         // `Name::…` (qualified) or the bare `Name(...)` shape parse as a
         // variant pattern; a bare name alone is *always* a binding (no
@@ -1081,6 +1071,18 @@ fn match_pattern(p: &mut Parser<'_>) {
 /// any caller asking whether a `-` line could start a pattern.
 pub fn sign_begins_literal_pat(next: SyntaxKind) -> bool {
     next == INT_NUMBER
+}
+
+/// The error on a `..` where a pattern or binding belongs.
+const DOT2_OUTSIDE_RECORD_PATTERN: &str =
+    "`..` is only allowed in a record pattern (`struct { x, .. }`)";
+
+/// `_` as a whole pattern, the one spelling both pattern grammars share:
+/// matches anything, binds nothing.
+fn wildcard_pat(p: &mut Parser<'_>) {
+    let m = p.start();
+    p.bump(HOLE);
+    m.complete(p, WILDCARD_PAT);
 }
 
 /// A literal pattern. EVERY literal kind parses here, not just the two
@@ -1130,19 +1132,15 @@ fn bind_pat(p: &mut Parser<'_>, msg: &str) {
     m.complete(p, BIND_PAT);
 }
 
-/// The positional bindings of a variant pattern: `mut? name`, `_` holes,
-/// and the reserved `..` rest marker.
+/// The positional bindings of a variant pattern: `mut? name` and `_`
+/// holes.
 fn pattern_binding_list(p: &mut Parser<'_>) {
     p.bump(L_PAREN);
     while !p.at(R_PAREN) && !p.at(EOF) {
         let before = p.pos();
         match p.current() {
             MUT_KW | IDENT | HOLE => bind_pat(p, "expected a binding name"),
-            DOT2 => {
-                let m = p.start();
-                p.bump(DOT2);
-                m.complete(p, REST_PAT);
-            }
+            DOT2 => p.err_and_bump(DOT2_OUTSIDE_RECORD_PATTERN),
             FAT_ARROW => {
                 // The arm's own arrow: the `)` is missing — don't eat it.
                 p.error("expected a binding name");

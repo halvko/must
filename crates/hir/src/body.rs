@@ -385,18 +385,16 @@ pub struct Param {
 /// inside a `Newtype`) — never inside a variant pattern's payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatData {
-    /// Source was broken (including the reserved `..` as a whole pattern —
-    /// validation rejects it); matches nothing.
+    /// Source was broken; matches nothing.
     Missing,
-    /// `_`: matches anything, binds nothing. Only a match-arm pattern — a
-    /// `let`/parameter hole lowers as an (unnamed) [`PatData::Bind`]
-    /// instead, so it still gets a value slot at runtime, exactly as an
-    /// ordinary hole binding always has.
+    /// `_`: matches anything, binds nothing — a match arm, a `let`, a
+    /// parameter, or nested in a destructuring pattern alike. The value it
+    /// meets is dropped (a parameter gets a slot at runtime so callers'
+    /// arguments line up positionally).
     Wildcard,
     /// A bare name: binds the whole scrutinee — unless inference
     /// reinterprets it, type-directed, as a payload-less variant of the
     /// scrutinee's enum (`Point =>` on a `Shape` scrutinee). Also how a
-    /// `let`/parameter hole (`_`) lowers (an unnamed binding), and how a
     /// bare name inside a [`PatData::Newtype`] binds the whole underlying
     /// value (`Foo(inner)`).
     Bind(BindingId),
@@ -427,12 +425,8 @@ pub enum PatData {
         /// Empty when broken (`Shape:: =>` — the parse error covers it).
         variant: String,
         /// Positional payload bindings, in source order; `_` holes lower
-        /// as unnamed bindings (like hole params).
+        /// as unnamed bindings.
         bindings: Vec<BindingId>,
-        /// A `..` rest marker was written. Reserved for record patterns
-        /// (validation rejects it today); carried so the arena is already
-        /// shaped for them.
-        rest: bool,
     },
     /// `struct { x, y as z, mut w, .. }` — destructures a structural
     /// record, construction's mirror image ([`crate::body::ExprData::RecordLit`]).
@@ -1074,8 +1068,6 @@ impl LowerCtx {
     fn lower_pat(&mut self, pat: ast::Pat) -> PatId {
         match pat {
             ast::Pat::WildcardPat(it) => self.alloc_pat(PatData::Wildcard, it.syntax()),
-            // Reserved syntax (validation rejects it): nothing to match.
-            ast::Pat::RestPat(it) => self.alloc_pat(PatData::Missing, it.syntax()),
             // The two SCALAR literals have pattern semantics; string and
             // boolean literals parse into this node so `validation` can
             // name them, and lower as broken (their diagnostic is already
@@ -1114,13 +1106,11 @@ impl LowerCtx {
                     .bindings()
                     .map(|bind| self.alloc_binding(bind.name(), None, bind.is_mut(), bind.syntax()))
                     .collect();
-                let rest = it.rest_pat().is_some();
                 self.alloc_pat(
                     PatData::Variant {
                         enum_name,
                         variant,
                         bindings,
-                        rest,
                     },
                     it.syntax(),
                 )
@@ -1134,13 +1124,10 @@ impl LowerCtx {
         }
     }
 
-    /// A `let`/parameter pattern — construction's mirror image. Unlike
-    /// [`Self::lower_pat`] (match arms), a bare name/hole always lowers as
-    /// [`PatData::Bind`] (never [`PatData::Wildcard`]): a `let`/parameter
-    /// hole has always allocated an (unnamed) value slot, and this keeps
-    /// doing exactly that. `type_ref`/`mutable` apply only when `pat` is
-    /// directly a bare name — nested patterns carry no type ascription, and
-    /// a nested binding's own `mut` is read straight off its syntax.
+    /// A `let`/parameter pattern — construction's mirror image. `_` lowers
+    /// as [`PatData::Wildcard`]. `type_ref`/`mutable` apply only when `pat`
+    /// is directly a bare name — nested patterns carry no type ascription,
+    /// and a nested binding's own `mut` is read straight off its syntax.
     fn lower_binding_pattern(
         &mut self,
         pat: ast::Pat,
@@ -1189,12 +1176,7 @@ impl LowerCtx {
                 };
                 self.alloc_pat(PatData::Newtype { type_name, inner }, it.syntax())
             }
-            // `match_pattern`'s spellings of `_` and `..`. `binding_pattern`
-            // parses `_` as a hole `BindPat` and has no `..` pattern, so
-            // these only come from broken input: nothing to bind.
-            // TODO: one node for `_` in both grammars (halvko/must#99).
-            ast::Pat::WildcardPat(it) => self.alloc_pat(PatData::Missing, it.syntax()),
-            ast::Pat::RestPat(it) => self.alloc_pat(PatData::Missing, it.syntax()),
+            ast::Pat::WildcardPat(it) => self.alloc_pat(PatData::Wildcard, it.syntax()),
         }
     }
 

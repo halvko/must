@@ -1228,8 +1228,8 @@ impl LowerCtx<'_> {
                                     let local = self.alloc_binding_local(b, *binding);
                                     b.push_assign(local, Rvalue::Use(init_op), init);
                                 }
-                                // Evaluated for effects only; nothing to
-                                // bind (a hole lowers as `Bind` above).
+                                // `_`: evaluated for effects only, nothing
+                                // to bind.
                                 PatData::Wildcard | PatData::Missing => {}
                                 // A destructuring pattern: stash the
                                 // initializer's value in a synthetic local,
@@ -2357,10 +2357,8 @@ impl LowerCtx<'_> {
                 self.bind_binding_pattern(b, pat, &Operand::Copy(local.into()), origin);
                 local
             }
-            // A hole lowers as `Bind` (see `LowerCtx::lower_binding_pattern`
-            // in `hir`), so `Wildcard` never reaches here in practice; kept
-            // total regardless — still needs a slot so callers' argument
-            // lists line up positionally.
+            // `_` binds nothing but needs a slot so callers' argument lists
+            // line up positionally.
             PatData::Wildcard | PatData::Missing => {
                 let ty = self
                     .infer

@@ -2380,6 +2380,10 @@
       "members": [
         {
           "type": "SYMBOL",
+          "name": "wildcard_pat"
+        },
+        {
+          "type": "SYMBOL",
           "name": "bind_pat"
         },
         {
@@ -2429,7 +2433,7 @@
     },
     "bind_pat": {
       "type": "SYMBOL",
-      "name": "_name"
+      "name": "identifier"
     },
     "_mut_bind_pat": {
       "type": "SEQ",
@@ -2670,6 +2674,10 @@
       "type": "CHOICE",
       "members": [
         {
+          "type": "SYMBOL",
+          "name": "wildcard_pat"
+        },
+        {
           "type": "ALIAS",
           "content": {
             "type": "SYMBOL",
@@ -2739,22 +2747,13 @@
       ]
     },
     "_param_bind_pat": {
-      "type": "CHOICE",
-      "members": [
-        {
-          "type": "ALIAS",
-          "content": {
-            "type": "SYMBOL",
-            "name": "identifier"
-          },
-          "named": true,
-          "value": "param_name"
-        },
-        {
-          "type": "STRING",
-          "value": "_"
-        }
-      ]
+      "type": "ALIAS",
+      "content": {
+        "type": "SYMBOL",
+        "name": "identifier"
+      },
+      "named": true,
+      "value": "param_name"
     },
     "_param_mut_bind_pat": {
       "type": "SEQ",
@@ -3060,10 +3059,6 @@
         },
         {
           "type": "SYMBOL",
-          "name": "rest_pat"
-        },
-        {
-          "type": "SYMBOL",
           "name": "variant_pat"
         },
         {
@@ -3222,22 +3217,13 @@
               "type": "SEQ",
               "members": [
                 {
-                  "type": "CHOICE",
-                  "members": [
-                    {
-                      "type": "ALIAS",
-                      "content": {
-                        "type": "SYMBOL",
-                        "name": "_payload_bind_pat"
-                      },
-                      "named": true,
-                      "value": "bind_pat"
-                    },
-                    {
-                      "type": "SYMBOL",
-                      "name": "rest_pat"
-                    }
-                  ]
+                  "type": "ALIAS",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "_payload_bind_pat"
+                  },
+                  "named": true,
+                  "value": "bind_pat"
                 },
                 {
                   "type": "REPEAT",
@@ -3249,22 +3235,13 @@
                         "value": ","
                       },
                       {
-                        "type": "CHOICE",
-                        "members": [
-                          {
-                            "type": "ALIAS",
-                            "content": {
-                              "type": "SYMBOL",
-                              "name": "_payload_bind_pat"
-                            },
-                            "named": true,
-                            "value": "bind_pat"
-                          },
-                          {
-                            "type": "SYMBOL",
-                            "name": "rest_pat"
-                          }
-                        ]
+                        "type": "ALIAS",
+                        "content": {
+                          "type": "SYMBOL",
+                          "name": "_payload_bind_pat"
+                        },
+                        "named": true,
+                        "value": "bind_pat"
                       }
                     ]
                   }

@@ -208,7 +208,6 @@ fn infer_let_hole_pattern() {
         expect![[r#"
             11..28 'fn { let _ = 5; }': fn()
             14..28 '{ let _ = 5; }': ()
-            20..21 '_': {number}
             24..25 '5': {number}
         "#]],
     );
@@ -799,7 +798,6 @@ static h = fn (_: _) -> usize { 5 };
             95..100 'p + 1': usize
             99..100 '1': usize
             115..139 'fn (_: _) -> usiz...': fn(_) -> usize
-            119..120 '_': _
             134..139 '{ 5 }': usize
             136..137 '5': usize
         "#]],
@@ -16808,9 +16806,8 @@ static leaks_the_payload = fn(text: str) -> () {
 }
 
 #[test]
-fn a_hole_binding_cannot_swallow_a_linear_and_says_so_without_a_name() {
-    // `let _ = ...` binds nothing to quote, and quoting the empty string
-    // reads as a compiler bug — so the message names the position instead.
+fn a_wildcard_let_cannot_swallow_a_linear() {
+    // `let _ = <linear>` is refused with the wildcard message.
     check_linear(
         r#"
 static main = fn() -> () {
@@ -16818,7 +16815,53 @@ static main = fn() -> () {
 };
 "#,
         expect![[r#"
-            361..385: the value swallowed by `_` is not consumed on this path; its type has no `forget` capability, so every path must consume it (the value swallowed by `_` is born here and must be consumed at 371..372)
+            371..372: `_` matches the value without binding it, and it must be consumed; give it a name so it has somewhere to go
+        "#]],
+    );
+}
+
+#[test]
+fn a_nested_wildcard_cannot_swallow_a_linear() {
+    // A `_` inside a destructuring `let` pattern is refused too.
+    check_linear(
+        r#"
+static main = fn() -> () {
+    let [r, _] = [make(1), make(2)];
+    r.drop();
+};
+"#,
+        expect![[r#"
+            375..376: `_` matches the value without binding it, and it must be consumed; give it a name so it has somewhere to go
+        "#]],
+    );
+}
+
+#[test]
+fn a_wildcard_parameter_cannot_swallow_a_linear() {
+    // A `_` parameter of a linear type is refused at the parameter.
+    check_linear(
+        r#"
+static take = fn(_: Res) -> () {};
+"#,
+        expect![[r#"
+            353..354: `_` matches the value without binding it, and it must be consumed; give it a name so it has somewhere to go
+        "#]],
+    );
+}
+
+#[test]
+fn a_hole_binding_cannot_swallow_a_linear_and_says_so_without_a_name() {
+    // A hole in a binding position (here a record field renamed to `_`)
+    // binds nothing to quote, and quoting the empty string reads as a
+    // compiler bug — so the message names the position instead.
+    check_linear(
+        r#"
+static main = fn() -> () {
+    let struct { r as _ } = struct { r = make(1) };
+};
+"#,
+        expect![[r#"
+            361..416: the value swallowed by `_` is not consumed on this path; its type has no `forget` capability, so every path must consume it (the value swallowed by `_` is born here and must be consumed at 385..386)
         "#]],
     );
 }
@@ -17481,7 +17524,7 @@ fn every_binding_reports_its_kind_and_display_name() {
 static mk = fn() -> usize { 5 };
 static main = fn() -> () {
     let struct { mut } = struct { x = 2 };
-    let _ = 1;
+    let struct { y as _ } = struct { y = 1 };
     let p = mk().&raw;
     unsafe { p.*; }
 };

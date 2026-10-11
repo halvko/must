@@ -794,7 +794,7 @@ static main = fn { let f = id; };
 }
 
 #[test]
-fn hole_pattern_locals_are_unnamed_but_still_assigned() {
+fn wildcard_patterns_bind_nothing_but_still_evaluate() {
     // `_` binds nothing (no ` // <name>` comment), but the initializer and
     // the argument are still lowered and evaluated for their effects.
     check_mir(
@@ -805,10 +805,8 @@ fn hole_pattern_locals_are_unnamed_but_still_assigned() {
               _0: ()  // return
               _1: usize  // param _
               _2: usize
-              _3: usize
               bb0:
                 _2 = Add(4, 5)
-                _3 = _2
                 _0 = ()
                 return
             }

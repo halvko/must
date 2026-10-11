@@ -399,6 +399,10 @@
         {
           "type": "variant_pat",
           "named": true
+        },
+        {
+          "type": "wildcard_pat",
+          "named": true
         }
       ]
     }
@@ -2744,6 +2748,10 @@
           {
             "type": "variant_pat",
             "named": true
+          },
+          {
+            "type": "wildcard_pat",
+            "named": true
           }
         ]
       },
@@ -2966,10 +2974,6 @@
           },
           {
             "type": "literal_pat",
-            "named": true
-          },
-          {
-            "type": "rest_pat",
             "named": true
           },
           {
@@ -3654,6 +3658,10 @@
         {
           "type": "variant_pat",
           "named": true
+        },
+        {
+          "type": "wildcard_pat",
+          "named": true
         }
       ]
     }
@@ -3704,6 +3712,10 @@
           },
           {
             "type": "variant_pat",
+            "named": true
+          },
+          {
+            "type": "wildcard_pat",
             "named": true
           }
         ]
@@ -5227,10 +5239,6 @@
       "types": [
         {
           "type": "bind_pat",
-          "named": true
-        },
-        {
-          "type": "rest_pat",
           "named": true
         }
       ]
