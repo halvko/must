@@ -2,8 +2,8 @@
 //! the runtime — Zed spawns this binary, and the program runs in-process on
 //! the same MIR interpreter the editor's const eval uses. Supports launch,
 //! breakpoints, stepping, stack/variables inspection, console evaluation,
-//! and stop-on-trap: a deferred error pauses at the crash site with the
-//! editor's diagnostic instead of just dying.
+//! terminate, and stop-on-trap: a deferred error pauses at the crash site
+//! with the editor's diagnostic instead of just dying.
 
 mod debuggee;
 #[cfg(test)]
@@ -74,6 +74,7 @@ impl<W: Write> Session<W> {
                         "supportsConditionalBreakpoints": true,
                         "supportsHitConditionalBreakpoints": true,
                         "supportsLogPoints": true,
+                        "supportsTerminateRequest": true,
                     }),
                 )?;
                 self.event("initialized", json!({}))?;
@@ -208,9 +209,7 @@ impl<W: Write> Session<W> {
                 self.respond(&request, body)?;
                 if self.debuggee.as_ref().is_some_and(|d| d.crashed.is_some()) {
                     // Resuming a crashed program: it's over.
-                    self.event("exited", json!({ "exitCode": 1 }))?;
-                    self.event("terminated", json!({}))?;
-                    self.debuggee = None;
+                    self.end_run(Some(1))?;
                     return Ok(true);
                 }
                 let mode = match request.command.as_str() {
@@ -303,6 +302,13 @@ impl<W: Write> Session<W> {
                     Err(message) => self.respond_err(&request, &message)?,
                 }
             }
+            // Stop the debuggee but keep the session: the client follows
+            // up with `disconnect`. The program never finished, so there is
+            // no exit code to report, only `terminated`.
+            "terminate" => {
+                self.respond(&request, json!({}))?;
+                self.end_run(None)?;
+            }
             "disconnect" => {
                 self.respond(&request, json!({}))?;
                 return Ok(false);
@@ -365,9 +371,7 @@ impl<W: Write> Session<W> {
                 if !matches!(value, eval::Value::Unit) {
                     self.output("console", &format!("{}\n", value.display()))?;
                 }
-                self.event("exited", json!({ "exitCode": 0 }))?;
-                self.event("terminated", json!({}))?;
-                self.debuggee = None;
+                self.end_run(Some(0))?;
             }
             // Stop-on-trap: the program is dead, but its frames stay
             // inspectable until the user resumes.
@@ -394,6 +398,25 @@ impl<W: Write> Session<W> {
             }
         }
         Ok(())
+    }
+
+    /// Tear down the run and tell the client: `exited` when the program
+    /// has an exit code, then `terminated`. A run that already ended sent
+    /// both, so nothing is sent twice. A `launch` parked before
+    /// `configurationDone` gets its answer here, since the run it asked
+    /// for never starts.
+    fn end_run(&mut self, exit_code: Option<i64>) -> ServerResult<()> {
+        if self.debuggee.is_none() && self.pending_launch.is_none() {
+            return Ok(());
+        }
+        if let Some(launch) = self.pending_launch.take() {
+            self.respond_err(&launch, "terminated before configurationDone")?;
+        }
+        self.debuggee = None;
+        if let Some(code) = exit_code {
+            self.event("exited", json!({ "exitCode": code }))?;
+        }
+        self.event("terminated", json!({}))
     }
 
     fn console(&self) -> ConsoleWriter<W> {
