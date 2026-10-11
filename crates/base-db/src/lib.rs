@@ -1,4 +1,4 @@
-//! Salsa database core: inputs and the `parse` query.
+//! Salsa database core: inputs and the `parse` and `line_index` queries.
 //!
 //! Everything downstream (hir, ide) computes via tracked queries over these
 //! inputs; the LSP layer mutates inputs (which bumps the revision and cancels
@@ -98,6 +98,13 @@ impl Db for RootDatabase {}
 #[salsa::tracked(returns(ref))]
 pub fn parse(db: &dyn Db, file: SourceFile) -> syntax::Parse {
     syntax::parse(file.text(db))
+}
+
+/// The file's line index, built once per text revision and shared by
+/// every caller that converts offsets to lines.
+#[salsa::tracked(returns(ref))]
+pub fn line_index(db: &dyn Db, file: SourceFile) -> ::line_index::LineIndex {
+    ::line_index::LineIndex::new(file.text(db))
 }
 
 #[cfg(test)]

@@ -188,7 +188,7 @@ pub(crate) fn diagnostic(
                     Some(lsp_types::DiagnosticRelatedInformation {
                         location: lsp_types::Location {
                             uri,
-                            range: range(&target_index, r.range),
+                            range: range(target_index, r.range),
                         },
                         message: r.message.clone(),
                     })
