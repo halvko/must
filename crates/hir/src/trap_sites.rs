@@ -225,6 +225,18 @@ fn declaration_mentions(
             mentions.push((bound.trait_.clone(), ptr.text_range()));
         }
     }
+    // A bound resolved at an instantiation reaches the implementer's impl
+    // without spelling it; a broken one traps there with its own errors.
+    for (key, entries) in inference.bound_dicts_of_expr.iter() {
+        let Some(range) = source_map.node_for_expr(key).map(|ptr| ptr.text_range()) else {
+            continue;
+        };
+        for entry in entries {
+            if let crate::infer::DictEntry::BrokenImpl { owner } = entry {
+                mentions.push((owner.clone(), range));
+            }
+        }
+    }
     mentions
 }
 

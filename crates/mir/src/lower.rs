@@ -3565,7 +3565,7 @@ impl LowerCtx<'_> {
                         }
                     }
                 }
-                hir::infer::DictEntry::Error => {
+                hir::infer::DictEntry::BrokenImpl { .. } | hir::infer::DictEntry::Error => {
                     return Err(
                         "cannot resolve a trait bound for this call (see the reported errors)"
                             .to_owned(),

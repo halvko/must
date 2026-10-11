@@ -237,8 +237,12 @@ pub enum DictEntry {
     /// The bound resolved to a rigid param of the enclosing binder that
     /// carries the same bound: forward the caller's own dictionary.
     Forward { param_index: u32, trait_: ItemLoc },
-    /// Unresolvable (unsatisfied, undetermined, or a broken impl) — the
-    /// call site carries a diagnostic and MIR traps the call.
+    /// The implementer's impl is missing a member. Its errors belong to
+    /// `owner`, the item whose chain hosts the impl, so the call traps with
+    /// them as if it named that item.
+    BrokenImpl { owner: ItemLoc },
+    /// Unresolvable (unsatisfied or undetermined) — the call site carries
+    /// a diagnostic and MIR traps the call.
     Error,
 }
 
@@ -3696,8 +3700,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         match crate::traits::impl_dict_members(self.db, &obligation.trait_, site) {
             Some(members) => DictEntry::Impl(members),
             // A broken impl (missing members): the definition site carries
-            // the diagnostic; the call traps.
-            None => DictEntry::Error,
+            // the diagnostic; the call traps with it.
+            None => DictEntry::BrokenImpl {
+                owner: site.owner.clone(),
+            },
         }
     }
 

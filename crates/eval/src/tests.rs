@@ -8725,6 +8725,76 @@ static main = fn() -> usize {
     );
 }
 
+/// A call through a bound traps with the trait's error when an `unsafe fn`
+/// requirement leaves the impl without its member.
+#[test]
+fn a_reserved_unsafe_requirement_traps_through_a_bound() {
+    check_run(
+        r#"
+trait D = requires { f: unsafe fn(Self) -> usize; } with {
+    impl usize { f = unsafe fn(x: usize) -> usize { x }; }
+};
+static g = fn::<T: D>(x: T) -> usize { unsafe { x.f() } + 1 };
+static main = fn() -> usize {
+    print("before;");
+    let n: usize = 1;
+    g(n)
+};
+"#,
+        "main()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: `unsafe` trait members are not supported yet
+        "#]],
+    );
+}
+
+/// A call through a bound traps with the trait's first error when both the
+/// trait and the impl are broken.
+#[test]
+fn a_non_fn_requirement_traps_through_a_bound() {
+    check_run(
+        r#"
+trait D = requires { f: usize; } with {
+    impl usize { f = 3; }
+};
+static g = fn::<T: D>(x: T) -> usize { x.f() + 1 };
+static main = fn() -> usize {
+    print("before;");
+    let n: usize = 1;
+    g(n)
+};
+"#,
+        "main()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: a requirement's signature must be an `fn` signature
+        "#]],
+    );
+}
+
+/// An impl missing a member traps a call that reaches it through a bound,
+/// even when nothing in the body names the impl's home.
+#[test]
+fn a_missing_impl_member_traps_through_a_bound() {
+    check_run(
+        r#"
+trait D = requires { m: fn(Self) -> usize; } with { impl usize { } };
+static g = fn::<T: D>(x: T) -> usize { x.m() };
+static main = fn() -> usize {
+    print("before;");
+    let n: usize = 1;
+    g(n)
+};
+"#,
+        "main()",
+        expect![[r#"
+            output: "before;"
+            error[Trap]: this impl of `D` is missing the member `m`
+        "#]],
+    );
+}
+
 /// A member without its full signature traps when a dot-call reaches it.
 #[test]
 fn a_member_without_a_full_signature_traps_at_the_call() {
