@@ -2716,8 +2716,10 @@ struct PendingObligation {
     /// The param's instantiation (a fresh var, or the written arg).
     var: Ty,
     trait_: ItemLoc,
-    /// The bounded param's declared name, for diagnostics.
-    param_name: String,
+    /// Where to look up the bounded param's name (`param_index` in
+    /// `binder`'s generics); only a diagnostic reads it.
+    binder: SiteName,
+    param_index: u32,
     /// Whether the edge sits in a NESTED body (a nested fn literal or a
     /// `const` block): a Forward resolution there would need to capture
     /// the root body's dictionary — reserved ([`InferenceDiagnostic::NestedBoundUse`]).
@@ -2766,7 +2768,8 @@ struct MemberSite {
     owner_hint: Option<ItemLoc>,
 }
 
-/// What a use site calls a binder's owner, rendered only for a message.
+/// What a use site calls a binder's owner, and the binder it names
+/// ([`InferCtx::site_generics`]).
 #[derive(Debug, Clone)]
 enum SiteName {
     /// The item's own name, which for a trait-impl member is already the
@@ -2774,8 +2777,14 @@ enum SiteName {
     Item(ItemLoc),
     /// A member under a written owner ([`InferCtx::member_path`]).
     Member { owner: ItemLoc, member: ItemLoc },
-    /// The trait's requirement at `index`, under the trait.
-    Requirement { trait_: ItemLoc, index: usize },
+    /// The requirement at `member_index` in the trait's members, under
+    /// the trait.
+    Requirement {
+        trait_: ItemLoc,
+        member_index: usize,
+    },
+    /// A generic builtin, whose binder no item tree declares.
+    Builtin(Builtin),
 }
 
 /// One instantiation of a generic item's scheme at a mention: which fresh
@@ -2786,16 +2795,16 @@ struct PendingInstantiation {
     /// The blame name and the spelling for
     /// [`InferenceDiagnostic::CannotInferGenericParam`] — carried from the
     /// site, because only the site knows how the binder can be WRITTEN (a
-    /// member's is not written the way its `ItemLoc` renders). The
-    /// diagnostics' item comes from it too ([`InferCtx::site_item`]).
+    /// member's is not written the way its `ItemLoc` renders). Also the
+    /// binder the `params` indices refer to, and the diagnostics' item
+    /// ([`InferCtx::site_item`]).
     owner: SiteName,
     spelling: TurbofishSpelling,
-    /// `(param name, the fresh variable, whether the binder wrote
-    /// `T: forget`)` per *type* param. The bound flag is CARRIED rather
-    /// than re-derived at check time: a builtin's binder has no item tree
-    /// to look it up in, so re-deriving would answer out of thin air —
-    /// record, don't re-derive.
-    params: Vec<(String, Ty, bool)>,
+    /// `(binder index, the fresh variable, whether the binder wrote
+    /// `T: forget`)` per *type* param. The flag is carried so the check
+    /// needs no binder lookup; the name is looked up in `owner`'s generics
+    /// only for a message.
+    params: Vec<(u32, Ty, bool)>,
 }
 
 /// A join under construction. The root `if` of a nest opens one; every
@@ -3369,7 +3378,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let mut signature_holes: Option<rustc_hash::FxHashSet<TyVar>> = None;
         let pending = std::mem::take(&mut self.pending_instantiations);
         for instantiation in pending {
-            for (param, var, needs_forget) in instantiation.params {
+            for (index, var, needs_forget) in instantiation.params {
                 let resolved = resolve_fully(self.table, &var);
                 // A body writes `T: forget` when it genuinely drops a `T`
                 // on the floor; this is the promise that keeps it honest.
@@ -3388,7 +3397,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         .push(InferenceDiagnostic::ForgetBoundUnsatisfied {
                             expr: instantiation.expr,
                             item: self.site_item(&instantiation.owner),
-                            param: param.clone(),
+                            param: self.binder_param_name(&instantiation.owner, index),
                             ty: resolved.clone(),
                             reason,
                         });
@@ -3430,7 +3439,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     .push(InferenceDiagnostic::CannotInferGenericParam {
                         expr: instantiation.expr,
                         item: self.site_item(&instantiation.owner),
-                        param,
+                        param: self.binder_param_name(&instantiation.owner, index),
                         owner: self.site_name(&instantiation.owner),
                         spelling: instantiation.spelling.clone(),
                     });
@@ -3774,7 +3783,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 .diagnostics
                 .push(InferenceDiagnostic::UnsatisfiedBound {
                     expr: obligation.key,
-                    param: obligation.param_name.clone(),
+                    param: self.binder_param_name(&obligation.binder, obligation.param_index),
                     trait_: obligation.trait_.clone(),
                     ty: resolved,
                 });
@@ -3786,7 +3795,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 .diagnostics
                 .push(InferenceDiagnostic::UnsatisfiedBound {
                     expr: obligation.key,
-                    param: obligation.param_name.clone(),
+                    param: self.binder_param_name(&obligation.binder, obligation.param_index),
                     trait_: obligation.trait_.clone(),
                     ty: resolved,
                 });
@@ -3798,7 +3807,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 .diagnostics
                 .push(InferenceDiagnostic::UnsatisfiedBound {
                     expr: obligation.key,
-                    param: obligation.param_name.clone(),
+                    param: self.binder_param_name(&obligation.binder, obligation.param_index),
                     trait_: obligation.trait_.clone(),
                     ty: resolved,
                 });
@@ -3824,30 +3833,36 @@ impl<'a, 'db> InferCtx<'a, 'db> {
 
     /// Push the obligations of one bounded instantiation, keyed by
     /// `key` (the mention or the call), in canonical slot order. `var_of`
-    /// maps a binder index to the param's instantiation.
+    /// maps an index into `binder`'s generics to the param's instantiation.
     fn push_bound_obligations(
         &mut self,
         key: ExprId,
-        generics: &[GenericParamData],
+        binder: &SiteName,
         var_of: &FxHashMap<u32, Ty>,
     ) {
+        let generics = self.site_generics(binder);
         let nested = self.in_nested_body();
         for slot in crate::traits::bound_slots(self.db, self.file, generics) {
             let Some(var) = var_of.get(&slot.param_index) else {
                 continue;
             };
-            let param_name = generics
-                .get(slot.param_index as usize)
-                .map(|param| param.name.clone())
-                .unwrap_or_default();
             self.pending_obligations.push(PendingObligation {
                 key,
                 var: var.clone(),
                 trait_: slot.trait_,
-                param_name,
+                binder: binder.clone(),
+                param_index: slot.param_index,
                 nested,
             });
         }
+    }
+
+    /// The declared name of `binder`'s parameter `index`, for a message.
+    fn binder_param_name(&self, binder: &SiteName, index: u32) -> String {
+        self.site_generics(binder)
+            .get(index as usize)
+            .map(|param| param.name.clone())
+            .unwrap_or_default()
     }
 
     fn fresh_var(&mut self) -> Ty {
@@ -4010,7 +4025,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         let generics = item_generics(self.db, target);
                         if !generics.is_empty() {
                             let sig = signature(self.db, target);
-                            self.instantiate_mention(expr, loc.clone(), sig, generics, None)
+                            self.instantiate_mention(
+                                expr,
+                                loc.clone(),
+                                SiteName::Item(loc.clone()),
+                                sig,
+                                None,
+                            )
                         } else {
                             let sig = signature(self.db, target);
                             // Inference couldn't determine the signature
@@ -6092,12 +6113,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             return Ty::Error;
         }
         let (mut subst, const_subst) = owner_arg_subst(&named.args);
-        let generics = item_generics(self.db, member_loc.to_id(self.db)).to_vec();
         subst.extend(self.member_own_type_subst(
             expr,
             callee,
             &sig,
-            &generics,
             owner_arity,
             member_args,
             &MemberSite {
@@ -6452,20 +6471,43 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             SiteName::Member { owner, member } => {
                 Self::member_path(owner.display_name(), member.display_name())
             }
-            SiteName::Requirement { trait_, index } => {
+            SiteName::Requirement {
+                trait_,
+                member_index,
+            } => {
                 let requirements =
                     crate::item_tree::trait_requirements(self.db, trait_.to_id(self.db));
-                Self::member_path(trait_.display_name(), &requirements[*index].name)
+                Self::member_path(trait_.display_name(), &requirements[*member_index].name)
             }
+            SiteName::Builtin(builtin) => builtin.name().to_owned(),
         }
     }
 
-    /// The declaration a [`SiteName`] names: the item, the member, or the
-    /// requirement's trait.
+    /// The binder a [`SiteName`] instantiates: the generics its params'
+    /// binder indices and names refer to.
+    fn site_generics(&self, name: &SiteName) -> &'db [GenericParamData] {
+        match name {
+            SiteName::Item(loc) | SiteName::Member { member: loc, .. } => {
+                item_generics(self.db, loc.to_id(self.db))
+            }
+            SiteName::Requirement {
+                trait_,
+                member_index,
+            } => crate::item_tree::trait_requirements(self.db, trait_.to_id(self.db))
+                .get(*member_index)
+                .map(|req| req.generics.as_slice())
+                .unwrap_or(&[]),
+            SiteName::Builtin(builtin) => builtin_generics(*builtin).unwrap_or(&[]),
+        }
+    }
+
+    /// The declaration a [`SiteName`] names: the item, the member, the
+    /// requirement's trait, or the builtin's prelude entry.
     fn site_item(&self, name: &SiteName) -> ItemLoc {
         match name {
             SiteName::Item(loc) | SiteName::Member { member: loc, .. } => loc.clone(),
             SiteName::Requirement { trait_, .. } => trait_.clone(),
+            SiteName::Builtin(builtin) => crate::scopes::prelude_loc(self.db, builtin.name()),
         }
     }
 
@@ -6497,11 +6539,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         key: ExprId,
         mention: ExprId,
         sig: &Ty,
-        generics: &[GenericParamData],
         owner_arity: usize,
         member_args: &mut Option<&[GenericArgData]>,
         site: &MemberSite,
     ) -> FxHashMap<u32, Ty> {
+        let generics = self.site_generics(&site.path);
         let type_slots: Vec<u32> = member_own_type_slots(generics, owner_arity);
         // TWO of the three spend sites (inherent and trait-impl members;
         // the third is a requirement, in `instantiate_requirement_sig`).
@@ -6510,7 +6552,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let written = member_args.take();
         let matched = self.matched_member_args(key, mention, site, generics, owner_arity, written);
         let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
-        let mut pending: Vec<(String, Ty, bool)> = Vec::new();
+        let mut pending: Vec<(u32, Ty, bool)> = Vec::new();
         for (position, &index) in type_slots.iter().enumerate() {
             let param = &generics[index as usize];
             let var = self.fresh_var();
@@ -6519,7 +6561,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             {
                 self.spend_member_arg(key, mention, at, &param.name, arg, &var);
             }
-            pending.push((param.name.clone(), var.clone(), param.forget));
+            pending.push((index, var.clone(), param.forget));
             subst.insert(index, var);
         }
         if !sig.contains_error() && !pending.is_empty() {
@@ -6534,7 +6576,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // over the OWNER's half of the binder find no variable in `subst`
         // and are skipped — an owner's bounds are the type declaration's
         // business, checked where the receiver was built.
-        self.push_bound_obligations(key, generics, &subst);
+        self.push_bound_obligations(key, &site.path, &subst);
         subst
     }
 
@@ -6774,13 +6816,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             self.infer_args_broken(args);
             return Ty::Error;
         }
-        let generics = item_generics(self.db, member_id).to_vec();
         let inst = self.instantiate_member_own_binder(
             expr,
             callee,
             &member_loc,
             sig,
-            &generics,
             member_args,
             // Already the qualified `head::member` spelling — and the head
             // is the one the impl WROTE, which the receiver's rendered type
@@ -6817,7 +6857,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         mention: ExprId,
         member_loc: &ItemLoc,
         sig: Ty,
-        generics: &[GenericParamData],
         member_args: &mut Option<&[GenericArgData]>,
         path: SiteName,
         spelling: TurbofishSpelling,
@@ -6828,7 +6867,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             owner_is_trait: true,
             owner_hint: None,
         };
-        if generics.is_empty() {
+        if self.site_generics(&site.path).is_empty() {
             // A member with no binder at all, handed arguments: the shared
             // binder-less refusal, named the way every other one is.
             self.refuse_member_args(key, mention, |this| this.site_name(&site.path), member_args);
@@ -6845,7 +6884,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 .unwrap_or(true),
             "a trait-impl member's owner must be non-generic for owner_arity 0"
         );
-        let subst = self.member_own_type_subst(key, mention, &sig, generics, 0, member_args, &site);
+        let subst = self.member_own_type_subst(key, mention, &sig, 0, member_args, &site);
         // Regions too, and for the same reason a free fn's are minted at
         // its mention: left rigid, a member's `@b` survives into the
         // CALLER's body, where the outlives solver reads a region param's
@@ -6946,18 +6985,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         };
         // Lower the requirement's signature with `Self` as the rigid
         // receiver and the requirement's own binder fresh.
-        let (inst, var_of) = self.instantiate_requirement_sig(
+        let inst = self.instantiate_requirement_sig(
             expr,
             callee,
             &trait_loc,
-            &req,
             member_index as usize,
             &sig_ref,
             Ty::Param(param.clone()),
             member_args,
             TurbofishSpelling::Dot,
         );
-        self.push_bound_obligations(expr, &req.generics, &var_of);
         // A requirement whose signature is not fn-shaped is broken at its
         // declaration, which carries that diagnostic.
         if !matches!(&inst, Ty::Fn(_)) {
@@ -7010,22 +7047,21 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// Lower a requirement's signature with `Self` bound to `self_ty` and
     /// the requirement's own binder instantiated — at the written member
     /// turbofish where the use site spelled one, fresh otherwise; returns
-    /// the instantiated fn type and the binder-index → variable map (for
-    /// obligations). The fresh vars register for the cannot-infer report,
-    /// blamed on the trait.
+    /// the instantiated fn type, and registers its bounds as obligations
+    /// of `key`. The fresh vars register for the cannot-infer report, blamed
+    /// on the trait.
     #[allow(clippy::too_many_arguments)]
     fn instantiate_requirement_sig(
         &mut self,
         key: ExprId,
         mention: ExprId,
         trait_loc: &ItemLoc,
-        req: &crate::item_tree::TraitRequirement,
         member_index: usize,
         sig_ref: &TypeRef,
         self_ty: Ty,
         member_args: &mut Option<&[GenericArgData]>,
         spelling: TurbofishSpelling,
-    ) -> (Ty, FxHashMap<u32, Ty>) {
+    ) -> Ty {
         // THE THIRD spend site: a bound-directed dot-call and a qualified
         // trait call both instantiate the REQUIREMENT, and both may spell
         // its own type arguments. A requirement's owner is a trait by
@@ -7033,23 +7069,24 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let site = MemberSite {
             path: SiteName::Requirement {
                 trait_: trait_loc.clone(),
-                index: member_index,
+                member_index,
             },
             spelling,
             owner_is_trait: true,
             owner_hint: None,
         };
+        let generics = self.site_generics(&site.path);
         let written = member_args.take();
-        let matched = self.matched_member_args(key, mention, &site, &req.generics, 0, written);
+        let matched = self.matched_member_args(key, mention, &site, generics, 0, written);
         let mut scope = crate::ty::ParamScope::default();
         scope.types.insert("Self".to_owned(), self_ty);
         let mut var_of: FxHashMap<u32, Ty> = FxHashMap::default();
-        let mut pending: Vec<(String, Ty, bool)> = Vec::new();
+        let mut pending: Vec<(u32, Ty, bool)> = Vec::new();
         // A requirement's signature is LOWERED fresh rather than
         // substituted, so a written argument is joined onto the variable the
         // scope carries — the same variable the lowering then reads.
-        for (position, &index) in member_own_type_slots(&req.generics, 0).iter().enumerate() {
-            let gp = &req.generics[index as usize];
+        for (position, &index) in member_own_type_slots(generics, 0).iter().enumerate() {
+            let gp = &generics[index as usize];
             let var = self.fresh_var();
             if let Some(at) = matched.as_ref().map(|kept| kept[position])
                 && let Some(arg) = written.map(|args| &args[at])
@@ -7060,7 +7097,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 continue;
             }
             scope.types.insert(gp.name.clone(), var.clone());
-            pending.push((gp.name.clone(), var.clone(), gp.forget));
+            pending.push((index, var.clone(), gp.forget));
             var_of.insert(index, var);
         }
         // A requirement's REGION params are existentials of THIS call. The
@@ -7068,14 +7105,14 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // region goes into the scope the lowering reads; without it the
         // name resolves to nothing and the borrow's region is `Error`.
         let mut region_subst: FxHashMap<u32, Region> = FxHashMap::default();
-        for (index, gp) in req.generics.iter().enumerate() {
+        for (index, gp) in generics.iter().enumerate() {
             if matches!(gp.kind, GenericParamKind::Region) && !gp.name.is_empty() {
                 let region = self.fresh_region();
                 scope.regions.insert(gp.name.clone(), region.clone());
                 region_subst.insert(index as u32, region);
             }
         }
-        self.push_region_binder_bounds(&req.generics, &region_subst, key);
+        self.push_region_binder_bounds(generics, &region_subst, key);
         if !pending.is_empty() {
             self.pending_instantiations.push(PendingInstantiation {
                 expr: key,
@@ -7089,7 +7126,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // (Inert while the world is one file — stated so this side and the
         // offer side cannot come to answer it differently.)
         let inst = lower_type_ref_in(self.db, trait_loc.file, sig_ref, self.table, &scope);
-        (inst, var_of)
+        self.push_bound_obligations(key, &site.path, &var_of);
+        inst
     }
 
     /// A qualified trait call (TR01), in either form: the requirement's
@@ -7162,18 +7200,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             Some(self_ty) => self_ty,
             None => self.fresh_var(),
         };
-        let (inst, var_of) = self.instantiate_requirement_sig(
+        let inst = self.instantiate_requirement_sig(
             expr,
             callee,
             &trait_loc,
-            &req,
             member_index,
             &sig_ref,
             self_var.clone(),
             member_args,
             TurbofishSpelling::Path,
         );
-        self.push_bound_obligations(expr, &req.generics, &var_of);
         let inst_ty = self.check(callee, inst.clone(), &callee_expectation, None);
         self.result.type_of_expr.insert(callee, inst_ty);
         let Ty::Fn(f) = inst else {
@@ -7818,7 +7854,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // owner's binder indices.
         let named = self.instantiate_type_mention(expr, owner, args);
         let (mut subst, const_subst) = owner_arg_subst(&named.args);
-        let generics = item_generics(self.db, member.to_id(self.db)).to_vec();
         // The one spelling where a list the member cannot take may still
         // have a home: `Owner::<...>::member`, one segment to the left. Set
         // only when the path left the owner's list unwritten; the consumer
@@ -7828,7 +7863,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             expr,
             expr,
             &sig,
-            &generics,
             named.args.len(),
             member_args,
             &MemberSite {
@@ -8065,8 +8099,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // The member's OWN binder (a requirement may be a generic fn):
         // instantiated fresh where the value is directly called; its bounds
         // would need a captured dictionary anywhere else — reserved.
-        let generics = item_generics(self.db, member_loc.to_id(self.db)).to_vec();
-        if !crate::traits::bound_slots(self.db, self.file, &generics).is_empty()
+        let generics = item_generics(self.db, member_loc.to_id(self.db));
+        if !crate::traits::bound_slots(self.db, self.file, generics).is_empty()
             && !self.direct_callees.contains(&expr)
         {
             self.result
@@ -8082,7 +8116,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             expr,
             &member_loc,
             sig,
-            &generics,
             member_args,
             // Named for the spelling the use site WROTE
             // (`Peek::<Self = usize>::peek`), not for the impl it resolved
@@ -8165,10 +8198,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         &mut self,
         expr: ExprId,
         loc: ItemLoc,
+        owner: SiteName,
         sig: Ty,
-        generics: &[GenericParamData],
         args: Option<&[GenericArgData]>,
     ) -> Ty {
+        let generics = self.site_generics(&owner);
         self.reject_named_args(expr, args);
         // The binder indices a written argument may spend, in order.
         let spellable: Vec<usize> = generics
@@ -8255,7 +8289,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let mut subst: FxHashMap<u32, Ty> = FxHashMap::default();
         let mut const_subst: FxHashMap<u32, ConstArgValue> = FxHashMap::default();
         let mut region_subst: FxHashMap<u32, Region> = FxHashMap::default();
-        let mut pending: Vec<(String, Ty, bool)> = Vec::new();
+        let mut pending: Vec<(u32, Ty, bool)> = Vec::new();
         let mut const_args: Vec<(u32, ExprId)> = Vec::new();
         for (index, param) in generics.iter().enumerate() {
             let arg_position = written_for[index].map(|(position, _)| position);
@@ -8314,7 +8348,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         | Some(GenericArgData::Named { .. })
                         | None => {}
                     }
-                    pending.push((param.name.clone(), var.clone(), param.forget));
+                    pending.push((index as u32, var.clone(), param.forget));
                     subst.insert(index as u32, var);
                 }
                 GenericParamKind::Const(declared) => match written {
@@ -8415,7 +8449,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let mut reserved_as_value = false;
         if !crate::traits::bound_slots(self.db, self.file, generics).is_empty() {
             if self.direct_callees.contains(&expr) {
-                self.push_bound_obligations(expr, generics, &subst);
+                self.push_bound_obligations(expr, &owner, &subst);
             } else {
                 reserved_as_value = true;
                 self.result
@@ -8432,7 +8466,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             // cannot-infer noise on every mention would drown it.
             self.pending_instantiations.push(PendingInstantiation {
                 expr,
-                owner: SiteName::Item(loc.clone()),
+                owner,
                 spelling: TurbofishSpelling::Path,
                 params: pending,
             });
@@ -8474,7 +8508,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     return signature(self.db, target);
                 }
                 let sig = signature(self.db, target);
-                self.instantiate_mention(expr, loc, sig, generics, Some(args))
+                let owner = SiteName::Item(loc.clone());
+                self.instantiate_mention(expr, loc, owner, sig, Some(args))
             }
             Some(Resolution::Local(binding)) => {
                 let binding = *binding;
@@ -8662,9 +8697,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         builtin: Builtin,
         args: Option<&[GenericArgData]>,
     ) -> Ty {
-        if let Some(generics) = builtin_generics(builtin) {
+        if builtin_generics(builtin).is_some() {
             let (loc, sig) = builtin_scheme(self.db, builtin);
-            return self.instantiate_mention(expr, loc, sig, &generics, args);
+            let owner = SiteName::Builtin(builtin);
+            return self.instantiate_mention(expr, loc, owner, sig, args);
         }
         if let Some(args) = args {
             self.refuse_item_args(expr, builtin.name(), args);
@@ -10008,7 +10044,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 None
             }
         };
-        let mut pending: Vec<(String, Ty, bool)> = Vec::new();
+        let mut pending: Vec<(u32, Ty, bool)> = Vec::new();
         let mut out: Vec<GenericArg> = Vec::with_capacity(generics.len());
         for (index, param) in generics.iter().enumerate() {
             let arg = matched.map(|args| &args[index]);
@@ -10057,7 +10093,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         // Refused at the list (`reject_named_args`).
                         Some(GenericArgData::Named { .. }) | None => {}
                     }
-                    pending.push((param.name.clone(), var.clone(), param.forget));
+                    pending.push((index as u32, var.clone(), param.forget));
                     out.push(GenericArg::Ty(var));
                 }
                 // Regions on a TYPE declaration are reserved (variance and
@@ -10622,10 +10658,11 @@ fn builtin_type_unpriced(db: &dyn Db, builtin: Builtin) -> Ty {
 /// ([`Builtin::flavor_polymorphic`]) ones. Mirrors [`crate::item_data`]'s
 /// shape for generic items so mentions run the exact same instantiation
 /// machinery.
-fn builtin_generics(builtin: Builtin) -> Option<Vec<GenericParamData>> {
-    match builtin {
-        Builtin::AllocArray | Builtin::DeallocArray | Builtin::Dangling => {
-            Some(vec![GenericParamData {
+fn builtin_generics(builtin: Builtin) -> Option<&'static [GenericParamData]> {
+    // Built once, so a mention reads the binder without allocating it.
+    static ONE_TYPE_PARAM: std::sync::LazyLock<[GenericParamData; 1]> =
+        std::sync::LazyLock::new(|| {
+            [GenericParamData {
                 name: "T".to_owned(),
                 kind: GenericParamKind::Type,
                 bounds: Vec::new(),
@@ -10636,7 +10673,11 @@ fn builtin_generics(builtin: Builtin) -> Option<Vec<GenericParamData>> {
                 // `alloc_array::<String>` is exactly as sound as
                 // `alloc_array::<usize>`.
                 forget: false,
-            }])
+            }]
+        });
+    match builtin {
+        Builtin::AllocArray | Builtin::DeallocArray | Builtin::Dangling => {
+            Some(ONE_TYPE_PARAM.as_slice())
         }
         Builtin::Print
         | Builtin::Panic
