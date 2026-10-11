@@ -7120,13 +7120,12 @@ fn turbofish_const_additive_arg_no_longer_parses() {
                     LITERAL@25..26
                       INT_NUMBER@25..26 "1"
                   R_ANGLE@26..27 ">"
-                  PAREN_EXPR@27..29
+                  UNIT_EXPR@27..29
                     L_PAREN@27..28 "("
                     R_PAREN@28..29 ")"
                 SEMICOLON@29..30 ";"
             error 21..22: expected `>`
             error 23..24: expected `,`
-            error 28..29: expected an expression
         "#]],
     );
 }
@@ -17209,5 +17208,34 @@ static f = fn () -> i32 { -2,147 };
               WHITESPACE@36..37 "\n"
             error 28..33: digit groups cannot be separated by `,`; use `_`
         "#]],
+    );
+}
+
+#[test]
+fn unit_value_is_spelled_like_the_unit_type() {
+    check(
+        "static u: () = ( );",
+        expect![[r#"
+        SOURCE_FILE@0..19
+          STATIC_ITEM@0..19
+            ITEM_HEAD@0..6
+              STATIC_KW@0..6 "static"
+            WHITESPACE@6..7 " "
+            NAME@7..8
+              IDENT@7..8 "u"
+            COLON@8..9 ":"
+            WHITESPACE@9..10 " "
+            UNIT_TYPE@10..12
+              L_PAREN@10..11 "("
+              R_PAREN@11..12 ")"
+            WHITESPACE@12..13 " "
+            EQ@13..14 "="
+            WHITESPACE@14..15 " "
+            UNIT_EXPR@15..18
+              L_PAREN@15..16 "("
+              WHITESPACE@16..17 " "
+              R_PAREN@17..18 ")"
+            SEMICOLON@18..19 ";"
+    "#]],
     );
 }

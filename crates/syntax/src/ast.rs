@@ -108,6 +108,7 @@ ast_node!(ExprStmt: EXPR_STMT);
 ast_node!(CallExpr: CALL_EXPR);
 ast_node!(ArgList: ARG_LIST);
 ast_node!(ParenExpr: PAREN_EXPR);
+ast_node!(UnitExpr: UNIT_EXPR);
 ast_node!(BinExpr: BIN_EXPR);
 ast_node!(IfExpr: IF_EXPR);
 ast_node!(Literal: LITERAL);
@@ -418,6 +419,7 @@ ast_enum!(
     ConstBlockExpr,
     UnsafeBlockExpr,
     ParenExpr,
+    UnitExpr,
     BinExpr,
     IfExpr,
     RecordExpr,

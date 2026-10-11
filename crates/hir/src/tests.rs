@@ -17526,3 +17526,20 @@ static f = fn() -> usize { get(mk().a.&) };
         "#]],
     );
 }
+
+#[test]
+fn unit_value_has_the_unit_type() {
+    check_infer(
+        "static f = fn (u: ()) -> bool { let v: () = (); u == () };",
+        expect![[r#"
+            11..57 'fn (u: ()) -> boo...': fn(()) -> bool
+            15..16 'u': ()
+            30..57 '{ let v: () = ();...': bool
+            36..37 'v': ()
+            44..46 '()': ()
+            48..49 'u': ()
+            48..55 'u == ()': bool
+            53..55 '()': ()
+        "#]],
+    );
+}
