@@ -11,7 +11,7 @@ env:
   MAX_ROUNDS: 3
 
 # One round per PR at a time. A round in progress finishes, so every reviewer
-# posts its summary; a newer event waits, replacing any older one waiting.
+# gets into the summary; a newer event waits, replacing any older one waiting.
 # Other labels get a group of their own, so they never wait or replace.
 concurrency:
   group: >-
@@ -56,8 +56,9 @@ jobs:
           echo "::warning file=$file::This PR edits the review workflow, which the reviewers can only run once it is on $DEFAULT."
           echo "skip=true" >> "$GITHUB_OUTPUT"
       # Opening the PR and the `review` label always start a round; pushes,
-      # reopening and marking ready are gated. Each reviewer's summary carries
-      # a marker naming its role, the head it reviewed and what started it.
+      # reopening and marking ready are gated. The summary comment carries a
+      # marker per reviewer and round, naming the head it reviewed and what
+      # started it.
       - id: gate
         if: >-
           steps.current.outputs.skip != 'true' &&
@@ -74,9 +75,12 @@ jobs:
             --jq '.[] | select(.user.type == "Bot") | .body')
           markers=$(printf '%s\n' "$comments" \
             | { grep -E '^<!-- review-round: [^ ]+ [0-9a-f]{40} (label|auto) -->$' || true; })
-          # A labelled round starts a fresh budget and counts as its first round.
+          # A labelled round starts a fresh budget for every reviewer, including
+          # one that wrote no summary in it, and counts as its first round.
           rounds=$(printf '%s\n' "$markers" | awk '
-            NF { n[$3] = ($5 == "label") ? 1 : n[$3] + 1 }
+            NF && $5 == "label" { if (prev != "label " $4) delete n; n[$3] = 1 }
+            NF && $5 == "auto" { n[$3]++ }
+            NF { prev = $5 " " $4 }
             END { m = 0; for (r in n) if (n[r] > m) m = n[r]; print m }')
           # A change that keeps the patch last reviewed (a rebase) gets no round.
           reviewed=$(printf '%s\n' "$markers" | awk 'NF { s = $4 } END { print s }')
@@ -93,16 +97,26 @@ jobs:
           fi
           if [ "$rounds" -ge "$MAX_ROUNDS" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            # One notice per budget: a labelled round makes room for another.
-            noticed=$(printf '%s\n' "$comments" | awk '
-              /^<!-- review-round: .* label -->$/ { c = 0 }
-              /<!-- review-cap -->/ { c = 1 }
-              END { print c + 0 }')
-            if [ "$noticed" = 0 ]; then
-              gh pr comment "$PR" --repo "$REPO" --body "<!-- review-cap -->
-          The reviewers have had $rounds rounds on this PR, so changes no longer start a new one. This needs a human look; add the \`review\` label to ask for another round." \
-                || echo "could not post the cap notice"
-            fi
+            # The notice goes into the summary comment, once per budget: the
+            # next round rewrites that comment without it.
+            summary=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+              --jq '.[] | select(.user.type == "Bot" and (.body | startswith("<!-- review-summary -->"))) | .id' \
+              | tail -n1)
+            body=""
+            [ -n "$summary" ] && body=$(gh api "repos/$REPO/issues/comments/$summary" --jq .body)
+            case "$body" in *"<!-- review-cap -->"*) exit 0 ;; esac
+            file=$(mktemp)
+            {
+              printf '%s\n' "${body:-<!-- review-summary -->}"
+              echo
+              echo "<!-- review-cap -->"
+              echo "**The reviewers have had $rounds rounds on this PR, so changes no longer start a new one. This needs a human look; add the \`review\` label to ask for another round.**"
+            } > "$file"
+            if [ -n "$summary" ]; then
+              gh api -X PATCH "repos/$REPO/issues/comments/$summary" -F body=@"$file" > /dev/null
+            else
+              gh pr comment "$PR" --repo "$REPO" --body-file "$file"
+            fi || echo "could not post the cap notice"
           fi
       - id: list
         if: steps.current.outputs.skip != 'true' && steps.gate.outputs.skip != 'true'
@@ -149,6 +163,34 @@ jobs:
             printf '%s\n' "$body"
             echo "$delim"
           } >> "$GITHUB_OUTPUT"
+      # A reviewer that has a round marker is in a later round, and only then
+      # gets told how to judge one.
+      - id: prior
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          ROLE: ${{ matrix.role }}
+        run: |
+          comments=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+            --jq '.[] | select(.user.type == "Bot") | .body')
+          if printf '%s\n' "$comments" | awk -v r="$ROLE" '
+            $1 == "<!--" && $2 == "review-round:" && $3 == r { f = 1 }
+            END { exit !f }'; then
+            delim="LATER_$(openssl rand -hex 16)"
+            {
+              echo "text<<$delim"
+              echo "You have reviewed this PR before, so this is a later round: judge"
+              echo "what changed since then, and whether your earlier findings were"
+              echo "addressed. On code that has not changed, raise only real defects,"
+              echo "not points an earlier round could have raised, and never post a"
+              echo "second inline comment on a line where you already have one. If"
+              echo "nothing new reaches that bar, say \"No new findings\" in one line."
+              echo "$delim"
+            } >> "$GITHUB_OUTPUT"
+          fi
+      # A review-summary.md checked into the PR is not a summary.
+      - run: rm -f review-summary.md
       - uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -179,30 +221,92 @@ jobs:
             unaddressed, list it once in your summary as still open, with no new
             inline comment.
 
-            If you already have summary comments on this PR, this is a later
-            round: judge what changed since your latest summary, and whether
-            your earlier findings were addressed. On code that has not changed,
-            raise only real defects, not points an earlier round could have
-            raised, and never post a second inline comment on a line where you
-            already have one. If nothing new reaches that bar, say "No new
-            findings" in one line.
+            ${{ steps.prior.outputs.text }}
 
             Post each finding as an inline comment on the line it concerns, with
             mcp__github_inline_comment__create_inline_comment and
             `confirmed: true`, opening with
-            `**${{ matrix.role }}:**`. Then post one summary comment with
-            `gh pr comment`. Its first line is exactly
-            `<!-- review-round: ${{ matrix.role }} ${{ github.event.pull_request.head.sha }} ${{ contains(github.event.pull_request.labels.*.name, 'review') && 'label' || 'auto' }} -->`
-            and its second
-            `### ${{ matrix.role }} review`; then list the findings in a sentence
-            each (or say there are none).
+            `**${{ matrix.role }}:**`. Then write your summary to
+            `review-summary.md` in the current directory with the Write tool:
+            the findings in a sentence each, then any earlier findings still
+            open, or one line saying there are none. Do not post it; the
+            workflow puts every reviewer's summary into one comment.
 
             Your brief:
 
             ${{ steps.brief.outputs.text }}
           claude_args: |
             ${{ steps.brief.outputs.model_arg }}
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*)"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Edit(./review-summary.md),Write(./review-summary.md),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: review-summary-${{ matrix.role }}
+          path: review-summary.md
+          if-no-files-found: ignore
+
+  # Keeps one summary comment per PR, rewritten each round, so a round adds
+  # no comment of its own. A reviewer gets a marker only if it wrote a summary.
+  summary:
+    needs: [roles, review]
+    if: always() && needs.roles.result == 'success' && needs.review.result != 'skipped'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: review-summary-*
+          path: summaries
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          ROLES: ${{ needs.roles.outputs.roles }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          TRIGGER: ${{ contains(github.event.pull_request.labels.*.name, 'review') && 'label' || 'auto' }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          summary=$(gh api --paginate "repos/$REPO/issues/$PR/comments" \
+            --jq '.[] | select(.user.type == "Bot" and (.body | startswith("<!-- review-summary -->"))) | .id' \
+            | tail -n1)
+          old=""
+          [ -n "$summary" ] && old=$(gh api "repos/$REPO/issues/comments/$summary" --jq .body)
+          file=$(mktemp)
+          {
+            echo "<!-- review-summary -->"
+            # Re-running failed jobs reruns this one with the earlier
+            # summaries too, so a marker already written is not counted twice.
+            {
+              printf '%s\n' "$old" | { grep -E '^<!-- review-round: ' || true; }
+              for role in $(jq -r '.[]' <<< "$ROLES"); do
+                if [ -s "summaries/review-summary-$role/review-summary.md" ]; then
+                  echo "<!-- review-round: $role $SHA $TRIGGER -->"
+                fi
+              done
+            } | awk '!seen[$0]++'
+            echo
+            echo "## Review of ${SHA:0:7}"
+            for role in $(jq -r '.[]' <<< "$ROLES"); do
+              echo
+              echo "### $role"
+              echo
+              f="summaries/review-summary-$role/review-summary.md"
+              if [ -s "$f" ]; then
+                # Reviewer text cannot open an HTML comment, so it cannot fake
+                # a marker or the cap notice, or hide the rest of the comment.
+                sed 's/<!--/\&lt;!--/g' "$f"
+              else
+                echo "No summary; see [the run]($RUN)."
+              fi
+            done
+          } > "$file"
+          if [ -n "$summary" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$summary" -F body=@"$file" > /dev/null
+          else
+            gh pr comment "$PR" --repo "$REPO" --body-file "$file"
+          fi
 
   # Takes the `review` label off once the round ends, so adding it again asks for another.
   unlabel:
