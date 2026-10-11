@@ -805,9 +805,9 @@ impl LowerCtx<'_> {
             // `const` blocks) and an [`ValueExpr::Instantiate`] attaches
             // their values to the fn value.
             ExprData::GenericApp { base, .. } => {
-                let name = match &self.body.exprs[*base] {
-                    ExprData::NameRef(name) => name.clone(),
-                    _ => String::new(),
+                let name = match &body.exprs[*base] {
+                    ExprData::NameRef(name) => name.as_str(),
+                    _ => "",
                 };
                 match self.resolutions.get(*base) {
                     Some(Resolution::Item(loc)) => {
@@ -855,7 +855,7 @@ impl LowerCtx<'_> {
                             // No const params: the instance's value IS the
                             // item's value (type args are type-level only),
                             // so the mention lowers exactly like a bare one.
-                            _ => self.lower_name_ref(b, *base, &name),
+                            _ => self.lower_name_ref(b, *base, name),
                         }
                     }
                     // Undiagnosed non-generic bases don't reach here (a
@@ -863,7 +863,7 @@ impl LowerCtx<'_> {
                     // `NotGeneric`-family value trap); kept total by
                     // lowering the base name as if the turbofish weren't
                     // there.
-                    _ => self.lower_name_ref(b, *base, &name),
+                    _ => self.lower_name_ref(b, *base, name),
                 }
             }
             ExprData::Call { callee, args, .. } => {
@@ -1746,11 +1746,13 @@ impl LowerCtx<'_> {
                 self.lower_match_switch(b, expr, &scrut, named.decl, arms, lens)
             }
             scrut_ty => {
-                let fallback = InferenceDiagnostic::MatchWithoutCatchAll {
-                    expr,
-                    scrutinee: scrut_ty,
-                }
-                .message();
+                let fallback = move || {
+                    InferenceDiagnostic::MatchWithoutCatchAll {
+                        expr,
+                        scrutinee: scrut_ty,
+                    }
+                    .message()
+                };
                 // LITERAL arms dispatch by TESTING, not by table lookup:
                 // an arm list over a scalar is not dense at any width, so
                 // a switch would be a table of holes. A chain of `==` tests
@@ -1806,9 +1808,27 @@ impl LowerCtx<'_> {
                 ArmKind::Literal(_) | ArmKind::Dead => {}
             }
         }
-        let (otherwise_block, needs_trap) = match otherwise {
-            Some(block) => (block, false),
-            None => (b.new_block(), true),
+        let otherwise_block = otherwise.unwrap_or_else(|| b.new_block());
+        let edge = if otherwise.is_some() {
+            Otherwise::Arm
+        } else {
+            let variants = hir::enum_variants(self.db, decl.to_id(self.db))
+                .as_deref()
+                .unwrap_or_default();
+            // Switch tags are distinct, so a full count means every variant
+            // has an arm and only valid tags exist.
+            if switch_arms.len() == variants.len() {
+                Otherwise::Unreachable
+            } else {
+                Otherwise::Trap(
+                    variants
+                        .iter()
+                        .enumerate()
+                        .filter(|&(i, _)| !switch_arms.iter().any(|&(j, _)| j as usize == i))
+                        .map(|(_, (name, _))| name.clone())
+                        .collect(),
+                )
+            }
         };
         // THE TAG TEST. Through a borrow it is a READ THROUGH THE BORROW,
         // not a read of a detached copy: the discriminant operand names
@@ -1851,7 +1871,7 @@ impl LowerCtx<'_> {
                 TerminatorKind::SwitchVariant {
                     discr,
                     decl: decl.clone(),
-                    arms: switch_arms.clone(),
+                    arms: switch_arms,
                     otherwise: otherwise_block,
                 },
                 origin,
@@ -1862,44 +1882,22 @@ impl LowerCtx<'_> {
             b.current = block;
             self.lower_arm(b, arm, scrut, lens, dest, join, expr);
         }
-        if needs_trap {
-            b.current = otherwise_block;
-            // Normally seeded from the diagnostic; the fallback re-renders
-            // the same message from the same set-cover, so the text can't
-            // drift even if the seeding ever does.
-            let message = self.nonexhaustive_traps.get(&expr).cloned().or_else(|| {
-                let uncovered: Vec<String> = hir::enum_variants(self.db, decl.to_id(self.db))
-                    .as_ref()
-                    .map(|variants| {
-                        variants
-                            .iter()
-                            .enumerate()
-                            .filter(|&(i, _)| !switch_arms.iter().any(|&(j, _)| j as usize == i))
-                            .map(|(_, (name, _))| name.clone())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                (!uncovered.is_empty()).then(|| {
+        match edge {
+            Otherwise::Arm => {}
+            Otherwise::Unreachable => {
+                b.current = otherwise_block;
+                b.terminate(TerminatorKind::Unreachable, expr);
+            }
+            Otherwise::Trap(uncovered) => {
+                b.current = otherwise_block;
+                self.trap_nonexhaustive(b, expr, dest, join, || {
                     InferenceDiagnostic::NonExhaustiveMatch {
                         expr,
                         decl: decl.clone(),
                         uncovered,
                     }
                     .message()
-                })
-            });
-            match message {
-                Some(message) => b.terminate(
-                    TerminatorKind::Trap {
-                        message,
-                        dest,
-                        target: join,
-                    },
-                    expr,
-                ),
-                // Every variant has an arm and only valid tags exist: the
-                // otherwise edge can never be taken.
-                None => b.terminate(TerminatorKind::Unreachable, expr),
+                });
             }
         }
         b.current = join;
@@ -1926,7 +1924,7 @@ impl LowerCtx<'_> {
         expr: ExprId,
         scrut: &Operand,
         arms: &[MatchArm],
-        fallback: String,
+        fallback: impl FnOnce() -> String,
         lens: Option<BorrowedScrutinee>,
     ) -> Operand {
         let dest = b.temp(self.ty(expr));
@@ -1989,21 +1987,7 @@ impl LowerCtx<'_> {
             }
         }
         if !covered {
-            // Same fallback contract as the other two lowerings: normally
-            // seeded from the diagnostic, re-rendered identically here.
-            let message = self
-                .nonexhaustive_traps
-                .get(&expr)
-                .cloned()
-                .unwrap_or(fallback);
-            b.terminate(
-                TerminatorKind::Trap {
-                    message,
-                    dest,
-                    target: join,
-                },
-                expr,
-            );
+            self.trap_nonexhaustive(b, expr, dest, join, fallback);
         }
         orphans.extend(arms);
         for arm in orphans {
@@ -2024,7 +2008,7 @@ impl LowerCtx<'_> {
         scrut: &Operand,
         arms: &[MatchArm],
         covering: Option<usize>,
-        fallback: String,
+        fallback: impl FnOnce() -> String,
         lens: Option<BorrowedScrutinee>,
     ) -> Operand {
         let dest = b.temp(self.ty(expr));
@@ -2037,23 +2021,7 @@ impl LowerCtx<'_> {
                 b.push_assign(dest, ValueExpr::Use(Operand::Const(Const::Unit)), expr);
                 b.terminate(TerminatorKind::Goto { target: join }, expr);
             }
-            None => {
-                // Same fallback contract as the switch's trap: normally
-                // seeded, re-rendered identically if seeding ever drifts.
-                let message = self
-                    .nonexhaustive_traps
-                    .get(&expr)
-                    .cloned()
-                    .unwrap_or(fallback);
-                b.terminate(
-                    TerminatorKind::Trap {
-                        message,
-                        dest,
-                        target: join,
-                    },
-                    expr,
-                );
-            }
+            None => self.trap_nonexhaustive(b, expr, dest, join, fallback),
         }
         for (index, arm) in arms.iter().enumerate() {
             if Some(index) == covering {
@@ -2085,6 +2053,32 @@ impl LowerCtx<'_> {
         b.close_scope(arm.body);
         b.push_assign(dest, ValueExpr::Use(value), arm.body);
         b.terminate(TerminatorKind::Goto { target: join }, expr);
+    }
+
+    /// Ends the current block in a match's non-exhaustiveness trap. The
+    /// message is normally seeded from the diagnostic; `fallback` renders
+    /// the same text from the same set-cover, so the two cannot drift.
+    fn trap_nonexhaustive(
+        &self,
+        b: &mut BodyBuilder,
+        expr: ExprId,
+        dest: LocalId,
+        join: BlockId,
+        fallback: impl FnOnce() -> String,
+    ) {
+        let message = self
+            .nonexhaustive_traps
+            .get(&expr)
+            .cloned()
+            .unwrap_or_else(fallback);
+        b.terminate(
+            TerminatorKind::Trap {
+                message,
+                dest,
+                target: join,
+            },
+            expr,
+        );
     }
 
     /// How an arm participates in dispatch: a literal arm (keyed by the
@@ -3720,6 +3714,16 @@ struct BorrowedScrutinee {
     /// The scrutinee expression, to blame the tag read on — the mirror of
     /// the field hir's own `MatchLens` carries for the same reason.
     expr: ExprId,
+}
+
+/// Where a variant switch's `otherwise` edge leads.
+enum Otherwise {
+    /// The catch-all arm.
+    Arm,
+    /// Nowhere: every variant has an arm.
+    Unreachable,
+    /// The non-exhaustiveness trap, naming the variants no arm covers.
+    Trap(Vec<String>),
 }
 
 /// How one match arm participates in dispatch.
