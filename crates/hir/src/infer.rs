@@ -1336,9 +1336,9 @@ pub enum TurbofishSpelling {
     Dot,
     /// A member VALUE reached through a trait. Such a value is
     /// impl-specific (TR01), so the bare `Trait::member` path is refused
-    /// here and the implementer naming is part of the spelling. Carries
-    /// the qualifier up to the member — `Mk::<Self = usize>`.
-    NamedSelf(String),
+    /// here, and the spelling carries the trait and the implementer:
+    /// `Mk::<Self = usize>::member::<...>`.
+    NamedSelf { trait_: ItemLoc, self_ty: Ty },
 }
 
 impl TurbofishSpelling {
@@ -1349,9 +1349,12 @@ impl TurbofishSpelling {
         match self {
             Self::Path => format!("{owner}::<...>"),
             Self::Dot => format!(".{}::<...>(...)", bare_member_name(owner)),
-            Self::NamedSelf(qualifier) => {
-                format!("{qualifier}::{}::<...>", bare_member_name(owner))
-            }
+            Self::NamedSelf { trait_, self_ty } => format!(
+                "{}::<Self = {}>::{}::<...>",
+                trait_.display_name(),
+                self_ty.display(),
+                bare_member_name(owner)
+            ),
         }
     }
 }
@@ -2748,7 +2751,7 @@ struct PendingNumberLiteral {
 struct MemberSite {
     /// The owner-qualified naming used in every such message
     /// (`Option::map`, `usize::n`, `Mk::mk`).
-    path: String,
+    path: SiteName,
     /// How this site writes the member's own turbofish.
     spelling: TurbofishSpelling,
     /// Whether the segment to the member's left is a TRAIT. It decides
@@ -2757,10 +2760,22 @@ struct MemberSite {
     /// owner there is no `Self` to name at all
     /// ([`NamedArgReason::NotATrait`]).
     owner_is_trait: bool,
-    /// A GENERIC owner whose own list this path left unwritten — the one
-    /// place a list the member cannot take may still have a home, one
-    /// segment to the left (`Owner::<...>::member`).
-    owner_hint: Option<String>,
+    /// An owner whose own list this path left unwritten — when it is
+    /// GENERIC, the one place a list the member cannot take may still have
+    /// a home, one segment to the left (`Owner::<...>::member`).
+    owner_hint: Option<ItemLoc>,
+}
+
+/// What a use site calls a binder's owner, rendered only for a message.
+#[derive(Debug, Clone)]
+enum SiteName {
+    /// The item's own name, which for a trait-impl member is already the
+    /// qualified `head::member` form.
+    Item(ItemLoc),
+    /// A member under a written owner ([`InferCtx::member_path`]).
+    Member { owner: ItemLoc, member: ItemLoc },
+    /// The trait's requirement at `index`, under the trait.
+    Requirement { trait_: ItemLoc, index: usize },
 }
 
 /// One instantiation of a generic item's scheme at a mention: which fresh
@@ -2768,12 +2783,12 @@ struct MemberSite {
 struct PendingInstantiation {
     /// The mentioning expression (a `NameRef` or `GenericApp`).
     expr: ExprId,
-    item: ItemLoc,
     /// The blame name and the spelling for
     /// [`InferenceDiagnostic::CannotInferGenericParam`] — carried from the
     /// site, because only the site knows how the binder can be WRITTEN (a
-    /// member's is not written the way its `ItemLoc` renders).
-    owner: String,
+    /// member's is not written the way its `ItemLoc` renders). The
+    /// diagnostics' item comes from it too ([`InferCtx::site_item`]).
+    owner: SiteName,
     spelling: TurbofishSpelling,
     /// `(param name, the fresh variable, whether the binder wrote
     /// `T: forget`)` per *type* param. The bound flag is CARRIED rather
@@ -3372,7 +3387,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         .diagnostics
                         .push(InferenceDiagnostic::ForgetBoundUnsatisfied {
                             expr: instantiation.expr,
-                            item: instantiation.item.clone(),
+                            item: self.site_item(&instantiation.owner),
                             param: param.clone(),
                             ty: resolved.clone(),
                             reason,
@@ -3414,9 +3429,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     .diagnostics
                     .push(InferenceDiagnostic::CannotInferGenericParam {
                         expr: instantiation.expr,
-                        item: instantiation.item.clone(),
+                        item: self.site_item(&instantiation.owner),
                         param,
-                        owner: instantiation.owner.clone(),
+                        owner: self.site_name(&instantiation.owner),
                         spelling: instantiation.spelling.clone(),
                     });
             }
@@ -4696,7 +4711,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     if self.resolve_shallow(&ty).contains_error() {
                         self.drop_member_args(&mut member_args);
                     } else {
-                        self.refuse_member_args(expr, expr, &name, &mut member_args);
+                        self.refuse_member_args(expr, expr, |_| name.clone(), &mut member_args);
                     }
                     self.carry_borrow_projection(expr, receiver, &ty);
                     ty
@@ -5901,7 +5916,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     }
                     // Resolved, and a builtin member has no binder: one
                     // of the three places the refusal is TRUE.
-                    self.refuse_member_args(callee, callee, name, member_args);
+                    self.refuse_member_args(callee, callee, |_| name.to_owned(), member_args);
                     let ty = self.infer_builtin_member_call(
                         expr,
                         callee,
@@ -6004,7 +6019,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // unknown receiver type, a name that is no field) is already
         // diagnosed, and errors are infectious and silent.
         if !self.resolve_shallow(&callee_ty).contains_error() {
-            self.refuse_member_args(callee, callee, name, member_args);
+            self.refuse_member_args(callee, callee, |_| name.to_owned(), member_args);
         }
         let ty = self.call_of_value(expr, callee, args, callee_ty);
         self.finish_dot_call(expr, ty, expected, cause)
@@ -6081,13 +6096,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         subst.extend(self.member_own_type_subst(
             expr,
             callee,
-            &member_loc,
             &sig,
             &generics,
             owner_arity,
             member_args,
             &MemberSite {
-                path: Self::member_path(named.decl.display_name(), member_loc.display_name()),
+                path: SiteName::Member {
+                    owner: named.decl.clone(),
+                    member: member_loc.clone(),
+                },
                 spelling: TurbofishSpelling::Dot,
                 owner_is_trait: false,
                 owner_hint: None,
@@ -6221,18 +6238,20 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// sentence about a thing that exists; everywhere else the silent
     /// [`Self::drop_member_args`] is the answer. A written region is
     /// refused first, on `mention` (the node the list hangs off), exactly
-    /// as a binder would refuse it ([`Self::owes_not_generic`]).
+    /// as a binder would refuse it ([`Self::owes_not_generic`]). `name`
+    /// renders only when the refusal fires.
     fn refuse_member_args(
         &mut self,
         key: ExprId,
         mention: ExprId,
-        name: &str,
+        name: impl FnOnce(&Self) -> String,
         member_args: &mut Option<&[GenericArgData]>,
     ) {
         if let Some(args) = *member_args
             && self.owes_not_generic(mention, args, TurbofishList::Member)
         {
-            self.push_not_generic(key, name);
+            let name = name(self);
+            self.push_not_generic(key, &name);
         }
         self.drop_member_args(member_args);
     }
@@ -6333,7 +6352,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         owner_arity: usize,
         args: Option<&[GenericArgData]>,
     ) -> Option<Vec<usize>> {
-        let path = site.path.as_str();
         let args = args?;
         // A member's binder has no nameable argument: `Self` is the OWNER's
         // (TR01 gives v1 exactly one, on a trait's own list), and a member's
@@ -6361,7 +6379,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 .diagnostics
                 .push(InferenceDiagnostic::MemberOwnConstArgs {
                     expr: key,
-                    path: path.to_owned(),
+                    path: self.site_name(&site.path),
                 });
             self.infer_const_args_free_quiet(args);
             return None;
@@ -6377,12 +6395,17 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             // the list may still have a home: the OWNER's binder, one
             // segment to the left.
             if !displaced || !kept.is_empty() {
+                let owner_list_hint = site
+                    .owner_hint
+                    .as_ref()
+                    .filter(|owner| !item_generics(self.db, owner.to_id(self.db)).is_empty())
+                    .map(|owner| owner.display_name().to_owned());
                 self.result
                     .diagnostics
                     .push(InferenceDiagnostic::NotGeneric {
                         expr: key,
-                        name: path.to_owned(),
-                        owner_list_hint: site.owner_hint.clone(),
+                        name: self.site_name(&site.path),
+                        owner_list_hint,
                     });
             }
             self.infer_const_args_free_quiet(args);
@@ -6394,7 +6417,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     .diagnostics
                     .push(InferenceDiagnostic::MemberGenericArgCount {
                         expr: key,
-                        path: path.to_owned(),
+                        path: self.site_name(&site.path),
                         expected,
                         found: kept.len(),
                     });
@@ -6420,6 +6443,30 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// calling this.
     fn member_path(owner_name: &str, member_name: &str) -> String {
         format!("{owner_name}::{}", bare_member_name(member_name))
+    }
+
+    /// The text a [`SiteName`] stands for.
+    fn site_name(&self, name: &SiteName) -> String {
+        match name {
+            SiteName::Item(loc) => loc.display_name().to_owned(),
+            SiteName::Member { owner, member } => {
+                Self::member_path(owner.display_name(), member.display_name())
+            }
+            SiteName::Requirement { trait_, index } => {
+                let requirements =
+                    crate::item_tree::trait_requirements(self.db, trait_.to_id(self.db));
+                Self::member_path(trait_.display_name(), &requirements[*index].name)
+            }
+        }
+    }
+
+    /// The declaration a [`SiteName`] names: the item, the member, or the
+    /// requirement's trait.
+    fn site_item(&self, name: &SiteName) -> ItemLoc {
+        match name {
+            SiteName::Item(loc) | SiteName::Member { member: loc, .. } => loc.clone(),
+            SiteName::Requirement { trait_, .. } => trait_.clone(),
+        }
     }
 
     /// Mint one fresh variable per member-own TYPE binder — unified with
@@ -6449,7 +6496,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         &mut self,
         key: ExprId,
         mention: ExprId,
-        member_loc: &ItemLoc,
         sig: &Ty,
         generics: &[GenericParamData],
         owner_arity: usize,
@@ -6479,7 +6525,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         if !sig.contains_error() && !pending.is_empty() {
             self.pending_instantiations.push(PendingInstantiation {
                 expr: key,
-                item: member_loc.clone(),
                 owner: site.path.clone(),
                 spelling: site.spelling.clone(),
                 params: pending,
@@ -6741,7 +6786,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             // is the one the impl WROTE, which the receiver's rendered type
             // is not (a `Self.&` member reached through a borrow would be
             // named `usize.&::peek`).
-            member_loc.display_name().to_owned(),
+            SiteName::Item(member_loc.clone()),
             TurbofishSpelling::Dot,
         );
         self.result.member_of_expr.insert(expr, member_loc);
@@ -6774,7 +6819,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         sig: Ty,
         generics: &[GenericParamData],
         member_args: &mut Option<&[GenericArgData]>,
-        path: String,
+        path: SiteName,
         spelling: TurbofishSpelling,
     ) -> Ty {
         let site = MemberSite {
@@ -6786,7 +6831,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         if generics.is_empty() {
             // A member with no binder at all, handed arguments: the shared
             // binder-less refusal, named the way every other one is.
-            self.refuse_member_args(key, mention, &site.path, member_args);
+            self.refuse_member_args(key, mention, |this| this.site_name(&site.path), member_args);
             return sig;
         }
         // A TRAIT-IMPL member's binder is its own alone — its owner is
@@ -6800,16 +6845,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 .unwrap_or(true),
             "a trait-impl member's owner must be non-generic for owner_arity 0"
         );
-        let subst = self.member_own_type_subst(
-            key,
-            mention,
-            member_loc,
-            &sig,
-            generics,
-            0,
-            member_args,
-            &site,
-        );
+        let subst = self.member_own_type_subst(key, mention, &sig, generics, 0, member_args, &site);
         // Regions too, and for the same reason a free fn's are minted at
         // its mention: left rigid, a member's `@b` survives into the
         // CALLER's body, where the outlives solver reads a region param's
@@ -6915,6 +6951,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             callee,
             &trait_loc,
             &req,
+            member_index as usize,
             &sig_ref,
             Ty::Param(param.clone()),
             member_args,
@@ -6983,6 +7020,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         mention: ExprId,
         trait_loc: &ItemLoc,
         req: &crate::item_tree::TraitRequirement,
+        member_index: usize,
         sig_ref: &TypeRef,
         self_ty: Ty,
         member_args: &mut Option<&[GenericArgData]>,
@@ -6993,7 +7031,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // its own type arguments. A requirement's owner is a trait by
         // construction, so its site says so.
         let site = MemberSite {
-            path: Self::member_path(trait_loc.display_name(), &req.name),
+            path: SiteName::Requirement {
+                trait_: trait_loc.clone(),
+                index: member_index,
+            },
             spelling,
             owner_is_trait: true,
             owner_hint: None,
@@ -7038,7 +7079,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         if !pending.is_empty() {
             self.pending_instantiations.push(PendingInstantiation {
                 expr: key,
-                item: trait_loc.clone(),
                 owner: site.path.clone(),
                 spelling: site.spelling.clone(),
                 params: pending,
@@ -7127,6 +7167,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             callee,
             &trait_loc,
             &req,
+            member_index,
             &sig_ref,
             self_var.clone(),
             member_args,
@@ -7779,23 +7820,22 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         let (mut subst, const_subst) = owner_arg_subst(&named.args);
         let generics = item_generics(self.db, member.to_id(self.db)).to_vec();
         // The one spelling where a list the member cannot take may still
-        // have a home: `Owner::<...>::member`, one segment to the left. Not
-        // offered when the owner has no binder either (that would trade one
-        // refusal for another) or when the path already writes the owner's
-        // list (nothing left to suggest).
-        let owner_hint = (args.is_none()
-            && !item_generics(self.db, owner.to_id(self.db)).is_empty())
-        .then(|| owner.display_name().to_owned());
+        // have a home: `Owner::<...>::member`, one segment to the left. Set
+        // only when the path left the owner's list unwritten; the consumer
+        // also drops it for a binder-less owner.
+        let owner_hint = args.is_none().then(|| owner.clone());
         subst.extend(self.member_own_type_subst(
             expr,
             expr,
-            &member,
             &sig,
             &generics,
             named.args.len(),
             member_args,
             &MemberSite {
-                path: Self::member_path(owner.display_name(), member.display_name()),
+                path: SiteName::Member {
+                    owner: owner.clone(),
+                    member: member.clone(),
+                },
                 spelling: TurbofishSpelling::Path,
                 owner_is_trait: false,
                 owner_hint,
@@ -8047,16 +8087,18 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             // Named for the spelling the use site WROTE
             // (`Peek::<Self = usize>::peek`), not for the impl it resolved
             // to.
-            Self::member_path(trait_loc.display_name(), member_loc.display_name()),
+            SiteName::Member {
+                owner: trait_loc.clone(),
+                member: member_loc.clone(),
+            },
             // And WRITABLE in that spelling only: a member value is
             // impl-specific, so the bare `Peek::peek` a path elsewhere
             // would carry is refused here (`QualifiedTraitMemberValue`).
             // The implementer is the one the path already named.
-            TurbofishSpelling::NamedSelf(format!(
-                "{}::<Self = {}>",
-                trait_loc.display_name(),
-                resolved.display()
-            )),
+            TurbofishSpelling::NamedSelf {
+                trait_: trait_loc.clone(),
+                self_ty: resolved,
+            },
         );
         self.result.member_value_of_expr.insert(
             expr,
@@ -8390,8 +8432,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             // cannot-infer noise on every mention would drown it.
             self.pending_instantiations.push(PendingInstantiation {
                 expr,
-                item: loc.clone(),
-                owner: loc.display_name().to_owned(),
+                owner: SiteName::Item(loc.clone()),
                 spelling: TurbofishSpelling::Path,
                 params: pending,
             });
@@ -10139,8 +10180,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         if !pending.is_empty() && crate::type_decl(self.db, loc.to_id(self.db)).is_some() {
             self.pending_instantiations.push(PendingInstantiation {
                 expr: mention,
-                item: loc.clone(),
-                owner: loc.display_name().to_owned(),
+                owner: SiteName::Item(loc.clone()),
                 spelling: TurbofishSpelling::Path,
                 params: pending,
             });
