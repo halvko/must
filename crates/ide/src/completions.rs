@@ -96,15 +96,15 @@
 //! - **The scrutinee slot** — `match ˽`, nothing written yet. The ordinary
 //!   expression candidate set, RE-RANKED so enum-typed (and variant-typed)
 //!   values lead it, nearest definition scope first — a `let` in this scope
-//!   before one in an enclosing scope before a parameter before a file item
-//!   ([`Context::MatchScrutinee`]). Nothing is suppressed; the normal set
-//!   follows underneath.
+//!   before one in an enclosing scope before a parameter before a file item,
+//!   then a `fn` whose call yields an enum ([`Context::MatchScrutinee`]).
+//!   Nothing is suppressed; the normal set follows underneath.
 //!
 //! Three further layers are DESIGNED BUT NOT BUILT, and the reasoning lives
 //! in `docs/design/platform-codegen-and-tooling.md` rather than here:
-//! one-step "easily produced" enums (a field access or method call that
-//! *yields* an enum), importable enums (moot — no module system exists),
-//! and streaming lower-priority layers in behind a first response.
+//! the other one-step "easily produced" enums (a field access or method
+//! call that *yields* an enum), importable enums (moot — no module system
+//! exists), and streaming lower-priority layers in behind a first response.
 //!
 //! ## Detail, and why there is no `completionItem/resolve`
 //!
@@ -217,6 +217,9 @@ enum Provenance {
     Gold = 0,
     Local = 10,
     Item = 20,
+    /// An enum's variant offered by its full path (`Shape::Circle`)
+    /// wherever a value goes.
+    Variant = 25,
     Builtin = 30,
     Keyword = 40,
 }
@@ -244,11 +247,13 @@ const TYPE_TIER_REFUSED: u8 = 3;
 /// meaning much anyway.
 const SCRUTINEE_LOCAL_TIER_MAX: u8 = 7;
 
-/// The bottom of the gold band: an enum-typed *file item* — the "broader
-/// context" layer, below every local however distant, above the ordinary
-/// candidate set. Deliberately not `09`: that slot stays free for a layer
-/// that has to sit between this and [`Provenance::Local`].
+/// An enum-typed *file item* in the scrutinee slot: below every local
+/// however distant.
 const SCRUTINEE_ITEM_TIER: u8 = 8;
+
+/// The scrutinee slot's last gold layer: a `fn`, local or item, whose call
+/// yields an enum (`make() -> Shape`).
+const SCRUTINEE_PRODUCER_TIER: u8 = 9;
 
 /// The leading component of the sort key — see the module doc's TYPE tier
 /// for the 0/1/2 scheme. Both types arrive fully resolved (expectations by
@@ -1234,9 +1239,7 @@ fn builtin_fn_items(
     .collect()
 }
 
-/// Whether a `type` item is best offered as `Enum` or `Struct` — the same
-/// test `hir::file_diagnostics` uses to word its "not a struct/enum"
-/// messages.
+/// Whether a `type` item is best offered as `Enum` or `Struct`.
 fn type_item_kind(db: &RootDatabase, item: hir::ItemId<'_>) -> CompletionItemKind {
     if hir::enum_variants(db, item).is_some() {
         CompletionItemKind::Enum
@@ -1247,8 +1250,8 @@ fn type_item_kind(db: &RootDatabase, item: hir::ItemId<'_>) -> CompletionItemKin
 
 /// Expression-position candidates from the file's top-level items: value
 /// items (constructors excluded — not lowered yet) as
-/// `Function`/`Constant`, and struct type items as `Struct` (construction
-/// heads).
+/// `Function`/`Constant`, struct type items as `Struct` (construction
+/// heads), and each enum's variants by their full paths.
 fn file_value_and_type_items(
     db: &RootDatabase,
     file: SourceFile,
@@ -1258,7 +1261,7 @@ fn file_value_and_type_items(
 ) -> Vec<CompletionItem> {
     hir::file_scope(db, file)
         .iter()
-        .filter_map(|(name, resolution)| match resolution {
+        .flat_map(|(name, resolution)| match resolution {
             hir::Resolution::Item(loc) => {
                 let item = loc.to_id(db);
                 let ty = hir::signature(db, item);
@@ -1268,15 +1271,12 @@ fn file_value_and_type_items(
                 } else {
                     CompletionItemKind::Constant
                 };
-                // The scrutinee slot's "broader context" layer: an enum-typed file item is
-                // still a legal scrutinee, just the furthest-away one. A
-                // `fn` RETURNING an enum is deliberately not lifted — that
-                // is the unbuilt "easily produced enums" layer, recorded in
-                // the tooling doc, not smuggled in here.
-                let provenance = if scrutinee_slot && dispatches_as_scrutinee(db, &ty) {
-                    SCRUTINEE_ITEM_TIER
-                } else {
-                    Provenance::Item as u8
+                // The scrutinee slot's "broader context" layers: an
+                // enum-typed file item, then a `fn` producing one.
+                let provenance = match scrutinee_layer(db, &ty, scrutinee_slot) {
+                    Some(ScrutineeLayer::Value) => SCRUTINEE_ITEM_TIER,
+                    Some(ScrutineeLayer::Producer) => SCRUTINEE_PRODUCER_TIER,
+                    None => Provenance::Item as u8,
                 };
                 let mut candidate = completion_item_at_tier(
                     name,
@@ -1288,28 +1288,101 @@ fn file_value_and_type_items(
                 );
                 insert_fn_as_call(&mut candidate, &ty, tier);
                 candidate.whole_expr = true;
-                Some(candidate)
+                vec![candidate]
             }
             hir::Resolution::TypeItem(loc) => {
                 let item = loc.to_id(db);
                 // A struct name heads a construction (`Point(...)`); an
-                // enum name is not a value, only its variants are. Neither
-                // has a type to rank against the expectation.
-                let kind = type_item_kind(db, item);
-                (kind == CompletionItemKind::Struct).then(|| {
-                    completion_item(
+                // enum name is not a value, so its variants are offered in
+                // its place, by full path.
+                let variants = hir::enum_variants(db, item);
+                match variants.as_deref() {
+                    Some(variants) => {
+                        enum_variant_path_items(name, &loc, variants, edit_range, expected)
+                    }
+                    None => vec![completion_item(
                         name,
-                        kind,
+                        CompletionItemKind::Struct,
                         Provenance::Item,
                         TYPE_TIER_NONE,
                         type_item_detail(db, item),
                         edit_range,
-                    )
-                })
+                    )],
+                }
             }
-            _ => None,
+            _ => Vec::new(),
         })
         .collect()
+}
+
+/// An enum's variants as values, by their full paths: `Shape::Point`, and
+/// `Shape::Circle($1)` for a variant with a payload, one tab stop per
+/// payload element.
+fn enum_variant_path_items(
+    enum_name: &str,
+    loc: &hir::ItemLoc,
+    variants: &[(String, Vec<hir::Ty>)],
+    edit_range: TextRange,
+    expected: Option<&hir::Ty>,
+) -> Vec<CompletionItem> {
+    let provenance = Provenance::Variant as u8;
+    variants
+        .iter()
+        .enumerate()
+        .map(|(index, (name, payload))| {
+            let path = format!("{enum_name}::{name}");
+            let mut item = variant_item(
+                hir::VariantTy {
+                    decl: loc.clone(),
+                    args: Vec::new(),
+                    index: index as u32,
+                    name: std::sync::Arc::from(name.as_str()),
+                },
+                payload,
+                path.clone(),
+                provenance,
+                expected,
+                edit_range,
+            );
+            if !payload.is_empty() {
+                item.text_edit.insert = InsertText::Snippet {
+                    snippet: format!("{path}({})", payload_stops(payload)),
+                    plain: path,
+                };
+            }
+            item.whole_expr = true;
+            item
+        })
+        .collect()
+}
+
+/// A completion for one enum variant, whatever spelling `label` gives it:
+/// ranked by the variant type against `expected`, detailed by its payload.
+fn variant_item(
+    variant: hir::VariantTy,
+    payload: &[hir::Ty],
+    label: String,
+    provenance: u8,
+    expected: Option<&hir::Ty>,
+    edit_range: TextRange,
+) -> CompletionItem {
+    let detail = hir::render_variant(&variant.name, payload);
+    completion_item_at_tier(
+        label,
+        CompletionItemKind::EnumMember,
+        provenance,
+        type_tier(Some(&hir::Ty::Variant(variant)), expected),
+        Some(detail),
+        edit_range,
+    )
+}
+
+/// One snippet tab stop per payload element: `$1, $2`.
+fn payload_stops(payload: &[hir::Ty]) -> String {
+    (1..=payload.len())
+        .map(|i| format!("${i}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Type-position candidates: only the file's declared types.
@@ -1382,13 +1455,19 @@ fn expression_position_items(
             .into_iter()
             .map(|local| {
                 // In the scrutinee slot an enum-typed local is ranked by
-                // how far away its declaration is; everywhere else every
-                // local shares one tier, as it always has.
-                let provenance = match &local.ty {
-                    Some(ty) if scrutinee_slot && dispatches_as_scrutinee(db, ty) => {
+                // how far away its declaration is, and a local `fn`
+                // producing one joins the producer layer; everywhere else
+                // every local shares one tier.
+                let layer = local
+                    .ty
+                    .as_ref()
+                    .and_then(|ty| scrutinee_layer(db, ty, scrutinee_slot));
+                let provenance = match layer {
+                    Some(ScrutineeLayer::Value) => {
                         local.depth.min(SCRUTINEE_LOCAL_TIER_MAX as u32) as u8
                     }
-                    _ => Provenance::Local as u8,
+                    Some(ScrutineeLayer::Producer) => SCRUTINEE_PRODUCER_TIER,
+                    None => Provenance::Local as u8,
                 };
                 let tier = type_tier(local.ty.as_ref(), expected);
                 let mut item = completion_item_at_tier(
@@ -1416,12 +1495,36 @@ fn expression_position_items(
 /// equality), or a borrow of any of them, because `match` looks through a
 /// borrow. The scrutinee slot's test for its leading layers.
 ///
-/// A `fn` returning an enum does NOT dispatch: calling it would produce a
-/// scrutinee, and "one step of production" is the unbuilt layer. The
-/// distinction is exactly the one [`type_tier`] draws for a `fn` candidate
-/// under a value expectation, kept deliberately.
+/// A `fn` returning an enum does NOT dispatch: calling it produces a
+/// scrutinee, which [`scrutinee_layer`] ranks as its own layer.
 fn dispatches_as_scrutinee(db: &RootDatabase, ty: &hir::Ty) -> bool {
     hir::dispatches_on(db, dispatch_ty(ty))
+}
+
+/// Which of the scrutinee slot's layers a candidate of this type joins;
+/// `None` outside the slot.
+enum ScrutineeLayer {
+    /// It dispatches itself ([`dispatches_as_scrutinee`]).
+    Value,
+    /// It is a `fn` whose call dispatches.
+    Producer,
+}
+
+fn scrutinee_layer(
+    db: &RootDatabase,
+    ty: &hir::Ty,
+    scrutinee_slot: bool,
+) -> Option<ScrutineeLayer> {
+    if !scrutinee_slot {
+        return None;
+    }
+    if dispatches_as_scrutinee(db, ty) {
+        return Some(ScrutineeLayer::Value);
+    }
+    match ty {
+        hir::Ty::Fn(f) if dispatches_as_scrutinee(db, &f.ret) => Some(ScrutineeLayer::Producer),
+        _ => None,
+    }
 }
 
 /// One borrow layer peeled off, if there is one; the type itself otherwise.
@@ -1654,20 +1757,19 @@ fn variant_segment_items(
             // enum's.
             // No mention args exist at `Enum::<cursor>` — an empty list
             // is fine for ranking/display (a generic enum renders bare).
-            let variant_ty = hir::Ty::Variant(hir::VariantTy {
-                decl: loc.clone(),
-                args: Vec::new(),
-                index: index as u32,
-                name: std::sync::Arc::from(name.as_str()),
-            });
             CompletionItem {
                 whole_expr: !in_type_position,
-                ..completion_item(
+                ..variant_item(
+                    hir::VariantTy {
+                        decl: loc.clone(),
+                        args: Vec::new(),
+                        index: index as u32,
+                        name: std::sync::Arc::from(name.as_str()),
+                    },
+                    payload,
                     name.clone(),
-                    CompletionItemKind::EnumMember,
-                    Provenance::Item,
-                    type_tier(Some(&variant_ty), expected),
-                    Some(hir::render_variant(name, payload)),
+                    Provenance::Item as u8,
+                    expected,
                     edit_range,
                 )
             }
@@ -1786,18 +1888,17 @@ fn match_arm_items(
             } else {
                 Provenance::Gold
             };
-            let variant_ty = hir::Ty::Variant(hir::VariantTy {
-                decl: enum_named.decl.clone(),
-                args: enum_named.args.clone(),
-                index: index as u32,
-                name: std::sync::Arc::from(name.as_str()),
-            });
-            let mut item = completion_item(
+            let mut item = variant_item(
+                hir::VariantTy {
+                    decl: enum_named.decl.clone(),
+                    args: enum_named.args.clone(),
+                    index: index as u32,
+                    name: std::sync::Arc::from(name.as_str()),
+                },
+                payload,
                 insert.clone(),
-                CompletionItemKind::EnumMember,
-                provenance,
-                type_tier(Some(&variant_ty), Some(&scrutinee_ty)),
-                Some(hir::render_variant(name, payload)),
+                provenance as u8,
+                Some(&scrutinee_ty),
                 edit_range,
             );
             if bare {
@@ -1814,12 +1915,8 @@ fn match_arm_items(
             // snippet-incapable client falls back to the bare insertion
             // (no parens — there's no sound name to invent).
             if !payload.is_empty() {
-                let stops = (1..=payload.len())
-                    .map(|i| format!("${i}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
                 item.text_edit.insert = InsertText::Snippet {
-                    snippet: format!("{insert}({stops})"),
+                    snippet: format!("{insert}({})", payload_stops(payload)),
                     plain: insert,
                 };
             }

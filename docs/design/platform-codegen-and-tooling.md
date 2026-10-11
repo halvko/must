@@ -85,12 +85,18 @@
   payload bindings and arm bodies as tab stops in definition order), and
   scrutinee ranking that re-orders the expression set so enum-typed values
   lead, ordered by definition-scope distance (scope-chain hop count, not a
-  hand-written tier list, so closures inherit the rule). Nothing is
-  suppressed. The template lives on an explicit invoke plus a quick fix on
-  the non-exhaustive-match diagnostic, not on a trigger character. Snippets
-  are indented absolutely: Zed's snippet path shifts the body by the indents
-  query's suggestion for its first line minus that line's own indentation,
-  which is zero for an absolute arm list that opens on its own line.
+  hand-written tier list, so closures inherit the rule), then enum-typed
+  items, then `fn`s (local or item) whose call produces one. The order
+  guesses how likely each candidate is as a scrutinee: local over global,
+  easy to match on over hard, useful over pointless. A variant
+  (`Shape::Circle`) is a pointless scrutinee, so it keeps its ordinary
+  rank, below every local.
+  Nothing is suppressed. The template lives on an explicit invoke plus a
+  quick fix on the non-exhaustive-match diagnostic, not on a trigger
+  character. Snippets are indented absolutely: Zed's snippet path shifts the
+  body by the indents query's suggestion for its first line minus that
+  line's own indentation, which is zero for an absolute arm list that opens
+  on its own line.
 - **P03** `print` emits exactly what it is given: `str` only, no newline, no formatting, no
   interpolation. The CLI runner writes to `stdout.lock()` — Rust's own line buffering, no
   per-call flush — and flushes it explicitly before a crash report and before a blocking
