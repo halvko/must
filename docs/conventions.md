@@ -29,6 +29,11 @@ here; they live in `docs/design/`.
   sign the code should be that other place. Share the code and drop the
   comment.
 
+## Code
+
+- `to_owned()` turns a `&str` into a `String`; `to_string()` is for
+  formatting a value as text.
+
 ## Tests
 
 - A multi-line test program is a raw string, `r#"..."#`, opening on its
