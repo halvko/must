@@ -990,6 +990,9 @@ impl LetStmt {
     pub fn initializer(&self) -> Option<Expr> {
         child(&self.syntax)
     }
+    pub fn semicolon_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, SEMICOLON)
+    }
 }
 
 impl AssignStmt {
