@@ -21,8 +21,10 @@
 //! carry [`ExprId`] provenance, and ranges are recovered through the body
 //! source map only at the diagnostic/debugger boundary.
 
+mod cfg;
 pub mod loans;
 mod lower;
+pub mod moves;
 pub mod pretty;
 #[cfg(test)]
 mod tests;
@@ -532,11 +534,23 @@ pub fn mir_lowered<'db>(db: &'db dyn Db, item: ItemId<'db>) -> MirLowered {
     lower::lower_item(db, item)
 }
 
-/// The item's MIR as it runs: every loan refusal trapped where its refused
-/// operation runs. The loan checker reads [`mir_lowered`], so its traps
-/// are planted on a copy of it.
+/// One trap a CFG checker plants: before statement `index` of `block` in
+/// `body`, or before the terminator when `index` is the statement count.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckTrap {
+    pub body: BodyId,
+    pub block: BlockId,
+    pub index: usize,
+    pub message: String,
+}
+
+/// The item's MIR as it runs: every refusal of the CFG checkers — loans,
+/// and moves — trapped where its refused operation runs. The checkers
+/// read [`mir_lowered`], so their traps are planted on a copy of it.
 pub fn mir_checked<'db>(db: &'db dyn Db, item: ItemId<'db>) -> &'db MirLowered {
-    if loans::loan_findings(db, item).traps.is_empty() {
+    if loans::loan_findings(db, item).traps.is_empty()
+        && moves::move_findings(db, item).traps.is_empty()
+    {
         mir_lowered(db, item)
     } else {
         mir_trapped(db, item)
@@ -546,9 +560,12 @@ pub fn mir_checked<'db>(db: &'db dyn Db, item: ItemId<'db>) -> &'db MirLowered {
 #[salsa::tracked(returns(ref))]
 fn mir_trapped<'db>(db: &'db dyn Db, item: ItemId<'db>) -> MirLowered {
     let mut checked = mir_lowered(db, item).clone();
-    let mut traps: Vec<&LoanTrap> = loans::loan_findings(db, item).traps.iter().collect();
+    let mut traps: Vec<&CheckTrap> = (loans::loan_findings(db, item).traps.iter())
+        .chain(&moves::move_findings(db, item).traps)
+        .collect();
     // Back to front within a block, so each split leaves the indices of
-    // the traps still to plant in it where they were.
+    // the traps still to plant in it where they were. Two checkers may
+    // refuse one operation; the first trap there is the one that runs.
     traps.sort_by_key(|trap| {
         (
             u32::from(trap.body.into_raw()),
@@ -556,6 +573,7 @@ fn mir_trapped<'db>(db: &'db dyn Db, item: ItemId<'db>) -> MirLowered {
             std::cmp::Reverse(trap.index),
         )
     });
+    traps.dedup_by_key(|trap| (trap.body, trap.block, trap.index));
     for trap in traps {
         plant_trap(&mut checked.bodies[trap.body], trap);
     }
@@ -565,7 +583,7 @@ fn mir_trapped<'db>(db: &'db dyn Db, item: ItemId<'db>) -> MirLowered {
 /// Split `trap.block` before `trap.index`: the statements from there on and
 /// the old terminator move to a new block, and the first half ends in a
 /// trap that continues there.
-fn plant_trap(body: &mut MirBody, trap: &LoanTrap) {
+fn plant_trap(body: &mut MirBody, trap: &CheckTrap) {
     let dest = body.locals.alloc(LocalData {
         ty: Ty::Unit,
         name: None,
@@ -592,6 +610,5 @@ fn plant_trap(body: &mut MirBody, trap: &LoanTrap) {
     };
 }
 
-pub use loans::{
-    AccessKind, LoanDiagnostic, LoanFindings, LoanTrap, StillUsed, loan_check, loan_findings,
-};
+pub use loans::{AccessKind, LoanDiagnostic, LoanFindings, StillUsed, loan_check, loan_findings};
+pub use moves::{MoveDiagnostic, MoveFindings, move_check, move_findings};

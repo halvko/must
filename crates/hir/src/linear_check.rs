@@ -1,79 +1,28 @@
-//! Must-consume checking: the dual of use-after-move.
-//!
-//! A value whose type lacks the `forget` capability (see
-//! [`crate::capability`]) must be consumed EXACTLY ONCE on every path.
-//! Use-after-move asks "was this value already given away?"; this asks the
-//! same question from the other side — "was it ever?" — and both answers
-//! fall out of one walk over the body with one fact per binding: live, or
-//! consumed.
-//!
-//! Why this is cheap here and expensive elsewhere: **there is no unwinding
-//! in Must.** A panic traps the program; nothing runs on the way out. So
-//! the paths out of a scope are the ones written in the source — falling off
-//! the end, `return`, `break`, `continue` — and a checker that visits those
-//! has visited all of them. A language with unwinding has an implicit exit
-//! edge at every call, which is precisely why such languages reach for
-//! destructors instead: there is no source position to write the cleanup at.
-//!
-//! What COUNTS as consuming is deliberately small, and each entry is a
-//! place where the value visibly leaves:
-//!
-//! - reading the binding as a value — passing it to a call, returning it,
-//!   binding it to another name, putting it in a record or an array;
-//! - matching an owned scrutinee (the payload bindings inherit the
-//!   obligation, arm by arm);
-//! - destructuring it (`let String(struct { ptr, cap, .. }) = s;`) — the
-//!   bottom of every disposal chain, and the reason no compiler magic is
-//!   needed for `drop`: taking a linear apart hands its obligation to the
-//!   parts, and a `String`'s parts are a pointer and two integers, which
-//!   anyone may forget.
-//!
-//! Everything else — borrowing it, reading one of its non-linear fields —
-//! leaves the obligation where it was. Every mention but a whole
-//! assignment needs the value still there, so any of them after a
-//! consumption is the same use-after-move.
-//!
-//! A deferred `let mut x;` is a binding born in the moved-out state (M21),
-//! so the same fact answers definite assignment: it is tracked whatever its
-//! type, and a mention before a whole assignment on every path is refused.
+//! Must-consume checking, the half that needs no path: what one expression
+//! or one pattern does with a value whose type lacks the `forget`
+//! capability — copied out of a place, repeated, dropped, written over, or
+//! skipped by a pattern (M16; whether a path consumed it is `mir::moves`'s).
 
 use base_db::Db;
 use la_arena::ArenaMap;
-use rustc_hash::FxHashMap;
+use rustc_hash::FxHashSet;
 
-use crate::body::{BindingKind, Body, ExprData, ExprId, PatData, PatId, Stmt, body};
+use crate::body::{Body, ExprData, ExprId, PatData, PatId, Stmt, body};
 use crate::capability::{Affine, has_forget};
 use crate::infer::{InferenceResult, infer};
 use crate::scopes::{Resolution, resolutions};
 use crate::ty::Ty;
-use crate::{BindingId, ItemId, diag};
+use crate::{ItemId, diag};
 
 /// Range-free (keyed by HIR ids); the diagnostics layer attaches ranges
 /// through the body source map.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinearDiagnostic {
-    /// A live linear binding at a scope's exit — the leak. Squiggles the
-    /// EXIT (the block, the `return`, the `break`), because that is the
-    /// path that fails; the binding is the related note, because that is
-    /// where the obligation started.
-    NotConsumed { binding: BindingId, exit: ExprId },
-    /// A linear binding read after it was already consumed — use-after-move,
-    /// which for a linear type is also double-disposal.
-    AlreadyConsumed {
-        binding: BindingId,
-        expr: ExprId,
-        first: ExprId,
-    },
     /// A linear value produced by a statement whose value is discarded.
     Discarded { expr: ExprId },
     /// A linear value borrowed as a temporary: it has no name, so nothing
     /// could consume it.
     BorrowedTemporary { expr: ExprId },
-    /// Assignment over a linear binding that still holds a live value.
-    AssignOverLive { binding: BindingId, target: ExprId },
-    /// A join whose branches disagree: consumed on one path, live on
-    /// another. Reported at the join, per the statement-boundary rule.
-    JoinDisagrees { binding: BindingId, join: ExprId },
     /// A linear read out of a place that is not a whole owned binding — a
     /// field of a value, an element of an array. The read would COPY, and a
     /// copy of a linear is two obligations naming one resource.
@@ -97,17 +46,6 @@ pub enum LinearDiagnostic {
     /// the binder to blame when the skipped value's type is linear only
     /// because a rigid parameter is.
     WildcardSkipsLinear { pat: PatId, param: Option<String> },
-    /// A binding's liveness differs between the start and the end of a
-    /// loop body — the next iteration would see a different world than the
-    /// one the body was checked against.
-    LoopChangesLinear { binding: BindingId, at: ExprId },
-    /// A deferred binding mentioned where some path to here (`maybe`) or
-    /// every path (`!maybe`) has not assigned it.
-    ReadUninit {
-        binding: BindingId,
-        expr: ExprId,
-        maybe: bool,
-    },
     /// An item's own value is linear. A `static` is never destroyed, so
     /// holding a linear in one is a leak with no exit path to blame.
     ItemHoldsLinear { expr: ExprId },
@@ -118,11 +56,9 @@ pub enum LinearDiagnostic {
     /// discharge them exactly once.
     ConstBlockHoldsLinear { expr: ExprId },
     /// Assignment over a linear place that is not a whole binding — a
-    /// record field, an array element, a `.&mut` referent. The twin of
-    /// [`Self::AssignOverLive`] where there is no binding to name and no
-    /// liveness to track: the place holds such a value BY TYPE, so the
-    /// write always loses one. A raw-pointer deref target is deliberately
-    /// exempt; that is `unsafe`'s hatch, the same one raw storage is.
+    /// record field, an array element, a `.&mut` referent. The place holds
+    /// such a value BY TYPE, so the write always loses one. A raw-pointer
+    /// deref target is exempt: that is `unsafe`'s hatch.
     AssignOverPlace { target: ExprId },
 }
 
@@ -130,25 +66,19 @@ impl LinearDiagnostic {
     /// The expression the squiggle lands on.
     pub fn expr(&self) -> Option<ExprId> {
         match self {
-            LinearDiagnostic::NotConsumed { exit, .. } => Some(*exit),
-            LinearDiagnostic::AlreadyConsumed { expr, .. }
-            | LinearDiagnostic::Discarded { expr }
+            LinearDiagnostic::Discarded { expr }
             | LinearDiagnostic::BorrowedTemporary { expr }
             | LinearDiagnostic::CopiedOut { expr }
             | LinearDiagnostic::Repeated { expr }
             | LinearDiagnostic::ItemHoldsLinear { expr }
-            | LinearDiagnostic::ConstBlockHoldsLinear { expr }
-            | LinearDiagnostic::ReadUninit { expr, .. } => Some(*expr),
-            LinearDiagnostic::AssignOverLive { target, .. }
-            | LinearDiagnostic::AssignOverPlace { target } => Some(*target),
-            LinearDiagnostic::JoinDisagrees { join, .. } => Some(*join),
-            LinearDiagnostic::WildcardSkipsLinear { .. } => None,
-            LinearDiagnostic::LoopChangesLinear { at, .. } => Some(*at),
-            LinearDiagnostic::RestSkipsLinear { .. } => None,
+            | LinearDiagnostic::ConstBlockHoldsLinear { expr } => Some(*expr),
+            LinearDiagnostic::AssignOverPlace { target } => Some(*target),
+            LinearDiagnostic::RestSkipsLinear { .. }
+            | LinearDiagnostic::WildcardSkipsLinear { .. } => None,
         }
     }
 
-    /// The pattern the squiggle lands on, for the one variant that has no
+    /// The pattern the squiggle lands on, for the variants that have no
     /// expression to point at.
     pub fn pat(&self) -> Option<PatId> {
         match self {
@@ -158,22 +88,8 @@ impl LinearDiagnostic {
         }
     }
 
-    /// The binding whose birth explains this diagnostic, for the related
-    /// note ("`s` is born here and must be consumed").
-    pub fn binding(&self) -> Option<BindingId> {
-        match self {
-            LinearDiagnostic::NotConsumed { binding, .. }
-            | LinearDiagnostic::AlreadyConsumed { binding, .. }
-            | LinearDiagnostic::AssignOverLive { binding, .. }
-            | LinearDiagnostic::JoinDisagrees { binding, .. }
-            | LinearDiagnostic::LoopChangesLinear { binding, .. }
-            | LinearDiagnostic::ReadUninit { binding, .. } => Some(*binding),
-            _ => None,
-        }
-    }
-
-    /// Whether this finding is about DUPLICATION (a value read twice, or
-    /// copied out of a place) rather than about a value that was lost.
+    /// Whether this finding is about DUPLICATION (a value copied out of a
+    /// place, or repeated) rather than about a value that was lost.
     ///
     /// The two families ask different questions of the type, so they take
     /// different ROOTS. Duplication is refused for anything the copy rule
@@ -185,42 +101,15 @@ impl LinearDiagnostic {
     pub fn about_duplication(&self) -> bool {
         matches!(
             self,
-            LinearDiagnostic::AlreadyConsumed { .. }
-                | LinearDiagnostic::CopiedOut { .. }
-                | LinearDiagnostic::Repeated { .. }
-                | LinearDiagnostic::LoopChangesLinear { .. }
+            LinearDiagnostic::CopiedOut { .. } | LinearDiagnostic::Repeated { .. }
         )
     }
 
-    /// The related note on [`Self::binding`]'s declaration. `linear` says
-    /// whether the value owes a consumption: one tracked only against
-    /// duplication (a rigid parameter, an exclusive borrow) owes none.
-    pub fn binding_note(&self, subject: Option<&BindingKind>, linear: bool) -> String {
-        match self {
-            LinearDiagnostic::ReadUninit { .. } => diag::declared_without_value(subject),
-            _ => diag::born_here(subject, linear),
-        }
-    }
-
-    /// The expression of an EARLIER event this diagnostic refers back to
-    /// (the first consumption of a double-consume).
-    pub fn related_expr(&self) -> Option<ExprId> {
-        match self {
-            LinearDiagnostic::AlreadyConsumed { first, .. } => Some(*first),
-            _ => None,
-        }
-    }
-
     /// The message as reported for a finding of `item`'s check: the
-    /// subject and the blamed root read off its body and types.
+    /// blamed root read off its types.
     pub fn render(&self, db: &dyn Db, item: ItemId<'_>) -> String {
-        let body = body(db, item);
         let types = infer(db, item);
-        let subject = self.binding().map(|binding| &body.bindings[binding].kind);
-        let ty = self
-            .binding()
-            .and_then(|binding| types.type_of_binding.get(binding))
-            .or_else(|| self.expr().and_then(|expr| types.type_of_expr.get(expr)));
+        let ty = self.expr().and_then(|expr| types.type_of_expr.get(expr));
         // Duplication and loss ask different questions of the type, so
         // they blame different roots (see [`Self::about_duplication`]).
         let root = ty.and_then(|ty| {
@@ -230,49 +119,36 @@ impl LinearDiagnostic {
                 crate::capability::blaming_param(db, ty).map(Affine::Param)
             }
         });
-        self.message(subject, root.as_ref())
+        self.message(root.as_ref())
     }
 
-    /// The message, given the binding's name and — when the value's type
-    /// has a root the message can name — what that root is.
+    /// The message, given — when the value's type has a root the message
+    /// can name — what that root is.
     ///
-    /// EVERY message that explains why a value could not be lost or read
-    /// again takes the hint, because inside a generic body all of them are
-    /// about the binder: nothing was declared `only move`, so a reader
-    /// sent looking for a declaration finds none.
+    /// Inside a generic body every message that explains why a value could
+    /// not be lost or copied is about the binder: nothing was declared
+    /// `only move`, so a reader sent looking for a declaration finds none.
     ///
     /// Which hint, and therefore which advice, is decided by
     /// [`Self::about_duplication`]. The LEAK arms may offer `T: forget`,
     /// because they fire only where an unbounded parameter is the reason
-    /// the value had to be consumed, and a parameter is the only root they
-    /// can have that a declaration does not explain. The DUPLICATION arms
-    /// may not offer the bound: a bounded parameter reaches them too, and
-    /// for one of them the bound has already waived consumption — so they
-    /// say what is true of every root, which is that nothing grants
-    /// copying, and name borrowing. Their third root has no declaration
-    /// and no binder either: a value HOLDING an exclusive borrow, refused
-    /// a second read because two of them would name one place.
+    /// the value had to be consumed. The DUPLICATION arms may not offer the
+    /// bound: a bounded parameter reaches them too, and for one of them the
+    /// bound has already waived consumption — so they say what is true of
+    /// every root, which is that nothing grants copying.
     ///
     /// Two arms ignore the `param` they are handed and use one they
-    /// carried from the walk instead. The type they answer for is neither
-    /// a binding's nor an expression's — a `..` blames the FIELD it
-    /// skipped, a match-arm `_` blames the SCRUTINEE it swallowed — so
-    /// only the walk that found them knows which type to blame. The one
-    /// arm that takes no hint at all is an ITEM's own value, which is
-    /// never inside a generic body's scope.
-    pub fn message(&self, subject: Option<&BindingKind>, root: Option<&Affine>) -> String {
+    /// carried from the walk instead. The type they answer for is not an
+    /// expression's — a `..` blames the FIELD it skipped, a match-arm `_`
+    /// blames the SCRUTINEE it swallowed — so only the walk that found them
+    /// knows which type to blame. The one arm that takes no hint at all is
+    /// an ITEM's own value, which is never inside a generic body's scope.
+    pub fn message(&self, root: Option<&Affine>) -> String {
         let param = match root {
             Some(Affine::Param(param)) => Some(param.as_str()),
             _ => None,
         };
         match self {
-            LinearDiagnostic::NotConsumed { .. } => match param {
-                Some(param) => diag::not_consumed_param(subject, param),
-                None => diag::not_consumed(subject),
-            },
-            LinearDiagnostic::AlreadyConsumed { .. } => root
-                .and_then(|root| diag::already_consumed_dup(subject, root))
-                .unwrap_or_else(|| diag::already_consumed(subject)),
             LinearDiagnostic::Discarded { .. } => match param {
                 Some(param) => diag::discarded_param(param),
                 None => diag::DISCARDED_LINEAR.to_owned(),
@@ -283,14 +159,6 @@ impl LinearDiagnostic {
             LinearDiagnostic::BorrowedTemporary { .. } => {
                 diag::BORROWED_LINEAR_TEMPORARY.to_owned()
             }
-            LinearDiagnostic::AssignOverLive { .. } => match param {
-                Some(param) => diag::assign_over_live_param(subject, param),
-                None => diag::assign_over_live(subject),
-            },
-            LinearDiagnostic::JoinDisagrees { .. } => match param {
-                Some(param) => diag::join_disagrees_param(subject, param),
-                None => diag::join_disagrees(subject),
-            },
             LinearDiagnostic::CopiedOut { .. } => root
                 .and_then(diag::copied_out_dup)
                 .unwrap_or_else(|| diag::COPIED_OUT_LINEAR.to_owned()),
@@ -305,10 +173,6 @@ impl LinearDiagnostic {
                 Some(param) => diag::wildcard_skips_param(param),
                 None => diag::WILDCARD_SKIPS_LINEAR.to_owned(),
             },
-            LinearDiagnostic::LoopChangesLinear { .. } => root
-                .and_then(|root| diag::loop_changes_dup(subject, root))
-                .unwrap_or_else(|| diag::loop_changes_linear(subject)),
-            LinearDiagnostic::ReadUninit { maybe, .. } => diag::read_uninit(subject, *maybe),
             LinearDiagnostic::ItemHoldsLinear { .. } => diag::ITEM_HOLDS_LINEAR.to_owned(),
             // Reached through the ANNOTATION rather than through a
             // runtime binding, which a const context indeed cannot read:
@@ -338,26 +202,17 @@ pub fn linear_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<LinearDiagno
         resolutions: resolutions(db, item),
         infer: inference,
         diagnostics: Vec::new(),
-        state: FxHashMap::default(),
-        owed: FxHashMap::default(),
-        scopes: Vec::new(),
-        loops: Vec::new(),
         error_exprs: inference
             .diagnostics
             .iter()
             .filter(|diag| diag.severity() == crate::Severity::Error)
             .map(|diag| diag.expr())
             .collect(),
-        poisoned: rustc_hash::FxHashSet::default(),
-        body_floor: 0,
     };
     if let Some(root) = body.root {
-        // The item's own initializer is a scope of its own — a const
-        // context, and the same rule applies in one (a linear born at
-        // compile time must be consumed at compile time). Its VALUE,
-        // though, is the item's value, and a `static` is never destroyed.
-        ctx.scopes.push(Vec::new());
-        let flow = ctx.read_value(root);
+        ctx.read_value(root);
+        // The item's VALUE is the item's value, and a `static` is never
+        // destroyed.
         if ctx.is_linear_expr(root) {
             // `static held = const { make(1) };` is one mistake, and the
             // const block's own complaint is this one a nesting level down
@@ -370,111 +225,8 @@ pub fn linear_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<LinearDiagno
             ctx.diagnostics
                 .push(LinearDiagnostic::ItemHoldsLinear { expr: root });
         }
-        ctx.pop_scope(root, flow);
     }
-    // The promise `crate::capability` makes: a broken program does not grow
-    // must-consume errors on top of the error it already has. Only the
-    // "it never happened" family is dropped — the "you did something
-    // wrong" family (a double consume, a copy-out) is about something
-    // written, and stays.
-    let poisoned = std::mem::take(&mut ctx.poisoned);
-    ctx.diagnostics.retain(|diag| match diag {
-        LinearDiagnostic::NotConsumed { binding, .. }
-        | LinearDiagnostic::JoinDisagrees { binding, .. }
-        | LinearDiagnostic::LoopChangesLinear { binding, .. } => !poisoned.contains(binding),
-        _ => true,
-    });
     ctx.diagnostics
-}
-
-/// Whether control reaches the end of an expression.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Flow {
-    Falls,
-    /// `return`, `break`, `continue`, a call that never returns. The
-    /// obligations of every scope this jumped out of were checked AT the
-    /// jump, so the scopes it unwinds report nothing.
-    Diverges,
-}
-
-/// What a tracked binding owes. The walk carries two obligations, and they
-/// differ by exactly one diagnostic family.
-///
-/// A LINEAR value owes a consumption on every path: losing it is a leak,
-/// and duplicating it is two obligations naming one resource. A value that
-/// is merely UNDUPLICABLE owes only the second half — it may be lost, and
-/// the walk still refuses a second read of it.
-///
-/// The second obligation is the use-after-move check the copy rule needs,
-/// so it asks the copy rule's own question (`capability::is_copyable`)
-/// rather than a narrower one of its own. Two things reach it: a rigid
-/// type PARAMETER, bounded or not — `T: forget` waives the consumption and
-/// grants no copying (TR11) — and a value HOLDING an exclusive borrow,
-/// which is the same statement about the same instantiation, since a
-/// bounded `T` may be `usize.&mut`. A body that read one binding of either
-/// twice would hand out two exclusive borrows of one place.
-///
-/// A BARE borrow is the exception, by name rather than by walk, and the
-/// reason is M07's. Where a position WANTS a borrow, every mention mints a
-/// fresh reborrow, so there are no two loans to refuse; where none does —
-/// a bare `let`, a read of an affine field — the read still copies,
-/// invisibly to both layers, and M07 rules that closing THAT is a typing
-/// change rather than a checker one. So this walk leaves the bare borrow
-/// where the ruling put it, and refuses only what HOLDS one, which no
-/// reborrow reaches.
-///
-/// A memo of a fact derivable from the binding's type, kept beside
-/// [`CheckCtx::state`] rather than re-derived at each of the half-dozen
-/// sites that ask: written once when the binding is tracked, never
-/// branch-dependent, and never cloned across the arms of a join.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Owed {
-    /// Exactly once — a linear value.
-    Once,
-    /// At most once — a value that may not be duplicated, whatever its
-    /// disposal story is.
-    AtMostOnce,
-    /// Nothing but holding a value when read: a deferred binding of a
-    /// copyable type, whose reads consume nothing.
-    Assigned,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Status {
-    Live,
-    Consumed {
-        at: ExprId,
-    },
-    /// A deferred binding unassigned: on every path, or (`maybe`) on some
-    /// path into a join.
-    Uninit {
-        maybe: bool,
-    },
-}
-
-impl Status {
-    fn is_live(self) -> bool {
-        matches!(self, Status::Live)
-    }
-}
-
-type State = FxHashMap<BindingId, Status>;
-
-struct LoopFrame {
-    /// `scopes.len()` at the loop's entry — `break`/`continue` check every
-    /// scope above this.
-    floor: usize,
-    /// The liveness of every tracked binding at the loop's entry. The body
-    /// must leave them as it found them, or the second iteration runs
-    /// against a world the first was not checked in (one direction is
-    /// allowed: see [`CheckCtx::check_loop_invariant`]).
-    entry: FxHashMap<BindingId, bool>,
-    /// The state at each `break` — the loop's exit is their join.
-    breaks: Vec<State>,
-    /// Bindings not live at entry that a back edge carries live. A break in
-    /// a later iteration may see them assigned, so the exit's "unassigned"
-    /// is only a maybe.
-    revived: Vec<BindingId>,
 }
 
 struct CheckCtx<'db> {
@@ -483,28 +235,9 @@ struct CheckCtx<'db> {
     resolutions: &'db ArenaMap<ExprId, Resolution>,
     infer: &'db InferenceResult,
     diagnostics: Vec<LinearDiagnostic>,
-    state: State,
-    /// What each tracked binding owes — see [`Owed`].
-    owed: FxHashMap<BindingId, Owed>,
-    /// One frame per open lexical scope, holding the tracked bindings it
-    /// introduced. Popping a frame is where "not consumed" is found.
-    scopes: Vec<Vec<BindingId>>,
-    loops: Vec<LoopFrame>,
-    /// Every expression inference reported an ERROR at. Two uses, both
-    /// about not saying the same thing twice or the wrong thing once: a
-    /// copy-out inference already refused is not repeated, and a
-    /// consumption site inference could not resolve POISONS the value it
-    /// would have consumed.
-    error_exprs: rustc_hash::FxHashSet<ExprId>,
-    /// Bindings whose consumption sites are broken. `s.` half-typed, or
-    /// `s.some_unresolved_member()`, is a consumption the user is in the
-    /// middle of writing — reporting a leak beside the real error would
-    /// accuse them of the opposite of what they are doing.
-    poisoned: rustc_hash::FxHashSet<BindingId>,
-    /// `scopes.len()` at the current fn body's entry — `return` checks
-    /// every scope above this, and no further (an enclosing body's locals
-    /// are not this body's to consume; captures do not exist).
-    body_floor: usize,
+    /// Every expression inference reported an ERROR at: a copy-out
+    /// inference already refused is not repeated.
+    error_exprs: FxHashSet<ExprId>,
 }
 
 impl CheckCtx<'_> {
@@ -521,55 +254,15 @@ impl CheckCtx<'_> {
             .is_some_and(|ty| self.is_linear(ty))
     }
 
-    /// What a value of `ty` owes, or `None` if it owes nothing and needs no
-    /// tracking. See [`Owed`]: the walk tracks two kinds of value and the
-    /// difference between them is exactly one diagnostic family.
-    fn owed_of(&self, ty: &Ty) -> Option<Owed> {
-        if self.is_linear(ty) {
-            Some(Owed::Once)
-        } else if matches!(ty, Ty::Borrow { .. }) {
-            None
-        } else if !crate::capability::is_copyable(self.db, ty) {
-            Some(Owed::AtMostOnce)
-        } else {
-            None
-        }
-    }
-
-    /// Whether a value of this expression's type may be DUPLICATED by a
-    /// plain read — the question a copy-out and an array-repeat ask, and
-    /// the one place the two obligations behave alike.
+    /// Whether a value of this expression's type may NOT be duplicated by a
+    /// plain read, the question a copy-out and an array-repeat ask. A bare
+    /// borrow is exempt (M07); a value HOLDING an exclusive borrow is not.
     fn is_unduplicable_expr(&self, expr: ExprId) -> bool {
-        self.infer
-            .type_of_expr
-            .get(expr)
-            .and_then(|ty| self.owed_of(ty))
-            .is_some()
-    }
-
-    /// Whether this binding owes a consumption at the end of its scope, as
-    /// opposed to merely owing not to be duplicated.
-    fn owes_once(&self, binding: BindingId) -> bool {
-        self.owed.get(&binding) == Some(&Owed::Once)
-    }
-
-    /// Whether control can leave this expression at all. `!` coerces to
-    /// anything and [`InferenceResult::type_of_expr`] records the type the
-    /// POSITION accepted, so a diverging expression checked against a real
-    /// expectation — a body's tail against the return type, an annotated
-    /// `let` — is filed under that expectation and not under `!`. A
-    /// callee's signature is never coerced, so a call asks that instead.
-    fn diverges(&self, expr: ExprId) -> bool {
-        if matches!(self.infer.type_of_expr.get(expr), Some(Ty::Never)) {
-            return true;
-        }
-        match &self.body.exprs[expr] {
-            ExprData::Call { callee, .. } => matches!(
-                self.infer.type_of_expr.get(*callee),
-                Some(Ty::Fn(signature)) if matches!(signature.ret, Ty::Never)
-            ),
-            _ => false,
-        }
+        self.infer.type_of_expr.get(expr).is_some_and(|ty| {
+            self.is_linear(ty)
+                || (!matches!(ty, Ty::Borrow { .. })
+                    && !crate::capability::is_copyable(self.db, ty))
+        })
     }
 
     /// Whether a dot-call resolved to a MEMBER (inherent, trait-impl,
@@ -580,36 +273,6 @@ impl CheckCtx<'_> {
         self.infer.member_of_expr.get(expr).is_some()
             || self.infer.builtin_member_of_expr.get(expr).is_some()
             || self.infer.bound_member_of_expr.get(expr).is_some()
-    }
-
-    // ---- scopes and bindings -------------------------------------------
-
-    /// Start tracking what `pat` binds. A `deferred` binding (`let mut x;`)
-    /// is tracked whatever its type, and starts out holding nothing.
-    fn track_pat(&mut self, pat: PatId, deferred: bool) {
-        for binding in self.body.pat_bindings(pat) {
-            let owed = self
-                .infer
-                .type_of_binding
-                .get(binding)
-                .and_then(|ty| self.owed_of(ty));
-            let (owed, status) = match owed {
-                _ if deferred => (
-                    owed.unwrap_or(Owed::Assigned),
-                    Status::Uninit { maybe: false },
-                ),
-                Some(owed) => (owed, Status::Live),
-                None => continue,
-            };
-            self.state.insert(binding, status);
-            self.owed.insert(binding, owed);
-            if let Some(frame) = self.scopes.last_mut() {
-                frame.push(binding);
-            }
-        }
-        if !deferred {
-            self.check_skipping_patterns(pat);
-        }
     }
 
     /// A `..` that would skip a linear field, or a `_` that would skip a
@@ -673,46 +336,6 @@ impl CheckCtx<'_> {
         }
     }
 
-    fn pop_scope(&mut self, exit: ExprId, flow: Flow) {
-        let frame = self.scopes.pop().unwrap_or_default();
-        for binding in frame {
-            if flow == Flow::Falls
-                && self.owes_once(binding)
-                && self.state.get(&binding).is_some_and(|s| s.is_live())
-            {
-                self.diagnostics
-                    .push(LinearDiagnostic::NotConsumed { binding, exit });
-            }
-            self.state.remove(&binding);
-        }
-    }
-
-    /// Every live binding in the scopes above `floor` — the check a jump
-    /// out of them performs. Nothing is mutated: the path ends here.
-    fn report_live_above(&mut self, floor: usize, exit: ExprId) {
-        let live: Vec<BindingId> = self.scopes[floor.min(self.scopes.len())..]
-            .iter()
-            .flatten()
-            .copied()
-            .filter(|b| self.owes_once(*b) && self.state.get(b).is_some_and(|s| s.is_live()))
-            .collect();
-        for binding in live {
-            self.diagnostics
-                .push(LinearDiagnostic::NotConsumed { binding, exit });
-        }
-    }
-
-    /// Whether inference gave up on this expression — it reported an error
-    /// AT it, or typed it `{error}`. The silent case matters as much as the
-    /// loud one: a dot-call on a member whose own definition is broken is
-    /// deliberately not re-diagnosed at the call (the definition carries
-    /// it), and that silence is exactly the shape a poisoned consumption
-    /// site has.
-    fn is_broken(&self, expr: ExprId) -> bool {
-        self.error_exprs.contains(&expr)
-            || matches!(self.infer.type_of_expr.get(expr), Some(Ty::Error))
-    }
-
     /// A copy-out, unless inference already refused the same read at the
     /// same place. `r.*[0]` of a linear element is BOTH "cannot move out of
     /// a borrow" and "cannot copy a value that must be consumed"; they are
@@ -725,118 +348,38 @@ impl CheckCtx<'_> {
         self.diagnostics.push(LinearDiagnostic::CopiedOut { expr });
     }
 
-    /// Mark the binding at the root of a place chain as one whose
-    /// consumption sites are broken.
-    fn poison_root(&mut self, expr: ExprId) {
-        let mut root = expr;
-        loop {
-            match &self.body.exprs[root] {
-                ExprData::Field { receiver, .. } | ExprData::Deref { receiver } => {
-                    root = *receiver;
-                }
-                ExprData::Index { base, .. } => root = *base,
-                _ => break,
-            }
-        }
-        if let Some(Resolution::Local(binding)) = self.resolutions.get(root).cloned() {
-            self.poisoned.insert(binding);
-        }
-    }
-
-    fn consume(&mut self, binding: BindingId, at: ExprId) {
-        match self.state.get(&binding).copied() {
-            Some(Status::Live) => {
-                if self.owed.get(&binding) != Some(&Owed::Assigned) {
-                    self.state.insert(binding, Status::Consumed { at });
-                }
-            }
-            _ => self.require_value(binding, at),
-        }
-    }
-
-    /// A mention of `binding` that needs it to hold a value: anything but a
-    /// whole assignment. A consumed one is use-after-move, an unassigned
-    /// one a read before definite assignment.
-    fn require_value(&mut self, binding: BindingId, at: ExprId) {
-        match self.state.get(&binding).copied() {
-            Some(Status::Consumed { at: first }) => {
-                self.diagnostics.push(LinearDiagnostic::AlreadyConsumed {
-                    binding,
-                    expr: at,
-                    first,
-                });
-            }
-            Some(Status::Uninit { maybe }) => {
-                self.diagnostics.push(LinearDiagnostic::ReadUninit {
-                    binding,
-                    expr: at,
-                    maybe,
-                });
-            }
-            Some(Status::Live) | None => {}
-        }
-    }
-
     // ---- the walk -------------------------------------------------------
 
-    /// `expr`'s value is produced and used by whoever asked. This is where
-    /// consumption happens.
-    fn read_value(&mut self, expr: ExprId) -> Flow {
-        let flow = self.read_value_inner(expr);
-        if flow == Flow::Falls && self.diverges(expr) {
-            return Flow::Diverges;
-        }
-        flow
-    }
-
-    fn read_value_inner(&mut self, expr: ExprId) -> Flow {
+    /// `expr`'s value is produced and used by whoever asked.
+    fn read_value(&mut self, expr: ExprId) {
         match &self.body.exprs[expr] {
-            ExprData::Missing
+            ExprData::NameRef(_)
+            | ExprData::Missing
             | ExprData::Literal(_)
+            | ExprData::Continue
             // A signature and nothing else: no value is produced from a
-            // linear one and none is consumed.
+            // linear one.
             | ExprData::ExternItem
             | ExprData::ElidedVariant { .. }
             | ExprData::VariantPath { .. }
-            | ExprData::GenericApp { .. } => Flow::Falls,
-            ExprData::NameRef(_) => {
-                if let Some(Resolution::Local(binding)) = self.resolutions.get(expr).cloned() {
-                    self.consume(binding, expr);
-                }
-                Flow::Falls
-            }
-            ExprData::Field { receiver, name, .. } => {
-                let (receiver, broken_name) = (*receiver, name.is_empty());
-                // `s.` — a consumption the user is in the middle of typing.
-                // The parse error covers it; a leak reported beside it
-                // would say the opposite of what is happening.
-                if broken_name {
-                    self.poison_root(receiver);
-                }
-                let flow = self.walk_place(receiver);
-                if flow == Flow::Diverges {
-                    return flow;
-                }
+            | ExprData::GenericApp { .. } => {}
+            ExprData::Field { receiver, .. } => {
+                let receiver = *receiver;
+                self.walk_place(receiver);
                 // Reading a linear FIELD out of a place would copy it, and
                 // the place keeps its own copy: two obligations, one
                 // resource. Taking the whole value apart is the way in.
                 if self.is_unduplicable_expr(expr) {
                     self.report_copied_out(expr);
                 }
-                Flow::Falls
             }
             ExprData::Index { base, index } => {
                 let (base, index) = (*base, *index);
-                if self.walk_place(base) == Flow::Diverges {
-                    return Flow::Diverges;
-                }
-                if self.read_value(index) == Flow::Diverges {
-                    return Flow::Diverges;
-                }
+                self.walk_place(base);
+                self.read_value(index);
                 if self.is_unduplicable_expr(expr) {
                     self.report_copied_out(expr);
                 }
-                Flow::Falls
             }
             ExprData::Call {
                 callee,
@@ -845,200 +388,129 @@ impl CheckCtx<'_> {
             } => {
                 let (callee, args, dot_call) = (*callee, args.clone(), *dot_call);
                 // A dot-call that resolved to a MEMBER passes its receiver
-                // as an argument — last, for a user member and a builtin
-                // one alike (TR01) — so the receiver is a value read, not a
-                // projection. Where in the argument list it lands decides
-                // nothing here; that it is READ decides everything.
-                //
-                // No auto-borrow exists, so the receiver's own type is
-                // exactly what is passed: `s.drop()` hands over the
-                // `String`, `m.next_line()` hands over the borrow `m`
-                // already is. The consumption question needs no signature.
+                // as an argument (TR01), so the receiver is a value read,
+                // not a projection. No auto-borrow exists, so the
+                // receiver's own type is exactly what is passed.
                 let member = dot_call && self.is_member_call(expr);
-                // A dot-call inference could not resolve is a consumption
-                // that did not happen because the CALL did not: the
-                // receiver's obligation is news to break only after the
-                // real error is fixed.
-                if dot_call
-                    && !member
-                    && (self.is_broken(expr) || self.is_broken(callee))
-                    && let ExprData::Field { receiver, .. } = &self.body.exprs[callee]
-                {
-                    let receiver = *receiver;
-                    self.poison_root(receiver);
-                }
-                let receiver = if member {
-                    match &self.body.exprs[callee] {
-                        ExprData::Field { receiver, .. } => Some(*receiver),
-                        _ => None,
-                    }
-                } else {
-                    None
+                let receiver = match &self.body.exprs[callee] {
+                    ExprData::Field { receiver, .. } if member => Some(*receiver),
+                    _ => None,
                 };
-                match receiver {
-                    Some(receiver) => {
-                        for arg in args {
-                            if self.read_value(arg) == Flow::Diverges {
-                                return Flow::Diverges;
-                            }
-                        }
-                        if self.read_value(receiver) == Flow::Diverges {
-                            return Flow::Diverges;
-                        }
-                    }
-                    None => {
-                        if self.read_value(callee) == Flow::Diverges {
-                            return Flow::Diverges;
-                        }
-                        for arg in args {
-                            if self.read_value(arg) == Flow::Diverges {
-                                return Flow::Diverges;
-                            }
-                        }
-                    }
+                self.read_value(receiver.unwrap_or(callee));
+                for arg in args {
+                    self.read_value(arg);
                 }
-                Flow::Falls
             }
             ExprData::Bin { lhs, rhs, .. } => {
                 let (lhs, rhs) = (*lhs, *rhs);
-                if self.read_value(lhs) == Flow::Diverges {
-                    return Flow::Diverges;
-                }
-                self.read_value(rhs)
+                self.read_value(lhs);
+                self.read_value(rhs);
             }
             ExprData::Neg { operand } => {
                 let operand = *operand;
-                self.read_value(operand)
+                self.read_value(operand);
             }
             ExprData::AddrOf { place, .. } | ExprData::Borrow { place, .. } => {
                 let place = *place;
-                self.walk_place(place)
+                self.walk_place(place);
             }
+            // A copy out of a borrow of a linear is already inference's
+            // "cannot move out of a borrow" (linear implies non-copyable);
+            // nothing to add here.
             ExprData::Deref { receiver } => {
                 let receiver = *receiver;
-                // A copy out of a borrow of a linear is already inference's
-                // "cannot move out of a borrow" (linear implies
-                // non-copyable); nothing to add here.
-                self.read_value(receiver)
+                self.read_value(receiver);
             }
             ExprData::RecordLit { fields } => {
                 let values: Vec<ExprId> = fields.iter().map(|f| f.value).collect();
                 for value in values {
-                    if self.read_value(value) == Flow::Diverges {
-                        return Flow::Diverges;
-                    }
+                    self.read_value(value);
                 }
-                Flow::Falls
             }
             ExprData::ArrayLit { elements } => {
-                let elements = elements.clone();
-                for element in elements {
-                    if self.read_value(element) == Flow::Diverges {
-                        return Flow::Diverges;
-                    }
+                for element in elements.clone() {
+                    self.read_value(element);
                 }
-                Flow::Falls
             }
             ExprData::ArrayRepeat { element, count } => {
                 let (element, count) = (*element, *count);
-                if self.read_value(element) == Flow::Diverges {
-                    return Flow::Diverges;
-                }
+                self.read_value(element);
                 if self.is_unduplicable_expr(element) {
                     self.diagnostics
                         .push(LinearDiagnostic::Repeated { expr: element });
                 }
-                self.read_value(count)
+                self.read_value(count);
             }
             ExprData::ConstBlock { body } => {
                 let body = *body;
-                let flow = self.read_value(body);
+                self.read_value(body);
                 // The item-level rule one nesting level down: a const
                 // block's value is a CONSTANT, copied into every
                 // evaluation, so a linear one is as many obligations as
                 // there are evaluations and no path discharges it once.
                 // The question is the block's TYPE, not a path through it
-                // — the same question its item-level twin asks above — so
-                // a diverging body is no excuse: `!` is forgettable, and a
-                // position that pinned the block to a linear type anyway
-                // is the mistake being reported.
+                // — so a diverging body is no excuse: `!` is forgettable,
+                // and a position that pinned the block to a linear type
+                // anyway is the mistake being reported.
                 if self.is_linear_expr(expr) {
                     self.diagnostics
                         .push(LinearDiagnostic::ConstBlockHoldsLinear { expr });
                 }
-                flow
             }
-            ExprData::Unsafe { body } => {
+            ExprData::Unsafe { body } | ExprData::Loop { body } => {
                 let body = *body;
-                self.read_value(body)
+                self.read_value(body);
             }
-            ExprData::Block { .. } => self.check_block(expr),
-            ExprData::If { .. } => self.check_if(expr),
-            ExprData::Match { .. } => self.check_match(expr),
-            ExprData::Loop { .. } => self.check_loop(expr),
-            ExprData::Break { value } => {
-                let value = *value;
-                if let Some(value) = value
-                    && self.read_value(value) == Flow::Diverges
-                {
-                    return Flow::Diverges;
+            ExprData::Block { stmts, tail } => {
+                let (stmts, tail) = (stmts.clone(), *tail);
+                for stmt in &stmts {
+                    self.check_stmt(stmt);
                 }
-                let floor = self.loops.last().map(|frame| frame.floor);
-                if let Some(floor) = floor {
-                    self.report_live_above(floor, expr);
-                    // A break is NOT a back edge: it leaves the loop, so the
-                    // invariant it would have to restore is nobody's. Its
-                    // state travels to the loop's exit join instead, which
-                    // is why taking ownership of something and breaking out
-                    // with it is the ordinary search-loop shape and checks
-                    // clean.
-                    let snapshot = self.state.clone();
-                    if let Some(frame) = self.loops.last_mut() {
-                        frame.breaks.push(snapshot);
+                if let Some(tail) = tail {
+                    self.read_value(tail);
+                }
+            }
+            ExprData::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                let (condition, then_branch, else_branch) =
+                    (*condition, *then_branch, *else_branch);
+                self.read_value(condition);
+                self.read_value(then_branch);
+                if let Some(branch) = else_branch {
+                    self.read_value(branch);
+                }
+            }
+            ExprData::Match { scrutinee, arms } => {
+                let (scrutinee, arms) = (*scrutinee, arms.clone());
+                self.read_value(scrutinee);
+                for arm in arms {
+                    // An arm's whole `_` binds nothing and has the
+                    // scrutinee's type: an owned linear one is refused, a
+                    // borrowed one owes nothing.
+                    if matches!(self.body.pats[arm.pat], PatData::Wildcard) {
+                        if let Some(ty) = self.infer.type_of_expr.get(scrutinee).cloned() {
+                            self.check_wildcard(arm.pat, &ty);
+                        }
+                    } else {
+                        self.check_skipping_patterns(arm.pat);
                     }
+                    self.read_value(arm.body);
                 }
-                Flow::Diverges
             }
-            ExprData::Continue => {
-                let floor = self.loops.last().map(|frame| frame.floor);
-                if let Some(floor) = floor {
-                    self.report_live_above(floor, expr);
-                    self.check_loop_invariant(expr);
+            ExprData::Break { value } | ExprData::Return { value } => {
+                if let Some(value) = *value {
+                    self.read_value(value);
                 }
-                Flow::Diverges
-            }
-            ExprData::Return { value } => {
-                let value = *value;
-                if let Some(value) = value
-                    && self.read_value(value) == Flow::Diverges
-                {
-                    return Flow::Diverges;
-                }
-                let floor = self.body_floor;
-                self.report_live_above(floor, expr);
-                Flow::Diverges
             }
             ExprData::FnLiteral { params, body, .. } => {
                 let (params, fn_body) = (params.clone(), *body);
-                // A nested body is checked in isolation: captures do not
-                // exist (MIR refuses them), so no obligation crosses the
-                // boundary in either direction.
-                let saved_state = std::mem::take(&mut self.state);
-                let saved_scopes = std::mem::take(&mut self.scopes);
-                let saved_loops = std::mem::take(&mut self.loops);
-                let saved_floor = self.body_floor;
-                self.body_floor = 0;
-                self.scopes.push(Vec::new());
                 for param in &params {
-                    self.track_pat(param.pat, false);
+                    self.check_skipping_patterns(param.pat);
                 }
-                let flow = self.read_value(fn_body);
-                self.pop_scope(fn_body, flow);
-                self.state = saved_state;
-                self.scopes = saved_scopes;
-                self.loops = saved_loops;
-                self.body_floor = saved_floor;
-                Flow::Falls
+                self.read_value(fn_body);
             }
         }
     }
@@ -1064,38 +536,29 @@ impl CheckCtx<'_> {
 
     /// `expr` names a PLACE whose root is not read out: the operand of a
     /// borrow, the target of a projected assignment, the receiver of a
-    /// field access. Nothing here consumes, but the root must still hold
-    /// its value: a consumed binding's storage holds nothing until it is
-    /// assigned whole.
-    fn walk_place(&mut self, expr: ExprId) -> Flow {
+    /// field access.
+    fn walk_place(&mut self, expr: ExprId) {
         match &self.body.exprs[expr] {
-            ExprData::NameRef(_) => {
-                if let Some(Resolution::Local(binding)) = self.resolutions.get(expr).cloned() {
-                    self.require_value(binding, expr);
-                }
-                Flow::Falls
-            }
+            ExprData::NameRef(_) => {}
             ExprData::Field { receiver, .. } => {
                 let receiver = *receiver;
-                self.walk_place(receiver)
+                self.walk_place(receiver);
             }
             ExprData::Index { base, index } => {
                 let (base, index) = (*base, *index);
-                if self.walk_place(base) == Flow::Diverges {
-                    return Flow::Diverges;
-                }
-                self.read_value(index)
+                self.walk_place(base);
+                self.read_value(index);
             }
             ExprData::Deref { receiver } => {
                 let receiver = *receiver;
-                self.read_value(receiver)
+                self.read_value(receiver);
             }
             // Not a place: a value that is only projected from, so a linear
             // one is lost here. A linear temporary (M12) is refused outright:
             // it cannot be named, so nothing could ever consume it.
             _ => {
-                let flow = self.read_value(expr);
-                if flow == Flow::Falls && self.is_linear_expr(expr) {
+                self.read_value(expr);
+                if self.is_linear_expr(expr) {
                     self.diagnostics
                         .push(if self.body.temp_local(expr).is_some() {
                             LinearDiagnostic::BorrowedTemporary { expr }
@@ -1103,279 +566,44 @@ impl CheckCtx<'_> {
                             LinearDiagnostic::Discarded { expr }
                         });
                 }
-                flow
             }
         }
     }
 
-    fn check_block(&mut self, expr: ExprId) -> Flow {
-        let ExprData::Block { stmts, tail } = &self.body.exprs[expr] else {
-            return Flow::Falls;
-        };
-        let (stmts, tail) = (stmts.clone(), *tail);
-        self.scopes.push(Vec::new());
-        let mut flow = Flow::Falls;
-        for stmt in stmts {
-            if flow == Flow::Diverges {
-                break;
-            }
-            flow = self.check_stmt(&stmt);
-        }
-        if flow == Flow::Falls
-            && let Some(tail) = tail
-        {
-            flow = self.read_value(tail);
-        }
-        self.pop_scope(expr, flow);
-        flow
-    }
-
-    fn check_stmt(&mut self, stmt: &Stmt) -> Flow {
+    fn check_stmt(&mut self, stmt: &Stmt) {
         match stmt {
             Stmt::Let { pat, init, .. } => {
                 let (pat, init) = (*pat, *init);
-                if let Some(init) = init
-                    && self.read_value(init) == Flow::Diverges
-                {
-                    return Flow::Diverges;
+                if let Some(init) = init {
+                    self.read_value(init);
+                    self.check_skipping_patterns(pat);
                 }
-                self.track_pat(pat, init.is_none());
-                Flow::Falls
             }
             Stmt::Assign { target, value } => {
                 let (target, value) = (*target, *value);
-                let flow = self.read_value(value);
-                if flow == Flow::Diverges {
-                    return flow;
+                self.read_value(value);
+                // A whole binding as the target is `mir::moves`' question:
+                // whether it still holds a value depends on the path.
+                if matches!(self.resolutions.get(target), Some(Resolution::Local(_))) {
+                    return;
                 }
-                // A whole binding as the target is no place use: the
-                // write is what gives a consumed one its value back.
-                let whole = self.resolutions.get(target).cloned();
-                if !matches!(whole, Some(Resolution::Local(_)))
-                    && self.walk_place(target) == Flow::Diverges
-                {
-                    return Flow::Diverges;
-                }
-                if let Some(Resolution::Local(binding)) = whole {
-                    // Writing over a live linear loses it: the old value is
-                    // gone and nothing was done about it. The new value
-                    // starts a fresh obligation.
-                    if self.owes_once(binding)
-                        && self.state.get(&binding).is_some_and(|s| s.is_live())
-                    {
-                        self.diagnostics
-                            .push(LinearDiagnostic::AssignOverLive { binding, target });
-                    }
-                    if self.state.contains_key(&binding) {
-                        self.state.insert(binding, Status::Live);
-                    }
-                } else if self.is_linear_expr(target) && !self.writes_through_raw_pointer(target) {
+                self.walk_place(target);
+                if self.is_linear_expr(target) && !self.writes_through_raw_pointer(target) {
                     // A field, an element, a `.&mut` referent: there is no
-                    // binding whose liveness could say otherwise, and the
-                    // place holds such a value by TYPE, so the write always
-                    // loses one.
+                    // binding whose path could say otherwise, and the place
+                    // holds such a value by TYPE, so the write always loses
+                    // one.
                     self.diagnostics
                         .push(LinearDiagnostic::AssignOverPlace { target });
                 }
-                Flow::Falls
             }
             Stmt::Expr(expr) => {
                 let expr = *expr;
-                let flow = self.read_value(expr);
-                if flow == Flow::Falls && self.is_linear_expr(expr) {
+                self.read_value(expr);
+                if self.is_linear_expr(expr) {
                     self.diagnostics.push(LinearDiagnostic::Discarded { expr });
                 }
-                flow
             }
         }
-    }
-
-    fn check_if(&mut self, expr: ExprId) -> Flow {
-        let ExprData::If {
-            condition,
-            then_branch,
-            else_branch,
-        } = &self.body.exprs[expr]
-        else {
-            return Flow::Falls;
-        };
-        let (condition, then_branch, else_branch) = (*condition, *then_branch, *else_branch);
-        if self.read_value(condition) == Flow::Diverges {
-            return Flow::Diverges;
-        }
-        let entry = self.state.clone();
-        let then_flow = self.read_value(then_branch);
-        let then_state = std::mem::replace(&mut self.state, entry.clone());
-        let (else_flow, else_state) = match else_branch {
-            Some(branch) => {
-                let flow = self.read_value(branch);
-                (flow, std::mem::replace(&mut self.state, entry.clone()))
-            }
-            // No `else`: the missing branch falls through having done
-            // nothing, which is exactly the state at the join.
-            None => (Flow::Falls, entry.clone()),
-        };
-        self.join(expr, vec![(then_flow, then_state), (else_flow, else_state)])
-    }
-
-    fn check_match(&mut self, expr: ExprId) -> Flow {
-        let ExprData::Match { scrutinee, arms } = &self.body.exprs[expr] else {
-            return Flow::Falls;
-        };
-        let (scrutinee, arms) = (*scrutinee, arms.clone());
-        // One read decides everything: an OWNED linear scrutinee is
-        // consumed by the match (its payloads take over, arm by arm), a
-        // borrowed one is not (a borrow is forgettable, so reading it
-        // consumes nothing). The scrutinee decides — the same rule
-        // match-projection already runs on.
-        if self.read_value(scrutinee) == Flow::Diverges {
-            return Flow::Diverges;
-        }
-        let entry = self.state.clone();
-        let mut branches = Vec::new();
-        for arm in arms {
-            self.state = entry.clone();
-            self.scopes.push(Vec::new());
-            // An arm's whole `_` binds nothing and has the scrutinee's type:
-            // an owned linear one is refused, a borrowed one owes nothing.
-            if matches!(self.body.pats[arm.pat], PatData::Wildcard) {
-                if let Some(ty) = self.infer.type_of_expr.get(scrutinee).cloned() {
-                    self.check_wildcard(arm.pat, &ty);
-                }
-            } else {
-                self.track_pat(arm.pat, false);
-            }
-            let flow = self.read_value(arm.body);
-            self.pop_scope(arm.body, flow);
-            branches.push((flow, std::mem::replace(&mut self.state, entry.clone())));
-        }
-        if branches.is_empty() {
-            return Flow::Falls;
-        }
-        self.join(expr, branches)
-    }
-
-    fn check_loop(&mut self, expr: ExprId) -> Flow {
-        let ExprData::Loop { body } = &self.body.exprs[expr] else {
-            return Flow::Falls;
-        };
-        let body = *body;
-        let entry = self
-            .state
-            .iter()
-            .map(|(binding, status)| (*binding, status.is_live()))
-            .collect();
-        self.loops.push(LoopFrame {
-            floor: self.scopes.len(),
-            entry,
-            breaks: Vec::new(),
-            revived: Vec::new(),
-        });
-        let flow = self.read_value(body);
-        // The back edge: falling off the body's end runs the body again.
-        if flow == Flow::Falls {
-            self.check_loop_invariant(body);
-        }
-        let frame = self.loops.pop().expect("loop frame");
-        if frame.breaks.is_empty() {
-            // No way out: the loop diverges, and the state after it is
-            // unreachable.
-            return Flow::Diverges;
-        }
-        let branches = frame
-            .breaks
-            .into_iter()
-            .map(|state| (Flow::Falls, state))
-            .collect();
-        let flow = self.join(expr, branches);
-        for binding in frame.revived {
-            if let Some(Status::Uninit { maybe }) = self.state.get_mut(&binding) {
-                *maybe = true;
-            }
-        }
-        flow
-    }
-
-    /// The loop's one invariant: every binding the loop could see at entry
-    /// must be in the same state when the body runs again. Consuming an
-    /// outer linear inside a loop is the case this catches — the second
-    /// iteration would consume it again — and assigning a fresh value back
-    /// satisfies it. Only a value that may be lost may become live (M21).
-    fn check_loop_invariant(&mut self, at: ExprId) {
-        let Some(frame) = self.loops.last() else {
-            return;
-        };
-        let (changed, revived): (Vec<_>, Vec<_>) = frame
-            .entry
-            .iter()
-            .filter(|(binding, was_live)| {
-                self.state
-                    .get(binding)
-                    .is_some_and(|status| status.is_live() != **was_live)
-            })
-            .partition(|(binding, was_live)| **was_live || self.owes_once(**binding));
-        let revived: Vec<BindingId> = revived.into_iter().map(|(binding, _)| *binding).collect();
-        let changed: Vec<BindingId> = changed.into_iter().map(|(binding, _)| *binding).collect();
-        if let Some(frame) = self.loops.last_mut() {
-            frame.revived.extend(revived);
-        }
-        for binding in changed {
-            self.diagnostics
-                .push(LinearDiagnostic::LoopChangesLinear { binding, at });
-        }
-    }
-
-    /// Resolve a set of branch outcomes into one state. Only branches that
-    /// FALL contribute — a branch that returned or broke has already
-    /// answered for its obligations at the jump. Where the survivors
-    /// disagree, the join is the error (joins resolve at statement
-    /// boundaries, so this is the boundary that owns it).
-    fn join(&mut self, at: ExprId, branches: Vec<(Flow, State)>) -> Flow {
-        let surviving: Vec<State> = branches
-            .into_iter()
-            .filter(|(flow, _)| *flow == Flow::Falls)
-            .map(|(_, state)| state)
-            .collect();
-        let Some(first) = surviving.first() else {
-            return Flow::Diverges;
-        };
-        let mut merged = first.clone();
-        for other in &surviving[1..] {
-            let mut disagreed = Vec::new();
-            for (binding, status) in &mut merged {
-                let Some(theirs) = other.get(binding) else {
-                    continue;
-                };
-                if theirs.is_live() != status.is_live() {
-                    disagreed.push(*binding);
-                    // Settle on "consumed" so the scope exit does not pile
-                    // a second complaint on top of this one — or on "maybe
-                    // unassigned" where a path never assigned it.
-                    *status = match (*status, theirs) {
-                        (Status::Uninit { .. }, _) | (_, Status::Uninit { .. }) => {
-                            Status::Uninit { maybe: true }
-                        }
-                        (_, Status::Consumed { at }) => Status::Consumed { at: *at },
-                        _ => Status::Consumed { at },
-                    };
-                } else if let (Status::Uninit { maybe }, Status::Uninit { maybe: theirs }) =
-                    (&mut *status, theirs)
-                {
-                    *maybe |= *theirs;
-                }
-            }
-            // The merge above settles a disagreement on "consumed" for
-            // BOTH kinds — a later read of it must be refused either way —
-            // but only a value that owes a consumption has been wronged by
-            // the disagreement itself.
-            for binding in disagreed {
-                if self.owes_once(binding) {
-                    self.diagnostics
-                        .push(LinearDiagnostic::JoinDisagrees { binding, join: at });
-                }
-            }
-        }
-        self.state = merged;
-        Flow::Falls
     }
 }

@@ -164,8 +164,9 @@ use hir::{BindingId, ExprId, ItemId, RegionConstraint, Ty};
 use rustc_hash::{FxHashMap, FxHashSet};
 use syntax::TextRange;
 
+use crate::cfg::{self, BitSet, Findings, Point, operand_places, place_places, value_places};
 use crate::{
-    BlockId, BodyId, LocalId, MirBody, Operand, Place, ProjElem, Rvalue, Scope, Statement,
+    BlockId, CheckTrap, LocalId, MirBody, Operand, Place, ProjElem, Rvalue, Scope, Statement,
     StatementKind, TerminatorKind, paths_overlap,
 };
 
@@ -457,17 +458,7 @@ pub struct LoanFindings {
     pub diagnostics: Vec<LoanDiagnostic>,
     /// Every point a refused operation runs at, with the message of the
     /// diagnostic that refuses it: one per point, not one per report.
-    pub traps: Vec<LoanTrap>,
-}
-
-/// One trap the checker plants: before statement `index` of `block` in
-/// `body`, or before the terminator when `index` is the statement count.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LoanTrap {
-    pub body: BodyId,
-    pub block: BlockId,
-    pub index: usize,
-    pub message: String,
+    pub traps: Vec<CheckTrap>,
 }
 
 /// Loan-check every body lowered from one item. Keyed by item because the
@@ -480,17 +471,11 @@ pub fn loan_findings<'db>(db: &'db dyn Db, item: ItemId<'db>) -> LoanFindings {
     let infer = hir::infer::infer(db, item);
     let cover = hir::outlives::region_cover(db, item);
     let mut findings = LoanFindings::default();
+    let message = |diag: &LoanDiagnostic| diag.message();
     for (body_id, body) in lowered.bodies.iter() {
-        let mut traps = Vec::new();
-        BodyCheck::new(db, body, hir_body, infer, cover).run(&mut findings.diagnostics, &mut traps);
-        findings
-            .traps
-            .extend(traps.into_iter().map(|(point, message)| LoanTrap {
-                body: body_id,
-                block: point.block,
-                index: point.index,
-                message,
-            }));
+        let mut out = Findings::new(&mut findings.diagnostics, &message);
+        BodyCheck::new(db, body, hir_body, infer, cover).run(&mut out);
+        findings.traps.extend(out.traps(body_id));
     }
     findings
 }
@@ -498,14 +483,6 @@ pub fn loan_findings<'db>(db: &'db dyn Db, item: ItemId<'db>) -> LoanFindings {
 /// The loan checker's diagnostics on one item.
 pub fn loan_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> &'db [LoanDiagnostic] {
     &loan_findings(db, item).diagnostics
-}
-
-/// A location in one body: before statement `index` of `block`, or before
-/// the terminator when `index` is the statement count.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct Point {
-    block: BlockId,
-    index: usize,
 }
 
 /// One loan: what a [`Rvalue::Borrow`] minted, with its place resolved
@@ -536,89 +513,6 @@ struct Access {
     place: Place,
     /// An assignment touches the place and nothing it points through.
     shallow: bool,
-}
-
-/// A dense set of locals (or loans), indexed by arena position.
-#[derive(Clone, PartialEq, Eq)]
-struct BitSet {
-    words: Vec<u64>,
-}
-
-impl BitSet {
-    fn new(len: usize) -> BitSet {
-        BitSet {
-            words: vec![0; len.div_ceil(64)],
-        }
-    }
-
-    fn contains(&self, index: usize) -> bool {
-        self.words[index / 64] & (1 << (index % 64)) != 0
-    }
-
-    /// Whether the bit was newly set.
-    fn insert(&mut self, index: usize) -> bool {
-        let was = self.contains(index);
-        self.words[index / 64] |= 1 << (index % 64);
-        !was
-    }
-
-    fn remove(&mut self, index: usize) {
-        self.words[index / 64] &= !(1 << (index % 64));
-    }
-
-    fn union_with(&mut self, other: &BitSet) {
-        for (word, more) in self.words.iter_mut().zip(&other.words) {
-            *word |= more;
-        }
-    }
-
-    fn intersect_with(&mut self, other: &BitSet) {
-        for (word, mask) in self.words.iter_mut().zip(&other.words) {
-            *word &= mask;
-        }
-    }
-
-    fn iter(&self) -> impl Iterator<Item = usize> + '_ {
-        self.words.iter().enumerate().flat_map(|(w, &word)| {
-            (0..64)
-                .filter(move |bit| word & (1 << bit) != 0)
-                .map(move |bit| w * 64 + bit)
-        })
-    }
-}
-
-/// Where [`BodyCheck::run`] reports: each refusal's diagnostic once per
-/// key, and its trap once per point.
-struct Findings<'a> {
-    diagnostics: &'a mut Vec<LoanDiagnostic>,
-    traps: &'a mut Vec<(Point, String)>,
-    trapped: FxHashSet<Point>,
-}
-
-impl Findings<'_> {
-    /// Report the refusal `build` describes, trapped at `point` and keyed
-    /// by `key` in `seen`. `build` runs only when the trap or the report
-    /// is new; `None` means there is nothing to refuse.
-    fn report<K: Eq + std::hash::Hash>(
-        &mut self,
-        point: Point,
-        seen: &mut FxHashSet<K>,
-        key: K,
-        build: impl FnOnce() -> Option<LoanDiagnostic>,
-    ) {
-        if self.trapped.contains(&point) && seen.contains(&key) {
-            return;
-        }
-        let Some(diag) = build() else {
-            return;
-        };
-        if self.trapped.insert(point) {
-            self.traps.push((point, diag.message()));
-        }
-        if seen.insert(key) {
-            self.diagnostics.push(diag);
-        }
-    }
 }
 
 struct BodyCheck<'a> {
@@ -705,11 +599,11 @@ impl<'a> BodyCheck<'a> {
         let blocks = self.body.blocks.len();
         let mut reach: Vec<BitSet> = vec![BitSet::new(blocks); blocks];
         for (block, _) in self.body.blocks.iter() {
-            let mut stack: Vec<BlockId> = self.successors(block);
+            let mut stack: Vec<BlockId> = cfg::successors(self.body, block);
             while let Some(next) = stack.pop() {
-                let index = Self::block_index(next);
-                if reach[Self::block_index(block)].insert(index) {
-                    stack.extend(self.successors(next));
+                let index = cfg::block_index(next);
+                if reach[cfg::block_index(block)].insert(index) {
+                    stack.extend(cfg::successors(self.body, next));
                 }
             }
         }
@@ -719,15 +613,7 @@ impl<'a> BodyCheck<'a> {
     /// Whether `from` is `to` or a point control can reach from it.
     fn reaches(&self, from: Point, to: Point) -> bool {
         (from.block == to.block && from.index <= to.index)
-            || self.reach[Self::block_index(from.block)].contains(Self::block_index(to.block))
-    }
-
-    fn local_index(local: LocalId) -> usize {
-        u32::from(local.into_raw()) as usize
-    }
-
-    fn block_index(block: BlockId) -> usize {
-        u32::from(block.into_raw()) as usize
+            || self.reach[cfg::block_index(from.block)].contains(cfg::block_index(to.block))
     }
 
     // ---- per-local facts --------------------------------------------------
@@ -791,7 +677,7 @@ impl<'a> BodyCheck<'a> {
         let mut seen = BitSet::new(self.body.locals.len());
         let mut projected_through = Vec::new();
         self.for_each_place(&mut |place| {
-            if !place.projection.is_empty() && seen.insert(Self::local_index(place.local)) {
+            if !place.projection.is_empty() && seen.insert(cfg::local_index(place.local)) {
                 projected_through.push(place.local);
             }
         });
@@ -800,10 +686,10 @@ impl<'a> BodyCheck<'a> {
             let Some(place) = self.copied_place(local) else {
                 continue;
             };
-            if place.projection.is_empty() && seen.insert(Self::local_index(place.local)) {
+            if place.projection.is_empty() && seen.insert(cfg::local_index(place.local)) {
                 projected_through.push(place.local);
             }
-            aliases[Self::local_index(local)] = Some(place.clone());
+            aliases[cfg::local_index(local)] = Some(place.clone());
         }
         // Resolve chains once, so lookups are one step. A temp copies a
         // place lowered before it, so the chain is finite.
@@ -812,7 +698,7 @@ impl<'a> BodyCheck<'a> {
                 continue;
             };
             let mut steps = 0;
-            while let Some(base) = &aliases[Self::local_index(place.local)] {
+            while let Some(base) = &aliases[cfg::local_index(place.local)] {
                 if steps == aliases.len() {
                     break;
                 }
@@ -832,7 +718,7 @@ impl<'a> BodyCheck<'a> {
     /// The place a MIR place stands for, through the temp it may be rooted
     /// at.
     fn resolve(&self, place: &Place) -> Place {
-        match &self.aliases[Self::local_index(place.local)] {
+        match &self.aliases[cfg::local_index(place.local)] {
             Some(base) => {
                 let mut projection = base.projection.clone();
                 projection.extend(place.projection.iter().cloned());
@@ -847,7 +733,7 @@ impl<'a> BodyCheck<'a> {
 
     /// Whether `local` is a temp standing for a place.
     fn is_place_temp(&self, local: LocalId) -> bool {
-        self.aliases[Self::local_index(local)].is_some()
+        self.aliases[cfg::local_index(local)].is_some()
     }
 
     /// Every place the body names, index operands included.
@@ -857,7 +743,7 @@ impl<'a> BodyCheck<'a> {
                 let StatementKind::Assign { dest, rvalue } = &stmt.kind else {
                     continue;
                 };
-                rvalue_places(rvalue, f);
+                value_places(rvalue, f);
                 place_places(dest, f);
             }
             match &data.terminator.kind {
@@ -958,8 +844,11 @@ impl<'a> BodyCheck<'a> {
     fn points_by_origin(&self) -> FxHashMap<ExprId, Vec<Point>> {
         let mut points: FxHashMap<ExprId, Vec<Point>> = FxHashMap::default();
         for (block, _) in self.body.blocks.iter() {
-            for point in self.points_of(block) {
-                points.entry(self.origin_at(point)).or_default().push(point);
+            for point in cfg::points_of(self.body, block) {
+                points
+                    .entry(cfg::origin_at(self.body, point))
+                    .or_default()
+                    .push(point);
             }
         }
         points
@@ -1042,7 +931,7 @@ impl<'a> BodyCheck<'a> {
                 .iter()
                 .any(|&flow| self.reaches(flow, point))
             || {
-                let live = &self.live_regions[Self::block_index(point.block)][point.index];
+                let live = &self.live_regions[cfg::block_index(point.block)][point.index];
                 loan.covers.iter().any(|&node| live.contains(node as usize))
             }
     }
@@ -1060,7 +949,7 @@ impl<'a> BodyCheck<'a> {
             .blocks
             .iter()
             .map(|(block, _)| {
-                self.points_of(block)
+                cfg::points_of(self.body, block)
                     .map(|point| {
                         let mut regions = BitSet::new(nodes);
                         for local in self.live_at(point).iter() {
@@ -1080,7 +969,7 @@ impl<'a> BodyCheck<'a> {
             .blocks
             .iter()
             .map(|(block, _)| {
-                self.points_of(block)
+                cfg::points_of(self.body, block)
                     .map(|point| {
                         let mut loans = BitSet::new(self.loans.len());
                         for (index, loan) in self.loans.iter().enumerate() {
@@ -1136,7 +1025,7 @@ impl<'a> BodyCheck<'a> {
         match data.statements.get(point.index) {
             Some(stmt) => match &stmt.kind {
                 StatementKind::Assign { dest, rvalue } => {
-                    rvalue_uses(rvalue, &mut uses);
+                    value_uses(rvalue, &mut uses);
                     if !dest.projection.is_empty() {
                         place_uses(dest, &mut uses);
                     }
@@ -1182,33 +1071,6 @@ impl<'a> BodyCheck<'a> {
         }
     }
 
-    fn successors(&self, block: BlockId) -> Vec<BlockId> {
-        match &self.body.blocks[block].terminator.kind {
-            TerminatorKind::Goto { target } => vec![*target],
-            TerminatorKind::SwitchBool {
-                then_block,
-                else_block,
-                ..
-            } => vec![*then_block, *else_block],
-            TerminatorKind::SwitchVariant {
-                arms, otherwise, ..
-            } => arms
-                .iter()
-                .map(|(_, target)| *target)
-                .chain(std::iter::once(*otherwise))
-                .collect(),
-            TerminatorKind::Call { target, .. } => target.iter().copied().collect(),
-            TerminatorKind::Trap { target, .. } | TerminatorKind::ConstTrap { target, .. } => {
-                vec![*target]
-            }
-            TerminatorKind::Return | TerminatorKind::Unreachable => Vec::new(),
-        }
-    }
-
-    fn points_of(&self, block: BlockId) -> impl Iterator<Item = Point> + '_ {
-        (0..=self.body.blocks[block].statements.len()).map(move |index| Point { block, index })
-    }
-
     /// Backward liveness to a fixpoint, then the per-point sets.
     fn compute_liveness(&self) -> Vec<Vec<BitSet>> {
         let locals = self.body.locals.len();
@@ -1217,12 +1079,16 @@ impl<'a> BodyCheck<'a> {
         let transfer = |block: BlockId, live_out: BitSet| -> Vec<BitSet> {
             let mut before: Vec<BitSet> = Vec::new();
             let mut live = live_out;
-            for point in self.points_of(block).collect::<Vec<_>>().into_iter().rev() {
+            for point in cfg::points_of(self.body, block)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+            {
                 if let Some(def) = self.def_at(point) {
-                    live.remove(Self::local_index(def));
+                    live.remove(cfg::local_index(def));
                 }
                 for local in self.uses_at(point) {
-                    live.insert(Self::local_index(local));
+                    live.insert(cfg::local_index(local));
                 }
                 before.push(live.clone());
             }
@@ -1241,13 +1107,13 @@ impl<'a> BodyCheck<'a> {
                 .rev()
             {
                 let mut out = BitSet::new(locals);
-                for succ in self.successors(block) {
-                    out.union_with(&live_in[Self::block_index(succ)]);
+                for succ in cfg::successors(self.body, block) {
+                    out.union_with(&live_in[cfg::block_index(succ)]);
                 }
                 let before = transfer(block, out);
                 let entry = before[0].clone();
-                if entry != live_in[Self::block_index(block)] {
-                    live_in[Self::block_index(block)] = entry;
+                if entry != live_in[cfg::block_index(block)] {
+                    live_in[cfg::block_index(block)] = entry;
                     changed = true;
                 }
             }
@@ -1257,8 +1123,8 @@ impl<'a> BodyCheck<'a> {
             .iter()
             .map(|(block, _)| {
                 let mut out = BitSet::new(locals);
-                for succ in self.successors(block) {
-                    out.union_with(&live_in[Self::block_index(succ)]);
+                for succ in cfg::successors(self.body, block) {
+                    out.union_with(&live_in[cfg::block_index(succ)]);
                 }
                 transfer(block, out)
             })
@@ -1266,7 +1132,7 @@ impl<'a> BodyCheck<'a> {
     }
 
     fn live_at(&self, point: Point) -> &BitSet {
-        &self.live_before[Self::block_index(point.block)][point.index]
+        &self.live_before[cfg::block_index(point.block)][point.index]
     }
 
     // ---- accesses ---------------------------------------------------------
@@ -1283,8 +1149,7 @@ impl<'a> BodyCheck<'a> {
         // and a `&mut` or a rigid parameter reads as `Copy` and is
         // affine all the same.
         let moves = moved
-            || (place.projection.is_empty()
-                && !self.local_copyable[Self::local_index(place.local)]);
+            || (place.projection.is_empty() && !self.local_copyable[cfg::local_index(place.local)]);
         out.push(Access {
             kind: if moves {
                 AccessKind::Move
@@ -1470,7 +1335,7 @@ impl<'a> BodyCheck<'a> {
     /// does not come back: the walk forward from the mint ends on this
     /// path. In scope therefore implies live.
     fn step(&self, point: Point, scope: &mut BitSet, mut on_access: impl FnMut(&Access, &BitSet)) {
-        scope.intersect_with(&self.live_loans[Self::block_index(point.block)][point.index]);
+        scope.intersect_with(&self.live_loans[cfg::block_index(point.block)][point.index]);
         for access in self.accesses_at(point) {
             on_access(&access, scope);
             if access.shallow {
@@ -1494,12 +1359,12 @@ impl<'a> BodyCheck<'a> {
         while changed {
             changed = false;
             for (block, _) in self.body.blocks.iter() {
-                let mut scope = scope_in[Self::block_index(block)].clone();
-                for point in self.points_of(block) {
+                let mut scope = scope_in[cfg::block_index(block)].clone();
+                for point in cfg::points_of(self.body, block) {
                     self.step(point, &mut scope, |_, _| {});
                 }
-                for succ in self.successors(block) {
-                    let entry = &mut scope_in[Self::block_index(succ)];
+                for succ in cfg::successors(self.body, block) {
+                    let entry = &mut scope_in[cfg::block_index(succ)];
                     let mut merged = entry.clone();
                     merged.union_with(&scope);
                     if merged != *entry {
@@ -1514,25 +1379,19 @@ impl<'a> BodyCheck<'a> {
 
     // ---- reporting --------------------------------------------------------
 
-    /// Report every refusal into `diagnostics` and the point it traps at
-    /// into `traps`.
-    fn run(&self, diagnostics: &mut Vec<LoanDiagnostic>, traps: &mut Vec<(Point, String)>) {
+    /// Report every refusal, with the point it traps at, into `out`.
+    fn run(&self, out: &mut Findings<LoanDiagnostic>) {
         let scope_in = self.compute_scope();
-        let mut out = Findings {
-            diagnostics,
-            traps,
-            trapped: FxHashSet::default(),
-        };
         let mut escaped: FxHashSet<ExprId> = FxHashSet::default();
         // One report per (access expression, loan): the earliest-minted
         // loan each access kills, and never twice for one origin.
         let mut reported: FxHashSet<(ExprId, usize)> = FxHashSet::default();
         let mut repointed: FxHashSet<ExprId> = FxHashSet::default();
         for (block, _) in self.body.blocks.iter() {
-            let mut scope = scope_in[Self::block_index(block)].clone();
-            for point in self.points_of(block) {
+            let mut scope = scope_in[cfg::block_index(block)].clone();
+            for point in cfg::points_of(self.body, block) {
                 self.step(point, &mut scope, |access, scope| {
-                    let origin = self.origin_at(point);
+                    let origin = cfg::origin_at(self.body, point);
                     if let Some(temp) = self.pinned_by(point, access) {
                         out.report(point, &mut repointed, origin, || {
                             let used =
@@ -1541,7 +1400,7 @@ impl<'a> BodyCheck<'a> {
                                 access: origin,
                                 kind: access.kind,
                                 place: self.render_place(&access.place, false),
-                                used: self.origin_at(used),
+                                used: cfg::origin_at(self.body, used),
                             })
                         });
                     }
@@ -1605,10 +1464,10 @@ impl<'a> BodyCheck<'a> {
         }
         let live = self.live_after(point);
         self.place_temps.iter().copied().find(|&temp| {
-            let alias = self.aliases[Self::local_index(temp)]
+            let alias = self.aliases[cfg::local_index(temp)]
                 .as_ref()
                 .expect("a place temp has an alias");
-            live.contains(Self::local_index(temp))
+            live.contains(cfg::local_index(temp))
                 && alias.local == access.place.local
                 && access.place.projection.len() <= alias.projection.len()
                 && paths_overlap(&access.place.projection, &alias.projection)
@@ -1626,21 +1485,13 @@ impl<'a> BodyCheck<'a> {
                 .clone();
         }
         let mut live = BitSet::new(self.body.locals.len());
-        for succ in self.successors(point.block) {
+        for succ in cfg::successors(self.body, point.block) {
             live.union_with(self.live_at(Point {
                 block: succ,
                 index: 0,
             }));
         }
         live
-    }
-
-    fn origin_at(&self, point: Point) -> ExprId {
-        let data = &self.body.blocks[point.block];
-        match data.statements.get(point.index) {
-            Some(stmt) => stmt.origin,
-            None => data.terminator.origin,
-        }
     }
 
     /// Why the loan is live at the access: handed back, when a flow into
@@ -1664,7 +1515,7 @@ impl<'a> BodyCheck<'a> {
         let uses_holder = |point: Point| {
             self.uses_at(point)
                 .iter()
-                .any(|local| holders.contains(&Self::local_index(*local)))
+                .any(|local| holders.contains(&cfg::local_index(*local)))
         };
         if uses_holder(from) {
             return StillUsed::AtTheAccess;
@@ -1672,8 +1523,8 @@ impl<'a> BodyCheck<'a> {
         let Some(point) = self.nearest_after(from, uses_holder) else {
             return StillUsed::HandedBack;
         };
-        let at = self.origin_at(point);
-        let access = self.origin_at(from);
+        let at = cfg::origin_at(self.body, point);
+        let access = cfg::origin_at(self.body, from);
         if u32::from(at.into_raw()) < u32::from(access.into_raw()) {
             StillUsed::NextIteration(at)
         } else {
@@ -1709,7 +1560,7 @@ impl<'a> BodyCheck<'a> {
                 &mut queue,
             );
         } else {
-            for succ in self.successors(from.block) {
+            for succ in cfg::successors(self.body, from.block) {
                 enqueue_block(succ, &mut queue);
             }
         }
@@ -1718,7 +1569,7 @@ impl<'a> BodyCheck<'a> {
                 return Some(point);
             }
             if point.index == self.body.blocks[point.block].statements.len() {
-                for succ in self.successors(point.block) {
+                for succ in cfg::successors(self.body, point.block) {
                     enqueue_block(succ, &mut queue);
                 }
             }
@@ -1825,60 +1676,8 @@ fn operand_uses(op: &Operand, uses: &mut Vec<LocalId>) {
     operand_places(op, &mut |place| uses.push(place.local));
 }
 
-fn rvalue_uses(rvalue: &Rvalue, uses: &mut Vec<LocalId>) {
-    rvalue_places(rvalue, &mut |place| uses.push(place.local));
-}
-
-/// A place and the places its index operands name.
-fn place_places(place: &Place, f: &mut impl FnMut(&Place)) {
-    f(place);
-    for elem in &place.projection {
-        if let ProjElem::Index(op) = elem {
-            operand_places(op, f);
-        }
-    }
-}
-
-fn operand_places(op: &Operand, f: &mut impl FnMut(&Place)) {
-    match op {
-        Operand::Copy(place) | Operand::Move(place) => place_places(place, f),
-        Operand::Const(_) => {}
-    }
-}
-
-fn rvalue_places(rvalue: &Rvalue, f: &mut impl FnMut(&Place)) {
-    match rvalue {
-        Rvalue::Use(op) | Rvalue::UnaryNeg(op) => operand_places(op, f),
-        Rvalue::BinaryOp(_, a, b) => {
-            operand_places(a, f);
-            operand_places(b, f);
-        }
-        Rvalue::Aggregate { ops, .. }
-        | Rvalue::Instantiate {
-            const_args: ops, ..
-        } => {
-            for op in ops {
-                operand_places(op, f);
-            }
-        }
-        Rvalue::Field { base, .. } => operand_places(base, f),
-        Rvalue::Index { base, index } => {
-            operand_places(base, f);
-            operand_places(index, f);
-        }
-        Rvalue::Repeat { elem, count } => {
-            operand_places(elem, f);
-            operand_places(count, f);
-        }
-        Rvalue::AddrOf { place, .. } | Rvalue::Borrow { place, .. } => place_places(place, f),
-        Rvalue::AddrOfStatic { projection, .. } => {
-            for elem in projection {
-                if let ProjElem::Index(op) = elem {
-                    operand_places(op, f);
-                }
-            }
-        }
-    }
+fn value_uses(value: &Rvalue, uses: &mut Vec<LocalId>) {
+    value_places(value, &mut |place| uses.push(place.local));
 }
 
 /// Every region a type mentions in a value position. A `fn` type's

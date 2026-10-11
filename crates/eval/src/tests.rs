@@ -103,10 +103,10 @@ static main = fn() -> usize {
     );
 }
 
-/// Runs a program with the loan checker's traps off, so what stops a
-/// refused program is the aliasing tree's own detection. The tests of that
-/// dynamic half use this; `run` never does.
-fn check_run_past_the_loan_checker(text: &str, entry: &str, expect: Expect) {
+/// Runs a program with the CFG checkers' traps (loans, moves) off, so what
+/// stops a refused program is the aliasing tree's own detection. The tests
+/// of that dynamic half use this; `run` never does.
+fn check_run_past_the_cfg_checkers(text: &str, entry: &str, expect: Expect) {
     check_run_impl(text, entry, std::io::empty(), false, expect);
 }
 
@@ -140,7 +140,7 @@ fn check_run_impl(
     text: &str,
     entry: &str,
     input: impl std::io::BufRead,
-    loan_traps: bool,
+    check_traps: bool,
     expect: Expect,
 ) {
     let db = RootDatabase::default();
@@ -157,7 +157,7 @@ fn check_run_impl(
             input,
         },
     );
-    machine.loan_traps = loan_traps;
+    machine.check_traps = check_traps;
     let result = machine.eval_root(&hir::item_loc(&db, entry_item));
     let printed = String::from_utf8(machine.mode.out).unwrap();
     // Printed output is shown *escaped*, as one `output:` line. `print`
@@ -808,7 +808,7 @@ fn a_borrowed_character_match_reads_through_the_borrow() {
     // And the read is a real one THROUGH the borrow, not a detached copy:
     // a scrutinee invalidated before the `match` is caught at the `match`
     // itself — the same event the tag test is for an enum.
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 static f = fn() -> usize {
     let mut c = 'a';
@@ -5731,7 +5731,7 @@ fn two_exclusive_borrows_of_one_place_is_detected_ub() {
     // The exclusive-write violation. Minting `b` is a write through the
     // parent, which disables the sibling `a`; writing through `a`
     // afterwards is the use of an invalidated borrow.
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };
 static f = fn () -> usize {
@@ -5758,7 +5758,7 @@ fn using_a_child_after_writing_through_its_parent_is_detected_ub() {
     // through `a` is foreign to `child`, so `child` is disabled — and
     // disabling is transitive, which is what makes one check cover a whole
     // subtree.
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };
 static f = fn::<@a>(m: usize.&mut::<@a>) -> () {
@@ -5807,7 +5807,7 @@ fn a_nested_literal_frame_escape_is_caught_dynamically() {
     // `a_nested_literal_borrow_of_its_own_local_cannot_escape`). Run
     // regardless, the interpreter catches it too: the borrowed local's
     // storage really is gone once the nested literal's own frame returns.
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 static main = fn () -> usize {
     let f = fn () -> usize.&::<@_> { let mut n = 7; n.& };
@@ -5929,7 +5929,7 @@ fn two_exclusive_borrows_of_the_same_field_is_still_detected_ub() {
     // Regression for the per-location fix: SAME field, not disjoint ones
     // — `paths_overlap` says `[x]`/`[x]` overlap, so this must still be
     // the ordinary exclusivity violation.
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };
 static f = fn () -> usize {
@@ -5956,7 +5956,7 @@ fn a_whole_struct_borrow_still_dominates_every_field() {
     // foreign to (and disable, and be disabled by) a borrow of any one
     // field — `paths_overlap` treats the empty path as a prefix of
     // everything.
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };
 static f = fn () -> usize {
@@ -5979,7 +5979,7 @@ static f = fn () -> usize {
 
 #[test]
 fn disjoint_array_element_borrows_coexist() {
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };
 static f = fn () -> usize {
@@ -6026,7 +6026,7 @@ static f = fn () -> usize {
 
 #[test]
 fn reading_one_element_through_a_wide_borrow_does_not_kill_a_sibling_element_child() {
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 static f = fn () -> usize {
     let mut a: [usize; 2] = [1, 2];
@@ -6096,7 +6096,7 @@ static f = fn () -> usize {
 
 #[test]
 fn reading_a_sibling_element_by_name_does_not_kill_an_element_child() {
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 static f = fn () -> usize {
     let mut a: [usize; 3] = [1, 2, 3];
@@ -6208,7 +6208,7 @@ fn reading_the_same_field_by_name_still_suspends_an_exclusive_borrow() {
     // which OVERLAPS the borrow's `[x]` — a shared use of a place with a
     // live exclusive borrow of it, and writing through that borrow
     // afterwards is the ordinary violation.
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 static f = fn () -> usize {
     let mut p: struct { x: usize, y: usize } = struct { x = 1, y = 2 };
@@ -6430,7 +6430,7 @@ fn a_direct_write_to_a_borrowed_local_invalidates_the_borrow() {
     // A write to a local BY ITS OWN NAME must reach the aliasing tree
     // exactly as a write through a deref-rooted place does — the most
     // ordinary exclusivity violation in the language, not a special case.
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 static f = fn () -> usize {
     let mut n: usize = 1;
@@ -6455,7 +6455,7 @@ fn a_direct_read_of_a_borrowed_local_freezes_an_exclusive_borrow() {
     // must name the STATE that rejected the write (`Frozen`, from a
     // foreign read), not the borrow's own flavor — `m` here IS a
     // `.&mut`, so "write through a shared borrow" would be false of it.
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 static f = fn () -> usize {
     let mut n: usize = 1;
@@ -6481,7 +6481,7 @@ fn an_implicit_degradation_mints_a_real_child_node() {
     // that an implicit reborrow must actually make true: it needs its own
     // MIR operation, so `s` and `m` mint distinct tags with a real
     // parent/child relation to violate.
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 static get = fn::<@x>(r: usize.&::<@x>) -> usize { r.* };
 static f = fn () -> usize {
@@ -6506,7 +6506,7 @@ fn dynamic_ub_names_the_borrow_site_and_the_invalidating_site() {
     // The report must name both interesting sites even when the trap
     // fires inside a callee that has no borrow sites of its own — both
     // the borrow site and the invalidating site live in the caller here.
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 static bump = fn::<@a>(m: usize.&mut::<@a>) -> () { m.* = m.* + 1; };
 static f = fn () -> () {
@@ -6620,7 +6620,7 @@ fn a_containing_borrow_still_conflicts_with_a_payload_borrow() {
     // second is a write the first can see. (`[]` — the allocation root —
     // contains everything, which is what keeps a write by the local's own
     // name reaching every borrow into it.)
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 type Opt = enum::<T> { Some(T), None };
 static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };
@@ -6648,7 +6648,7 @@ fn the_tag_read_of_a_shared_borrowed_match_goes_through_the_tree() {
     // the undefined behavior, before any arm body runs. Lowering the tag
     // read as a copy of a detached value — which is what the owned path
     // does — would have let this run clean.
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 type Opt = enum::<T> { Some(T), None };
 static f = fn() -> usize {
@@ -6678,7 +6678,7 @@ fn the_tag_read_of_an_exclusive_borrowed_match_is_a_shared_freeze() {
     // node rather than disabling it, so writing through `inner` afterwards
     // is the suspended-by-a-read case, which gets its own message. Reading
     // the tag off a detached copy would have done none of this.
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 type Opt = enum::<T> { Some(T), None };
 static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };
@@ -6706,7 +6706,7 @@ fn a_borrowed_match_that_dispatches_on_nothing_reads_nothing() {
     // `match` whose arms make no tag decision does not read the tag, so it
     // is not an access at all. Same program, with `_` back in place of the
     // two variant arms — `inner` survives it and the write lands.
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 type Opt = enum::<T> { Some(T), None };
 static set = fn::<@a>(m: usize.&mut::<@a>, v: usize) -> () { m.* = v; };
@@ -6796,7 +6796,7 @@ fn reading_the_whole_value_still_freezes_a_payload_borrow() {
     // frozen by it, so the later write through `t` is the
     // suspended-by-a-read case. Path exactness must not have turned this
     // off — a shorter path covers more, and `[]` covers everything.
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 type Opt = enum::<T> { Some(T), None };
 static set = fn::<@r>(m: usize.&mut::<@r>, v: usize) -> () { m.* = v; };
@@ -6823,7 +6823,7 @@ fn reading_through_a_prefix_still_freezes_the_borrow_below_it() {
     // CONTAINMENT one level in: the borrow is of `w.*.inner.b`, the read is
     // of `w.*.inner` — a strict PREFIX of the borrow's path, so it contains
     // it and the freeze fires. Overlap is prefix-either-way, not equality.
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 type Inner = struct { a: usize, b: usize };
 type W = struct { inner: Inner, other: usize };
@@ -6854,7 +6854,7 @@ fn reading_a_local_by_its_bare_name_still_reaches_every_borrow_into_it() {
     // empty path, which contains everything. `let r = n.&; n = 99; r.*` —
     // the ordinary exclusivity bug — must still be caught, and a bare-name
     // read of a borrowed STRUCT must still reach a borrow of one field.
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 type W = struct { a: usize, b: usize };
 static set = fn::<@r>(m: usize.&mut::<@r>, v: usize) -> () { m.* = v; };
@@ -7524,7 +7524,7 @@ fn a_borrowed_view_is_invalidated_when_the_reader_is_used_again() {
     //
     // Nothing was added to the aliasing model for it: this is
     // reborrow-at-every-use doing its job.
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 type R = struct { line: str, n: usize } with {
     impl Self {
@@ -7876,7 +7876,7 @@ fn moving_a_value_invalidates_borrows_of_it_exactly_as_writing_does() {
     // stale bytes with nothing to say about it — while its write-shaped
     // twin (below) was caught, which is what made the gap a bug rather
     // than a limit.
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 type Lin = struct { id: usize } only move with {
     impl Self {
@@ -7901,7 +7901,7 @@ static f = fn() -> usize {
 
 #[test]
 fn the_write_shaped_twin_of_a_move_invalidation_says_the_same_thing() {
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 type Id = struct { id: usize };
 static f = fn() -> usize {
@@ -8558,7 +8558,7 @@ static f = fn() -> usize {
 /// it, so the write goes through a suspended borrow.
 #[test]
 fn an_argument_read_under_a_live_exclusive_borrow_suspends_it() {
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 static pack = fn(a: usize, b: usize) -> usize { a * 10 + b };
 static f = fn() -> usize {
@@ -8580,7 +8580,7 @@ static f = fn() -> usize {
 /// read goes through the old pointer, under the live borrow `x`.
 #[test]
 fn a_read_through_a_pointer_reassigned_by_its_index_uses_the_old_pointer() {
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 static f = fn() -> usize {
     let mut a: [usize; 2] = [1, 2];
@@ -8604,7 +8604,7 @@ static f = fn() -> usize {
 
 #[test]
 fn a_write_through_a_pointer_reassigned_by_its_index_uses_the_old_pointer() {
-    check_run_past_the_loan_checker(
+    check_run_past_the_cfg_checkers(
         r#"
 static f = fn() -> usize {
     let mut a: [usize; 2] = [1, 2];
@@ -8815,10 +8815,10 @@ static main = fn() {
     );
 }
 
-/// A linear value left live on one branch traps at the join, after the
-/// branch that runs.
+/// A linear value left live on one branch traps where its storage ends,
+/// after everything that path runs.
 #[test]
-fn a_linear_join_disagreement_traps_at_the_join() {
+fn a_linear_left_live_on_one_branch_traps_where_its_scope_ends() {
     check_run(
         r#"
 type L = struct { x: usize } only move;
@@ -8831,8 +8831,48 @@ static f = fn(c: bool) {
 "#,
         "f(false)",
         expect![[r#"
-            output: "leak;"
-            error[Trap]: `t` is consumed on some paths through this expression and not on others
+            output: "leak;after;"
+            error[Trap]: `t` is not consumed on this path; its type has no `forget` capability, so every path must consume it
+        "#]],
+    );
+}
+
+/// A refused `t;` on one branch leaves the other branch's leak trapped.
+#[test]
+fn a_linear_skipping_a_refused_discard_traps_where_its_scope_ends() {
+    check_run(
+        r#"
+type L = struct { x: usize } only move;
+static f = fn(c: bool) {
+    let t = L(struct { x = 1 });
+    if c { t; } else { print("leak;"); }
+    print("after;");
+};
+"#,
+        "f(false)",
+        expect![[r#"
+            output: "leak;after;"
+            error[Trap]: `t` is not consumed on this path; its type has no `forget` capability, so every path must consume it
+        "#]],
+    );
+}
+
+/// A value a non-exhaustive match produced on a covered arm leaks there.
+#[test]
+fn a_linear_from_a_covered_arm_of_a_nonexhaustive_match_traps_where_its_scope_ends() {
+    check_run(
+        r#"
+type L = struct { x: usize } only move;
+type Shape = enum { Circle(usize), Point };
+static f = fn(s: Shape) {
+    let r = match s { ::Circle(n) => L(struct { x = n }) };
+    print("after;");
+};
+"#,
+        "f(Shape::Circle(1))",
+        expect![[r#"
+            output: "after;"
+            error[Trap]: `r` is not consumed on this path; its type has no `forget` capability, so every path must consume it
         "#]],
     );
 }

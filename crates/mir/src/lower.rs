@@ -503,21 +503,16 @@ impl LowerCtx<'_> {
             use hir::linear_check::LinearDiagnostic as L;
             let message = diag.render(self.db, self.item);
             match diag {
-                // The write would lose the live value: it must not happen.
-                L::AssignOverLive { target, .. } | L::AssignOverPlace { target } => {
+                // The write would lose the value the place holds: it must
+                // not happen.
+                L::AssignOverPlace { target } => {
                     push_trap(&mut self.assign_traps, *target, message);
                 }
-                // Reported where the obligation breaks: the exit leaving a
-                // live value behind, the join or loop boundary that
-                // disagrees, the read that duplicates, the value dropped or
-                // held where nothing can consume it, the deferred binding
-                // read before it is assigned. Control does not pass.
-                L::NotConsumed { exit: expr, .. }
-                | L::JoinDisagrees { join: expr, .. }
-                | L::LoopChangesLinear { at: expr, .. }
-                | L::AlreadyConsumed { expr, .. }
-                | L::ReadUninit { expr, .. }
-                | L::Discarded { expr }
+                // Reported where the obligation breaks: the read that
+                // duplicates, the value dropped or held where nothing can
+                // consume it. Control does not pass. (What breaks on a
+                // path, `crate::moves` finds on this MIR and traps itself.)
+                L::Discarded { expr }
                 | L::BorrowedTemporary { expr }
                 | L::CopiedOut { expr }
                 | L::Repeated { expr }
@@ -1630,9 +1625,8 @@ impl LowerCtx<'_> {
                     // A bare `break;` carries `()` as the loop's value.
                     None => Operand::Const(Const::Unit),
                 };
-                // A refused exit (no loop, or a live linear left behind)
-                // must not leave: the `lower_expr` wrapper plants the trap
-                // here.
+                // A refused exit (no loop to leave) must not leave: the
+                // `lower_expr` wrapper plants the trap here.
                 match b.loop_frames.last().copied() {
                     Some(frame) if !self.value_traps.contains_key(&expr) => {
                         b.push_assign(frame.result, Rvalue::Use(op), expr);
