@@ -1,7 +1,8 @@
 //! Lexical scopes and name resolution.
 //!
 //! [`expr_scopes`] depends only on the item's own [`Body`]; [`resolutions`]
-//! additionally reads [`file_scope`] (range-free names of all items), so an
+//! additionally reads [`file_scope`] (range-free names of the file's items
+//! and imports), so an
 //! edit inside another item's body never reaches it, and adding/removing
 //! items only re-resolves names — it never re-runs body lowering.
 
@@ -11,6 +12,7 @@ use rustc_hash::FxHashMap;
 
 use crate::body::{BindingId, Body, ExprData, ExprId, Stmt, body};
 use crate::item_tree::{GenericParamData, GenericParamKind, ItemKind, TypeRef, item_tree};
+use crate::library::{ImportTarget, LibraryId, file_imports};
 use crate::{ItemId, ItemLoc};
 
 pub type ScopeId = Idx<ScopeData>;
@@ -869,16 +871,33 @@ pub fn utf8_result_loc(db: &dyn Db) -> ItemLoc {
     synthetic_decl_loc(db, UTF8_RESULT_NAME)
 }
 
-/// Top-level names of a file, *including* what's wrong with them: the scope
-/// decides that the first declaration wins, so it is also the analysis that
-/// knows about the losers. Diagnostics travel with the analysis that
-/// discovers them; the aggregator only attaches ranges. Range-free, so body
-/// edits backdate it.
+/// Top-level names of a file, its own items and then its imports,
+/// *including* what's wrong with them: the scope is what sees a name come
+/// from more than one place, so it records the clash. Diagnostics travel
+/// with the analysis that discovers them; the aggregator only attaches
+/// ranges. Range-free, so body edits backdate it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FileScope {
     entries: FxHashMap<String, ScopeEntry>,
-    /// One entry per extra declaration of an already-declared name.
-    pub duplicates: Vec<Duplicate>,
+    /// Every name the file has from more than one place.
+    pub clashes: Vec<NameClash>,
+}
+
+/// A name the file declares or imports more than once: every place it
+/// comes from, items in source order and then imports. None wins, so each
+/// carries the error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameClash {
+    pub name: String,
+    pub origins: Vec<NameOrigin>,
+}
+
+/// A place a file's name comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NameOrigin {
+    Item(ItemLoc),
+    /// The import at this index in [`crate::library::Imports::names`].
+    Import(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -886,12 +905,21 @@ struct ScopeEntry {
     loc: ItemLoc,
     kind: ItemKind,
     ambiguous: bool,
+    /// The import that brought the name in, if one did.
+    import: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Duplicate {
-    pub first: ItemLoc,
-    pub second: ItemLoc,
+impl ScopeEntry {
+    /// The same name from one more place: the entry is ambiguous. It still
+    /// carries one place, so the resolution has a location, and a type's
+    /// when one of the places is a type, so [`type_scope`] sees the name as
+    /// an ambiguous type.
+    fn merge(&mut self, other: ScopeEntry) {
+        if !matches!(self.kind, ItemKind::Type) && matches!(other.kind, ItemKind::Type) {
+            *self = other;
+        }
+        self.ambiguous = true;
+    }
 }
 
 impl FileScope {
@@ -968,61 +996,44 @@ impl TypeScope {
     }
 }
 
+/// The slice of [`file_scope`] that names types, the compiler-provided
+/// ones included. A name the file has from more than one place is in it,
+/// ambiguous, when one of those places is a type.
 #[salsa::tracked(returns(ref))]
 pub fn type_scope(db: &dyn Db, file: SourceFile) -> TypeScope {
-    let tree = item_tree(db, file);
-    let mut counts: FxHashMap<&str, u32> = FxHashMap::default();
-    for data in tree.items.iter() {
-        *counts.entry(data.name.as_str()).or_insert(0) += 1;
-    }
-    // Disambiguators count occurrences the same way `file_item_ids` does,
-    // so an `ItemLoc` here and the interned `ItemId` agree on identity.
-    let mut seen: FxHashMap<&str, u32> = FxHashMap::default();
-    let mut scope = TypeScope::default();
-    for data in tree.items.iter() {
-        let disambiguator = {
-            let counter = seen.entry(data.name.as_str()).or_insert(0);
-            let current = *counter;
-            *counter += 1;
-            current
-        };
-        if data.name.is_empty() || !matches!(data.kind, ItemKind::Type) {
-            continue;
-        }
-        let loc = ItemLoc::top_level(
-            file,
-            std::sync::Arc::from(data.name.as_str()),
-            disambiguator,
-        );
-        scope
-            .entries
-            .entry(data.name.clone())
-            .or_insert(TypeScopeEntry {
-                loc,
-                ambiguous: counts[data.name.as_str()] > 1,
-            });
-    }
-    // The compiler-provided declarations, visible everywhere like the
-    // builtin value names — inserted only when the file doesn't declare the
-    // name itself (user declarations shadow builtins, the `print`
-    // precedent), and never counted as a duplicate.
-    for decl in synthetic_decls() {
-        if counts.contains_key(decl.name) {
-            continue;
-        }
-        scope.entries.insert(
-            decl.name.to_owned(),
-            TypeScopeEntry {
-                loc: synthetic_decl_loc(db, decl.name),
-                ambiguous: false,
-            },
-        );
-    }
-    scope
+    let entries = (file_scope(db, file).entries.iter())
+        .filter(|(_, entry)| matches!(entry.kind, ItemKind::Type))
+        .map(|(name, entry)| {
+            let entry = TypeScopeEntry {
+                loc: entry.loc.clone(),
+                ambiguous: entry.ambiguous,
+            };
+            (name.clone(), entry)
+        })
+        .collect();
+    TypeScope { entries }
 }
 
-/// Items are visible everywhere, including their own bodies — mutual
-/// recursion needs no special casing.
+/// Every top-level item of `library` with its location and item-tree entry,
+/// in [`crate::library::library_item_ids`] order.
+pub(crate) fn library_items<'db>(
+    db: &'db dyn Db,
+    library: LibraryId<'db>,
+) -> Vec<(ItemLoc, &'db crate::item_tree::ItemData)> {
+    library
+        .files(db)
+        .into_iter()
+        .flat_map(|file| {
+            let ids = crate::file_item_ids(db, file).iter();
+            ids.zip(item_tree(db, file).items.iter())
+                .map(|(&id, data)| (crate::item_loc(db, id), data))
+        })
+        .collect()
+}
+
+/// Items are visible everywhere in their file, including their own bodies
+/// — mutual recursion needs no special casing — and so are the items the
+/// file imports.
 #[salsa::tracked(returns(ref))]
 pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
     let tree = item_tree(db, file);
@@ -1030,6 +1041,7 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
     // Disambiguators count occurrences the same way `file_item_ids` does,
     // so an `ItemLoc` here and the interned `ItemId` agree on identity.
     let mut seen: FxHashMap<&str, u32> = FxHashMap::default();
+    let mut sources: Vec<(&str, NameOrigin, ScopeEntry)> = Vec::new();
     for data in tree.items.iter() {
         let disambiguator = {
             let counter = seen.entry(data.name.as_str()).or_insert(0);
@@ -1045,25 +1057,72 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
             std::sync::Arc::from(data.name.as_str()),
             disambiguator,
         );
-        match scope.entries.entry(data.name.clone()) {
-            std::collections::hash_map::Entry::Vacant(slot) => {
-                slot.insert(ScopeEntry {
-                    loc,
-                    kind: data.kind,
+        let entry = ScopeEntry {
+            loc: loc.clone(),
+            kind: data.kind,
+            ambiguous: false,
+            import: None,
+        };
+        sources.push((&data.name, NameOrigin::Item(loc), entry));
+    }
+    for (index, import) in file_imports(db, file).names.iter().enumerate() {
+        let (loc, kind) = match &import.target {
+            ImportTarget::Item { loc, kind } => (loc.clone(), *kind),
+            ImportTarget::Ambiguous { items, .. } => {
+                let entry = |(loc, kind): &(ItemLoc, ItemKind)| ScopeEntry {
+                    loc: loc.clone(),
+                    kind: *kind,
                     ambiguous: false,
-                });
+                    import: Some(index),
+                };
+                // The module declares the name more than once: the import
+                // names nothing, and the name is ambiguous here too.
+                let mut merged = entry(&items[0]);
+                for item in &items[1..] {
+                    merged.merge(entry(item));
+                }
+                sources.push((&import.name, NameOrigin::Import(index), merged));
+                continue;
             }
-            std::collections::hash_map::Entry::Occupied(mut first) => {
-                first.get_mut().ambiguous = true;
-                scope.duplicates.push(Duplicate {
-                    first: first.get().loc.clone(),
-                    second: loc,
+            ImportTarget::NoItem { .. } | ImportTarget::NoPath => continue,
+        };
+        let entry = ScopeEntry {
+            loc,
+            kind,
+            ambiguous: false,
+            import: Some(index),
+        };
+        sources.push((&import.name, NameOrigin::Import(index), entry));
+    }
+    let mut count: FxHashMap<&str, u32> = FxHashMap::default();
+    for (name, _, _) in &sources {
+        *count.entry(name).or_insert(0) += 1;
+    }
+    // A name from more than one place is ambiguous (see `ScopeEntry::merge`).
+    let mut clash_of: FxHashMap<&str, usize> = FxHashMap::default();
+    for (name, origin, entry) in sources {
+        if count[name] > 1 {
+            let clash = *clash_of.entry(name).or_insert_with(|| {
+                scope.clashes.push(NameClash {
+                    name: name.to_owned(),
+                    origins: Vec::new(),
                 });
+                scope.clashes.len() - 1
+            });
+            scope.clashes[clash].origins.push(origin);
+        }
+        match scope.entries.entry(name.to_owned()) {
+            std::collections::hash_map::Entry::Occupied(mut existing) => {
+                existing.get_mut().merge(entry);
+            }
+            std::collections::hash_map::Entry::Vacant(vacant) => {
+                vacant.insert(entry);
             }
         }
     }
-    // The compiler-provided declarations — shadowable, never a duplicate
-    // (see `type_scope`).
+    // The compiler-provided declarations, visible everywhere like the
+    // builtin value names: a name the file has itself shadows one (the
+    // `print` precedent), and none is ever a duplicate.
     for decl in synthetic_decls() {
         if scope.entries.contains_key(decl.name) {
             continue;
@@ -1074,6 +1133,7 @@ pub fn file_scope(db: &dyn Db, file: SourceFile) -> FileScope {
                 loc: synthetic_decl_loc(db, decl.name),
                 kind: ItemKind::Type,
                 ambiguous: false,
+                import: None,
             },
         );
     }

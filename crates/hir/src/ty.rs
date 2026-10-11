@@ -1059,7 +1059,8 @@ fn decl_generics(db: &dyn Db, loc: &ItemLoc) -> Vec<crate::item_tree::GenericPar
 ///
 /// Goes through [`type_scope`] — not [`crate::scopes::file_scope`] — so
 /// annotation lowering (and with it `infer`/`signature`) only depends on
-/// the file's *type* items and backdates across value-item edits.
+/// the type names the file sees (its own and imported) and backdates across
+/// value-item edits.
 fn lower_type_path(db: &dyn Db, file: SourceFile, name: &str) -> Ty {
     match type_scope(db, file).resolve(name) {
         Some(Resolution::TypeItem(loc)) => {
@@ -2088,19 +2089,12 @@ pub fn signature<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Ty {
             &ParamScope::default(),
         );
     }
-    let Some(index) = crate::item_index(db, item) else {
+    let library = crate::library::library_of(db, item.file(db));
+    let groups = crate::groups::inference_groups(db, library);
+    let Some(&(group, position)) = groups.slot.get(&crate::item_loc(db, item)) else {
         return Ty::Error;
     };
-    let file = item.file(db);
-    let groups = crate::groups::inference_groups(db, file);
-    let Some(Some(group)) = groups.group_of.get(index).copied() else {
-        return Ty::Error;
-    };
-    let members = &groups.groups[group as usize];
-    let Some(position) = members.iter().position(|&member| member == index) else {
-        return Ty::Error;
-    };
-    crate::groups::infer_group(db, crate::groups::GroupId::new(db, file, group))
+    crate::groups::infer_group(db, crate::groups::GroupId::new(db, library, group))
         .signatures
         .get(position)
         .cloned()

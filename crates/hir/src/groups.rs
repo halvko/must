@@ -20,12 +20,10 @@
 //! it runs after the members and fills only what their bodies left open
 //! (T11). Everything one such body references joins one group.
 //!
-//! Groups are currently scoped to a single file. Cross-file inference
-//! within a library is desirable (splitting code across files should not
-//! require extra annotations), but the incremental cost is an open
-//! question: cross-file groups would let edits in one file trigger
-//! re-inference in another, and how well salsa early-cutoff contains that
-//! depends on how large those groups grow.
+//! Groups span a library, so splitting code across a library's files needs
+//! no extra annotations. An edit in one file can re-infer a group that
+//! reaches into another; how well salsa early-cutoff contains that depends
+//! on how large groups grow.
 //!
 //! Language decision (recorded): items exported at the *library* boundary
 //! will require written contracts regardless — inference is for internal
@@ -37,24 +35,23 @@ use rustc_hash::FxHashMap;
 
 use crate::constraint::resolve_fully;
 use crate::infer::InferCtx;
-use crate::item_tree::item_tree;
+use crate::library::{LibraryId, library_item_ids};
 use crate::ty::{ParamScope, Ty, TyVar, TyVarValue, erase_infer, lower_type_ref_in};
-use crate::{ItemLoc, file_item_ids, item_loc};
+use crate::{ItemLoc, item_loc};
 
 /// One inference group per salsa key.
 #[salsa::interned(debug)]
 pub struct GroupId<'db> {
-    pub file: SourceFile,
+    pub library: LibraryId<'db>,
     pub index: u32,
 }
 
-/// The partition of a file's group-inferrable items (no fully-typed
-/// annotation) into binding groups, with the fully typed items that feed
-/// each. Range-free; only membership changes invalidate it.
+/// The partition of a library's group-inferrable items (no fully-typed
+/// annotation) into binding groups, indexed like [`library_item_ids`], with
+/// the fully typed items that feed each. Range-free; only membership
+/// changes invalidate it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InferenceGroups {
-    /// Item index → group index; `None` for fully-typed items.
-    pub group_of: Vec<Option<u32>>,
     /// Group index → member item indices (deterministic order).
     pub groups: Vec<Vec<usize>>,
     /// Group index → the fully typed items (top-level items and members)
@@ -62,16 +59,16 @@ pub struct InferenceGroups {
     /// in [`crate::all_checkable_items`] order. Each feeds at most one
     /// group.
     pub sources: Vec<Vec<ItemLoc>>,
+    /// Each group member → its group index and its position in the group.
+    pub slot: FxHashMap<ItemLoc, (u32, usize)>,
 }
 
 #[salsa::tracked(returns(ref))]
-pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
-    let tree = item_tree(db, file);
-    let ids = file_item_ids(db, file);
-    let group_inferrable: Vec<bool> = tree
-        .items
+pub fn inference_groups<'db>(db: &'db dyn Db, library: LibraryId<'db>) -> InferenceGroups {
+    let items = crate::scopes::library_items(db, library);
+    let group_inferrable: Vec<bool> = items
         .iter()
-        .map(|it| {
+        .map(|(_, it)| {
             // Type items declare no value: they have no signature to infer,
             // so they never join a binding group. Generic items NEVER join
             // one either (TR06, load-bearing): a group's shared signature
@@ -89,18 +86,16 @@ pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
         })
         .collect();
 
-    // Item identity → index, the same (name, disambiguator) scheme ids use.
-    let mut index_of: FxHashMap<(&str, u32), usize> = FxHashMap::default();
-    let mut seen: FxHashMap<&str, u32> = FxHashMap::default();
-    for (index, data) in tree.items.iter().enumerate() {
-        let disambiguator = seen.entry(data.name.as_str()).or_insert(0);
-        index_of.insert((data.name.as_str(), *disambiguator), index);
-        *disambiguator += 1;
-    }
+    // Item identity → index.
+    let index_of: FxHashMap<&ItemLoc, usize> = items
+        .iter()
+        .enumerate()
+        .map(|(index, (loc, _))| (loc, index))
+        .collect();
 
     // The group-inferrable items each item's body references (sorted,
-    // deduplicated). Only this file's top-level items count: a member or
-    // another file's item that shares a name is a different item.
+    // deduplicated). Only the library's top-level items are indexed, so a
+    // member is never one.
     let inferrable_refs = |item: crate::ItemId<'_>| -> Vec<usize> {
         let mut refs: Vec<usize> = crate::resolutions(db, item)
             .values()
@@ -108,10 +103,7 @@ pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
                 let crate::Resolution::Item(loc) = resolution else {
                     return None;
                 };
-                if loc.file != file || loc.member.is_some() {
-                    return None;
-                }
-                let target = *index_of.get(&(&*loc.name, loc.disambiguator))?;
+                let target = *index_of.get(loc)?;
                 group_inferrable[target].then_some(target)
             })
             .collect();
@@ -121,10 +113,10 @@ pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
     };
 
     // Reference edges between group-inferrable items.
-    let edges: Vec<Vec<usize>> = (0..tree.items.len())
+    let edges: Vec<Vec<usize>> = (0..items.len())
         .map(|index| {
             if group_inferrable[index] {
-                inferrable_refs(ids[index])
+                inferrable_refs(items[index].0.to_id(db))
             } else {
                 Vec::new()
             }
@@ -145,8 +137,10 @@ pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
 
     // Constraint sources (T11): a fully typed body feeds the group of what
     // it references, and everything one body references joins one group.
-    let source_refs: Vec<(ItemLoc, Vec<usize>)> = crate::all_checkable_items(db, file)
+    let source_refs: Vec<(ItemLoc, Vec<usize>)> = library
+        .files(db)
         .into_iter()
+        .flat_map(|file| crate::all_checkable_items(db, file))
         .filter(|&item| is_constraint_source(db, item))
         .map(|item| (item_loc(db, item), inferrable_refs(item)))
         .filter(|(_, refs)| !refs.is_empty())
@@ -179,22 +173,22 @@ pub fn inference_groups(db: &dyn Db, file: SourceFile) -> InferenceGroups {
         }
     }
 
-    let mut group_of = vec![None; edges.len()];
+    let mut slot = FxHashMap::default();
     for (group_index, members) in state.groups.iter().enumerate() {
-        for &member in members {
-            group_of[member] = Some(group_index as u32);
+        for (position, &member) in members.iter().enumerate() {
+            slot.insert(items[member].0.clone(), (group_index as u32, position));
         }
     }
     let mut sources = vec![Vec::new(); state.groups.len()];
     for (source, refs) in source_refs {
-        if let Some(group) = group_of[refs[0]] {
+        if let Some(&(group, _)) = slot.get(&items[refs[0]].0) {
             sources[group as usize].push(source);
         }
     }
     InferenceGroups {
-        group_of,
         groups: state.groups,
         sources,
+        slot,
     }
 }
 
@@ -232,6 +226,34 @@ fn is_constraint_source(db: &dyn Db, item: crate::ItemId<'_>) -> bool {
             .is_some_and(|type_ref| type_ref.is_fully_typed())
 }
 
+/// The groups of `library` bigger than [`base_db::Settings`] allows, each
+/// with its expression count over the bodies it covers (members and the
+/// fully typed bodies feeding it). Range-free, so it backdates across
+/// edits that change no oversized group's size.
+#[salsa::tracked(returns(ref))]
+pub fn oversized_groups<'db>(db: &'db dyn Db, library: LibraryId<'db>) -> Vec<(u32, u64)> {
+    let Some(threshold) = base_db::settings(db).big_inference_group(db) else {
+        return Vec::new();
+    };
+    let groups = inference_groups(db, library);
+    let ids = library_item_ids(db, library);
+    groups
+        .groups
+        .iter()
+        .zip(&groups.sources)
+        .enumerate()
+        .filter_map(|(group, (members, sources))| {
+            let size: u64 = members
+                .iter()
+                .map(|&member| ids[member])
+                .chain(sources.iter().map(|source| source.to_id(db)))
+                .map(|item| crate::body::body(db, item).exprs.len() as u64)
+                .sum();
+            (size > u64::from(threshold)).then_some((group as u32, size))
+        })
+        .collect()
+}
+
 /// The warning for groups bigger than [`base_db::Settings`] allows: every
 /// body the group covers (members and the fully typed bodies feeding it)
 /// gets one warning, at its first use of an unannotated member, with each
@@ -239,30 +261,29 @@ fn is_constraint_source(db: &dyn Db, item: crate::ItemId<'_>) -> bool {
 /// them out of the group.
 pub fn big_group_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<crate::Diagnostic> {
     use syntax::ast::AstNode as _;
-    let Some(threshold) = base_db::settings(db).big_inference_group(db) else {
+    let library = crate::library::library_of(db, file);
+    let oversized = oversized_groups(db, library);
+    if oversized.is_empty() {
         return Vec::new();
-    };
-    let groups = inference_groups(db, file);
-    let ids = file_item_ids(db, file);
+    }
+    let groups = inference_groups(db, library);
+    let items = crate::scopes::library_items(db, library);
     let mut diagnostics = Vec::new();
-    for (members, sources) in groups.groups.iter().zip(&groups.sources) {
-        let bodies: Vec<crate::ItemId<'_>> = members
-            .iter()
-            .map(|&member| ids[member])
-            .chain(sources.iter().map(|source| source.to_id(db)))
-            .collect();
-        let size: u64 = bodies
-            .iter()
-            .map(|&item| crate::body::body(db, item).exprs.len() as u64)
-            .sum();
-        if size <= u64::from(threshold) {
-            continue;
-        }
+    for &(group, size) in oversized {
+        let members = &groups.groups[group as usize];
+        let sources = &groups.sources[group as usize];
         let count = members.len() + sources.len();
-        let member_locs: rustc_hash::FxHashSet<ItemLoc> =
-            members.iter().map(|&m| item_loc(db, ids[m])).collect();
-        for item in bodies {
-            let own = item_loc(db, item);
+        let member_locs: rustc_hash::FxHashSet<&ItemLoc> =
+            members.iter().map(|&m| &items[m].0).collect();
+        // Each file warns for its own bodies.
+        let bodies = members
+            .iter()
+            .map(|&m| &items[m].0)
+            .chain(sources)
+            .filter(|loc| loc.file == file);
+        for body_loc in bodies {
+            let item = body_loc.to_id(db);
+            let own = body_loc;
             let (_, source_map) = crate::body::body_with_source_map(db, item);
             let mut first_use = None;
             let mut used: Vec<&ItemLoc> = Vec::new();
@@ -273,7 +294,7 @@ pub fn big_group_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<crate::Diagno
                 };
                 // Recursion is the item's own business, not a call into
                 // the group.
-                if *target == own || !member_locs.contains(target) || seen.contains(target) {
+                if target == own || !member_locs.contains(target) || seen.contains(target) {
                     continue;
                 }
                 let Some(ptr) = source_map.node_for_expr(expr) else {
@@ -376,16 +397,11 @@ pub struct GroupSignatures {
 
 #[salsa::tracked(returns(ref))]
 pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures {
-    // TODO: figure out cross file inference - is it worth it? On one hand we don't want to
-    // disincentivize splitting code across files, but on the other we want to give a nice real-time
-    // experience. Maybe we want to support inference but give warnings where we had to do it cross
-    // file such we can add a quick fix to add the type?
-    let file = group.file(db);
-    let groups = inference_groups(db, file);
+    let groups = inference_groups(db, group.library(db));
     let Some(members) = groups.groups.get(group.index(db) as usize) else {
         return GroupSignatures::default();
     };
-    let ids = file_item_ids(db, file);
+    let ids = library_item_ids(db, group.library(db));
 
     let mut table: InPlaceUnificationTable<TyVar> = InPlaceUnificationTable::new();
     // One signature variable per member; in-group references resolve to
@@ -405,6 +421,7 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
     // So this processing order is load-bearing, not incidental.
     for (&member, loc) in members.iter().zip(&member_locs) {
         let item = ids[member];
+        let file = item.file(db);
         let body = crate::body::body(db, item);
         let Some(root) = body.root else {
             // No initializer: nothing to infer from (parse errors cover it).

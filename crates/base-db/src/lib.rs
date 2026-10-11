@@ -19,6 +19,38 @@ pub struct SourceFile {
     pub path: String,
     #[returns(ref)]
     pub text: String,
+    /// The library the file belongs to, whose files it can import from; a
+    /// file in no library is a library by itself.
+    #[default]
+    pub library: Option<Library>,
+}
+
+/// The files of one directory tree. Each file is a module; a `use` path
+/// names one by its path from `root` (`use a::b::x` reads `root/a/b.must`).
+#[salsa::input(debug)]
+pub struct Library {
+    /// The directory `use` paths start from.
+    #[returns(ref)]
+    pub root: String,
+    #[returns(ref)]
+    pub files: Vec<SourceFile>,
+}
+
+/// Creates a library rooted at `root` of the files `(path, text)` and
+/// returns them in that order.
+pub fn new_library(db: &mut dyn Db, root: &str, files: Vec<(String, String)>) -> Vec<SourceFile> {
+    use salsa::Setter as _;
+    let library = Library::new(db, root.to_owned(), Vec::new());
+    let files: Vec<SourceFile> = files
+        .into_iter()
+        .map(|(path, text)| {
+            let file = SourceFile::new(db, path, text);
+            file.set_library(db).to(Some(library));
+            file
+        })
+        .collect();
+    library.set_files(db).to(files.clone());
+    files
 }
 
 /// The file the compiler-provided declarations belong to: one per
@@ -95,6 +127,24 @@ impl salsa::Database for RootDatabase {}
 #[salsa::db]
 impl Db for RootDatabase {}
 
+/// The files of a test fixture: each `//- path` line starts a file, and
+/// text before the first one is ignored. A fixture with no such line is one
+/// file, `test.must`.
+pub fn fixture_files(fixture: &str) -> Vec<(String, String)> {
+    if !fixture.lines().any(|line| line.starts_with("//- ")) {
+        return vec![("test.must".to_owned(), fixture.to_owned())];
+    }
+    let mut files: Vec<(String, String)> = Vec::new();
+    for line in fixture.split_inclusive('\n') {
+        if let Some(path) = line.strip_prefix("//- ") {
+            files.push((path.trim().to_owned(), String::new()));
+        } else if let Some((_, text)) = files.last_mut() {
+            text.push_str(line);
+        }
+    }
+    files
+}
+
 #[salsa::tracked(returns(ref))]
 pub fn parse(db: &dyn Db, file: SourceFile) -> syntax::Parse {
     syntax::parse(file.text(db))
@@ -145,6 +195,28 @@ mod tests {
         let reparsed = parse(&db, file);
         assert_eq!(reparsed.errors().len(), 1);
         assert_eq!(executions.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn fixture_files_split_at_path_lines() {
+        let files = fixture_files(
+            r#"ignored
+//- a.must
+static a = 1;
+//- dir/b.must
+"#,
+        );
+        assert_eq!(
+            files,
+            [
+                ("a.must".to_owned(), "static a = 1;\n".to_owned()),
+                ("dir/b.must".to_owned(), String::new()),
+            ]
+        );
+        assert_eq!(
+            fixture_files("static a = 1;"),
+            [("test.must".to_owned(), "static a = 1;".to_owned())]
+        );
     }
 
     #[test]

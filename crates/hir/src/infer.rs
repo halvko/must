@@ -578,6 +578,8 @@ pub enum InferenceDiagnostic {
         match_expr: ExprId,
         /// The pattern (carries the squiggle).
         pat: PatId,
+        /// The path's first segment, the name that is no enum.
+        name: String,
         message: String,
     },
     /// A bare variant pattern (`Circle(r)`) on a scrutinee whose type is
@@ -1176,7 +1178,7 @@ pub enum InferenceDiagnostic {
         expr: ExprId,
         type_name: String,
         member: String,
-        /// The traits providing it for this type, in file order.
+        /// The traits providing it for this type, in library order.
         traits: Vec<String>,
     },
     /// `Trait::<Self = T>::Item` — an associated-type path. Associated
@@ -3834,6 +3836,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// Push the obligations of one bounded instantiation, keyed by
     /// `key` (the mention or the call), in canonical slot order. `var_of`
     /// maps an index into `binder`'s generics to the param's instantiation.
+    /// The bounds name traits in the file that writes the binder, as the
+    /// callee's dictionary parameters do.
     fn push_bound_obligations(
         &mut self,
         key: ExprId,
@@ -3841,8 +3845,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         var_of: &FxHashMap<u32, Ty>,
     ) {
         let generics = self.site_generics(binder);
+        let declared_in = self.site_item(binder).file;
         let nested = self.in_nested_body();
-        for slot in crate::traits::bound_slots(self.db, self.file, generics) {
+        for slot in crate::traits::bound_slots(self.db, declared_in, generics) {
             let Some(var) = var_of.get(&slot.param_index) else {
                 continue;
             };
@@ -6737,7 +6742,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
 
     /// Every trait that could answer `recv.name(...)` on a CONCRETE
     /// receiver (impl-directed, TR01 extended): the trait declares `name`
-    /// AND is implemented for the receiver. In file order; whether each
+    /// AND is implemented for the receiver. In library order; whether each
     /// one can actually take the call is on the candidate.
     fn trait_call_candidates(
         &self,
@@ -8100,7 +8105,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // instantiated fresh where the value is directly called; its bounds
         // would need a captured dictionary anywhere else — reserved.
         let generics = item_generics(self.db, member_loc.to_id(self.db));
-        if !crate::traits::bound_slots(self.db, self.file, generics).is_empty()
+        if !crate::traits::bound_slots(self.db, member_loc.file, generics).is_empty()
             && !self.direct_callees.contains(&expr)
         {
             self.result
@@ -8154,7 +8159,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             Some(GenericParamData {
                 kind: GenericParamKind::Const(type_ref),
                 ..
-            }) => self.lower_const_param_ty(type_ref),
+            }) => self.lower_const_param_ty(self.file, type_ref),
             // A stale index or a type param read as a value: broken
             // source, silently `{error}`.
             _ => Ty::Error,
@@ -8164,11 +8169,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// Lower a const param's *declared* type — see
     /// [`Self::const_param_value_ty`] for the no-param-scope/no-holes
     /// reasoning; also used for the declared type a turbofish const
-    /// argument is checked against.
-    fn lower_const_param_ty(&mut self, type_ref: &TypeRef) -> Ty {
+    /// argument is checked against. `declared_in` is the file that writes
+    /// the param, which resolves the type's names.
+    fn lower_const_param_ty(&mut self, declared_in: SourceFile, type_ref: &TypeRef) -> Ty {
         let ty = lower_type_ref_in(
             self.db,
-            self.file,
+            declared_in,
             type_ref,
             self.table,
             &ParamScope::default(),
@@ -8354,7 +8360,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 GenericParamKind::Const(declared) => match written {
                     Some(GenericArgData::Const(value)) => {
                         let value = *value;
-                        let declared = self.lower_const_param_ty(declared);
+                        let declared = self.lower_const_param_ty(loc.file, declared);
                         // Fn values are outside the const-arg domain
                         // (TR06: concrete data types only): the
                         // declaration already carries this exact text
@@ -8447,7 +8453,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // the WHOLE story for such a mention (no cannot-infer noise on
         // params the reserved value was never going to determine).
         let mut reserved_as_value = false;
-        if !crate::traits::bound_slots(self.db, self.file, generics).is_empty() {
+        if !crate::traits::bound_slots(self.db, loc.file, generics).is_empty() {
             if self.direct_callees.contains(&expr) {
                 self.push_bound_obligations(expr, &owner, &subst);
             } else {
@@ -9610,6 +9616,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             .push(InferenceDiagnostic::PatPathError {
                 match_expr,
                 pat,
+                name: enum_name.to_owned(),
                 message,
             });
         None
@@ -10116,7 +10123,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         }
                         Some(GenericArgData::Const(value)) => {
                             let value = *value;
-                            let declared = self.lower_const_param_ty(declared);
+                            let declared = self.lower_const_param_ty(loc.file, declared);
                             // Fn values are outside the const-arg domain
                             // (TR06: concrete data types only) — same belt
                             // as fn mentions. Array values are excluded
@@ -10173,8 +10180,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 }) = self.own_generics.get(*own_index as usize)
                             {
                                 let own_declared = own_declared.clone();
-                                let expected = self.lower_const_param_ty(declared);
-                                let found = self.lower_const_param_ty(&own_declared);
+                                let expected = self.lower_const_param_ty(loc.file, declared);
+                                let found = self.lower_const_param_ty(self.file, &own_declared);
                                 if !expected.contains_error()
                                     && !found.contains_error()
                                     && expected != found

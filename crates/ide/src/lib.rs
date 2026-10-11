@@ -396,8 +396,13 @@ impl Analysis {
                     .iter()
                     // A related location in another file belongs to that
                     // file's diagnostics; synthesize it there once related
-                    // locations can cross files.
+                    // locations can cross files. One that carries the same
+                    // error itself (each side of a clash) explains itself.
                     .filter(|r| r.file == file)
+                    .filter(|r| {
+                        !(diagnostics.iter())
+                            .any(|other| other.range == r.range && other.message == d.message)
+                    })
                     .map(move |r| Diagnostic {
                         range: r.range,
                         severity: Severity::Info,

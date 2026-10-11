@@ -629,55 +629,29 @@ fn quick_fix_adds_missing_match_arms_attached_to_the_diagnostic() {
 }
 
 #[test]
-fn duplicate_definition_links_to_the_first_one() {
+fn a_duplicate_definition_links_every_definition() {
     let client = TestClient::start();
     let file = uri("file:///dup.must");
 
     client.open(&file, "static name: usize = 1;\nstatic name: usize = 2;\n");
     let diags = client.next_diagnostics();
-    // The error, plus a companion hint at the first definition.
+    // One error at each definition, each pointing at the other; no
+    // companion hints, since every related location carries the error.
     assert_eq!(diags.diagnostics.len(), 2);
-    let diag = diags
-        .diagnostics
-        .iter()
-        .find(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR))
-        .expect("has the error diagnostic");
-    assert_eq!(diag.message, "`name` is defined multiple times");
-    // On the second definition's name...
-    assert_eq!(diag.range.start, lsp_types::Position::new(1, 7));
-    assert_eq!(diag.range.end, lsp_types::Position::new(1, 11));
-    // ...with a clickable pointer back to the first.
-    let related = diag.related_information.as_ref().expect("has related info");
-    assert_eq!(related.len(), 1);
-    assert_eq!(related[0].message, "first defined here");
-    assert_eq!(related[0].location.uri, file);
-    assert_eq!(
-        related[0].location.range.start,
-        lsp_types::Position::new(0, 7)
-    );
-    assert_eq!(
-        related[0].location.range.end,
-        lsp_types::Position::new(0, 11)
-    );
-    // The companion sits at the first definition, explains the connection
-    // in prose, and links back to the error.
-    let companion = diags
-        .diagnostics
-        .iter()
-        .find(|d| d.severity == Some(lsp_types::DiagnosticSeverity::INFORMATION))
-        .expect("has the companion hint");
-    assert_eq!(companion.range.start, lsp_types::Position::new(0, 7));
-    assert_eq!(
-        companion.message,
-        "first defined here — causes the error on line 2: `name` is defined multiple times"
-    );
-    let back = companion
-        .related_information
-        .as_ref()
-        .expect("companion links back");
-    assert_eq!(back.len(), 1);
-    assert_eq!(back[0].message, "the error reported here");
-    assert_eq!(back[0].location.range.start, lsp_types::Position::new(1, 7));
+    for (diag, (line, other)) in diags.diagnostics.iter().zip([(0, 1), (1, 0)]) {
+        assert_eq!(diag.severity, Some(lsp_types::DiagnosticSeverity::ERROR));
+        assert_eq!(diag.message, "`name` is defined multiple times");
+        assert_eq!(diag.range.start, lsp_types::Position::new(line, 7));
+        assert_eq!(diag.range.end, lsp_types::Position::new(line, 11));
+        let related = diag.related_information.as_ref().expect("has related info");
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0].message, "also defined here");
+        assert_eq!(related[0].location.uri, file);
+        assert_eq!(
+            related[0].location.range.start,
+            lsp_types::Position::new(other, 7)
+        );
+    }
 
     drop(client);
 }

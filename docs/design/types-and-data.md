@@ -64,7 +64,7 @@
   and the second reports the mismatch (TODO: halvko/must#146: blame both). The firewall covers
   the item's signature, not its body: editing a fully typed body re-infers the groups it feeds,
   and can change its callees' signatures. A generic body stays a hard firewall: its rigid
-  params must not fill a monotype. There is no cross-file inference.
+  params must not fill a monotype. A group spans its library's files (M05).
 - **T12** An unconstrained join resolves by a family-aware plurality vote over concrete branch
   types: unresolved branches abstain, all-free ties tie together, a family tie recovers with
   the first witness.
@@ -295,9 +295,9 @@
 - **Traits gate `==`** — everything-is-comparable fell out of reusing unification, and
   narrowing it later is a breaking change. `==` on function values additionally rests on an
   identity nobody trusts. **T09**
-- **Modules land** — the join plurality vote and per-file inference are observable rules that
-  were never ruled. Per-file solving is invisible in a single-file world and will shape or
-  break programs once modules exist. **T11 T12**
+- **Libraries depend on each other** — the join plurality vote is an observable rule that was
+  never ruled, and inference stops at the library boundary, which imports across libraries
+  make visible. **T11 T12**
 - **Integer conversions** land when a customer names itself; `char ↔ u32` arrives fallible
   in the integer-to-char direction. **Variadic generics** stay parked; the first customer is
   interpolation. **T01 T15 T16**

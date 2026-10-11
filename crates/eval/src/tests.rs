@@ -30,7 +30,9 @@ fn check_const(text: &str, expect: Expect) {
 /// run-mode semantics (`print` is legal at the entry, statics still force as
 /// consts). Renders captured output, then the result. No stdin: a
 /// `read_line` call sees immediate end-of-input — see
-/// [`check_run_with_input`] for the injectable-input twin.
+/// [`check_run_with_input`] for the injectable-input twin. `text` may hold
+/// several files ([`base_db::fixture_files`]); the entry is appended to the
+/// last file.
 fn check_run(text: &str, entry: &str, expect: Expect) {
     check_run_impl(text, entry, std::io::empty(), true, expect);
 }
@@ -143,9 +145,13 @@ fn check_run_impl(
     check_traps: bool,
     expect: Expect,
 ) {
-    let db = RootDatabase::default();
-    let full = format!("{text}\nstatic entrypoint = ({entry});\n");
-    let file = SourceFile::new(&db, "test.must".to_owned(), full);
+    let mut db = RootDatabase::default();
+    let mut files = base_db::fixture_files(text);
+    let (_, last) = files.last_mut().expect("a fixture has a file");
+    last.push_str(&format!("\nstatic entrypoint = ({entry});\n"));
+    let file = *base_db::new_library(&mut db, "", files)
+        .last()
+        .expect("a fixture has a file");
     let entry_item = *hir::file_item_ids(&db, file)
         .iter()
         .find(|&&it| it.name(&db) == "entrypoint")
@@ -9406,6 +9412,127 @@ static f = fn () -> usize {
         "f()",
         expect![[r#"
             error[Trap]: `p` is used before it is assigned a value
+        "#]],
+    );
+}
+
+#[test]
+fn a_program_runs_across_the_files_of_its_library() {
+    check_run(
+        r#"
+//- b.must
+static double = fn(n: usize) -> usize { n + n };
+//- a.must
+use b::double;
+static main = fn() -> usize { double(2) };
+"#,
+        "main()",
+        expect![[r#"
+            => 4
+        "#]],
+    );
+}
+
+/// A fully typed caller fills the holes of a callee in another file.
+#[test]
+fn a_fully_typed_caller_fills_a_callee_in_another_file() {
+    check_run(
+        r#"
+//- b.must
+static id = fn(x) { x };
+//- a.must
+use b::id;
+static main = fn() -> usize { id(1) + 1 };
+"#,
+        "main()",
+        expect![[r#"
+            => 2
+        "#]],
+    );
+}
+
+/// A `ReadLineResult` made in one file matches the patterns of another: both
+/// name the prelude's declaration.
+#[test]
+fn a_compiler_provided_enum_is_one_type_across_files() {
+    check_run(
+        r#"
+//- b.must
+static line = fn() -> ReadLineResult { read_line() };
+//- a.must
+use b::line;
+static main = fn() -> usize {
+    match line() { ReadLineResult::Line(s) => 1, ReadLineResult::End => 2 }
+};
+"#,
+        "main()",
+        expect![[r#"
+            => 2
+        "#]],
+    );
+}
+
+/// A generic callee in another file gets its dictionary from a caller that
+/// does not import the bound's trait.
+#[test]
+fn a_bound_from_another_file_passes_its_dictionary() {
+    check_run(
+        r#"
+//- b.must
+trait D = requires { m: fn(Self) -> usize; };
+type P = struct { a: usize } with {
+    impl D { m = fn(x: Self) -> usize { x.a + 40 }; }
+};
+static f = fn::<T: D>(x: T) -> usize { x.m() };
+//- a.must
+use b::{f, P};
+static main = fn() -> usize { f::<P>(P(struct { a = 2 })) };
+"#,
+        "main()",
+        expect![[r#"
+            => 42
+        "#]],
+    );
+}
+
+/// A dot-call's impl names its trait in the impl's file: a namesake trait of
+/// the caller's file, broken or not, has nothing to do with the call.
+#[test]
+fn a_dot_call_is_not_blamed_on_a_namesake_trait_of_the_caller() {
+    check_run(
+        r#"
+//- b.must
+trait Show = requires { show: fn(Self) -> usize; };
+type P = struct { a: usize } with {
+    impl Show { show = fn(x: Self) -> usize { x.a + 1 }; }
+};
+//- a.must
+use b::P;
+trait Show = requires { other: fn(Self) -> Nope; };
+static main = fn() -> usize { P(struct { a = 5 }).show() };
+"#,
+        "main()",
+        expect![[r#"
+            => 6
+        "#]],
+    );
+}
+
+/// A broken import is an error outside every item: it traps every item of
+/// its file before any of it runs.
+#[test]
+fn a_broken_import_traps_before_anything_runs() {
+    check_run(
+        r#"
+//- b.must
+static g = fn() -> usize { 1 };
+//- a.must
+use b::missing;
+static main = fn() -> usize { print("a;"); 2 };
+"#,
+        "main()",
+        expect![[r#"
+            error[Trap]: `b` declares no `missing`
         "#]],
     );
 }

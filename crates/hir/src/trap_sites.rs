@@ -212,13 +212,15 @@ fn declaration_mentions(
         };
         let owner = ItemLoc::top_level(member.file, member.name.clone(), member.disambiguator);
         // A trait-impl member is named `head::member`, `head` being the
-        // impl's trait or implementer.
+        // impl's trait or implementer, as the impl's own file reads it.
         let head = member
             .member
             .as_ref()
             .and_then(|(name, _)| name.split_once("::"))
             .map(|(head, _)| head);
-        if let Some(Resolution::TraitItem(trait_)) = head.and_then(|head| scope.resolve(head)) {
+        let impl_scope = file_scope(db, member.file);
+        if let Some(Resolution::TraitItem(trait_)) = head.and_then(|head| impl_scope.resolve(head))
+        {
             mentions.push((trait_, range));
         }
         mentions.push((owner, range));

@@ -1222,9 +1222,10 @@ trait Adds = requires { m: fn::<W>(W, Self) -> W; } with { impl usize { m = fn::
 trait Omits = requires { m: fn::<W: forget>(W, Self) -> W; } with { impl usize { m = fn::<W>(w: W, x: usize) -> W { w }; } };
 trait Agrees = requires { m: fn::<W: forget>(W, Self) -> W; } with { impl usize { m = fn::<W: forget>(w: W, x: usize) -> W { w }; } };
 "#,
+        // TODO: halvko/must#163: bounds may come in any order; the message stops naming one.
         expect![[r#"
-            73..74: member `m`'s generic binder does not match `Adds`'s requirement (arity, kinds and bounds must agree) (required by the trait here at 25..26)
-            207..208: member `m`'s generic binder does not match `Omits`'s requirement (arity, kinds and bounds must agree) (required by the trait here at 151..152)
+            73..74: member `m`'s generic binder does not match `Adds`'s requirement (arity, kinds and bounds must agree, the bounds in the requirement's order) (required by the trait here at 25..26)
+            207..208: member `m`'s generic binder does not match `Omits`'s requirement (arity, kinds and bounds must agree, the bounds in the requirement's order) (required by the trait here at 151..152)
         "#]],
     );
 }
