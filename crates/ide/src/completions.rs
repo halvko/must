@@ -2210,18 +2210,26 @@ fn locals_for(
         let Some(block) = anchor.ancestors().find_map(ast::BlockExpr::cast) else {
             return Vec::new();
         };
-        locals_in_block(body, source_map, expr_scopes, &block, offset)
+        locals_in_block(body, source_map, expr_scopes, &block, offset, true)
     } else {
-        let Some(expr_id) = anchor
-            .ancestors()
-            .find_map(|n| source_map.expr_for_node(SyntaxNodePtr::new(&n)))
-        else {
+        let Some((node, expr_id)) = anchor.ancestors().find_map(|n| {
+            let expr_id = source_map.expr_for_node(SyntaxNodePtr::new(&n))?;
+            Some((n, expr_id))
+        }) else {
             return Vec::new();
         };
-        let Some(scope) = expr_scopes.scope_of(expr_id) else {
-            return Vec::new();
-        };
-        expr_scopes.visible_bindings_with_depth(scope)
+        // The cursor sits in no lowered expression of its own — e.g. the
+        // empty initializer of `let t = $0;` — so the nearest one is the
+        // enclosing block, whose scope is its *entry* scope and misses every
+        // `let` before the cursor. Reconstruct the scope at `offset` instead.
+        if let Some(block) = ast::BlockExpr::cast(node) {
+            locals_in_block(body, source_map, expr_scopes, &block, offset, false)
+        } else {
+            let Some(scope) = expr_scopes.scope_of(expr_id) else {
+                return Vec::new();
+            };
+            expr_scopes.visible_bindings_with_depth(scope)
+        }
     };
     let inference = hir::infer::infer(db, item);
     bindings
@@ -2257,6 +2265,7 @@ fn locals_in_block(
     expr_scopes: &hir::ExprScopes,
     block: &ast::BlockExpr,
     offset: TextSize,
+    statement_start: bool,
 ) -> Vec<(String, hir::BindingId, u32)> {
     let Some(block_id) = source_map.expr_for_node(SyntaxNodePtr::new(block.syntax())) else {
         return Vec::new();
@@ -2266,13 +2275,27 @@ fn locals_in_block(
     };
     let mut current = expr_scopes.visible_bindings_with_depth(scope);
     for stmt in block.statements() {
-        if stmt.syntax().text_range().start() >= offset {
+        // A statement that ends after `offset` contains the cursor: a `let`
+        // is not in scope in its own initializer.
+        if stmt.syntax().text_range().end() > offset {
             break;
         }
         let ast::Stmt::LetStmt(let_stmt) = &stmt else {
             // Neither `Assign` nor a plain `Expr` statement changes scope.
             continue;
         };
+        // An unterminated `let` ends at its last parsed token (`let t = $0`
+        // at the `=`, `let t = s + $0` at the `+`), before the cursor. Off a
+        // statement start, the cursor is inside an expression, so when such
+        // a `let` is the last node (statement or tail) before it, that
+        // expression is the `let`'s own initializer.
+        let last_before_cursor = let_stmt
+            .syntax()
+            .next_sibling()
+            .is_none_or(|next| next.text_range().start() >= offset);
+        if !statement_start && let_stmt.semicolon_token().is_none() && last_before_cursor {
+            break;
+        }
         let Some(pat) = let_stmt.pat() else { continue };
         let Some(pat_id) = source_map.pat_for_node(SyntaxNodePtr::new(pat.syntax())) else {
             continue;

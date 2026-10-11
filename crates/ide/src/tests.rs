@@ -5516,3 +5516,97 @@ static main = fn () -> () {
         "#]],
     );
 }
+
+#[test]
+fn completions_let_initializer_sees_earlier_lets_but_not_itself() {
+    // An earlier `let` is offered in a later `let`'s initializer; the `let`
+    // itself is not.
+    check_completions(
+        r#"
+static f = fn (p: usize) {
+    let s: usize = 1;
+    let t: usize = $0;
+};
+"#,
+        expect_test::expect![[r#"
+            p Variable (usize)
+            s Variable (usize)
+            panic Function (fn(str) -> !)
+            AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            NextChar Enum (enum { Char(char, usize), End })
+            ReadLineResult Enum (enum { Line(str), End })
+            Utf8Result Enum (enum { Ok(str), Err })
+            f Function (fn(usize))
+            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
+            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
+            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
+            dangling Function (fn::<T>() -> T.&raw mut)
+            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
+            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
+            print Function (fn(str))
+            read_line Function (fn() -> ReadLineResult)
+            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
+            const Keyword
+            false Keyword
+            fn Keyword
+            if Keyword
+            loop Keyword
+            match Keyword
+            struct Keyword
+            true Keyword
+            unsafe Keyword
+        "#]],
+    );
+}
+
+#[test]
+fn completions_unterminated_let_initializer_does_not_see_itself() {
+    // A `let` missing its `;` is not offered in its own empty or partial
+    // initializer; an earlier `let` is.
+    for program in [
+        r#"
+static f = fn (p: usize) {
+    let s: usize = 1;
+    let t: usize = $0
+};
+"#,
+        r#"
+static f = fn (p: usize) {
+    let s: usize = 1;
+    let t: usize = s + $0
+};
+"#,
+    ] {
+        check_has_completion(program, "s");
+        check_no_completion(program, "t");
+    }
+}
+
+#[test]
+fn completions_statement_start_after_unterminated_let_sees_it() {
+    // A `let` missing its `;` is offered at the next statement start.
+    check_has_completion(
+        r#"
+static f = fn {
+    let s: usize = 1
+    $0
+};
+"#,
+        "s",
+    );
+}
+
+#[test]
+fn completions_tail_after_unterminated_let_sees_it() {
+    // A `let` missing its `;` is offered in the tail expression after it.
+    check_has_completion(
+        r#"
+static f = fn () -> usize {
+    let t: usize = 2
+    t + $0
+};
+"#,
+        "t",
+    );
+}
