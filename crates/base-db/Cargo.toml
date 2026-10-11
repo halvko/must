@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 syntax.workspace = true
 salsa.workspace = true
+line-index.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true

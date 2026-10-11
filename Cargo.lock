@@ -28,6 +28,7 @@ name = "base-db"
 version = "0.1.0"
 dependencies = [
  "expect-test",
+ "line-index",
  "salsa",
  "syntax",
 ]

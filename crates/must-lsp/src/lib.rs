@@ -639,12 +639,14 @@ impl GlobalState {
         let sender = self.sender.clone();
         self.pool.spawn(move || {
             let diagnostics = cancellable(|| {
+                let diagnostics = snapshot.analysis.diagnostics(file);
+                if diagnostics.is_empty() {
+                    return Vec::new();
+                }
                 let line_index = snapshot.analysis.line_index(file);
-                snapshot
-                    .analysis
-                    .diagnostics(file)
+                diagnostics
                     .into_iter()
-                    .map(|d| to_proto::diagnostic(&snapshot, &line_index, d))
+                    .map(|d| to_proto::diagnostic(&snapshot, line_index, d))
                     .collect::<Vec<_>>()
             });
             // Cancelled: some edit bumped the revision. Only the edited
@@ -695,7 +697,7 @@ impl Snapshot {
             return None;
         };
         let line_index = self.analysis.line_index(file);
-        let offset = from_proto::offset(&line_index, doc.position)?;
+        let offset = from_proto::offset(line_index, doc.position)?;
         let nav = self
             .analysis
             .goto_definition(ide::FilePosition { file, offset })?;
@@ -704,7 +706,7 @@ impl Snapshot {
         let target_index = self.analysis.line_index(nav.file);
         let location = lsp_types::Location {
             uri: target_uri,
-            range: to_proto::range(&target_index, nav.focus_range),
+            range: to_proto::range(target_index, nav.focus_range),
         };
         Some(lsp_types::GotoDefinitionResponse::Scalar(location))
     }
@@ -733,8 +735,8 @@ impl Snapshot {
             })
         };
         let line_index = self.analysis.line_index(file);
-        let start = from_proto::offset(&line_index, params.range.start)?;
-        let end = from_proto::offset(&line_index, params.range.end)?;
+        let start = from_proto::offset(line_index, params.range.start)?;
+        let end = from_proto::offset(line_index, params.range.end)?;
         let query = syntax::TextRange::new(start, end);
 
         let mut offers: Vec<(ide::Fix, Option<ide::Diagnostic>)> = Vec::new();
@@ -775,7 +777,7 @@ impl Snapshot {
                 changes
                     .entry(target_uri)
                     .or_default()
-                    .push(to_proto::text_edit(&target_index, &file_edit.edit));
+                    .push(to_proto::text_edit(target_index, &file_edit.edit));
             }
             if !all_resolved {
                 continue;
@@ -788,9 +790,8 @@ impl Snapshot {
                     } else {
                         lsp_types::CodeActionKind::REFACTOR_REWRITE
                     }),
-                    diagnostics: diagnostic.map(|diagnostic| {
-                        vec![to_proto::diagnostic(self, &line_index, diagnostic)]
-                    }),
+                    diagnostics: diagnostic
+                        .map(|diagnostic| vec![to_proto::diagnostic(self, line_index, diagnostic)]),
                     edit: Some(lsp_types::WorkspaceEdit {
                         changes: Some(changes),
                         ..Default::default()
@@ -813,7 +814,7 @@ impl Snapshot {
         };
         let line_index = self.analysis.line_index(file);
         let highlights = self.analysis.highlight(file);
-        let tokens = to_proto::semantic_tokens(&line_index, &highlights);
+        let tokens = to_proto::semantic_tokens(line_index, &highlights);
         tracing::debug!(
             uri = %uri.as_str(),
             tokens = tokens.data.len(),
@@ -832,14 +833,14 @@ impl Snapshot {
             return None;
         };
         let line_index = self.analysis.line_index(file);
-        let offset = from_proto::offset(&line_index, doc.position)?;
+        let offset = from_proto::offset(line_index, doc.position)?;
         let hover = self.analysis.hover(ide::FilePosition { file, offset })?;
         Some(lsp_types::Hover {
             contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
                 kind: lsp_types::MarkupKind::Markdown,
                 value: hover.markup,
             }),
-            range: Some(to_proto::range(&line_index, hover.range)),
+            range: Some(to_proto::range(line_index, hover.range)),
         })
     }
 
@@ -854,14 +855,14 @@ impl Snapshot {
             return None;
         };
         let line_index = self.analysis.line_index(file);
-        let offset = from_proto::offset(&line_index, doc.position)?;
+        let offset = from_proto::offset(line_index, doc.position)?;
         let items = self
             .analysis
             .completions(ide::FilePosition { file, offset });
         Some(lsp_types::CompletionResponse::Array(
             items
                 .into_iter()
-                .map(|item| to_proto::completion_item(&line_index, item, self.snippet_support))
+                .map(|item| to_proto::completion_item(line_index, item, self.snippet_support))
                 .collect(),
         ))
     }
@@ -895,15 +896,15 @@ impl Snapshot {
             .analysis
             .inlay_hints(file)
             .into_iter()
-            .filter(|hint| visible.contains(&to_proto::position(&line_index, hint.offset)))
+            .filter(|hint| visible.contains(&to_proto::position(line_index, hint.offset)))
             .map(|hint| lsp_types::InlayHint {
-                position: to_proto::position(&line_index, hint.offset),
+                position: to_proto::position(line_index, hint.offset),
                 label: lsp_types::InlayHintLabel::String(hint.label),
                 kind: Some(lsp_types::InlayHintKind::TYPE),
                 text_edits: Some(
                     hint.edits
                         .iter()
-                        .map(|edit| to_proto::text_edit(&line_index, edit))
+                        .map(|edit| to_proto::text_edit(line_index, edit))
                         .collect(),
                 ),
                 tooltip: Some(lsp_types::InlayHintTooltip::String(hint.fix_label)),
@@ -929,7 +930,7 @@ impl Snapshot {
             .map(|lens| {
                 let entry = format!("{}()", lens.name);
                 lsp_types::CodeLens {
-                    range: to_proto::range(&line_index, lens.range),
+                    range: to_proto::range(line_index, lens.range),
                     command: Some(lsp_types::Command {
                         title: format!("▶ run {entry}"),
                         command: RUN_COMMAND.to_owned(),

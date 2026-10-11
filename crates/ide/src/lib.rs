@@ -8,12 +8,12 @@ mod goto_definition;
 mod hover;
 mod syntax_highlighting;
 
+pub use ::line_index::LineIndex;
 use base_db::{RootDatabase, SourceFile};
 pub use completions::{CompletionItem, CompletionItemKind, CompletionTextEdit, InsertText};
 pub use goto_definition::NavigationTarget;
 pub use hir::RelatedInfo;
 pub use hover::HoverResult;
-pub use line_index::LineIndex;
 pub use syntax::TextEdit;
 use syntax::ast::AstNode as _;
 use syntax::{TextRange, TextSize};
@@ -178,12 +178,11 @@ impl Analysis {
         // of the linear check). Same aggregator pattern:
         // findings travel with the query value, only ranges attach here.
         // Lives above hir because hir can't see mir.
-        let top_level = hir::file_item_ids(&self.db, file);
         for item in hir::all_checkable_items(&self.db, file) {
             // TODO: report members' lowering diagnostics too; `map` in
             // `examples/option.must` captures `f` (halvko/must#94).
             let lowered = &mir::mir_lowered(&self.db, item).diagnostics[..];
-            let lowered = if top_level.contains(&item) {
+            let lowered = if lowered.is_empty() || item.member(&self.db).is_none() {
                 lowered
             } else {
                 &[]
@@ -389,11 +388,10 @@ impl Analysis {
         // back to the error. Give each one a companion information-severity
         // diagnostic that spells out the connection and points back —
         // hovering the underline then explains itself.
-        let line_index = self.line_index(file);
         let companions: Vec<Diagnostic> = diagnostics
             .iter()
             .flat_map(|d| {
-                let line = line_index.line_col(d.range.start()).line + 1;
+                let line = self.line_index(file).line_col(d.range.start()).line + 1;
                 d.related
                     .iter()
                     // A related location in another file belongs to that
@@ -480,8 +478,8 @@ impl Analysis {
         syntax_highlighting::highlight(&self.db, file)
     }
 
-    pub fn line_index(&self, file: SourceFile) -> LineIndex {
-        LineIndex::new(file.text(&self.db))
+    pub fn line_index(&self, file: SourceFile) -> &LineIndex {
+        base_db::line_index(&self.db, file)
     }
 
     pub fn file_text(&self, file: SourceFile) -> String {

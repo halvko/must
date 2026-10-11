@@ -10,7 +10,7 @@ use std::io::{IsTerminal, Write};
 
 use base_db::{RootDatabase, SourceFile};
 use eval::{EvalErrorKind, Machine, NoteAnchor, RunMode, Value};
-use line_index::{LineIndex, WideEncoding};
+use line_index::WideEncoding;
 use syntax::ast::AstNode;
 
 /// The entry expression is wrapped in a synthetic item appended to the file:
@@ -220,7 +220,7 @@ pub fn prepare(
             .rev()
             .find(|err| usize::from(err.range.start()) <= original_len)
         {
-            let line_col = LineIndex::new(file.text(db)).line_col(err.range.start());
+            let line_col = base_db::line_index(db, file).line_col(err.range.start());
             return Err(PrepareError::FileSyntax(format!(
                 "error: cannot evaluate the entry expression: \
                  the file has a syntax error that swallows the end of the file\n  \
@@ -267,7 +267,7 @@ pub fn source_position(
     if usize::from(range.start()) > original_len {
         return None;
     }
-    let line_index = LineIndex::new(file.text(db));
+    let line_index = base_db::line_index(db, file);
     let line_col = line_index.line_col(range.start());
     let wide = line_index
         .to_wide(WideEncoding::Utf16, line_col)
@@ -358,7 +358,7 @@ fn locate(
     if usize::from(range.start()) > original_len {
         return Some("entry expression".to_owned());
     }
-    let line_col = LineIndex::new(file.text(db)).line_col(range.start());
+    let line_col = base_db::line_index(db, file).line_col(range.start());
     Some(format!("{path}:{}:{}", line_col.line + 1, line_col.col + 1))
 }
 
