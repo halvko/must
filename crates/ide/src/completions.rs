@@ -243,7 +243,7 @@ fn type_tier(candidate: Option<&hir::Ty>, expected: Option<&hir::Ty>) -> u8 {
     let (Some(candidate), Some(expected)) = (candidate, expected) else {
         return TYPE_TIER_NONE;
     };
-    if candidate == expected {
+    if matches_as_value(candidate, expected) {
         return 0;
     }
     if hir::widens_to(candidate, expected) {
@@ -252,11 +252,19 @@ fn type_tier(candidate: Option<&hir::Ty>, expected: Option<&hir::Ty>) -> u8 {
     // A `fn` candidate that doesn't match as a value (the arms above) may
     // still satisfy the position when *called*.
     if let hir::Ty::Fn(f) = candidate
-        && (f.ret == *expected || hir::widens_to(&f.ret, expected))
+        && (matches_as_value(&f.ret, expected) || hir::widens_to(&f.ret, expected))
     {
         return 1;
     }
     TYPE_TIER_NONE
+}
+
+/// Whether `candidate` satisfies `expected` as a value: the same type, or
+/// any integer when `expected` is `{number}` (an arithmetic operand whose
+/// integer type nothing pinned).
+fn matches_as_value(candidate: &hir::Ty, expected: &hir::Ty) -> bool {
+    candidate == expected
+        || (*expected == hir::Ty::UnresolvedNumber && matches!(candidate, hir::Ty::Int(_)))
 }
 
 fn completion_item(

@@ -5610,3 +5610,47 @@ static f = fn () -> usize {
         "t",
     );
 }
+
+#[test]
+fn completions_arithmetic_operand_ranks_integers_first() {
+    // An operand of `+` whose integer type nothing pins ranks integer
+    // candidates above the rest.
+    check_completions(
+        r#"
+static f = fn {
+    let xf = fn(a: usize) {};
+    let xtra: usize = 1;
+    let y = 11 + x$0;
+};
+"#,
+        expect_test::expect![[r#"
+            xtra Variable (usize)
+            panic Function (fn(str) -> !)
+            xf Variable (fn(usize))
+            AllocResult Enum (enum { Ok(T.&raw mut), Err })
+            NextChar Enum (enum { Char(char, usize), End })
+            ReadLineResult Enum (enum { Line(str), End })
+            Utf8Result Enum (enum { Ok(str), Err })
+            f Function (fn())
+            add Function (unsafe fn(T.&raw [mut], usize) -> T.&raw [mut])
+            alloc_array Function (fn::<T>(usize) -> AllocResult::<T>)
+            copy Function (unsafe fn(T.&raw [mut], T.&raw mut, usize))
+            dangling Function (fn::<T>() -> T.&raw mut)
+            dealloc_array Function (unsafe fn::<T>(T.&raw mut, usize))
+            offset Function (unsafe fn(T.&raw [mut], isize) -> T.&raw [mut])
+            print Function (fn(str))
+            read_line Function (fn() -> ReadLineResult)
+            str_from_utf8 Function (unsafe fn(u8.&raw [mut], usize) -> Utf8Result)
+            str_from_utf8_unchecked Function (unsafe fn(u8.&raw [mut], usize) -> str)
+            const Keyword
+            false Keyword
+            fn Keyword
+            if Keyword
+            loop Keyword
+            match Keyword
+            struct Keyword
+            true Keyword
+            unsafe Keyword
+        "#]],
+    );
+}
