@@ -2559,9 +2559,9 @@ static main = fn() -> usize {
               _11: usize
               bb0:
                 _1 = 1
-                _2 = &raw mut _1
+                _2 = _1.&raw mut
                 _3 = _2
-                _4 = &raw static s
+                _4 = static s.&raw
                 _5 = _4
                 _6 = _3
                 _6.* = 2
@@ -2604,7 +2604,7 @@ static main = fn() -> usize {
               _5: usize
               bb0:
                 _1 = 1
-                _2 = &raw mut _1
+                _2 = _1.&raw mut
                 _3 = _2
                 _4 = _3
                 _5 = trap "dereferencing a raw pointer requires an `unsafe { ... }` block" -> bb1
@@ -2653,7 +2653,7 @@ static main = fn() {
                 _1 = [1, 2]
                 _2 = { buf: _1, x: 1 }
                 _3 = _2
-                _4 = &raw mut _3
+                _4 = _3.&raw mut
                 _5 = _4
                 _6 = 1
                 _7 = _5
@@ -2720,7 +2720,7 @@ static main = fn() {
                 _1 = [1, 2]
                 _2 = { buf: _1, x: 1 }
                 _3 = _2
-                _4 = &raw mut _3
+                _4 = _3.&raw mut
                 _5 = _4
                 _6 = 1
                 _7 = _6
@@ -2772,9 +2772,9 @@ static main = fn() {
               _7: usize.&raw mut
               bb0:
                 _1 = 1
-                _2 = &raw mut _1
+                _2 = _1.&raw mut
                 _3 = _2
-                _4 = &raw mut _3
+                _4 = _3.&raw mut
                 _5 = _4
                 _6 = _5
                 _7 = _6.*
@@ -2827,14 +2827,14 @@ static main = fn() -> usize {
               bb0:
                 _1 = [1, 2]
                 _2 = _1
-                _3 = &raw mut _2[0]
+                _3 = _2[0].&raw mut
                 _4 = _3
                 _5 = { x: 1 }
                 _6 = _5
-                _7 = &raw mut _6
+                _7 = _6.&raw mut
                 _8 = _7
                 _9 = _8
-                _10 = &raw mut _9.*.0
+                _10 = _9.*.0.&raw mut
                 _11 = _10
                 _12 = _11
                 _13 = _12.*
@@ -3175,9 +3175,9 @@ fn a_safe_borrow_is_its_own_rvalue() {
               _5: usize.&raw mut  // r
               bb0:
                 _1 = 1
-                _2 = &mut _1
+                _2 = _1.&mut
                 _3 = _2
-                _4 = &raw mut _1
+                _4 = _1.&raw mut
                 _5 = _4
                 _0 = ()
                 return
@@ -3216,10 +3216,10 @@ fn a_reborrow_through_a_borrow_stays_a_borrow() {
               _7: usize.&raw mut  // r
               bb0:
                 _2 = _1
-                _3 = &mut _2.*
+                _3 = _2.*.&mut
                 _4 = _3
                 _5 = _1
-                _6 = &raw mut _5.*
+                _6 = _5.*.&raw mut
                 _7 = _6
                 _0 = ()
                 return
@@ -3243,7 +3243,7 @@ fn a_borrowed_match_reads_the_tag_through_the_deref_and_borrows_its_payloads() {
     //   * `switch _2.*` — the tag test is a READ THROUGH THE BORROW, not a
     //     read of a detached copy, so the interpreter's aliasing tree sees
     //     it and an invalidated scrutinee is caught before any arm runs;
-    //   * `_4 = &mut _2.*.0` — the payload binding is a BORROW of the
+    //   * `_4 = _2.*.0.&mut` — the payload binding is a BORROW of the
     //     payload's sub-place, `Rvalue::Borrow` over `[Deref, Field(0)]`.
     //     Compare the owned lowering (`match_on_enum_lowers_to_switch_variant`),
     //     which is `_4 = _2.0`: a value read out of a copy.
@@ -3271,7 +3271,7 @@ static f = fn::<@a>(s: Opt.&mut::<@a>) -> () {
                 _2 = _1
                 switch _2.* on Opt -> [0: bb1, 1: bb2, otherwise: bb3]
               bb1:
-                _4 = &mut _2.*.0
+                _4 = _2.*.0.&mut
                 _5 = _4
                 _5.* = 1
                 storage_dead _4
@@ -3324,7 +3324,7 @@ static f = fn::<@a>(s: Opt.&::<@a>) -> usize {
                 _2 = _1
                 switch _2.* on Opt -> [0: bb1, 1: bb2, otherwise: bb3]
               bb1:
-                _4 = & _2.*.0
+                _4 = _2.*.0.&
                 _5 = _4
                 _6 = _5.*
                 storage_dead _4
@@ -3374,7 +3374,7 @@ static f = fn::<@a>(s: State::Run.&mut::<@a>) -> () {
               _5: usize.&mut
               bb0:
                 _2 = _1
-                _4 = &mut _2.*.0
+                _4 = _2.*.0.&mut
                 _5 = _4
                 _5.* = 1
                 storage_dead _4
@@ -5471,7 +5471,7 @@ static f = fn() -> usize { get(mk().b.&) };
                 _1 = call item mk() -> bb1
               bb1:
                 _2 = _1
-                _3 = & _2.1
+                _3 = _2.1.&
                 _4 = call item get(_3) -> bb2
               bb2:
                 _0 = _4
@@ -5521,7 +5521,7 @@ static main = fn() -> usize { unsafe { mk().&raw.* } };
                 _1 = call item mk() -> bb1
               bb1:
                 _2 = _1
-                _3 = &raw _2
+                _3 = _2.&raw
                 _4 = _3.*
                 storage_dead _2
                 _0 = _4
