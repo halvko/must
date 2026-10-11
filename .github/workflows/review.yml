@@ -238,6 +238,11 @@ jobs:
 
             Read the diff (`gh pr diff`), the PR description and commit messages
             (`gh pr view`), and as much surrounding code as you need to judge it.
+            Read files with the Read, Grep and Glob tools. The only commands you
+            can run are `gh pr diff`, `gh pr view`, the `gh api` call below,
+            `git log`, `git show`, `git diff` and `git range-diff`, one per Bash
+            call, with no `cd`, `;`, pipes or redirects; anything else is
+            refused.
             Report only findings you can point at a line for and would defend to
             the author. No praise, no restating the diff, no style nits your brief
             does not ask for. If you find nothing, say so in one line.
@@ -290,6 +295,7 @@ jobs:
           out="$RUNNER_TEMP/claude-execution-output.json"
           [ -f "$out" ] && jq -r '.. | .permission_denials? // empty | .[]
             | "refused: \(.tool_name) \(.tool_input | tostring | .[:300])"' "$out" || true
+          cp "$out" review-log.json 2>/dev/null || true
           problems=$(.github/scripts/review-check.sh)
           [ -n "$problems" ] || exit 0
           printf '%s\n' "$problems"
@@ -324,7 +330,18 @@ jobs:
           out="$RUNNER_TEMP/claude-execution-output.json"
           [ -f "$out" ] && jq -r '.. | .permission_denials? // empty | .[]
             | "refused: \(.tool_name) \(.tool_input | tostring | .[:300])"' "$out" || true
+          cp "$out" review-log-retry.json 2>/dev/null || true
           .github/scripts/review-check.sh
+      # The reviewer's full transcript, to see how it read the PR.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-log-${{ matrix.role }}
+          path: |
+            review-log.json
+            review-log-retry.json
+          if-no-files-found: ignore
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         with:
           name: review-summary-${{ matrix.role }}
