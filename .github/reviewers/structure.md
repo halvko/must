@@ -23,6 +23,14 @@ about, slower, or harder to abstract than it needs to be.
   iteration, often over data the loop does not need (a hidden quadratic, or
   a scan for one field of every item). Look at what the callee touches and
   produces, not just its signature.
+- Hidden coupling: code that relies on an order, position or shape it does
+  not own, such as the first entries of a list being of one kind.
+- Checks bolted on afterwards: validating something after building it,
+  where building it differently (parsing the shape, a type that cannot
+  hold the bad state, one place that must handle every case) would rule
+  the mistake out. Likewise a special case for one context when the rule
+  holds in all of them, or a fallback that should fall out of the normal
+  mechanism.
 
 For each finding, name the places involved and say why it matters here:
 harder to reason about, slower, or in the way of a better abstraction.
