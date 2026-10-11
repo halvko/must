@@ -2559,15 +2559,13 @@ impl<'db, M: Mode> Machine<'db, M> {
                             }
                         }
                         builtin_variant(
-                            loc.file,
+                            self.db,
                             hir::READ_LINE_RESULT_NAME,
                             "Line",
                             vec![Value::Str(text)],
                         )
                     }
-                    None => {
-                        builtin_variant(loc.file, hir::READ_LINE_RESULT_NAME, "End", Vec::new())
-                    }
+                    None => builtin_variant(self.db, hir::READ_LINE_RESULT_NAME, "End", Vec::new()),
                 })
             }
             Builtin::AllocArray => {
@@ -2687,7 +2685,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             return Err(self.ill_typed("a `usize` argument", index, loc, origin));
         };
         let index = usize::try_from(index.to_i128().max(0)).unwrap_or(usize::MAX);
-        let end = builtin_variant(loc.file, hir::NEXT_CHAR_NAME, "End", Vec::new());
+        let end = builtin_variant(self.db, hir::NEXT_CHAR_NAME, "End", Vec::new());
         if index >= text.len() {
             return Ok(end);
         }
@@ -2719,7 +2717,7 @@ impl<'db, M: Mode> Machine<'db, M> {
             ));
         };
         Ok(builtin_variant(
-            loc.file,
+            self.db,
             hir::NEXT_CHAR_NAME,
             "Char",
             vec![Value::Char(c), Value::Int(next)],
@@ -2782,7 +2780,7 @@ impl<'db, M: Mode> Machine<'db, M> {
         });
         // The head pointer: element 0 of the allocation.
         Ok(builtin_variant(
-            loc.file,
+            self.db,
             hir::ALLOC_RESULT_NAME,
             "Ok",
             vec![Value::Ptr {
@@ -3104,10 +3102,10 @@ impl<'db, M: Mode> Machine<'db, M> {
             }
         }
         match String::from_utf8(bytes) {
-            Ok(text) => Ok(self.blessed(builtin, text, loc)),
+            Ok(text) => Ok(self.blessed(builtin, text)),
             Err(err) => match builtin {
                 Builtin::StrFromUtf8 => Ok(builtin_variant(
-                    loc.file,
+                    self.db,
                     hir::UTF8_RESULT_NAME,
                     "Err",
                     Vec::new(),
@@ -3129,14 +3127,11 @@ impl<'db, M: Mode> Machine<'db, M> {
     /// The successful answer of a bless, in whichever shape the spelling
     /// asks for: the checked one wraps it in `Utf8Result::Ok`, the claimed
     /// one hands back the `str` itself.
-    fn blessed(&self, builtin: Builtin, text: String, loc: &ItemLoc) -> Value {
+    fn blessed(&self, builtin: Builtin, text: String) -> Value {
         match builtin {
-            Builtin::StrFromUtf8 => builtin_variant(
-                loc.file,
-                hir::UTF8_RESULT_NAME,
-                "Ok",
-                vec![Value::Str(text)],
-            ),
+            Builtin::StrFromUtf8 => {
+                builtin_variant(self.db, hir::UTF8_RESULT_NAME, "Ok", vec![Value::Str(text)])
+            }
             _ => Value::Str(text),
         }
     }
@@ -3401,12 +3396,7 @@ impl<'db, M: Mode> Machine<'db, M> {
 ///
 /// Panics if `enum_name` names no row or `variant` no variant of it: both
 /// are typos in this file, not states a program can reach.
-fn builtin_variant(
-    file: base_db::SourceFile,
-    enum_name: &str,
-    variant: &str,
-    payload: Vec<Value>,
-) -> Value {
+fn builtin_variant(db: &dyn Db, enum_name: &str, variant: &str, payload: Vec<Value>) -> Value {
     let row = hir::synthetic_decl_named(enum_name)
         .unwrap_or_else(|| panic!("`{enum_name}` is not a compiler-provided enum"));
     let (index, payload_types) = row
@@ -3418,7 +3408,7 @@ fn builtin_variant(
         "`{enum_name}::{variant}` was built with the wrong number of payload slots"
     );
     Value::Variant {
-        decl: hir::synthetic_decl_loc(file, enum_name),
+        decl: hir::synthetic_decl_loc(db, enum_name),
         index,
         name: variant.to_owned(),
         payload,

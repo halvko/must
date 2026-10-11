@@ -104,7 +104,7 @@
   mechanism. Short reads are real and are not end of input; an I/O error rides the return
   value so a lifting wrapper's error arm is reachable; the destination range is judged before
   the read, so a trap never eats input. `read_line()` still returns the compiler-provided
-  per-file enum `ReadLineResult = enum { Line(str), End }`, minted the way `AllocResult` is
+  enum `ReadLineResult = enum { Line(str), End }`, minted the way `AllocResult` is
   and shadowable by a file's own declaration of the name. The line rule — strip the
   terminator (`\n`, and a preceding `\r`, so CRLF reads as LF), a blank line is `Line("")`, a
   final unterminated line is still a `Line`, `End` is genuine end of input — is the machine's
