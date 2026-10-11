@@ -13551,6 +13551,187 @@ static borrowed_variant = fn::<@a>(c: Shape::Circle.&::<@a>) -> usize { c.area()
 }
 
 #[test]
+fn a_plain_let_borrowed_as_its_enum_widens_on_demand() {
+    // `c` is borrowed where `Shape.&` is needed, so it is the enum; `p` is
+    // never borrowed that way and keeps its variant.
+    check_infer(
+        r#"
+type Shape = enum { Circle(usize), Point } with {
+    impl Self {
+        area = fn::<@b>(s: Self.&::<@b>) -> usize { 1 };
+    }
+};
+static f = fn -> usize {
+    let p = Shape::Point;
+    let c = Shape::Circle(2);
+    c.&.area()
+};
+"#,
+        expect![[r#"
+            144..230 'fn -> usize {    ...': fn() -> usize
+            156..230 '{     let p = Sha...': usize
+            166..167 'p': Shape::Point
+            170..182 'Shape::Point': Shape::Point
+            192..193 'c': Shape
+            196..209 'Shape::Circle': fn(usize) -> Shape::Circle
+            196..212 'Shape::Circle(2)': Shape::Circle
+            210..211 '2': usize
+            218..219 'c': Shape
+            218..221 'c.&': Shape.&
+            218..226 'c.&.area': fn(Shape.&) -> usize
+            218..228 'c.&.area()': usize
+        "#]],
+    );
+}
+
+#[test]
+fn a_binding_widened_on_demand_is_the_enum_everywhere() {
+    // An earlier match that covered only the variant has to cover the enum.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point } with {
+    impl Self {
+        area = fn::<@b>(s: Self.&::<@b>) -> usize { 1 };
+    }
+};
+static f = fn -> usize {
+    let c = Shape::Circle(2);
+    let n = match c { ::Circle(r) => r };
+    c.&.area()
+};
+"#,
+        expect![[r#"
+            200..205: this `match` does not cover `Shape::Point`
+        "#]],
+    );
+}
+
+#[test]
+fn a_match_binder_widens_on_demand() {
+    // A whole-value match binder borrowed as the enum widens like a `let`.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point } with {
+    impl Self {
+        area = fn::<@b>(s: Self.&::<@b>) -> usize { 1 };
+    }
+};
+static f = fn -> usize {
+    match Shape::Circle(2) { x => x.&.area() }
+};
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn a_payload_binder_widens_on_demand() {
+    // A payload binder borrowed as the enum widens like a `let`.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point } with {
+    impl Self {
+        area = fn::<@b>(s: Self.&::<@b>) -> usize { 1 };
+    }
+};
+type Wrap = enum { W(Shape::Circle) };
+static f = fn -> usize {
+    match Wrap::W(Shape::Circle(2)) { ::W(x) => x.&.area() }
+};
+"#,
+        expect![""],
+    );
+}
+
+#[test]
+fn an_annotated_binding_does_not_widen_on_demand() {
+    // The annotation is the axiom: `c` stays `Shape::Circle`, so the
+    // borrow is a reported mismatch.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point } with {
+    impl Self {
+        area = fn::<@b>(s: Self.&::<@b>) -> usize { 1 };
+    }
+};
+static f = fn -> usize {
+    let c: Shape::Circle = Shape::Circle(2);
+    c.&.area()
+};
+"#,
+        expect![[r#"
+            207..210: type mismatch: expected `Shape.&`, found `Shape::Circle.&`
+        "#]],
+    );
+}
+
+#[test]
+fn group_inference_widens_on_demand_too() {
+    // `f` and `g` share one inference group; `f` widens `c`, so both
+    // signatures return the enum, which `h` cannot narrow back.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point } with {
+    impl Self {
+        area = fn::<@b>(s: Self.&::<@b>) -> usize { 1 };
+    }
+};
+static f = fn(n: usize) {
+    let c = Shape::Circle(n);
+    let a = c.&.area();
+    if n == 0 { c } else { g(n - 1) }
+};
+static g = fn(n: usize) { f(n) };
+static h = fn -> Shape::Circle { g(1) };
+"#,
+        expect![[r#"
+            321..325: type mismatch: expected `Shape::Circle`, found `Shape` (expected `Shape::Circle` because of this return type at 302..318)
+        "#]],
+    );
+}
+
+#[test]
+fn a_parameter_does_not_widen_on_demand() {
+    // A parameter's type is its signature's, so no binding site widens it:
+    // the borrow stays a mismatch.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point } with {
+    impl Self {
+        area = fn::<@b>(s: Self.&::<@b>) -> usize { 1 };
+    }
+};
+static f = fn(c: Shape::Circle) -> usize { c.&.area() };
+"#,
+        expect![[r#"
+            176..179: type mismatch: expected `Shape.&`, found `Shape::Circle.&`
+        "#]],
+    );
+}
+
+#[test]
+fn a_widening_on_demand_can_demand_another() {
+    // Widening `c` makes `r` a `Shape.&`, which `d.&` then has to meet.
+    check_diagnostics(
+        r#"
+type Shape = enum { Circle(usize), Point } with {
+    impl Self {
+        area = fn::<@b>(s: Self.&::<@b>) -> usize { 1 };
+    }
+};
+static f = fn -> usize {
+    let c = Shape::Circle(1);
+    let d = Shape::Circle(2);
+    let mut r = c.&;
+    r = d.&;
+    r.area() + c.&.area()
+};
+"#,
+        expect![""],
+    );
+}
+
+#[test]
 fn a_trait_requirement_may_carry_a_region_binder() {
     // `binders_match` had arms for Type and Const and none for Region, so
     // a region param in a requirement's binder made EVERY textually

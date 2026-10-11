@@ -5233,6 +5233,30 @@ type Light = enum { Red, Green } with {
     );
 }
 
+#[test]
+fn a_plain_let_borrowed_as_its_enum_runs_the_member() {
+    // `o` is borrowed where `Option.&` is needed, so it widens at binding
+    // time and the borrow points at a tagged value.
+    check_run(
+        r#"
+type Option = enum::<T> { Some(T), None } with {
+    impl Self {
+        is_some = fn::<@b>(s: Self.&::<@b>) -> bool {
+            match s {
+                ::Some(_) => true,
+                ::None => false,
+            }
+        };
+    }
+};
+"#,
+        "{ let o = Option::<usize>::Some(11); o.&.is_some() }",
+        expect![[r#"
+            => true
+        "#]],
+    );
+}
+
 // A `const fn` member is const-callable; a plain member is rejected in a
 // const context with the ordinary const-check story.
 #[test]

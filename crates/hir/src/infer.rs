@@ -12,7 +12,7 @@
 use base_db::{Db, SourceFile};
 use ena::unify::InPlaceUnificationTable;
 use la_arena::ArenaMap;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::body::{
     BindingId, Body, ExprData, ExprId, GenericArgData, LiteralData, MatchArm, PatData, PatId, Stmt,
@@ -51,8 +51,9 @@ pub struct InferenceResult {
     /// check site, and the precise variant where it happened at a deferred
     /// join edge.
     pub widened: ArenaMap<ExprId, VariantTy>,
-    /// Every unannotated `mut` whole-value binder in a match pattern on a
-    /// variant-typed scrutinee, mapped to the variant the scrutinee was.
+    /// Every pattern binder that widens a variant-typed value (an
+    /// unannotated `mut` one, or a plain one on demand), mapped to the
+    /// variant the value was.
     /// The binding's type is the enum (G27), and MIR plants the
     /// `WidenToEnum` op where it binds the value.
     pub widened_bindings: ArenaMap<BindingId, VariantTy>,
@@ -2467,9 +2468,6 @@ fn shared_step(body: &Body, place: ExprId, ty_of: &mut dyn FnMut(ExprId) -> Ty) 
 pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
     let body = body(db, item);
     let file = item.file(db);
-    let mut table = InPlaceUnificationTable::new();
-    let no_group = FxHashMap::default();
-    let mut ctx;
 
     // The item's own generic binder (TR06): its type params resolve to rigid
     // `Ty::Param`s in every type position lowered inside this body, and its
@@ -2487,33 +2485,70 @@ pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
     } else {
         generic_param_scope(db, item, generics)
     };
+    let mut table = InPlaceUnificationTable::new();
+    let no_group = FxHashMap::default();
+    with_widening_on_demand(&mut table, |table, widen_on_demand| {
+        let mut ctx;
+        if let Some(root) = body.root {
+            // Check the body against the item's annotation, if any. For a
+            // generic item the "annotation" is the scheme synthesized from
+            // the literal's own (mandatory) annotations, lowered under the
+            // param scope — the same `Ty` `signature` returns.
+            let ty_ref = crate::item_data(db, item)
+                .as_ref()
+                .and_then(|it| it.type_ref.as_ref());
+            let expected = lower_type_ref_in(
+                db,
+                file,
+                ty_ref.unwrap_or(&TypeRef::Hole),
+                table,
+                &type_params,
+            );
+            let cause = ty_ref.is_some().then_some(Cause::ItemAnnotation);
+            ctx = InferCtx::new(db, file, body, resolutions(db, item), table, &no_group);
+            ctx.type_params = type_params.clone();
+            ctx.own_generics = generics;
+            ctx.own_item = Some(item_loc(db, item));
+            ctx.widen_on_demand = widen_on_demand.clone();
+            ctx.infer_expr_with(root, &expected, cause);
+        } else {
+            ctx = InferCtx::new(db, file, body, resolutions(db, item), table, &no_group);
+        }
+        let demanded = std::mem::take(&mut ctx.demanded_widenings);
+        (ctx.finish(), demanded)
+    })
+}
 
-    if let Some(root) = body.root {
-        // Check the body against the item's annotation, if any. For a
-        // generic item the "annotation" is the scheme synthesized from the
-        // literal's own (mandatory) annotations, lowered under the param
-        // scope — the same `Ty` `signature` returns.
-        let ty_ref = crate::item_data(db, item)
-            .as_ref()
-            .and_then(|it| it.type_ref.as_ref());
-        let expected = lower_type_ref_in(
-            db,
-            file,
-            ty_ref.unwrap_or(&TypeRef::Hole),
-            &mut table,
-            &type_params,
-        );
-        let cause = ty_ref.is_some().then_some(Cause::ItemAnnotation);
-        ctx = InferCtx::new(db, file, body, resolutions(db, item), &mut table, &no_group);
-        ctx.type_params = type_params;
-        ctx.own_generics = generics;
-        ctx.own_item = Some(item_loc(db, item));
-        ctx.infer_expr_with(root, &expected, cause);
-    } else {
-        ctx = InferCtx::new(db, file, body, resolutions(db, item), &mut table, &no_group);
+/// Runs `pass` over one body until it demands no new widening. A pass
+/// that borrows plain bindings where their enum is needed is rolled back,
+/// and the next widens them at binding time ([`InferCtx::widen_on_demand`]).
+/// A widening can demand another (`r = d.&` once `r` holds `Shape.&`); the
+/// set only grows, so this ends within one pass per binding.
+pub(crate) fn with_widening_on_demand<R>(
+    table: &mut InPlaceUnificationTable<TyVar>,
+    mut pass: impl FnMut(
+        &mut InPlaceUnificationTable<TyVar>,
+        &FxHashSet<BindingId>,
+    ) -> (R, FxHashSet<BindingId>),
+) -> R {
+    let mut widen = FxHashSet::default();
+    loop {
+        let snapshot = table.snapshot();
+        let (result, demanded) = pass(table, &widen);
+        let before = widen.len();
+        widen.extend(demanded);
+        if widen.len() == before {
+            table.commit(snapshot);
+            return result;
+        }
+        table.rollback_to(snapshot);
     }
+}
 
-    ctx.finish()
+/// Whether a binder has a name and no annotation: the binders whose type
+/// a binding site may widen (T04).
+fn unannotated_name(data: &crate::body::BindingData) -> bool {
+    data.type_ref.is_none() && matches!(data.kind, crate::body::BindingKind::Named(_))
 }
 
 /// One entry of [`InferCtx::return_targets`] — a body a `return` could be
@@ -2623,6 +2658,14 @@ pub(crate) struct InferCtx<'a, 'db> {
     /// does. A `!` or `{error}` value gives the binding no type, so it keeps
     /// waiting.
     deferred_unannotated: rustc_hash::FxHashSet<BindingId>,
+    /// Plain bindings this pass widens at binding time, as if `mut`
+    /// (T04's widening on demand). Filled by [`with_widening_on_demand`]
+    /// from earlier passes' [`Self::demanded_widenings`].
+    pub(crate) widen_on_demand: FxHashSet<BindingId>,
+    /// Plain variant-typed bindings borrowed (`x.&`) where their enum's
+    /// borrow was expected: a borrow cannot tag its referent in place, so
+    /// the binding itself must hold the tagged value.
+    pub(crate) demanded_widenings: FxHashSet<BindingId>,
     /// Literals directly under a unary minus (`-5`): their range check
     /// applies the sign (`-128` fits `i8`; plain `128` does not). Filled by
     /// the [`crate::body::ExprData::Neg`] arm before its operand is
@@ -2804,6 +2847,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             pending_number_literals: Vec::new(),
             unresolved_scrutinees: rustc_hash::FxHashSet::default(),
             deferred_unannotated: Default::default(),
+            widen_on_demand: Default::default(),
+            demanded_widenings: Default::default(),
             negated_literals: rustc_hash::FxHashSet::default(),
             number_expectations: rustc_hash::FxHashSet::default(),
             pending_obligations: Vec::new(),
@@ -3271,16 +3316,12 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         self.result.diagnostics.extend(diagnostics);
     }
 
-    /// An unannotated `let mut`'s initializer type: a variant widens to
-    /// its enum, with the conversion recorded on `init` (T04).
-    fn widen_mut_initializer(&mut self, init: ExprId, ty: Ty) -> Ty {
-        match self.resolve_shallow(&ty) {
-            Ty::Variant(variant) => {
-                self.result.widened.insert(init, variant.clone());
-                variant.enum_ty()
-            }
-            _ => ty,
-        }
+    /// A binding's initializer `init` widened to its enum, with the
+    /// conversion recorded on `init` (T04).
+    fn widen_initializer(&mut self, init: ExprId, variant: VariantTy) -> Ty {
+        let ty = variant.enum_ty();
+        self.result.widened.insert(init, variant);
+        ty
     }
 
     fn finish(mut self) -> InferenceResult {
@@ -4343,8 +4384,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 // already known here; a join-typed initializer
                                 // resolves later, driven by the axioms its
                                 // uses provide.
-                                if !has_annotation && self.body.bindings[binding].mutable {
-                                    ty = self.widen_mut_initializer(*init, ty);
+                                if let Some(variant) = self.widening_at_binding(binding, &ty) {
+                                    ty = self.widen_initializer(*init, variant);
                                 }
                                 self.result.type_of_binding.insert(binding, ty.clone());
                                 self.result.type_of_pat.insert(*pat, ty);
@@ -4492,7 +4533,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 let binding = *binding;
                                 let fresh = self.fresh_var();
                                 let ty = self.infer_expr_with(*value, &fresh, cause);
-                                let ty = self.widen_mut_initializer(*value, ty);
+                                let ty = match self.resolve_shallow(&ty) {
+                                    Ty::Variant(variant) => self.widen_initializer(*value, variant),
+                                    _ => ty,
+                                };
                                 match self.resolve_shallow(&ty) {
                                     Ty::Never => {}
                                     // Skip the check and leave `x` untyped, so
@@ -9443,15 +9487,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
                 let ty = match scrut {
                     Scrutinee::Enum(named) => Ty::Named(named.clone()),
-                    // `mut` widening (G27): an owned `mut` binder takes the
-                    // enum so it can be reassigned across variants.
-                    Scrutinee::Variant(variant)
-                        if lens.is_none() && self.body.bindings[binding].mutable =>
-                    {
-                        self.result
-                            .widened_bindings
-                            .insert(binding, variant.clone());
-                        variant.enum_ty()
+                    // An owned binder may widen to the enum (G27).
+                    Scrutinee::Variant(variant) if lens.is_none() => {
+                        self.widen_binder(binding, Ty::Variant(variant.clone()))
                     }
                     Scrutinee::Variant(variant) => Ty::Variant(variant.clone()),
                     Scrutinee::Other(ty) | Scrutinee::Unknown(ty) => ty.clone(),
@@ -9598,7 +9636,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             );
                             lens.wrap(region, ty)
                         }
-                        _ => self.widen_mut_binder(binding, ty),
+                        _ => self.widen_binder(binding, ty),
                     };
                     self.result.type_of_binding.insert(binding, ty);
                 }
@@ -9811,28 +9849,36 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         match self.body.pats[pat] {
             PatData::Bind(binding) => {
                 self.result.type_of_pat.insert(pat, ty.clone());
-                let ty = self.widen_mut_binder(binding, ty.clone());
+                let ty = self.widen_binder(binding, ty.clone());
                 self.result.type_of_binding.insert(binding, ty);
             }
             _ => self.check_pat(pat, ty, anchor),
         }
     }
 
-    /// The type an unannotated binder inside a pattern takes: a `mut` one
-    /// of a variant-typed value widens to the enum (G27), recorded for MIR;
-    /// any other keeps `ty`.
-    fn widen_mut_binder(&mut self, binding: BindingId, ty: Ty) -> Ty {
-        if !self.body.bindings[binding].mutable {
-            return ty;
-        }
-        match self.resolve_shallow(&ty) {
-            Ty::Variant(variant) => {
-                self.result
-                    .widened_bindings
-                    .insert(binding, variant.clone());
-                variant.enum_ty()
+    /// The variant a binder receiving `ty` widens to its enum, if any: an
+    /// unannotated `mut` binder always (T04, G27), a plain one on demand.
+    fn widening_at_binding(&mut self, binding: BindingId, ty: &Ty) -> Option<VariantTy> {
+        let Ty::Variant(variant) = self.resolve_shallow(ty) else {
+            return None;
+        };
+        let data = &self.body.bindings[binding];
+        let widens =
+            unannotated_name(data) && (data.mutable || self.widen_on_demand.contains(&binding));
+        widens.then_some(variant)
+    }
+
+    /// The type a binder takes for a value of `ty`: the enum when
+    /// [`Self::widening_at_binding`] widens it, recorded for MIR; `ty`
+    /// otherwise.
+    fn widen_binder(&mut self, binding: BindingId, ty: Ty) -> Ty {
+        match self.widening_at_binding(binding, &ty) {
+            Some(variant) => {
+                let ty = variant.enum_ty();
+                self.result.widened_bindings.insert(binding, variant);
+                ty
             }
-            _ => ty,
+            None => ty,
         }
     }
 
@@ -9925,7 +9971,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     for f in &fields {
                         match rec.field_ty(&f.field) {
                             Some(field_ty) => {
-                                let ty = self.widen_mut_binder(f.binding, field_ty.clone());
+                                let ty = self.widen_binder(f.binding, field_ty.clone());
                                 self.result.type_of_binding.insert(f.binding, ty);
                             }
                             None => {
@@ -10522,6 +10568,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         ) {
             return resolved_expected;
         }
+        self.note_demanded_widening(expr, &resolved_actual, &resolved_expected);
         let mut reasons: Vec<Cause> = cause.into_iter().collect();
         // When a turbofish pinned the expected side, say so: direct checks
         // don't otherwise consult the cause store (only the join solver
@@ -10558,6 +10605,42 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         poison_unresolved_number(self.table, &actual);
         poison_unresolved_number(self.table, expected);
         expected.clone()
+    }
+
+    /// Records a plain variant-typed binding borrowed where its enum's
+    /// borrow is expected (`o.&.is_some()`). The mismatch stands for this
+    /// pass; the rerun widens the binding at binding time. A binding no
+    /// site widens (a parameter) costs one more pass on a broken program.
+    fn note_demanded_widening(&mut self, expr: ExprId, actual: &Ty, expected: &Ty) {
+        let (
+            Ty::Borrow {
+                referent: actual, ..
+            },
+            Ty::Borrow {
+                referent: expected, ..
+            },
+        ) = (actual, expected)
+        else {
+            return;
+        };
+        let (Ty::Variant(variant), Ty::Named(named)) =
+            (self.resolve_shallow(actual), self.resolve_shallow(expected))
+        else {
+            return;
+        };
+        if variant.decl != named.decl {
+            return;
+        }
+        let ExprData::Borrow { place, .. } = self.body.exprs[peel_blocks(self.body, expr)] else {
+            return;
+        };
+        let Some(Resolution::Local(binding)) = self.resolutions.get(place) else {
+            return;
+        };
+        let data = &self.body.bindings[*binding];
+        if unannotated_name(data) && !data.mutable {
+            self.demanded_widenings.insert(*binding);
+        }
     }
 
     /// Adoption — see `Constraints::adopt`. Every caller of this in the

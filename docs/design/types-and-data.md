@@ -20,6 +20,9 @@
   variant; an unannotated `let mut` widens to the enum at binding time, the one place
   mutability changes a type rather than only permissions. An unannotated deferred
   `let mut x;` widens at its first assignment instead, which plays the initializer's part.
+  A plain unannotated binding widens on demand: when the body borrows it where its enum's
+  borrow is needed (`o.&.is_some()`), it widens at binding time like `let mut`, because a
+  borrow cannot tag its referent in place. The binding is then the enum at every use.
   Trait dispatch adds a second widening site: every RECEIVER-LIKE `Self` position — a dot-call's receiver, and each
   argument at a literal-`Self` position of a qualified short-form call — is inferred freely
   first, widens to its enum if it came back a variant, and only THEN is checked against the

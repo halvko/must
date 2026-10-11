@@ -259,24 +259,30 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
                 lower_type_ref_in(db, file, type_ref, &mut table, &ParamScope::default())
             })
             .unwrap_or_else(|| Ty::Infer(table.new_key(TyVarValue::Unknown)));
-        let mut ctx = InferCtx::new(
-            db,
-            file,
-            body,
-            crate::resolutions(db, item),
-            &mut table,
-            &in_group,
-        );
-        let root_ty = ctx.infer_expr(root, &expected);
-        let unified = ctx.adopt(&in_group[loc], &root_ty);
-        // Solve this member's deferred joins *before* the next member runs:
-        // a member's signature is decided by its own body (its axioms and
-        // conclusions); later members may only fill variables the body left
-        // genuinely free, never override its conclusions. Without this, a
-        // use like `print(g(..))` in a sibling would set an unannotated
-        // `g`'s return type to `str` while its branches say `usize` — and
-        // the mismatch would be visible from no single item.
-        ctx.solve();
+        let unified =
+            crate::infer::with_widening_on_demand(&mut table, |table, widen_on_demand| {
+                let mut ctx = InferCtx::new(
+                    db,
+                    file,
+                    body,
+                    crate::resolutions(db, item),
+                    table,
+                    &in_group,
+                );
+                ctx.widen_on_demand = widen_on_demand.clone();
+                let root_ty = ctx.infer_expr(root, &expected);
+                let unified = ctx.adopt(&in_group[loc], &root_ty);
+                // Solve this member's deferred joins *before* the next member
+                // runs: a member's signature is decided by its own body (its
+                // axioms and conclusions); later members may only fill
+                // variables the body left genuinely free, never override its
+                // conclusions. Without this, a use like `print(g(..))` in a
+                // sibling would set an unannotated `g`'s return type to `str`
+                // while its branches say `usize` — and the mismatch would be
+                // visible from no single item.
+                ctx.solve();
+                (unified, std::mem::take(&mut ctx.demanded_widenings))
+            });
         if !unified {
             // The body contradicts what the group already committed this
             // member to (called as a function in one body, bound to a plain
