@@ -17660,3 +17660,26 @@ fn files_outside_a_library_do_not_see_each_other() {
         .collect();
     assert_eq!(messages, ["unresolved name `g`"]);
 }
+
+/// An error outside every item traps only its own library: a file in no
+/// library is one by itself.
+#[test]
+fn an_error_outside_every_item_does_not_trap_another_library() {
+    let db = RootDatabase::default();
+    let _a = SourceFile::new(
+        &db,
+        "a.must".to_owned(),
+        r#"
+static one = 1;
+\
+"#
+        .to_owned(),
+    );
+    let b = SourceFile::new(
+        &db,
+        "b.must".to_owned(),
+        "static f = fn() -> usize { 2 };".to_owned(),
+    );
+    let item = crate::file_item_ids(&db, b)[0];
+    assert_eq!(crate::trap_sites::range_traps(&db, item), &[]);
+}

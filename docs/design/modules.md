@@ -26,6 +26,14 @@
   and trait impls and coherence are library-wide, so a dot-call needs no import of the trait
   that answers it. A trait is imported only to name it, as a bound or an impl head, or to tell
   two traits apart. Items exported across the library boundary need written signatures.
+- **M06** A broken `use` (a missing module or name, a name declared twice there, a syntax error)
+  stops the program only where its file names what it imports: the name traps with the `use`'s
+  error. Code that never names it runs. A name the file declares or imports more than once traps the
+  same way, where the file names it, never in another file that imports one of its items. An
+  ambiguous name in a type, bound or impl head is also an error at the spelling, as is any name
+  that names nothing there. An error outside
+  every item traps every item of its file, and another file's code where it names one of that file's
+  items.
 - **M03** The compiler-provided declarations (T23) live in one prelude file per database, so
   every module names the same `ReadLineResult`.
 - **M04** References are indexed eagerly: as files are analysed, each records what it refers

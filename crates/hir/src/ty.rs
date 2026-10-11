@@ -1070,7 +1070,7 @@ fn lower_type_path(db: &dyn Db, file: SourceFile, name: &str) -> Ty {
                 Ty::Error
             }
         }
-        // The duplicate definitions carry the diagnostics.
+        // `type_position_error` reports it at the spelling.
         Some(Resolution::Ambiguous(_)) => Ty::Error,
         // A value item (invisible here) or nothing: only a builtin type
         // name can save it.
