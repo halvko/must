@@ -1848,3 +1848,31 @@ static array = fn() -> usize {
         check(PROGRAM, entry);
     }
 }
+
+#[test]
+fn nested_patterns_dispatch_at_every_depth() {
+    check(
+        r#"
+type S = enum { A(usize), B(usize, usize) };
+type T = enum { Wrap(S), Arr([usize; 2]), Ch(char), Nil };
+static owned = fn (t: T) -> usize {
+    match t {
+        ::Wrap(::A(0)) => 100,
+        ::Wrap(::A(n)) => n,
+        ::Wrap(::B(x, y)) => x + y,
+        ::Arr([a, 0]) => a,
+        ::Arr([_, b]) => b,
+        ::Ch('x') => 10,
+        ::Ch(_) => 11,
+        ::Nil => 0,
+    }
+};
+static main = fn () -> usize {
+    owned(T::Wrap(S::A(0))) + owned(T::Wrap(S::A(7))) + owned(T::Wrap(S::B(1, 2)))
+        + owned(T::Arr([9, 0])) + owned(T::Arr([9, 1])) + owned(T::Ch('x'))
+        + owned(T::Ch('y')) + owned(T::Nil)
+}
+"#,
+        "main()",
+    );
+}

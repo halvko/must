@@ -68,8 +68,8 @@
 //!   itself as a value;
 //! - a `type X = …` RHS: `struct { $1 }` / `enum { $1 }`;
 //! - a payload-carrying variant pattern in a match arm: `::Circle($1)` /
-//!   `Pair($1, $2)`, one tab stop per payload, because `check_match_pat`
-//!   counts bindings against payloads;
+//!   `Pair($1, $2)`, one tab stop per payload, because inference counts
+//!   sub-patterns against payloads;
 //! - a missing record-literal field: `x = $1`;
 //! - the block-taking keywords: `loop {$0}`, and `if $0` / `match $0`,
 //!   which write no braces;
@@ -1892,8 +1892,8 @@ fn match_arm_items(
             // A payload-carrying variant inserts a snippet with a
             // tab-stop per payload element (`::Circle($1)` /
             // `Pair($1, $2)`, matching the context's own spelling) — one
-            // stop each, not one for the lot, because `check_match_pat`
-            // counts a pattern's bindings against the variant's payloads
+            // stop each, not one for the lot, because inference counts
+            // a pattern's sub-patterns against the variant's payloads
             // and hands a mismatch the `PatternArity` error. A
             // snippet-incapable client falls back to the bare insertion
             // (no parens — there's no sound name to invent).

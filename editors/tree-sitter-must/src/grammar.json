@@ -2387,7 +2387,7 @@
             "name": "pattern",
             "content": {
               "type": "SYMBOL",
-              "name": "_binding_pattern"
+              "name": "_pattern"
             }
           },
           {
@@ -2521,7 +2521,7 @@
         ]
       }
     },
-    "_binding_pattern": {
+    "_pattern": {
       "type": "CHOICE",
       "members": [
         {
@@ -2559,12 +2559,12 @@
         }
       ]
     },
-    "_nested_binding_pattern": {
+    "_nested_pattern": {
       "type": "CHOICE",
       "members": [
         {
           "type": "SYMBOL",
-          "name": "_binding_pattern"
+          "name": "_pattern"
         },
         {
           "type": "ALIAS",
@@ -2609,7 +2609,7 @@
               "members": [
                 {
                   "type": "SYMBOL",
-                  "name": "_nested_binding_pattern"
+                  "name": "_nested_pattern"
                 },
                 {
                   "type": "REPEAT",
@@ -2622,7 +2622,7 @@
                       },
                       {
                         "type": "SYMBOL",
-                        "name": "_nested_binding_pattern"
+                        "name": "_nested_pattern"
                       }
                     ]
                   }
@@ -2807,7 +2807,7 @@
           },
           {
             "type": "SYMBOL",
-            "name": "_nested_binding_pattern"
+            "name": "_nested_pattern"
           },
           {
             "type": "STRING",
@@ -3192,32 +3192,6 @@
       "type": "STRING",
       "value": ".."
     },
-    "_match_pattern": {
-      "type": "CHOICE",
-      "members": [
-        {
-          "type": "SYMBOL",
-          "name": "literal_pat"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "wildcard_pat"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "variant_pat"
-        },
-        {
-          "type": "ALIAS",
-          "content": {
-            "type": "SYMBOL",
-            "name": "_match_bind_pat"
-          },
-          "named": true,
-          "value": "bind_pat"
-        }
-      ]
-    },
     "literal_pat": {
       "type": "CHOICE",
       "members": [
@@ -3243,62 +3217,6 @@
     "wildcard_pat": {
       "type": "STRING",
       "value": "_"
-    },
-    "_match_bind_pat": {
-      "type": "CHOICE",
-      "members": [
-        {
-          "type": "SYMBOL",
-          "name": "identifier"
-        },
-        {
-          "type": "SEQ",
-          "members": [
-            {
-              "type": "STRING",
-              "value": "mut"
-            },
-            {
-              "type": "SYMBOL",
-              "name": "_name"
-            }
-          ]
-        }
-      ]
-    },
-    "_payload_bind_pat": {
-      "type": "SEQ",
-      "members": [
-        {
-          "type": "CHOICE",
-          "members": [
-            {
-              "type": "STRING",
-              "value": "mut"
-            },
-            {
-              "type": "BLANK"
-            }
-          ]
-        },
-        {
-          "type": "SYMBOL",
-          "name": "_name"
-        }
-      ]
-    },
-    "variant_pat": {
-      "type": "CHOICE",
-      "members": [
-        {
-          "type": "SYMBOL",
-          "name": "_qualified_variant_pat"
-        },
-        {
-          "type": "SYMBOL",
-          "name": "_retired_unqualified_variant_pat"
-        }
-      ]
     },
     "_qualified_variant_pat": {
       "type": "PREC_RIGHT",
@@ -3339,7 +3257,7 @@
             "members": [
               {
                 "type": "SYMBOL",
-                "name": "_pattern_binding_list"
+                "name": "_variant_payload"
               },
               {
                 "type": "BLANK"
@@ -3349,7 +3267,7 @@
         ]
       }
     },
-    "_pattern_binding_list": {
+    "_variant_payload": {
       "type": "SEQ",
       "members": [
         {
@@ -3363,13 +3281,8 @@
               "type": "SEQ",
               "members": [
                 {
-                  "type": "ALIAS",
-                  "content": {
-                    "type": "SYMBOL",
-                    "name": "_payload_bind_pat"
-                  },
-                  "named": true,
-                  "value": "bind_pat"
+                  "type": "SYMBOL",
+                  "name": "_nested_pattern"
                 },
                 {
                   "type": "REPEAT",
@@ -3381,13 +3294,8 @@
                         "value": ","
                       },
                       {
-                        "type": "ALIAS",
-                        "content": {
-                          "type": "SYMBOL",
-                          "name": "_payload_bind_pat"
-                        },
-                        "named": true,
-                        "value": "bind_pat"
+                        "type": "SYMBOL",
+                        "name": "_nested_pattern"
                       }
                     ]
                   }
@@ -4337,7 +4245,7 @@
             "name": "pattern",
             "content": {
               "type": "SYMBOL",
-              "name": "_match_pattern"
+              "name": "_nested_pattern"
             }
           },
           {
@@ -5020,23 +4928,6 @@
           }
         ]
       }
-    },
-    "_retired_unqualified_variant_pat": {
-      "type": "SEQ",
-      "members": [
-        {
-          "type": "FIELD",
-          "name": "variant",
-          "content": {
-            "type": "SYMBOL",
-            "name": "identifier"
-          }
-        },
-        {
-          "type": "SYMBOL",
-          "name": "_pattern_binding_list"
-        }
-      ]
     },
     "identifier": {
       "type": "PATTERN",

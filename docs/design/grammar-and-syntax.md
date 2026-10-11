@@ -127,14 +127,15 @@
   the same. `( )` with only trivia inside is the unit value, never an empty group; the unit
   value otherwise comes from an empty block, a bare `break` or `return`, and an `if` with no
   `else`. If tuples land, `()` is the empty tuple. **G07**
-- **G29** A `let` or parameter pattern is a one-arm `match` that must be exhaustive. It takes
-  `mut? name`, `_`, records, newtypes, arrays (`[a, b]`, exactly the array's length) and the
-  match-arm variant and literal patterns, nested in arrays and newtypes. A variant pattern is
-  checked exactly as a match arm is, and passes only when it covers every value: the
-  value is that variant, or its enum has one variant. A pattern that can fail to match is an
-  error on the pattern, which says to use `match`. Like any broken pattern it traps with the
-  same message before reading the value: before its `let` runs, or on entry to its `fn`.
-  Through a borrow the payloads bind as borrows, as in a match arm (M13).
+- **G29** One pattern grammar serves match arms, `let`s and parameters, nested to any depth:
+  `mut? name`, `_`, records, newtypes, arrays (`[a, b]`, exactly the array's length),
+  variant patterns and literals. A `let` or parameter pattern is a one-arm `match` that must
+  be exhaustive; one that can fail to match is an error on the pattern naming what it misses
+  and saying to use `match`. Like any broken pattern it traps with the same message before
+  reading the value: before its `let` runs, or on entry to its `fn`. Through a borrow every
+  binder at every depth binds a borrow of its part, as in a match arm (M13).
+  Record fields are the one slot that only binds (`struct { a, b as c }`); a sub-pattern
+  in a field (`struct { a = 0 }`) is not accepted.
 - **G21** `only` is the capability ceiling clause (T20). One production, one home:
 
   ```

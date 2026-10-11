@@ -9,13 +9,17 @@ use hir::body::{BinOp, Body, ExprData, LiteralData, MatchArm, PatData, Stmt};
 use hir::infer::{InferenceDiagnostic, InferenceResult};
 use hir::{BindingId, ExprId, ItemId, ItemLoc, PatId, Resolution, Ty};
 use la_arena::{Arena, ArenaMap};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use crate::{
     AggregateKind, BlockData, BlockId, BodyId, Const, LocalData, LocalId, MirBody, MirDiagnostic,
     MirLowered, Operand, Place, Scope, Statement, StatementKind, Terminator, TerminatorKind,
     ValueExpr,
 };
+
+/// The backstop trap of a `match` with an arm refused on a broken type:
+/// the type's own diagnostic sits elsewhere.
+const REFUSED_ARM: &str = "this `match` cannot run: one of its patterns has a broken type";
 
 pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
     let body = hir::body::body(db, item);
@@ -46,6 +50,7 @@ pub(crate) fn lower_item(db: &dyn Db, item: ItemId<'_>) -> MirLowered {
         nonexhaustive_traps: FxHashMap::default(),
         entry_traps: FxHashMap::default(),
         stmt_traps: FxHashMap::default(),
+        arm_traps: FxHashMap::default(),
         initializer_context: true,
         dict_locals: Vec::new(),
     };
@@ -120,6 +125,9 @@ struct LowerCtx<'db> {
     /// Statements that must not start, keyed by (block, statement index);
     /// the index one past the last statement is the block's tail.
     stmt_traps: FxHashMap<(ExprId, usize), Vec<String>>,
+    /// Messages to trap with on taking a match arm, before it binds; keyed
+    /// by the arm's pattern.
+    arm_traps: FxHashMap<PatId, Vec<String>>,
     /// True while lowering the item initializer's own const context: the
     /// root body outside any `fn` literal and outside any `const` block.
     /// That is the one const context with a runtime escape (the runner's
@@ -230,8 +238,7 @@ impl LowerCtx<'_> {
                 }
                 // Deferred like any other error, but only on the executions
                 // that reach the uncovered case: the otherwise arm traps.
-                InferenceDiagnostic::NonExhaustiveMatch { expr, .. }
-                | InferenceDiagnostic::MatchWithoutCatchAll { expr, .. } => {
+                InferenceDiagnostic::NonExhaustiveMatch { expr, .. } => {
                     self.nonexhaustive_traps.insert(*expr, diag.message());
                 }
                 // Warnings: an unreachable arm is dead (lowers as an
@@ -471,20 +478,15 @@ impl LowerCtx<'_> {
                 push_trap(&mut self.const_call_traps, call, diag.message());
             }
         }
-        // A broken match-arm pattern means the match as a whole can't be
-        // judged: the arms lower (the CFG keeps everything), then the
-        // match's value is refused. Any other pattern is a `let`'s or a
-        // parameter's, and its destructure must not run.
+        // A broken pattern in a match arm: the arm still lowers, nothing
+        // dispatches to it, and the match's value is refused. Any other
+        // pattern is a `let`'s or a parameter's: its destructure must not
+        // run.
+        let mut arm_of_pat = None; // built on the first error that needs it
         if !pat_errors.is_empty() {
-            let arm_pats: FxHashSet<PatId> = (self.body.exprs.iter())
-                .filter_map(|(_, data)| match data {
-                    ExprData::Match { arms, .. } => Some(arms.iter().map(|arm| arm.pat)),
-                    _ => None,
-                })
-                .flatten()
-                .collect();
+            let arm_of_pat = arm_of_pat.get_or_insert_with(|| arm_owners(self.body));
             for (pat, match_expr, message) in pat_errors {
-                if arm_pats.contains(&pat) {
+                if arm_of_pat.contains_key(&pat) {
                     push_trap(&mut self.value_traps, match_expr, message);
                 } else {
                     pat_traps.push((pat, message));
@@ -525,14 +527,19 @@ impl LowerCtx<'_> {
             }
         }
         if !pat_traps.is_empty() {
-            // A parameter pattern's error traps on entry to its `fn`, before
-            // the destructure; a `let` pattern's traps at its site.
+            // Where a pattern's error traps: a parameter's on entry to its
+            // `fn`, before the destructure; one nested in a match arm on
+            // taking the arm, before it binds; a `let`'s at its site.
             let fn_of_param = param_pats(self.body);
+            let arm_of_pat = arm_of_pat.get_or_insert_with(|| arm_owners(self.body));
             let mut let_traps = Vec::new();
             for (pat, message) in pat_traps {
-                match fn_of_param.get(&pat) {
-                    Some(&body) => push_trap(&mut self.entry_traps, body, message),
-                    None => let_traps.push((pat, message)),
+                if let Some(&body) = fn_of_param.get(&pat) {
+                    push_trap(&mut self.entry_traps, body, message);
+                } else if let Some(&arm) = arm_of_pat.get(&pat).filter(|&&arm| arm != pat) {
+                    push_trap(&mut self.arm_traps, arm, message);
+                } else {
+                    let_traps.push((pat, message));
                 }
             }
             for (site, message) in hir::trap_sites_for_pats(self.db, self.item, let_traps) {
@@ -1220,12 +1227,10 @@ impl LowerCtx<'_> {
                                 | PatData::Char(_)
                                 | PatData::Int { .. } => {
                                     let local = self.operand_local(b, init_op, init);
-                                    self.bind_binding_pattern(
-                                        b,
-                                        *pat,
-                                        &Operand::Copy(local.into()),
-                                        init,
-                                    );
+                                    let val = PatVal::Owned(Box::new(ValueExpr::Use(
+                                        Operand::Copy(local.into()),
+                                    )));
+                                    self.bind_pat(b, *pat, val, init);
                                 }
                             }
                         }
@@ -1696,11 +1701,10 @@ impl LowerCtx<'_> {
         }
     }
 
-    /// Lower a `match`. An enum-typed scrutinee dispatches through
-    /// [`TerminatorKind::SwitchVariant`]; anything else can only be matched
-    /// by a catch-all arm (or literal tests), which lowers straight-line.
-    /// Unreachable arms lower as blocks no edge targets, so the CFG stays
-    /// total.
+    /// Lower a `match` as a decision tree: each test reads one part of the
+    /// scrutinee and narrows the arms that can match, until one arm matches
+    /// everything left. Every arm lowers, reached or not, and binds from
+    /// the scrutinee in its own block.
     fn lower_match(
         &mut self,
         b: &mut BodyBuilder,
@@ -1709,329 +1713,369 @@ impl LowerCtx<'_> {
         arms: &[MatchArm],
     ) -> Operand {
         let scrut_op = self.lower_expr(b, scrutinee);
-        // Pin the scrutinee in a temp: the switch reads it and every
-        // payload extraction re-reads it. Through a borrow the temp holds
-        // the POINTER, and every read/borrow below goes through its deref.
+        // Pin the scrutinee in a temp: the tests read it and every arm
+        // re-reads it. Through a borrow the temp holds the POINTER, and
+        // every read below goes through its deref.
         let scrut_local = self.operand_local(b, scrut_op, scrutinee);
-        let scrut = Operand::Copy(scrut_local.into());
+        let scrut = PatVal::Owned(Box::new(ValueExpr::Use(Operand::Copy(scrut_local.into()))));
+        let scrut_ty = self.ty(scrutinee);
 
-        // MATCH PROJECTS THROUGH BORROWS: dispatch on the type BEHIND the
-        // borrow, and bind payloads as borrows of its sub-places. The lens
-        // is `None` for an owned scrutinee, and every line below then runs
-        // exactly the code it ran before this existed.
-        //
-        // The condition is the same predicate `infer_match` used —
-        // `hir::dispatches_on`, which a SCALAR referent satisfies by
-        // literal equality just as an enum does by tag — so a `struct.&`
-        // scrutinee still reaches the catch-all-only lowering as the
-        // BORROW it is, and its trap message does not move.
-        let mut lens = None;
-        let mut dispatch_on = self.ty(scrutinee);
-        if let Some((mutable, referent)) = self.borrowed_referent(&dispatch_on) {
-            lens = Some(BorrowedScrutinee {
-                local: scrut_local,
-                mutable,
-                expr: scrutinee,
-            });
-            dispatch_on = referent.clone();
-        }
-
-        match dispatch_on {
-            // The dispatch is keyed on the DECLARATION alone: variant
-            // indices (and so tags) are identical across instantiations of
-            // a generic enum — the args never reach the runtime switch.
-            Ty::Named(named)
-                if hir::enum_variants(self.db, named.decl.to_id(self.db)).is_some() =>
-            {
-                self.lower_match_switch(b, expr, &scrut, named.decl, arms, lens)
-            }
-            scrut_ty => {
-                let fallback = move || {
-                    InferenceDiagnostic::MatchWithoutCatchAll {
-                        expr,
-                        scrutinee: scrut_ty,
-                    }
-                    .message()
-                };
-                // LITERAL arms dispatch by TESTING, not by table lookup:
-                // an arm list over a scalar is not dense at any width, so
-                // a switch would be a table of holes. A chain of `==` tests
-                // reuses the machinery equality and `if` already have — no
-                // new terminator, no new operation for eval or the backend
-                // to learn, and integer patterns landed inside it without
-                // adding one.
-                if arms
-                    .iter()
-                    .any(|arm| matches!(self.arm_kind(arm.pat, None), ArmKind::Literal(_)))
-                {
-                    return self.lower_match_literals(b, expr, &scrut, arms, fallback, lens);
-                }
-                let covering = arms
-                    .iter()
-                    .position(|arm| matches!(self.arm_kind(arm.pat, None), ArmKind::CatchAll));
-                self.lower_match_straight(b, expr, &scrut, arms, covering, fallback, lens)
-            }
-        }
-    }
-
-    /// The tagged dispatch: one switch arm per first-covering variant
-    /// pattern, a catch-all arm as `otherwise` — or, when there is none
-    /// and coverage has holes, a trap carrying the non-exhaustiveness
-    /// diagnostic's exact message. No variant pattern dispatches means no
-    /// switch: the arms go straight to `otherwise` and no tag is read.
-    fn lower_match_switch(
-        &mut self,
-        b: &mut BodyBuilder,
-        expr: ExprId,
-        scrut: &Operand,
-        decl: ItemLoc,
-        arms: &[MatchArm],
-        lens: Option<BorrowedScrutinee>,
-    ) -> Operand {
         let dest = b.temp(self.ty(expr));
         let arm_blocks: Vec<BlockId> = arms.iter().map(|_| b.new_block()).collect();
-        let mut switch_arms: Vec<(u32, BlockId)> = Vec::new();
-        let mut otherwise = None;
-        for (arm, &block) in arms.iter().zip(&arm_blocks) {
-            if otherwise.is_some() {
-                break; // everything after a catch-all is dead
-            }
-            match self.arm_kind(arm.pat, Some(&decl)) {
-                ArmKind::Variant(index) => {
-                    if !switch_arms.iter().any(|&(i, _)| i == index) {
-                        switch_arms.push((index, block));
-                    }
-                }
-                ArmKind::CatchAll => otherwise = Some(block),
-                // A literal can never match an enum-typed value; inference
-                // already refused it.
-                ArmKind::Literal(_) | ArmKind::Dead => {}
-            }
-        }
-        let otherwise_block = otherwise.unwrap_or_else(|| b.new_block());
-        let edge = if otherwise.is_some() {
-            Otherwise::Arm
-        } else {
-            let variants = hir::enum_variants(self.db, decl.to_id(self.db))
-                .as_deref()
-                .unwrap_or_default();
-            // Switch tags are distinct, so a full count means every variant
-            // has an arm and only valid tags exist.
-            if switch_arms.len() == variants.len() {
-                Otherwise::Unreachable
-            } else {
-                Otherwise::Trap(
-                    variants
-                        .iter()
-                        .enumerate()
-                        .filter(|&(i, _)| !switch_arms.iter().any(|&(j, _)| j as usize == i))
-                        .map(|(_, (name, _))| name.clone())
-                        .collect(),
-                )
-            }
+        let rows: Vec<MatchRow> = arms
+            .iter()
+            .enumerate()
+            .filter(|(_, arm)| {
+                self.infer.refused_arms.is_empty() || !self.infer.refused_arms.contains(&arm.pat)
+            })
+            .map(|(arm, a)| MatchRow {
+                pats: vec![Some(a.pat)],
+                arm,
+            })
+            .collect();
+        let refused = rows.len() < arms.len();
+        let cols = vec![MatchCol {
+            val: scrut.clone(),
+            ty: scrut_ty,
+            origin: scrutinee,
+        }];
+        let mut tree = MatchTree {
+            expr,
+            arm_blocks: &arm_blocks,
+            fail: None,
         };
-        // THE TAG TEST. Through a borrow it is a READ THROUGH THE BORROW,
-        // not a read of a detached copy: the discriminant operand names
-        // the pointee place, so the interpreter's aliasing tree sees the
-        // access and a scrutinee that was invalidated (written through
-        // another borrow, or through the local's own name) is caught HERE,
-        // before any arm runs. For a `.&mut` scrutinee it is a shared read
-        // through that node, which freezes every borrow foreign to it —
-        // the same event `s.*` would be, minus the copy-out rule.
-        // The origin moves to the scrutinee only when there IS a read to
-        // blame: an owned switch reads a detached value and keeps the
-        // whole-match origin it always had.
-        //
-        // No arm dispatches (a catch-all first, or nothing but dead arms)
-        // means the tag decides nothing, and then it is not read at all. It
-        // matters most through a borrow, where the read would otherwise
-        // freeze every payload borrow minted under the scrutinee for a
-        // `match` that inspects nothing. An owned scrutinee drops the dead
-        // switch on the same grounds — there it only drops a redundant read
-        // of the pinned temp, which nothing can borrow into.
-        if switch_arms.is_empty() {
-            b.terminate(
-                TerminatorKind::Goto {
-                    target: otherwise_block,
-                },
-                expr,
-            );
-        } else {
-            let (discr, origin) = match &lens {
-                Some(lens) => (
-                    Operand::Copy(Place {
-                        local: lens.local,
-                        projection: vec![crate::ProjElem::Deref],
-                    }),
-                    lens.expr,
-                ),
-                None => (scrut.clone(), expr),
-            };
-            b.terminate(
-                TerminatorKind::SwitchVariant {
-                    discr,
-                    decl: decl.clone(),
-                    arms: switch_arms,
-                    otherwise: otherwise_block,
-                },
-                origin,
-            );
-        }
+        self.lower_match_tree(b, rows, cols, &mut tree);
+        let fail = tree.fail;
         let join = b.new_block();
         for (arm, &block) in arms.iter().zip(&arm_blocks) {
             b.current = block;
-            self.lower_arm(b, arm, scrut, lens, dest, join, expr);
+            self.lower_arm(b, arm, &scrut, dest, join, expr);
         }
-        match edge {
-            Otherwise::Arm => {}
-            Otherwise::Unreachable => {
-                b.current = otherwise_block;
-                b.terminate(TerminatorKind::Unreachable, expr);
-            }
-            Otherwise::Trap(uncovered) => {
-                b.current = otherwise_block;
-                self.trap_nonexhaustive(b, expr, dest, join, || {
-                    InferenceDiagnostic::NonExhaustiveMatch {
-                        expr,
-                        decl: decl.clone(),
-                        uncovered,
-                    }
-                    .message()
-                });
+        if let Some(fail) = fail {
+            b.current = fail;
+            // The tables are empty for correct code: skip the lookups.
+            let message = if self.nonexhaustive_traps.is_empty() {
+                None
+            } else {
+                self.nonexhaustive_traps.get(&expr).cloned()
+            };
+            match message {
+                Some(message) => b.terminate(
+                    TerminatorKind::Trap {
+                        message,
+                        dest,
+                        target: join,
+                    },
+                    expr,
+                ),
+                // A broken-pattern match: the pending value trap (planted
+                // by the `lower_expr` wrapper) is the whole story.
+                None if !self.value_traps.is_empty() && self.value_traps.contains_key(&expr) => {
+                    b.push_assign(dest, ValueExpr::Use(Operand::Const(Const::Unit)), expr);
+                    b.terminate(TerminatorKind::Goto { target: join }, expr);
+                }
+                // An arm refused on a broken type (whose own diagnostic
+                // sits elsewhere) is not dispatched to: a value it would
+                // have matched stops here.
+                None if refused => b.terminate(
+                    TerminatorKind::Trap {
+                        message: REFUSED_ARM.to_owned(),
+                        dest,
+                        target: join,
+                    },
+                    expr,
+                ),
+                // Inference found the arms exhaustive: no value gets here.
+                None => b.terminate(TerminatorKind::Unreachable, expr),
             }
         }
         b.current = join;
         Operand::Copy(dest.into())
     }
 
-    /// The LITERAL dispatch: one equality test per literal arm, in source
-    /// order, each falling through to the next — the shape a hand-written
-    /// `if`/`else if` chain has, and for the same reason (there is nothing
-    /// to index). A catch-all ends the chain; without one the fall-through
-    /// traps with the non-exhaustiveness message the editor already showed.
-    ///
-    /// MATCHING PROJECTS THROUGH BORROWS here too (M13: the scrutinee's
-    /// flavor decides, all the way down). Under a `lens` the equality test
-    /// reads THROUGH the borrow — the operand names the pointee place, the
-    /// same shape `lower_match_switch`'s tag test uses — so a scrutinee
-    /// that was invalidated is caught at the `match`, before any arm runs,
-    /// rather than at whichever arm first looked at it. A catch-all arm's
-    /// binder still binds the borrow itself: it names the very same place,
-    /// so there is nothing to project.
-    fn lower_match_literals(
+    /// Emit the tests that pick an arm for `rows` (patterns over `cols`)
+    /// from the current block on, ending in a jump to an arm or to the
+    /// tree's fail block.
+    fn lower_match_tree(
         &mut self,
         b: &mut BodyBuilder,
-        expr: ExprId,
-        scrut: &Operand,
-        arms: &[MatchArm],
-        fallback: impl FnOnce() -> String,
-        lens: Option<BorrowedScrutinee>,
-    ) -> Operand {
-        let dest = b.temp(self.ty(expr));
-        let join = b.new_block();
-        // The value the tests compare against, and where to blame the read.
-        // The origin moves to the scrutinee only when there IS a read to
-        // blame — an owned match compares a detached copy and keeps the
-        // whole-match origin, exactly as the tag test does.
-        let (discr, origin) = match &lens {
-            Some(lens) => (
-                Operand::Copy(Place {
-                    local: lens.local,
-                    projection: vec![crate::ProjElem::Deref],
-                }),
-                lens.expr,
-            ),
-            None => (scrut.clone(), expr),
+        rows: Vec<MatchRow>,
+        cols: Vec<MatchCol>,
+        tree: &mut MatchTree<'_>,
+    ) {
+        let target = match rows.first() {
+            None => tree.fail(b),
+            Some(_) if let Some(arm) = self.leaf(&rows) => tree.arm_blocks[arm],
+            Some(first) => {
+                let column = first.pats.iter().position(|&pat| self.tests(pat));
+                let column = column.expect("a row that is no leaf tests a column");
+                return self.lower_match_test(b, rows, cols, column, tree);
+            }
         };
-        // Arms the chain never reaches (everything after a catch-all, and
-        // every dead pattern) still lower, as blocks no edge targets — the
-        // CFG stays total, exactly as in the other two lowerings.
-        let mut orphans: Vec<&MatchArm> = Vec::new();
-        let mut arms = arms.iter();
-        let mut covered = false;
-        for arm in arms.by_ref() {
-            match self.arm_kind(arm.pat, None) {
-                ArmKind::Literal(value) => {
+        b.terminate(TerminatorKind::Goto { target }, tree.expr);
+    }
+
+    /// The block that runs the tests for `rows`: the arm itself when its
+    /// first row matches everything left, the fail block when no row is.
+    fn match_target(
+        &mut self,
+        b: &mut BodyBuilder,
+        rows: Vec<MatchRow>,
+        cols: Vec<MatchCol>,
+        tree: &mut MatchTree<'_>,
+    ) -> BlockId {
+        match rows.first() {
+            None => tree.fail(b),
+            Some(_) if let Some(arm) = self.leaf(&rows) => tree.arm_blocks[arm],
+            Some(_) => {
+                let block = b.new_block();
+                let resume = std::mem::replace(&mut b.current, block);
+                self.lower_match_tree(b, rows, cols, tree);
+                b.current = resume;
+                block
+            }
+        }
+    }
+
+    /// The arm of the first row, when that row tests nothing more: every
+    /// value left reaches it.
+    fn leaf(&self, rows: &[MatchRow]) -> Option<usize> {
+        let first = rows.first()?;
+        (!first.pats.iter().any(|&pat| self.tests(pat))).then_some(first.arm)
+    }
+
+    /// Test column `column`, which the first row's pattern looks inside.
+    fn lower_match_test(
+        &mut self,
+        b: &mut BodyBuilder,
+        rows: Vec<MatchRow>,
+        cols: Vec<MatchCol>,
+        column: usize,
+        tree: &mut MatchTree<'_>,
+    ) {
+        let col = cols[column].clone();
+        let (open, shape) = self.open_pat_val(b, col.val, &col.ty, col.origin);
+        match &shape {
+            Ty::Named(named)
+                if hir::enum_variants(self.db, named.decl.to_id(self.db)).is_some() =>
+            {
+                let count = hir::enum_variants(self.db, named.decl.to_id(self.db))
+                    .as_ref()
+                    .map_or(0, Vec::len);
+                let mut heads: Vec<u32> = Vec::new();
+                for row in &rows {
+                    if let Some(pat) = row.pats[column]
+                        && let Some(variant) = self.infer.variant_of_pat.get(pat)
+                        && !heads.contains(&variant.index)
+                    {
+                        heads.push(variant.index);
+                    }
+                }
+                let discr = Self::read_open(&open);
+                let mut switch_arms = Vec::new();
+                for &index in &heads {
+                    let (rows, cols) =
+                        self.specialize(&rows, &cols, column, (&open, &shape), Some(index));
+                    let target = self.match_target(b, rows, cols, tree);
+                    switch_arms.push((index, target));
+                }
+                let (rest, rest_cols) = self.default_rows(&rows, &cols, column);
+                let otherwise = if heads.len() == count && rest.is_empty() {
+                    tree.fail(b)
+                } else {
+                    self.match_target(b, rest, rest_cols, tree)
+                };
+                b.terminate(
+                    TerminatorKind::SwitchVariant {
+                        discr,
+                        decl: named.decl.clone(),
+                        arms: switch_arms,
+                        otherwise,
+                    },
+                    open.origin(tree.expr),
+                );
+            }
+            Ty::Char | Ty::Int(_) => {
+                let mut heads: Vec<Const> = Vec::new();
+                for row in &rows {
+                    if let Some(pat) = row.pats[column]
+                        && self.tests(Some(pat))
+                    {
+                        let value = self.literal_const(pat);
+                        if !heads.contains(&value) {
+                            heads.push(value);
+                        }
+                    }
+                }
+                // Literal parts dispatch by TESTING, not by table lookup:
+                // a scalar's arms are not dense at any width, so a switch
+                // would be a table of holes. One `==` per value, in arm
+                // order, each falling through to the next.
+                let (rest, rest_cols) = self.default_rows(&rows, &cols, column);
+                // A value whose test would land on the same arm as no test
+                // at all (an arm after a `_`) needs none.
+                let otherwise = self.leaf(&rest);
+                let tests: Vec<_> = heads
+                    .into_iter()
+                    .map(|value| {
+                        let spec = self.specialize_literal(&rows, &cols, column, &value);
+                        (value, spec)
+                    })
+                    .filter(|(_, (spec, _))| otherwise.is_none() || self.leaf(spec) != otherwise)
+                    .collect();
+                let discr = Self::read_open(&open);
+                let origin = open.origin(tree.expr);
+                if tests.is_empty() {
+                    return self.lower_match_tree(b, rest, rest_cols, tree);
+                }
+                let count = tests.len();
+                let mut rest = Some((rest, rest_cols));
+                for (i, (value, (spec, spec_cols))) in tests.into_iter().enumerate() {
+                    let then_block = self.match_target(b, spec, spec_cols, tree);
                     let test = b.temp(Ty::Bool);
                     b.push_assign(
                         test,
                         ValueExpr::BinaryOp(BinOp::Eq, discr.clone(), Operand::Const(value)),
                         origin,
                     );
-                    let then_block = b.new_block();
-                    let else_block = b.new_block();
+                    let else_block = if i + 1 == count {
+                        let (rest, rest_cols) = rest.take().expect("one last test");
+                        self.match_target(b, rest, rest_cols, tree)
+                    } else {
+                        b.new_block()
+                    };
                     b.terminate(
                         TerminatorKind::SwitchBool {
                             discr: Operand::Copy(test.into()),
                             then_block,
                             else_block,
                         },
-                        expr,
+                        tree.expr,
                     );
-                    b.current = then_block;
-                    self.lower_arm(b, arm, scrut, lens, dest, join, expr);
                     b.current = else_block;
                 }
-                ArmKind::CatchAll => {
-                    self.lower_arm(b, arm, scrut, lens, dest, join, expr);
-                    covered = true;
-                    break;
-                }
-                // A broken pattern (its diagnostic is already written):
-                // no test, no edge — just a body to keep lowering.
-                ArmKind::Dead => orphans.push(arm),
-                // Variant arms cannot occur: the scrutinee is not an enum
-                // (this lowering is only reached from the `other` arm of
-                // `lower_match`), so `arm_kind` answered `Dead` for one.
-                ArmKind::Variant(_) => orphans.push(arm),
+            }
+            // One shape only: nothing to test, just look inside.
+            _ => {
+                let (rows, cols) = self.specialize(&rows, &cols, column, (&open, &shape), None);
+                self.lower_match_tree(b, rows, cols, tree);
             }
         }
-        if !covered {
-            self.trap_nonexhaustive(b, expr, dest, join, fallback);
-        }
-        orphans.extend(arms);
-        for arm in orphans {
-            b.current = b.new_block();
-            self.lower_arm(b, arm, scrut, lens, dest, join, expr);
-        }
-        b.current = join;
-        Operand::Copy(dest.into())
     }
 
-    /// The no-dispatch lowering: run the first covering arm straight-line
-    /// (the scrutinee just binds), or trap when nothing covers. The
-    /// remaining arms lower as dead blocks.
-    fn lower_match_straight(
-        &mut self,
-        b: &mut BodyBuilder,
-        expr: ExprId,
-        scrut: &Operand,
-        arms: &[MatchArm],
-        covering: Option<usize>,
-        fallback: impl FnOnce() -> String,
-        lens: Option<BorrowedScrutinee>,
-    ) -> Operand {
-        let dest = b.temp(self.ty(expr));
-        let join = b.new_block();
-        match covering {
-            Some(covering) => self.lower_arm(b, &arms[covering], scrut, lens, dest, join, expr),
-            None if self.value_traps.contains_key(&expr) => {
-                // A broken-pattern match: the pending value trap (planted
-                // by the `lower_expr` wrapper) is the whole story.
-                b.push_assign(dest, ValueExpr::Use(Operand::Const(Const::Unit)), expr);
-                b.terminate(TerminatorKind::Goto { target: join }, expr);
-            }
-            None => self.trap_nonexhaustive(b, expr, dest, join, fallback),
+    /// The rows that match a value whose part at `column` has the shape
+    /// `variant` names (`None`: its only shape), that part's sub-patterns
+    /// spliced in its place.
+    fn specialize(
+        &self,
+        rows: &[MatchRow],
+        cols: &[MatchCol],
+        column: usize,
+        (open, shape): (&OpenVal, &Ty),
+        variant: Option<u32>,
+    ) -> (Vec<MatchRow>, Vec<MatchCol>) {
+        let origin = cols[column].origin;
+        let parts = self.pat_parts(open, shape, variant, origin);
+        let arity = parts.len();
+        let rows = rows
+            .iter()
+            .filter_map(|row| {
+                let subs: Vec<Option<PatId>> = match row.pats[column] {
+                    Some(pat) if self.tests(Some(pat)) => {
+                        if let PatData::Variant { .. } = self.body.pats[pat]
+                            && Some(self.infer.variant_of_pat.get(pat)?.index) != variant
+                        {
+                            return None;
+                        }
+                        self.body.children(pat).iter().copied().map(Some).collect()
+                    }
+                    _ => vec![None; arity],
+                };
+                let mut pats = row.pats.clone();
+                pats.splice(column..=column, subs);
+                Some(MatchRow { pats, arm: row.arm })
+            })
+            .collect();
+        let mut cols = cols.to_vec();
+        cols.splice(column..=column, parts);
+        (rows, cols)
+    }
+
+    /// The rows whose pattern at `column` matches anything, the column
+    /// dropped.
+    fn default_rows(
+        &self,
+        rows: &[MatchRow],
+        cols: &[MatchCol],
+        column: usize,
+    ) -> (Vec<MatchRow>, Vec<MatchCol>) {
+        let rows = rows
+            .iter()
+            .filter(|row| !self.tests(row.pats[column]))
+            .map(|row| {
+                let mut pats = row.pats.clone();
+                pats.remove(column);
+                MatchRow { pats, arm: row.arm }
+            })
+            .collect();
+        let mut cols = cols.to_vec();
+        cols.remove(column);
+        (rows, cols)
+    }
+
+    /// The rows that match a scalar part equal to `value`, the part
+    /// dropped.
+    fn specialize_literal(
+        &self,
+        rows: &[MatchRow],
+        cols: &[MatchCol],
+        column: usize,
+        value: &Const,
+    ) -> (Vec<MatchRow>, Vec<MatchCol>) {
+        let rows = rows
+            .iter()
+            .filter(|row| match row.pats[column] {
+                Some(pat) if self.tests(Some(pat)) => self.literal_const(pat) == *value,
+                _ => true,
+            })
+            .map(|row| {
+                let mut pats = row.pats.clone();
+                pats.remove(column);
+                MatchRow { pats, arm: row.arm }
+            })
+            .collect();
+        let mut cols = cols.to_vec();
+        cols.remove(column);
+        (rows, cols)
+    }
+
+    /// Whether `pat` looks inside the value it meets: everything but `_`,
+    /// a binder, and a record pattern (whose fields are all binders).
+    fn tests(&self, pat: Option<PatId>) -> bool {
+        pat.is_some_and(|pat| {
+            !matches!(
+                self.body.pats[pat],
+                PatData::Missing | PatData::Wildcard | PatData::Bind(_) | PatData::Record { .. }
+            )
+        })
+    }
+
+    /// The constant a literal pattern tests for: for an integer, the width
+    /// comes from the value it meets. Inference refuses an arm whose
+    /// literal is no valid constant, so a dispatched arm always has one.
+    fn literal_const(&self, pat: PatId) -> Const {
+        let mut ty = self.infer.type_of_pat.get(pat);
+        while let Some(Ty::Borrow { referent, .. }) = ty {
+            ty = Some(referent);
         }
-        for (index, arm) in arms.iter().enumerate() {
-            if Some(index) == covering {
-                continue;
-            }
-            b.current = b.new_block();
-            self.lower_arm(b, arm, scrut, lens, dest, join, expr);
-        }
-        b.current = join;
-        Operand::Copy(dest.into())
+        let value = match (&self.body.pats[pat], ty) {
+            (PatData::Char(c), Some(Ty::Char)) => Some(Const::Char(*c)),
+            (PatData::Int { value, negative }, Some(&Ty::Int(kind))) => value
+                .and_then(|value| hir::IntValue::from_literal(kind, value, *negative))
+                .map(Const::Int),
+            _ => None,
+        };
+        value.expect("a literal pattern in a dispatched arm has a valid constant")
     }
 
     /// Lower one arm of the `match` at `expr` into the current block: the
@@ -2041,181 +2085,314 @@ impl LowerCtx<'_> {
         &mut self,
         b: &mut BodyBuilder,
         arm: &MatchArm,
-        scrut: &Operand,
-        lens: Option<BorrowedScrutinee>,
+        scrut: &PatVal,
         dest: LocalId,
         join: BlockId,
         expr: ExprId,
     ) {
         b.scopes.push((Scope::Arm, Vec::new()));
-        self.bind_match_pattern(b, arm.pat, scrut, arm.body, lens);
+        if !self.arm_traps.is_empty()
+            && let Some(messages) = self.arm_traps.get(&arm.pat).cloned()
+        {
+            self.trap(b, arm.body, messages);
+        }
+        self.bind_pat(b, arm.pat, scrut.clone(), arm.body);
         let value = self.lower_expr(b, arm.body);
         b.close_scope(arm.body);
         b.push_assign(dest, ValueExpr::Use(value), arm.body);
         b.terminate(TerminatorKind::Goto { target: join }, expr);
     }
 
-    /// Ends the current block in a match's non-exhaustiveness trap. The
-    /// message is normally seeded from the diagnostic; `fallback` renders
-    /// the same text from the same set-cover, so the two cannot drift.
-    fn trap_nonexhaustive(
-        &self,
-        b: &mut BodyBuilder,
-        expr: ExprId,
-        dest: LocalId,
-        join: BlockId,
-        fallback: impl FnOnce() -> String,
-    ) {
-        let message = self
-            .nonexhaustive_traps
-            .get(&expr)
-            .cloned()
-            .unwrap_or_else(fallback);
-        b.terminate(
-            TerminatorKind::Trap {
-                message,
-                dest,
-                target: join,
-            },
-            expr,
-        );
-    }
-
-    /// How an arm participates in dispatch: a literal arm (keyed by the
-    /// value it tests against), a variant arm (keyed by index, only when
-    /// its variant belongs to `scrut_enum`), a catch-all, or dead (broken
-    /// pattern, wrong enum, a literal pattern inference refused or whose
-    /// width never resolved — all already diagnosed).
-    fn arm_kind(&self, pat: PatId, scrut_enum: Option<&ItemLoc>) -> ArmKind {
-        match &self.body.pats[pat] {
-            PatData::Missing => ArmKind::Dead,
-            PatData::Wildcard => ArmKind::CatchAll,
-            // A bare bind always binds the whole scrutinee — never a
-            // variant (see `check_match_pat`), so always a catch-all.
-            PatData::Bind(_) => ArmKind::CatchAll,
-            // Both literal arms ask inference whether it AGREED, exactly
-            // as a variant arm asks `variant_of_pat`: a refused pattern is
-            // a dead arm, never a live test between mismatched types. For
-            // `char` the recorded type IS the whole answer (the token
-            // carries the value); a REFUSED `'a'` against a `usize`
-            // scrutinee therefore lowers no `Eq` at all.
-            PatData::Char(c) => match self.infer.type_of_pat.get(pat) {
-                Some(Ty::Char) => ArmKind::Literal(Const::Char(*c)),
-                _ => ArmKind::Dead,
-            },
-            // An integer literal pattern's WIDTH comes from inference too
-            // (the scrutinee is its defining use), so the same read
-            // answers agreement and builds the constant at once — the read
-            // `ExprData::Literal` does for an expression literal, from the
-            // pattern-side map. An unresolved or out-of-range one already
-            // carries a value trap on the match, so a dead arm here is
-            // never the whole story.
-            PatData::Int { value, negative } => {
-                let iv = value.and_then(|value| match self.infer.type_of_pat.get(pat) {
-                    Some(&Ty::Int(kind)) => hir::IntValue::from_literal(kind, value, *negative),
-                    _ => None,
-                });
-                match iv {
-                    Some(iv) => ArmKind::Literal(Const::Int(iv)),
-                    None => ArmKind::Dead,
-                }
-            }
-            PatData::Variant { .. } => match self.infer.variant_of_pat.get(pat) {
-                Some(vt) if scrut_enum.is_none_or(|d| *d == vt.decl) => ArmKind::Variant(vt.index),
-                _ => ArmKind::Dead,
-            },
-            // `let`/parameter-only shapes; `match_pattern`'s grammar never
-            // produces them. Defensive fallback.
-            PatData::Record { .. } | PatData::Newtype { .. } | PatData::Array { .. } => {
-                ArmKind::Dead
-            }
-        }
-    }
-
-    /// Emit the arm's pattern bindings from the pinned scrutinee operand.
-    /// A variant pattern reads its payloads out of the enum value by
-    /// field index; a bare bind aliases the whole value.
-    ///
-    /// Through a borrow (`lens`), the payloads are not read at all: each
-    /// binder gets a `ValueExpr::Borrow` of the payload's SUB-PLACE, reached
-    /// as `scrutinee.*.<index>`. That is the whole runtime content of
-    /// "match projects through borrows" — the binding aliases the
-    /// scrutinee's storage instead of copying out of a detached value, and
-    /// each one is a real child node in the aliasing tree. A bare bind
-    /// still aliases the whole thing, which through a borrow means copying
-    /// the pointer: it names the same place, so there is nothing to
-    /// project.
-    fn bind_match_pattern(
+    /// `val`, of type `ty`, opened for a pattern that looks inside it:
+    /// through every borrow (M13), to the value behind them. Returns the
+    /// opened value and its type.
+    fn open_pat_val(
         &mut self,
         b: &mut BodyBuilder,
-        pat: PatId,
-        scrut: &Operand,
+        val: PatVal,
+        ty: &Ty,
         origin: ExprId,
-        lens: Option<BorrowedScrutinee>,
-    ) {
-        match &self.body.pats[pat].clone() {
-            // A literal pattern binds nothing: the test IS the whole
-            // pattern (see `lower_match_literals`).
-            PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int { .. } => {}
-            PatData::Bind(binding) => {
-                // A bare bind always binds the whole scrutinee (never
-                // narrowed to a variant), so it just aliases the value.
-                let local = self.alloc_binding_local(b, *binding);
-                b.push_assign(local, ValueExpr::Use(scrut.clone()), origin);
+    ) -> (OpenVal, Ty) {
+        let (mut open, mut shape) = match val {
+            // A part of a borrowed value is typed as a borrow of the part,
+            // but its place holds the part itself.
+            PatVal::Borrowed {
+                place,
+                mutable,
+                origin,
+            } => {
+                let held = match ty {
+                    Ty::Borrow { referent, .. } => referent.as_ref().clone(),
+                    other => other.clone(),
+                };
+                let place = self.short_place(b, place, mutable, &held, origin);
+                (
+                    OpenVal::Borrowed {
+                        place,
+                        mutable,
+                        origin,
+                    },
+                    held,
+                )
             }
-            PatData::Variant { bindings, .. } => {
-                let payloads = self
-                    .infer
-                    .variant_of_pat
-                    .get(pat)
-                    .and_then(|vt| {
-                        hir::enum_variants(self.db, vt.decl.to_id(self.db))
-                            .as_ref()?
-                            .get(vt.index as usize)
-                            .map(|(_, payload)| payload.len())
-                    })
-                    .unwrap_or(0);
-                for (index, &binding) in bindings.iter().enumerate() {
-                    let local = self.alloc_binding_local(b, binding);
-                    if index < payloads {
-                        let value = match &lens {
-                            Some(lens) => ValueExpr::Borrow {
-                                mutable: lens.mutable,
-                                place: Place {
-                                    local: lens.local,
-                                    projection: vec![
-                                        crate::ProjElem::Deref,
-                                        crate::ProjElem::Field(index as u32),
-                                    ],
-                                },
-                            },
-                            None => ValueExpr::Field {
-                                base: scrut.clone(),
-                                index: index as u32,
-                            },
-                        };
-                        b.push_assign(local, value, origin);
-                    } else {
-                        // Arity error (already trapped): a placeholder
-                        // keeps the local initialized and lowering total.
-                        b.push_assign(local, ValueExpr::Use(Operand::Const(Const::Unit)), origin);
-                    }
+            PatVal::Owned(value) => {
+                let op = self.owned_operand(b, *value, ty, origin);
+                (OpenVal::Owned(op), ty.clone())
+            }
+        };
+        while let Ty::Borrow {
+            mutable, referent, ..
+        } = &shape
+        {
+            // A pointer held here: follow it.
+            let op = Self::read_open(&open);
+            let local = match op {
+                Operand::Copy(place) if place.projection.is_empty() => place.local,
+                op => {
+                    let temp = b.temp(shape.erase_regions());
+                    b.push_assign(temp, ValueExpr::Use(op), origin);
+                    temp
                 }
+            };
+            let outer = match &open {
+                OpenVal::Borrowed { mutable, .. } => *mutable,
+                OpenVal::Owned(_) => true,
+            };
+            open = OpenVal::Borrowed {
+                place: Place {
+                    local,
+                    projection: vec![crate::ProjElem::Deref],
+                },
+                mutable: *mutable && outer,
+                origin,
+            };
+            shape = referent.as_ref().clone();
+        }
+        (open, shape)
+    }
+
+    /// An owned value as an operand, read into a temp of type `ty` when it
+    /// is a part of another value.
+    fn owned_operand(
+        &mut self,
+        b: &mut BodyBuilder,
+        value: ValueExpr,
+        ty: &Ty,
+        origin: ExprId,
+    ) -> Operand {
+        match value {
+            ValueExpr::Use(op) => op,
+            value => {
+                let temp = b.temp(ty.erase_regions());
+                b.push_assign(temp, value, origin);
+                Operand::Copy(temp.into())
             }
-            // `let`/parameter-only shapes; `match_pattern`'s grammar never
-            // produces them. Defensive fallback.
-            PatData::Record { .. } | PatData::Newtype { .. } | PatData::Array { .. } => {}
         }
     }
 
-    /// The flavor and referent of a borrowed scrutinee that dispatches
-    /// through its borrow, whose payloads then bind as borrows.
-    fn borrowed_referent<'t>(&self, ty: &'t Ty) -> Option<(bool, &'t Ty)> {
-        match ty {
-            Ty::Borrow {
-                mutable, referent, ..
-            } if hir::dispatches_on(self.db, referent) => Some((*mutable, referent.as_ref())),
+    /// `place`, holding a `held`, rooted at a pointer's deref with no
+    /// projection after it: the backends read through a pointer only so,
+    /// and never project into an enum's payload from a place. A deeper
+    /// place is borrowed into a pointer of its own first.
+    fn short_place(
+        &mut self,
+        b: &mut BodyBuilder,
+        place: Place,
+        mutable: bool,
+        held: &Ty,
+        origin: ExprId,
+    ) -> Place {
+        if place.projection.len() <= 1 {
+            return place;
+        }
+        let pointer = b.temp(Ty::borrow(
+            mutable,
+            hir::Region::Erased,
+            held.erase_regions(),
+        ));
+        b.push_assign(pointer, ValueExpr::Borrow { mutable, place }, origin);
+        Place {
+            local: pointer,
+            projection: vec![crate::ProjElem::Deref],
+        }
+    }
+
+    /// The opened value itself, as an operand for a test. Through a borrow
+    /// it is a READ THROUGH THE BORROW, so the interpreter's aliasing tree
+    /// sees the access and a scrutinee that was invalidated is caught at
+    /// the test, before any arm runs.
+    fn read_open(open: &OpenVal) -> Operand {
+        match open {
+            OpenVal::Owned(op) => op.clone(),
+            OpenVal::Borrowed { place, .. } => Operand::Copy(place.clone()),
+        }
+    }
+
+    /// The parts of an opened value of type `shape` that its pattern's
+    /// sub-patterns meet: the payloads of `variant`, an array's elements,
+    /// a newtype's underlying value.
+    fn pat_parts(
+        &self,
+        open: &OpenVal,
+        shape: &Ty,
+        variant: Option<u32>,
+        origin: ExprId,
+    ) -> Vec<MatchCol> {
+        enum Step {
+            Field(u32),
+            Index(usize),
+            Same,
+        }
+        let parts: Vec<(Step, Ty)> = match (shape, variant) {
+            (Ty::Named(hir::NamedTy { decl, args, .. }), Some(index)) => {
+                hir::variant_payload_tys(self.db, decl, args, index)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, ty)| (Step::Field(i as u32), ty))
+                    .collect()
+            }
+            (Ty::Record(rec), None) => (rec.fields.iter().enumerate())
+                .map(|(i, (_, ty))| (Step::Field(i as u32), ty.clone()))
+                .collect(),
+            (
+                Ty::Array {
+                    elem,
+                    len: hir::ConstArgValue::Int(n),
+                },
+                None,
+            ) => (0..*n as usize)
+                .map(|i| (Step::Index(i), elem.as_ref().clone()))
+                .collect(),
+            (Ty::Named(named), None) => {
+                let underlying = hir::type_underlying_for(self.db, named).unwrap_or(Ty::Error);
+                vec![(Step::Same, underlying)]
+            }
+            _ => Vec::new(),
+        };
+        parts
+            .into_iter()
+            .map(|(step, ty)| match open {
+                OpenVal::Owned(op) => {
+                    let value = match step {
+                        Step::Field(index) => ValueExpr::Field {
+                            base: op.clone(),
+                            index,
+                        },
+                        Step::Index(index) => ValueExpr::Index {
+                            base: op.clone(),
+                            index: Operand::Const(usize_const(index)),
+                        },
+                        Step::Same => ValueExpr::Use(op.clone()),
+                    };
+                    MatchCol {
+                        val: PatVal::Owned(Box::new(value)),
+                        ty,
+                        origin,
+                    }
+                }
+                OpenVal::Borrowed {
+                    place,
+                    mutable,
+                    origin,
+                } => {
+                    let mut place = place.clone();
+                    match step {
+                        Step::Field(index) => place.projection.push(crate::ProjElem::Field(index)),
+                        Step::Index(index) => place
+                            .projection
+                            .push(crate::ProjElem::Index(Operand::Const(usize_const(index)))),
+                        Step::Same => {}
+                    }
+                    MatchCol {
+                        val: PatVal::Borrowed {
+                            place,
+                            mutable: *mutable,
+                            origin: *origin,
+                        },
+                        ty: Ty::borrow(*mutable, hir::Region::Erased, ty),
+                        origin: *origin,
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// Bind every name `pat` introduces from `val`, the value it meets. A
+    /// binder takes an owned value as is, and a borrowed one as a borrow
+    /// of its place. Nothing is tested: a `match` tested before it got here,
+    /// and a `let`/parameter pattern that could fail to match traps before
+    /// its `let` or `fn` starts.
+    fn bind_pat(&mut self, b: &mut BodyBuilder, pat: PatId, val: PatVal, origin: ExprId) {
+        let data = self.body.pats[pat].clone();
+        if let PatData::Bind(binding) = data {
+            let local = self.alloc_binding_local(b, binding);
+            let value = Self::bind_value(val);
+            b.push_assign(local, value, origin);
+            return;
+        }
+        // Nothing to bind, nothing to read.
+        if self.body.pat_bindings(pat).is_empty() {
+            return;
+        }
+        let ty = (self.infer.type_of_pat.get(pat).cloned()).unwrap_or(Ty::Error);
+        let (open, shape) = self.open_pat_val(b, val, &ty, origin);
+        if let PatData::Record { fields, .. } = &data {
+            let rec = match &shape {
+                Ty::Named(named) => hir::type_underlying_for(self.db, named),
+                shape => Some(shape.clone()),
+            };
+            let (record, parts) = match &rec {
+                Some(rec @ Ty::Record(record)) => {
+                    (Some(record), self.pat_parts(&open, rec, None, origin))
+                }
+                _ => (None, Vec::new()),
+            };
+            for f in fields {
+                let local = self.alloc_binding_local(b, f.binding);
+                let index = record.and_then(|r| r.fields.iter().position(|(n, _)| *n == f.field));
+                let value = match index {
+                    Some(index) => Self::bind_value(parts[index].val.clone()),
+                    // Unknown field (already diagnosed): a placeholder
+                    // keeps the local initialized and lowering total.
+                    None => ValueExpr::Use(Operand::Const(Const::Unit)),
+                };
+                b.push_assign(local, value, origin);
+            }
+            return;
+        }
+        let variant = match &data {
+            PatData::Variant { .. } => match self.infer.variant_of_pat.get(pat) {
+                Some(variant) => Some(variant.index),
+                None => return self.bind_placeholders(b, pat, origin),
+            },
             _ => None,
+        };
+        let parts = self.pat_parts(&open, &shape, variant, origin);
+        let subs = self.body.children(pat).to_vec();
+        for (index, &sub) in subs.iter().enumerate() {
+            match parts.get(index) {
+                Some(part) => self.bind_pat(b, sub, part.val.clone(), origin),
+                // A shape error (already trapped): a placeholder keeps each
+                // local initialized and lowering total.
+                None => self.bind_placeholders(b, sub, origin),
+            }
+        }
+    }
+
+    /// Initialize every binder of `pat` with a placeholder: its shape is
+    /// an error already trapped on, and lowering stays total.
+    fn bind_placeholders(&mut self, b: &mut BodyBuilder, pat: PatId, origin: ExprId) {
+        for binding in self.body.pat_bindings(pat) {
+            let local = self.alloc_binding_local(b, binding);
+            b.push_assign(local, ValueExpr::Use(Operand::Const(Const::Unit)), origin);
+        }
+    }
+
+    /// What a binder meeting `val` is assigned.
+    fn bind_value(val: PatVal) -> ValueExpr {
+        match val {
+            PatVal::Owned(value) => *value,
+            PatVal::Borrowed { place, mutable, .. } => ValueExpr::Borrow { mutable, place },
         }
     }
 
@@ -2267,7 +2444,8 @@ impl LowerCtx<'_> {
                     binding: None,
                     addressable: false,
                 });
-                self.bind_binding_pattern(b, pat, &Operand::Copy(local.into()), origin);
+                let val = PatVal::Owned(Box::new(ValueExpr::Use(Operand::Copy(local.into()))));
+                self.bind_pat(b, pat, val, origin);
                 local
             }
             // `_` binds nothing but needs a slot so callers' argument lists
@@ -2285,97 +2463,6 @@ impl LowerCtx<'_> {
                     binding: None,
                     addressable: false,
                 })
-            }
-        }
-    }
-
-    /// Destructure `value` into the bindings of a `let`/parameter pattern,
-    /// handing variant patterns to [`Self::bind_match_pattern`]. A `let`
-    /// pattern never dispatches: one that could fail to match traps before
-    /// its `let` or `fn` starts, so every binding here runs.
-    fn bind_binding_pattern(
-        &mut self,
-        b: &mut BodyBuilder,
-        pat: PatId,
-        value: &Operand,
-        origin: ExprId,
-    ) {
-        match &self.body.pats[pat].clone() {
-            // A literal binds nothing.
-            PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int { .. } => {}
-            PatData::Bind(binding) => {
-                let local = self.alloc_binding_local(b, *binding);
-                b.push_assign(local, ValueExpr::Use(value.clone()), origin);
-            }
-            PatData::Record { fields, .. } => {
-                let rec = match self.infer.type_of_pat.get(pat) {
-                    Some(Ty::Record(rec)) => Some(rec.clone()),
-                    Some(Ty::Named(named)) => match hir::type_underlying_for(self.db, named) {
-                        Some(Ty::Record(rec)) => Some(rec),
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                for f in fields {
-                    let local = self.alloc_binding_local(b, f.binding);
-                    let index = rec
-                        .as_ref()
-                        .and_then(|rec| rec.fields.iter().position(|(n, _)| *n == f.field));
-                    match index {
-                        Some(index) => {
-                            let field = ValueExpr::Field {
-                                base: value.clone(),
-                                index: index as u32,
-                            };
-                            b.push_assign(local, field, origin);
-                        }
-                        // Unknown field (already diagnosed): a placeholder
-                        // keeps the local initialized and lowering total.
-                        None => b.push_assign(
-                            local,
-                            ValueExpr::Use(Operand::Const(Const::Unit)),
-                            origin,
-                        ),
-                    }
-                }
-            }
-            PatData::Newtype { inner, .. } => {
-                self.bind_binding_pattern(b, *inner, value, origin);
-            }
-            // Each element is read out by its constant index into a temp
-            // of its own, which the element's pattern destructures.
-            PatData::Array { elements } => {
-                let elem_ty = match self.infer.type_of_pat.get(pat) {
-                    Some(Ty::Array { elem, .. }) => elem.as_ref().clone(),
-                    _ => Ty::Error,
-                };
-                for (index, &element) in elements.iter().enumerate() {
-                    let index = hir::IntValue::new(hir::IntKind::Usize, index as i128)
-                        .map_or(Const::Unit, Const::Int);
-                    let temp = b.temp(elem_ty.clone());
-                    b.push_assign(
-                        temp,
-                        ValueExpr::Index {
-                            base: value.clone(),
-                            index: Operand::Const(index),
-                        },
-                        origin,
-                    );
-                    self.bind_binding_pattern(b, element, &Operand::Copy(temp.into()), origin);
-                }
-            }
-            // Through a borrow the payloads bind as borrows of the
-            // referent's sub-places.
-            PatData::Variant { .. } => {
-                let borrowed = (self.infer.type_of_pat.get(pat))
-                    .and_then(|ty| self.borrowed_referent(ty))
-                    .map(|(mutable, _)| mutable);
-                let lens = borrowed.map(|mutable| BorrowedScrutinee {
-                    local: self.operand_local(b, value.clone(), origin),
-                    mutable,
-                    expr: origin,
-                });
-                self.bind_match_pattern(b, pat, value, origin, lens);
             }
         }
     }
@@ -3697,47 +3784,79 @@ enum DerefRoot {
     Silent,
 }
 
-/// A `match` whose scrutinee is a BORROW of the matched enum: the local
-/// holding that pointer, and the flavor every payload borrow inherits from
-/// it. `None` everywhere means an owned scrutinee, which lowers exactly as
-/// it always has.
-///
-/// There is no per-binder mode here for the same reason there is none in
-/// the grammar: the scrutinee's flavor decides, and copying a payload out
-/// afterwards is spelled `t.*`.
-#[derive(Clone, Copy)]
-struct BorrowedScrutinee {
-    /// The pinned scrutinee temp — it holds the POINTER, so every access
-    /// below is rooted at `local.*`.
-    local: LocalId,
-    mutable: bool,
-    /// The scrutinee expression, to blame the tag read on — the mirror of
-    /// the field hir's own `MatchLens` carries for the same reason.
+/// A value a pattern meets while a `match`, `let` or parameter lowers.
+#[derive(Clone)]
+enum PatVal {
+    /// What a `ValueExpr` produces: the value itself, or a part read out of
+    /// an owned value.
+    Owned(Box<ValueExpr>),
+    /// Reached through a borrow: the value lives at `place`, rooted at a
+    /// pointer's deref. Typed as a borrow of the value, in the flavor
+    /// `mutable`; reads through it are blamed on `origin`.
+    Borrowed {
+        place: Place,
+        mutable: bool,
+        origin: ExprId,
+    },
+}
+
+/// A [`PatVal`] opened for a pattern that looks inside it.
+enum OpenVal {
+    Owned(Operand),
+    /// At a place no projection follows the deref of.
+    Borrowed {
+        place: Place,
+        mutable: bool,
+        origin: ExprId,
+    },
+}
+
+impl OpenVal {
+    /// The expression a read of this value is blamed on: the scrutinee
+    /// through a borrow, where the read is real; else `owned`.
+    fn origin(&self, owned: ExprId) -> ExprId {
+        match self {
+            OpenVal::Owned(_) => owned,
+            OpenVal::Borrowed { origin, .. } => *origin,
+        }
+    }
+}
+
+/// One arm still in the running in a `match` decision tree: its patterns
+/// left to test, one per column, `None` where a wildcard stands in.
+#[derive(Clone)]
+struct MatchRow {
+    pats: Vec<Option<PatId>>,
+    arm: usize,
+}
+
+/// One part of the scrutinee a decision tree can test.
+#[derive(Clone)]
+struct MatchCol {
+    val: PatVal,
+    /// The type a pattern on this part meets.
+    ty: Ty,
+    /// Where reads of the part are blamed.
+    origin: ExprId,
+}
+
+/// The fixed ends of one `match`'s decision tree.
+struct MatchTree<'a> {
     expr: ExprId,
+    arm_blocks: &'a [BlockId],
+    /// Where a value no arm matches goes, made on first use.
+    fail: Option<BlockId>,
 }
 
-/// Where a variant switch's `otherwise` edge leads.
-enum Otherwise {
-    /// The catch-all arm.
-    Arm,
-    /// Nowhere: every variant has an arm.
-    Unreachable,
-    /// The non-exhaustiveness trap, naming the variants no arm covers.
-    Trap(Vec<String>),
+impl MatchTree<'_> {
+    fn fail(&mut self, b: &mut BodyBuilder) -> BlockId {
+        *self.fail.get_or_insert_with(|| b.new_block())
+    }
 }
 
-/// How one match arm participates in dispatch.
-enum ArmKind {
-    /// Keyed by variant index in the scrutinee's enum.
-    Variant(u32),
-    /// A literal arm: dispatched by an equality TEST against this value,
-    /// not by a table lookup — see [`LowerCtx::lower_match_literals`].
-    Literal(Const),
-    /// A `_` or plain-binding arm: matches anything.
-    CatchAll,
-    /// Never dispatched to (broken pattern, wrong enum — already
-    /// diagnosed); lowers as an unreachable block.
-    Dead,
+/// `index` as a `usize` constant.
+fn usize_const(index: usize) -> Const {
+    hir::IntValue::new(hir::IntKind::Usize, index as i128).map_or(Const::Unit, Const::Int)
 }
 
 /// One live `loop` during lowering: where `continue` goes (the header),
@@ -3776,25 +3895,43 @@ struct BodyBuilder {
 /// Every parameter pattern of `body`'s `fn` literals, nested ones included,
 /// mapped to the body of the `fn` it belongs to.
 fn param_pats(body: &Body) -> FxHashMap<PatId, ExprId> {
-    let mut out = FxHashMap::default();
-    let mut stack = Vec::new();
-    for (_, data) in body.exprs.iter() {
-        if let ExprData::FnLiteral {
+    let roots = body.exprs.iter().filter_map(|(_, data)| match data {
+        ExprData::FnLiteral {
             params,
             body: fn_body,
             ..
-        } = data
-        {
-            stack.extend(params.iter().map(|param| (param.pat, *fn_body)));
-        }
-    }
-    while let Some((pat, fn_body)) = stack.pop() {
-        out.insert(pat, fn_body);
-        match &body.pats[pat] {
-            PatData::Newtype { inner, .. } => stack.push((*inner, fn_body)),
-            PatData::Array { elements } => stack.extend(elements.iter().map(|&e| (e, fn_body))),
-            _ => {}
-        }
+        } => Some(params.iter().map(|param| (param.pat, *fn_body))),
+        _ => None,
+    });
+    pat_owners(body, roots.flatten())
+}
+
+/// Every pattern in a match arm, the arm's own included, mapped to the
+/// arm's pattern.
+fn arm_owners(body: &Body) -> FxHashMap<PatId, PatId> {
+    pat_owners(body, match_arm_pats(body).map(|arm| (arm, arm)))
+}
+
+/// Every match arm's pattern in `body`.
+fn match_arm_pats(body: &Body) -> impl Iterator<Item = PatId> + '_ {
+    let arms = body.exprs.iter().filter_map(|(_, data)| match data {
+        ExprData::Match { arms, .. } => Some(arms.iter().map(|arm| arm.pat)),
+        _ => None,
+    });
+    arms.flatten()
+}
+
+/// Each root pattern and every pattern nested in it, mapped to the root's
+/// owner.
+fn pat_owners<T: Copy>(
+    body: &Body,
+    roots: impl IntoIterator<Item = (PatId, T)>,
+) -> FxHashMap<PatId, T> {
+    let mut out = FxHashMap::default();
+    let mut stack: Vec<_> = roots.into_iter().collect();
+    while let Some((pat, owner)) = stack.pop() {
+        out.insert(pat, owner);
+        stack.extend(body.children(pat).iter().map(|&sub| (sub, owner)));
     }
     out
 }
