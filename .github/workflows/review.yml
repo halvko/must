@@ -193,7 +193,8 @@ jobs:
           fi
       # Files checked into the PR are not the reviewer's output.
       - run: rm -f review-findings.json review-summary.md
-      - uses: anthropics/claude-code-action@v1
+      - id: claude
+        uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
@@ -250,12 +251,51 @@ jobs:
 
       # The action hides the reviewer's output; its refused tool calls are
       # what to look at when a reviewer writes no summary.
-      - if: always()
+      - id: check
+        if: always() && steps.claude.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
         run: |
           out="$RUNNER_TEMP/claude-execution-output.json"
-          [ -f "$out" ] || exit 0
-          jq -r '.. | .permission_denials? // empty | .[]
+          [ -f "$out" ] && jq -r '.. | .permission_denials? // empty | .[]
             | "refused: \(.tool_name) \(.tool_input | tostring | .[:300])"' "$out" || true
+          problems=$(.github/scripts/review-check.sh)
+          [ -n "$problems" ] || exit 0
+          printf '%s\n' "$problems"
+          delim="PROBLEMS_$(openssl rand -hex 16)"
+          printf 'text<<%s\n%s\n%s\n' "$delim" "$problems" "$delim" >> "$GITHUB_OUTPUT"
+      # A reviewer whose files are missing or would not post gets one more
+      # turn in the same session, told what is wrong.
+      - id: retry
+        if: always() && steps.check.outputs.text != '' && steps.claude.outputs.session_id != ''
+        continue-on-error: true
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            The workflow checked your output files and cannot post them yet:
+
+            ${{ steps.check.outputs.text }}
+
+            Fix this by writing both files again with the Write tool. A finding
+            on a line the diff does not show can move to a line it does show,
+            or go in your summary instead.
+          claude_args: |
+            ${{ steps.brief.outputs.model_arg }}
+            --resume ${{ steps.claude.outputs.session_id }}
+            --allowedTools "Edit(./review-findings.json),Write(./review-findings.json),Edit(./review-summary.md),Write(./review-summary.md),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Bash(git log:*),Bash(git show:*),Bash(git diff:*)"
+      - if: always() && steps.retry.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          out="$RUNNER_TEMP/claude-execution-output.json"
+          [ -f "$out" ] && jq -r '.. | .permission_denials? // empty | .[]
+            | "refused: \(.tool_name) \(.tool_input | tostring | .[:300])"' "$out" || true
+          .github/scripts/review-check.sh
       - uses: actions/upload-artifact@v4
         with:
           name: review-summary-${{ matrix.role }}

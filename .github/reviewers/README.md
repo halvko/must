@@ -2,7 +2,9 @@
 
 Each `*.md` file here (other than this one) is one Claude reviewer. On every
 pull request that is opened, reopened or marked ready for review, the
-`Review` workflow runs one job per file, in parallel. Once all are done, it
+`Review` workflow runs one job per file, in parallel. A reviewer whose
+output is missing or would not post (a finding on a line outside the diff,
+say) is told what is wrong and gets one more turn. Once all are done, it
 posts their findings as one review of inline comments, and keeps one summary
 comment on the PR with a section per reviewer, rewritten in place each round.
 
