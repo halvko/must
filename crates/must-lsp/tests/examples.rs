@@ -978,6 +978,19 @@ fn option_runs() {
             2
         "#]],
     );
+    // `map` calls its `fn` argument on the `::Some` payload.
+    assert_run(
+        &[
+            "run",
+            "examples/option.must",
+            "-e",
+            "Option::Some(1).map(fn(x: usize) -> usize { x + 1 }).unwrap()",
+        ],
+        0,
+        expect![[r#"
+            2
+        "#]],
+    );
 }
 
 #[test]
