@@ -2266,7 +2266,7 @@ impl<'db, M: Mode> Machine<'db, M> {
                     .last()
                     .and_then(|frame| frame.const_args.get(*index as usize))
                     .cloned()
-                    .ok_or(EvalError {
+                    .ok_or_else(|| EvalError {
                         kind: EvalErrorKind::Uninstantiated,
                         message: "the value of a const parameter is not known \
                                   before instantiation"
