@@ -85,7 +85,9 @@ pub struct InferenceResult {
     /// Note the flip side: a fresh-variable expectation that unification
     /// later *pins* (typically to the expression's own type — a bare
     /// `let`'s initializer, an equality operand) resolves concrete and is
-    /// kept. Consumed by ide completions for type-directed ranking.
+    /// kept. One exception: an unpinned integer variable stays `{number}`
+    /// (see `InferCtx::number_expectations`). Consumed by ide completions for
+    /// type-directed ranking.
     pub expectation_of_expr: ArenaMap<ExprId, Ty>,
     /// The const arguments of every turbofish mention whose arity matched:
     /// `(binder index, value expression)` pairs, in source order. Inference
@@ -2526,6 +2528,11 @@ pub(crate) struct InferCtx<'a, 'db> {
     /// the [`crate::body::ExprData::Neg`] arm before its operand is
     /// visited.
     negated_literals: rustc_hash::FxHashSet<ExprId>,
+    /// Expressions checked against an unbound NUMBER-CLASS variable.
+    /// [`Self::finish`] keeps `{number}` as their expectation unless the
+    /// variable resolves to an integer type, even when it resolves to
+    /// `{error}` (a name being completed is unresolved).
+    number_expectations: rustc_hash::FxHashSet<ExprId>,
     /// Bound obligations from instantiation edges, resolved in
     /// [`Self::finish`] once joins have solved: per KEY expression, in
     /// canonical slot order (push order — see
@@ -2697,6 +2704,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             pending_number_literals: Vec::new(),
             unresolved_scrutinees: rustc_hash::FxHashSet::default(),
             negated_literals: rustc_hash::FxHashSet::default(),
+            number_expectations: rustc_hash::FxHashSet::default(),
             pending_obligations: Vec::new(),
             const_block_depth: 0,
             direct_callees: body
@@ -3537,11 +3545,16 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // the position had no real expectation, and an `{error}` means the
         // expectation itself came from broken code (see the field's doc
         // for why both must go).
+        //
+        // Exception: expectations in `number_expectations` keep `{number}`.
         let recorded = std::mem::take(&mut result.expectation_of_expr);
         for (expr, ty) in recorded.iter() {
-            let resolved = resolve_finished(self.table, ty);
+            let mut resolved = resolve_finished(self.table, ty);
             if resolved.contains_infer() || resolved.contains_error() {
-                continue;
+                if !self.number_expectations.contains(&expr) {
+                    continue;
+                }
+                resolved = Ty::UnresolvedNumber;
             }
             result.expectation_of_expr.insert(expr, resolved);
         }
@@ -3705,6 +3718,11 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         self.result
             .expectation_of_expr
             .insert(expr, expected.clone());
+        if let Ty::Infer(var) = self.resolve_shallow(expected)
+            && matches!(self.table.probe_value(var), TyVarValue::UnknownNumber)
+        {
+            self.number_expectations.insert(expr);
+        }
         // A join sink propagates only through transparent wrappers (block
         // tails, `const` blocks) into an `if`'s witness position. Any other
         // expression is a leaf of the enclosing join, and its
