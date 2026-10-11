@@ -2869,6 +2869,63 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         })
     }
 
+    /// The root of a place chain: `place` with its field and index steps
+    /// peeled off.
+    fn place_root(&self, mut place: ExprId) -> ExprId {
+        loop {
+            match &self.body.exprs[place] {
+                ExprData::Field { receiver, .. } => place = *receiver,
+                ExprData::Index { base, .. } => place = *base,
+                _ => return place,
+            }
+        }
+    }
+
+    /// The name of `binding` (the local `place` is rooted at) and the text
+    /// of `place`, when the binding is not `mut`: what a refused borrow or
+    /// assignment through `place` reports.
+    fn immutable_root(&self, binding: BindingId, place: ExprId) -> Option<(String, String)> {
+        let data = &self.body.bindings[binding];
+        (!data.mutable).then(|| (data.name().to_owned(), self.place_text(place)))
+    }
+
+    /// The constness of the item `loc`; `static` if it has none.
+    fn item_constness(&self, loc: &ItemLoc) -> Constness {
+        crate::item_data(self.db, loc.to_id(self.db))
+            .as_ref()
+            .and_then(|it| it.kind.constness())
+            // Unreached: a bare name resolves to a file-scope `static` or
+            // `const`, which always has a constness.
+            .unwrap_or(Constness::Static)
+    }
+
+    /// A variable-rooted place chain as message text (`m[_].x`). The text
+    /// is stored in the diagnostic, so it is built from the body, never
+    /// from source text. An index renders as `[_]`, "an element".
+    ///
+    /// TODO: render simple index expressions (halvko/must#142).
+    fn place_text(&self, place: ExprId) -> String {
+        let mut text = String::new();
+        self.write_place_text(place, &mut text);
+        text
+    }
+
+    fn write_place_text(&self, place: ExprId, text: &mut String) {
+        match &self.body.exprs[place] {
+            ExprData::Field { receiver, name, .. } => {
+                self.write_place_text(*receiver, text);
+                text.push('.');
+                text.push_str(name);
+            }
+            ExprData::Index { base, .. } => {
+                self.write_place_text(*base, text);
+                text.push_str("[_]");
+            }
+            ExprData::NameRef(name) => text.push_str(name),
+            _ => {}
+        }
+    }
+
     /// The place rules for a SAFE borrow — `check_addr_of_place`'s twin,
     /// one flavor up. The accepted places are identical (a variable, a
     /// chain of its fields, a `static`, or a deref-rooted chain) and the
@@ -2897,45 +2954,25 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // flavor: a shared borrow of a shared place is exactly what a
         // shared borrow is for.
         let governing = mutable.then(|| self.shared_step_governing(place)).flatten();
-        let mut segments: Vec<String> = Vec::new();
-        let mut root = place;
-        loop {
-            match &self.body.exprs[root] {
-                ExprData::Field { receiver, name, .. } => {
-                    segments.push(format!(".{name}"));
-                    root = *receiver;
-                }
-                ExprData::Index { base, .. } => {
-                    segments.push("[_]".to_owned());
-                    root = *base;
-                }
-                _ => break,
-            }
-        }
+        let root = self.place_root(place);
         match &self.body.exprs[root] {
             ExprData::NameRef(name) => match self.resolutions.get(root) {
                 Some(Resolution::Local(binding)) => {
-                    let data = &self.body.bindings[*binding];
-                    if mutable && !data.mutable {
-                        segments.reverse();
-                        let place_text = format!("{name}{}", segments.concat());
+                    if mutable && let Some((name, place)) = self.immutable_root(*binding, place) {
                         self.result
                             .diagnostics
                             .push(InferenceDiagnostic::BorrowMutImmutable {
                                 borrow,
                                 root,
                                 binding: *binding,
-                                name: data.name().to_owned(),
-                                place: place_text,
+                                name,
+                                place,
                             });
                     }
                 }
                 Some(Resolution::Item(loc)) => {
                     if mutable {
-                        let constness = crate::item_data(self.db, loc.to_id(self.db))
-                            .as_ref()
-                            .and_then(|it| it.kind.constness())
-                            .unwrap_or(Constness::Static);
+                        let constness = self.item_constness(loc);
                         self.result
                             .diagnostics
                             .push(InferenceDiagnostic::BorrowMutItem {
@@ -4409,10 +4446,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     None
                                 }
                                 Some(Resolution::Item(loc)) => {
-                                    let constness = crate::item_data(self.db, loc.to_id(self.db))
-                                        .as_ref()
-                                        .and_then(|it| it.kind.constness())
-                                        .unwrap_or(Constness::Static);
+                                    let constness = self.item_constness(loc);
                                     self.result.diagnostics.push(
                                         InferenceDiagnostic::AssignToItem {
                                             target: *target,
@@ -4521,8 +4555,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 fields: missing,
                             });
                     }
-                    let mut seen: Vec<String> = Vec::new();
-                    for field in fields {
+                    for (i, field) in fields.iter().enumerate() {
                         let ascription = field
                             .type_ref
                             .clone()
@@ -4542,7 +4575,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 // nothing is dropped silently). Duplicates of
                                 // one extra name get a single diagnostic —
                                 // validation already flags the duplication.
-                                if !seen.contains(&field.name) {
+                                if !fields[..i].iter().any(|f| f.name == field.name) {
                                     self.result.diagnostics.push(
                                         InferenceDiagnostic::RecordLitExtraField {
                                             expr: field.value,
@@ -4555,7 +4588,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 self.infer_expr(field.value, &expected_field);
                             }
                         }
-                        seen.push(field.name.clone());
                     }
                     // Field mismatches were reported above (or the sets
                     // match); either way the literal recovers with the
@@ -7169,24 +7201,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// (the inferred-from-initializer fallback hint would claim the
     /// *binding* has the projected type).
     fn check_field_assign_target(&mut self, target: ExprId) -> Option<Cause> {
-        let mut segments: Vec<String> = Vec::new();
-        let mut root = target;
-        loop {
-            match &self.body.exprs[root] {
-                ExprData::Field { receiver, name, .. } => {
-                    segments.push(format!(".{name}"));
-                    root = *receiver;
-                }
-                // The index expression has no stable rendering here
-                // (message texts are range-free); `[_]` says "an element".
-                ExprData::Index { base, .. } => {
-                    segments.push("[_]".to_owned());
-                    root = *base;
-                }
-                _ => break,
-            }
-        }
-        let ExprData::NameRef(root_name) = &self.body.exprs[root] else {
+        let root = self.place_root(target);
+        let ExprData::NameRef(_) = &self.body.exprs[root] else {
             // A deref roots the chain (`p.* = e;`, `p.*.x = e;`, or
             // `bb.*.* = e;`): the write goes through the pointers, so the
             // judgement is [`InferCtx::shared_step_governing`]'s — every
@@ -7207,27 +7223,24 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             // squiggle either way.
             return None;
         };
-        segments.push(root_name.clone());
-        segments.reverse();
-        let place = segments.concat();
         // The same target taxonomy as a plain-name assignment, judged at
         // the root; the silent arms match its reasoning too (the root read
         // already carries `TypeNotValue` / unresolved-name / duplicate
         // diagnostics).
         match self.resolutions.get(root) {
             Some(Resolution::Local(binding)) => {
-                let data = &self.body.bindings[*binding];
-                if !data.mutable {
+                if let Some((name, place)) = self.immutable_root(*binding, target) {
                     self.result
                         .diagnostics
                         .push(InferenceDiagnostic::AssignToImmutable {
                             target: root,
                             binding: *binding,
-                            name: data.name().to_owned(),
+                            name,
                             place,
                         });
                 }
-                data.type_ref.is_some().then_some(Cause::Binding(*binding))
+                let annotated = self.body.bindings[*binding].type_ref.is_some();
+                annotated.then_some(Cause::Binding(*binding))
             }
             // A const param is a compile-time value, not a place — and it
             // has no fields anyway; the root is what's judged, as for
@@ -7244,10 +7257,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 None
             }
             Some(Resolution::Item(loc)) => {
-                let constness = crate::item_data(self.db, loc.to_id(self.db))
-                    .as_ref()
-                    .and_then(|it| it.kind.constness())
-                    .unwrap_or(Constness::Static);
+                let constness = self.item_constness(loc);
                 self.result
                     .diagnostics
                     .push(InferenceDiagnostic::AssignToItem {
@@ -7302,49 +7312,27 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // flavor: a shared address of a shared place is what `.&raw` is
         // for.
         let governing = mutable.then(|| self.shared_step_governing(place)).flatten();
-        let mut segments: Vec<String> = Vec::new();
-        let mut root = place;
-        loop {
-            match &self.body.exprs[root] {
-                ExprData::Field { receiver, name, .. } => {
-                    segments.push(format!(".{name}"));
-                    root = *receiver;
-                }
-                // The index expression has no stable rendering here
-                // (message texts are range-free); `[_]` says "an element".
-                ExprData::Index { base, .. } => {
-                    segments.push("[_]".to_owned());
-                    root = *base;
-                }
-                _ => break,
-            }
-        }
+        let root = self.place_root(place);
         match &self.body.exprs[root] {
             ExprData::NameRef(root_name) => {
-                segments.push(root_name.clone());
-                segments.reverse();
-                let place_str = segments.concat();
                 match self.resolutions.get(root) {
                     Some(Resolution::Local(binding)) => {
-                        let data = &self.body.bindings[*binding];
-                        if mutable && !data.mutable {
+                        if mutable && let Some((name, place)) = self.immutable_root(*binding, place)
+                        {
                             self.result
                                 .diagnostics
                                 .push(InferenceDiagnostic::AddrOfMutImmutable {
                                     addr_of,
                                     root,
                                     binding: *binding,
-                                    name: data.name().to_owned(),
-                                    place: place_str,
+                                    name,
+                                    place,
                                 });
                         }
                     }
                     Some(Resolution::Item(loc)) => {
                         if mutable {
-                            let constness = crate::item_data(self.db, loc.to_id(self.db))
-                                .as_ref()
-                                .and_then(|it| it.kind.constness())
-                                .unwrap_or(Constness::Static);
+                            let constness = self.item_constness(loc);
                             self.result
                                 .diagnostics
                                 .push(InferenceDiagnostic::AddrOfMutItem {
@@ -8372,9 +8360,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// anything non-generic is an error, recovering with the base's own
     /// type as if the turbofish weren't there.
     fn infer_generic_app(&mut self, expr: ExprId, base: ExprId, args: &[GenericArgData]) -> Ty {
-        let base_name = match &self.body.exprs[base] {
-            ExprData::NameRef(name) => name.clone(),
-            _ => String::new(),
+        let body = self.body;
+        let base_name: &str = match &body.exprs[base] {
+            ExprData::NameRef(name) => name,
+            _ => "",
         };
         match self.resolutions.get(base) {
             Some(Resolution::Item(loc)) => {
@@ -8383,13 +8372,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     // Generic items never join groups, so an in-group
                     // member is non-generic by construction.
                     let member_sig = member_sig.clone();
-                    self.refuse_item_args(expr, &base_name, args);
+                    self.refuse_item_args(expr, base_name, args);
                     return member_sig;
                 }
                 let target = loc.to_id(self.db);
                 let generics = item_generics(self.db, target);
                 if generics.is_empty() {
-                    self.refuse_item_args(expr, &base_name, args);
+                    self.refuse_item_args(expr, base_name, args);
                     return signature(self.db, target);
                 }
                 let sig = signature(self.db, target);
@@ -8397,7 +8386,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             }
             Some(Resolution::Local(binding)) => {
                 let binding = *binding;
-                self.refuse_item_args(expr, &base_name, args);
+                self.refuse_item_args(expr, base_name, args);
                 self.result
                     .type_of_binding
                     .get(binding)
@@ -8406,7 +8395,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             }
             Some(Resolution::ConstParam(index)) => {
                 let index = *index;
-                self.refuse_item_args(expr, &base_name, args);
+                self.refuse_item_args(expr, base_name, args);
                 self.const_param_value_ty(index)
             }
             Some(Resolution::Builtin(builtin)) => {
@@ -8423,7 +8412,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     .diagnostics
                     .push(InferenceDiagnostic::TypeNotValue {
                         expr,
-                        name: base_name.clone(),
+                        name: base_name.to_owned(),
                     });
                 self.infer_const_args_free(args);
                 Ty::Error
@@ -8445,7 +8434,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         .diagnostics
                         .push(InferenceDiagnostic::TraitNotValue {
                             expr,
-                            name: base_name.clone(),
+                            name: base_name.to_owned(),
                         });
                 }
                 self.infer_const_args_free(args);
