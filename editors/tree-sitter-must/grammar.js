@@ -410,7 +410,7 @@ module.exports = grammar({
       alias($._match_bind_pat, $.bind_pat),
     ),
 
-    literal_pat: $ => $._literal,
+    literal_pat: $ => choice($._literal, seq('-', $.integer)),
 
     wildcard_pat: _ => '_',
 

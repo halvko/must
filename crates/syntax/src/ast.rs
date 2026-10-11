@@ -1166,6 +1166,10 @@ impl LiteralPat {
     pub fn literal(&self) -> Option<Literal> {
         child(&self.syntax)
     }
+    /// The `-` of a negative integer pattern (`-1`).
+    pub fn minus_token(&self) -> Option<SyntaxToken> {
+        token(&self.syntax, MINUS)
+    }
 }
 
 impl PathExpr {

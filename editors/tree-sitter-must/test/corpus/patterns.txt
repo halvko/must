@@ -216,3 +216,33 @@ static f = fn ([a, mut b]: [usize; 2]) { let [x, [mut y, _]] = v; let ::Char(c, 
             (integer))
           (path_expr
             (identifier)))))))
+
+==================
+Negative integer literal patterns
+==================
+
+static f = fn () { match n { -1 => 0, 1 => 2, _ => 3 } };
+
+---
+
+(source_file
+  (static_item
+    (identifier)
+    (fn_literal
+      (param_list)
+      (block_expr
+        (expr_stmt
+          (match_expr
+            (path_expr
+              (identifier))
+            (match_arm
+              (literal_pat
+                (integer))
+              (integer))
+            (match_arm
+              (literal_pat
+                (integer))
+              (integer))
+            (match_arm
+              (wildcard_pat)
+              (integer))))))))

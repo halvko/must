@@ -3078,8 +3078,26 @@
       ]
     },
     "literal_pat": {
-      "type": "SYMBOL",
-      "name": "_literal"
+      "type": "CHOICE",
+      "members": [
+        {
+          "type": "SYMBOL",
+          "name": "_literal"
+        },
+        {
+          "type": "SEQ",
+          "members": [
+            {
+              "type": "STRING",
+              "value": "-"
+            },
+            {
+              "type": "SYMBOL",
+              "name": "integer"
+            }
+          ]
+        }
+      ]
     },
     "wildcard_pat": {
       "type": "STRING",
