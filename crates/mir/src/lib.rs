@@ -110,6 +110,11 @@ pub struct LocalData {
     /// behavior, if it is. Initialization and by-name reassignment are not
     /// pointer writes.
     pub read_only: Option<ReadOnly>,
+    /// A compiler temp a `match` decision tree reads a part of an owned
+    /// scrutinee into only to test it. It owns nothing: every arm takes its
+    /// values from the scrutinee itself, so the move check does not track
+    /// it.
+    pub test_only: bool,
 }
 
 /// Why a local is read-only to writes through a pointer
@@ -621,6 +626,7 @@ fn plant_trap(body: &mut MirBody, trap: &CheckTrap) {
         binding: None,
         addressable: false,
         read_only: None,
+        test_only: false,
     });
     let data = &mut body.blocks[trap.block];
     let origin = data

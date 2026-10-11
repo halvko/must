@@ -410,8 +410,10 @@ impl<'a> BodyCheck<'a> {
             .iter()
             .map(|(local, data)| {
                 let Some(binding) = data.binding else {
-                    // The return place is the caller's to consume.
+                    // The return place is the caller's to consume, and a
+                    // test-only temp owns nothing.
                     return (local != body.return_local()
+                        && !data.test_only
                         && read.contains(cfg::local_index(local))
                         && !hir::capability::has_forget(check.db, &data.ty))
                     .then_some(Tracked::Temporary);

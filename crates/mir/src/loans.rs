@@ -529,6 +529,11 @@ struct BodyCheck<'a> {
     aliases: Vec<Option<Place>>,
     /// The locals that have an alias, in arena order.
     place_temps: Vec<LocalId>,
+    /// Per local: the place a compiler pointer points at, resolved, when
+    /// it is a temp defined once as a borrow no region was recorded for
+    /// (a pattern reaching deep into a borrowed value goes through one).
+    /// A place rooted at its deref stands for that place.
+    pointees: Vec<Option<Place>>,
     /// Per local: the region graph nodes its value's type mentions, sorted.
     local_regions: Vec<Vec<u32>>,
     /// Per local: whether a plain read of it duplicates the value. A read
@@ -569,6 +574,7 @@ impl<'a> BodyCheck<'a> {
             cover,
             aliases: Vec::new(),
             place_temps: Vec::new(),
+            pointees: Vec::new(),
             local_regions: Vec::new(),
             local_copyable: Vec::new(),
             loans: Vec::new(),
@@ -579,6 +585,7 @@ impl<'a> BodyCheck<'a> {
             live_loans: Vec::new(),
         };
         check.aliases = check.compute_aliases();
+        check.pointees = check.compute_pointees();
         check.place_temps = check
             .body
             .locals
@@ -690,9 +697,9 @@ impl<'a> BodyCheck<'a> {
     }
 
     /// The place a MIR place stands for, through the temp it may be rooted
-    /// at.
+    /// at and the compiler pointer that temp may hold.
     fn resolve(&self, place: &Place) -> Place {
-        match &self.aliases[cfg::local_index(place.local)] {
+        let place = match &self.aliases[cfg::local_index(place.local)] {
             Some(base) => {
                 let mut projection = base.projection.clone();
                 projection.extend(place.projection.iter().cloned());
@@ -702,7 +709,60 @@ impl<'a> BodyCheck<'a> {
                 }
             }
             None => place.clone(),
+        };
+        self.through_pointee(place)
+    }
+
+    /// `place` with a compiler pointer's deref at its root replaced by the
+    /// place the pointer points at.
+    fn through_pointee(&self, place: Place) -> Place {
+        match (
+            self.pointees
+                .get(cfg::local_index(place.local))
+                .and_then(Option::as_ref),
+            place.projection.first(),
+        ) {
+            (Some(pointee), Some(crate::ProjElem::Deref)) => {
+                let mut projection = pointee.projection.clone();
+                projection.extend(place.projection[1..].iter().cloned());
+                Place {
+                    local: pointee.local,
+                    projection,
+                }
+            }
+            _ => place,
         }
+    }
+
+    /// See [`BodyCheck::pointees`]. A pointer is minted after the place it
+    /// points into, so arena order resolves each through the ones before.
+    fn compute_pointees(&mut self) -> Vec<Option<Place>> {
+        self.pointees = vec![None; self.body.locals.len()];
+        for (local, data) in self.body.locals.iter() {
+            if data.binding.is_some() {
+                continue;
+            }
+            let defs = cfg::defs_of(self.body, local);
+            let [(point, _)] = defs.as_slice() else {
+                continue;
+            };
+            let Some(stmt) = self.body.blocks[point.block].statements.get(point.index) else {
+                continue;
+            };
+            let StatementKind::Assign {
+                dest,
+                value: ValueExpr::Borrow { place, .. },
+            } = &stmt.kind
+            else {
+                continue;
+            };
+            if !dest.projection.is_empty() || self.loan_region(stmt).is_some() {
+                continue;
+            }
+            let pointee = self.resolve(place);
+            self.pointees[cfg::local_index(local)] = Some(pointee);
+        }
+        std::mem::take(&mut self.pointees)
     }
 
     /// Whether `local` is a temp standing for a place.
