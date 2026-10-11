@@ -158,8 +158,9 @@ impl Analysis {
             })
             .collect();
         // MIR is a diagnostic producer like any other analysis (it finds
-        // what only the CFG can see — unsupported captures, and the loan
-        // liveness half of the borrow checker). Same aggregator pattern:
+        // what only the CFG can see — unsupported captures, the loan
+        // liveness half of the borrow checker, and the path-sensitive half
+        // of the linear check). Same aggregator pattern:
         // findings travel with the query value, only ranges attach here.
         // Lives above hir because hir can't see mir.
         let top_level = hir::file_item_ids(&self.db, file);
@@ -173,7 +174,8 @@ impl Analysis {
                 &[]
             };
             let loans = mir::loan_check(&self.db, item);
-            if lowered.is_empty() && loans.is_empty() {
+            let moves = mir::move_check(&self.db, item);
+            if lowered.is_empty() && loans.is_empty() && moves.is_empty() {
                 continue;
             }
             let (_, source_map) = hir::body_with_source_map(&self.db, item);
@@ -212,6 +214,30 @@ impl Analysis {
                     range,
                     severity: Severity::Error,
                     message: diag.message(),
+                    fix: None,
+                    related,
+                });
+            }
+            // A leak or a use after a move names the binding it is about,
+            // so its declaration is the first note: "this is where the
+            // obligation started".
+            for diag in moves {
+                let Some(range) = diag.range(source_map) else {
+                    continue;
+                };
+                let related = diag
+                    .related(&self.db, item, source_map)
+                    .into_iter()
+                    .map(|(at, message)| RelatedInfo {
+                        file,
+                        range: at,
+                        message,
+                    })
+                    .collect();
+                diagnostics.push(Diagnostic {
+                    range,
+                    severity: Severity::Error,
+                    message: diag.message(&self.db, item),
                     fix: None,
                     related,
                 });

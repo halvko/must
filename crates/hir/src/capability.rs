@@ -11,8 +11,9 @@
 //! A type capped at `move` is a linear type: a value of it must be consumed
 //! exactly once on every path. That is the whole of the disposal story —
 //! there is no destructor, no drop glue and no unwinding, so the checker
-//! (see [`crate::linear_check`]) is the only thing that runs, and it runs at
-//! check time only. Codegen never learns that a type is linear.
+//! ([`crate::linear_check`] for what one expression does, `mir::moves` for
+//! what a path does) is the only thing that runs, and it runs at check time
+//! only. Codegen never learns that a type is linear.
 //!
 //! Two rules and their reasons:
 //!
@@ -59,8 +60,8 @@ use crate::ty::{GenericArg, Ty};
 use crate::{ItemId, ItemLoc};
 
 /// Whether values of `ty` may be forgotten — let go with nothing done about
-/// them. `false` makes the type LINEAR: [`crate::linear_check`] then demands
-/// exactly one consumption on every path.
+/// them. `false` makes the type LINEAR: `mir::moves` then demands exactly
+/// one consumption on every path.
 ///
 /// Total and silent on broken types ([`Ty::Error`], unresolved variables,
 /// declarations that failed to lower): an unknown type answers `true`, so a

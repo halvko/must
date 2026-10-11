@@ -113,13 +113,18 @@
   cannot be duplicated, so a read of one is always the last read — and the static rule reads
   the same fact from the same place: a by-name read of a value that cannot be duplicated is a
   move.
-- **M16** Must-consume is the dual of use-after-move: one walk, one fact per binding, so the
-  checker that refuses a double disposal is the one that refuses a leak. No unwinding pays for
-  it: a panic traps, so every exit from a scope is written in the source, and a checker that
-  visits `return`/`break`/`continue`/fall-off has visited all of them. A language with
+- **M16** Must-consume is the dual of use-after-move: one forward dataflow over MIR, one fact
+  per named local (what it may hold: nothing yet, a value, or nothing since a move), so the
+  checker that refuses a double disposal is the one that refuses a leak — a linear still
+  holding a value at its storage end. No unwinding pays for it: a panic traps, so every exit
+  from a scope is an edge lowering already wrote, with a storage end on it. A language with
   unwinding has an implicit exit edge at every call, which is why such languages need
-  destructors. A `break` is not a back edge; it carries its state to the loop's exit join,
-  while a `continue` answers the same entry-equals-back-edge invariant a fall-through does.
+  destructors. Loops and branches need nothing of their own: the back edge carries one
+  iteration's end into the next, so consuming an outer linear in a loop is the next
+  iteration's use after move, and a branch that consumes on one path only is the leak at the
+  scope exit, noted at the move on the other path. What one expression or pattern does with a
+  linear (a copy out of a place, a discard, a `..` that skips one) needs no path and stays in
+  hir's walk (halvko/must#28).
 - **M12** A borrowed operand that is not a place gets a temporary: an anonymous local nobody
   can name, born where the expression is written, living to the end of the innermost enclosing
   block, fresh per loop iteration; a shorter life is spelled with an explicit block. The root
@@ -145,11 +150,10 @@
   the move is detected UB with the move as its note. A bare `.&mut` read into a bare `let`
   still copies (M07) and moves nothing. A declaration without a value (`let mut x;`) is a
   binding born in this moved-out state, so definite assignment is the same fact in the same
-  walk: a deferred binding is tracked whatever its type (a copyable one only for whether it
-  holds a value), a diverging path does not join, and paths that disagree settle on "maybe
-  unassigned", which every mention but a whole assignment refuses. Across a loop's back edge
-  the one change allowed is a value that may be lost becoming live (assigned before a
-  `break`); a linear one would be overwritten live. Dynamically the deferred local is unwritten
+  dataflow: a deferred binding is tracked whatever its type (a copyable one only for whether
+  it holds a value), a diverging path does not join, and paths that disagree make it "maybe
+  unassigned", which every mention but a whole assignment refuses. A linear one assigned
+  again on a loop's next iteration is overwritten live. Dynamically the deferred local is unwritten
   until assigned and a read of it traps. Strict first (X12): only `let mut` and a single name
   omit the value — an immutable `let x;` is reserved, a destructuring one refused.
 - **M22** A place is pinned while it is evaluated. A deref-rooted place reads its pointer
@@ -247,8 +251,10 @@
   just as easily, checks clean, and is priced at the deref under `unsafe` (D1); refusing the
   temporary buys no safety the local case does not already forgo. **M12**
 - **A maybe-moved dataflow in the loan pass, for M21 alone** — a second owner of
-  use-after-move beside M16's walk, and the two would report one mistake twice at joins and
-  loops; the walk moves to MIR whole (halvko/must#28) or not at all. **Allowing `.&raw` of a
+  use-after-move beside M16's, and the two would report one mistake twice at joins and
+  loops; M16 is a pass of its own over MIR, beside the loan pass (halvko/must#28). **A separate "consumed on some paths and not others" error at the join** — MIR has
+  no node for the merge, and the leak at the exit with the other path's move as its note
+  says where it goes wrong. **Allowing `.&raw` of a
   consumed binding** — the pointer would address storage nothing may read, and refusing it
   keeps the static rule one sentence. **A flow-sensitive alias for place temps** — judging
   the access against the pointer it goes through needs the pointer's own loans at the copy, a
@@ -274,9 +280,7 @@
   (the ordinary NLL rule; the tree's freeze is operational semantics for unsafe code).
   **M14 M19**
 - **An immutable deferred `let x;` is wanted** — reserved (X12); granting it means the walk
-  also proves "assigned at most once", which a second fact per binding would carry. A linear
-  value assigned on some paths only reports "consumed on some paths and not others" at the
-  join, which names the wrong half; a message of its own when that confuses. **M21**
+  also proves "assigned at most once", which a second fact per binding would carry. **M21**
 - **A loan refusal plants no trap**, so a program the loan check refuses still runs past the
   refused borrow. Outlives and linearity refusals trap where they blame; loan refusals come
   from MIR itself, so trapping them needs a second pass (halvko/must#52). **M14**

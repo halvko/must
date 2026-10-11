@@ -1899,9 +1899,9 @@ static one_arm = fn (c: bool) -> () {
 };
 ```
 
-answers "`r` is consumed on some paths through this expression and not on
-others", reported on the whole `if`, because neither branch is wrong on its
-own. Divergence is not a path: `if c { r.drop(); } else { panic("no"); }` is
+answers "`r` is not consumed on this path" on the body, the path through the
+empty `else`, with a note on the `drop()` that consumed it on the other one.
+Divergence is not a path: `if c { r.drop(); } else { panic("no"); }` is
 fine, and so is a `return` that consumes on the way out.
 
 ```must
@@ -1911,13 +1911,13 @@ static every_time = fn () -> () {
 };
 ```
 
-answers "`r` is left in a different state than the loop found it in": the
-second iteration would consume it again. Putting a fresh value back
-(`r.drop(); r = make(2);`) satisfies the loop, and so does moving the
-declaration inside it.
+answers "`r` was already consumed" at the `drop()`, with a note saying it
+was consumed there on an earlier iteration: the second iteration would
+consume it again. Putting a fresh value back (`r.drop(); r = make(2);`)
+fixes it, and so does moving the declaration inside the loop.
 
-The rule is about the *back edge* — the path that runs the body again — and
-a `break` is not one. Taking ownership of something and stopping is
+The second iteration is reached by the *back edge* — the path that runs the
+body again — and a `break` is not one. Taking ownership of something and stopping is
 therefore the ordinary shape it looks like:
 
 ```must

@@ -477,26 +477,6 @@ pub fn assign_over_live_param(subject: Option<&BindingKind>, param: &str) -> Str
     )
 }
 
-/// The join case, stated as the disagreement it is. Joins resolve at
-/// statement boundaries, so the squiggle sits on the whole `if`/`match`
-/// rather than on one arm — neither arm is wrong on its own.
-pub fn join_disagrees(subject: Option<&BindingKind>) -> String {
-    format!(
-        "{} is consumed on some paths through this expression and not on others",
-        linear_subject(subject)
-    )
-}
-
-/// [`join_disagrees`] where the binder is the reason the paths had to
-/// agree. Leak family, so the bound is one way out.
-pub fn join_disagrees_param(subject: Option<&BindingKind>, param: &str) -> String {
-    format!(
-        "{} is consumed on some paths through this expression and not on others, and {}",
-        linear_subject(subject),
-        leak_hint(param)
-    )
-}
-
 /// Copying a linear out of a place. Says what to do instead, because the
 /// answer is not obvious and is the same every time: take the whole value
 /// apart.
@@ -550,28 +530,6 @@ pub fn rest_skips_param(field: &str, param: &str) -> String {
         leak_reason(param),
         forget_advice(param)
     )
-}
-
-/// The loop invariant. Phrased as the next iteration's problem, because
-/// that is what makes it one — the body read on its own is fine.
-pub fn loop_changes_linear(subject: Option<&BindingKind>) -> String {
-    format!(
-        "{} is left in a different state than the loop found it in; \
-         the next iteration would run against a world this body was not checked in",
-        linear_subject(subject)
-    )
-}
-
-/// [`loop_changes_linear`] where the value is merely unduplicable.
-/// Duplication family: what the next iteration would do is READ a value
-/// this one already moved, which nothing makes legal.
-pub fn loop_changes_dup(subject: Option<&BindingKind>, root: &Affine) -> Option<String> {
-    let (_, hint) = duplication_of(root)?;
-    Some(format!(
-        "{} is left in a different state than the loop found it in: {hint} — \
-         the next iteration would read one this one already moved",
-        linear_subject(subject)
-    ))
 }
 
 /// An item whose own value must be consumed. A `static` is never destroyed,

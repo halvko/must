@@ -1262,13 +1262,10 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             });
         }
 
-        // Must-consume findings: a value whose type has no `forget`
-        // capability, on a path that never disposes of it (or on one that
-        // disposes of it twice). Every one of them names a BINDING, so the
-        // related note is that binding's own declaration — "this is where
-        // the obligation started" is the sentence a reader needs, and the
-        // squiggle sits on the path that broke it instead.
-        let types = infer::infer(db, item);
+        // Must-consume findings that need no path: a value whose type has
+        // no `forget` capability copied, dropped, or skipped by what one
+        // expression or pattern does. The path-sensitive half — leaks and
+        // uses after a move — is `mir::moves`, reported by `ide`.
         for diag in linear {
             let range = match (diag.expr(), diag.pat()) {
                 (Some(expr), _) => source_map.node_for_expr(expr).map(|p| p.text_range()),
@@ -1278,37 +1275,12 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             let Some(range) = range else {
                 continue;
             };
-            let subject = diag.binding().map(|binding| &body.bindings[binding].kind);
-            let ty = diag
-                .binding()
-                .and_then(|binding| types.type_of_binding.get(binding))
-                .or_else(|| diag.expr().and_then(|expr| types.type_of_expr.get(expr)));
-            let mut related = Vec::new();
-            if let Some(binding) = diag.binding()
-                && let Some(ptr) = source_map.node_for_binding(binding)
-            {
-                let linear = ty.is_some_and(|ty| !capability::has_forget(db, ty));
-                related.push(RelatedInfo {
-                    file,
-                    range: ptr.text_range(),
-                    message: diag.binding_note(subject, linear),
-                });
-            }
-            if let Some(first) = diag.related_expr()
-                && let Some(ptr) = source_map.node_for_expr(first)
-            {
-                related.push(RelatedInfo {
-                    file,
-                    range: ptr.text_range(),
-                    message: "first consumed here".to_owned(),
-                });
-            }
             diagnostics.push(Diagnostic {
                 range,
                 severity: Severity::Error,
                 message: diag.render(db, item),
                 fix: None,
-                related,
+                related: Vec::new(),
             });
         }
     }

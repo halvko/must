@@ -3601,9 +3601,10 @@ static f = fn::<@a>(c: char.&::<@a>) -> usize {
 
 // ---- loan liveness: the static exclusivity fence -------------------------
 
-/// Renders every loan-check finding in the file — range, message, then
-/// each companion as a note with its range — after any hir diagnostic, so
-/// a program that fails to type-check cannot pass as "accepted".
+/// Renders every loan-check finding in the file, then every move-check
+/// finding — range, message, then each companion as a note with its range
+/// — after any hir diagnostic, so a program that fails to type-check
+/// cannot pass as "accepted".
 fn check_loans(text: &str, expect: Expect) {
     let db = RootDatabase::default();
     let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
@@ -3619,6 +3620,15 @@ fn check_loans(text: &str, expect: Expect) {
             };
             rendered.push_str(&format!("{range:?}: {}\n", diag.message()));
             for (range, note) in diag.related(source_map) {
+                rendered.push_str(&format!("  note at {range:?}: {note}\n"));
+            }
+        }
+        for diag in crate::move_check(&db, item) {
+            let Some(range) = diag.range(source_map) else {
+                continue;
+            };
+            rendered.push_str(&format!("{range:?}: {}\n", diag.message(&db, item)));
+            for (range, note) in diag.related(&db, item, source_map) {
                 rendered.push_str(&format!("  note at {range:?}: {note}\n"));
             }
         }
@@ -5941,9 +5951,17 @@ static generic_statement = fn::<T>(m: T) -> T { let w = m; let r = m.&; pair(w, 
 "#,
         expect![[r#"
             306..307: `v` was already consumed
+              note at 271..272: `v` is born here and must be consumed
+              note at 303..304: first consumed here
             399..400: `v` was already consumed
+              note at 353..354: `v` is born here and must be consumed
+              note at 388..389: first consumed here
             531..532: `m` was already consumed: a value of `T` may not be duplicated, and no bound grants copying — borrow it at the first use
+              note at 510..511: `m` is born here and must be consumed
+              note at 528..529: first consumed here
             606..607: `m` was already consumed: a value of `T` may not be duplicated, and no bound grants copying — borrow it at the first use
+              note at 574..575: `m` is born here and must be consumed
+              note at 595..596: first consumed here
         "#]],
     );
 }
@@ -6043,6 +6061,23 @@ static double = fn() -> usize {
 /// target block starts with must be the one the finding names in the
 /// lowered MIR, for every trap, including two in one block.
 fn check_loan_traps(text: &str, expect: Expect) {
+    fn loan_traps<'db>(
+        db: &'db dyn base_db::Db,
+        item: hir::ItemId<'db>,
+    ) -> &'db [crate::CheckTrap] {
+        &crate::loan_findings(db, item).traps
+    }
+    check_traps(text, loan_traps, expect);
+}
+
+/// Where `mir_checked` plants each trap one CFG checker found: the
+/// operation the trap's target block starts with must be the one the
+/// finding names in the lowered MIR.
+pub(crate) fn check_traps(
+    text: &str,
+    traps: for<'db> fn(&'db dyn base_db::Db, hir::ItemId<'db>) -> &'db [crate::CheckTrap],
+    expect: Expect,
+) {
     let db = RootDatabase::default();
     let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
     let operation = |block: &crate::BlockData, index: usize| match block.statements.get(index) {
@@ -6053,8 +6088,7 @@ fn check_loan_traps(text: &str, expect: Expect) {
     for &item in hir::file_item_ids(&db, file) {
         let (_, source_map) = hir::body_with_source_map(&db, item);
         let lowered = crate::mir_lowered(&db, item);
-        let mut named: Vec<_> = crate::loan_findings(&db, item)
-            .traps
+        let mut named: Vec<_> = traps(&db, item)
             .iter()
             .map(|trap| {
                 let (kind, origin) =
