@@ -4214,7 +4214,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     .unwrap_or_else(|| self.fresh_var());
                                 let binding_cause =
                                     has_annotation.then_some(Cause::Binding(binding));
-                                let mut ty = self.infer_expr_with(*init, &declared, binding_cause);
+                                let ty = self.infer_expr_with(*init, &declared, binding_cause);
+                                let mut ty = self.trust_declared(ty, &declared);
                                 // `let mut` widening: an UNANNOTATED mutable
                                 // binding initialized with a variant-typed value
                                 // widens to the enum at binding time (with the
@@ -4250,6 +4251,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                         .unwrap_or_else(|| self.fresh_var()),
                                 };
                                 let ty = self.infer_expr_with(*init, &declared, None);
+                                let ty = self.trust_declared(ty, &declared);
                                 self.check_pat(*pat, &ty, *init);
                             }
                         }
@@ -4743,7 +4745,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // this expression's type with what it flowed INTO — see
                 // `InferenceResult::loan_regions`.
                 self.result.loan_regions.insert(expr, region.clone());
-                Ty::borrow(mutable, region, place_ty)
+                // A borrow of `{error}` is `{error}`: nothing past it can be
+                // judged.
+                if matches!(self.resolve_shallow(&place_ty), Ty::Error) {
+                    Ty::Error
+                } else {
+                    Ty::borrow(mutable, region, place_ty)
+                }
             }
             ExprData::AddrOf { mutable, place } => {
                 let mutable = *mutable;
@@ -10306,6 +10314,18 @@ impl<'a, 'db> InferCtx<'a, 'db> {
 
     fn resolve_shallow(&mut self, ty: &Ty) -> Ty {
         constraint::resolve_shallow(self.table, ty)
+    }
+
+    /// The type a `let` binds: its initializer's, or `declared` (the
+    /// annotation, or the pattern's own type) when the initializer is
+    /// `{error}` as a whole. With neither, `declared` is a fresh variable
+    /// already bound to `{error}`, so the binding stays poisoned.
+    fn trust_declared(&mut self, init_ty: Ty, declared: &Ty) -> Ty {
+        if matches!(self.resolve_shallow(&init_ty), Ty::Error) {
+            declared.clone()
+        } else {
+            init_ty
+        }
     }
 }
 

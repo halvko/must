@@ -9645,6 +9645,128 @@ static main = fn (a: A) -> usize { a.get() };
     );
 }
 
+/// An annotated `let` whose initializer is poisoned is typed by its
+/// annotation, so later uses are judged against `char`.
+#[test]
+fn annotated_let_with_poisoned_initializer_uses_its_annotation() {
+    check_diagnostics(
+        r#"
+static main = fn () -> () {
+    let c: char = match input.next_char(0) {
+        ::Char(ch, _) => ch,
+        ::End => panic("no input"),
+    };
+    let d = c.&.to_i32();
+};
+"#,
+        expect![[r#"
+            53..58: unresolved name `input`
+            158..170: no field or member `to_i32` on `char`
+        "#]],
+    );
+}
+
+/// An unannotated `let` with a poisoned initializer reports nothing past
+/// the original error.
+#[test]
+fn unannotated_let_with_poisoned_initializer_stays_silent() {
+    check_diagnostics(
+        r#"
+static main = fn () -> () {
+    let c = match input.next_char(0) {
+        ::Char(ch, _) => ch,
+        ::End => panic("no input"),
+    };
+    let d = c.&.to_i32();
+    let e = c.&.x;
+    let f = c.&();
+};
+"#,
+        expect![[r#"
+            47..52: unresolved name `input`
+        "#]],
+    );
+}
+
+/// A diagnostic on a poisoned operand is reported when it is its own error
+/// (`.b` on a record, an annotation mismatch).
+#[test]
+fn an_error_beside_the_poison_is_reported() {
+    check_diagnostics(
+        r#"
+static main = fn () -> () {
+    let y = nope;
+    let g = struct { a = y }.b;
+    let x: usize = struct { a = y };
+};
+"#,
+        expect![[r#"
+            41..45: unresolved name `nope`
+            76..77: no field `b` on `struct { a: {error} }`
+            98..114: type mismatch: expected `usize`, found `struct { a: {error} }` (expected `usize` because of this annotation at 90..95)
+        "#]],
+    );
+}
+
+/// A branch join whose types hold a nested `{error}` reports nothing past
+/// the original error.
+#[test]
+fn branch_join_with_nested_poison_stays_silent() {
+    check_diagnostics(
+        r#"
+static f = fn (c: bool) -> () {
+    let y: Nope = 5;
+    let r = if c { struct { a = y } } else { struct { a = "s" } };
+};
+"#,
+        expect![[r#"
+            44..48: unknown type `Nope`
+        "#]],
+    );
+}
+
+/// Branch leaves with a poisoned part disagree when their shapes do:
+/// with each other, or with a clean leaf.
+#[test]
+fn branch_join_with_poisoned_leaves_of_different_shapes_reports() {
+    check_diagnostics(
+        r#"
+static f = fn (c: bool) -> () {
+    let y: Nope = 5;
+    let r = if c { struct { a = y } } else { struct { b = y } };
+    let s = if c { struct { a = y } } else { struct { b = "s" } };
+};
+"#,
+        expect![[r#"
+            44..48: unknown type `Nope`
+            99..115: `if` branches have incompatible types: `struct { a: {error} }` vs `struct { b: {error} }`; add a type annotation to decide between them (this branch has type `struct { a: {error} }` at 73..89)
+            138..154: type mismatch: expected `struct { b: str }`, found `struct { a: {error} }` (this branch has type `struct { b: str }` at 164..182)
+        "#]],
+    );
+}
+
+/// A destructuring `let` with a poisoned initializer is typed by its
+/// annotation.
+#[test]
+fn annotated_destructuring_let_with_poisoned_initializer_uses_its_annotation() {
+    check_infer(
+        r#"
+static main = fn () -> () {
+    let struct { x }: struct { x: usize } = nope;
+    let y = x;
+};
+"#,
+        expect![[r#"
+            15..95 'fn () -> () {    ...': fn()
+            27..95 '{     let struct ...': ()
+            46..47 'x': usize
+            73..77 'nope': {error}
+            87..88 'y': usize
+            91..92 'x': usize
+        "#]],
+    );
+}
+
 // ---- the record-literal equals-defines respell --------------------------
 
 #[test]
