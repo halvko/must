@@ -14,6 +14,7 @@ pub mod groups;
 pub mod infer;
 pub mod inferred_signature;
 pub mod item_tree;
+pub mod library;
 pub mod linear_check;
 pub mod outlives;
 pub mod scopes;
@@ -43,7 +44,7 @@ pub use item_tree::{
 };
 pub use outlives::{OutlivesDiagnostic, outlives_check};
 pub use scopes::{
-    ALLOC_RESULT_NAME, Builtin, ConstLegality, Duplicate, ExprScopes, FileScope, NEXT_CHAR_NAME,
+    ALLOC_RESULT_NAME, Builtin, ConstLegality, ExprScopes, FileScope, NEXT_CHAR_NAME,
     READ_LINE_RESULT_NAME, Resolution, SyntheticDecl, TypeScope, UTF8_RESULT_NAME,
     alloc_result_loc, expr_scopes, file_scope, next_char_loc, read_line_result_loc, resolutions,
     synthetic_decl_loc, synthetic_decl_named, synthetic_decls, type_scope, utf8_result_loc,
@@ -424,6 +425,105 @@ pub fn body_findings<'db>(db: &'db dyn Db, item: ItemId<'db>) -> BodyFindings<'d
     }
 }
 
+/// Where an unresolved `name` could come from: each other module of the
+/// file's library that declares a `name` of a kind that `fits` where the
+/// name is written, and, when exactly one does, the `use` that imports it.
+fn import_hints(
+    db: &dyn Db,
+    file: SourceFile,
+    name: &str,
+    fits: fn(ItemKind) -> bool,
+) -> (Option<syntax::Fix>, Vec<RelatedInfo>) {
+    let declarations = library::library_declarations(db, library::library_of(db, file));
+    let Some(declarations) = declarations.get(name) else {
+        return (None, Vec::new());
+    };
+    let elsewhere: Vec<&library::Declaration> = (declarations.iter())
+        .filter(|declaration| declaration.loc.file != file && fits(declaration.kind))
+        .collect();
+    let related = (elsewhere.iter())
+        .filter_map(|declaration| {
+            let item = item_source(db, declaration.loc.to_id(db))?.name()?;
+            Some(RelatedInfo {
+                file: declaration.loc.file,
+                range: item.syntax().text_range(),
+                message: format!("`{}` declares `{name}`", declaration.module),
+            })
+        })
+        .collect();
+    let fix = match elsewhere.as_slice() {
+        [declaration] => Some(syntax::Fix {
+            label: format!("Import `{name}` from `{}`", declaration.module),
+            edits: vec![syntax::TextEdit {
+                range: TextRange::empty(0.into()),
+                insert: format!("use {}::{name};\n", declaration.module),
+            }],
+        }),
+        _ => None,
+    };
+    (fix, related)
+}
+
+/// An error at a name, with [`import_hints`] when the file has no such name.
+struct NameError {
+    message: String,
+    fix: Option<syntax::Fix>,
+    related: Vec<RelatedInfo>,
+}
+
+impl NameError {
+    fn new(message: String) -> Self {
+        NameError {
+            message,
+            fix: None,
+            related: Vec::new(),
+        }
+    }
+
+    /// The file has no `name`: `message`, and the modules that declare a
+    /// `name` that `fits`.
+    fn unknown(
+        db: &dyn Db,
+        file: SourceFile,
+        name: &str,
+        message: String,
+        fits: fn(ItemKind) -> bool,
+    ) -> Self {
+        let (fix, related) = import_hints(db, file, name, fits);
+        NameError {
+            message,
+            fix,
+            related,
+        }
+    }
+
+    fn at(self, range: TextRange) -> Diagnostic {
+        Diagnostic {
+            range,
+            severity: Severity::Error,
+            message: self.message,
+            fix: self.fix,
+            related: self.related,
+        }
+    }
+}
+
+fn is_value_or_type(kind: ItemKind) -> bool {
+    matches!(kind, ItemKind::Value(_) | ItemKind::Type)
+}
+
+fn is_type_or_trait(kind: ItemKind) -> bool {
+    matches!(kind, ItemKind::Type | ItemKind::Trait)
+}
+
+fn is_type(kind: ItemKind) -> bool {
+    matches!(kind, ItemKind::Type)
+}
+
+fn is_trait(kind: ItemKind) -> bool {
+    matches!(kind, ItemKind::Trait)
+}
+
 /// All semantic diagnostics for a file. This is the one place that converts
 /// range-free facts back into text ranges (via the source maps).
 pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
@@ -452,28 +552,36 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         } = body_findings(db, item);
         let (body, source_map) = body_with_source_map(db, item);
         let resolutions = resolutions(db, item);
+        // The base of a `::` path names a type or a trait (`Shape::Dot`,
+        // `Size::size(x)`). Any other name in a body names a value or a
+        // type (`Pair(..)` constructs one).
+        let path_bases: rustc_hash::FxHashSet<ExprId> = (body.exprs.iter())
+            .filter_map(|(_, data)| match data {
+                body::ExprData::VariantPath { base, .. } => Some(*base),
+                _ => None,
+            })
+            .collect();
         for (expr, data) in body.exprs.iter() {
-            let message = match data {
+            let error = match data {
                 body::ExprData::NameRef(name) if resolutions.get(expr).is_none() => {
-                    diag::unresolved_name(name)
+                    let fits = if path_bases.contains(&expr) {
+                        is_type_or_trait
+                    } else {
+                        is_value_or_type
+                    };
+                    NameError::unknown(db, file, name, diag::unresolved_name(name), fits)
                 }
                 // A literal too large for every integer type. MIR lowering
                 // traps on it with this message, and this reports it.
                 body::ExprData::Literal(body::LiteralData::Int(None)) => {
-                    diag::INT_LITERAL_TOO_LARGE.to_owned()
+                    NameError::new(diag::INT_LITERAL_TOO_LARGE.to_owned())
                 }
                 _ => continue,
             };
             let Some(ptr) = source_map.node_for_expr(expr) else {
                 continue;
             };
-            diagnostics.push(Diagnostic {
-                range: ptr.text_range(),
-                severity: Severity::Error,
-                message,
-                fix: None,
-                related: Vec::new(),
-            });
+            diagnostics.push(error.at(ptr.text_range()));
         }
 
         for diag in inference {
@@ -1115,6 +1223,21 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             // Added after the filter above, since the enum operand may be
             // the squiggled one.
             related.extend(enum_note);
+            // A pattern's type name (`Name(..)`, `Name::Variant`) that the
+            // file does not have: where it could be imported from. Inference
+            // reads only `type_scope`, so a value item of that name is not
+            // seen there; ask `file_scope` here.
+            let (hint_fix, hint_related) = match diag {
+                InferenceDiagnostic::PatUnknownType { name, .. }
+                | InferenceDiagnostic::PatPathError { name, .. }
+                    if file_scope(db, file).resolve(name).is_none()
+                        && ty::builtin_type_by_name(name).is_none() =>
+                {
+                    import_hints(db, file, name, is_type)
+                }
+                _ => (None, Vec::new()),
+            };
+            related.extend(hint_related);
             let fix = match diag {
                 // Write the definition's inferred signature in. Fixes here
                 // edit the diagnosed file only, so a definition elsewhere
@@ -1173,7 +1296,7 @@ pub fn file_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
                             }],
                         }
                     }),
-                _ => None,
+                _ => hint_fix,
             };
             diagnostics.push(Diagnostic {
                 range,
@@ -1540,29 +1663,106 @@ pub fn range_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         });
     }
 
-    // Duplicate definitions, discovered by `file_scope` (the analysis that
-    // decides first-wins also knows about the losers); only the range
-    // attachment happens here.
-    for dup in &file_scope(db, file).duplicates {
-        let Some(second) = item_name(&dup.second) else {
-            continue;
+    // Imports: a path naming no module of the library, a name the module
+    // does not declare or declares more than once, and a name this file
+    // already declares or imports. The analyses are `file_imports` and
+    // `file_scope`; only ranges attach here.
+    let root = ast::SourceFile::cast(parse(db, file).syntax_node()).expect("a source file");
+    let imported: Vec<(ast::UseName, ast::NameRef)> = root
+        .use_items()
+        .flat_map(|use_item| library::imported_names(&use_item))
+        .collect();
+    let imports = library::file_imports(db, file);
+    for (use_item, error) in root.use_items().zip(&imports.paths) {
+        let message = match error {
+            Some(library::PathError::NoModule { path }) if file.library(db).is_some() => {
+                format!("no module `{path}` in this library to import from")
+            }
+            // Loaded without its library: the library may well have
+            // `path`, but nothing loaded it.
+            Some(library::PathError::NoModule { path }) => {
+                format!("this file is loaded on its own, so it cannot import from `{path}`")
+            }
+            Some(library::PathError::Broken) | None => continue,
         };
-        let related = item_name(&dup.first)
-            .map(|first| {
-                vec![RelatedInfo {
-                    file: dup.first.file,
-                    range: first.syntax().text_range(),
-                    message: "first defined here".to_owned(),
-                }]
-            })
-            .unwrap_or_default();
+        let mut segments = use_item.segments().map(|s| s.syntax().text_range());
+        let first = segments.next().expect("a path error has a path");
         diagnostics.push(Diagnostic {
-            range: second.syntax().text_range(),
+            range: first.cover(segments.last().unwrap_or(first)),
             severity: Severity::Error,
-            message: diag::defined_multiple_times(&second.text()),
+            message,
+            fix: None,
+            related: Vec::new(),
+        });
+    }
+    for ((_, name_ref), import) in imported.iter().zip(&imports.names) {
+        let (message, related) = match &import.target {
+            library::ImportTarget::NoItem { path, name } => {
+                (format!("`{path}` declares no `{name}`"), Vec::new())
+            }
+            library::ImportTarget::Ambiguous { path, name, items } => {
+                let related = (items.iter())
+                    .filter_map(|(loc, _)| {
+                        Some(RelatedInfo {
+                            file: loc.file,
+                            range: item_name(loc)?.syntax().text_range(),
+                            message: "declared here".to_owned(),
+                        })
+                    })
+                    .collect();
+                (
+                    format!("`{path}` declares `{name}` more than once"),
+                    related,
+                )
+            }
+            library::ImportTarget::Item { .. } | library::ImportTarget::NoPath => continue,
+        };
+        diagnostics.push(Diagnostic {
+            range: name_ref.syntax().text_range(),
+            severity: Severity::Error,
+            message,
             fix: None,
             related,
         });
+    }
+    // A name declared or imported more than once, from `file_scope`: every
+    // place it comes from carries the error and points at the others.
+    let import_range = |index: usize| {
+        imported
+            .get(index)
+            .map(|(use_name, name_ref)| match use_name.rename() {
+                Some(rename) => rename.syntax().text_range(),
+                None => name_ref.syntax().text_range(),
+            })
+    };
+    for clash in &file_scope(db, file).clashes {
+        let sites: Vec<(TextRange, &str)> = (clash.origins.iter())
+            .filter_map(|origin| match origin {
+                scopes::NameOrigin::Item(loc) => {
+                    item_name(loc).map(|item| (item.syntax().text_range(), "also defined here"))
+                }
+                scopes::NameOrigin::Import(index) => {
+                    import_range(*index).map(|range| (range, "also imported here"))
+                }
+            })
+            .collect();
+        for &(range, _) in &sites {
+            let related = (sites.iter())
+                .filter(|(other, _)| *other != range)
+                .map(|&(other, message)| RelatedInfo {
+                    file,
+                    range: other,
+                    message: message.to_owned(),
+                })
+                .collect();
+            diagnostics.push(Diagnostic {
+                range,
+                severity: Severity::Error,
+                message: diag::defined_multiple_times(&clash.name),
+                fix: None,
+                related,
+            });
+        }
     }
 
     // Bad type names, in any annotation position: unknown, naming a value
@@ -1630,28 +1830,18 @@ pub fn range_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
             // In scope and rigid: a use is fine, but a type param has no
             // variants to name through `::`.
             TypeParamBinding::Bound => path_type.variant_name_ref().map(|_| {
-                (
-                    format!("`{name}` has no variants (it is a type parameter)"),
-                    None,
-                )
+                NameError::new(format!("`{name}` has no variants (it is a type parameter)"))
             }),
-            TypeParamBinding::InOwnBinder => Some((
+            TypeParamBinding::InOwnBinder => Some(NameError::new(
                 "a const parameter's type cannot mention a type parameter".to_owned(),
-                None,
             )),
             TypeParamBinding::NotBound => match path_type.variant_name_ref() {
                 Some(variant) => variant_position_error(db, file, &path_type, &name, &variant),
-                None => type_position_error(db, file, &name).map(|message| (message, None)),
+                None => type_position_error(db, file, &name),
             },
         };
-        if let Some((message, fix)) = message {
-            diagnostics.push(Diagnostic {
-                range: path_type.syntax().text_range(),
-                severity: Severity::Error,
-                message,
-                fix,
-                related: Vec::new(),
-            });
+        if let Some(error) = message {
+            diagnostics.push(error.at(path_type.syntax().text_range()));
             continue;
         }
         // A GENERIC type item mentioned bare: annotation lowering is
@@ -2308,35 +2498,36 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
                     continue;
                 }
             }
-            let message = match file_scope(db, file).resolve(&name) {
+            let error = match file_scope(db, file).resolve(&name) {
                 // A RESERVED generic trait must not go semantically live
                 // through a bound (reserved for generic traits).
                 Some(Resolution::TraitItem(loc)) => traits::trait_is_generic(db, &loc).then(|| {
-                    format!(
+                    NameError::new(format!(
                         "`{name}` is a reserved generic trait \
                          (generic traits are not supported yet); it cannot be a bound"
-                    )
+                    ))
                 }),
                 // Duplicate definitions carry the diagnostics.
                 Some(Resolution::Ambiguous(_)) => None,
-                Some(_) => Some(format!("`{name}` is not a trait")),
+                Some(_) => Some(NameError::new(format!("`{name}` is not a trait"))),
                 None => {
                     if ty::builtin_type_by_name(&name).is_some() {
-                        Some(format!("`{name}` is not a trait"))
+                        Some(NameError::new(format!("`{name}` is not a trait")))
                     } else {
-                        Some(format!("unknown trait `{name}`"))
+                        let message = format!("unknown trait `{name}`");
+                        Some(NameError::unknown(db, file, &name, message, is_trait))
                     }
                 }
             };
-            if let Some(message) = message {
-                diagnostics.push(simple_error(bound.syntax().text_range(), message));
+            if let Some(error) = error {
+                diagnostics.push(error.at(bound.syntax().text_range()));
             }
         }
     }
 
     // Impl sites: head resolution, member coverage and matching.
     let impls = traits::trait_impls(db, file);
-    for site in &impls.sites {
+    for (_, site) in impls.sites_in(file) {
         let head_slot = std::cell::OnceCell::new();
         let head_range = || {
             *head_slot.get_or_init(|| {
@@ -2349,51 +2540,57 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
             })
         };
         if site.type_side && site.trait_.is_none() {
-            let message = match file_scope(db, file).resolve(&site.head) {
+            let error = match file_scope(db, file).resolve(&site.head) {
                 // Resolvable, but reserved: the impl must not go live.
-                Some(Resolution::TraitItem(_)) => Some(format!(
+                Some(Resolution::TraitItem(_)) => Some(NameError::new(format!(
                     "`{}` is a reserved generic trait \
                      (generic traits are not supported yet); it cannot be implemented",
                     site.head
-                )),
+                ))),
                 Some(Resolution::Ambiguous(_)) => None,
-                Some(_) => Some(format!("`{}` is not a trait", site.head)),
+                Some(_) => Some(NameError::new(format!("`{}` is not a trait", site.head))),
                 None => {
                     // A builtin TYPE name in a type-side head (`impl usize`
                     // in a type's chain): not a trait — say so, matching
                     // the bound-position wording.
                     if ty::builtin_type_by_name(&site.head).is_some() {
-                        Some(format!("`{}` is not a trait", site.head))
+                        Some(NameError::new(format!("`{}` is not a trait", site.head)))
                     } else {
-                        Some(format!("unknown trait `{}`", site.head))
+                        let message = format!("unknown trait `{}`", site.head);
+                        Some(NameError::unknown(db, file, &site.head, message, is_trait))
                     }
                 }
             };
-            if let (Some(message), Some(range)) = (message, head_range()) {
-                diagnostics.push(simple_error(range, message));
+            if let (Some(error), Some(range)) = (error, head_range()) {
+                diagnostics.push(error.at(range));
             }
             continue;
         }
         if !site.type_side && site.self_key.is_none() {
-            let message = match type_scope(db, file).resolve(&site.head) {
+            let error = match type_scope(db, file).resolve(&site.head) {
                 Some(Resolution::TypeItem(_)) => {
                     // Resolvable but generic: reserved (generic-type impls).
-                    Some("impls for generic types are not supported yet".to_owned())
+                    Some(NameError::new(
+                        "impls for generic types are not supported yet".to_owned(),
+                    ))
                 }
                 Some(Resolution::Ambiguous(_)) => None,
                 Some(_) | None => match file_scope(db, file).resolve(&site.head) {
-                    Some(Resolution::TraitItem(_)) => Some(format!(
+                    Some(Resolution::TraitItem(_)) => Some(NameError::new(format!(
                         "`{}` is a trait; an impl in a trait's `with`-chain names the \
                          IMPLEMENTING type",
                         site.head
-                    )),
+                    ))),
                     Some(Resolution::Ambiguous(_)) => None,
-                    Some(_) => Some(format!("`{}` is not a type", site.head)),
-                    None => Some(format!("unknown type `{}`", site.head)),
+                    Some(_) => Some(NameError::new(format!("`{}` is not a type", site.head))),
+                    None => {
+                        let message = format!("unknown type `{}`", site.head);
+                        Some(NameError::unknown(db, file, &site.head, message, is_type))
+                    }
                 },
             };
-            if let (Some(message), Some(range)) = (message, head_range()) {
-                diagnostics.push(simple_error(range, message));
+            if let (Some(error), Some(range)) = (error, head_range()) {
+                diagnostics.push(error.at(range));
             }
             continue;
         }
@@ -2435,16 +2632,23 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
                 continue;
             }
             let range = || member_ranges.get(&member.name, member.disambiguator);
-            if !traits::binders_match(db, file, &req.generics, &member.generics) {
+            if !traits::binders_match(
+                db,
+                (trait_loc.file, &req.generics),
+                (site.owner.file, &member.generics),
+            ) {
                 let Some(range) = range() else {
                     continue;
                 };
+                // TODO: halvko/must#163: bounds in any order, and the
+                // message stops naming one.
                 diagnostics.push(Diagnostic {
                     range,
                     severity: Severity::Error,
                     message: format!(
                         "member `{}`'s generic binder does not match `{}`'s requirement \
-                         (arity, kinds and bounds must agree)",
+                         (arity, kinds and bounds must agree, the bounds in the requirement's \
+                         order)",
                         req.name,
                         trait_loc.display_name(),
                     ),
@@ -2514,13 +2718,18 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
         }
     }
 
-    // Coherence: at most one impl per (trait, self type) bucket.
-    for ((trait_loc, self_key), indices) in &impls.buckets {
-        if indices.len() < 2 {
+    // Coherence: at most one impl per (trait, self type) bucket, reported
+    // at every later impl in this file.
+    for (index, site) in impls.sites_in(file) {
+        let (Some(trait_loc), Some(self_key)) = (&site.trait_, &site.self_key) else {
+            continue;
+        };
+        let first_index = impls.buckets[&(trait_loc.clone(), self_key.clone())][0];
+        if first_index == index {
             continue;
         }
-        let first = &impls.sites[indices[0]];
-        let first_related = traits::impl_site_source(db, first)
+        let first = &impls.sites[first_index];
+        let related = traits::impl_site_source(db, first)
             .map(|element| {
                 vec![RelatedInfo {
                     file: first.owner.file,
@@ -2532,26 +2741,23 @@ fn trait_definition_diagnostics(db: &dyn Db, file: SourceFile, diagnostics: &mut
                 }]
             })
             .unwrap_or_default();
-        for &later in &indices[1..] {
-            let site = &impls.sites[later];
-            let Some(element) = traits::impl_site_source(db, site) else {
-                continue;
-            };
-            diagnostics.push(Diagnostic {
-                range: element
-                    .head()
-                    .map(|head| head.syntax().text_range())
-                    .unwrap_or_else(|| element.syntax().text_range()),
-                severity: Severity::Error,
-                message: format!(
-                    "duplicate impl of `{}` for `{}`",
-                    trait_loc.display_name(),
-                    self_key.display()
-                ),
-                fix: None,
-                related: first_related.clone(),
-            });
-        }
+        let Some(element) = traits::impl_site_source(db, site) else {
+            continue;
+        };
+        diagnostics.push(Diagnostic {
+            range: element
+                .head()
+                .map(|head| head.syntax().text_range())
+                .unwrap_or_else(|| element.syntax().text_range()),
+            severity: Severity::Error,
+            message: format!(
+                "duplicate impl of `{}` for `{}`",
+                trait_loc.display_name(),
+                self_key.display()
+            ),
+            fix: None,
+            related,
+        });
     }
 }
 
@@ -3010,8 +3216,8 @@ fn apply_position_diagnostics(
                 }
                 return;
             }
-            if let Some(message) = type_position_error(db, file, name) {
-                diagnostics.push(simple(whole, message));
+            if let Some(error) = type_position_error(db, file, name) {
+                diagnostics.push(error.at(whole));
             }
             return;
         }
@@ -3272,7 +3478,7 @@ fn const_param_agreement_error(
     ))
 }
 
-fn type_position_error(db: &dyn Db, file: SourceFile, name: &str) -> Option<String> {
+fn type_position_error(db: &dyn Db, file: SourceFile, name: &str) -> Option<NameError> {
     match type_scope(db, file).resolve(name) {
         // A type item; or a duplicate name, whose definitions already
         // carry the diagnostics.
@@ -3283,14 +3489,17 @@ fn type_position_error(db: &dyn Db, file: SourceFile, name: &str) -> Option<Stri
             }
             match file_scope(db, file).resolve(name) {
                 // Traits are bounds, not types (TR05): the precise story.
-                Some(Resolution::TraitItem(_)) => Some(format!(
+                Some(Resolution::TraitItem(_)) => Some(NameError::new(format!(
                     "`{name}` is a trait; traits are bounds, not types — \
                      did you mean a bounded generic param (`T: {name}`)?"
-                )),
+                ))),
                 // Also covers value-item duplicates: whichever way the
                 // ambiguity resolves, it is not a type.
-                Some(_) => Some(format!("`{name}` is not a type")),
-                None => Some(format!("unknown type `{name}`")),
+                Some(_) => Some(NameError::new(format!("`{name}` is not a type"))),
+                None => {
+                    let message = format!("unknown type `{name}`");
+                    Some(NameError::unknown(db, file, name, message, is_type))
+                }
             }
         }
     }
@@ -3311,9 +3520,9 @@ fn variant_position_error(
     path_type: &ast::PathType,
     base: &str,
     variant_ref: &ast::NameRef,
-) -> Option<(String, Option<syntax::Fix>)> {
+) -> Option<NameError> {
     let variant = &variant_ref.text();
-    let message = |message: String| Some((message, None));
+    let message = |message: String| Some(NameError::new(message));
     match type_scope(db, file).resolve(base) {
         Some(Resolution::TypeItem(loc)) => {
             let item = loc.to_id(db);
@@ -3334,10 +3543,13 @@ fn variant_position_error(
                                 insert: String::new(),
                             }],
                         });
-                        Some((
-                            format!("`{base}::{variant}` is a variant, not a type; use `{base}`"),
+                        Some(NameError {
+                            message: format!(
+                                "`{base}::{variant}` is a variant, not a type; use `{base}`"
+                            ),
                             fix,
-                        ))
+                            related: Vec::new(),
+                        })
                     } else {
                         message(format!(
                             "`{}` has no variant `{variant}`",
@@ -3366,7 +3578,7 @@ fn variant_position_error(
             }
             // Reuse the single-segment wording for a base that is no type
             // at all ("unknown type" / "is not a type").
-            type_position_error(db, file, base).map(|message| (message, None))
+            type_position_error(db, file, base)
         }
     }
 }

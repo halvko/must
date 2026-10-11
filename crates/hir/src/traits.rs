@@ -1,4 +1,4 @@
-//! The trait layer: the per-file impl index (coherence buckets, TR04) and
+//! The trait layer: the per-library impl index (coherence buckets, TR04) and
 //! bound resolution — the non-generic-trait core.
 //!
 //! Everything here is range-free and item-tree-driven (the impl index
@@ -14,10 +14,11 @@
 use base_db::{Db, SourceFile};
 use rustc_hash::FxHashMap;
 
+use crate::ItemLoc;
 use crate::item_tree::{self, GenericParamData, GenericParamKind, TypeRef};
+use crate::library::{LibraryId, library_item_ids, library_of};
 use crate::scopes::{Resolution, file_scope, type_scope};
 use crate::ty::{ParamTy, Ty, builtin_type_by_name};
-use crate::{ItemId, ItemLoc};
 
 /// The self-type half of a coherence bucket key: a `type` declaration, or
 /// one of the nameable builtin types (which are legal implementers but
@@ -82,20 +83,30 @@ pub(crate) struct ImplSite {
     pub(crate) ordinal: u32,
 }
 
-/// The per-file impl index: every semantically-live impl element, plus the
-/// coherence buckets over the resolved ones.
+/// The per-library impl index: every semantically-live impl element, plus
+/// the coherence buckets over the resolved ones.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct TraitImpls {
-    /// Every live impl element, in file order (diagnostics iterate this).
+    /// Every live impl element, in library order.
     pub(crate) sites: Vec<ImplSite>,
-    /// Bucket key → indices into [`Self::sites`], in file order. More than
+    /// Bucket key → indices into [`Self::sites`], in library order. More than
     /// one entry = a coherence violation (ground-disjointness is trivial
     /// for non-generic traits), diagnosed at the later sites.
     pub(crate) buckets: FxHashMap<(ItemLoc, SelfKey), Vec<usize>>,
+    /// Every trait the library declares, in library order.
+    pub(crate) traits: Vec<ItemLoc>,
 }
 
 impl TraitImpls {
-    /// The unique impl for `(trait, self)`, if any — the first in file
+    /// The impl elements in `file`, with their indices into [`Self::sites`].
+    pub(crate) fn sites_in(&self, file: SourceFile) -> impl Iterator<Item = (usize, &ImplSite)> {
+        self.sites
+            .iter()
+            .enumerate()
+            .filter(move |(_, site)| site.owner.file == file)
+    }
+
+    /// The unique impl for `(trait, self)`, if any — the first in library
     /// order when duplicates exist (they carry their own diagnostics).
     pub(crate) fn impl_for(&self, trait_: &ItemLoc, self_key: &SelfKey) -> Option<&ImplSite> {
         let indices = self.buckets.get(&(trait_.clone(), self_key.clone()))?;
@@ -103,15 +114,21 @@ impl TraitImpls {
     }
 }
 
-/// Build the file's impl index. Resolution of heads: a TYPE-side element's
+/// The impl index of `file`'s library.
+pub(crate) fn trait_impls(db: &dyn Db, file: SourceFile) -> &TraitImpls {
+    library_trait_impls(db, library_of(db, file))
+}
+
+/// Build the library's impl index. Resolution of heads: a TYPE-side element's
 /// head names a trait ([`file_scope`]); a TRAIT-side element's head names
 /// an implementing type — a builtin scalar or a non-generic `type` item
 /// ([`type_scope`]). Unresolvable or reserved heads keep their site (so
 /// diagnostics can speak about them) but enter no bucket.
 #[salsa::tracked(returns(ref))]
-pub(crate) fn trait_impls(db: &dyn Db, file: SourceFile) -> TraitImpls {
+pub(crate) fn library_trait_impls<'db>(db: &'db dyn Db, library: LibraryId<'db>) -> TraitImpls {
     let mut index = TraitImpls::default();
-    for &item in crate::file_item_ids(db, file) {
+    for &item in library_item_ids(db, library) {
+        let file = item.file(db);
         let Some(data) = crate::item_data(db, item).as_ref() else {
             continue;
         };
@@ -123,6 +140,9 @@ pub(crate) fn trait_impls(db: &dyn Db, file: SourceFile) -> TraitImpls {
             item_tree::ItemKind::Value(_) | item_tree::ItemKind::Member => continue,
         };
         let owner = crate::item_loc(db, item);
+        if !type_side {
+            index.traits.push(owner.clone());
+        }
         // The impl heads are exactly the distinct qualifiers of the item's
         // trait-impl members — plus impls with EMPTY bodies, which mint no
         // members; the shared with-chain traversal enumerates them (still
@@ -299,22 +319,9 @@ pub fn dict_param_count(db: &dyn Db, file: SourceFile, generics: &[GenericParamD
         .sum()
 }
 
-/// All traits declared in `file`, in file order.
-pub(crate) fn trait_items<'db>(db: &'db dyn Db, file: SourceFile) -> Vec<ItemId<'db>> {
-    crate::file_item_ids(db, file)
-        .iter()
-        .copied()
-        .filter(|&item| {
-            crate::item_data(db, item)
-                .as_ref()
-                .is_some_and(|data| matches!(data.kind, item_tree::ItemKind::Trait))
-        })
-        .collect()
-}
-
 /// The traits that can answer a dot-call `recv.name(...)` on a concrete
 /// receiver keyed `self_key`: every trait with a requirement named `name`
-/// AND an impl for the receiver. Returned in file order (ambiguity — more
+/// AND an impl for the receiver. Returned in library order (ambiguity — more
 /// than one — is the caller's diagnostic).
 pub(crate) fn traits_providing_member(
     db: &dyn Db,
@@ -324,14 +331,13 @@ pub(crate) fn traits_providing_member(
 ) -> Vec<(ItemLoc, u32)> {
     let impls = trait_impls(db, file);
     let mut out = Vec::new();
-    for trait_item in trait_items(db, file) {
-        let requirements = item_tree::trait_requirements(db, trait_item);
+    for trait_loc in &impls.traits {
+        let requirements = item_tree::trait_requirements(db, trait_loc.to_id(db));
         let Some(index) = requirements.iter().position(|req| req.name == name) else {
             continue;
         };
-        let trait_loc = crate::item_loc(db, trait_item);
-        if impls.impl_for(&trait_loc, self_key).is_some() {
-            out.push((trait_loc, index as u32));
+        if impls.impl_for(trait_loc, self_key).is_some() {
+            out.push((trait_loc.clone(), index as u32));
         }
     }
     out
@@ -431,10 +437,11 @@ pub fn lower_requirement_sig(
 }
 
 /// Whether two binders match for impl-vs-requirement purposes: same
-/// arity, same kinds position by position, the same RESOLVED bound set and
-/// the same `forget` requirement per type param, and the same OUTLIVES set
-/// per region param (the sets order-insensitive; unresolvable bounds
-/// compare by absence — their own diagnostics tell that story).
+/// arity, same kinds position by position, the same RESOLVED bounds in the
+/// same written order (the order the dictionaries are passed in) and the
+/// same `forget` requirement per type param, and the same OUTLIVES set per
+/// region param (order-insensitive; unresolvable bounds compare by absence
+/// — their own diagnostics tell that story).
 ///
 /// A REGION param matches a region param. Without that arm a requirement
 /// could not carry a region binder at all — and a requirement whose member
@@ -452,9 +459,8 @@ pub fn lower_requirement_sig(
 /// more), so loosening in that direction later is purely additive.
 pub(crate) fn binders_match(
     db: &dyn Db,
-    file: SourceFile,
-    req: &[GenericParamData],
-    member: &[GenericParamData],
+    (req_file, req): (SourceFile, &[GenericParamData]),
+    (member_file, member): (SourceFile, &[GenericParamData]),
 ) -> bool {
     if req.len() != member.len() {
         return false;
@@ -512,18 +518,24 @@ pub(crate) fn binders_match(
         if r.forget != m.forget {
             return false;
         }
-        let resolve = |bounds: &[TypeRef]| {
-            let mut traits: Vec<ItemLoc> = bounds
+        // Each binder's bounds name traits in the file that declares it, and
+        // compare in written order: the order of the dictionaries
+        // [`bound_slots`] passes, which the caller pushes by the requirement
+        // and the member's body reads by its own binder.
+        // TODO: halvko/must#163: accept any order by matching slots by trait.
+        let resolve = |file: SourceFile, bounds: &[TypeRef]| {
+            let mut traits: Vec<ItemLoc> = Vec::new();
+            for trait_ in bounds
                 .iter()
                 .filter_map(|bound| bound_trait(db, file, bound))
-                .collect();
-            traits.sort_by(|a, b| {
-                (a.name.as_ref(), a.disambiguator).cmp(&(b.name.as_ref(), b.disambiguator))
-            });
-            traits.dedup();
+            {
+                if !traits.contains(&trait_) {
+                    traits.push(trait_);
+                }
+            }
             traits
         };
-        resolve(&r.bounds) == resolve(&m.bounds)
+        resolve(req_file, &r.bounds) == resolve(member_file, &m.bounds)
     })
 }
 
