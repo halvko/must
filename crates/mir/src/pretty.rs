@@ -99,21 +99,20 @@ fn render_rvalue(rvalue: &Rvalue) -> String {
         Rvalue::Index { base, index } => format!("{}[{}]", operand(base), operand(index)),
         Rvalue::Repeat { elem, count } => format!("[{}; {}]", operand(elem), operand(count)),
         Rvalue::AddrOf { mutable, place: p } => {
-            // MIR-IR debug notation, not source syntax — kept prefix; source
-            // spells this postfix (`place.&raw` / `place.&raw mut`).
             let flavor = if *mutable { "&raw mut" } else { "&raw" };
-            format!("{flavor} {}", place(p))
+            format!("{}.{flavor}", place(p))
         }
         // Rendered without a region: MIR is region-erased, and a snapshot
         // that showed one would be advertising information this layer does
         // not have.
         Rvalue::Borrow { mutable, place: p } => {
             let flavor = if *mutable { "&mut" } else { "&" };
-            format!("{flavor} {}", place(p))
+            format!("{}.{flavor}", place(p))
         }
         Rvalue::AddrOfStatic { item, projection } => {
-            let mut path = format!("&raw static {}", item.display_name());
+            let mut path = format!("static {}", item.display_name());
             path.push_str(&projection_suffix(projection));
+            path.push_str(".&raw");
             path
         }
         Rvalue::Instantiate { item, const_args } => {
