@@ -56,7 +56,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ItemId;
 use crate::constraint::{RegionConstraint, RegionConstraintReason};
-use crate::item_tree::GenericParamKind;
+use crate::item_tree::{GenericParamData, GenericParamKind};
 use crate::ty::{Region, RegionVar};
 
 /// One finding. Carries the expression to blame and everything the message
@@ -195,12 +195,12 @@ struct Solver {
     values: Vec<RegionValue>,
     /// `sup -> sources`: each edge says what `Values(sup)` must contain.
     edges: Vec<Vec<Edge>>,
-    /// Display name per universal, sigil included.
-    universal_names: Vec<String>,
     /// The declared `@a: @b` relation, transitively closed — what the
     /// signature promises, and therefore what the check measures against.
     declared: Vec<FxHashSet<u32>>,
-    /// Per node, which obligation first put each element into its value.
+    /// Per universal node, which obligation first put each element into its
+    /// value. Only universals are kept, because they are the only nodes the
+    /// check reports on.
     ///
     /// This is what makes blame land on the culprit. Reporting the first
     /// edge that merely HAS this region as its longer side points at
@@ -215,12 +215,8 @@ struct Solver {
 }
 
 impl Solver {
-    fn new(
-        universal_names: Vec<String>,
-        declared_bounds: Vec<Vec<u32>>,
-        region_count: u32,
-    ) -> Self {
-        let universal_count = universal_names.len() as u32;
+    fn new(declared_bounds: Vec<Vec<u32>>, region_count: u32) -> Self {
+        let universal_count = declared_bounds.len() as u32;
         let total = (universal_count + region_count) as usize;
         let mut values = vec![RegionValue::default(); total];
         // A universal covers its own end, and the ends of everything it
@@ -238,9 +234,8 @@ impl Solver {
             universal_count,
             values,
             edges: vec![Vec::new(); total],
-            introduced: vec![FxHashMap::default(); total],
+            introduced: vec![FxHashMap::default(); universal_count as usize],
             meet_checks: Vec::new(),
-            universal_names,
             declared,
         }
     }
@@ -374,12 +369,12 @@ impl Solver {
                     if additions.is_empty() {
                         continue;
                     }
-                    for elem in &additions {
-                        // First writer wins: the obligation that actually
-                        // put this element here is the one to blame.
-                        self.introduced[sup]
-                            .entry(*elem)
-                            .or_insert((origin, reason));
+                    if let Some(introduced) = self.introduced.get_mut(sup) {
+                        for elem in &additions {
+                            // First writer wins: the obligation that actually
+                            // put this element here is the one to blame.
+                            introduced.entry(*elem).or_insert((origin, reason));
+                        }
                     }
                     self.values[sup].extend(additions);
                     changed = true;
@@ -471,14 +466,10 @@ fn build_solver<'db>(
     item: ItemId<'db>,
     infer: &'db crate::infer::InferenceResult,
 ) -> Solver {
-    let generics = crate::item_data(db, item)
-        .as_ref()
-        .map(|data| data.generics.clone())
-        .unwrap_or_default();
+    let generics = universal_params(db, item);
     // Universals keep their BINDER index, so a `Region::Param`'s index is
     // its node number directly. Non-region params leave a hole, which
     // nothing ever names.
-    let mut universal_names: Vec<String> = Vec::with_capacity(generics.len());
     let mut declared_bounds: Vec<Vec<u32>> = Vec::with_capacity(generics.len());
     let by_name: FxHashMap<&str, u32> = generics
         .iter()
@@ -486,8 +477,7 @@ fn build_solver<'db>(
         .filter(|(_, param)| matches!(param.kind, GenericParamKind::Region))
         .map(|(index, param)| (param.name.as_str(), index as u32))
         .collect();
-    for param in &generics {
-        universal_names.push(param.name.clone());
+    for param in generics {
         declared_bounds.push(
             param
                 .outlives
@@ -497,7 +487,7 @@ fn build_solver<'db>(
         );
     }
 
-    let mut solver = Solver::new(universal_names, declared_bounds, infer.region_count);
+    let mut solver = Solver::new(declared_bounds, infer.region_count);
     for RegionConstraint {
         sup,
         sub,
@@ -524,8 +514,6 @@ fn build_solver<'db>(
 pub struct RegionCover {
     universal_count: u32,
     covers: Vec<Vec<u32>>,
-    /// Display name per universal, sigil included.
-    universal_names: Vec<String>,
 }
 
 impl RegionCover {
@@ -548,13 +536,26 @@ impl RegionCover {
     pub fn is_universal(&self, node: u32) -> bool {
         node < self.universal_count
     }
+}
 
-    /// A universal's name as the signature spells it, sigil included.
-    pub fn universal_name(&self, node: u32) -> &str {
-        self.universal_names
-            .get(node as usize)
-            .map_or("", String::as_str)
-    }
+/// `item`'s generic parameters, in binder order; a universal's node number
+/// is its index here (non-region params leave holes).
+fn universal_params<'db>(db: &'db dyn Db, item: ItemId<'db>) -> &'db [GenericParamData] {
+    crate::item_data(db, item)
+        .as_ref()
+        .map_or(&[], |data| data.generics.as_slice())
+}
+
+/// A universal's name as `item`'s signature spells it, sigil included.
+pub fn universal_name(db: &dyn Db, item: ItemId<'_>, node: u32) -> String {
+    param_name(universal_params(db, item), node)
+}
+
+/// The name of universal `node` among `params`, sigil included.
+fn param_name(params: &[GenericParamData], node: u32) -> String {
+    params
+        .get(node as usize)
+        .map_or_else(String::new, |param| param.name.clone())
 }
 
 #[salsa::tracked(returns(ref))]
@@ -563,7 +564,6 @@ pub fn region_cover<'db>(db: &'db dyn Db, item: ItemId<'db>) -> RegionCover {
     RegionCover {
         universal_count: solver.universal_count,
         covers: solver.cover(),
-        universal_names: solver.universal_names,
     }
 }
 
@@ -579,6 +579,7 @@ pub fn outlives_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<OutlivesDi
     solver.solve();
 
     let mut diagnostics = Vec::new();
+    let params = universal_params(db, item);
 
     // 1. The universal-region check. Read off the constraints rather than
     //    off the solved values, so blame lands on the obligation the user's
@@ -602,8 +603,8 @@ pub fn outlives_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<OutlivesDi
             };
             diagnostics.push(OutlivesDiagnostic::UndeclaredOutlives {
                 expr: origin,
-                longer: solver.universal_names[universal as usize].clone(),
-                shorter: solver.universal_names[shorter as usize].clone(),
+                longer: param_name(params, universal),
+                shorter: param_name(params, shorter),
                 reason,
             });
         }
@@ -623,11 +624,11 @@ pub fn outlives_check<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<OutlivesDi
         }) {
             continue;
         }
-        let longer = solver.universal_names[sup_node.0 as usize].clone();
+        let longer = param_name(params, sup_node.0);
         let shorter = members
             .iter()
             .filter(|member| member.0 < solver.universal_count)
-            .map(|member| solver.universal_names[member.0 as usize].clone())
+            .map(|member| param_name(params, member.0))
             .collect::<Vec<_>>()
             .join(" + ");
         if shorter.is_empty() {

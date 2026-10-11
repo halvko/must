@@ -124,7 +124,7 @@ pub enum Affine {
     /// make a second read of one binding a second exclusive borrow of one
     /// place. Refusing every parameter is the strict, reversible
     /// direction — a future `T: copy` can only ever accept more programs.
-    Param(String),
+    Param(std::sync::Arc<str>),
     /// An exclusive BORROW held inside the value. Duplicating it
     /// duplicates a PERMISSION; two handles on one loan is the thing
     /// exclusivity exists to prevent.
@@ -133,7 +133,7 @@ pub enum Affine {
 
 fn affine_leaf(db: &dyn Db, ty: &Ty) -> Option<Affine> {
     match ty {
-        Ty::Param(param) => Some(Affine::Param(param.name.to_string())),
+        Ty::Param(param) => Some(Affine::Param(param.name.clone())),
         Ty::Borrow { mutable: true, .. } => Some(Affine::MutBorrow),
         // Everything a value must be consumed FOR, it must also not be
         // duplicated for. The leaves are the disposal walk's own.
@@ -168,7 +168,7 @@ pub fn no_forget_reason(db: &dyn Db, ty: &Ty) -> Option<String> {
 /// preference order would name `T` while the message named `Lin`, so the
 /// diagnostic would offer `T: forget` for a program that stays linear
 /// after taking the advice. One walk, one root, one fix.
-pub fn blaming_param(db: &dyn Db, ty: &Ty) -> Option<String> {
+pub fn blaming_param(db: &dyn Db, ty: &Ty) -> Option<std::sync::Arc<str>> {
     let mut path = Vec::new();
     blame(db, ty, None, &mut Search::default(), &mut path)?.param
 }
@@ -480,18 +480,20 @@ fn mentions(ty: &Ty, found: &mut impl FnMut(&ItemLoc)) {
     }
 }
 
-/// How a message names the step from a declaration down to one of its own
-/// components. Carried alongside the component rather than phrased on the
-/// spot, because only [`blame`] ever renders one.
-enum Step {
-    Field(String),
-    Payload(String),
+/// The step from a declaration down to one of its own components: a field
+/// of the record it declares, or the variant whose payload it is. Only
+/// [`blame`] renders one.
+enum Step<'db> {
+    Field(std::sync::Arc<crate::ty::RecordTy>, u32),
+    Payload(&'db str),
 }
 
-impl Step {
+impl Step<'_> {
     fn phrase(&self) -> String {
         match self {
-            Step::Field(name) => format!("through field `{name}`"),
+            Step::Field(record, index) => {
+                format!("through field `{}`", record.fields[*index as usize].0)
+            }
             Step::Payload(name) => format!("through the `::{name}` payload"),
         }
     }
@@ -502,13 +504,14 @@ impl Step {
 /// substituted — the arguments are the other half of the answer, and
 /// keeping them out of this half is what makes it a property of the
 /// declaration.
-fn decl_components(db: &dyn Db, decl: &ItemLoc) -> Vec<(Step, Ty)> {
+fn decl_components<'db>(db: &'db dyn Db, decl: &ItemLoc) -> Vec<(Step<'db>, Ty)> {
     let item = decl.to_id(db);
     if let Some(Ty::Record(record)) = crate::ty::type_underlying(db, item) {
         return record
             .fields
             .iter()
-            .map(|(name, ty)| (Step::Field(name.clone()), ty.clone()))
+            .enumerate()
+            .map(|(index, (_, ty))| (Step::Field(record.clone(), index as u32), ty.clone()))
             .collect();
     }
     let Some(variants) = crate::ty::enum_variants(db, item).as_ref() else {
@@ -519,7 +522,7 @@ fn decl_components(db: &dyn Db, decl: &ItemLoc) -> Vec<(Step, Ty)> {
         .flat_map(|(name, payload)| {
             payload
                 .iter()
-                .map(|ty| (Step::Payload(name.clone()), ty.clone()))
+                .map(|ty| (Step::Payload(name.as_str()), ty.clone()))
         })
         .collect()
 }
@@ -551,7 +554,7 @@ struct Blame {
     sentence: String,
     /// `Some` exactly when the root is a parameter — the one case where a
     /// diagnostic can offer `T: forget` and be right about it.
-    param: Option<String>,
+    param: Option<std::sync::Arc<str>>,
 }
 
 impl Blame {
@@ -562,12 +565,12 @@ impl Blame {
         }
     }
 
-    fn param(name: &str) -> Blame {
+    fn param(name: &std::sync::Arc<str>) -> Blame {
         Blame {
             sentence: format!(
                 "`{name}` has no `forget` bound, so it may be a type that must be consumed"
             ),
-            param: Some(name.to_owned()),
+            param: Some(name.clone()),
         }
     }
 }
