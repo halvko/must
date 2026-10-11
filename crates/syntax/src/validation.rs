@@ -44,10 +44,7 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
             require_mut_names_a_binding(let_stmt.mut_token(), let_stmt.pat(), &mut errors);
             validate_deferred_let(&let_stmt, &mut errors);
         } else if let Some(record_ty) = ast::RecordType::cast(node.clone()) {
-            let names = record_ty
-                .fields()
-                .filter_map(|f| f.name())
-                .map(|n| (n.text(), n.syntax().text_range()));
+            let names = record_ty.fields().filter_map(|f| f.name()?.ident_token());
             report_duplicate_fields(names, &mut errors);
             reject_open_record(record_ty.dot3_token(), &mut errors);
             for field in record_ty.fields() {
@@ -56,8 +53,7 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
         } else if let Some(record_expr) = ast::RecordExpr::cast(node.clone()) {
             let names = record_expr
                 .fields()
-                .filter_map(|f| f.name_ref())
-                .map(|n| (n.text(), n.syntax().text_range()));
+                .filter_map(|f| f.name_ref()?.ident_token());
             report_duplicate_fields(names, &mut errors);
             reject_open_record(record_expr.dot3_token(), &mut errors);
             reject_stray_type_binder(
@@ -106,10 +102,7 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
         } else if let Some(params) = ast::GenericParamList::cast(node.clone()) {
             require_regions_first(&params, &mut errors);
         } else if let Some(enum_expr) = ast::EnumExpr::cast(node.clone()) {
-            let names = enum_expr
-                .variants()
-                .filter_map(|v| v.name())
-                .map(|n| (n.text(), n.syntax().text_range()));
+            let names = enum_expr.variants().filter_map(|v| v.name()?.ident_token());
             report_duplicates(names, "variant", &mut errors);
             require_enum_declares_a_type(&enum_expr, &mut errors);
             reject_stray_type_binder(
@@ -122,8 +115,7 @@ pub(crate) fn validate(root: &SyntaxNode) -> Vec<SyntaxError> {
         } else if let Some(record_pat) = ast::RecordPat::cast(node.clone()) {
             let names = record_pat
                 .fields()
-                .filter_map(|f| f.field_name())
-                .map(|n| (n.text(), n.syntax().text_range()));
+                .filter_map(|f| f.field_name()?.ident_token());
             report_duplicate_fields(names, &mut errors);
         } else if let Some(variant_pat) = ast::VariantPat::cast(node.clone()) {
             reject_unqualified_bare_variant_pat(&variant_pat, &mut errors);
@@ -704,32 +696,28 @@ fn validate_member(member: &ast::Member, errors: &mut Vec<SyntaxError>) {
     }
 }
 
-/// Report every repeat of a field name after its first occurrence. Empty
-/// names (missing in broken code) are ignored so they never collide.
+/// Report every repeat of a field name after its first occurrence.
 fn report_duplicate_fields(
-    fields: impl Iterator<Item = (String, TextRange)>,
+    names: impl Iterator<Item = SyntaxToken>,
     errors: &mut Vec<SyntaxError>,
 ) {
-    report_duplicates(fields, "field", errors);
+    report_duplicates(names, "field", errors);
 }
 
 /// Report every repeat of a name after its first occurrence — record fields
-/// and enum variants share the rule. Empty names (missing in broken code)
-/// are ignored so they never collide.
+/// and enum variants share the rule.
 fn report_duplicates(
-    names: impl Iterator<Item = (String, TextRange)>,
+    names: impl Iterator<Item = SyntaxToken>,
     what: &str,
     errors: &mut Vec<SyntaxError>,
 ) {
-    let mut seen = std::collections::HashSet::new();
-    for (name, range) in names {
-        if name.is_empty() {
-            continue;
-        }
-        if !seen.insert(name.clone()) {
+    let idents: Vec<SyntaxToken> = names.collect();
+    for (i, ident) in idents.iter().enumerate() {
+        let name = ident.text();
+        if idents[..i].iter().any(|earlier| earlier.text() == name) {
             errors.push(SyntaxError {
                 message: format!("duplicate {what} `{name}`"),
-                range,
+                range: ident.text_range(),
                 fix: None,
             });
         }
@@ -1551,14 +1539,26 @@ fn reject_nested_generic_binder(fn_literal: &ast::FnLiteral, errors: &mut Vec<Sy
 /// position — fn literals, `struct`/`enum` declarations, trait requirements
 /// — and a binder reads the same way wherever it is declared.
 fn require_regions_first(list: &ast::GenericParamList, errors: &mut Vec<SyntaxError>) {
-    let mut spellable: Option<String> = None;
+    // The first type or const parameter, and the placeholder that stands
+    // for it when it has no name (broken code): the ordering is about the
+    // KINDS, so a nameless parameter counts as one.
+    let mut spellable: Option<(Option<ast::Name>, &str)> = None;
     for param in list.params() {
         match &param {
+            ast::GenericParam::TypeParam(p) => {
+                spellable.get_or_insert((p.name(), "T"));
+            }
+            ast::GenericParam::ConstParam(p) => {
+                spellable.get_or_insert((p.name(), "N"));
+            }
             ast::GenericParam::RegionParam(region) => {
-                let Some(earlier) = &spellable else {
+                let Some((earlier, placeholder)) = &spellable else {
                     continue;
                 };
                 let name = region.name().unwrap_or_else(|| "@".to_owned());
+                let earlier = earlier
+                    .as_ref()
+                    .map_or_else(|| (*placeholder).to_owned(), |n| n.text());
                 errors.push(SyntaxError {
                     message: format!(
                         "region parameters come first in a binder; \
@@ -1566,29 +1566,6 @@ fn require_regions_first(list: &ast::GenericParamList, errors: &mut Vec<SyntaxEr
                     ),
                     range: param.syntax().text_range(),
                     fix: None,
-                });
-            }
-            // A nameless (broken) parameter still counts as one: the
-            // ordering is about the KINDS, and a placeholder keeps the
-            // message readable rather than skipping the check.
-            ast::GenericParam::TypeParam(type_param) => {
-                spellable = spellable.or_else(|| {
-                    Some(
-                        type_param
-                            .name()
-                            .map(|n| n.text())
-                            .unwrap_or_else(|| "T".to_owned()),
-                    )
-                });
-            }
-            ast::GenericParam::ConstParam(const_param) => {
-                spellable = spellable.or_else(|| {
-                    Some(
-                        const_param
-                            .name()
-                            .map(|n| n.text())
-                            .unwrap_or_else(|| "N".to_owned()),
-                    )
                 });
             }
         }

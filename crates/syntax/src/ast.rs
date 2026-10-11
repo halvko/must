@@ -789,15 +789,19 @@ impl TypeItem {
 }
 
 impl Name {
-    pub fn text(&self) -> String {
+    pub fn ident_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, IDENT)
+    }
+
+    pub fn text(&self) -> String {
+        self.ident_token()
             .map(|it| it.text().to_owned())
             .unwrap_or_default()
     }
 
     /// The identifier, or `None` when this name is the hole `_`.
     pub fn ident(&self) -> Option<String> {
-        token(&self.syntax, IDENT).map(|it| it.text().to_owned())
+        self.ident_token().map(|it| it.text().to_owned())
     }
 
     /// Whether this name is the hole `_` rather than an identifier. A
@@ -837,8 +841,12 @@ impl Name {
 }
 
 impl NameRef {
-    pub fn text(&self) -> String {
+    pub fn ident_token(&self) -> Option<SyntaxToken> {
         token(&self.syntax, IDENT)
+    }
+
+    pub fn text(&self) -> String {
+        self.ident_token()
             .map(|it| it.text().to_owned())
             .unwrap_or_default()
     }
