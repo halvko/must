@@ -16,5 +16,4 @@ Judge names and words: identifiers, diagnostics, docs and commit messages.
   whose subject says what is true after it, and fixups are squashed into
   the commit they fix.
 
-Suggest the replacement wording in each finding. Leave correctness to the
-soundness reviewer.
+Suggest the replacement wording in each finding.
