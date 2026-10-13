@@ -323,15 +323,6 @@ pub enum Ty {
     /// [`variant_payloads_for`], which substitute the args for the
     /// declaration's rigid params.
     Named(NamedTy),
-    /// `Shape::Circle`: the type of one variant of an enum, a first-class
-    /// type of its own. It does *not* unify with its enum — a variant-typed
-    /// value is tag-free at runtime, an enum-typed value is tagged, so
-    /// going variant → enum is a real conversion ([`widens_to`]), never
-    /// equality. Payload types are not carried here (identity only, like
-    /// [`Ty::Named`] — though the enum's generic args are, so the widening
-    /// conversion preserves them); they are projected through
-    /// [`variant_payloads_for`].
-    Variant(VariantTy),
     /// `T.&raw` / `T.&raw mut`: a raw pointer. Unifies exactly and
     /// equationally like everything else — same mutability, pointwise
     /// pointee — with NO variance (there is no subtyping to be variant
@@ -375,8 +366,8 @@ pub enum Ty {
     },
     /// A rigid type parameter of a generic item (`T` in `fn::<T>`).
     /// Identity is `(item, index)` — the declaring item plus the position
-    /// in its binder — the same range-free scheme as [`Ty::Named`] /
-    /// [`VariantTy`]. Rigid: it unifies ONLY with itself (never with a
+    /// in its binder — the same range-free scheme as [`Ty::Named`].
+    /// Rigid: it unifies ONLY with itself (never with a
     /// concrete type, never bound like an inference variable), widens to
     /// nothing and nothing widens to it — inside the generic body the
     /// param is fully opaque (pass/store/return/`==` work; field access,
@@ -467,7 +458,7 @@ impl Region {
 /// parameter's position in the item's full generic binder (type and const
 /// params share one index space). The name is carried for display; it is
 /// determined by `(item, index)`, so including it in equality is harmless
-/// (same reasoning as [`VariantTy`]).
+/// (same reasoning as [`ResolvedVariant`]).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ParamTy {
     /// The declaring generic item.
@@ -494,7 +485,7 @@ pub struct ParamTy {
 /// safe `fn` may be used where an `unsafe fn` is expected (a value that
 /// needs no vouching is fine in a position that would accept vouching),
 /// never the reverse. That conversion is a no-op at run time; nothing is
-/// recorded for MIR, unlike a variant → enum widening.
+/// recorded for MIR.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FnTy {
     pub params: Vec<Ty>,
@@ -539,7 +530,7 @@ impl NamedTy {
     }
 }
 
-/// One generic argument of a [`NamedTy`]/[`VariantTy`], in binder order.
+/// One generic argument of a [`NamedTy`], in binder order.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GenericArg {
     /// A REGION argument. Only reachable through a region param on a TYPE
@@ -614,24 +605,26 @@ fn display_args(args: &[GenericArg]) -> String {
     format!("::<{list}>")
 }
 
-/// Identity of a variant type: the enum declaration plus the variant's
-/// position in it. The name is carried for display (and for the runtime
-/// value's DAP rendering); it is determined by `(decl, index)`, so including
-/// it in equality is harmless.
+/// One variant of an enum mention, as a constructor path or a pattern
+/// resolved it: the enum declaration plus the variant's position in it.
+/// Not a type — a variant's value has its enum's type ([`Self::enum_ty`]).
+/// The name is carried for display (and for the runtime value's DAP
+/// rendering); it is determined by `(decl, index)`, so including it in
+/// equality is harmless.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct VariantTy {
+pub struct ResolvedVariant {
     /// The declaring `type ... = enum { ... };` item.
     pub decl: ItemLoc,
     /// The enum mention's generic arguments — the same full-list identity
-    /// as [`NamedTy::args`], carried so variant → enum widening preserves
-    /// them and payload projection can substitute.
+    /// as [`NamedTy::args`], carried so the enum type keeps them and
+    /// payload projection can substitute.
     pub args: Vec<GenericArg>,
     /// Position in the declaration's source-order variant list.
     pub index: u32,
     pub name: std::sync::Arc<str>,
 }
 
-impl VariantTy {
+impl ResolvedVariant {
     /// The enum this variant belongs to, with the same generic arguments.
     pub fn enum_ty(&self) -> Ty {
         Ty::Named(NamedTy {
@@ -639,37 +632,42 @@ impl VariantTy {
             args: self.args.clone(),
         })
     }
+
+    /// The type a mention of this variant has as a value: the enum for a
+    /// payload-less variant, else its constructor `fn(payload...) -> Enum`.
+    /// `Ty::Error` if the declaration has no such variant.
+    pub fn value_ty(&self, db: &dyn Db) -> Ty {
+        match variant_payloads_for(db, self) {
+            Some(payload) if payload.is_empty() => self.enum_ty(),
+            Some(payload) => Ty::fn_type(payload, self.enum_ty()),
+            None => Ty::Error,
+        }
+    }
 }
 
 /// The implicit-conversion lattice as a PREDICATE — "would a value of
 /// `actual` be accepted where `expected` is wanted, other than by being the
-/// same type". Three edges, and they are the whole list:
+/// same type". Two edges, and they are the whole list:
 ///
 /// - `!` converts to everything (divergence produces no value to convert);
-/// - a variant type converts to *its* enum — a real runtime conversion (the
-///   tag is injected; see `mir`'s `WidenToEnum`);
 /// - a safe `fn` converts to the corresponding `unsafe fn` — no runtime
 ///   conversion at all, just a permission the position declines to use.
 ///
 /// Only shallowly: no variance through `fn` parameters or results, record
 /// fields, or generic arguments. Unification itself stays equational —
-/// `unify(Variant, Named)` and `unify(fn, unsafe fn)` are both false.
+/// `unify(fn, unsafe fn)` is false.
 ///
-/// Declaration-level only, and that is why this is not the whole judgement
-/// at a real check site: an enum's generic ARGS must additionally agree
-/// (`Option::<usize>::Some` converts to `Option::<usize>`, never to
-/// `Option::<str>`), and two fn types' parameters and results must unify.
-/// The check sites (`InferCtx::check` and the join solver) run the
-/// OPERATIONS — `Constraints::widen_to_enum` and
-/// `Constraints::coerce_fn_to_unsafe` — which relate those parts through
-/// the table. This predicate exists for the one consumer that has no table
-/// and needs no diagnostics: the editor's completion ranker, which must
-/// rank a legal candidate as legal, and which is why the list lives in one
-/// place instead of being re-derived per consumer.
+/// Not the whole judgement at a real check site: two fn types' parameters
+/// and results must unify. The check sites (`InferCtx::check` and the join
+/// solver) run the OPERATION — `Constraints::coerce_fn_to_unsafe` — which
+/// relates those parts through the table. This predicate exists for the
+/// one consumer that has no table and needs no diagnostics: the editor's
+/// completion ranker, which must rank a legal candidate as legal, and
+/// which is why the list lives in one place instead of being re-derived
+/// per consumer.
 pub fn widens_to(actual: &Ty, expected: &Ty) -> bool {
     match (actual, expected) {
         (Ty::Never, _) => true,
-        (Ty::Variant(variant), Ty::Named(named)) => variant.decl == named.decl,
         // Parameters and result are compared by EQUALITY, not unified:
         // this predicate has no table to unify through, and a candidate
         // whose parameters are merely unifiable is not yet known to belong
@@ -767,10 +765,6 @@ impl Ty {
                 decl: named.decl.clone(),
                 args: named.args.iter().map(erase_regions_arg).collect(),
             }),
-            Ty::Variant(variant) => Ty::Variant(VariantTy {
-                args: variant.args.iter().map(erase_regions_arg).collect(),
-                ..variant.clone()
-            }),
             other => other.clone(),
         }
     }
@@ -793,8 +787,8 @@ impl Ty {
     }
 
     /// Whether any part of the type is an inference variable — after
-    /// `resolve_fully`, an *unbound* one. `Named`/`Variant` are
-    /// identity-only for the declared SHAPE (not carried here), but their
+    /// `resolve_fully`, an *unbound* one. `Named` is
+    /// identity-only for the declared SHAPE (not carried here), but its
     /// generic args ARE the identity, so the traversal recurses into them
     /// (`Pair::<_>` is undetermined until the arg resolves).
     pub fn contains_infer(&self) -> bool {
@@ -810,16 +804,14 @@ impl Ty {
             // never inferred, TR06) — only the element can be undetermined.
             Ty::Array { elem, .. } => elem.contains_infer(),
             Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| ty.contains_infer()),
-            Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
-                args.iter().any(GenericArg::contains_infer)
-            }
+            Ty::Named(NamedTy { args, .. }) => args.iter().any(GenericArg::contains_infer),
             _ => false,
         }
     }
 
     /// Whether an fn type appears anywhere in the type. Same traversal
-    /// shape (and the same declared-shape blind spot on `Named`/`Variant`,
-    /// whose args are still visited) as [`Ty::contains_infer`]. Used by the
+    /// shape (and the same declared-shape blind spot on `Named`, whose args
+    /// are visited) as [`Ty::contains_infer`]. Used by the
     /// mention-side belt that keeps fn values out of the const-arg domain
     /// (TR06) — the declaration-side twin checks the syntactic `TypeRef`
     /// (see `TypeRef::mentions_fn`).
@@ -830,12 +822,10 @@ impl Ty {
             Ty::Borrow { referent, .. } => referent.mentions_fn(),
             Ty::Array { elem, .. } => elem.mentions_fn(),
             Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| ty.mentions_fn()),
-            Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
-                args.iter().any(|arg| match arg {
-                    GenericArg::Ty(ty) => ty.mentions_fn(),
-                    GenericArg::Region(_) | GenericArg::Const(_) => false,
-                })
-            }
+            Ty::Named(NamedTy { args, .. }) => args.iter().any(|arg| match arg {
+                GenericArg::Ty(ty) => ty.mentions_fn(),
+                GenericArg::Region(_) | GenericArg::Const(_) => false,
+            }),
             _ => false,
         }
     }
@@ -853,12 +843,10 @@ impl Ty {
             Ty::Borrow { referent, .. } => referent.mentions_array(),
             Ty::Fn(f) => f.params.iter().any(Ty::mentions_array) || f.ret.mentions_array(),
             Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| ty.mentions_array()),
-            Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
-                args.iter().any(|arg| match arg {
-                    GenericArg::Ty(ty) => ty.mentions_array(),
-                    GenericArg::Region(_) | GenericArg::Const(_) => false,
-                })
-            }
+            Ty::Named(NamedTy { args, .. }) => args.iter().any(|arg| match arg {
+                GenericArg::Ty(ty) => ty.mentions_array(),
+                GenericArg::Region(_) | GenericArg::Const(_) => false,
+            }),
             _ => false,
         }
     }
@@ -885,7 +873,7 @@ impl Ty {
             // The moment `struct::<@a, T>` becomes legal, a `Named` whose
             // declaration stores a borrow will answer `false` here and
             // slip through every guard this predicate protects.
-            Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
+            Ty::Named(NamedTy { args, .. }) => {
                 args.iter().any(|arg| match arg {
                     GenericArg::Ty(ty) => ty.contains_borrow(),
                     // A region argument is not a borrow, and a const one
@@ -923,9 +911,7 @@ impl Ty {
             // either (`contains_infer` must stay false for it: a
             // `Param`-typed expectation is a real, concrete expectation,
             // never "no expectation").
-            Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
-                args.iter().any(GenericArg::contains_error)
-            }
+            Ty::Named(NamedTy { args, .. }) => args.iter().any(GenericArg::contains_error),
             Ty::Param(_) => false,
             _ => false,
         }
@@ -1003,14 +989,6 @@ impl Ty {
             }
             Ty::Named(named) => {
                 format!("{}{}", named.decl.display_name(), display_args(&named.args))
-            }
-            Ty::Variant(variant) => {
-                format!(
-                    "{}{}::{}",
-                    variant.decl.display_name(),
-                    display_args(&variant.args),
-                    variant.name
-                )
             }
             Ty::Param(param) => param.name.to_string(),
         }
@@ -1137,33 +1115,6 @@ fn lower_type_path(db: &dyn Db, file: SourceFile, name: &str) -> Ty {
         // A value item (invisible here) or nothing: only a builtin type
         // name can save it.
         _ => builtin_type_by_name(name).unwrap_or(Ty::Error),
-    }
-}
-
-/// Resolve `Enum::Variant` in *type* position to a [`Ty::Variant`]. Every
-/// `Ty::Error` case (base not an enum type, unknown variant, generic enum —
-/// variant types of a generic enum have no annotation spelling yet) has a
-/// matching diagnostic in [`crate::file_diagnostics`]'s `PathType` pass —
-/// same mirror contract as [`lower_type_path`].
-fn lower_variant_type_path(db: &dyn Db, file: SourceFile, enum_name: &str, variant: &str) -> Ty {
-    let Some(Resolution::TypeItem(loc)) = type_scope(db, file).resolve(enum_name) else {
-        return Ty::Error;
-    };
-    if !decl_generics(db, &loc).is_empty() {
-        return Ty::Error;
-    }
-    let Some(variants) = enum_variants(db, loc.to_id(db)).as_ref() else {
-        // A struct `type` item, or a broken declaration.
-        return Ty::Error;
-    };
-    match variants.iter().position(|(name, _)| name == variant) {
-        Some(index) => Ty::Variant(VariantTy {
-            decl: loc,
-            args: Vec::new(),
-            index: index as u32,
-            name: std::sync::Arc::from(variant),
-        }),
-        None => Ty::Error,
     }
 }
 
@@ -1370,16 +1321,11 @@ pub(crate) fn lower_type_ref_in(
             None => lower_type_path(db, file, path),
         },
         TypeRef::Apply { name, args } => lower_apply(db, file, name, args, table, scope),
-        TypeRef::Variant { enum_name, variant } => {
-            // A type param has no variants (`T::X` is silently `{error}` —
-            // the diagnostics pass reports it); an unshadowed name resolves
-            // as usual.
-            if scope.types.contains_key(enum_name) {
-                Ty::Error
-            } else {
-                lower_variant_type_path(db, file, enum_name, variant)
-            }
-        }
+        // `Enum::Variant` names a value, never a type: a variant has its
+        // enum's type. Silently `{error}` here — the diagnostics pass
+        // (`variant_position_error`) says so, and so does `T::X` on a type
+        // param, which has no variants at all.
+        TypeRef::Variant { .. } => Ty::Error,
         TypeRef::Hole => Ty::Infer(table.new_key(TyVarValue::Unknown)),
         TypeRef::Record(fields) => Ty::record(
             fields
@@ -1735,7 +1681,6 @@ pub fn type_underlying<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Option<Ty> {
 pub fn dispatches_on(db: &dyn Db, ty: &Ty) -> bool {
     match ty {
         Ty::Named(named) => enum_variants(db, named.decl.to_id(db)).is_some(),
-        Ty::Variant(_) => true,
         Ty::Char | Ty::Int(_) => true,
         _ => false,
     }
@@ -1824,10 +1769,6 @@ fn erase_infer(ty: &Ty) -> Ty {
             decl: named.decl.clone(),
             args: named.args.iter().map(erase_infer_arg).collect(),
         }),
-        Ty::Variant(variant) => Ty::Variant(VariantTy {
-            args: variant.args.iter().map(erase_infer_arg).collect(),
-            ..variant.clone()
-        }),
         other => other.clone(),
     }
 }
@@ -1843,7 +1784,7 @@ fn erase_infer_arg(arg: &GenericArg) -> GenericArg {
 /// Substitute `decl`'s rigid binder params by `args` throughout `ty` — the
 /// on-demand projection that turns a stored generic body ([`type_underlying`],
 /// [`enum_variants`]) into a mention's concrete shape. A pure walk keyed by
-/// `(item, index)`, exactly like fn-scheme instantiation; `Named`/`Variant`
+/// `(item, index)`, exactly like fn-scheme instantiation; `Named`
 /// args are substituted but their declared shapes never expand, so
 /// self-referential generic types terminate. Out-of-range or kind-crossed
 /// substitutions (broken mentions, diagnosed upstream) land on
@@ -1902,14 +1843,6 @@ pub fn substitute_args(ty: &Ty, decl: &ItemLoc, args: &[GenericArg]) -> Ty {
                 .map(|arg| substitute_generic_arg(arg, decl, args))
                 .collect(),
         }),
-        Ty::Variant(variant) => Ty::Variant(VariantTy {
-            args: variant
-                .args
-                .iter()
-                .map(|arg| substitute_generic_arg(arg, decl, args))
-                .collect(),
-            ..variant.clone()
-        }),
         other => other.clone(),
     }
 }
@@ -1944,7 +1877,7 @@ pub fn type_underlying_for(db: &dyn Db, named: &NamedTy) -> Option<Ty> {
 /// The payload types of one variant *mention* — [`enum_variants`]'s stored
 /// generic payloads with the variant's enum args substituted. Same
 /// memoization split as [`type_underlying_for`].
-pub fn variant_payloads_for(db: &dyn Db, variant: &VariantTy) -> Option<Vec<Ty>> {
+pub fn variant_payloads_for(db: &dyn Db, variant: &ResolvedVariant) -> Option<Vec<Ty>> {
     let variants = enum_variants(db, variant.decl.to_id(db)).as_ref()?;
     let (_, payload) = variants.get(variant.index as usize)?;
     Some(substitute_payload(payload, &variant.decl, &variant.args))

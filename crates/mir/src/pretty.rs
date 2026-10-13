@@ -79,14 +79,18 @@ fn render_rvalue(rvalue: &Rvalue) -> String {
                 .join(", ");
             format!("{{ {parts} }}")
         }
-        // Tag-free by design, so it renders as a bare tuple — no enum, no
-        // variant, nothing to leak into a snapshot.
+        // Spelled like the constructor call that built it.
         Rvalue::Aggregate {
-            kind: AggregateKind::VariantPayload,
+            kind: AggregateKind::Variant { decl, variant, .. },
             ops,
         } => {
-            let parts = ops.iter().map(operand).collect::<Vec<_>>().join(", ");
-            format!("payload({parts})")
+            let name = format!("{}::{variant}", decl.display_name());
+            if ops.is_empty() {
+                name
+            } else {
+                let parts = ops.iter().map(operand).collect::<Vec<_>>().join(", ");
+                format!("{name}({parts})")
+            }
         }
         Rvalue::Aggregate {
             kind: AggregateKind::Array,
@@ -123,17 +127,6 @@ fn render_rvalue(rvalue: &Rvalue) -> String {
                 .join(", ");
             format!("instantiate {}({args})", item.display_name())
         }
-        Rvalue::WidenToEnum {
-            op,
-            decl,
-            variant,
-            index: _,
-        } => format!(
-            "widen {} to {}::{}",
-            operand(op),
-            decl.display_name(),
-            variant
-        ),
     }
 }
 

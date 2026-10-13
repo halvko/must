@@ -178,8 +178,7 @@ requires byte-identical behavior. Design notes:
 `docs/design/platform-codegen-and-tooling.md`.
 
 `examples/` has a short tour beyond `hello.must` — records and named types
-(`records.must`), the tag-free variant-parameter state-machine pattern
-(`state_machine.must`), loops and mutability (`loops.must`), functions,
+(`records.must`), loops and mutability (`loops.must`), functions,
 recursion, and higher-order calls (`functions.must`), compile-time
 evaluation (`compile_time.must`), generics (`generics.must`), fixed-size
 arrays (`arrays.must`), raw pointers (`pointers.must`), the heap built on

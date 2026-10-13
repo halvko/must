@@ -1780,16 +1780,15 @@ fn named_type_inequality_observes_field_values() {
 }
 
 #[test]
-fn variant_values_are_tag_free_payloads() {
-    // Round-trip through a fn demanding the variant: the value stays the
-    // bare payload tuple (equal to a freshly constructed one — no hidden
-    // tag could sneak in), and the run's result renders with no enum, no
-    // variant, no tag in sight.
+fn variant_values_round_trip_and_render_as_their_enum() {
+    // Round-trip through a fn: the value stays equal to a freshly
+    // constructed one, and the run's result renders as the enum value it
+    // is, variant and payload.
     check_run(
         r#"
 type Shape = enum { Circle(usize), Pair(usize, str), Point };
-static through = fn (c: Shape::Circle) -> Shape::Circle { c };
-static main = fn -> Shape::Pair {
+static through = fn (c: Shape) -> Shape { c };
+static main = fn -> Shape {
     if through(Shape::Circle(3)) == Shape::Circle(3) {
         print("round-tripped intact");
     };
@@ -1799,36 +1798,34 @@ static main = fn -> Shape::Pair {
         "main()",
         expect![[r#"
             output: "round-tripped intact"
-            => (1, "a")
+            => Shape::Pair(1, "a")
         "#]],
     );
 }
 
 #[test]
-fn variant_and_widened_values_const_evaluate() {
-    // Tag-free carriers for every arity, and the tag appearing exactly at
-    // the widening edge (the `Shape` annotations).
+fn variant_values_const_evaluate() {
+    // Every arity const-evaluates to its enum value, tag and payload, with
+    // or without an annotation.
     check_const(
         r#"
 type Shape = enum { Circle(usize), Pair(usize, str), Point };
 static circle = Shape::Circle(3);
 static pair = Shape::Pair(1, "a");
 static point = Shape::Point;
-static widened_circle: Shape = Shape::Circle(3);
-static widened_point: Shape = Shape::Point;
+static annotated_circle: Shape = Shape::Circle(3);
 "#,
         expect![[r#"
-            circle = (3)
-            pair = (1, "a")
-            point = ()
-            widened_circle = Shape::Circle(3)
-            widened_point = Shape::Point
+            circle = Shape::Circle(3)
+            pair = Shape::Pair(1, "a")
+            point = Shape::Point
+            annotated_circle = Shape::Circle(3)
         "#]],
     );
 }
 
 #[test]
-fn widened_values_compare_by_tag_and_payload() {
+fn enum_values_compare_by_tag_and_payload() {
     check_const(
         r#"
 type Shape = enum { Circle(usize), Point };
@@ -1856,7 +1853,7 @@ fn first_class_constructor_runs() {
     check_run(
         r#"
 type Shape = enum { Circle(usize) };
-static make: fn(usize) -> Shape::Circle = Shape::Circle;
+static make: fn(usize) -> Shape = Shape::Circle;
 static main = fn -> bool { make(3) == Shape::Circle(3) };
 "#,
         "main()",
@@ -1867,8 +1864,8 @@ static main = fn -> bool { make(3) == Shape::Circle(3) };
 }
 
 #[test]
-fn const_context_construction_and_widening() {
-    // Constructors are const-legal; the widening conversion is too.
+fn const_context_construction() {
+    // Constructors are const-legal, with or without an annotation.
     check_const_blocks(
         r#"
 type Shape = enum { Circle(usize), Point };
@@ -1878,7 +1875,7 @@ static f = fn {
 };
 "#,
         expect![[r#"
-            f#0 = (2)
+            f#0 = Shape::Circle(2)
             f#1 = Shape::Point
         "#]],
     );
@@ -1957,8 +1954,8 @@ static bump = fn (o: Opt) -> usize {
 }
 
 #[test]
-fn mut_match_bind_of_a_variant_value_widens_to_its_enum() {
-    // The binder holds a tagged enum value: it starts as the `Circle` and
+fn a_mut_match_binder_can_be_reassigned_to_another_variant() {
+    // The binder holds the enum value: it starts as the `Circle` and
     // can be reassigned to `Point`.
     check_run(
         r#"
@@ -1984,13 +1981,13 @@ static f = fn (point: bool) -> usize {
 }
 
 #[test]
-fn nested_mut_binders_of_a_variant_value_widen_to_its_enum() {
+fn nested_mut_binders_of_a_variant_value_can_be_reassigned() {
     // Each binder starts as the `Circle` it was given and can be
     // reassigned to `Point`.
     check_run(
         r#"
 type Shape = enum { Circle(usize), Point };
-type Pair = enum { Two(Shape::Circle, usize) };
+type Pair = enum { Two(Shape, usize) };
 static size = fn (s: Shape) -> usize {
     match s {
         ::Circle(n) => n,
@@ -2057,15 +2054,15 @@ static f = fn (o: Only) -> usize {
 fn nested_let_patterns_bind_through_every_level() {
     check_run(
         r#"
-type Opt = enum { Some(usize), None };
+type Only = enum { One(usize) };
 type Pair = struct { lo: usize, hi: usize };
-static f = fn (v: Opt::Some, w: Opt::Some) -> usize {
-    let [::Some(n), ::Some(m)] = [v, w];
+static f = fn (v: Only, w: Only) -> usize {
+    let [::One(n), ::One(m)] = [v, w];
     let [Pair(struct { lo, hi }), _] = [Pair(struct { lo = 5, hi = 6 }), Pair(struct { lo = 7, hi = 8 })];
     n * 1000 + m * 100 + lo * 10 + hi
 };
 "#,
-        "f(Opt::Some(1), Opt::Some(2))",
+        "f(Only::One(1), Only::One(2))",
         expect![[r#"
             => 1256
         "#]],
@@ -2133,11 +2130,11 @@ fn a_let_pattern_naming_another_variant_traps_instead_of_binding() {
     // The `Circle`'s payload is never read as the `Label`'s `str`.
     let text = r#"
 type Shape = enum { Circle(usize), Label(str) };
-static owned = fn (c: Shape::Circle) -> str {
+static owned = fn (c: Shape) -> str {
     let ::Label(s) = c;
     s
 };
-static borrowed = fn (c: Shape::Circle) -> str {
+static borrowed = fn (c: Shape) -> str {
     let ::Label(s) = c.&;
     s.*
 };
@@ -2322,9 +2319,9 @@ static main = fn {
 }
 
 #[test]
-fn match_on_widened_value_round_trips() {
-    // Construct tag-free, widen at the `let mut`, dispatch on the injected
-    // tag — the full round trip.
+fn match_on_a_reassigned_value_round_trips() {
+    // Construct, reassign another variant, dispatch on the tag — the full
+    // round trip.
     check_run(
         r#"
 type Shape = enum { Circle(usize), Point };
@@ -2369,14 +2366,13 @@ static c = const { match Shape::Circle(9) { ::Circle(r) => r, ::Point => 0 } };
 }
 
 #[test]
-fn variant_typed_match_runs_the_state_machine_end_to_end() {
-    // Construct `Running(5)`, pass it to a function taking the *variant*
-    // type, match inside (no dispatch — see the MIR snapshot), extract the
-    // payload.
+fn match_runs_the_state_machine_end_to_end() {
+    // Construct `Running(5)`, pass it to a function taking the enum,
+    // dispatch on it inside, extract the payload.
     check_run(
         r#"
 type State = enum { Idle, Running(usize) };
-static tick = fn (s: State::Running) -> usize {
+static tick = fn (s: State) -> usize {
     match s {
         ::Running(n) => n + 1,
         ::Idle => 0,
@@ -3059,7 +3055,7 @@ static main = fn () -> usize { let p = Pair::<usize>(struct { a = 1, b = 2 }); p
 }
 
 #[test]
-fn generic_enum_matches_and_widens() {
+fn generic_enum_matches_and_reassigns() {
     check_run(
         r#"
 type Option = enum::<T> { Some(T), None };
@@ -5212,7 +5208,7 @@ type Buf = struct::<const N: usize> { used: usize } with {
 }
 
 #[test]
-fn variant_typed_receiver_widens_into_the_member() {
+fn a_constructed_variant_receiver_reaches_the_member() {
     check_run(
         r#"
 type Light = enum { Red, Green } with {
@@ -5229,6 +5225,32 @@ type Light = enum { Red, Green } with {
         "Light::Red.flip()",
         expect![[r#"
             => Light::Green
+        "#]],
+    );
+}
+
+#[test]
+fn a_constructed_variant_reaches_a_borrowing_member() {
+    // `o` is unannotated: `Option::<usize>::Some(11)` has the enum's type,
+    // so `o.&` is exactly the `Self.&` the member takes.
+    check_run(
+        r#"
+type Option = enum::<T> { Some(T), None } with {
+    impl Self {
+        is_some = fn::<@local>(s: Self.&::<@local>) -> bool {
+            match s { ::Some(_) => true, ::None => false, }
+        }
+    }
+};
+static main = fn () -> () {
+    let o = Option::<usize>::Some(11);
+    if o.&.is_some() { print("some"); }
+};
+"#,
+        "main()",
+        expect![[r#"
+            output: "some"
+            => ()
         "#]],
     );
 }
@@ -5605,9 +5627,9 @@ static main = fn() -> usize { f::<P>(P(struct { a = 1 })) };
 }
 
 #[test]
-fn trait_impls_on_enums_and_variant_receivers() {
-    // A variant-typed receiver reaches its ENUM's trait impl through the
-    // sanctioned widening — dot-form and qualified short form alike.
+fn trait_impls_on_enums_and_constructed_variant_receivers() {
+    // A constructed variant is a value of its ENUM, so it reaches the
+    // enum's trait impl — dot-form and qualified short form alike.
     check_run(
         r#"
 type Shape = enum { Circle(usize), Point };
@@ -5633,10 +5655,9 @@ static main = fn() -> () {
 }
 
 #[test]
-fn qualified_variant_self_widens_and_dispatches() {
-    // A variant-typed argument at a `Self` position widens to its enum,
-    // so the impl's returned tag is real and the match dispatches
-    // honestly.
+fn qualified_variant_self_resolves_to_the_enum_and_dispatches() {
+    // A constructed variant at a `Self` position has its enum's type, so
+    // the impl's returned tag is real and the match dispatches honestly.
     check_run(
         r#"
 type Shape = enum { Circle(usize), Point } with {
@@ -6701,29 +6722,6 @@ static f = fn() -> usize {
         "f()",
         expect![[r#"
             => 16
-        "#]],
-    );
-}
-
-#[test]
-fn a_variant_typed_borrowed_match_writes_through_its_payload() {
-    // Tag-free at runtime — no switch, no tag read — but the payload
-    // binding is a borrow of the slot just the same.
-    check_run(
-        r#"
-type State = enum { Run(usize), Stop };
-static tick = fn::<@a>(s: State::Run.&mut::<@a>) -> () {
-    match s { ::Run(n) => { n.* = n.* + 1; } }
-};
-static f = fn() -> usize {
-    let mut s: State::Run = ::Run(41);
-    tick(s.&mut);
-    match s { ::Run(n) => n }
-};
-"#,
-        "f()",
-        expect![[r#"
-            => 42
         "#]],
     );
 }

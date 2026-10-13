@@ -50,7 +50,7 @@ pub use trap_sites::{
 };
 pub use ty::{
     ConstArgValue, DotReach, FnTy, GenericArg, IntKind, IntValue, NamedTy, ReceiverShape, Region,
-    RegionVar, SelfPosition, Ty, VariantTy, dispatches_on, dot_reach, enum_variants,
+    RegionVar, ResolvedVariant, SelfPosition, Ty, dispatches_on, dot_reach, enum_variants,
     member_self_position, member_self_ty, receiver_takes, render_variant, signature,
     substitute_args, type_underlying, type_underlying_for, variant_payloads_for, widens_to,
 };
@@ -1635,23 +1635,27 @@ pub fn range_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         let message = match type_param_binding(&path_type, &name) {
             // In scope and rigid: a use is fine, but a type param has no
             // variants to name through `::`.
-            TypeParamBinding::Bound => path_type
-                .variant_name_ref()
-                .map(|_| format!("`{name}` has no variants (it is a type parameter)")),
-            TypeParamBinding::InOwnBinder => {
-                Some("a const parameter's type cannot mention a type parameter".to_owned())
-            }
+            TypeParamBinding::Bound => path_type.variant_name_ref().map(|_| {
+                (
+                    format!("`{name}` has no variants (it is a type parameter)"),
+                    None,
+                )
+            }),
+            TypeParamBinding::InOwnBinder => Some((
+                "a const parameter's type cannot mention a type parameter".to_owned(),
+                None,
+            )),
             TypeParamBinding::NotBound => match path_type.variant_name_ref() {
-                Some(variant) => variant_position_error(db, file, &name, &variant.text()),
-                None => type_position_error(db, file, &name),
+                Some(variant) => variant_position_error(db, file, &path_type, &name, &variant),
+                None => type_position_error(db, file, &name).map(|message| (message, None)),
             },
         };
-        if let Some(message) = message {
+        if let Some((message, fix)) = message {
             diagnostics.push(Diagnostic {
                 range: path_type.syntax().text_range(),
                 severity: Severity::Error,
                 message,
-                fix: None,
+                fix,
                 related: Vec::new(),
             });
             continue;
@@ -1909,13 +1913,11 @@ pub fn range_diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 /// exhaustiveness pass in `infer_match` computed it as "every variant not
 /// reached by an arm", so a `match s {}` with zero arms and a `match` missing
 /// just the last variant both reduce to the same "insert these names" work
-/// here, and a variant-typed scrutinee's single-entry `uncovered` naturally
-/// yields a single arm — none of that needs special-casing in this
-/// function, only in the diagnostic that already computed it. `decl`
-/// (carried on the diagnostic) says which enum to look the variants' arity
-/// up in; borrowed and variant-typed scrutinees need no extra handling
-/// here because `infer_match` already resolved the dispatch before either
-/// field was populated.
+/// here — none of that needs special-casing in this function, only in the
+/// diagnostic that already computed it. `decl` (carried on the diagnostic)
+/// says which enum to look the variants' arity up in; borrowed scrutinees
+/// need no extra handling here because `infer_match` already resolved the
+/// dispatch before either field was populated.
 ///
 /// The edit is a pure insertion right after the last existing arm, or
 /// right after `{` when there is none (the empty-arm-list case) — never a
@@ -2765,7 +2767,7 @@ fn enum_comparison_note(db: &dyn Db, enum_ty: &Ty, other: &Ty) -> Option<String>
     let Ty::Named(named) = enum_ty else {
         return None;
     };
-    if let Ty::Named(NamedTy { decl, .. }) | Ty::Variant(VariantTy { decl, .. }) = other
+    if let Ty::Named(NamedTy { decl, .. }) = other
         && *decl == named.decl
     {
         return None;
@@ -3280,30 +3282,27 @@ fn type_position_error(db: &dyn Db, file: SourceFile, name: &str) -> Option<Stri
     }
 }
 
-/// The error for `Enum::Variant` in *type* position, if any. Mirrors
-/// [`ty::lower_variant_type_path`] exactly (the same silent-`Ty::Error`
-/// contract as [`type_position_error`]): the base must name an enum `type`
-/// item and the variant must exist in it. An unknown or ambiguous base is
-/// covered by [`type_position_error`]-style reporting here too, so a
-/// two-segment path never needs a second pass over its first segment.
+/// The error for `Enum::Variant` in *type* position. A variant is a value
+/// whose type is its enum, never a type of its own, so annotation lowering
+/// makes every such path a silent `Ty::Error` and this always names why
+/// (the same mirror contract as [`type_position_error`]): a real variant
+/// points at its enum, anything else says what is wrong with the path. An
+/// unknown or ambiguous base is covered by [`type_position_error`]-style
+/// reporting here too, so a two-segment path never needs a second pass
+/// over its first segment. A real variant comes with a fix that drops the
+/// `::Variant` segment.
 fn variant_position_error(
     db: &dyn Db,
     file: SourceFile,
+    path_type: &ast::PathType,
     base: &str,
-    variant: &str,
-) -> Option<String> {
+    variant_ref: &ast::NameRef,
+) -> Option<(String, Option<syntax::Fix>)> {
+    let variant = &variant_ref.text();
+    let message = |message: String| Some((message, None));
     match type_scope(db, file).resolve(base) {
         Some(Resolution::TypeItem(loc)) => {
             let item = loc.to_id(db);
-            // A generic enum's variant types have no annotation spelling
-            // yet (`Option::<usize>::Some` parses only in expression
-            // position) — the lowering is `Ty::Error`, this is its mirror.
-            if decl_generics_len(db, &loc) > 0 {
-                return Some(format!(
-                    "`{base}` is generic; a generic enum's variant types \
-                     cannot be written in annotations yet"
-                ));
-            }
             match ty::enum_variants(db, item) {
                 Some(variants) => {
                     if variant.is_empty() {
@@ -3311,9 +3310,22 @@ fn variant_position_error(
                         return None;
                     }
                     if variants.iter().any(|(name, _)| name == variant) {
-                        None
+                        let fix = path_type.name_ref().map(|base_ref| syntax::Fix {
+                            label: format!("Use `{base}`"),
+                            edits: vec![syntax::TextEdit {
+                                range: TextRange::new(
+                                    base_ref.syntax().text_range().end(),
+                                    variant_ref.syntax().text_range().end(),
+                                ),
+                                insert: String::new(),
+                            }],
+                        });
+                        Some((
+                            format!("`{base}::{variant}` is a variant, not a type; use `{base}`"),
+                            fix,
+                        ))
                     } else {
-                        Some(format!(
+                        message(format!(
                             "`{}` has no variant `{variant}`",
                             loc.display_name()
                         ))
@@ -3321,7 +3333,7 @@ fn variant_position_error(
                 }
                 None => {
                     if matches!(type_decl(db, item), Some(TypeDeclData::Struct { .. })) {
-                        Some(format!(
+                        message(format!(
                             "`{}` has no variants (it is a `struct` type)",
                             loc.display_name()
                         ))
@@ -3336,11 +3348,11 @@ fn variant_position_error(
         Some(_) => None,
         None => {
             if ty::builtin_type_by_name(base).is_some() {
-                return Some(format!("`{base}` has no variants (it is a builtin type)"));
+                return message(format!("`{base}` has no variants (it is a builtin type)"));
             }
             // Reuse the single-segment wording for a base that is no type
             // at all ("unknown type" / "is not a type").
-            type_position_error(db, file, base)
+            type_position_error(db, file, base).map(|message| (message, None))
         }
     }
 }

@@ -120,10 +120,9 @@
 - **G27** `mut` before a binding name in a pattern (`::Char(mut c, _)`, `mut x =>`,
   `[a, mut b]`) marks that one binding assignable, exactly as `let mut` and a `mut` parameter
   do. It is about the binding, not the matched data's shape, so it changes neither dispatch
-  nor coverage, and `mut _` is refused as a hole that can never be assigned. An unannotated
-  `mut` binding of a variant-typed value widens to its enum, as `let mut` does: a whole match
-  arm, a payload, and a binding nested in a `let` or parameter pattern alike (only an owned
-  value; through a borrow a payload binds the borrow).
+  nor coverage, and `mut _` is refused as a hole that can never be assigned. Nor does it
+  change the binding's type: a `mut` binder has the type a plain one would (a variant has its
+  enum's type, T04).
 - **G28** The unit value is spelled `()`, like the unit type, so a value and its type read
   the same. `( )` with only trivia inside is the unit value, never an empty group; the unit
   value otherwise comes from an empty block, a bare `break` or `return`, and an `if` with no

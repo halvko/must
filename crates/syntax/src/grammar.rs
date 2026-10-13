@@ -2385,7 +2385,8 @@ fn type_core(p: &mut Parser<'_>) -> Option<CompletedMarker> {
         IDENT => {
             let m = p.start();
             name_ref(p);
-            // `Shape::Circle` in type position: a variant type. `Pair::<T>`:
+            // `Shape::Circle` in type position: parsed so lowering can say
+            // "is a variant, not a type" (T04). `Pair::<T>`:
             // a generic type mention, spelled the same as on the expression
             // side.
             if p.at(COLON2) {

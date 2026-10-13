@@ -292,9 +292,8 @@ pub enum ExprData {
         body: ExprId,
     },
     /// `match scrutinee { arms }`. Typing-wise the arms are witnesses of
-    /// one join (like `if`/`else` branches); dispatch-wise MIR decides
-    /// between a tag switch (enum-typed scrutinee) and a direct
-    /// destructure (variant-typed scrutinee — no dispatch at all).
+    /// one join (like `if`/`else` branches); dispatch-wise MIR lowers it
+    /// to a tag switch over the scrutinee's enum.
     Match {
         scrutinee: ExprId,
         arms: Vec<MatchArm>,

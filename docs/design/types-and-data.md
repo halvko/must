@@ -15,18 +15,12 @@
   two types. Records are exact structural types; a structural record has no declaration,
   so it has no owner, and the newtype line is what gives it one. Nominal and structural
   never coerce.
-- **T04** Variant widening is a runtime conversion over a tag-free variant representation: a
-  variant-typed value carries no tag, and widening adds one. A plain `let` keeps the precise
-  variant; an unannotated `let mut` widens to the enum at binding time, the one place
-  mutability changes a type rather than only permissions. An unannotated deferred
-  `let mut x;` widens at its first assignment instead, which plays the initializer's part.
-  Trait dispatch adds a second widening site: every RECEIVER-LIKE `Self` position — a dot-call's receiver, and each
-  argument at a literal-`Self` position of a qualified short-form call — is inferred freely
-  first, widens to its enum if it came back a variant, and only THEN is checked against the
-  determined `Self`, so `Self` itself can never bind to a tag-free variant type (a variant has
-  no impls of its own to dispatch to). A NESTED `Self` position (inside a receiver-like
-  argument's own type, never the position itself) does not widen; a variant that reaches
-  there lands on the sound `NoTraitImpl` rather than silently picking its enum's impl.
+- **T04** A variant is a value, never a type. A variant constructor — `Shape::Point`,
+  `Option::<usize>::Some(11)`, the elided `::Some(x)` — has its enum's type, and a
+  payload-carrying one is the constructor function `fn(payload...) -> Enum`; every enum value
+  carries its tag from construction. `Enum::Variant` in type position is an error that names
+  the enum to write instead, and a `let` pattern naming one variant of a multi-variant enum is
+  refutable. A variant's precision is flow narrowing's job (halvko/must#125).
 - **T23** The compiler-provided enums (`AllocResult`, `ReadLineResult`, `NextChar`,
   `Utf8Result`) are the prelude Must cannot write yet: ordinary declarations in the one prelude
   file, minted from one table, user-shadowable and never duplicate-flagged; the table's order is the
@@ -61,7 +55,7 @@
   signature is as fixed as any other (T13: `fn() -> T` is invariant, so `!` in return position
   never widens to something else on a later use's say-so).
 - **T05** The expectation register, exhaustive because two rules depend on it (the `::` sigil,
-  G25, and the variant→enum conversion, which happens at a check):
+  G25, and the safe→`unsafe` fn conversion, which happens at a check):
 
   | position | expectation |
   |---|---|
@@ -98,9 +92,8 @@
   the first disagreement — so a literal of the wrong arity inherits nothing, and one whose
   written part disagrees inherits only what was bound before that part, which is also what
   the whole-literal mismatch names. It has to happen before the body rather than by unifying
-  the finished type afterwards, because the tail is checked against the return type and the
-  variant→enum conversion happens at a check: with no expected return the tail types as the
-  tag-free variant and the whole literal mismatches, naming a type the reader never wrote.
+  the finished type afterwards, because the tail is checked against the return type: with no
+  expected return an elided `::Some(t)` in the tail has no enum to resolve against.
   A mismatch in the body names the position as its reason — nothing was written on the
   literal, so the slot that supplied the type is what there is to point at.
 - **T15** `str` is a primitive; `Vec`, `String` and `Slice` are library types, and slices
@@ -131,7 +124,7 @@
   returning and forgetting one are free. The type is the only thing that travels with a value
   through a `let`, an argument, a return or a field, so the call site always knows. Coercion
   is one-way, safe to unsafe, applied at check sites and never inferred backwards through a
-  variable, the same discipline as variant→enum. It is shallow: no variance, so a formed
+  variable. It is shallow: no variance, so a formed
   `struct { go: fn() }` does not convert, while a record LITERAL does, field by field,
   because a literal's fields are checked one at a time against the annotation. It has no
   runtime consequence: the conversion moves no bits, it declines a permission. A join takes
@@ -154,7 +147,7 @@
   and without the clause). An `only` clause ceils only the ladders it names, so when a `send`
   capability lands every existing `only move` type keeps the send-axis default.
 - **T21** Containment infects; indirection does not. A record, enum or array holding a linear
-  is linear, and widening a variant never changes the answer. A borrow, a raw pointer or a
+  is linear. A borrow, a raw pointer or a
   `fn` type mentioning one keeps `forget`, because the obligation stayed with the owner, which
   is what lets the allocator take a linear element type at no cost. That is a hatch: raw
   storage will hold a linear nothing tracks. It is the same hatch as writing any value through
@@ -213,6 +206,15 @@
   must be installed early, and this one was not needed: containment already makes a container
   of linears linear whether or not any bound is checked. Its cost was every container written
   twice, once per payload kind, differing by a clause that changed no behaviour. **T22**
+- **Variant types** (removed 2026-10-13) — each variant was a type of its own, tag-free at
+  runtime so code that stayed on one variant never materialized the enum's tag, with a
+  runtime widening conversion to the enum at check sites, join edges, an unannotated
+  `let mut` or `mut` pattern binder (G27), and every receiver-like `Self` position. Its
+  precision was paid for everywhere a value met an API on the enum: a constructed
+  `Option::<usize>::Some(11)` was not an `Option::<usize>`, so `o.&.is_some()` on it did not
+  check, and each place that had to see the enum through the variant grew its own widening
+  rule. Flow narrowing (halvko/must#125) is the planned replacement: the value keeps its
+  enum type, and a match or test narrows what is known about it. **T04**
 - **Equality on function values as a designed relation** — it fell out of a derive, not a
   decision, and is not to be relied on. **T09**
 - **`char` as a raw codepoint** — UTF-8 cannot encode a surrogate, so admitting them makes
@@ -272,9 +274,9 @@
 - **Traits gate `==`** — everything-is-comparable fell out of reusing unification, and
   narrowing it later is a breaking change. `==` on function values additionally rests on an
   identity nobody trusts. **T09**
-- **Modules land** — the join plurality vote, `let mut` widening and per-file inference are
-  observable rules that were never ruled. Per-file solving is invisible in a single-file world
-  and will shape or break programs once modules exist. **T04 T11 T12**
+- **Modules land** — the join plurality vote and per-file inference are observable rules that
+  were never ruled. Per-file solving is invisible in a single-file world and will shape or
+  break programs once modules exist. **T11 T12**
 - **Integer conversions** land when a customer names itself; `char ↔ u32` arrives fallible
   in the integer-to-char direction. **Variadic generics** stay parked; the first customer is
   interpolation. **T01 T15 T16**

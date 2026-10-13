@@ -34,8 +34,8 @@
 //! ties at the worst tier and the provenance order below decides alone):
 //! `0` — the candidate's type equals the expectation (a `fn`-typed
 //! candidate matches a `fn`-typed expectation as a value: *passing*, not
-//! calling); `1` — it widens to it ([`hir::widens_to`]: variant→its enum,
-//! `!`→anything, safe `fn`→the corresponding `unsafe fn`), or it is a
+//! calling); `1` — it widens to it ([`hir::widens_to`]: `!`→anything,
+//! safe `fn`→the corresponding `unsafe fn`), or it is a
 //! `fn` whose *return* type matches/widens (calling it would satisfy the
 //! position); `2` — no match, or nothing known (keywords always; any
 //! candidate without an expectation).
@@ -47,8 +47,9 @@
 //! below every general-purpose tier, so it always sorts first without
 //! renumbering `Local`/`Item`/`Builtin`/`Keyword`. Gold candidates keep
 //! their provenance *and* get the type tier applied like everyone else
-//! (an uncovered variant under an enum-typed scrutinee trivially widens —
-//! tier `1` — so gold stays ahead within its context) — except the
+//! (an uncovered variant in a match-arm pattern slot sits at
+//! [`PATTERN_VARIANT_TIER`] like every variant there, so gold stays ahead
+//! within its context) — except the
 //! arm-list template ([`match_template_items`]), which has no type to
 //! compare against an expectation and is pinned at tier `0` instead.
 //!
@@ -94,11 +95,11 @@
 //!   already produced stay exactly where they were, the template just
 //!   outranks them.
 //! - **The scrutinee slot** — `match ˽`, nothing written yet. The ordinary
-//!   expression candidate set, RE-RANKED so enum-typed (and variant-typed)
-//!   values lead it, nearest definition scope first — a `let` in this scope
-//!   before one in an enclosing scope before a parameter before a file item,
-//!   then a `fn` whose call yields an enum ([`Context::MatchScrutinee`]).
-//!   Nothing is suppressed; the normal set follows underneath.
+//!   expression candidate set, RE-RANKED so enum-typed values lead it,
+//!   nearest definition scope first — a `let` in this scope before one in
+//!   an enclosing scope before a parameter before a file item, then a `fn`
+//!   whose call yields an enum ([`Context::MatchScrutinee`]). Nothing is
+//!   suppressed; the normal set follows underneath.
 //!
 //! Three further layers are DESIGNED BUT NOT BUILT, and the reasoning lives
 //! in `docs/design/platform-codegen-and-tooling.md` rather than here:
@@ -232,6 +233,11 @@ const TYPE_TIER_NONE: u8 = 2;
 /// Below [`TYPE_TIER_NONE`]: a candidate offered although accepting it
 /// gives an error.
 const TYPE_TIER_REFUSED: u8 = 3;
+
+/// Every variant candidate in a match-arm pattern slot: one tier for all
+/// of them (a pattern is not a value with a type to compare), behind the
+/// arm-list template's pinned `0`.
+const PATTERN_VARIANT_TIER: u8 = 1;
 
 /// The scrutinee slot spends the gold band (`00`–`09`, the gap below
 /// [`Provenance::Local`]) on **definition-scope distance**: an enum-typed
@@ -455,15 +461,11 @@ enum Context {
         receiver_range: TextRange,
         dot: TextSize,
     },
-    /// The second segment of a `::` path, in expression (`PathExpr`)
-    /// or type (`PathType`) position. `base_name` is the *first* segment's
-    /// text, read straight off the speculative tree — it sits before the
-    /// cursor, untouched by the splice, so no back-mapping is needed to
-    /// resolve it by name.
-    VariantSegment {
-        base_name: String,
-        in_type_position: bool,
-    },
+    /// The second segment of a `::` path in expression (`PathExpr`)
+    /// position. `base_name` is the *first* segment's text, read straight
+    /// off the speculative tree — it sits before the cursor, untouched by
+    /// the splice, so no back-mapping is needed to resolve it by name.
+    VariantSegment { base_name: String },
     /// A match arm's own pattern slot: either a bare name (`BindPat`,
     /// `bare: true`) or a `VariantPat` already past a `::` (elided sigil or
     /// `Enum`-qualified, `bare: false`). Carries the scrutinee's
@@ -602,17 +604,9 @@ pub(crate) fn completions(
             edit_range,
             expected_ty,
         ),
-        Some(Context::VariantSegment {
-            base_name,
-            in_type_position,
-        }) => variant_segment_items(
-            db,
-            file,
-            &base_name,
-            in_type_position,
-            edit_range,
-            expected_ty,
-        ),
+        Some(Context::VariantSegment { base_name }) => {
+            variant_segment_items(db, file, &base_name, edit_range, expected_ty)
+        }
         Some(Context::MatchArmPattern {
             scrutinee_range,
             bare,
@@ -887,16 +881,10 @@ fn classify(parent: &SyntaxNode) -> Option<Context> {
     let grandparent = name_ref.syntax().parent()?;
 
     if let Some(path_type) = ast::PathType::cast(grandparent.clone()) {
+        // Only the first segment: the second segment of `Shape::Circle`
+        // names a variant, which is a value and never a type.
         if path_type.name_ref().as_ref() == Some(&name_ref) {
-            // Only the first segment; the second segment of `Shape::Circle`
-            // in type position is the `VariantSegment` case below.
             return Some(Context::TypePosition);
-        }
-        if path_type.variant_name_ref().as_ref() == Some(&name_ref) {
-            return Some(Context::VariantSegment {
-                base_name: path_type.name_ref()?.text(),
-                in_type_position: true,
-            });
         }
         return None;
     }
@@ -943,7 +931,6 @@ fn classify(parent: &SyntaxNode) -> Option<Context> {
     if path_expr.variant_name_ref().as_ref() == Some(&name_ref) {
         return Some(Context::VariantSegment {
             base_name: path_expr.name_ref()?.text(),
-            in_type_position: false,
         });
     }
     // Same first-segment-only restriction as `PathType` above.
@@ -1325,23 +1312,23 @@ fn enum_variant_path_items(
     edit_range: TextRange,
     expected: Option<&hir::Ty>,
 ) -> Vec<CompletionItem> {
-    let provenance = Provenance::Variant as u8;
+    let enum_ty = hir::Ty::Named(hir::NamedTy {
+        decl: loc.clone(),
+        args: expected_enum_args(loc, expected),
+    });
+    // The inserted path is a whole construction (a payload gets its tab
+    // stops), so every candidate has the enum's type.
+    let tier = type_tier(Some(&enum_ty), expected);
     variants
         .iter()
-        .enumerate()
-        .map(|(index, (name, payload))| {
+        .map(|(name, payload)| {
             let path = format!("{enum_name}::{name}");
             let mut item = variant_item(
-                hir::VariantTy {
-                    decl: loc.clone(),
-                    args: Vec::new(),
-                    index: index as u32,
-                    name: std::sync::Arc::from(name.as_str()),
-                },
+                name,
                 payload,
                 path.clone(),
-                provenance,
-                expected,
+                Provenance::Variant,
+                tier,
                 edit_range,
             );
             if !payload.is_empty() {
@@ -1356,25 +1343,35 @@ fn enum_variant_path_items(
         .collect()
 }
 
-/// A completion for one enum variant, whatever spelling `label` gives it:
-/// ranked by the variant type against `expected`, detailed by its payload.
+/// A completion for one enum variant, whatever spelling `label` gives it,
+/// detailed by its payload.
 fn variant_item(
-    variant: hir::VariantTy,
+    name: &str,
     payload: &[hir::Ty],
     label: String,
-    provenance: u8,
-    expected: Option<&hir::Ty>,
+    provenance: Provenance,
+    type_tier: u8,
     edit_range: TextRange,
 ) -> CompletionItem {
-    let detail = hir::render_variant(&variant.name, payload);
-    completion_item_at_tier(
+    completion_item(
         label,
         CompletionItemKind::EnumMember,
         provenance,
-        type_tier(Some(&hir::Ty::Variant(variant)), expected),
-        Some(detail),
+        type_tier,
+        Some(hir::render_variant(name, payload)),
         edit_range,
     )
+}
+
+/// The arguments of the enum at `loc` as `expected` pins them: no mention
+/// writes them at a variant candidate, so an expectation naming this enum
+/// lends its own, as inference would. Otherwise none; a generic enum ranks
+/// and renders bare.
+fn expected_enum_args(loc: &hir::ItemLoc, expected: Option<&hir::Ty>) -> Vec<hir::GenericArg> {
+    match expected {
+        Some(hir::Ty::Named(named)) if named.decl == *loc => named.args.clone(),
+        _ => Vec::new(),
+    }
 }
 
 /// One snippet tab stop per payload element: `$1, $2`.
@@ -1489,8 +1486,7 @@ fn expression_position_items(
 }
 
 /// Whether a value of this type can be a `match` scrutinee that dispatches
-/// — [`hir::dispatches_on`] behind one peeled borrow, so an enum, one of
-/// its variants (legal, and simply has one reachable arm), a scalar
+/// — [`hir::dispatches_on`] behind one peeled borrow, so an enum, a scalar
 /// (`char`, the integer types, whose literal patterns dispatch by
 /// equality), or a borrow of any of them, because `match` looks through a
 /// borrow. The scrutinee slot's test for its leading layers.
@@ -1614,9 +1610,8 @@ fn field_items(
             )
         })
         .collect();
-    // Dot-callable inherent members of a named (or variant-typed — it
-    // widens) receiver, offered next to the fields they share the dot
-    // with. A borrow receiver's members hang off the REFERENT's
+    // Dot-callable inherent members of a named receiver, offered next to
+    // the fields they share the dot with. A borrow receiver's members hang off the REFERENT's
     // declaration; which of them the dot offers is the receiver shape's
     // row of the table.
     let shape = hir::ReceiverShape::of(ty);
@@ -1626,7 +1621,6 @@ fn field_items(
     };
     let decl = match owner {
         hir::Ty::Named(named) => Some(&named.decl),
-        hir::Ty::Variant(variant) => Some(&variant.decl),
         _ => None,
     };
     if let Some(decl) = decl {
@@ -1724,8 +1718,8 @@ fn borrowed_member_item(
     item
 }
 
-/// The second segment of a `::` path (`Shape::Circle`), in expression
-/// or type position: the base name's own enum variants, detail rendered
+/// The second segment of a `::` path (`Shape::Circle`) in expression
+/// position: the base name's own enum variants, detail rendered
 /// like `hover`'s variant hover. Empty for anything the base doesn't
 /// resolve to an enum `type` item (a plain value item, a struct-type item,
 /// or nothing at all) — those already get their own squiggle.
@@ -1733,43 +1727,37 @@ fn variant_segment_items(
     db: &RootDatabase,
     file: SourceFile,
     base_name: &str,
-    in_type_position: bool,
     edit_range: TextRange,
     expected: Option<&hir::Ty>,
 ) -> Vec<CompletionItem> {
-    let resolution = if in_type_position {
-        hir::type_scope(db, file).resolve(base_name)
-    } else {
-        hir::file_scope(db, file).resolve(base_name)
-    };
-    let Some(hir::Resolution::TypeItem(loc)) = resolution else {
+    let Some(hir::Resolution::TypeItem(loc)) = hir::file_scope(db, file).resolve(base_name) else {
         return Vec::new();
     };
     let Some(variants) = hir::enum_variants(db, loc.to_id(db)).as_ref() else {
         return Vec::new();
     };
+    let args = expected_enum_args(&loc, expected);
     variants
         .iter()
         .enumerate()
         .map(|(index, (name, payload))| {
-            // The candidate's type is the variant type itself: exact under
-            // a variant-typed expectation, `widens_to` (tier 1) under the
-            // enum's.
-            // No mention args exist at `Enum::<cursor>` — an empty list
-            // is fine for ranking/display (a generic enum renders bare).
+            // The candidate's type is the one the path has: the enum for a
+            // payload-less variant, its constructor `fn` otherwise.
+            let candidate = hir::ResolvedVariant {
+                decl: loc.clone(),
+                args: args.clone(),
+                index: index as u32,
+                name: std::sync::Arc::from(name.as_str()),
+            }
+            .value_ty(db);
             CompletionItem {
-                whole_expr: !in_type_position,
+                whole_expr: true,
                 ..variant_item(
-                    hir::VariantTy {
-                        decl: loc.clone(),
-                        args: Vec::new(),
-                        index: index as u32,
-                        name: std::sync::Arc::from(name.as_str()),
-                    },
+                    name,
                     payload,
                     name.clone(),
-                    Provenance::Item as u8,
-                    expected,
+                    Provenance::Item,
+                    type_tier(Some(&candidate), expected),
                     edit_range,
                 )
             }
@@ -1869,11 +1857,10 @@ fn match_arm_items(
         }
     }
 
-    // The pattern-side "expectation" is the scrutinee's own enum type:
-    // every variant candidate widens to it (tier 1, gold or not), keeping
-    // the pattern slot's candidates ahead of where an unrankable candidate
-    // would sort while preserving gold-before-covered within the tier.
-    let scrutinee_ty = hir::Ty::Named(enum_named.clone());
+    // A pattern names a variant of the scrutinee's own enum, so every
+    // candidate shares one tier (gold or not), ahead of where an
+    // unrankable candidate would sort and behind the arm-list template's
+    // pinned `0`, preserving gold-before-covered within the tier.
     let mut items: Vec<CompletionItem> = variants
         .iter()
         .enumerate()
@@ -1889,16 +1876,11 @@ fn match_arm_items(
                 Provenance::Gold
             };
             let mut item = variant_item(
-                hir::VariantTy {
-                    decl: enum_named.decl.clone(),
-                    args: enum_named.args.clone(),
-                    index: index as u32,
-                    name: std::sync::Arc::from(name.as_str()),
-                },
+                name,
                 payload,
                 insert.clone(),
-                provenance as u8,
-                Some(&scrutinee_ty),
+                provenance,
+                PATTERN_VARIANT_TIER,
                 edit_range,
             );
             if bare {
@@ -1933,13 +1915,8 @@ fn match_arm_items(
 /// snippet writing every variant as an arm, payload bindings and arm bodies
 /// as tab stops in document order.
 ///
-/// Empty unless the scrutinee's type is a `Ty::Named` enum. A variant-typed
-/// scrutinee is deliberately excluded even though it matches fine: the
-/// honest template for it is the single arm for that one variant, which is
-/// not "predict the rest of the statement" so much as "write the only line
-/// there is", and `match_arm_items` already declines variant-typed
-/// scrutinees for the same reason. Non-enum scrutinees offer nothing at all
-/// — there are no arms to guess.
+/// Empty unless the scrutinee's type is a `Ty::Named` enum. Non-enum
+/// scrutinees offer nothing at all — there are no arms to guess.
 fn match_template_items(
     db: &RootDatabase,
     file: SourceFile,
@@ -2176,7 +2153,7 @@ fn record_literal_items(
 /// syntactic only: either the single argument of a bare-name construction
 /// call (`Foo(struct { … })`) or the initializer of a `let`/`static`/
 /// `const` item annotated with a bare type name. Anything else (no
-/// annotation, a `RecordType`-literal or variant-typed annotation, a
+/// annotation, a `RecordType`-literal annotation, a
 /// callee that isn't a plain name) yields `None` — [`expected_type_at`]'s
 /// job, not this pass's.
 fn expected_record(

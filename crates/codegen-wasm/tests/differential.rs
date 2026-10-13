@@ -4,7 +4,7 @@
 //!
 //! `examples.rs` is the same machine pointed at `examples/`; this file is
 //! where the sharp edges live (overflow at every width, division traps,
-//! widening, dictionary dispatch, divergence).
+//! enum construction, dictionary dispatch, divergence).
 
 mod harness;
 
@@ -387,11 +387,17 @@ static main = fn (i: usize) -> usize {
 }
 
 #[test]
-fn enums_variants_widening_and_match() {
+fn enums_construct_reassign_and_match() {
     check(
         r#"
 type Light = enum { Red, Yellow, Green };
-static advance = const fn (l: Light::Red) -> Light::Green { Light::Green };
+static advance = const fn (l: Light) -> Light {
+    match l {
+        ::Red => Light::Green,
+        ::Green => Light::Yellow,
+        ::Yellow => Light::Red,
+    }
+};
 static describe = fn (l: Light) -> str {
     match l {
         ::Red => "stop",
@@ -415,7 +421,7 @@ static main = fn () -> () {
 }
 
 #[test]
-fn enum_payloads_widen_and_destructure() {
+fn enum_payloads_construct_and_destructure() {
     check(
         r#"
 type Shape = enum { Point, Circle(usize), Rect(usize, usize) };
@@ -457,22 +463,6 @@ fn a_refutable_parameter_pattern_traps_with_the_editors_message() {
 type S = enum { A(usize), B(usize, usize) };
 static f = fn (::B(x, y): S) -> usize { x + y };
 static main = fn () -> usize { f(S::A(1)) }
-"#,
-        "main()",
-    );
-}
-
-#[test]
-fn a_variant_typed_match_needs_no_tag() {
-    check(
-        r#"
-type Shape = enum { Point, Circle(usize) };
-static radius = fn (c: Shape::Circle) -> usize {
-    match c {
-        ::Circle(r) => r,
-    }
-};
-static main = fn () -> usize { radius(Shape::Circle(9)) }
 "#,
         "main()",
     );

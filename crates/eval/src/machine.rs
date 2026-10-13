@@ -849,10 +849,8 @@ impl<'db, M: Mode> Machine<'db, M> {
                 };
                 self.jump(target);
             }
-            // Tagged dispatch: read the widening-injected tag, jump to the
-            // arm for that variant index (or `otherwise`). Only ever
-            // executed on enum-typed values — a variant-typed scrutinee's
-            // match compiled to no switch at all.
+            // Enum dispatch: read the tag, jump to the arm for that
+            // variant index (or `otherwise`).
             TerminatorKind::SwitchVariant {
                 discr,
                 decl,
@@ -1634,14 +1632,24 @@ impl<'db, M: Mode> Machine<'db, M> {
                 Ok(Value::Record { fields })
             }
             Rvalue::Aggregate {
-                kind: AggregateKind::VariantPayload,
+                kind:
+                    AggregateKind::Variant {
+                        decl,
+                        index,
+                        variant,
+                    },
                 ops,
             } => {
-                let values = ops
+                let payload = ops
                     .iter()
                     .map(|op| self.eval_operand(loc, body, op, origin))
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(Value::Tuple(values))
+                Ok(Value::Variant {
+                    decl: decl.clone(),
+                    index: *index,
+                    name: variant.clone(),
+                    payload,
+                })
             }
             Rvalue::Aggregate {
                 kind: AggregateKind::Array,
@@ -1706,26 +1714,6 @@ impl<'db, M: Mode> Machine<'db, M> {
                 }
                 Ok(values.swap_remove(index as usize))
             }
-            // The widening conversion: the one place a tag comes into
-            // existence — the tag-free payload carrier becomes a tagged
-            // enum value.
-            Rvalue::WidenToEnum {
-                op,
-                decl,
-                index,
-                variant,
-            } => {
-                let value = self.eval_operand(loc, body, op, origin)?;
-                let Value::Tuple(payload) = value else {
-                    return Err(self.ill_typed("a variant payload", &value, loc, origin));
-                };
-                Ok(Value::Variant {
-                    decl: decl.clone(),
-                    index: *index,
-                    name: variant.clone(),
-                    payload,
-                })
-            }
             // Constructing a generic instance's fn value: the item's own
             // value (its root is the fn literal — a plain lazy forcing)
             // with the *evaluated* const arguments attached. Each operand
@@ -1764,17 +1752,8 @@ impl<'db, M: Mode> Machine<'db, M> {
                             Err(out_of_range(self, "record field", fields.len()))
                         }
                     }
-                    // Positional payload extraction, both carriers: the
-                    // tag-free variant-typed value and the tagged enum
-                    // value (a match arm reads payloads out of whichever
-                    // its scrutinee is).
-                    Value::Tuple(mut values) => {
-                        if index < values.len() {
-                            Ok(values.swap_remove(index))
-                        } else {
-                            Err(out_of_range(self, "payload", values.len()))
-                        }
-                    }
+                    // Positional payload extraction from the enum
+                    // value a match arm (or `let` pattern) destructures.
                     Value::Variant { mut payload, .. } => {
                         if index < payload.len() {
                             Ok(payload.swap_remove(index))
@@ -3481,13 +3460,11 @@ fn project_path_mut<'v>(
 }
 
 /// One FIELD step of a path walk: a record field by canonical index, or a
-/// variant/tuple payload element by position.
+/// variant payload element by position.
 ///
 /// The payload arms are what makes a match-through-a-borrow binding
 /// reachable — the binder's pointer path steps into the matched value, and
-/// every read and write through it walks that step back down. An enum-typed
-/// value is a [`Value::Variant`]; an unwidened variant-TYPED one is a
-/// tag-free [`Value::Tuple`], so both spell the same step.
+/// every read and write through it walks that step back down.
 ///
 /// Overrunning either is an internal error, not UB: arity is a
 /// compile-time fact (the checker reports `PatArity`, and lowering plants a
@@ -3501,11 +3478,11 @@ fn field_step(value: &Value, index: u32) -> Result<&Value, ProjectError> {
             .get(index as usize)
             .map(|(_, field)| field)
             .ok_or_else(|| field_out_of_range("record field", index, fields.len())),
-        Value::Variant { payload, .. } | Value::Tuple(payload) => payload
+        Value::Variant { payload, .. } => payload
             .get(index as usize)
             .ok_or_else(|| field_out_of_range("variant payload", index, payload.len())),
         other => Err(ProjectError::Shape(format!(
-            "expected a record, variant or tuple value to project into, found `{}`",
+            "expected a record or variant value to project into, found `{}`",
             other.display()
         ))),
     }
@@ -3523,14 +3500,14 @@ fn field_step_mut(value: &mut Value, index: u32) -> Result<&mut Value, ProjectEr
                 .map(|(_, field)| field)
                 .ok_or_else(|| field_out_of_range("record field", index, len))
         }
-        Value::Variant { payload, .. } | Value::Tuple(payload) => {
+        Value::Variant { payload, .. } => {
             let len = payload.len();
             payload
                 .get_mut(index as usize)
                 .ok_or_else(|| field_out_of_range("variant payload", index, len))
         }
         other => Err(ProjectError::Shape(format!(
-            "expected a record, variant or tuple value to project into, found `{}`",
+            "expected a record or variant value to project into, found `{}`",
             other.display()
         ))),
     }
@@ -3651,9 +3628,9 @@ fn project_mut<'v>(
 
 /// Best-effort type of a runtime value, for displaying const params in the
 /// debugger (their declared `TypeRef` isn't lowered here). Scalars and
-/// records reconstruct exactly; a tagged variant value is its enum; the
+/// records reconstruct exactly; a variant value is its enum; the
 /// carriers whose static type isn't recoverable from the value alone
-/// (tag-free payloads, fn values) fall back to `{error}`, which only
+/// (fn values, pointers) fall back to `{error}`, which only
 /// demotes them from console-eval parameters — the variables panel still
 /// shows name and value.
 fn value_ty(value: &Value) -> hir::Ty {
@@ -3692,11 +3669,9 @@ fn value_ty(value: &Value) -> hir::Ty {
         // (and a pointer must not cross into a fresh console-eval machine
         // anyway — its allocation lives here): `{error}` demotes it from
         // console-eval parameters, the variables panel still shows it.
-        Value::Fn(_)
-        | Value::ExternFn { .. }
-        | Value::Builtin(_)
-        | Value::Tuple(_)
-        | Value::Ptr { .. } => hir::Ty::Error,
+        Value::Fn(_) | Value::ExternFn { .. } | Value::Builtin(_) | Value::Ptr { .. } => {
+            hir::Ty::Error
+        }
         // Machine-internal poison: no surface type exists for it.
         Value::Uninit => hir::Ty::Error,
     }

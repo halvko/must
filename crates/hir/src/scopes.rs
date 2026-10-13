@@ -697,7 +697,7 @@ pub const UTF8_RESULT_NAME: &str = "Utf8Result";
 /// builtin returns. It lives in the prelude file ([`prelude_loc`]), so every
 /// file names the same declaration. Its identity is an ordinary [`ItemLoc`],
 /// which keeps every downstream consumer (patterns, match lowering,
-/// widening, the runtime tag) on the ordinary nominal-enum machinery.
+/// construction, the runtime tag) on the ordinary nominal-enum machinery.
 pub struct SyntheticDecl {
     /// Its file-scope name. A file's own declaration of the name shadows
     /// it, the `print` precedent, and is never reported as a duplicate.

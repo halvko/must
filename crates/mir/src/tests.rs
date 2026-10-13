@@ -1307,9 +1307,9 @@ static second = fn (p: Pair) -> usize { p.b };
 }
 
 #[test]
-fn variant_construction_is_tag_free() {
-    // Constructing and passing a variant-typed value produces only the
-    // payload aggregate — no tag, no `widen` op anywhere on this path.
+fn variant_construction_builds_the_enum_value() {
+    // Constructing a variant builds the enum value in one aggregate: the
+    // tag (named by the variant) plus the payload.
     check_mir(
         r#"
 type Shape = enum { Circle(usize), Point };
@@ -1319,56 +1319,20 @@ static p = Shape::Point;
         expect![[r#"
             item Shape:
             item c:
-            fn b0() -> Shape::Circle {
-              _0: Shape::Circle  // return
-              _1: Shape::Circle
+            fn b0() -> Shape {
+              _0: Shape  // return
+              _1: Shape
               bb0:
-                _1 = payload(3)
+                _1 = Shape::Circle(3)
                 _0 = _1
                 return
             }
             item p:
-            fn b0() -> Shape::Point {
-              _0: Shape::Point  // return
-              _1: Shape::Point
-              bb0:
-                _1 = payload()
-                _0 = _1
-                return
-            }
-        "#]],
-    );
-}
-
-#[test]
-fn widening_happens_exactly_at_the_conversion_edge() {
-    // The enum annotation is the edge: `widen` appears once, on the
-    // initializer; the same-variant `keep` path has none.
-    check_mir(
-        r#"
-type Shape = enum { Circle(usize), Point };
-static widened: Shape = Shape::Point;
-static keep: Shape::Point = Shape::Point;
-"#,
-        expect![[r#"
-            item Shape:
-            item widened:
             fn b0() -> Shape {
               _0: Shape  // return
               _1: Shape
-              _2: Shape
               bb0:
-                _1 = payload()
-                _2 = widen _1 to Shape::Point
-                _0 = _2
-                return
-            }
-            item keep:
-            fn b0() -> Shape::Point {
-              _0: Shape::Point  // return
-              _1: Shape::Point
-              bb0:
-                _1 = payload()
+                _1 = Shape::Point
                 _0 = _1
                 return
             }
@@ -1377,7 +1341,7 @@ static keep: Shape::Point = Shape::Point;
 }
 
 #[test]
-fn mixed_variant_join_widens_each_edge_only() {
+fn mixed_variant_join_builds_each_branch_value_directly() {
     check_mir(
         r#"
 type Shape = enum { Circle(usize), Point };
@@ -1393,22 +1357,18 @@ static f = fn (a: bool) -> Shape {
               _1: bool  // param a
               _2: bool
               _3: Shape
-              _4: Shape::Circle
+              _4: Shape
               _5: Shape
-              _6: Shape::Point
-              _7: Shape
               bb0:
                 _2 = _1
                 if _2 -> [then: bb1, else: bb2]
               bb1:
-                _4 = payload(1)
-                _5 = widen _4 to Shape::Circle
-                _3 = _5
+                _4 = Shape::Circle(1)
+                _3 = _4
                 goto -> bb3
               bb2:
-                _6 = payload()
-                _7 = widen _6 to Shape::Point
-                _3 = _7
+                _5 = Shape::Point
+                _3 = _5
                 goto -> bb3
               bb3:
                 _0 = _3
@@ -1416,50 +1376,6 @@ static f = fn (a: bool) -> Shape {
             }
             fn b1() -> fn(bool) -> Shape {
               _0: fn(bool) -> Shape  // return
-              bb0:
-                _0 = fn b0
-                return
-            }
-        "#]],
-    );
-}
-
-#[test]
-fn same_variant_join_has_no_widening() {
-    check_mir(
-        r#"
-type Shape = enum { Circle(usize), Point };
-static f = fn (a: bool) {
-    if a { Shape::Point } else { Shape::Point }
-};
-"#,
-        expect![[r#"
-            item Shape:
-            item f:
-            fn b0(_1: bool) -> Shape::Point {
-              _0: Shape::Point  // return
-              _1: bool  // param a
-              _2: bool
-              _3: Shape::Point
-              _4: Shape::Point
-              _5: Shape::Point
-              bb0:
-                _2 = _1
-                if _2 -> [then: bb1, else: bb2]
-              bb1:
-                _4 = payload()
-                _3 = _4
-                goto -> bb3
-              bb2:
-                _5 = payload()
-                _3 = _5
-                goto -> bb3
-              bb3:
-                _0 = _3
-                return
-            }
-            fn b1() -> fn(bool) -> Shape::Point {
-              _0: fn(bool) -> Shape::Point  // return
               bb0:
                 _0 = fn b0
                 return
@@ -1481,18 +1397,18 @@ static f = fn {
         expect![[r#"
             item Shape:
             item f:
-            fn b0(_1: usize) -> Shape::Circle {
-              _0: Shape::Circle  // return
+            fn b0(_1: usize) -> Shape {
+              _0: Shape  // return
               _1: usize  // param _
               bb0:
-                _0 = payload(_1)
+                _0 = Shape::Circle(_1)
                 return
             }
-            fn b1() -> Shape::Circle {
-              _0: Shape::Circle  // return
-              _1: fn(usize) -> Shape::Circle  // make
-              _2: fn(usize) -> Shape::Circle
-              _3: Shape::Circle
+            fn b1() -> Shape {
+              _0: Shape  // return
+              _1: fn(usize) -> Shape  // make
+              _2: fn(usize) -> Shape
+              _3: Shape
               bb0:
                 _1 = fn b0
                 _2 = _1
@@ -1501,8 +1417,8 @@ static f = fn {
                 _0 = _3
                 return
             }
-            fn b2() -> fn() -> Shape::Circle {
-              _0: fn() -> Shape::Circle  // return
+            fn b2() -> fn() -> Shape {
+              _0: fn() -> Shape  // return
               bb0:
                 _0 = fn b1
                 return
@@ -1719,61 +1635,9 @@ static f = fn (s: Shape) -> usize {
 }
 
 #[test]
-fn variant_typed_scrutinee_match_compiles_to_no_switch() {
-    // The state-machine payoff: the scrutinee can only be `State::Running`,
-    // so the match is a straight-line payload destructure — no switch, no
-    // tag read; the other arms are dead blocks nothing jumps to.
-    check_mir(
-        r#"
-type State = enum { Idle, Running(usize) };
-static step = fn (s: State::Running) -> usize {
-    match s {
-        ::Running(n) => n + 1,
-        ::Idle => 0,
-    }
-};
-"#,
-        expect![[r#"
-            item State:
-            item step:
-            fn b0(_1: State::Running) -> usize {
-              _0: usize  // return
-              _1: State::Running  // param s
-              _2: State::Running
-              _3: usize
-              _4: usize  // n
-              _5: usize
-              _6: usize
-              bb0:
-                _2 = _1
-                _4 = _2.0
-                _5 = _4
-                _6 = Add(_5, 1)
-                storage_dead _4
-                _3 = _6
-                goto -> bb1
-              bb1:
-                _0 = _3
-                return
-              bb2:
-                _3 = 0
-                goto -> bb1
-            }
-            fn b1() -> fn(State::Running) -> usize {
-              _0: fn(State::Running) -> usize  // return
-              bb0:
-                _0 = fn b0
-                return
-            }
-        "#]],
-    );
-}
-
-#[test]
-fn widen_then_match_round_trip() {
-    // Construct a variant (tag-free), widen it into the enum (`let mut`
-    // injects the tag), then match: the tag written by `WidenToEnum` is
-    // exactly what `SwitchVariant` dispatches on.
+fn construct_then_match_round_trip() {
+    // Construct a variant, then match: the tag the variant aggregate
+    // writes is exactly what `SwitchVariant` dispatches on.
     check_mir(
         r#"
 type Shape = enum { Circle(usize), Point };
@@ -1790,32 +1654,30 @@ static f = fn () -> usize {
             item f:
             fn b0() -> usize {
               _0: usize  // return
-              _1: Shape::Circle
-              _2: Shape
-              _3: Shape  // s
-              _4: Shape
-              _5: usize
-              _6: usize  // r
-              _7: usize
+              _1: Shape
+              _2: Shape  // s
+              _3: Shape
+              _4: usize
+              _5: usize  // r
+              _6: usize
               bb0:
-                _1 = payload(3)
-                _2 = widen _1 to Shape::Circle
+                _1 = Shape::Circle(3)
+                _2 = _1
                 _3 = _2
-                _4 = _3
-                switch _4 on Shape -> [0: bb1, 1: bb2, otherwise: bb3]
+                switch _3 on Shape -> [0: bb1, 1: bb2, otherwise: bb3]
               bb1:
-                _6 = _4.0
-                _7 = _6
-                storage_dead _6
-                _5 = _7
+                _5 = _3.0
+                _6 = _5
+                storage_dead _5
+                _4 = _6
                 goto -> bb4
               bb2:
-                _5 = 0
+                _4 = 0
                 goto -> bb4
               bb3:
                 unreachable
               bb4:
-                _0 = _5
+                _0 = _4
                 return
             }
             fn b1() -> fn() -> usize {
@@ -2491,7 +2353,7 @@ fn generic_enum_match_switches_on_the_declaration() {
 }
 
 #[test]
-fn generic_widening_injects_the_tag() {
+fn a_generic_variant_value_is_a_tagged_aggregate() {
     check_mir(
         "type Option = enum::<T> { Some(T), None };\n\
          static main = fn () -> Option::<usize> { Option::<usize>::None };",
@@ -2501,11 +2363,9 @@ fn generic_widening_injects_the_tag() {
             fn b0() -> Option::<usize> {
               _0: Option::<usize>  // return
               _1: Option::<usize>
-              _2: Option::<usize>
               bb0:
-                _1 = payload()
-                _2 = widen _1 to Option::None
-                _0 = _2
+                _1 = Option::None
+                _0 = _1
                 return
             }
             fn b1() -> fn() -> Option::<usize> {
@@ -3339,51 +3199,6 @@ static f = fn::<@a>(s: Opt.&::<@a>) -> usize {
             }
             fn b1() -> fn(Opt.&) -> usize {
               _0: fn(Opt.&) -> usize  // return
-              bb0:
-                _0 = fn b0
-                return
-            }
-        "#]],
-    );
-}
-
-#[test]
-fn a_variant_typed_borrowed_match_borrows_without_a_switch() {
-    // No dispatch (the value can only be this one variant), so no tag read
-    // — but the payload binding is still a borrow of the sub-place.
-    check_mir(
-        r#"
-type State = enum { Run(usize), Stop };
-static f = fn::<@a>(s: State::Run.&mut::<@a>) -> () {
-    match s {
-        ::Run(n) => { n.* = 1; },
-    }
-};
-"#,
-        expect![[r#"
-            item State:
-            item f:
-            fn b0(_1: State::Run.&mut) -> () {
-              _0: ()  // return
-              _1: State::Run.&mut  // param s
-              _2: State::Run.&mut
-              _3: ()
-              _4: usize.&mut  // n
-              _5: usize.&mut
-              bb0:
-                _2 = _1
-                _4 = _2.*.0.&mut
-                _5 = _4
-                _5.* = 1
-                storage_dead _4
-                _3 = ()
-                goto -> bb1
-              bb1:
-                _0 = _3
-                return
-            }
-            fn b1() -> fn(State::Run.&mut) {
-              _0: fn(State::Run.&mut)  // return
               bb0:
                 _0 = fn b0
                 return

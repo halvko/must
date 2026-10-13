@@ -61,9 +61,6 @@ const SUPPORTED: &[(&str, &str)] = &[
     ("records.must", "sum_pair"),
     ("records.must", "moved"),
     ("records.must", "same_point"),
-    ("state_machine.must", "cycle_once"),
-    ("state_machine.must", "describe(cycle_once)"),
-    ("state_machine.must", "run_lights()"),
 ];
 
 /// `(file, entry expression, what the refusal must name)` — the

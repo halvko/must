@@ -335,20 +335,6 @@ pub enum Rvalue {
         /// through a pointer temp instead).
         projection: Vec<ProjElem>,
     },
-    /// The variant → enum widening conversion: takes a *variant-typed*
-    /// (tag-free payload) value and injects the tag, producing an
-    /// *enum-typed* (tagged) value. This op is the only place a tag is
-    /// ever created — same-variant code paths never see one. Planted
-    /// exactly where inference recorded a widening edge
-    /// (`InferenceResult::widened`); `index`/`variant` identify the
-    /// variant within `decl` (`variant` is the display name, carried so
-    /// runtime values render without a database).
-    WidenToEnum {
-        op: Operand,
-        decl: ItemLoc,
-        index: u32,
-        variant: String,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -356,11 +342,15 @@ pub enum AggregateKind {
     /// Field names sorted by name — the same canonical order as
     /// [`Ty::Record`]'s fields, so `ops[i]` is the value of `fields[i]`.
     Record(Vec<String>),
-    /// A *variant-typed* value: the bare payload tuple, in declaration
-    /// order. Deliberately carries no enum or variant identity — a
-    /// variant-typed value is fully erased at runtime (the state-machine
-    /// story); the tag exists only after [`Rvalue::WidenToEnum`].
-    VariantPayload,
+    /// An *enum* value built by a variant constructor: the tag plus the
+    /// payload, `ops` in declaration order. `index`/`variant` identify the
+    /// variant within `decl` (`variant` is the display name, carried so
+    /// runtime values render without a database).
+    Variant {
+        decl: ItemLoc,
+        index: u32,
+        variant: String,
+    },
     /// `[e1, e2, e3]` — an array value; `ops` are the elements in source
     /// order (which IS the canonical order: elements are positional).
     Array,
@@ -458,13 +448,10 @@ pub enum TerminatorKind {
         then_block: BlockId,
         else_block: BlockId,
     },
-    /// Dispatch over a *tagged* (enum-typed) value: read the tag, jump to
+    /// Dispatch over an enum value: read the tag, jump to
     /// the arm whose variant index it is, or to `otherwise` (a catch-all
     /// arm's block — or the non-exhaustiveness trap, carrying the same
-    /// message as the editor diagnostic). Matching a *variant-typed*
-    /// scrutinee never emits this: the value can only be its one variant,
-    /// so lowering destructures it directly — zero runtime dispatch (the
-    /// state-machine payoff).
+    /// message as the editor diagnostic).
     SwitchVariant {
         discr: Operand,
         /// The enum declaration the tag must belong to (the machine

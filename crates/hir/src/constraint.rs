@@ -28,7 +28,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::ItemLoc;
 use crate::body::{BindingId, ExprId, PatId};
 use crate::infer::InferenceDiagnostic;
-use crate::ty::{ConstArgValue, GenericArg, NamedTy, Region, Ty, TyVar, TyVarValue, VariantTy};
+use crate::ty::{ConstArgValue, GenericArg, NamedTy, Region, Ty, TyVar, TyVarValue};
 
 /// Why a type was required or concluded. Attached to
 /// [`InferenceDiagnostic::TypeMismatch`] to render "because of this" hints;
@@ -220,12 +220,6 @@ pub(crate) struct Constraints {
     next_region: u32,
     /// Canonical root var → the causes that decided its concrete type.
     causes: FxHashMap<TyVar, Vec<Cause>>,
-    /// Join witnesses the solver accepted by *widening* (variant → enum
-    /// conversion) rather than by unification: `(leaf expression, the
-    /// variant it was)`. Drained into `InferenceResult::widened` by
-    /// `InferCtx::solve`, so MIR plants the conversion exactly at these
-    /// edges.
-    widenings: Vec<(ExprId, VariantTy)>,
 }
 
 /// One outlives obligation collected from a body: `sup` must outlive `sub`,
@@ -353,10 +347,6 @@ impl Constraints {
             }
         }
         false
-    }
-
-    pub(crate) fn take_widenings(&mut self) -> Vec<(ExprId, VariantTy)> {
-        std::mem::take(&mut self.widenings)
     }
 
     pub(crate) fn take_region_edges(&mut self) -> Vec<RegionConstraint> {
@@ -521,8 +511,7 @@ impl Constraints {
             // reserved), so a declaration cannot hide one — the args are
             // the whole story. `Ty::contains_borrow` carries the note about
             // the day that changes.
-            (Ty::Named(NamedTy { args: aa, .. }), Ty::Named(NamedTy { args: ab, .. }))
-            | (Ty::Variant(VariantTy { args: aa, .. }), Ty::Variant(VariantTy { args: ab, .. })) => {
+            (Ty::Named(NamedTy { args: aa, .. }), Ty::Named(NamedTy { args: ab, .. })) => {
                 for (ga, gb) in aa.iter().zip(ab) {
                     match (ga, gb) {
                         (GenericArg::Ty(ta), GenericArg::Ty(tb)) => {
@@ -581,10 +570,6 @@ impl Constraints {
             Ty::Named(named) => Ty::Named(NamedTy {
                 decl: named.decl.clone(),
                 args: self.freshen_regions_args(&named.args),
-            }),
-            Ty::Variant(variant) => Ty::Variant(VariantTy {
-                args: self.freshen_regions_args(&variant.args),
-                ..variant.clone()
             }),
             other => other.clone(),
         }
@@ -829,9 +814,8 @@ impl Constraints {
             // SAFETY flag: `fn(usize)` and `unsafe fn(usize)` are two types,
             // and going from the first to the second is a directed
             // conversion applied at check sites (`InferCtx::check`), never
-            // an equation — the same discipline variant → enum follows, and
-            // for the same reason: inferring it backwards through a variable
-            // would let an `unsafe fn` arrive where a safe one was promised.
+            // an equation: inferring it backwards through a variable would
+            // let an `unsafe fn` arrive where a safe one was promised.
             (Ty::Fn(f1), Ty::Fn(f2)) => {
                 f1.unsafe_to_call == f2.unsafe_to_call && f1.params.len() == f2.params.len() && {
                     let params_ok = f1
@@ -905,17 +889,6 @@ impl Constraints {
             // that opacity is what makes a generic body check once, before
             // any instantiation (TR06).
             (Ty::Param(a), Ty::Param(b)) => a == b,
-            // A variant type unifies only with itself — same declaration,
-            // same variant, pointwise-unifying enum args. Variant vs. its
-            // enum is deliberately FALSE here: unification is equational,
-            // and variant → enum is a runtime conversion (`widens_to`),
-            // applied only at check sites — never inferred backwards
-            // through a unification variable.
-            (Ty::Variant(a), Ty::Variant(b)) => {
-                a.decl == b.decl
-                    && a.index == b.index
-                    && self.unify_args(table, &a.args, &b.args, cause)
-            }
             // Structural, exact field-set equality: same names (both sides
             // are canonically sorted, so zipping compares the sets), then
             // the field types unify pairwise. No subtyping.
@@ -954,59 +927,6 @@ impl Constraints {
             })
     }
 
-    /// The variant → enum widening judgement, argument-preserving: `actual`
-    /// is a variant of exactly the enum `expected` names AND the enum args
-    /// unify pointwise (`Option::<usize>::Some` widens to `Option::<usize>`,
-    /// never to `Option::<str>`). Returns the variant (for the conversion
-    /// record) on success. The two check sites (`InferCtx::check`, the join
-    /// solver below) go through here so the args can bind still-free
-    /// variables on either side.
-    pub(crate) fn widen_to_enum(
-        &mut self,
-        table: &mut InPlaceUnificationTable<TyVar>,
-        actual: &Ty,
-        expected: &Ty,
-        origin: ExprId,
-    ) -> Option<VariantTy> {
-        let (Ty::Variant(variant), Ty::Named(named)) = (actual, expected) else {
-            return None;
-        };
-        if variant.decl != named.decl {
-            return None;
-        }
-        let variant = variant.clone();
-        if !self.unify_args(table, &variant.args, &named.args, None) {
-            return None;
-        }
-        // `unify_args` is region-blind, like every unification here — so
-        // the widening edge has to relate the args' regions itself, or the
-        // conversion is a laundry: `Opt::<usize.&::<@short>>::Some(..)`
-        // would flow into `Opt::<usize.&::<@long>>` with no obligation
-        // recorded anywhere. The tag injection changes the representation,
-        // not the payload, so the payload's regions are RELATED (both
-        // directions, no variance), exactly as `relate` would.
-        for (ga, gb) in variant.args.iter().zip(&named.args) {
-            match (ga, gb) {
-                (GenericArg::Ty(ta), GenericArg::Ty(tb)) => {
-                    let (ta, tb) = (ta.clone(), tb.clone());
-                    self.relate_type_regions(table, &ta, &tb, origin);
-                }
-                // A region ARGUMENT is related the same way, and for the
-                // same reason. Unreachable until a type declaration may
-                // take a region; exhaustive so that day is a compile error.
-                (GenericArg::Region(ra), GenericArg::Region(rb)) => {
-                    let (ra, rb) = (ra.clone(), rb.clone());
-                    self.relate_regions_invariant(&ra, &rb, origin);
-                }
-                // A const argument carries no region.
-                (GenericArg::Const(_), GenericArg::Const(_)) => {}
-                // Mismatched kinds: `unify_args` above already refused.
-                (GenericArg::Ty(_) | GenericArg::Region(_) | GenericArg::Const(_), _) => {}
-            }
-        }
-        Some(variant)
-    }
-
     /// SAFE `fn` → `unsafe fn`, the one directed conversion on function
     /// types — applied where unification has already failed, at both check
     /// sites (a direct one in `InferCtx::check`, and a join's witness loop
@@ -1024,7 +944,7 @@ impl Constraints {
     /// mismatch, whose two rendered types differ by the one token that is
     /// the whole story. Returns `true` when the conversion applied; there
     /// is nothing to hand back, because it converts no bits — a caller
-    /// records no edge for MIR, unlike [`Self::widen_to_enum`].
+    /// records no edge for MIR.
     pub(crate) fn coerce_fn_to_unsafe(
         &mut self,
         table: &mut InPlaceUnificationTable<TyVar>,
@@ -1046,9 +966,9 @@ impl Constraints {
         // NOT recorded on the expression: the caller returns the EXPECTED
         // type, so hover past a converted edge reads `unsafe fn(...)` — the
         // type the value has in the position it landed in. That is a
-        // decision, and it is the one variant → enum already made: the
-        // conversion happened HERE, and showing the pre-conversion type
-        // afterwards would describe a value that no longer exists.
+        // decision: the conversion happens HERE, and showing the
+        // pre-conversion type would describe a type the value does not
+        // have in that position.
     }
 
     /// Solve all deferred joins, emitting blame-attributed diagnostics.
@@ -1095,13 +1015,9 @@ impl Constraints {
             // No axiom constrained the result: the witnesses — the leaf
             // branches of the whole (possibly nested) construct — vote, so
             // a plurality of leaves wins regardless of the nesting shape
-            // they arrived in. Voting is *family-aware*: a Variant or
-            // Named-enum leaf votes for its enum declaration (the family
-            // root), any other leaf for its own type. The winning family
-            // then resolves to its least upper bound — every leaf the same
-            // variant keeps that variant (precision survives, zero
-            // conversions); mixed variants of one enum widen to the enum
-            // (each variant leaf gets its conversion in the loop below).
+            // they arrived in. Voting is *family-aware*: a `Named` leaf
+            // votes for its declaration whatever its args, any other leaf
+            // for its own type.
             Ty::Infer(_) => {
                 let leaves: Vec<(ExprId, Ty)> = join
                     .witnesses
@@ -1154,12 +1070,11 @@ impl Constraints {
                     .filter(|(_, ty)| family_of(ty) == family)
                     .map(|(_, ty)| ty)
                     .collect();
-                // Least upper bound within the family: identical leaves
-                // keep their exact type; anything mixed is only possible in
-                // an enum family, whose LUB is the enum itself.
+                // Identical leaves keep their exact type; anything mixed is
+                // only possible in a nominal family, whose args disagree.
                 // Compared region-erased, for the same reason the family
                 // key is: differing regions are not differing types, so
-                // they must not send this down the enum-LUB path (which
+                // they must not send this down the nominal path (which
                 // would be unreachable for a borrow family).
                 let winner = if members
                     .iter()
@@ -1186,25 +1101,13 @@ impl Constraints {
                         winner
                     }
                 } else {
-                    let Family::Enum(loc) = &family else {
-                        unreachable!("only enum families hold more than one type")
+                    let Family::Named(_) = &family else {
+                        unreachable!("only nominal families hold more than one type")
                     };
-                    // The enum with the first member's generic args: the
-                    // remaining members' args unify against it in the
-                    // witness pass below (an arg disagreement is an
-                    // ordinary culprit).
-                    let args = members
-                        .iter()
-                        .find_map(|ty| match ty {
-                            Ty::Variant(variant) => Some(variant.args.clone()),
-                            Ty::Named(named) => Some(named.args.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-                    Ty::Named(NamedTy {
-                        decl: loc.clone(),
-                        args,
-                    })
+                    // The first member: the remaining members' args unify
+                    // against it in the witness pass below (an arg
+                    // disagreement is an ordinary culprit).
+                    members[0].clone()
                 };
                 // The winning leaves are the causes: "this branch has type
                 // …" hints, wherever in the nesting those leaves sit.
@@ -1229,15 +1132,12 @@ impl Constraints {
         };
 
         // Witnesses that agree become "this branch has type …" hints; free
-        // variables adopt the type; witnesses whose variant type widens to
-        // an expected enum pass with a conversion at their edge; the rest
-        // are culprits.
+        // variables adopt the type; the rest are culprits.
         let mut siblings: Vec<Cause> = Vec::new();
-        let mut widened = 0usize;
         // Leaves that passed through the safe-fn → `unsafe fn` conversion.
-        // Counted for exactly one thing, the same one `widened` is counted
-        // for: a witness that converted is not a culprit, so the conflict
-        // below is not unanimous and must not be reported as one.
+        // Counted for exactly one thing: a witness that converted is not a
+        // culprit, so the conflict below is not unanimous and must not be
+        // reported as one.
         let mut coerced = 0usize;
         let mut culprits: Vec<(&Witness, Ty)> = Vec::new();
         for witness in &join.witnesses {
@@ -1301,16 +1201,6 @@ impl Constraints {
                         // Hint on the tail sub-expression that produced the
                         // type, not the whole branch.
                         siblings.push(Cause::Branch(witness.blame));
-                    } else if let Some(variant) =
-                        self.widen_to_enum(table, &actual, &expected, witness.blame)
-                    {
-                        // Not unified (the leaf keeps its precise variant
-                        // type) — the conversion op lands on this edge. Not
-                        // a sibling either: a "this branch has type
-                        // `Shape`" hint on a `Shape::Circle` leaf would
-                        // lie.
-                        self.widenings.push((witness.blame, variant));
-                        widened += 1;
                     } else if self.coerce_fn_to_unsafe(table, &witness.ty, &expected, witness.blame)
                     {
                         // A SAFE fn leaf meeting an `unsafe fn` context —
@@ -1320,12 +1210,12 @@ impl Constraints {
                         // site, and every conversion a direct check
                         // performs it must perform too, or wrapping a value
                         // in an `if` changes what the language accepts.
-                        // Records nothing: unlike a widening this converts
-                        // no bits, so there is no edge for MIR to act on.
+                        // Records nothing: this converts no bits, so there
+                        // is no edge for MIR to act on.
                         //
-                        // Not a sibling, for the widening's reason — "this
-                        // branch has type `unsafe fn(...)`" would lie about
-                        // a leaf that is a safe `fn`.
+                        // Not a sibling: "this branch has type
+                        // `unsafe fn(...)`" would lie about a leaf that is
+                        // a safe `fn`.
                         coerced += 1;
                     } else {
                         culprits.push((witness, actual));
@@ -1343,7 +1233,6 @@ impl Constraints {
             // behind `expected` — though not necessarily a recorded cause
             // yet.
             let unanimous = siblings.is_empty()
-                && widened == 0
                 && coerced == 0
                 && culprits.iter().all(|(_, ty)| *ty == culprits[0].1);
             if unanimous {
@@ -1379,27 +1268,22 @@ impl Constraints {
     }
 }
 
-/// Which "family" a join leaf votes for. Variant-typed and enum-typed
-/// leaves of one enum are votes for the *same* outcome family (their least
-/// upper bound is decided after the vote); every other type is a family of
-/// its own. Keyed by declaration, not by asking the database whether a
-/// `Named` is an enum: a struct's `Named` gets a declaration key too, but
-/// no `Variant` can share it (variants are only minted from enum
-/// declarations), so its family LUB degenerates to plain equality.
+/// Which "family" a join leaf votes for. `Named` leaves of one declaration
+/// are votes for the *same* outcome family whatever their args; every other
+/// type is a family of its own.
 #[derive(Clone, PartialEq)]
 enum Family {
-    Enum(ItemLoc),
+    Named(ItemLoc),
     Shape(Ty),
 }
 
 fn family_of(ty: &Ty) -> Family {
-    // Keyed by declaration alone (not args): mixed-arg leaves of one enum
-    // are one family whose vote resolves to the first member's args — a
-    // real arg disagreement then surfaces as an ordinary witness mismatch
-    // rather than a family tie.
+    // Keyed by declaration alone (not args): mixed-arg leaves of one
+    // declaration are one family whose vote resolves to the first member's
+    // args — a real arg disagreement then surfaces as an ordinary witness
+    // mismatch rather than a family tie.
     match ty {
-        Ty::Variant(variant) => Family::Enum(variant.decl.clone()),
-        Ty::Named(named) => Family::Enum(named.decl.clone()),
+        Ty::Named(named) => Family::Named(named.decl.clone()),
         // REGION-ERASED, and that is load-bearing rather than tidy: two
         // borrows of the same referent are the same shape however long
         // each is good for. Keying the family on the region would make a
@@ -1495,7 +1379,7 @@ pub(crate) fn poison_unresolved_number(table: &mut InPlaceUnificationTable<TyVar
                 poison_unresolved_number(table, field);
             }
         }
-        Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
+        Ty::Named(NamedTy { args, .. }) => {
             for arg in &args {
                 if let GenericArg::Ty(ty) = arg {
                     poison_unresolved_number(table, ty);
@@ -1539,10 +1423,6 @@ pub(crate) fn resolve_fully(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty)
         Ty::Named(named) => Ty::Named(NamedTy {
             decl: named.decl.clone(),
             args: resolve_args_fully(table, &named.args),
-        }),
-        Ty::Variant(variant) => Ty::Variant(VariantTy {
-            args: resolve_args_fully(table, &variant.args),
-            ..variant.clone()
         }),
         other => other.clone(),
     }
@@ -1603,24 +1483,13 @@ fn render_unresolved_numbers(table: &mut InPlaceUnificationTable<TyVar>, ty: &Ty
                 })
                 .collect(),
         }),
-        Ty::Variant(variant) => Ty::Variant(VariantTy {
-            args: variant
-                .args
-                .iter()
-                .map(|arg| match arg {
-                    GenericArg::Ty(ty) => GenericArg::Ty(render_unresolved_numbers(table, ty)),
-                    GenericArg::Region(_) | GenericArg::Const(_) => arg.clone(),
-                })
-                .collect(),
-            ..variant.clone()
-        }),
         other => other.clone(),
     }
 }
 
 /// [`resolve_fully`] over a generic-argument list — also used by `infer`'s
-/// finish pass for the `VariantTy`s persisted outside any `Ty` (`widened`,
-/// `variant_of_expr`, `variant_of_pat`).
+/// finish pass for the `ResolvedVariant`s persisted outside any `Ty`
+/// (`variant_of_expr`, `variant_of_pat`).
 pub(crate) fn resolve_args_fully(
     table: &mut InPlaceUnificationTable<TyVar>,
     args: &[GenericArg],
@@ -1652,12 +1521,10 @@ fn occurs(table: &mut InPlaceUnificationTable<TyVar>, var: TyVar, ty: &Ty) -> bo
         Ty::Borrow { referent, .. } => occurs(table, var, referent),
         Ty::Array { elem, .. } => occurs(table, var, elem),
         Ty::Record(rec) => rec.fields.iter().any(|(_, ty)| occurs(table, var, ty)),
-        Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
-            args.iter().any(|arg| match arg {
-                GenericArg::Ty(ty) => occurs(table, var, ty),
-                GenericArg::Region(_) | GenericArg::Const(_) => false,
-            })
-        }
+        Ty::Named(NamedTy { args, .. }) => args.iter().any(|arg| match arg {
+            GenericArg::Ty(ty) => occurs(table, var, ty),
+            GenericArg::Region(_) | GenericArg::Const(_) => false,
+        }),
         _ => false,
     }
 }
