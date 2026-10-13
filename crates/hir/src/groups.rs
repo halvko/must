@@ -33,7 +33,7 @@ use rustc_hash::FxHashMap;
 use crate::constraint::resolve_fully;
 use crate::infer::InferCtx;
 use crate::item_tree::item_tree;
-use crate::ty::{ParamScope, Ty, TyVar, TyVarValue, lower_type_ref_in};
+use crate::ty::{ParamScope, Ty, TyVar, TyVarValue, erase_infer, lower_type_ref_in};
 use crate::{ItemLoc, file_item_ids, item_loc};
 
 /// One inference group per salsa key.
@@ -300,24 +300,6 @@ pub fn infer_group<'db>(db: &'db dyn Db, group: GroupId<'db>) -> GroupSignatures
             // `Ty::Error` and pass through unchanged.)
             .map(|loc| erase_infer(&resolve_fully(&mut table, &in_group[loc])))
             .collect(),
-    }
-}
-
-fn erase_infer(ty: &Ty) -> Ty {
-    match ty {
-        Ty::Infer(_) => Ty::Error,
-        Ty::Fn(f) => f.rebuilt(
-            f.params.iter().map(erase_infer).collect(),
-            erase_infer(&f.ret),
-        ),
-        Ty::Array { elem, len } => Ty::array(erase_infer(elem), len.clone()),
-        Ty::Record(rec) => Ty::record(
-            rec.fields
-                .iter()
-                .map(|(name, ty)| (name.clone(), erase_infer(ty)))
-                .collect(),
-        ),
-        other => other.clone(),
     }
 }
 
