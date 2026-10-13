@@ -1,4 +1,5 @@
-//! Moves and initialization: M16's dataflow, one fact per named local.
+//! Moves and initialization: M16's dataflow, one fact per named local,
+//! plus one per compiler temporary that holds a linear value.
 //! What one expression or pattern does with a linear is
 //! [`hir::linear_check`]'s; what has happened to a local on a path is asked
 //! here. A move is a whole-local read of a value that cannot be duplicated;
@@ -32,6 +33,11 @@ pub enum MoveDiagnostic {
         /// A move that empties the binding on another path to the exit.
         moved: Option<ExprId>,
     },
+    /// A linear value lowering parked in a temporary, abandoned: a
+    /// `return`, `break` or `continue` cut its expression short, so it is
+    /// held where the frame ends or where the expression runs again.
+    /// Squiggles that exit; the expression that made the value is the note.
+    ValueNotConsumed { value: ExprId, exit: ExprId },
     /// A binding used after a move took its value — which for a linear is
     /// also disposal twice. `first` is a move that reaches here, only round
     /// a loop's back edge when `earlier_iteration`.
@@ -57,20 +63,31 @@ impl MoveDiagnostic {
     /// The expression the squiggle lands on.
     pub fn expr(&self) -> ExprId {
         match self {
-            MoveDiagnostic::NotConsumed { exit, .. } => *exit,
+            MoveDiagnostic::NotConsumed { exit, .. }
+            | MoveDiagnostic::ValueNotConsumed { exit, .. } => *exit,
             MoveDiagnostic::AlreadyConsumed { expr, .. }
             | MoveDiagnostic::ReadUninit { expr, .. } => *expr,
             MoveDiagnostic::AssignOverLive { target, .. } => *target,
         }
     }
 
-    /// The binding whose declaration explains the finding.
-    pub fn binding(&self) -> BindingId {
+    /// The binding whose declaration explains the finding, if a binding
+    /// holds the value.
+    pub fn binding(&self) -> Option<BindingId> {
         match self {
             MoveDiagnostic::NotConsumed { binding, .. }
             | MoveDiagnostic::AlreadyConsumed { binding, .. }
             | MoveDiagnostic::AssignOverLive { binding, .. }
-            | MoveDiagnostic::ReadUninit { binding, .. } => *binding,
+            | MoveDiagnostic::ReadUninit { binding, .. } => Some(*binding),
+            MoveDiagnostic::ValueNotConsumed { .. } => None,
+        }
+    }
+
+    /// The type of the value the finding is about.
+    fn ty<'t>(&self, types: &'t InferenceResult) -> Option<&'t hir::Ty> {
+        match self {
+            MoveDiagnostic::ValueNotConsumed { value, .. } => types.type_of_expr.get(*value),
+            _ => types.type_of_binding.get(self.binding()?),
         }
     }
 
@@ -85,15 +102,16 @@ impl MoveDiagnostic {
     pub fn message(&self, db: &dyn Db, item: ItemId<'_>) -> String {
         let body = hir::body::body(db, item);
         let types = hir::infer::infer(db, item);
-        let binding = self.binding();
-        let subject = Some(&body.bindings[binding].kind);
-        let ty = types.type_of_binding.get(binding);
+        let subject = self.binding().map(|binding| &body.bindings[binding].kind);
+        let ty = self.ty(types);
         let param = || ty.and_then(|ty| hir::capability::blaming_param(db, ty));
         match self {
-            MoveDiagnostic::NotConsumed { .. } => match param() {
-                Some(param) => hir::diag::not_consumed_param(subject, &param),
-                None => hir::diag::not_consumed(subject),
-            },
+            MoveDiagnostic::NotConsumed { .. } | MoveDiagnostic::ValueNotConsumed { .. } => {
+                match param() {
+                    Some(param) => hir::diag::not_consumed_param(subject, &param),
+                    None => hir::diag::not_consumed(subject),
+                }
+            }
             MoveDiagnostic::AlreadyConsumed { .. } => ty
                 .and_then(|ty| hir::capability::affine_root(db, ty))
                 .and_then(|root| hir::diag::already_consumed_dup(subject, &root))
@@ -106,8 +124,9 @@ impl MoveDiagnostic {
         }
     }
 
-    /// The companion sites: the binding's declaration, then the move that
-    /// explains the finding, when it has one.
+    /// The companion sites: the binding's declaration (or the expression
+    /// that made the value), then the move that explains the finding, when
+    /// it has one.
     pub fn related(
         &self,
         db: &dyn Db,
@@ -116,26 +135,27 @@ impl MoveDiagnostic {
     ) -> Vec<(TextRange, String)> {
         let body = hir::body::body(db, item);
         let types = hir::infer::infer(db, item);
-        let binding = self.binding();
-        let subject: Option<&BindingKind> = Some(&body.bindings[binding].kind);
+        let subject: Option<&BindingKind> =
+            self.binding().map(|binding| &body.bindings[binding].kind);
         let at = |expr: ExprId| Some(source_map.node_for_expr(expr)?.text_range());
         let mut notes = Vec::new();
         let declared = match self {
             MoveDiagnostic::ReadUninit { .. } => hir::diag::declared_without_value(subject),
             _ => {
-                let linear = types
-                    .type_of_binding
-                    .get(binding)
+                let linear = self
+                    .ty(types)
                     .is_some_and(|ty| !hir::capability::has_forget(db, ty));
                 hir::diag::born_here(subject, linear)
             }
         };
-        notes.push((
-            source_map
-                .node_for_binding(binding)
+        let born = match self {
+            MoveDiagnostic::ValueNotConsumed { value, .. } => at(*value),
+            _ => self
+                .binding()
+                .and_then(|binding| source_map.node_for_binding(binding))
                 .map(|ptr| ptr.text_range()),
-            declared,
-        ));
+        };
+        notes.push((born, declared));
         match self {
             MoveDiagnostic::AlreadyConsumed {
                 first,
@@ -303,9 +323,14 @@ enum Owed {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct Tracked {
-    binding: BindingId,
-    owed: Owed,
+enum Tracked {
+    /// A named local: every use is checked, against what it owes.
+    Binding { binding: BindingId, owed: Owed },
+    /// A compiler temporary holding a linear value that something reads,
+    /// checked for a leak only. Lowering's own reads of it are right by
+    /// construction, and a linear nothing reads is
+    /// [`hir::linear_check`]'s to refuse.
+    Temporary,
 }
 
 /// What a local may hold at a point: each flag but `halted` holds on some
@@ -352,6 +377,7 @@ impl Holds {
 type State = Vec<Holds>;
 
 /// What a point does to one local, for the walk back to a move.
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Effect {
     Takes,
     /// Gives it a value, ends its storage, or halts it.
@@ -375,11 +401,21 @@ struct BodyCheck<'a> {
 
 impl<'a> BodyCheck<'a> {
     fn new(check: &'a ItemCheck<'a>, body: &'a MirBody) -> BodyCheck<'a> {
+        let mut read = BitSet::new(body.locals.len());
+        cfg::for_each_read(body, &mut |place| {
+            read.insert(cfg::local_index(place.local));
+        });
         let tracked = body
             .locals
             .iter()
-            .map(|(_, data)| {
-                let binding = data.binding?;
+            .map(|(local, data)| {
+                let Some(binding) = data.binding else {
+                    // The return place is the caller's to consume.
+                    return (local != body.return_local()
+                        && read.contains(cfg::local_index(local))
+                        && !hir::capability::has_forget(check.db, &data.ty))
+                    .then_some(Tracked::Temporary);
+                };
                 if check.hir_body.bindings[binding].is_temporary() {
                     return None;
                 }
@@ -389,7 +425,7 @@ impl<'a> BodyCheck<'a> {
                     Some(ty) if !hir::capability::is_copyable(check.db, ty) => Owed::AtMostOnce,
                     Some(_) => Owed::Nothing,
                 };
-                Some(Tracked { binding, owed })
+                Some(Tracked::Binding { binding, owed })
             })
             .collect();
         BodyCheck {
@@ -413,7 +449,7 @@ impl<'a> BodyCheck<'a> {
     fn entry_state(&self) -> State {
         let mut state: State = vec![Holds::default(); self.body.locals.len()];
         for (local, _) in self.body.locals.iter() {
-            if self.tracked(local).is_some() {
+            if let Some(Tracked::Binding { .. }) = self.tracked(local) {
                 state[cfg::local_index(local)].unassigned = true;
             }
         }
@@ -478,6 +514,8 @@ impl<'a> BodyCheck<'a> {
                     dest,
                     rvalue: value,
                 } => {
+                    // Asked before the reads below take a temporary.
+                    let halted = self.is_halted(value, state);
                     match value {
                         Rvalue::Borrow { place, .. } | Rvalue::AddrOf { place, .. } => {
                             self.place_use(point, origin, place, false, state, &mut out);
@@ -490,7 +528,7 @@ impl<'a> BodyCheck<'a> {
                         // Written into or through: the root must hold its
                         // value.
                         self.place_use(point, origin, dest, true, state, &mut out);
-                    } else if self.is_halted(value, state) {
+                    } else if halted {
                         self.halt(dest.local, state);
                     } else {
                         self.assign(point, origin, dest.local, state, &mut out);
@@ -533,7 +571,9 @@ impl<'a> BodyCheck<'a> {
                     self.halt(*dest, state);
                     if let Some((_, binding)) = self.check.root(origin, true) {
                         for (local, _) in self.body.locals.iter() {
-                            if self.tracked(local).is_some_and(|t| t.binding == binding) {
+                            if let Some(Tracked::Binding { binding: b, .. }) = self.tracked(local)
+                                && b == binding
+                            {
                                 self.halt(local, state);
                             }
                         }
@@ -587,11 +627,19 @@ impl<'a> BodyCheck<'a> {
             Operand::Move(place) => (place, true),
             Operand::Const(_) => return false,
         };
-        place.local == local
-            && place.projection.is_empty()
-            && self.tracked(local).is_some_and(|tracked| {
-                moved || matches!(tracked.owed, Owed::Once | Owed::AtMostOnce)
-            })
+        if place.local != local {
+            return false;
+        }
+        match self.tracked(local) {
+            Some(Tracked::Binding { owed, .. }) => {
+                place.projection.is_empty()
+                    && (moved || matches!(owed, Owed::Once | Owed::AtMostOnce))
+            }
+            // A temporary's value goes wherever lowering reads it, a field
+            // at a time when a pattern takes it apart.
+            Some(Tracked::Temporary) => true,
+            None => false,
+        }
     }
 
     fn operand(
@@ -637,7 +685,7 @@ impl<'a> BodyCheck<'a> {
                 self.operand(point, origin, op, state, out);
             }
         }
-        let Some(tracked) = self.tracked(place.local) else {
+        let Some(Tracked::Binding { binding, .. }) = self.tracked(place.local) else {
             return;
         };
         let Some(out) = out else {
@@ -651,10 +699,10 @@ impl<'a> BodyCheck<'a> {
             true => self.check.assign_target(origin).unwrap_or(origin),
             false => origin,
         };
-        let expr = self.check.mention(at, tracked.binding);
+        let expr = self.check.mention(at, binding);
         let diag = if holds.unassigned {
             MoveDiagnostic::ReadUninit {
-                binding: tracked.binding,
+                binding,
                 expr,
                 maybe: holds.value || holds.moved,
             }
@@ -663,12 +711,12 @@ impl<'a> BodyCheck<'a> {
                 (expr, false)
             } else {
                 match self.find_move(point, place.local) {
-                    Some((at, round)) => (self.mention_at(at, tracked.binding), round),
+                    Some((at, round)) => (self.mention_at(at, binding), round),
                     None => (expr, false),
                 }
             };
             MoveDiagnostic::AlreadyConsumed {
-                binding: tracked.binding,
+                binding,
                 expr,
                 first,
                 earlier_iteration,
@@ -678,7 +726,8 @@ impl<'a> BodyCheck<'a> {
     }
 
     /// A whole-local write. Over a linear that may still hold a value, a
-    /// user's assignment loses it.
+    /// user's assignment loses it, and so does lowering's when it refills a
+    /// temporary an earlier iteration left full.
     fn assign(
         &self,
         point: Point,
@@ -693,17 +742,22 @@ impl<'a> BodyCheck<'a> {
             return;
         };
         if let Some(out) = out
-            && tracked.owed == Owed::Once
             && holds.value
-            && let Some(target) = self.check.assign_target(origin)
         {
-            out.report(
-                point,
-                MoveDiagnostic::AssignOverLive {
-                    binding: tracked.binding,
-                    target,
-                },
-            );
+            let diag = match tracked {
+                Tracked::Binding {
+                    binding,
+                    owed: Owed::Once,
+                } => self
+                    .check
+                    .assign_target(origin)
+                    .map(|target| MoveDiagnostic::AssignOverLive { binding, target }),
+                Tracked::Binding { .. } => None,
+                Tracked::Temporary => self.abandoned(point, local, origin),
+            };
+            if let Some(diag) = diag {
+                out.report(point, diag);
+            }
         }
         *holds = Holds::VALUE;
     }
@@ -720,19 +774,41 @@ impl<'a> BodyCheck<'a> {
         let (Some(tracked), Some(out)) = (self.tracked(local), out) else {
             return;
         };
-        if tracked.owed == Owed::Once && state[cfg::local_index(local)].value {
-            let moved = self
-                .find_move(point, local)
-                .map(|(at, _)| self.mention_at(at, tracked.binding));
-            out.report(
-                point,
-                MoveDiagnostic::NotConsumed {
-                    binding: tracked.binding,
-                    exit,
-                    moved,
-                },
-            );
+        if !state[cfg::local_index(local)].value {
+            return;
         }
+        let diag = match tracked {
+            Tracked::Binding {
+                binding,
+                owed: Owed::Once,
+            } => MoveDiagnostic::NotConsumed {
+                binding,
+                exit,
+                moved: self
+                    .find_move(point, local)
+                    .map(|(at, _)| self.mention_at(at, binding)),
+            },
+            Tracked::Binding { .. } => return,
+            Tracked::Temporary => match self.abandoned(point, local, exit) {
+                Some(diag) => diag,
+                None => return,
+            },
+        };
+        out.report(point, diag);
+    }
+
+    /// The finding for the temporary `local`, holding its value at
+    /// `point`: blamed at the exit that cut its expression short, else at
+    /// `fallback`, with the write that filled it on a path to `point`.
+    fn abandoned(&self, point: Point, local: LocalId, fallback: ExprId) -> Option<MoveDiagnostic> {
+        let defs = cfg::defs_of(self.body, local);
+        let filled = |at: Point, _| defs.iter().any(|&(def, _)| def == at);
+        let def = (self.walk_back(point, local, false, filled))
+            .or_else(|| self.walk_back(point, local, true, filled))?;
+        Some(MoveDiagnostic::ValueNotConsumed {
+            value: cfg::origin_at(self.body, def),
+            exit: self.abandoned_at(point, local).unwrap_or(fallback),
+        })
     }
 
     fn mention_at(&self, point: Point, binding: BindingId) -> ExprId {
@@ -750,6 +826,34 @@ impl<'a> BodyCheck<'a> {
     }
 
     fn walk_back_to_move(&self, to: Point, local: LocalId, round_loops: bool) -> Option<Point> {
+        self.walk_back(to, local, round_loops, |_, effect| effect == Effect::Takes)
+    }
+
+    /// The `break`, `continue` or `return` that carried a value in the
+    /// temporary `local` out of the expression meant to consume it, on a
+    /// path to the frame's end at `to`.
+    fn abandoned_at(&self, to: Point, local: LocalId) -> Option<ExprId> {
+        let exits = |point: Point, _| {
+            matches!(
+                self.check.hir_body.exprs[cfg::origin_at(self.body, point)],
+                ExprData::Break { .. } | ExprData::Continue | ExprData::Return { .. }
+            )
+        };
+        let point = (self.walk_back(to, local, false, exits))
+            .or_else(|| self.walk_back(to, local, true, exits))?;
+        Some(cfg::origin_at(self.body, point))
+    }
+
+    /// The first point walking back from `to` that is `found`, without
+    /// walking past a point that refills, ends or halts `local`; round a
+    /// loop's back edge only when `round_loops`.
+    fn walk_back(
+        &self,
+        to: Point,
+        local: LocalId,
+        round_loops: bool,
+        found: impl Fn(Point, Effect) -> bool,
+    ) -> Option<Point> {
         let preds = self.preds.get_or_init(|| predecessors(self.body));
         let rpo = self.rpo.get_or_init(|| reverse_postorder(self.body));
         let mut seen = BitSet::new(self.body.blocks.len());
@@ -760,10 +864,12 @@ impl<'a> BodyCheck<'a> {
                     block: from.block,
                     index,
                 };
-                match self.effect(point, local) {
-                    Effect::Takes => return Some(point),
-                    Effect::Ends => continue 'walk,
-                    Effect::Nothing => {}
+                let effect = self.effect(point, local);
+                if found(point, effect) {
+                    return Some(point);
+                }
+                if effect == Effect::Ends {
+                    continue 'walk;
                 }
             }
             let Some(to_order) = rpo[cfg::block_index(from.block)] else {

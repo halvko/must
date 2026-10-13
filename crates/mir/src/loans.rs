@@ -164,7 +164,7 @@ use hir::{BindingId, ExprId, ItemId, RegionConstraint, Ty};
 use rustc_hash::{FxHashMap, FxHashSet};
 use syntax::TextRange;
 
-use crate::cfg::{self, BitSet, Findings, Point, operand_places, place_places, value_places};
+use crate::cfg::{self, BitSet, Findings, Point, operand_places, value_places};
 use crate::{
     BlockId, CheckTrap, LocalId, MirBody, Operand, Place, ProjElem, Rvalue, Scope, Statement,
     StatementKind, TerminatorKind, paths_overlap,
@@ -618,43 +618,12 @@ impl<'a> BodyCheck<'a> {
 
     // ---- per-local facts --------------------------------------------------
 
-    /// Every point that DEFINES the whole of a local, with its origin.
-    fn defs_of(&self, local: LocalId) -> Vec<(Point, ExprId)> {
-        let mut defs = Vec::new();
-        for (block, data) in self.body.blocks.iter() {
-            for (index, stmt) in data.statements.iter().enumerate() {
-                let StatementKind::Assign { dest, .. } = &stmt.kind else {
-                    continue;
-                };
-                if dest.local == local && dest.projection.is_empty() {
-                    defs.push((Point { block, index }, stmt.origin));
-                }
-            }
-            let dest = match &data.terminator.kind {
-                TerminatorKind::Call { dest, .. } | TerminatorKind::Trap { dest, .. } => {
-                    Some(*dest)
-                }
-                _ => None,
-            };
-            if dest == Some(local) {
-                defs.push((
-                    Point {
-                        block,
-                        index: data.statements.len(),
-                    },
-                    data.terminator.origin,
-                ));
-            }
-        }
-        defs
-    }
-
     /// The place an unbound temp is defined once as a copy of.
     fn copied_place(&self, local: LocalId) -> Option<&Place> {
         if self.body.locals[local].binding.is_some() {
             return None;
         }
-        let defs = self.defs_of(local);
+        let defs = cfg::defs_of(self.body, local);
         let [(point, _)] = defs.as_slice() else {
             return None;
         };
@@ -738,28 +707,12 @@ impl<'a> BodyCheck<'a> {
 
     /// Every place the body names, index operands included.
     fn for_each_place(&self, f: &mut impl FnMut(&Place)) {
+        cfg::for_each_read(self.body, f);
         for (_, data) in self.body.blocks.iter() {
             for stmt in &data.statements {
-                let StatementKind::Assign { dest, rvalue } = &stmt.kind else {
-                    continue;
-                };
-                value_places(rvalue, f);
-                place_places(dest, f);
-            }
-            match &data.terminator.kind {
-                TerminatorKind::SwitchBool { discr, .. }
-                | TerminatorKind::SwitchVariant { discr, .. } => operand_places(discr, f),
-                TerminatorKind::Call { callee, args, .. } => {
-                    operand_places(callee, f);
-                    for arg in args {
-                        operand_places(arg, f);
-                    }
+                if let StatementKind::Assign { dest, .. } = &stmt.kind {
+                    f(dest);
                 }
-                TerminatorKind::Return
-                | TerminatorKind::Goto { .. }
-                | TerminatorKind::Trap { .. }
-                | TerminatorKind::ConstTrap { .. }
-                | TerminatorKind::Unreachable => {}
             }
         }
     }
@@ -777,7 +730,7 @@ impl<'a> BodyCheck<'a> {
                 .into_iter()
                 .collect();
         }
-        self.defs_of(local)
+        cfg::defs_of(self.body, local)
             .into_iter()
             .filter_map(|(_, origin)| self.infer.type_of_expr.get(origin).cloned())
             .collect()
@@ -796,7 +749,7 @@ impl<'a> BodyCheck<'a> {
             // recorded at the mint (the use site's type may hold what the
             // loan flowed into, or what it came from).
             if data.binding.is_none() {
-                for (_, origin) in self.defs_of(local) {
+                for (_, origin) in cfg::defs_of(self.body, local) {
                     if let Some(region) = self.infer.loan_regions.get(origin) {
                         nodes.extend(self.cover.node(region));
                     }

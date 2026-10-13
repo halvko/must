@@ -8877,6 +8877,26 @@ static f = fn(s: Shape) {
     );
 }
 
+/// A `return` that cuts a call short abandons the argument already made.
+#[test]
+fn a_linear_argument_abandoned_by_a_return_traps_where_the_frame_ends() {
+    check_run(
+        r#"
+type L = struct { x: usize } only move;
+static make = fn() -> L { print("made;"); L(struct { x = 1 }) };
+static take = fn(l: L, n: usize) { let L(struct { x }) = l; };
+static f = fn() {
+    take(make(), return);
+};
+"#,
+        "f()",
+        expect![[r#"
+            output: "made;"
+            error[Trap]: this value is not consumed on this path; its type has no `forget` capability, so every path must consume it
+        "#]],
+    );
+}
+
 /// A borrow of a local that escapes its body traps before it is returned.
 #[test]
 fn an_escaping_borrow_traps_before_it_leaves() {
