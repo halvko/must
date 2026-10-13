@@ -175,10 +175,11 @@ impl Analysis {
             };
             let loans = mir::loan_check(&self.db, item);
             let moves = mir::move_check(&self.db, item);
-            if lowered.is_empty() && loans.is_empty() && moves.is_empty() {
+            let unused = mir::unused_check(&self.db, item);
+            if lowered.is_empty() && loans.is_empty() && moves.is_empty() && unused.is_empty() {
                 continue;
             }
-            let (_, source_map) = hir::body_with_source_map(&self.db, item);
+            let (hir_body, source_map) = hir::body_with_source_map(&self.db, item);
             for diag in lowered {
                 let Some(ptr) = source_map.node_for_expr(diag.expr()) else {
                     continue;
@@ -240,6 +241,24 @@ impl Analysis {
                     message: diag.message(&self.db, item),
                     fix: None,
                     related,
+                });
+            }
+            for diag in unused {
+                let Some(range) = diag.range(source_map) else {
+                    continue;
+                };
+                let fix = match diag {
+                    mir::UnusedDiagnostic::Unused { binding } => {
+                        prefix_underscore_fix(&self.db, file, hir_body, source_map, *binding)
+                    }
+                    _ => None,
+                };
+                diagnostics.push(Diagnostic {
+                    range,
+                    severity: Severity::Warning,
+                    message: diag.message(hir_body),
+                    fix,
+                    related: Vec::new(),
                 });
             }
         }
@@ -496,3 +515,38 @@ pub fn cancellable<T>(f: impl FnOnce() -> T) -> Option<T> {
 
 #[cfg(test)]
 mod tests;
+
+/// "Prefix with `_`" for an unused binding: renames `x` to `_x`, or, where
+/// one name both selects a record field and binds it (`{ x }`), keeps the
+/// field and renames the binding (`{ x as _x }`).
+fn prefix_underscore_fix(
+    db: &RootDatabase,
+    file: SourceFile,
+    body: &hir::Body,
+    source_map: &hir::BodySourceMap,
+    binding: hir::BindingId,
+) -> Option<Fix> {
+    let name = body.bindings[binding].written_name()?;
+    let root = base_db::parse(db, file).syntax_node();
+    let node = source_map.node_for_binding(binding)?.to_node(&root);
+    let range = node.text_range();
+    let shorthand = node
+        .parent()
+        .and_then(syntax::ast::RecordPatField::cast)
+        .is_some_and(|field| field.as_token().is_none());
+    let edit = if shorthand {
+        TextEdit {
+            range: TextRange::empty(range.end()),
+            insert: format!(" as _{name}"),
+        }
+    } else {
+        TextEdit {
+            range,
+            insert: format!("_{name}"),
+        }
+    };
+    Some(Fix {
+        label: format!("Rename to `_{name}`"),
+        edits: vec![FileEdit { file, edit }],
+    })
+}

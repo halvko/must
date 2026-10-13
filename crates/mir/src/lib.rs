@@ -30,6 +30,7 @@ pub mod pretty;
 mod tests;
 #[cfg(test)]
 mod trap_guard;
+pub mod unused;
 
 use base_db::Db;
 use hir::body::BinOp;
@@ -612,3 +613,4 @@ fn plant_trap(body: &mut MirBody, trap: &CheckTrap) {
 
 pub use loans::{AccessKind, LoanDiagnostic, LoanFindings, StillUsed, loan_check, loan_findings};
 pub use moves::{MoveDiagnostic, MoveFindings, move_check, move_findings};
+pub use unused::{UnusedDiagnostic, unused_check};

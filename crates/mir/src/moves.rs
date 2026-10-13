@@ -432,10 +432,7 @@ impl<'a> BodyCheck<'a> {
             check,
             body,
             tracked,
-            traps: body
-                .blocks
-                .iter()
-                .any(|(_, data)| matches!(data.terminator.kind, TerminatorKind::Trap { .. })),
+            traps: cfg::has_trap(body),
             preds: OnceCell::new(),
             rpo: OnceCell::new(),
             scratch: RefCell::new(Vec::new()),
@@ -855,7 +852,7 @@ impl<'a> BodyCheck<'a> {
         found: impl Fn(Point, Effect) -> bool,
     ) -> Option<Point> {
         let preds = self.preds.get_or_init(|| predecessors(self.body));
-        let rpo = self.rpo.get_or_init(|| reverse_postorder(self.body));
+        let rpo = self.rpo.get_or_init(|| cfg::reverse_postorder(self.body));
         let mut seen = BitSet::new(self.body.blocks.len());
         let mut work = vec![to];
         'walk: while let Some(from) = work.pop() {
@@ -926,32 +923,6 @@ fn predecessors(body: &MirBody) -> Vec<Vec<BlockId>> {
         }
     }
     preds
-}
-
-/// Each reachable block's position in reverse postorder: an edge to a
-/// block no later than its source is a loop's back edge.
-fn reverse_postorder(body: &MirBody) -> Vec<Option<usize>> {
-    let blocks = body.blocks.len();
-    let mut post = Vec::with_capacity(blocks);
-    let mut seen = BitSet::new(blocks);
-    seen.insert(cfg::block_index(body.entry));
-    let mut stack = vec![(body.entry, cfg::successors(body, body.entry), 0)];
-    while let Some((block, succs, next)) = stack.last_mut() {
-        if let Some(&succ) = succs.get(*next) {
-            *next += 1;
-            if seen.insert(cfg::block_index(succ)) {
-                stack.push((succ, cfg::successors(body, succ), 0));
-            }
-        } else {
-            post.push(*block);
-            stack.pop();
-        }
-    }
-    let mut order = vec![None; blocks];
-    for (position, block) in post.iter().rev().enumerate() {
-        order[cfg::block_index(*block)] = Some(position);
-    }
-    order
 }
 
 #[cfg(test)]

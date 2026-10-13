@@ -236,6 +236,30 @@ literal like `let 0 = n;`, the pattern can fail to match, and that is
 an error telling you to use `match`. An array pattern names exactly as
 many elements as the array's length.
 
+=== Unused bindings
+
+A binding nothing reads is a warning, and so is a value written to a
+binding, or into one of its fields or elements, that every path
+overwrites or abandons before reading it. Both
+come from liveness over the lowered control flow, so a value overwritten
+on every branch of an `if` is never read, while one that a single branch
+keeps is:
+
+```must
+static pick = fn (c: bool) -> usize {
+    let mut x = 10;            // warning: value written to `x` is never read
+    if c { x = 1; } else { x = 2; }
+    x
+};
+```
+
+A name starting with `_` says the binding is unused on purpose, and the
+warning's fix renames `x` to `_x` (or `{ x }` to `{ x as _x }`, keeping the
+field). There is no warning for a value that must be consumed (losing it is
+already an error, see "Values that must be consumed"), for a local whose
+address is taken (a raw pointer can read it later), or anywhere in an item
+with a name or type error.
+
 == Const functions and const blocks
 
 Every item initializer — `static` and `const` alike — is evaluated at

@@ -63,7 +63,7 @@ static wants_circle = fn (s: Shape::Circle) -> usize { 0 };
 //    warning: `Point` binds the whole value; write `::Point` (or `Shape::Point`) to match the variant
 static shadow_variant = fn (s: Shape) -> str {
     match s {
-        ::Circle(r) => "circle",
+        ::Circle(_) => "circle",
         Point => "point",
     }
 };
@@ -164,7 +164,7 @@ static old_spelling: struct { x: usize } = struct { x: 1 };
 //     error: unknown trait `Display`
 type Reserved = struct { n: usize } with {
     impl Display {
-        fmt = fn(r: Self) -> str { "reserved" };
+        fmt = fn(_: Self) -> str { "reserved" };
     }
 };
 
@@ -245,7 +245,7 @@ static member_own_turbofish = fn () -> () { let f = Measured::size::<usize>; };
 //     off the receiver's own type, which cannot supply one.
 //     error: `Counted::step` declares a const parameter of its own, and const member arguments are not supported yet (a member's type arguments are written here; its region arguments are always inferred)
 trait Counted = requires { step: fn::<const N: usize>(Self) -> usize; } with {
-    impl usize { step = fn::<const N: usize>(s: usize) -> usize { N }; }
+    impl usize { step = fn::<const N: usize>(_: usize) -> usize { N }; }
 };
 static member_own_const_turbofish = fn (n: usize) -> usize { Counted::step::<3>(n) };
 

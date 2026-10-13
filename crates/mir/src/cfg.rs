@@ -1,6 +1,7 @@
-//! What the CFG checkers ([`crate::loans`], [`crate::moves`]) share: points
-//! in a body, its edges, dense sets, the places a statement names, and
-//! where refusals are reported.
+//! What the CFG passes ([`crate::loans`], [`crate::moves`],
+//! [`crate::unused`]) share: points in a body, its edges, dense sets, the
+//! places a statement names, local liveness, and where refusals are
+//! reported.
 
 use hir::ExprId;
 use rustc_hash::FxHashSet;
@@ -227,6 +228,147 @@ pub(crate) fn defs_of(body: &MirBody, local: LocalId) -> Vec<(Point, ExprId)> {
         }
     }
     defs
+}
+
+/// The locals a point reads. A projected destination reads its root (the
+/// write goes into or through it); a whole-local destination is a
+/// definition, not a use.
+pub(crate) fn uses_at(body: &MirBody, point: Point) -> Vec<LocalId> {
+    let data = &body.blocks[point.block];
+    let mut uses = Vec::new();
+    let mut push = |place: &Place| uses.push(place.local);
+    match data.statements.get(point.index) {
+        Some(stmt) => match &stmt.kind {
+            StatementKind::Assign { dest, rvalue } => {
+                value_places(rvalue, &mut push);
+                if !dest.projection.is_empty() {
+                    place_places(dest, &mut push);
+                }
+            }
+            // Neither a use nor a def: counting it as a use would keep
+            // every holder live up to its own storage end.
+            StatementKind::StorageDead { .. } => {}
+        },
+        None => match &data.terminator.kind {
+            TerminatorKind::SwitchBool { discr, .. }
+            | TerminatorKind::SwitchVariant { discr, .. } => operand_places(discr, &mut push),
+            TerminatorKind::Call { callee, args, .. } => {
+                operand_places(callee, &mut push);
+                for arg in args {
+                    operand_places(arg, &mut push);
+                }
+            }
+            TerminatorKind::Return => uses.push(body.return_local()),
+            TerminatorKind::Goto { .. }
+            | TerminatorKind::Trap { .. }
+            | TerminatorKind::ConstTrap { .. }
+            | TerminatorKind::Unreachable => {}
+        },
+    }
+    uses
+}
+
+/// The local a point writes whole, if any.
+pub(crate) fn def_at(body: &MirBody, point: Point) -> Option<LocalId> {
+    let data = &body.blocks[point.block];
+    match data.statements.get(point.index) {
+        Some(stmt) => match &stmt.kind {
+            StatementKind::Assign { dest, .. } => dest.projection.is_empty().then_some(dest.local),
+            StatementKind::StorageDead { .. } => None,
+        },
+        None => match &data.terminator.kind {
+            TerminatorKind::Call { dest, .. } | TerminatorKind::Trap { dest, .. } => Some(*dest),
+            _ => None,
+        },
+    }
+}
+
+/// Backward local liveness to a fixpoint: per block, per point
+/// (statements then terminator), the locals live before it — used there,
+/// or later on some path.
+pub(crate) fn liveness(body: &MirBody) -> Vec<Vec<BitSet>> {
+    liveness_of(body, |point| uses_at(body, point))
+}
+
+/// [`liveness`] with the locals each point reads given by `uses`.
+pub(crate) fn liveness_of(
+    body: &MirBody,
+    uses: impl Fn(Point) -> Vec<LocalId>,
+) -> Vec<Vec<BitSet>> {
+    let locals = body.locals.len();
+    let blocks = body.blocks.len();
+    let mut live_in: Vec<BitSet> = vec![BitSet::new(locals); blocks];
+    let transfer = |block: BlockId, live_out: BitSet| -> Vec<BitSet> {
+        let mut before: Vec<BitSet> = Vec::new();
+        let mut live = live_out;
+        for point in points_of(body, block).collect::<Vec<_>>().into_iter().rev() {
+            if let Some(def) = def_at(body, point) {
+                live.remove(local_index(def));
+            }
+            for local in uses(point) {
+                live.insert(local_index(local));
+            }
+            before.push(live.clone());
+        }
+        before.reverse();
+        before
+    };
+    let live_out = |live_in: &[BitSet], block: BlockId| {
+        let mut out = BitSet::new(locals);
+        for succ in successors(body, block) {
+            out.union_with(&live_in[block_index(succ)]);
+        }
+        out
+    };
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (block, _) in body.blocks.iter().collect::<Vec<_>>().into_iter().rev() {
+            let before = transfer(block, live_out(&live_in, block));
+            let entry = before[0].clone();
+            if entry != live_in[block_index(block)] {
+                live_in[block_index(block)] = entry;
+                changed = true;
+            }
+        }
+    }
+    body.blocks
+        .iter()
+        .map(|(block, _)| transfer(block, live_out(&live_in, block)))
+        .collect()
+}
+
+/// Whether lowering planted a `Trap` for an error anywhere in the body.
+pub(crate) fn has_trap(body: &MirBody) -> bool {
+    body.blocks
+        .iter()
+        .any(|(_, data)| matches!(data.terminator.kind, TerminatorKind::Trap { .. }))
+}
+
+/// Each reachable block's position in reverse postorder: an edge to a
+/// block no later than its source is a loop's back edge.
+pub(crate) fn reverse_postorder(body: &MirBody) -> Vec<Option<usize>> {
+    let blocks = body.blocks.len();
+    let mut post = Vec::with_capacity(blocks);
+    let mut seen = BitSet::new(blocks);
+    seen.insert(block_index(body.entry));
+    let mut stack = vec![(body.entry, successors(body, body.entry), 0)];
+    while let Some((block, succs, next)) = stack.last_mut() {
+        if let Some(&succ) = succs.get(*next) {
+            *next += 1;
+            if seen.insert(block_index(succ)) {
+                stack.push((succ, successors(body, succ), 0));
+            }
+        } else {
+            post.push(*block);
+            stack.pop();
+        }
+    }
+    let mut order = vec![None; blocks];
+    for (position, block) in post.iter().rev().enumerate() {
+        order[block_index(*block)] = Some(position);
+    }
+    order
 }
 
 /// Where a checker reports one body's refusals: each diagnostic once per

@@ -46,7 +46,7 @@ static char_count = fn (s: str) -> usize {
     let mut i = 0;
     loop {
         match s.next_char(i) {
-            ::Char(c, next) => {
+            ::Char(_, next) => {
                 n = n + 1;
                 i = next;
             },

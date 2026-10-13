@@ -44,7 +44,7 @@ static same_point = moved == Point(struct { x = 5, y = 0 });
 // `moved` in the editor and the type still reads `Point`; only the checker
 // keeps `Point` and the bare shape apart.
 
-static f = fn(r: struct { a: usize, b: str }) -> ! {
+static f = fn(_: struct { a: usize, b: str }) -> ! {
 
     loop {}
 }
