@@ -1267,6 +1267,8 @@ static s = Shape::Poi$0nt;
 
 #[test]
 fn goto_variant_from_type_annotation() {
+    // `Shape::Circle` is not a type (the checker says so); the segment
+    // names the variant, so it navigates like the value spelling.
     check_goto(
         r#"
 type Shape = enum { Circle(usize), Point };
@@ -1278,7 +1280,7 @@ static s: Shape::Cir$0cle = Shape::Circle(1);
 }
 
 #[test]
-fn hover_variant_value_shows_the_variant_type() {
+fn hover_variant_value_shows_the_enum_type() {
     check_hover(
         r#"
 type Shape = enum { Circle(usize), Point };
@@ -1287,12 +1289,17 @@ static f = fn {
     c$0;
 };
 "#,
-        "```must\nc: Shape::Circle\n```",
+        r#"
+```must
+c: Shape
+type Shape = enum { Circle(usize), Point }
+```
+"#,
     );
 }
 
 #[test]
-fn hover_widened_binding_shows_the_enum() {
+fn hover_mut_binding_of_a_variant_shows_the_enum() {
     check_hover(
         r#"
 type Shape = enum { Circle(usize), Point };
@@ -1339,18 +1346,25 @@ static s = Sha$0pe::Point;
 }
 
 #[test]
-fn hover_variant_segment_shows_its_type() {
+fn hover_variant_segment_shows_its_enum_type() {
     check_hover(
         r#"
 type Shape = enum { Circle(usize), Point };
 static s = Shape::Poi$0nt;
 "#,
-        "```must\nPoint: Shape::Point\n```",
+        r#"
+```must
+Point: Shape
+type Shape = enum { Circle(usize), Point }
+```
+"#,
     );
 }
 
 #[test]
 fn hover_variant_in_type_position_shows_the_declaration() {
+    // Not a type (the checker says so), but the segment names the
+    // variant: the hover shows what it declares.
     check_hover(
         r#"
 type Shape = enum { Circle(usize), Point };
@@ -2320,16 +2334,15 @@ static f = fn {
 }
 
 #[test]
-fn completions_variant_segment_type_position() {
+fn completions_variant_segment_type_position_offers_nothing() {
+    // A variant is a value, never a type: nothing to offer after `Shape::`
+    // in an annotation.
     check_completions(
         r#"
 type Shape = enum { Circle(usize), Point };
 static f = fn (s: Shape::$0) {};
 "#,
-        expect_test::expect![[r#"
-            Circle EnumMember (Circle(usize))
-            Point EnumMember (Point)
-        "#]],
+        expect_test::expect![[""]],
     );
 }
 
@@ -2812,9 +2825,10 @@ static main = fn (p: Point, n: usize) {
 
 #[test]
 fn completions_type_ranking_variant_under_enum_expectation() {
-    // A variant candidate under its own enum's expectation widens to it
-    // (tier 1): its sort key outranks every unrankable/mismatching
-    // (tier 2) item's.
+    // A variant candidate under its own enum's expectation: a payload-less
+    // one IS a value of the enum (tier 0), a payload-carrying one is a
+    // constructor whose call produces one (tier 1). Both outrank every
+    // unrankable/mismatching (tier 2) item.
     let (analysis, _file, pos) = fixture(
         r#"
 type Shape = enum { Circle(usize), Square };
@@ -2833,6 +2847,11 @@ static main = fn {
         circle.sort_text.as_str() < "2_00_",
         "outranks any tier-2 item"
     );
+    let square = items
+        .iter()
+        .find(|c| c.label == "Square")
+        .expect("Square is offered");
+    assert_eq!(square.sort_text, "0_20_Square");
 
     // Control: under a non-matching expectation the same variant is
     // tier 2 — type ranking is the expectation's doing, not the context's.
@@ -2853,10 +2872,10 @@ static main = fn {
 }
 
 #[test]
-fn completions_type_ranking_match_arm_variants_carry_the_widening_tier() {
-    // Match-arm variant candidates rank against the scrutinee's enum: all
-    // widen (tier 1), with gold-before-covered preserved inside the tier
-    // and `_` staying an unranked keyword.
+fn completions_type_ranking_match_arm_variants_share_one_tier() {
+    // Match-arm variant candidates all share one tier (1), with
+    // gold-before-covered preserved inside it and `_` staying an unranked
+    // keyword.
     let (analysis, _file, pos) = fixture(
         r#"
 type Shape = enum { Circle(usize), Square };
@@ -3269,8 +3288,8 @@ static f = fn (p: P) {
 }
 
 /// An enum's variants are values, offered by their full paths: under the
-/// enum's expectation they follow the enum-typed locals and the fns
-/// producing one.
+/// enum's expectation they rank with the enum-typed values, below the
+/// locals, and above the fns whose call produces one.
 #[test]
 fn completions_offer_variants_by_path_below_enum_typed_values() {
     let fixture_text = r#"
@@ -3287,10 +3306,10 @@ static f = fn (s: Shape, n: usize) {
         .map(|item| item.label)
         .collect();
     let at = |label: &str| labels.iter().position(|l| l == label).unwrap();
-    assert!(at("s") < at("make"), "{labels:?}");
-    assert!(at("make") < at("Shape::Circle"), "{labels:?}");
+    assert!(at("s") < at("Shape::Circle"), "{labels:?}");
     assert!(at("Shape::Circle") < at("Shape::Point"), "{labels:?}");
-    assert!(at("Shape::Point") < at("n"), "{labels:?}");
+    assert!(at("Shape::Point") < at("make"), "{labels:?}");
+    assert!(at("make") < at("n"), "{labels:?}");
     assert_eq!(
         completion_insert(fixture_text, "Shape::Circle"),
         crate::InsertText::Snippet {
@@ -4174,21 +4193,6 @@ static f = fn (param: Shape) {
 }
 
 #[test]
-fn completions_match_scrutinee_lifts_a_variant_typed_local() {
-    // A variant-typed value is a legal scrutinee (it simply has one
-    // reachable arm), so it belongs in the leading layer next to the
-    // enum-typed ones.
-    let fixture_text = r#"
-type Shape = enum { Circle(usize), Point };
-static f = fn () {
-    let c: Shape::Circle = Shape::Circle(1);
-    match $0
-};
-"#;
-    assert_eq!(completion_sort_text(fixture_text, "c"), "2_00_c");
-}
-
-#[test]
 fn completions_match_scrutinee_ranking_stops_at_the_match() {
     // Only the scrutinee slot re-ranks. The same locals in an ordinary
     // expression position keep the flat local tier — a ranking that leaked
@@ -4387,10 +4391,18 @@ fn hover_shows_generic_type_instance() {
 }
 
 #[test]
-fn hover_shows_generic_variant_instance() {
+fn hover_shows_the_generic_enum_instance_of_a_constructed_variant() {
     check_hover(
-        "type Option = enum::<T> { Some(T), None };\nstatic main = fn { let o$0 = Option::<usize>::Some(3); };",
-        "```must\no: Option::<usize>::Some\n```",
+        r#"
+type Option = enum::<T> { Some(T), None };
+static main = fn { let o$0 = Option::<usize>::Some(3); };
+"#,
+        r#"
+```must
+o: Option::<usize>
+type Option = enum { Some(T), None }
+```
+"#,
     );
 }
 

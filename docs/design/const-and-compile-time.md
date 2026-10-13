@@ -51,7 +51,7 @@
 ## Discarded
 
 - **Const-argument inference** — running an instance backwards is inference through a
-  conversion; widening never runs backwards either (T04). **C05**
+  conversion; no conversion is inferred backwards (T19). **C05**
 - **Fn values as const arguments** — a fn value carries an arena index that renumbers under
   body edits, so instance identity and FFI symbols would churn. **Pointers as const arguments**
   — allocation ids are per machine run. **Dependent const parameters** — no use case before

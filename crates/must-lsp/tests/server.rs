@@ -1467,16 +1467,16 @@ fn snippet_capable_client_receives_the_match_arm_template_inside_empty_braces() 
 
 /// Dogfood: open a real example file and ask for completions at a
 /// hand-picked, unremarkable spot (a fresh statement at the top of
-/// `run_lights`'s body). Not a snapshot of the whole list — examples are
-/// free to grow — just: several distinct completion kinds show up (an item
-/// function, a type, a keyword, a builtin) and the server doesn't panic
-/// answering a real file.
+/// `find_even_multiple`'s body). Not a snapshot of the whole list —
+/// examples are free to grow — just: several distinct completion kinds
+/// show up (an item function, a type, a keyword, a builtin) and the server
+/// doesn't panic answering a real file.
 #[test]
-fn dogfood_state_machine_example_offers_sensible_completions() {
+fn dogfood_loops_example_offers_sensible_completions() {
     let mut client = TestClient::start();
-    let file = uri("file:///state_machine.must");
+    let file = uri("file:///loops.must");
 
-    let text = include_str!("../../../examples/state_machine.must");
+    let text = include_str!("../../../examples/loops.must");
     client.open(&file, text);
     let diags = client.next_diagnostics();
     assert_eq!(
@@ -1485,10 +1485,10 @@ fn dogfood_state_machine_example_offers_sensible_completions() {
         "the example is expected to be clean"
     );
 
-    // Right before `let mut l = Light::Red;` in `run_lights`'s body.
+    // Right before `let mut i = step;` in `find_even_multiple`'s body.
     let target_line = text
         .lines()
-        .position(|line| line.trim_start() == "let mut l = Light::Red;")
+        .position(|line| line.trim_start() == "let mut i = step;")
         .expect("fixture still has this exact statement — update the offset if it moves")
         as u32;
     let response = client.request::<lsp_types::request::Completion>(lsp_types::CompletionParams {
@@ -1507,12 +1507,11 @@ fn dogfood_state_machine_example_offers_sensible_completions() {
 
     let has = |label: &str| items.iter().any(|it| it.label == label);
     assert!(has("let"), "statement-start keyword `let` is offered");
-    assert!(!has("Light"), "an enum name is not a value");
     assert!(
-        has("run_lights"),
+        has("find_even_multiple"),
         "recursion into the enclosing fn is legal"
     );
-    assert!(has("describe"), "sibling fn items are offered");
+    assert!(has("is_even"), "sibling fn items are offered");
     assert!(has("print"), "the builtin fn is offered");
 
     let kinds: std::collections::HashSet<_> =

@@ -1334,7 +1334,7 @@ impl<'a> BodyCheck<'a> {
                     {
                         self.index_accesses(place, &mut out);
                     }
-                    Rvalue::Use(op) | Rvalue::UnaryNeg(op) | Rvalue::WidenToEnum { op, .. } => {
+                    Rvalue::Use(op) | Rvalue::UnaryNeg(op) => {
                         self.operand_access(op, &mut out);
                     }
                     Rvalue::BinaryOp(_, a, b) => {
@@ -1848,9 +1848,7 @@ fn operand_places(op: &Operand, f: &mut impl FnMut(&Place)) {
 
 fn rvalue_places(rvalue: &Rvalue, f: &mut impl FnMut(&Place)) {
     match rvalue {
-        Rvalue::Use(op) | Rvalue::UnaryNeg(op) | Rvalue::WidenToEnum { op, .. } => {
-            operand_places(op, f)
-        }
+        Rvalue::Use(op) | Rvalue::UnaryNeg(op) => operand_places(op, f),
         Rvalue::BinaryOp(_, a, b) => {
             operand_places(a, f);
             operand_places(b, f);
@@ -1915,7 +1913,6 @@ fn collect_regions(ty: &Ty, found: &mut impl FnMut(&Region)) {
             .for_each(|(_, field)| collect_regions(field, found)),
         Ty::Array { elem, .. } => collect_regions(elem, found),
         Ty::Named(named) => args(&named.args, found),
-        Ty::Variant(variant) => args(&variant.args, found),
         Ty::Fn(_)
         | Ty::Param(_)
         | Ty::Infer(_)

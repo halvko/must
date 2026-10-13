@@ -51,12 +51,10 @@ static reassign_immutable = fn () -> usize {
 //    error: record literal is missing field `y: str`
 static missing_field: struct { x: usize, y: str } = struct { x = 1 };
 
-// 6. Variant demanded, enum given: `wants_circle` is typed to require the
-//    precise `Shape::Circle` variant; a `Shape::Point` doesn't widen the
-//    other way (widening only ever goes variant -> enum).
-//    error: type mismatch: expected `Shape::Circle`, found `Shape::Point`
+// 6. Variant written as a type: `Shape::Circle` is a value of type `Shape`,
+//    not a type of its own, so an annotation cannot demand one variant.
+//    error: `Shape::Circle` is a variant, not a type; use `Shape`
 static wants_circle = fn (s: Shape::Circle) -> usize { 0 };
-static call_with_wrong_variant = fn () -> usize { wants_circle(Shape::Point) };
 
 // 7. Binding-shadows-variant: a bare name in pattern position always binds
 //    the whole scrutinee, even when it spells a variant's name — well-typed

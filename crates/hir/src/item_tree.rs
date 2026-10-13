@@ -192,9 +192,10 @@ pub enum TypeRef {
         name: String,
         args: Vec<GenericArgRef>,
     },
-    /// `Shape::Circle` — a variant type, named through its enum. The names
-    /// stay syntactic here (like [`TypeRef::Path`]); resolution happens in
-    /// lowering, against the enum's [`type_decl`].
+    /// `Shape::Circle` written in type position. A variant is not a type
+    /// (T04): lowering reports "is a variant, not a type" against the
+    /// enum's [`type_decl`]. The names stay syntactic here (like
+    /// [`TypeRef::Path`]) so that diagnostic, hover and goto can resolve them.
     Variant {
         enum_name: String,
         variant: String,
@@ -726,7 +727,7 @@ pub enum TypeDeclData {
 pub fn type_decl<'db>(db: &'db dyn Db, item: crate::ItemId<'db>) -> Option<TypeDeclData> {
     // A compiler-provided declaration (`scopes::synthetic_decls`): its
     // variants are syntax-shaped data, so everything downstream
-    // (`enum_variants`, patterns, widening, match lowering) runs the
+    // (`enum_variants`, patterns, construction, match lowering) runs the
     // completely ordinary nominal-enum machinery on it.
     if let Some(decl) = crate::synthetic_decl(db, item) {
         return Some(TypeDeclData::Enum {

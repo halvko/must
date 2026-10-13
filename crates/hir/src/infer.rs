@@ -31,7 +31,7 @@ use crate::scopes::{Builtin, Resolution, resolutions, type_scope};
 use crate::traits::BoundDotCandidate;
 use crate::ty::{
     ConstArgValue, GenericArg, IntKind, IntValue, NamedTy, ParamScope, ReceiverShape, Region,
-    SelfPosition, Ty, TyVar, TyVarValue, VariantTy, builtin_type_by_name, dot_callable,
+    ResolvedVariant, SelfPosition, Ty, TyVar, TyVarValue, builtin_type_by_name, dot_callable,
     enum_variants, generic_param_scope, lower_type_ref_in, member_self_position, member_self_ty,
     receiver_takes, self_position_of, signature, signature_needs_annotation, substitute_args,
     type_underlying_for,
@@ -42,26 +42,12 @@ use crate::{ItemId, ItemLoc, Severity, TypeRef, item_loc};
 pub struct InferenceResult {
     pub type_of_expr: ArenaMap<ExprId, Ty>,
     pub type_of_binding: ArenaMap<BindingId, Ty>,
-    /// Where a variant-typed value was accepted by the *widening
-    /// conversion* (variant → its enum): the expression whose value gets
-    /// the tag injected, mapped to the variant it was. MIR plants its
-    /// `WidenToEnum` op exactly at these expressions and nowhere else; the
-    /// expression's own entry in [`Self::type_of_expr`] is the
-    /// post-conversion type where the conversion happened at a direct
-    /// check site, and the precise variant where it happened at a deferred
-    /// join edge.
-    pub widened: ArenaMap<ExprId, VariantTy>,
-    /// Every unannotated `mut` whole-value binder in a match pattern on a
-    /// variant-typed scrutinee, mapped to the variant the scrutinee was.
-    /// The binding's type is the enum (G27), and MIR plants the
-    /// `WidenToEnum` op where it binds the value.
-    pub widened_bindings: ArenaMap<BindingId, VariantTy>,
     /// Resolution of every `Enum::Variant` path expression that named a
     /// real variant — the type-directed second-segment resolution (`::`
     /// paths resolve against the enum's declaration during inference, not
     /// in `scopes`). Consumed by MIR (construction) and ide (goto-def,
     /// highlighting).
-    pub variant_of_expr: ArenaMap<ExprId, VariantTy>,
+    pub variant_of_expr: ArenaMap<ExprId, ResolvedVariant>,
     /// The pattern-side counterpart of [`Self::variant_of_expr`]: every
     /// match-arm variant pattern that named a real variant — the qualified
     /// (`Shape::Circle`) and elided sigil (`::Circle`) spellings, resolved
@@ -70,7 +56,7 @@ pub struct InferenceResult {
     /// is never reinterpreted as a
     /// variant. Consumed by MIR (dispatch) and ide (goto-def, hover,
     /// highlighting).
-    pub variant_of_pat: ArenaMap<PatId, VariantTy>,
+    pub variant_of_pat: ArenaMap<PatId, ResolvedVariant>,
     /// The type a `let`/parameter pattern destructures — every pattern, not
     /// just [`crate::body::PatData::Bind`] (which is also mirrored into
     /// [`Self::type_of_binding`] under its own binding). MIR reads this for
@@ -1497,9 +1483,6 @@ pub enum UnreachableReason {
     AfterCatchAll,
     /// Every variant of the enum is already covered individually.
     AllVariantsCovered(String),
-    /// The scrutinee is variant-typed; this arm matches a different
-    /// variant of its enum.
-    OtherVariant { scrutinee: Ty },
 }
 
 /// One literal value an earlier arm already matched — the duplicate-arm
@@ -1958,10 +1941,6 @@ impl InferenceDiagnostic {
                 UnreachableReason::AllVariantsCovered(name) => {
                     format!("unreachable arm: every variant of `{name}` is already covered")
                 }
-                UnreachableReason::OtherVariant { scrutinee } => format!(
-                    "this arm is unreachable: the scrutinee is a `{}`",
-                    scrutinee.display()
-                ),
             },
             // What CAN match is type-dependent since literal patterns
             // arrived: the scalars take those too, so the old blanket "only
@@ -2618,11 +2597,6 @@ pub(crate) struct InferCtx<'a, 'db> {
     /// stays quiet about it rather than saying it twice — the arms are two
     /// symptoms, the missing annotation is one fact.
     unresolved_scrutinees: rustc_hash::FxHashSet<ExprId>,
-    /// Each unannotated deferred `let mut x;` awaiting its first assignment,
-    /// which removes it and widens a variant to its enum, as `let mut x = v;`
-    /// does. A `!` or `{error}` value gives the binding no type, so it keeps
-    /// waiting.
-    deferred_unannotated: rustc_hash::FxHashSet<BindingId>,
     /// Literals directly under a unary minus (`-5`): their range check
     /// applies the sign (`-128` fits `i8`; plain `128` does not). Filled by
     /// the [`crate::body::ExprData::Neg`] arm before its operand is
@@ -2803,7 +2777,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             pending_empty_arrays: Vec::new(),
             pending_number_literals: Vec::new(),
             unresolved_scrutinees: rustc_hash::FxHashSet::default(),
-            deferred_unannotated: Default::default(),
             negated_literals: rustc_hash::FxHashSet::default(),
             number_expectations: rustc_hash::FxHashSet::default(),
             pending_obligations: Vec::new(),
@@ -3212,12 +3185,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 decl: named.decl.clone(),
                 args: self.mint_wildcard_regions_args(written, &named.args),
             }),
-            (TypeRef::Apply { args: written, .. }, Ty::Variant(variant)) => {
-                Ty::Variant(VariantTy {
-                    args: self.mint_wildcard_regions_args(written, &variant.args),
-                    ..variant.clone()
-                })
-            }
             _ => ty.clone(),
         }
     }
@@ -3263,24 +3230,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// join-typed signatures to come out concrete.
     pub(crate) fn solve(&mut self) {
         let diagnostics = self.constraints.solve(self.table);
-        // Widenings the join solver accepted land in the result next to
-        // the ones `check` recorded directly — one map, one MIR consumer.
-        for (expr, variant) in self.constraints.take_widenings() {
-            self.result.widened.insert(expr, variant);
-        }
         self.result.diagnostics.extend(diagnostics);
-    }
-
-    /// An unannotated `let mut`'s initializer type: a variant widens to
-    /// its enum, with the conversion recorded on `init` (T04).
-    fn widen_mut_initializer(&mut self, init: ExprId, ty: Ty) -> Ty {
-        match self.resolve_shallow(&ty) {
-            Ty::Variant(variant) => {
-                self.result.widened.insert(init, variant.clone());
-                variant.enum_ty()
-            }
-            _ => ty,
-        }
     }
 
     fn finish(mut self) -> InferenceResult {
@@ -3434,16 +3384,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         for (_, ty) in result.type_of_binding.iter_mut() {
             *ty = resolve_finished(self.table, ty);
         }
-        // `VariantTy`s persisted outside any `Ty` carry generic args of
-        // their own — resolve them too, both for MIR (payload substitution
-        // needs the pinned args) and for value-determinism (an unresolved
-        // canonical variable index would break backdating).
-        for (_, variant) in result.widened.iter_mut() {
-            variant.args = resolve_args_fully(self.table, &variant.args);
-        }
-        for (_, variant) in result.widened_bindings.iter_mut() {
-            variant.args = resolve_args_fully(self.table, &variant.args);
-        }
+        // `ResolvedVariant`s persisted outside any `Ty` carry generic args
+        // of their own — resolve them too, both for MIR (payload
+        // substitution needs the pinned args) and for value-determinism (an
+        // unresolved canonical variable index would break backdating).
         for (_, variant) in result.variant_of_expr.iter_mut() {
             variant.args = resolve_args_fully(self.table, &variant.args);
         }
@@ -3520,11 +3464,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
                 InferenceDiagnostic::MatchWithoutCatchAll { scrutinee, .. }
                 | InferenceDiagnostic::NonEnumScrutineeVariantPat { scrutinee, .. }
-                | InferenceDiagnostic::PatWrongEnum { scrutinee, .. }
-                | InferenceDiagnostic::UnreachableArm {
-                    reason: UnreachableReason::OtherVariant { scrutinee },
-                    ..
-                } => {
+                | InferenceDiagnostic::PatWrongEnum { scrutinee, .. } => {
                     *scrutinee = resolve_finished(self.table, scrutinee);
                 }
                 InferenceDiagnostic::PatUnknownField { record_ty, .. } => {
@@ -4320,9 +4260,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 // from the annotation, or else from the
                                 // assignments that give it a value.
                                 let Some(init) = init else {
-                                    if !has_annotation {
-                                        self.deferred_unannotated.insert(binding);
-                                    }
                                     self.result
                                         .type_of_binding
                                         .insert(binding, declared.clone());
@@ -4330,22 +4267,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                     continue;
                                 };
                                 let ty = self.infer_expr_with(*init, &declared, binding_cause);
-                                let mut ty = self.trust_declared(ty, &declared);
-                                // `let mut` widening: an UNANNOTATED mutable
-                                // binding initialized with a variant-typed value
-                                // widens to the enum at binding time (with the
-                                // conversion on the initializer) — a `mut`
-                                // state variable is meant to be reassigned
-                                // across variants. `let mut x: Shape::Circle`
-                                // keeps precision (the annotation is the
-                                // axiom), and a plain `let` keeps the variant.
-                                // Applies when the initializer's type is
-                                // already known here; a join-typed initializer
-                                // resolves later, driven by the axioms its
-                                // uses provide.
-                                if !has_annotation && self.body.bindings[binding].mutable {
-                                    ty = self.widen_mut_initializer(*init, ty);
-                                }
+                                let ty = self.trust_declared(ty, &declared);
                                 self.result.type_of_binding.insert(binding, ty.clone());
                                 self.result.type_of_pat.insert(*pat, ty);
                             } else {
@@ -4482,30 +4404,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 }
                                 Some(Resolution::Ambiguous(_)) | None => None,
                             };
-                            // The first assignment to an unannotated
-                            // deferred `let mut x;` is its initializer: a
-                            // variant widens to its enum, as in
-                            // `let mut x = v;`.
-                            if let Some(Resolution::Local(binding)) = self.resolutions.get(*target)
-                                && self.deferred_unannotated.contains(binding)
-                            {
-                                let binding = *binding;
-                                let fresh = self.fresh_var();
-                                let ty = self.infer_expr_with(*value, &fresh, cause);
-                                let ty = self.widen_mut_initializer(*value, ty);
-                                match self.resolve_shallow(&ty) {
-                                    Ty::Never => {}
-                                    // Skip the check and leave `x` untyped, so
-                                    // `{error}` doesn't leak; the next real
-                                    // value types it.
-                                    Ty::Error => continue,
-                                    _ => {
-                                        self.deferred_unannotated.remove(&binding);
-                                    }
-                                }
-                                self.check(*value, ty, &target_ty, cause);
-                                continue;
-                            }
                             self.infer_expr_with(*value, &target_ty, cause);
                         }
                         Stmt::Expr(e) => {
@@ -5025,12 +4923,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // to the slot's counterpart.
                 //
                 // BEFORE the body, not after, because the body's tail is
-                // checked against the RETURN type and the sanctioned
-                // variant→enum conversion happens at a CHECK: a tail
-                // `Option::Some(v)` needs `Option::<usize>` in hand while it
-                // is being checked, or it types as the tag-free variant and
-                // the literal mismatches as a WHOLE — squiggle on the
-                // literal, message about a type the reader never wrote.
+                // checked against the RETURN type, so that type must be in
+                // hand first: an elided `::Some(v)` cannot resolve without
+                // it, and a mismatching tail is blamed at the tail rather
+                // than the whole literal.
                 //
                 // No arity guard is written here because `unify`'s `Fn` arm
                 // is one: it compares parameter counts before binding any
@@ -5133,7 +5029,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // from this loop's breaks (nested constructs in statement
                 // position open sinks of their own, LIFO): no contribution
                 // means no break ever carries a value out — the loop never
-                // finishes, `!`, and the never machinery (widening, no
+                // finishes, `!`, and the never machinery (coercion, no
                 // vote) takes it from there.
                 let broke_with_value =
                     self.join_sinks[sink_index].witnesses.len() > witnesses_before;
@@ -5695,16 +5591,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             return self.finish_dot_call(expr, ty, expected, cause);
         }
 
-        // A named receiver (a variant-typed one reaches its ENUM's
-        // members: the receiver widens — variant → enum, the sanctioned
-        // conversion — into the Self argument, exactly as it would into
-        // any enum-typed parameter).
         let named_recv = match &member_recv {
             Ty::Named(named) if !name.is_empty() => Some(named.clone()),
-            Ty::Variant(variant) if !name.is_empty() => Some(NamedTy {
-                decl: variant.decl.clone(),
-                args: variant.args.clone(),
-            }),
             _ => None,
         };
         // Whether the receiver's type declares `name` as a FIELD — the
@@ -5745,12 +5633,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     enum_variants(self.db, named.decl.to_id(self.db)).is_none()
                 });
             if !decl_broken {
-                // The receiver's type as the escapes spell it — the ENUM
-                // for a variant-typed receiver (impls live on the enum, and
-                // the receiver widens into the Self argument, the ordinary
-                // sanctioned conversion).
-                //
-                // Under a BORROW receiver this is the REFERENT's type, not
+                // The receiver's type as the escapes spell it. Under a
+                // BORROW receiver this is the REFERENT's type, not
                 // the borrow: impls live on the referent, and every escape
                 // (`Map::get(k, m)`) spells the referent too.
                 let recv_ty = match &named_recv {
@@ -6097,11 +5981,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         self.result.member_of_expr.insert(expr, member_loc);
         // Arity is checked by `finish_receiver_call`; the receiver IS the
         // last argument, checked against the instantiated Self param —
-        // identical by construction for enum/struct-typed receivers (a
-        // plain unification that lets leftover inference variables
-        // flow), a WIDENING for variant-typed ones (the tag injection
-        // lands on the receiver expression like at any other check
-        // site).
+        // identical by construction (a plain unification that lets
+        // leftover inference variables flow).
         self.finish_receiver_call(
             expr,
             callee,
@@ -6151,11 +6032,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             self.infer_expr_with(arg, &param, Some(Cause::CallSite { call: expr, arg }));
         }
         // The receiver IS the last argument: check it against the
-        // instantiated Self param — identical by construction for
-        // enum/struct-typed receivers (a plain unification that lets
-        // leftover inference variables flow), a WIDENING for
-        // variant-typed ones (the tag injection lands on the receiver
-        // expression like at any other check site).
+        // instantiated Self param — identical by construction (a plain
+        // unification that lets leftover inference variables flow).
         if let Some(last) = f.params.last() {
             self.check(receiver, receiver_ty.clone(), last, None);
         }
@@ -7153,55 +7031,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     found: args.len(),
                 });
         }
-        // Arguments at literal-`Self` positions are RECEIVER-LIKE: they
-        // are inferred freely first, `Self` is determined from them
-        // (variants widening to their ENUM — never letting `Self` bind to
-        // a tag-free variant type), and then each is checked against the
-        // determined `Self` so the ordinary variant→enum conversion is
-        // recorded per argument. Everything else checks against its
-        // instantiated parameter directly.
-        let self_positions: Vec<bool> = match &sig_ref {
-            TypeRef::Fn { params, .. } => params
-                .iter()
-                .map(|param| matches!(param, TypeRef::Path(name) if name == "Self"))
-                .collect(),
-            _ => Vec::new(),
-        };
-        let mut self_args: Vec<(ExprId, Ty)> = Vec::new();
+        // Each argument checks against its instantiated parameter.
         for (i, &arg) in args.iter().enumerate() {
-            if self_positions.get(i).copied().unwrap_or(false) {
-                let fresh = self.fresh_var();
-                let ty = self.infer_expr(arg, &fresh);
-                self_args.push((arg, ty));
-            } else {
-                let param_ty = f.params.get(i).cloned().unwrap_or(Ty::Error);
-                self.infer_expr_with(arg, &param_ty, Some(Cause::CallSite { call: expr, arg }));
-            }
-        }
-        for (_, ty) in &self_args {
-            if !matches!(self.resolve_shallow(&self_var), Ty::Infer(_)) {
-                break;
-            }
-            let candidate = match self.resolve_shallow(ty) {
-                Ty::Variant(variant) => Ty::Named(NamedTy {
-                    decl: variant.decl,
-                    args: variant.args,
-                }),
-                Ty::Infer(_) => continue,
-                other => other,
-            };
-            self.adopt(&self_var, &candidate);
-        }
-        for (arg, ty) in &self_args {
-            self.check(
-                *arg,
-                ty.clone(),
-                &self_var,
-                Some(Cause::CallSite {
-                    call: expr,
-                    arg: *arg,
-                }),
-            );
+            let param_ty = f.params.get(i).cloned().unwrap_or(Ty::Error);
+            self.infer_expr_with(arg, &param_ty, Some(Cause::CallSite { call: expr, arg }));
         }
         // `Self` is inferred from the arguments (TR01's short form) —
         // resolved eagerly, right after they were checked.
@@ -7256,11 +7089,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     });
             }
             concrete => {
-                // NOTE: a VARIANT-typed Self can only still appear here
-                // when a nested-`Self` position (never a literal one — the
-                // receiver-like pass above widens those) pinned it — a
-                // variant has no impls of its own (`SelfKey::for_ty` is
-                // `None`), so it lands on the sound `NoTraitImpl` below.
                 let resolved_impl = crate::traits::SelfKey::for_ty(concrete).and_then(|key| {
                     let impls = crate::traits::trait_impls(self.db, self.file);
                     impls
@@ -7530,9 +7358,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// Resolve `Enum::Variant` in expression position — the type-directed
     /// second-segment resolution: the base's resolution comes from `scopes`
     /// like any name, the variant is looked up in the enum's declaration
-    /// right here. A payload-less variant *is* the value (typed
-    /// [`Ty::Variant`]); a variant with payloads is a constructor function
-    /// `fn(payload...) -> Enum::Variant` — first-class, and a direct call
+    /// right here. A payload-less variant *is* the value, typed as its
+    /// enum; a variant with payloads is a constructor function
+    /// `fn(payload...) -> Enum` — first-class, and a direct call
     /// of it goes through the ordinary `Call` machinery (arity errors are
     /// plain `ArgCountMismatch`es).
     ///
@@ -7647,23 +7475,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                         // variables that the payload (or the expectation
                         // the value meets) pins by ordinary unification.
                         let named = self.instantiate_type_mention(expr, &loc, args);
-                        let variant_ty = VariantTy {
-                            decl: loc.clone(),
+                        let resolved = ResolvedVariant {
+                            decl: loc,
                             args: named.args,
                             index: index as u32,
                             name: std::sync::Arc::from(variant),
                         };
-                        self.result.variant_of_expr.insert(expr, variant_ty.clone());
-                        let payload = &variants[index].1;
-                        if payload.is_empty() {
-                            Ty::Variant(variant_ty)
-                        } else {
-                            let payload = payload
-                                .iter()
-                                .map(|ty| substitute_args(ty, &loc, &variant_ty.args))
-                                .collect();
-                            Ty::fn_type(payload, Ty::Variant(variant_ty))
-                        }
+                        let ty = resolved.value_ty(self.db);
+                        self.result.variant_of_expr.insert(expr, resolved);
+                        ty
                     }
                     None => {
                         // An enum's `Type::member` reference is the same
@@ -7784,8 +7604,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     ///    branch, an unannotated `let` — has no enum in view and is
     ///    REFUSED, with the qualified spelling named.
     /// 2. It resolves to exactly what the qualified spelling resolves to,
-    ///    `variant_of_expr` included, so everything downstream (widening,
-    ///    MIR, hover) sees no difference at all.
+    ///    `variant_of_expr` included, so everything downstream (MIR,
+    ///    hover) sees no difference at all.
     /// 3. The enum's generic ARGS come from the expectation rather than
     ///    from a fresh mention, which is what lets `-> Option::<V.&mut>`
     ///    accept a bare `::None`: there is no second instantiation to
@@ -7795,17 +7615,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// here is spellable there, and this only ever removes a rejection.
     fn infer_elided_variant(&mut self, expr: ExprId, variant: &str, expected: &Ty) -> Ty {
         let resolved = self.resolve_shallow(expected);
-        // A variant-typed expectation names its enum just as well; the
-        // value is then checked against the precise variant afterwards by
-        // the ordinary `check`, exactly as a qualified path would be.
         let named = match &resolved {
             Ty::Named(named) if enum_variants(self.db, named.decl.to_id(self.db)).is_some() => {
                 named.clone()
             }
-            Ty::Variant(variant) => NamedTy {
-                decl: variant.decl.clone(),
-                args: variant.args.clone(),
-            },
             // Errors are infectious and silent.
             broken if broken.contains_error() => return Ty::Error,
             other => {
@@ -7840,23 +7653,15 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 });
             return Ty::Error;
         };
-        let variant_ty = VariantTy {
-            decl: named.decl.clone(),
+        let resolved = ResolvedVariant {
+            decl: named.decl,
             args: named.args,
             index: index as u32,
             name: std::sync::Arc::from(variant),
         };
-        self.result.variant_of_expr.insert(expr, variant_ty.clone());
-        let payload = &variants[index].1;
-        if payload.is_empty() {
-            Ty::Variant(variant_ty)
-        } else {
-            let payload = payload
-                .iter()
-                .map(|ty| substitute_args(ty, &variant_ty.decl, &variant_ty.args))
-                .collect();
-            Ty::fn_type(payload, Ty::Variant(variant_ty))
-        }
+        let ty = resolved.value_ty(self.db);
+        self.result.variant_of_expr.insert(expr, resolved);
+        ty
     }
 
     /// `Point::len` — a qualified reference to an INHERENT member (the G13
@@ -8999,8 +8804,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         };
 
         // Flat set-cover over variant indices: which variants the arms
-        // reach, and whether a catch-all (`_`/binding — or the scrutinee's
-        // own variant on a variant-typed scrutinee) has been seen.
+        // reach, and whether a catch-all (`_`/binding) has been seen.
         let n_variants = match &scrut {
             Scrutinee::Enum(named) => enum_variants(self.db, named.decl.to_id(self.db))
                 .as_ref()
@@ -9022,11 +8826,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             let cover = self.check_match_pat(expr, arm.pat, &scrut, lens.as_ref());
             match cover {
                 Cover::Nothing | Cover::Unknown => {}
-                Cover::OtherVariant(variant) => {
-                    let scrutinee = Ty::Variant(variant);
-                    let reason = UnreachableReason::OtherVariant { scrutinee };
-                    self.push_unreachable(expr, arm.pat, reason);
-                }
                 _ if catch_all => {
                     // Reached by a literal arm too: `_ => ...` before
                     // `'(' => ...` makes the literal dead, and the reason
@@ -9092,9 +8891,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             UnreachableReason::AllVariantsCovered(name),
                         );
                     }
-                    // On a variant-typed scrutinee a same-variant arm is
-                    // irrefutable — everything after it is dead, same as a
-                    // wildcard.
                     catch_all = true;
                 }
             }
@@ -9131,15 +8927,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                                 uncovered,
                             });
                     }
-                }
-                Scrutinee::Variant(variant) => {
-                    self.result
-                        .diagnostics
-                        .push(InferenceDiagnostic::NonExhaustiveMatch {
-                            expr,
-                            decl: variant.decl.clone(),
-                            uncovered: vec![variant.name.to_string()],
-                        });
                 }
                 Scrutinee::Other(ty) => {
                     self.result
@@ -9237,7 +9024,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     Scrutinee::Error
                 }
             }
-            Ty::Variant(variant) => Scrutinee::Variant(variant),
             Ty::Infer(var) => Scrutinee::Unknown(Ty::Infer(var)),
             // A diverging or broken scrutinee: the arms never run; stay
             // silent (the scrutinee carries its own story).
@@ -9248,7 +9034,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     }
 
     /// Generic args for a pattern's enum: taken from the scrutinee when it
-    /// is (a variant of) the same enum — patterns never introduce args of
+    /// is the same enum — patterns never introduce args of
     /// their own beyond a written turbofish, and the scrutinee's are the
     /// ground truth. A wrong-enum pattern (its own diagnostic) gets
     /// all-error args, so the declaration's rigid params never leak into
@@ -9256,7 +9042,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     fn pat_enum_args(&mut self, target: &ItemLoc, scrut: &Scrutinee) -> Vec<GenericArg> {
         match scrut {
             Scrutinee::Enum(named) if named.decl == *target => named.args.clone(),
-            Scrutinee::Variant(variant) if variant.decl == *target => variant.args.clone(),
             _ => item_generics(self.db, target.to_id(self.db))
                 .iter()
                 .map(|param| match param.kind {
@@ -9315,7 +9100,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     ) -> bool {
         let scrut_ty = match scrut {
             Scrutinee::Enum(named) => Ty::Named(named.clone()),
-            Scrutinee::Variant(variant) => Ty::Variant(variant.clone()),
             Scrutinee::Other(ty) | Scrutinee::Unknown(ty) => ty.clone(),
             Scrutinee::Error => Ty::Error,
         };
@@ -9339,7 +9123,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// the pattern covers.
     ///
     /// `lens` is `Some` exactly when the scrutinee is a BORROW of the enum
-    /// (or variant) `scrut` describes — see [`MatchLens`]. It changes only
+    /// `scrut` describes — see [`MatchLens`]. It changes only
     /// what the bindings are typed as: a whole-value binder gets the
     /// borrow back, and each payload binder gets a borrow of that
     /// payload's sub-place. Coverage, variant resolution, arity and every
@@ -9424,7 +9208,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // type or the `Cover::All` outcome — it only warns.
                 let enum_loc = match scrut {
                     Scrutinee::Enum(named) => Some(named.decl.clone()),
-                    Scrutinee::Variant(variant) => Some(variant.decl.clone()),
                     _ => None,
                 };
                 if let Some(loc) = &enum_loc
@@ -9443,17 +9226,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 }
                 let ty = match scrut {
                     Scrutinee::Enum(named) => Ty::Named(named.clone()),
-                    // `mut` widening (G27): an owned `mut` binder takes the
-                    // enum so it can be reassigned across variants.
-                    Scrutinee::Variant(variant)
-                        if lens.is_none() && self.body.bindings[binding].mutable =>
-                    {
-                        self.result
-                            .widened_bindings
-                            .insert(binding, variant.clone());
-                        variant.enum_ty()
-                    }
-                    Scrutinee::Variant(variant) => Ty::Variant(variant.clone()),
                     Scrutinee::Other(ty) | Scrutinee::Unknown(ty) => ty.clone(),
                     Scrutinee::Error => Ty::Error,
                 };
@@ -9487,7 +9259,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     },
                     None => match scrut {
                         Scrutinee::Enum(named) => named.decl.clone(),
-                        Scrutinee::Variant(variant) => variant.decl.clone(),
                         Scrutinee::Other(ty) => {
                             self.result.diagnostics.push(
                                 InferenceDiagnostic::NonEnumScrutineeVariantPat {
@@ -9543,7 +9314,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     return Cover::Nothing;
                 }
                 let args = self.pat_enum_args(&target, scrut);
-                let variant_ty = VariantTy {
+                let variant_ty = ResolvedVariant {
                     decl: target.clone(),
                     args,
                     index: index as u32,
@@ -9598,7 +9369,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             );
                             lens.wrap(region, ty)
                         }
-                        _ => self.widen_mut_binder(binding, ty),
+                        _ => ty,
                     };
                     self.result.type_of_binding.insert(binding, ty);
                 }
@@ -9617,26 +9388,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             Cover::Nothing
                         } else {
                             Cover::Variant(variant_ty.index)
-                        }
-                    }
-                    Scrutinee::Variant(scrut_variant) => {
-                        if scrut_variant.decl != target {
-                            self.result
-                                .diagnostics
-                                .push(InferenceDiagnostic::PatWrongEnum {
-                                    match_expr,
-                                    pat,
-                                    item: target,
-                                    variant: variant_ty.name.to_string(),
-                                    scrutinee: Ty::Variant(scrut_variant.clone()),
-                                });
-                            Cover::Nothing
-                        } else if scrut_variant.index == variant_ty.index {
-                            // The scrutinee can only be this one variant:
-                            // the pattern is irrefutable, no dispatch.
-                            Cover::All
-                        } else {
-                            Cover::OtherVariant(scrut_variant.clone())
                         }
                     }
                     // A qualified pattern on a non-enum scrutinee: the
@@ -9805,37 +9556,6 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         }
     }
 
-    /// [`Self::check_pat`] for a pattern nested in another: a `mut` binder
-    /// here has no annotation of its own, so it widens like a payload's.
-    fn check_nested_pat(&mut self, pat: PatId, ty: &Ty, anchor: ExprId) {
-        match self.body.pats[pat] {
-            PatData::Bind(binding) => {
-                self.result.type_of_pat.insert(pat, ty.clone());
-                let ty = self.widen_mut_binder(binding, ty.clone());
-                self.result.type_of_binding.insert(binding, ty);
-            }
-            _ => self.check_pat(pat, ty, anchor),
-        }
-    }
-
-    /// The type an unannotated binder inside a pattern takes: a `mut` one
-    /// of a variant-typed value widens to the enum (G27), recorded for MIR;
-    /// any other keeps `ty`.
-    fn widen_mut_binder(&mut self, binding: BindingId, ty: Ty) -> Ty {
-        if !self.body.bindings[binding].mutable {
-            return ty;
-        }
-        match self.resolve_shallow(&ty) {
-            Ty::Variant(variant) => {
-                self.result
-                    .widened_bindings
-                    .insert(binding, variant.clone());
-                variant.enum_ty()
-            }
-            _ => ty,
-        }
-    }
-
     /// Check a `let`/parameter pattern against the type it destructures,
     /// binding every name it introduces. A `Record` pattern must name
     /// exactly `ty`'s fields (missing/extra fields are reported), and a
@@ -9865,7 +9585,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     // A refused pattern is already an error, and a value
                     // that never arrives meets no pattern.
                     Cover::All | Cover::Nothing => true,
-                    Cover::OtherVariant(_) | Cover::Unknown => false,
+                    Cover::Unknown => false,
                     Cover::Variant(_) => match &scrut {
                         Scrutinee::Enum(named) => enum_variants(self.db, named.decl.to_id(self.db))
                             .as_ref()
@@ -9898,7 +9618,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                             });
                     }
                     for element in elements {
-                        self.check_nested_pat(element, &elem, anchor);
+                        self.check_pat(element, &elem, anchor);
                     }
                 }
                 Ty::Infer(_) => {
@@ -9925,8 +9645,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                     for f in &fields {
                         match rec.field_ty(&f.field) {
                             Some(field_ty) => {
-                                let ty = self.widen_mut_binder(f.binding, field_ty.clone());
-                                self.result.type_of_binding.insert(f.binding, ty);
+                                self.result
+                                    .type_of_binding
+                                    .insert(f.binding, field_ty.clone());
                             }
                             None => {
                                 self.result.diagnostics.push(
@@ -10003,7 +9724,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 match self.resolve_shallow(ty) {
                     Ty::Named(named) if named.decl == target => {
                         let underlying = type_underlying_for(self.db, &named).unwrap_or(Ty::Error);
-                        self.check_nested_pat(inner, &underlying, anchor);
+                        self.check_pat(inner, &underlying, anchor);
                     }
                     Ty::Infer(_) => {
                         self.result.diagnostics.push(
@@ -10417,7 +10138,7 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// loop-break values.
     ///
     /// Two kinds of branch contribute nothing: a diverging branch (it
-    /// doesn't vote, it widens — the join is decided by the surviving
+    /// doesn't vote, it coerces — the join is decided by the surviving
     /// leaves alone), and a branch whose tail is itself an `if`/`else`, a
     /// `match` or a `loop` (it was inferred with this sink as its witness
     /// position, so its leaves — a loop's break values — are already in;
@@ -10461,11 +10182,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
     /// in the constraint store — that's how the join solver later knows why
     /// an `if`'s result type was decided.
     ///
-    /// Between unification and the mismatch sits the widening lattice
+    /// Between unification and the mismatch sits the conversion lattice
     /// ([`widens_to`]): `!` adopts anything (no value to convert), and a
-    /// variant type converts to *its* enum — accepted silently, with the
-    /// conversion recorded in [`InferenceResult::widened`] so MIR injects
-    /// the tag at exactly this expression.
+    /// safe `fn` converts to the corresponding `unsafe fn`.
     fn check(&mut self, expr: ExprId, actual: Ty, expected: &Ty, cause: Option<Cause>) -> Ty {
         // `!` coerces to anything — but only on the actual side. Its own
         // early path (rather than `widens_to` below) because `!` also
@@ -10497,23 +10216,13 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         }
         let resolved_actual = self.resolve_shallow(&actual);
         let resolved_expected = self.resolve_shallow(expected);
-        if let Some(variant) =
-            self.constraints
-                .widen_to_enum(self.table, &resolved_actual, &resolved_expected, expr)
-        {
-            self.result.widened.insert(expr, variant);
-            // The context's type is what flows on from here — the value is
-            // tagged at this edge, so hover past it shows the enum.
-            return resolved_expected;
-        }
         // SAFE fn → UNSAFE fn, the one directed conversion on function
         // types and the only one there will be: a value that needs no
         // vouching is welcome in a position willing to vouch. Nothing is
-        // recorded for MIR — unlike variant → enum this converts no bits,
-        // it only declines a permission the position was not going to use.
-        // The judgement itself lives in `Constraints`, next to the widening,
-        // because the JOIN solver is a check site too and has to make
-        // exactly this call.
+        // recorded for MIR — this converts no bits, it only declines a
+        // permission the position was not going to use. The judgement
+        // itself lives in `Constraints`, because the JOIN solver is a
+        // check site too and has to make exactly this call.
         if self.constraints.coerce_fn_to_unsafe(
             self.table,
             &resolved_actual,
@@ -10622,9 +10331,6 @@ enum Scrutinee {
     /// declaration's variants; the mention's generic args flow into the
     /// arms' payload binding types.
     Enum(NamedTy),
-    /// Variant-typed (tag-free at runtime): only this one variant can
-    /// ever show up — no dispatch.
-    Variant(VariantTy),
     /// Any other concrete type: only `_`/binding arms can match it (v1).
     Other(Ty),
     /// Still an inference variable.
@@ -10649,8 +10355,6 @@ enum Cover {
     /// thing a program does, so the rule reads the same at every width
     /// instead of turning on where the domain stops being small.
     Literal,
-    /// No value: the scrutinee is this variant, not the pattern's.
-    OtherVariant(VariantTy),
     /// Not judged: a resolved variant pattern on a scrutinee of unknown
     /// type.
     Unknown,
@@ -10939,7 +10643,7 @@ fn collect_params<'t>(ty: &'t Ty, out: &mut Vec<&'t crate::ty::ParamTy>) {
                 collect_params(field, out);
             }
         }
-        Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => {
+        Ty::Named(NamedTy { args, .. }) => {
             for arg in args {
                 if let GenericArg::Ty(ty) = arg {
                     collect_params(ty, out);
@@ -11112,10 +10816,6 @@ fn instantiate_scheme(
             decl: named.decl.clone(),
             args: instantiate_scheme_args(&named.args, item, subst, const_subst),
         }),
-        Ty::Variant(variant) => Ty::Variant(VariantTy {
-            args: instantiate_scheme_args(&variant.args, item, subst, const_subst),
-            ..variant.clone()
-        }),
         other => other.clone(),
     }
 }
@@ -11167,10 +10867,6 @@ fn substitute_regions(ty: &Ty, item: &ItemLoc, subst: &FxHashMap<u32, Region>) -
         Ty::Named(named) => Ty::Named(NamedTy {
             decl: named.decl.clone(),
             args: substitute_regions_args(&named.args, item, subst),
-        }),
-        Ty::Variant(variant) => Ty::Variant(VariantTy {
-            args: substitute_regions_args(&variant.args, item, subst),
-            ..variant.clone()
         }),
         other => other.clone(),
     }
@@ -11300,7 +10996,7 @@ fn ty_mentions_const_param(ty: &Ty, item: &ItemLoc, index: u32) -> bool {
                     } if param_item == item && *param_index == index
                 )
         }
-        Ty::Named(NamedTy { args, .. }) | Ty::Variant(VariantTy { args, .. }) => in_args(args),
+        Ty::Named(NamedTy { args, .. }) => in_args(args),
         _ => false,
     }
 }

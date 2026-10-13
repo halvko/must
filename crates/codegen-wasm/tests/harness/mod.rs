@@ -310,14 +310,6 @@ fn decode_into(
             }
             Some(format!("[{}]", list(parts)))
         }
-        // A variant-typed (tag-free) value: its payload, in order.
-        Value::Tuple(values) => {
-            let mut parts = Vec::with_capacity(values.len());
-            for value in values {
-                parts.push(decode_into(db, value, slots, read_str)?);
-            }
-            Some(format!("({})", list(parts)))
-        }
         // A TAGGED value: tag in slot 0, payload element `j` at its
         // column offset. Reading it back needs the backend's column
         // layout — which is the point: a payload read that takes the

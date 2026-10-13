@@ -376,9 +376,9 @@ assigned it on one branch only — is refused, and running the program anyway
 crashes at that read.
 
 The type comes from the annotation (`let mut x: usize;`) or else from the
-assignments. As with `let mut s = Shape::Circle(1);`, a variant assigned
-first widens to its enum (see "Enums and variants"), so `s` can later hold
-any `Shape`; write `let mut s: Shape::Circle;` to keep the variant. Only
+assignments. A variant assigned first gives the binding its enum's type
+(a constructed variant always has its enum's type, see "Enums and
+variants"), so `s` assigned `Shape::Circle(1)` can later hold any `Shape`. Only
 `let mut` and a single name may leave the value out: an immutable `let x;` is
 not supported yet, and a destructuring pattern always needs its value.
 
@@ -706,50 +706,26 @@ may be a `struct { ... }` record type, which covers the same ground).
 type Shape = enum { Circle(usize), Pair(usize, str), Point };
 ```
 
-*Variant types are first-class.* `Shape::Circle(3)` has type
-`Shape::Circle` — not `Shape`. The precise type survives as long as
-possible: annotations may demand a specific variant (`fn (c:
-Shape::Circle)`), and an API can force callers to prove which state they
-are in. A payload-less variant path (`Shape::Point`) *is* the value; a
-variant with payloads is a constructor function `fn(usize) ->
-Shape::Circle`, usable first-class (`let make = Shape::Circle;
-make(3)`). Constructors are pure, so construction is legal in const
-contexts.
+*A variant is a value, never a type.* `Shape::Circle(3)` has type
+`Shape` — every constructed value has its enum's type, tagged with which
+variant it is. A payload-less variant path (`Shape::Point`) *is* the value;
+a variant with payloads is a constructor function `fn(usize) -> Shape`,
+usable first-class (`let make = Shape::Circle; make(3)`). Constructors are
+pure, so construction is legal in const contexts. Writing a variant where a
+type is expected is an error: `fn (c: Shape::Circle)` is "`Shape::Circle`
+is a variant, not a type; use `Shape`".
 
-*Widening is a conversion, not subtyping.* A variant-typed value is
-**tag-free** at runtime: `Shape::Circle(3)` is just the payload — for code
-that stays on one variant (a state machine whose states are variants) the
-enum is fully erased, exactly like named struct types. An *enum-typed*
-value is **tagged**: which variant it is, plus the payload. Going from
-`Shape::Circle` to `Shape` therefore does real runtime work (injecting the
-tag), so it is an implicit *conversion* applied where a context demands
-the enum — an annotation, a call argument, a return type — never an
-equality the inference engine can run backwards. The conversion is
-shallow: `fn() -> Shape::Circle` is not a `fn() -> Shape`.
+Because a constructed value already has the enum's type, everything the
+enum offers reaches it directly — `Option::<usize>::Some(11).&.is_some()`
+needs no conversion — and `if`/`else` branches that build different
+variants of one enum simply agree on the enum. Variants of *different*
+enums are incompatible branches, as ever.
 
-`if`/`else` values join family-aware: leaves that agree on one variant
-keep that variant (full precision, zero conversions); mixed variants of
-one enum widen to the enum, with the conversion at each branch edge;
-variants of *different* enums are incompatible branches, as ever.
-
-*`let mut` widening.* An unannotated `let mut` initialized with a
-variant-typed value widens the binding to the enum at binding time — a
-mutable state variable is meant to be reassigned across variants:
-
-```
-static run = fn {
-    let p = Shape::Point;          // p: Shape::Point  (plain let keeps precision)
-    let mut s = Shape::Point;      // s: Shape         (mut widens at binding)
-    s = Shape::Circle(1);          // fine: converts at the assignment
-};
-```
-
-An annotated `let mut s: Shape::Circle = ...` keeps the annotation's
-precision — the axiom always wins.
-A `mut` binding inside a pattern has no annotation of its own, so it
-always widens the same way: a whole match arm (`mut o =>`), a payload
-(`::Two(mut c, _)`), or a part of a `let` or parameter pattern
-(`let struct { mut a } = ...`).
+Knowing *which* variant a value holds is a matter for `match`, not for the
+type: narrowing a value's type by control flow is planned
+(halvko/must\#125). Until then a `let` pattern naming one variant of an
+enum with several (`let ::Circle(r) = s;`) is refutable, like any other
+partial pattern.
 
 Bare `Shape` remains a type, not a value, and `Shape(...)` does not
 construct (an enum has no single shape) — construction always goes through
@@ -817,11 +793,10 @@ nothing about the scrutinee and changes neither dispatch nor coverage.
 Assigning to a binding written without `mut` is the same error it is for
 a `let`.
 
-Arms are branches of one join, exactly like `if`/`else`: arms that agree on
-one variant keep that variant's precision, mixed variants of one enum widen
-to the enum (the conversion sits on each arm's edge), and a match nested in
-an `if`'s branch tail contributes its arms to the enclosing join — blame
-speaks about the leaves.
+Arms are branches of one join, exactly like `if`/`else`: arms that build
+variants of one enum agree on the enum, and a match nested in an `if`'s
+branch tail contributes its arms to the enclosing join — blame speaks about
+the leaves.
 
 *Exhaustiveness* is flat set-cover over the enum's variants: a `_` or
 binding arm covers everything, and a `match` that misses variants is a
@@ -884,13 +859,6 @@ that has already been invalidated is caught at the `match` itself rather
 than at whichever arm first touches a binding. A `match` no arm of which
 dispatches — only `_` or a binding — tests no tag and so reads nothing.
 
-*Matching a variant-typed scrutinee needs no dispatch at all.* A `fn (s:
-State::Running)` knows statically which variant it holds, so a `match`
-inside compiles to a direct payload destructure — no switch, no tag read,
-the enum fully erased. That is the state-machine payoff: code that stays
-on one variant pays nothing for the enum it belongs to. Arms naming the
-*other* variants of the enum are legal but flagged unreachable.
-
 `match` is pure control flow, so it is const-legal — fine inside `const
 fn` bodies and `const { ... }` blocks.
 
@@ -939,9 +907,9 @@ nested data through a borrow is spelled as two matches until they land.
 `loop { ... }` is an expression: an infinite loop. `break;` and `break
 value;` exit it, `continue;` restarts the body. The loop's value is carried
 by its breaks — the break values are branches of one join, exactly like
-`if`/`else` branches and `match` arms, so they must agree on one type (and
-family-aware variant widening applies to them too). The body's own tail
-value is discarded: running off the body's end just continues the loop.
+`if`/`else` branches and `match` arms, so they must agree on one type. The
+body's own tail value is discarded: running off the body's end just
+continues the loop.
 
 ```
 static sum_to_ten = fn () -> usize {
@@ -1108,8 +1076,8 @@ Const params make instances *distinct types*: `Buf::<8>` and `Buf::<9>` do
 not unify (the const argument is checked, not decorative), and the length
 flows into the field type — a `Buf::<8>` really does carry a `[usize; 8]`.
 Variants of a generic enum spell their arguments before the variant name:
-`Option::<usize>::Some(3)`, and mixed variants widen to the generic enum
-exactly as in the non-generic case.
+`Option::<usize>::Some(3)`, which has type `Option::<usize>` exactly as in
+the non-generic case.
 
 Honest restrictions, all diagnosed:
 
@@ -1121,9 +1089,8 @@ Honest restrictions, all diagnosed:
   passed through a generic function's const parameter instead.
 - A const param cannot be used as a *type* (`{ len: N }` is "`N` is a const
   parameter, not a type").
-- A generic enum's *variant types* are not spellable in annotations yet
-  (`fn (o: Option::Some)` is rejected with that reason); use the whole
-  generic enum, or a monomorphic enum, until it lands.
+- A variant is not a type, generic or not: `fn (o: Option::Some)`
+  is "`Option::Some` is a variant, not a type; use `Option`".
 
 A type's binder is not the only one a member sees: an inherent member may
 bind type parameters of its own, which vary per *call* rather than per

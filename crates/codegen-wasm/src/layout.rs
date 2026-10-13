@@ -2,12 +2,11 @@
 //!
 //! **The slot model.** Every value is a flat sequence of `i64` *slots*.
 //! No linear memory, no shadow stack, no pointers: a record is its fields'
-//! slots end to end, an array is its elements' slots end to end, a
-//! variant-typed value is its payload's slots, a tagged enum is one tag
-//! slot followed by its payload columns. Function values occupy ZERO slots
-//! — monomorphization resolves every callee statically, so a fn value has
-//! nothing left to carry at runtime (that is what "dictionaries die into
-//! direct calls" means concretely).
+//! slots end to end, an array is its elements' slots end to end, an enum
+//! is one tag slot followed by its payload columns. Function values occupy
+//! ZERO slots — monomorphization resolves every callee statically, so a fn
+//! value has nothing left to carry at runtime (that is what "dictionaries
+//! die into direct calls" means concretely).
 //!
 //! **Uniform `i64` is deliberate, and unobservable.** Storage width is not
 //! semantics: what the language pins is the *operations* (`u8 + u8` traps
@@ -78,15 +77,6 @@ fn slots_at(db: &dyn Db, ty: &Ty, depth: u32) -> Layout<u32> {
             let len = array_len(len)?;
             let elem = slots_at(db, elem, depth + 1)?;
             Ok(elem * len)
-        }
-        Ty::Variant(variant) => {
-            let payload = hir::variant_payloads_for(db, variant)
-                .ok_or_else(|| Unsupported::new("a broken variant type"))?;
-            let mut total = 0;
-            for ty in &payload {
-                total += slots_at(db, ty, depth + 1)?;
-            }
-            Ok(total)
         }
         Ty::Named(_) => match nominal(db, ty)? {
             Nominal::Struct(fields) => {
@@ -165,7 +155,7 @@ pub fn nominal(db: &dyn Db, ty: &Ty) -> Layout<Nominal> {
     )))
 }
 
-/// The layout of a tagged enum value: slot 0 is the variant index, and
+/// The layout of an enum value: slot 0 is the variant index, and
 /// payload element *j* of EVERY variant lives at `columns[j]`.
 ///
 /// Column-wise, not variant-wise: element `j`'s column is as wide as the
@@ -180,6 +170,19 @@ pub struct EnumLayout {
     /// declares.
     pub columns: Vec<u32>,
     pub variants: Vec<(String, Vec<Ty>)>,
+}
+
+impl EnumLayout {
+    /// How many slots payload column `position` spans: up to the next
+    /// column, or to the end of the value for the last one.
+    pub fn column_width(&self, position: usize) -> u32 {
+        let next = self
+            .columns
+            .get(position + 1)
+            .copied()
+            .unwrap_or(self.slots);
+        next - self.columns[position]
+    }
 }
 
 pub fn enum_layout(db: &dyn Db, ty: &Ty) -> Layout<EnumLayout> {
@@ -220,20 +223,9 @@ fn enum_layout_at(db: &dyn Db, variants: &[(String, Vec<Ty>)], depth: u32) -> La
 /// Where field `index` of an aggregate starts, and — where it is
 /// knowable — what type it has. Handles every carrier
 /// `mir::Rvalue::Field` / `mir::ProjElem::Field` can name: records, named
-/// structs, variant payloads (positional), and tagged enums (positional,
-/// through the column layout).
+/// structs, and enums (positional, through the column layout).
 pub fn field(db: &dyn Db, ty: &Ty, index: u32) -> Layout<FieldRead> {
     let position = index as usize;
-    let positional = |types: Vec<Ty>| -> Layout<FieldRead> {
-        let mut offset = 0;
-        for ty in types.iter().take(position) {
-            offset += slots(db, ty)?;
-        }
-        let ty = types.get(position).cloned().ok_or_else(|| {
-            Unsupported::new(format!("payload element {position} of a value without one"))
-        })?;
-        Ok(FieldRead::Exact { offset, ty })
-    };
     match ty {
         Ty::Record(record) => {
             let mut offset = 0;
@@ -249,11 +241,6 @@ pub fn field(db: &dyn Db, ty: &Ty, index: u32) -> Layout<FieldRead> {
                 })?;
             Ok(FieldRead::Exact { offset, ty })
         }
-        Ty::Variant(variant) => {
-            let payload = hir::variant_payloads_for(db, variant)
-                .ok_or_else(|| Unsupported::new("a broken variant type"))?;
-            positional(payload)
-        }
         Ty::Named(_) => match nominal(db, ty)? {
             Nominal::Struct(fields) => {
                 let mut offset = 0;
@@ -268,7 +255,7 @@ pub fn field(db: &dyn Db, ty: &Ty, index: u32) -> Layout<FieldRead> {
                     })?;
                 Ok(FieldRead::Exact { offset, ty })
             }
-            // A payload read out of a TAGGED value. The column layout
+            // A payload read out of an enum value. The column layout
             // makes the OFFSET independent of the variant — the TYPE is
             // not: two variants may declare different types at the same
             // position, and MIR's `Rvalue::Field` carries no variant
@@ -292,14 +279,14 @@ pub fn field(db: &dyn Db, ty: &Ty, index: u32) -> Layout<FieldRead> {
     }
 }
 
-/// What [`field`] found: an aggregate element whose type is known, or a
-/// tagged enum's payload column, whose type is not.
+/// What [`field`] found: an aggregate element whose type is known, or an
+/// enum's payload column, whose type is not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldRead {
-    /// A record field, a named struct's field, or a variant payload
-    /// element: the offset, and the element's exact type.
+    /// A record field or a named struct's field: the offset, and the
+    /// field's exact type.
     Exact { offset: u32, ty: Ty },
-    /// A payload column of a TAGGED enum. The offset is exact; the width
+    /// A payload column of an enum. The offset is exact; the width
     /// must come from the READ's destination, and no type is available
     /// (see [`field`]). A payload element always starts at its column
     /// offset, and the column is as wide as the widest variant's element
@@ -314,7 +301,7 @@ impl FieldRead {
         }
     }
 
-    /// The element's type, when it is knowable. `None` for a tagged
+    /// The element's type, when it is knowable. `None` for an
     /// enum's payload column — a caller that needs a type there must
     /// refuse rather than guess.
     pub fn ty(&self) -> Option<&Ty> {
@@ -355,11 +342,11 @@ pub enum EqSlot {
 
 /// The slot-by-slot equality plan for a type.
 ///
-/// Tagged enums are the one refusal: with a column layout, two values of
-/// *different* variants can put a `str` and a number in the same column,
-/// and a byte comparison against a number would be nonsense (and could
-/// read outside memory). Payload-free enums and enums whose payloads
-/// carry no `str` compare slot-wise and are supported.
+/// Enums carrying a `str` payload are the one refusal: with a column
+/// layout, two values of *different* variants can put a `str` and a
+/// number in the same column, and a byte comparison against a number
+/// would be nonsense (and could read outside memory). Every other enum
+/// compares slot-wise.
 pub fn eq_plan(db: &dyn Db, ty: &Ty) -> Layout<Vec<EqSlot>> {
     let mut plan = Vec::new();
     eq_plan_into(db, ty, &mut plan, 0)?;
@@ -390,14 +377,6 @@ fn eq_plan_into(db: &dyn Db, ty: &Ty, out: &mut Vec<EqSlot>, depth: u32) -> Layo
         Ty::Array { elem, len } => {
             for _ in 0..array_len(len)? {
                 eq_plan_into(db, elem, out, depth + 1)?;
-            }
-            Ok(())
-        }
-        Ty::Variant(variant) => {
-            let payload = hir::variant_payloads_for(db, variant)
-                .ok_or_else(|| Unsupported::new("a broken variant type"))?;
-            for ty in &payload {
-                eq_plan_into(db, ty, out, depth + 1)?;
             }
             Ok(())
         }
@@ -440,8 +419,6 @@ fn mentions_str(db: &dyn Db, ty: &Ty, depth: u32) -> bool {
             .iter()
             .any(|(_, field)| mentions_str(db, field, depth + 1)),
         Ty::Array { elem, .. } => mentions_str(db, elem, depth + 1),
-        Ty::Variant(variant) => hir::variant_payloads_for(db, variant)
-            .is_none_or(|payload| payload.iter().any(|ty| mentions_str(db, ty, depth + 1))),
         Ty::Named(_) => match nominal(db, ty) {
             Ok(Nominal::Struct(fields)) => fields
                 .iter()

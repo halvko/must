@@ -24,8 +24,8 @@ use eval::Value;
 use hir::body::BinOp;
 use hir::{ExprId, IntKind, ItemLoc, Ty};
 use mir::{
-    BlockId, Const, LocalId, MirBody, Operand, Place, ProjElem, Rvalue, StatementKind,
-    TerminatorKind,
+    AggregateKind, BlockId, Const, LocalId, MirBody, Operand, Place, ProjElem, Rvalue,
+    StatementKind, TerminatorKind,
 };
 
 use rustc_hash::FxHashMap;
@@ -305,11 +305,14 @@ impl<'a, 'db> Emitter<'a, 'db> {
                 self.negate(ctx, op, origin)?;
                 Ok(1)
             }
-            // Records, variant payloads and arrays are all the same thing
-            // here: slots concatenate in the aggregate's canonical order,
-            // which IS the order MIR hands the operands over in (records
-            // sorted by name, payloads and elements positional). So the
-            // `kind` needs no inspection at all.
+            Rvalue::Aggregate {
+                kind: AggregateKind::Variant { index, .. },
+                ops,
+            } => self.variant(ctx, ops, *index, dest_ty, width, origin),
+            // Records and arrays are the same thing here: slots
+            // concatenate in the aggregate's canonical order, which IS the
+            // order MIR hands the operands over in (records sorted by name,
+            // elements positional).
             Rvalue::Aggregate { ops, .. } => {
                 let mut total = 0;
                 for op in ops {
@@ -325,10 +328,10 @@ impl<'a, 'db> Emitter<'a, 'db> {
                 let read = layout::field(self.db(), &ty, *index)
                     .map_err(|err| self.refuse(ctx, err, origin))?;
                 let count = match read.ty() {
-                    // Records, named structs and variant payloads: the
-                    // element's own type says how wide the read is.
+                    // Records and named structs: the field's own type says
+                    // how wide the read is.
                     Some(field_ty) => self.slots(ctx, field_ty, origin)?,
-                    // A TAGGED enum's payload column. Which variant this
+                    // An enum's payload column. Which variant this
                     // arm matched is not in MIR, so the element's type is
                     // unknowable here — but the DESTINATION's type is
                     // exactly that element's type (it is the binding the
@@ -375,9 +378,6 @@ impl<'a, 'db> Emitter<'a, 'db> {
             // A function value: zero slots. Monomorphization already
             // recorded which function this is.
             Rvalue::Instantiate { .. } => Ok(0),
-            Rvalue::WidenToEnum { op, index, .. } => {
-                self.widen(ctx, op, *index, dest_ty, width, origin)
-            }
             Rvalue::AddrOf { .. } | Rvalue::AddrOfStatic { .. } => Err(Refusal::new(
                 "taking an address (`.&raw`) — raw pointers and the heap are \
                  out of scope for this backend",
@@ -397,51 +397,31 @@ impl<'a, 'db> Emitter<'a, 'db> {
         }
     }
 
-    /// The variant → enum widening: inject the tag and place the payload
-    /// into the enum's columns, zero-filling everything the variant does
-    /// not occupy. The one place a tag ever comes into existence — and a
-    /// real conversion, not a no-op: it costs a tag store plus the padding.
-    #[allow(clippy::too_many_arguments)]
-    fn widen(
+    /// A variant constructor's enum value: the tag, then each payload
+    /// operand in its column, zero-filling everything the variant does not
+    /// occupy.
+    fn variant(
         &mut self,
         ctx: &mut Ctx<'db>,
-        op: &Operand,
+        ops: &[Operand],
         index: u32,
         dest_ty: &Ty,
         width: u32,
         origin: ExprId,
     ) -> Result<u32, Refusal> {
-        // Everything is read off the DESTINATION type (X10). MIR types the
-        // pre-conversion temp with the *post*-conversion type where the
-        // widening happened at a direct check site, so the operand's own
-        // type cannot be trusted to describe the payload it holds — but
-        // the payload always starts at slot 0 of it, which is all this
-        // needs.
+        // The layout is read off the DESTINATION type (X10), which is the
+        // enum; each payload operand's own type sizes its column's fill.
         let enum_layout =
             layout::enum_layout(self.db(), dest_ty).map_err(|err| self.refuse(ctx, err, origin))?;
-        let Some((_, payload)) = enum_layout.variants.get(index as usize).cloned() else {
-            return Err(Refusal::new(
-                format!("widening into `{}`", dest_ty.display()),
-                &ctx.loc,
-                origin,
-            ));
-        };
-        let (src, _) = self.operand(ctx, op, origin)?;
         ctx.body.i64_const(i64::from(index));
         let mut emitted = 1;
-        let mut offset = 0;
-        for (position, column) in enum_layout.columns.iter().enumerate() {
-            let column_width = enum_layout
-                .columns
-                .get(position + 1)
-                .copied()
-                .unwrap_or(enum_layout.slots)
-                - column;
+        for position in 0..enum_layout.columns.len() {
+            let column_width = enum_layout.column_width(position);
             let mut written = 0;
-            if let Some(element_ty) = payload.get(position) {
-                written = self.slots(ctx, element_ty, origin)?;
-                self.push_range(ctx, &src, offset, written, origin)?;
-                offset += written;
+            if let Some(op) = ops.get(position) {
+                let (src, ty) = self.operand(ctx, op, origin)?;
+                written = self.slots(ctx, &ty, origin)?;
+                self.push_range(ctx, &src, 0, written, origin)?;
             }
             for _ in written..column_width {
                 ctx.body.i64_const(0);
@@ -450,7 +430,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
         }
         debug_assert_eq!(
             emitted, width,
-            "a widened value must fill exactly its enum's layout"
+            "a variant value must fill exactly its enum's layout"
         );
         Ok(emitted)
     }
@@ -900,14 +880,6 @@ impl<'a, 'db> Emitter<'a, 'db> {
                 }
                 Ok(out)
             }
-            Value::Tuple(values) => {
-                let mut out = Vec::new();
-                for (index, value) in values.iter().enumerate() {
-                    let (_, element_ty) = self.field_of(ctx, ty, index as u32, origin)?;
-                    out.extend(self.value_slots(ctx, value, &element_ty, origin)?);
-                }
-                Ok(out)
-            }
             Value::Variant { index, payload, .. } => {
                 let enum_layout = layout::enum_layout(self.db(), ty)
                     .map_err(|err| self.refuse(ctx, err, origin))?;
@@ -915,13 +887,8 @@ impl<'a, 'db> Emitter<'a, 'db> {
                     return Err(mismatch(ctx));
                 };
                 let mut out = vec![i64::from(*index)];
-                for (position, column) in enum_layout.columns.iter().enumerate() {
-                    let column_width = enum_layout
-                        .columns
-                        .get(position + 1)
-                        .copied()
-                        .unwrap_or(enum_layout.slots)
-                        - column;
+                for position in 0..enum_layout.columns.len() {
+                    let column_width = enum_layout.column_width(position);
                     let mut written = 0;
                     if let (Some(value), Some(element_ty)) =
                         (payload.get(position), types.get(position))
@@ -1283,8 +1250,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
     ) -> Result<(), Refusal> {
         let (lsrc, lty) = self.operand(ctx, l, origin)?;
         let (rsrc, rty) = self.operand(ctx, r, origin)?;
-        // A variant-typed operand compared against its enum cannot happen
-        // (widening is explicit in MIR), so one plan serves both sides.
+        // Both operands have one type, so one plan serves both sides.
         let plan = layout::eq_plan(self.db(), &lty)
             .or_else(|_| layout::eq_plan(self.db(), &rty))
             .map_err(|err| self.refuse(ctx, err, origin))?;
@@ -1352,7 +1318,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
             } => {
                 let (src, _) = self.operand(ctx, discr, origin)?;
                 let tag = ctx.claim_scratch(1);
-                // Slot 0 of a tagged value is its variant index.
+                // Slot 0 of an enum value is its variant index.
                 self.push_range(ctx, &src, 0, 1, origin)?;
                 ctx.body.local_set(tag);
                 for (index, target) in arms {
@@ -1624,7 +1590,7 @@ impl<'a, 'db> Emitter<'a, 'db> {
 
     /// A field read that MUST know the element's type — every caller that
     /// continues walking into the element, or lays a compile-time value
-    /// out through it. A tagged enum's payload column has no knowable
+    /// out through it. An enum's payload column has no knowable
     /// type ([`layout::FieldRead`]), so this refuses rather than guesses.
     /// MIR does not emit such a read today (place projections come from
     /// NAMED field access, and enums have no named fields; payload reads

@@ -77,10 +77,6 @@ fn no_forget_leaf(db: &dyn Db, ty: &Ty) -> Option<()> {
     match ty {
         // A declaration that capped itself.
         Ty::Named(named) if decl_only_move(db, &named.decl) => Some(()),
-        // A variant-typed value is its payload tuple; the enum's own
-        // ceiling covers it too, since widening one to the other must not
-        // change what has to happen to it.
-        Ty::Variant(variant) if decl_only_move(db, &variant.decl) => Some(()),
         // A rigid parameter is whatever its binder ASKED FOR. `T: forget`
         // makes every caller supply a forgettable type, so the body may
         // forget it; no bound assumes nothing, so the body is checked as
@@ -181,7 +177,7 @@ pub fn blaming_param(db: &dyn Db, ty: &Ty) -> Option<String> {
 ///
 /// The one traversal behind every capability question. Containment infects
 /// and indirection does not, so it descends through records, arrays,
-/// nominal mentions and variants and stops at everything else; `leaf` says
+/// nominal mentions and stops at everything else; `leaf` says
 /// which of the types it meets is an answer. An ALL-question ("may this be
 /// forgotten?") asks for the first component that says no and reads a
 /// `None` as yes; an ANY-question ("what makes this unduplicable?") reads
@@ -214,18 +210,7 @@ fn find_component<T>(
             .iter()
             .find_map(|(_, field)| find_component(db, field, owner, search, leaf)),
         Ty::Array { elem, .. } => find_component(db, elem, owner, search, leaf),
-        Ty::Named(named) => {
-            find_in_mention(db, &named.decl, None, &named.args, owner, search, leaf)
-        }
-        Ty::Variant(variant) => find_in_mention(
-            db,
-            &variant.decl,
-            Some(variant.index),
-            &variant.args,
-            owner,
-            search,
-            leaf,
-        ),
+        Ty::Named(named) => find_in_mention(db, &named.decl, &named.args, owner, search, leaf),
         // Indirection does not infect: what a value points at, it does
         // not hold. A parameter reaching here is either bounded or another
         // declaration's, and `leaf` has said what it says about it.
@@ -259,21 +244,20 @@ fn find_component<T>(
 fn find_in_mention<T>(
     db: &dyn Db,
     decl: &ItemLoc,
-    variant: Option<u32>,
     args: &[GenericArg],
     owner: Option<&ItemLoc>,
     search: &mut Search,
     leaf: &impl Fn(&dyn Db, &Ty) -> Option<T>,
 ) -> Option<T> {
-    if search.enter(decl, variant) {
-        let found = decl_components(db, decl, variant)
+    if search.enter(decl) {
+        let found = decl_components(db, decl)
             .iter()
             .find_map(|(_, component)| find_component(db, component, Some(decl), search, leaf));
         if found.is_some() {
             return found;
         }
     }
-    for &index in flows(db, decl, variant) {
+    for &index in decl_flows(db, decl.to_id(db)) {
         let Some(GenericArg::Ty(arg)) = args.get(index as usize) else {
             continue;
         };
@@ -305,39 +289,26 @@ fn find_in_mention<T>(
 /// 2^depth times.
 #[derive(Default)]
 struct Search {
-    seen: Vec<(ItemLoc, Option<u32>)>,
+    seen: Vec<ItemLoc>,
 }
 
 impl Search {
     /// Claim a declaration's own components for this query — `false` when
     /// they have already been searched.
-    fn enter(&mut self, decl: &ItemLoc, variant: Option<u32>) -> bool {
-        // The enum's own components ARE every variant's payloads, so a
-        // whole-declaration walk subsumes each variant's; the reverse does
-        // not hold, and the key keeps them apart.
-        let claimed = |of: &Option<u32>| *of == variant || (variant.is_some() && of.is_none());
-        if self
-            .seen
-            .iter()
-            .any(|(seen, of)| seen == decl && claimed(of))
-        {
+    fn enter(&mut self, decl: &ItemLoc) -> bool {
+        if self.seen.contains(decl) {
             return false;
         }
-        self.seen.push((decl.clone(), variant));
+        self.seen.push(decl.clone());
         true
     }
 }
 
-/// The parameters of `decl` whose arguments a mention of this shape — the
-/// declaration, or one of its variants — holds. A declaration that failed
-/// to lower flows nothing, which is what it would have computed.
-fn flows<'db>(db: &'db dyn Db, decl: &ItemLoc, variant: Option<u32>) -> &'db [u32] {
-    decl_flows(db, decl.to_id(db)).of(variant)
-}
-
 /// One declaration's parametric summary: which of its parameters reach a
-/// VALUE position of it, so that a mention holds the argument in that
-/// place. Summarized once, independently of any argument.
+/// VALUE position of it (a struct's fields, or every variant's payloads),
+/// so that a mention holds the argument in that place. Summarized once,
+/// independently of any argument; a declaration that failed to lower flows
+/// nothing, which is what it would have computed.
 ///
 /// This is the finite half of the construction. The parametric question is
 /// answered on the declaration graph, which is finite; an instance is then
@@ -345,28 +316,9 @@ fn flows<'db>(db: &'db dyn Db, decl: &ItemLoc, variant: Option<u32>) -> &'db [u3
 /// are finite syntax. Neither half ever expands a nested mention, so the
 /// answer terminates with no bound on depth or size, and no inhabited type
 /// is refused for want of such a bound.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct DeclFlows {
-    /// For the declaration itself: a struct's fields, or every variant's
-    /// payloads.
-    all: Vec<u32>,
-    /// For each variant on its own. A variant-typed value is its own
-    /// payload tuple and nothing else: `Opt::<Res>::N` holds no `Res`.
-    variants: Vec<Vec<u32>>,
-}
-
-impl DeclFlows {
-    fn of(&self, variant: Option<u32>) -> &[u32] {
-        match variant {
-            None => &self.all,
-            Some(index) => self.variants.get(index as usize).map_or(&[], Vec::as_slice),
-        }
-    }
-}
-
-/// [`DeclFlows`] for one declaration, memoized by salsa: it changes only
-/// when a declaration it can reach changes, and a query then costs a
-/// lookup per mention.
+///
+/// Memoized by salsa: it changes only when a declaration it can reach
+/// changes, and a query then costs a lookup per mention.
 ///
 /// The LEAST fixpoint over every declaration reachable from this one, and
 /// it has to be least: no parameter flows until some component says it
@@ -377,24 +329,17 @@ impl DeclFlows {
 /// `P` and no `T` is ever held. The iteration is monotone (a component can
 /// only add positions) and bounded by the parameter count, so it ends.
 #[salsa::tracked(returns(ref))]
-fn decl_flows<'db>(db: &'db dyn Db, item: ItemId<'db>) -> DeclFlows {
+fn decl_flows<'db>(db: &'db dyn Db, item: ItemId<'db>) -> Vec<u32> {
     let root = crate::item_loc(db, item);
     let decls = reachable_decls(db, &root);
-    let mut known: HashMap<ItemLoc, DeclFlows> = HashMap::new();
+    let mut known: HashMap<ItemLoc, Vec<u32>> = HashMap::new();
     loop {
         let mut changed = false;
         // Leaves first: a flow enters a declaration through the ones it
         // mentions, so a chain converges in a round or two this way round
         // and in one round per link the other.
         for decl in decls.iter().rev() {
-            let flows = DeclFlows {
-                all: value_params(&known, decl, &decl_components(db, decl, None)),
-                variants: (0..variant_count(db, decl))
-                    .map(|index| {
-                        value_params(&known, decl, &decl_components(db, decl, Some(index)))
-                    })
-                    .collect(),
-            };
+            let flows = value_params(&known, decl, &decl_components(db, decl));
             if known.get(decl) != Some(&flows) {
                 known.insert(decl.clone(), flows);
                 changed = true;
@@ -407,13 +352,9 @@ fn decl_flows<'db>(db: &'db dyn Db, item: ItemId<'db>) -> DeclFlows {
     known.remove(&root).unwrap_or_default()
 }
 
-/// What the fixpoint knows so far about a mention of this shape.
-fn known_flows<'a>(
-    known: &'a HashMap<ItemLoc, DeclFlows>,
-    decl: &ItemLoc,
-    variant: Option<u32>,
-) -> &'a [u32] {
-    known.get(decl).map_or(&[], |flows| flows.of(variant))
+/// What the fixpoint knows so far about a mention of `decl`.
+fn known_flows<'a>(known: &'a HashMap<ItemLoc, Vec<u32>>, decl: &ItemLoc) -> &'a [u32] {
+    known.get(decl).map_or(&[], Vec::as_slice)
 }
 
 /// Which of `decl`'s parameters reach a VALUE position of `components`.
@@ -424,7 +365,7 @@ fn known_flows<'a>(
 /// it. A pointer, a borrow and a `fn` type are leaves: what a value points
 /// at, it does not hold (T21), and linearity travels by ownership only.
 fn value_params(
-    known: &HashMap<ItemLoc, DeclFlows>,
+    known: &HashMap<ItemLoc, Vec<u32>>,
     decl: &ItemLoc,
     components: &[(Step, Ty)],
 ) -> Vec<u32> {
@@ -438,7 +379,7 @@ fn value_params(
 }
 
 fn params_in_value_position(
-    known: &HashMap<ItemLoc, DeclFlows>,
+    known: &HashMap<ItemLoc, Vec<u32>>,
     decl: &ItemLoc,
     ty: &Ty,
     found: &mut Vec<u32>,
@@ -451,15 +392,8 @@ fn params_in_value_position(
             .for_each(|(_, field)| params_in_value_position(known, decl, field, found)),
         Ty::Array { elem, .. } => params_in_value_position(known, decl, elem, found),
         Ty::Named(named) => {
-            for &index in known_flows(known, &named.decl, None) {
+            for &index in known_flows(known, &named.decl) {
                 if let Some(GenericArg::Ty(arg)) = named.args.get(index as usize) {
-                    params_in_value_position(known, decl, arg, found);
-                }
-            }
-        }
-        Ty::Variant(variant) => {
-            for &index in known_flows(known, &variant.decl, Some(variant.index)) {
-                if let Some(GenericArg::Ty(arg)) = variant.args.get(index as usize) {
                     params_in_value_position(known, decl, arg, found);
                 }
             }
@@ -493,11 +427,7 @@ fn params_in_value_position(
 /// pointee could not change the answer, and summarizing it anyway would
 /// only make this memo depend on declarations whose edits cannot alter it.
 fn reachable_decls(db: &dyn Db, root: &ItemLoc) -> Vec<ItemLoc> {
-    let components = |decl: &ItemLoc| {
-        decl_components(db, decl, None)
-            .into_iter()
-            .map(|(_, ty)| ty)
-    };
+    let components = |decl: &ItemLoc| decl_components(db, decl).into_iter().map(|(_, ty)| ty);
     let mut found = vec![root.clone()];
     let mut pending: Vec<Ty> = components(root).collect();
     while let Some(ty) = pending.pop() {
@@ -519,10 +449,6 @@ fn mentions(ty: &Ty, found: &mut impl FnMut(&ItemLoc)) {
         Ty::Named(named) => {
             found(&named.decl);
             named.args.as_slice()
-        }
-        Ty::Variant(variant) => {
-            found(&variant.decl);
-            variant.args.as_slice()
         }
         Ty::Record(record) => {
             record
@@ -571,11 +497,11 @@ impl Step {
 }
 
 /// A declaration's OWN components, with its parameters left RIGID: a
-/// struct's fields, one variant's payloads, or every variant's payloads for
-/// the enum itself. Nothing is substituted — the arguments are the other
-/// half of the answer, and keeping them out of this half is what makes it a
-/// property of the declaration.
-fn decl_components(db: &dyn Db, decl: &ItemLoc, variant: Option<u32>) -> Vec<(Step, Ty)> {
+/// struct's fields, or every variant's payloads for an enum. Nothing is
+/// substituted — the arguments are the other half of the answer, and
+/// keeping them out of this half is what makes it a property of the
+/// declaration.
+fn decl_components(db: &dyn Db, decl: &ItemLoc) -> Vec<(Step, Ty)> {
     let item = decl.to_id(db);
     if let Some(Ty::Record(record)) = crate::ty::type_underlying(db, item) {
         return record
@@ -587,26 +513,14 @@ fn decl_components(db: &dyn Db, decl: &ItemLoc, variant: Option<u32>) -> Vec<(St
     let Some(variants) = crate::ty::enum_variants(db, item).as_ref() else {
         return Vec::new();
     };
-    let payloads = |(name, payload): &(String, Vec<Ty>)| {
-        payload
-            .iter()
-            .map(|ty| (Step::Payload(name.clone()), ty.clone()))
-            .collect::<Vec<_>>()
-    };
-    match variant {
-        Some(index) => variants
-            .get(index as usize)
-            .map(payloads)
-            .unwrap_or_default(),
-        None => variants.iter().flat_map(payloads).collect(),
-    }
-}
-
-/// How many variants `decl` declares — none when it is a struct or broken.
-fn variant_count(db: &dyn Db, decl: &ItemLoc) -> u32 {
-    crate::ty::enum_variants(db, decl.to_id(db))
-        .as_ref()
-        .map_or(0, |variants| variants.len() as u32)
+    variants
+        .iter()
+        .flat_map(|(name, payload)| {
+            payload
+                .iter()
+                .map(|ty| (Step::Payload(name.clone()), ty.clone()))
+        })
+        .collect()
 }
 
 /// Whether the `type` declaration at `decl` wrote `only move`.
@@ -685,21 +599,7 @@ fn blame(
             if decl_only_move(db, &named.decl) {
                 return Some(Blame::decl(&named.decl));
             }
-            blame_mention(db, &named.decl, None, &named.args, owner, search, path)
-        }
-        Ty::Variant(variant) => {
-            if decl_only_move(db, &variant.decl) {
-                return Some(Blame::decl(&variant.decl));
-            }
-            blame_mention(
-                db,
-                &variant.decl,
-                Some(variant.index),
-                &variant.args,
-                owner,
-                search,
-                path,
-            )
+            blame_mention(db, &named.decl, &named.args, owner, search, path)
         }
         Ty::Record(record) => record.fields.iter().find_map(|(name, field)| {
             let root = blame(db, field, owner, search, path)?;
@@ -730,14 +630,13 @@ fn blame(
 fn blame_mention(
     db: &dyn Db,
     decl: &ItemLoc,
-    variant: Option<u32>,
     args: &[GenericArg],
     owner: Option<&ItemLoc>,
     search: &mut Search,
     path: &mut Vec<String>,
 ) -> Option<Blame> {
-    if search.enter(decl, variant) {
-        let found = decl_components(db, decl, variant)
+    if search.enter(decl) {
+        let found = decl_components(db, decl)
             .iter()
             .find_map(|(step, component)| {
                 let root = blame(db, component, Some(decl), search, path)?;
@@ -748,7 +647,7 @@ fn blame_mention(
             return found;
         }
     }
-    for &index in flows(db, decl, variant) {
+    for &index in decl_flows(db, decl.to_id(db)) {
         let Some(GenericArg::Ty(arg)) = args.get(index as usize) else {
             continue;
         };

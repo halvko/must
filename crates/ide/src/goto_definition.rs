@@ -254,7 +254,7 @@ fn nav_to_member(db: &RootDatabase, member: &hir::ItemLoc) -> Option<NavigationT
 
 /// Navigate to a variant's declaration inside its enum's `type` item: the
 /// variant node is the full range, its name the focus.
-fn nav_to_variant(db: &RootDatabase, variant: &hir::VariantTy) -> Option<NavigationTarget> {
+fn nav_to_variant(db: &RootDatabase, variant: &hir::ResolvedVariant) -> Option<NavigationTarget> {
     let ast::Item::TypeItem(decl) = hir::item_source(db, variant.decl.to_id(db))? else {
         return None;
     };
@@ -288,7 +288,7 @@ fn nav_to_variant_by_name(
         .position(|(variant, _)| variant == name)?;
     nav_to_variant(
         db,
-        &hir::VariantTy {
+        &hir::ResolvedVariant {
             decl: loc.clone(),
             args: Vec::new(),
             index: index as u32,

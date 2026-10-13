@@ -1051,22 +1051,6 @@ fn unify(
                 }
             }
         }
-        // A variant-typed argument widens to its enum at a parameter of
-        // enum type, so these two line up as well.
-        (Ty::Named(a), Ty::Variant(b)) if a.decl == b.decl && a.args.len() == b.args.len() => {
-            for (a, b) in a.args.iter().zip(&b.args) {
-                if let (GenericArg::Ty(a), GenericArg::Ty(b)) = (a, b) {
-                    unify(item, generics, a, b, out);
-                }
-            }
-        }
-        (Ty::Variant(a), Ty::Variant(b)) if a.decl == b.decl && a.args.len() == b.args.len() => {
-            for (a, b) in a.args.iter().zip(&b.args) {
-                if let (GenericArg::Ty(a), GenericArg::Ty(b)) = (a, b) {
-                    unify(item, generics, a, b, out);
-                }
-            }
-        }
         _ => {}
     }
 }

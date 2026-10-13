@@ -62,21 +62,11 @@ pub enum Value {
     /// into statics. Derived `PartialEq` is elementwise structural
     /// equality, like `Record`'s.
     Array(Vec<Value>),
-    /// A *variant-typed* value: the bare payload tuple, in declaration
-    /// order. This is the uniform carrier for every payload arity —
-    /// `Shape::Point` is `Tuple([])`, `Shape::Circle(3)` is
-    /// `Tuple([Int(3)])`, `Shape::Pair(1, "a")` is `Tuple([Int(1),
-    /// Str("a")])`. Deliberately tag-free: no enum, no variant index —
-    /// for code that stays on one variant (the state-machine case) the
-    /// enum is fully erased at runtime. The static variant type is the
-    /// only thing that says what this is.
-    Tuple(Vec<Value>),
-    /// An *enum-typed* (tagged) value: which declaration, which variant,
-    /// plus the payload. Only ever produced by the widening conversion
-    /// (`mir::Rvalue::WidenToEnum`) — the tag exists exactly from that
-    /// edge on. `name` duplicates what `(decl, index)` already determine,
-    /// carried so display needs no database; derived equality is
-    /// therefore still identity-plus-payload.
+    /// An enum value: which declaration, which variant (the tag), plus
+    /// the payload in declaration order — `Shape::Point` has an empty
+    /// payload, `Shape::Circle(3)` is `[Int(3)]`. `name` duplicates what
+    /// `(decl, index)` already determine, carried so display needs no
+    /// database; derived equality is therefore identity-plus-payload.
     Variant {
         decl: ItemLoc,
         index: u32,
@@ -266,7 +256,6 @@ impl std::hash::Hash for Value {
             // the const-arg domain (see `hir::diag::ARRAY_CONST_ARG`), so
             // this hash can never key an instance.
             Value::Array(values) => values.hash(state),
-            Value::Tuple(values) => values.hash(state),
             Value::Variant {
                 decl,
                 index,
@@ -329,17 +318,6 @@ impl Value {
                     .join(", ");
                 format!("[{parts}]")
             }
-            // A payload-less variant-typed value renders like unit — all
-            // the runtime has (its *type* names the variant; the debugger
-            // shows it alongside).
-            Value::Tuple(values) => {
-                let parts = values
-                    .iter()
-                    .map(Value::display)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("({parts})")
-            }
             Value::Variant {
                 decl,
                 name,
@@ -378,7 +356,6 @@ impl Value {
             Value::Ptr { .. } => true,
             Value::Record { fields } => fields.iter().any(|(_, value)| value.contains_ptr()),
             Value::Array(values) => values.iter().any(Value::contains_ptr),
-            Value::Tuple(values) => values.iter().any(Value::contains_ptr),
             Value::Variant { payload, .. } => payload.iter().any(Value::contains_ptr),
             Value::Unit
             | Value::Int(_)
@@ -402,7 +379,6 @@ impl Value {
             Value::Uninit => true,
             Value::Record { fields } => fields.iter().any(|(_, value)| value.contains_uninit()),
             Value::Array(values) => values.iter().any(Value::contains_uninit),
-            Value::Tuple(values) => values.iter().any(Value::contains_uninit),
             Value::Variant { payload, .. } => payload.iter().any(Value::contains_uninit),
             Value::Unit
             | Value::Int(_)

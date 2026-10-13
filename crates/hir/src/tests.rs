@@ -2049,45 +2049,6 @@ static f = fn (s: Shape) -> usize {
 }
 
 #[test]
-fn mut_match_bind_of_a_variant_scrutinee_takes_the_enum() {
-    // A `mut` binder of a variant-typed scrutinee (`Shape::Circle`) takes
-    // the enum (G27), so reassigning it to another variant is accepted.
-    check_diagnostics(
-        r#"
-type Shape = enum { Circle(usize), Point };
-static f = fn () -> usize {
-    let c = Shape::Circle(1);
-    match c { mut o => { o = Shape::Point; 0 } }
-};
-"#,
-        expect![[""]],
-    );
-}
-
-#[test]
-fn nested_mut_binders_of_a_variant_value_take_the_enum() {
-    // A `mut` binder nested in a `let`, parameter or payload pattern has no
-    // annotation of its own, so it widens like a whole-arm binder (G27).
-    check_diagnostics(
-        r#"
-type Shape = enum { Circle(usize), Point };
-type Pair = enum { Two(Shape::Circle, usize) };
-static f = fn (struct { mut p }: struct { p: Shape::Circle }) -> usize {
-    p = Shape::Point;
-    let struct { mut a, b } = struct { a = Shape::Circle(1), b = 2 };
-    a = Shape::Point;
-    let [mut c, _] = [Shape::Circle(1), Shape::Circle(2)];
-    c = Shape::Point;
-    match Pair::Two(Shape::Circle(1), 2) {
-        ::Two(mut e, _) => { e = Shape::Point; b },
-    }
-};
-"#,
-        expect![[""]],
-    );
-}
-
-#[test]
 fn mut_on_a_match_hole_is_refused() {
     check_diagnostics(
         r#"
@@ -2171,12 +2132,11 @@ fn a_variant_let_pattern_must_cover_its_type() {
         r#"
 type Only = enum { One(usize, usize) };
 type Shape = enum { Circle(usize), Point };
-static f = fn (o: Only, c: Shape::Circle) -> usize {
+static f = fn (o: Only) -> usize {
     let ::One(x, mut y) = o;
     y = y + 1;
     let Only::One(z, _) = o;
-    let ::Circle(r) = c;
-    x + y + z + r
+    x + y + z
 };
 static g = fn (s: Shape) -> usize {
     let ::Circle(r) = s;
@@ -2184,30 +2144,30 @@ static g = fn (s: Shape) -> usize {
 };
 "#,
         expect![[r#"
-            301..312: this pattern can fail to match; use `match`
+            254..265: this pattern can fail to match; use `match`
         "#]],
     );
 }
 
 #[test]
-fn a_let_pattern_naming_another_variant_than_the_value_is_refused() {
-    // The value is variant-precise, so the pattern matches no value: one
-    // error, owned or through a borrow.
+fn a_let_pattern_naming_one_of_several_variants_is_refused() {
+    // A variant of a multi-variant enum may not be what the value holds:
+    // one error, owned or through a borrow.
     check_diagnostics(
         r#"
 type Shape = enum { Circle(usize), Label(str) };
-static f = fn (c: Shape::Circle) -> str {
+static f = fn (c: Shape) -> str {
     let ::Label(s) = c;
     s
 };
-static g = fn (c: Shape::Circle) -> str {
+static g = fn (c: Shape) -> str {
     let ::Label(s) = c.&;
     s.*
 };
 "#,
         expect![[r#"
-            100..110: this pattern can fail to match; use `match`
-            175..185: this pattern can fail to match; use `match`
+            92..102: this pattern can fail to match; use `match`
+            159..169: this pattern can fail to match; use `match`
         "#]],
     );
 }
@@ -2248,17 +2208,17 @@ static f = fn (o: Only) -> usize {
 }
 
 #[test]
-fn a_qualified_let_pattern_naming_another_variant_than_the_value_is_refused() {
+fn a_qualified_let_pattern_naming_one_of_several_variants_is_refused() {
     check_diagnostics(
         r#"
 type Shape = enum { Circle(usize), Label(str) };
-static f = fn (c: Shape::Circle) -> str {
+static f = fn (c: Shape) -> str {
     let Shape::Label(s) = c;
     s
 };
 "#,
         expect![[r#"
-            100..115: this pattern can fail to match; use `match`
+            92..107: this pattern can fail to match; use `match`
         "#]],
     );
 }
@@ -2955,12 +2915,13 @@ static f = fn { let p = Foo(struct { x = 1 }); p.x };
     );
 }
 
-// ---- enums and variant types ----
+// ---- enums and variants ----
 
 #[test]
-fn variant_construction_infers_the_variant_type() {
-    // Precise types survive: a constructed value is `Shape::Circle`, not
-    // `Shape`; a payload-less variant path IS the value.
+fn variant_construction_has_the_enum_type() {
+    // A constructed value has the enum's type, `Shape`; a payload-less
+    // variant path IS the value, and a payload-carrying one is the
+    // constructor `fn(payload) -> Shape`.
     check_infer(
         r#"
 type Shape = enum { Circle(usize), Point };
@@ -2968,10 +2929,10 @@ static c = Shape::Circle(3);
 static p = Shape::Point;
 "#,
         expect![[r#"
-            56..69 'Shape::Circle': fn(usize) -> Shape::Circle
-            56..72 'Shape::Circle(3)': Shape::Circle
+            56..69 'Shape::Circle': fn(usize) -> Shape
+            56..72 'Shape::Circle(3)': Shape
             70..71 '3': usize
-            85..97 'Shape::Point': Shape::Point
+            85..97 'Shape::Point': Shape
         "#]],
     );
 }
@@ -2987,60 +2948,21 @@ static f = fn {
 };
 "#,
         expect![[r#"
-            56..104 'fn {     let make...': fn() -> Shape::Circle
-            59..104 '{     let make = ...': Shape::Circle
-            69..73 'make': fn(usize) -> Shape::Circle
-            76..89 'Shape::Circle': fn(usize) -> Shape::Circle
-            95..99 'make': fn(usize) -> Shape::Circle
-            95..102 'make(3)': Shape::Circle
+            56..104 'fn {     let make...': fn() -> Shape
+            59..104 '{     let make = ...': Shape
+            69..73 'make': fn(usize) -> Shape
+            76..89 'Shape::Circle': fn(usize) -> Shape
+            95..99 'make': fn(usize) -> Shape
+            95..102 'make(3)': Shape
             100..101 '3': usize
         "#]],
     );
 }
 
 #[test]
-fn same_variant_nested_join_keeps_precision() {
-    // A whole nest of `if`s whose leaves agree on one variant: the join
-    // (flattened by J1) resolves to that variant — no widening anywhere.
-    check_infer(
-        r#"
-type Shape = enum { Circle(usize), Point };
-static f = fn (a: bool, b: bool) {
-    let s = if a { Shape::Circle(1) } else if b { Shape::Circle(2) } else { Shape::Circle(3) };
-    s
-};
-"#,
-        expect![[r#"
-            56..183 'fn (a: bool, b: b...': fn(bool, bool) -> Shape::Circle
-            60..61 'a': bool
-            69..70 'b': bool
-            78..183 '{     let s = if ...': Shape::Circle
-            88..89 's': Shape::Circle
-            92..174 'if a { Shape::Cir...': Shape::Circle
-            95..96 'a': bool
-            97..117 '{ Shape::Circle(1) }': Shape::Circle
-            99..112 'Shape::Circle': fn(usize) -> Shape::Circle
-            99..115 'Shape::Circle(1)': Shape::Circle
-            113..114 '1': usize
-            123..174 'if b { Shape::Cir...': Shape::Circle
-            126..127 'b': bool
-            128..148 '{ Shape::Circle(2) }': Shape::Circle
-            130..143 'Shape::Circle': fn(usize) -> Shape::Circle
-            130..146 'Shape::Circle(2)': Shape::Circle
-            144..145 '2': usize
-            154..174 '{ Shape::Circle(3) }': Shape::Circle
-            156..169 'Shape::Circle': fn(usize) -> Shape::Circle
-            156..172 'Shape::Circle(3)': Shape::Circle
-            170..171 '3': usize
-            180..181 's': Shape::Circle
-        "#]],
-    );
-}
-
-#[test]
-fn mixed_variant_join_widens_to_the_enum() {
-    // Family-aware voting: Circle and Point are one family (Shape); the
-    // LUB within the family is the enum, with a conversion at each edge.
+fn mixed_variant_join_has_the_enum_type() {
+    // Both branches construct a variant of `Shape`, so both are `Shape`
+    // and the join is plain agreement.
     check_infer(
         r#"
 type Shape = enum { Circle(usize), Point };
@@ -3056,12 +2978,12 @@ static f = fn (a: bool) {
             79..80 's': Shape
             83..130 'if a { Shape::Cir...': Shape
             86..87 'a': bool
-            88..108 '{ Shape::Circle(1) }': Shape::Circle
-            90..103 'Shape::Circle': fn(usize) -> Shape::Circle
-            90..106 'Shape::Circle(1)': Shape::Circle
+            88..108 '{ Shape::Circle(1) }': Shape
+            90..103 'Shape::Circle': fn(usize) -> Shape
+            90..106 'Shape::Circle(1)': Shape
             104..105 '1': usize
-            114..130 '{ Shape::Point }': Shape::Point
-            116..128 'Shape::Point': Shape::Point
+            114..130 '{ Shape::Point }': Shape
+            116..128 'Shape::Point': Shape
             136..137 's': Shape
         "#]],
     );
@@ -3079,7 +3001,7 @@ static f = fn (a: bool) {
 };
 "#,
         expect![[r#"
-            136..146: `if` branches have incompatible types: `Shape::Circle` vs `Color::Red`; add a type annotation to decide between them (this branch has type `Shape::Circle` at 110..126)
+            136..146: `if` branches have incompatible types: `Shape` vs `Color`; add a type annotation to decide between them (this branch has type `Shape` at 110..126)
         "#]],
     );
 }
@@ -3100,35 +3022,35 @@ static f = fn (a: bool) -> Shape {
 }
 
 #[test]
-fn variant_annotation_rejects_other_variants() {
+fn a_variant_is_not_an_annotation_type() {
     check_diagnostics(
         r#"
 type Shape = enum { Circle(usize), Point };
 static s: Shape::Circle = Shape::Point;
 "#,
         expect![[r#"
-            71..83: type mismatch: expected `Shape::Circle`, found `Shape::Point` (expected `Shape::Circle` because of this annotation at 55..68)
+            55..68: `Shape::Circle` is a variant, not a type; use `Shape`
         "#]],
     );
 }
 
 #[test]
-fn fn_demanding_a_variant_rejects_another_variant() {
-    // The state-machine case: an API that demands one specific state.
+fn a_variant_is_not_a_parameter_type() {
+    // A variant is a value of its enum's type, so an API cannot demand
+    // one specific state through a parameter type.
     check_diagnostics(
         r#"
 type Shape = enum { Circle(usize), Point };
 static wants_circle = fn (s: Shape::Circle) {};
-static f = fn { wants_circle(Shape::Point); };
 "#,
         expect![[r#"
-            122..134: type mismatch: expected `Shape::Circle`, found `Shape::Point`
+            74..87: `Shape::Circle` is a variant, not a type; use `Shape`
         "#]],
     );
 }
 
 #[test]
-fn let_mut_widens_but_plain_let_keeps_the_variant() {
+fn let_and_let_mut_of_a_variant_have_the_enum_type() {
     check_infer(
         r#"
 type Shape = enum { Circle(usize), Point };
@@ -3141,32 +3063,14 @@ static f = fn {
         expect![[r#"
             56..144 'fn {     let p = ...': fn()
             59..144 '{     let p = Sha...': ()
-            69..70 'p': Shape::Point
-            73..85 'Shape::Point': Shape::Point
+            69..70 'p': Shape
+            73..85 'Shape::Point': Shape
             99..100 's': Shape
-            103..115 'Shape::Point': Shape::Point
+            103..115 'Shape::Point': Shape
             121..122 's': Shape
-            125..138 'Shape::Circle': fn(usize) -> Shape::Circle
+            125..138 'Shape::Circle': fn(usize) -> Shape
             125..141 'Shape::Circle(1)': Shape
             139..140 '1': usize
-        "#]],
-    );
-}
-
-#[test]
-fn annotated_let_mut_keeps_precision() {
-    // `let mut s: Shape::Circle` is an axiom: no widening, and another
-    // variant is rejected on assignment.
-    check_diagnostics(
-        r#"
-type Shape = enum { Circle(usize), Point };
-static f = fn {
-    let mut s: Shape::Circle = Shape::Circle(1);
-    s = Shape::Point;
-};
-"#,
-        expect![[r#"
-            118..130: type mismatch: expected `Shape::Circle`, found `Shape::Point` (expected `Shape::Circle` because of this annotation at 76..89)
         "#]],
     );
 }
@@ -3268,15 +3172,16 @@ type Shape = enum { Point };
 static p = Shape::Point();
 "#,
         expect![[r#"
-            41..53: expression of type `Shape::Point` is not callable
+            41..53: expression of type `Shape` is not callable
         "#]],
     );
 }
 
 #[test]
-fn variant_type_annotation_errors_mirror_lowering() {
-    // Every silent `Ty::Error` from variant-path lowering has a diagnostic:
-    // unknown variant, struct base, builtin base.
+fn variant_path_annotation_errors_explain_the_path() {
+    // A variant path in type position always lowers to a silent
+    // `Ty::Error`; when it names no variant at all, the diagnostic says
+    // what is wrong with it: unknown variant, struct base, builtin base.
     check_diagnostics(
         r#"
 type Shape = enum { Circle(usize) };
@@ -3319,8 +3224,8 @@ static f = fn (s: Shape) { s.x };
 }
 
 #[test]
-fn let_mut_widening_explains_a_later_mismatch() {
-    // When the widened binding bites later, the mismatch carries the
+fn let_mut_of_a_variant_explains_a_later_mismatch() {
+    // When the binding bites later, the mismatch carries the
     // binding hint ("inferred from its initializer") — which the ide layer
     // surfaces as an info-severity companion at the `let mut`.
     check_diagnostics(
@@ -3340,46 +3245,9 @@ static f = fn {
 // ---- match ----
 
 #[test]
-fn match_arms_same_variant_keep_precision() {
-    // Every arm produces the same variant: the match keeps the precise
-    // variant type — no widening, no conversions (the join's family vote LUBs
-    // identical leaves to themselves).
-    check_infer(
-        r#"
-type Shape = enum { Circle(usize), Point };
-static f = fn (s: Shape) {
-    let t = match s {
-        ::Circle(r) => Shape::Circle(r + 1),
-        ::Point => Shape::Circle(0),
-    };
-    t
-};
-"#,
-        expect![[r#"
-            56..190 'fn (s: Shape) {  ...': fn(Shape) -> Shape::Circle
-            60..61 's': Shape
-            70..190 '{     let t = mat...': Shape::Circle
-            80..81 't': Shape::Circle
-            84..181 'match s {        ...': Shape::Circle
-            90..91 's': Shape
-            111..112 'r': usize
-            117..130 'Shape::Circle': fn(usize) -> Shape::Circle
-            117..137 'Shape::Circle(r + 1)': Shape::Circle
-            131..132 'r': usize
-            131..136 'r + 1': usize
-            135..136 '1': usize
-            158..171 'Shape::Circle': fn(usize) -> Shape::Circle
-            158..174 'Shape::Circle(0)': Shape::Circle
-            172..173 '0': usize
-            187..188 't': Shape::Circle
-        "#]],
-    );
-}
-
-#[test]
-fn match_arms_mixed_variants_lub_to_enum() {
-    // Arms produce different variants of one enum: the family LUB is the
-    // enum, with the conversion on each arm edge.
+fn match_arms_of_different_variants_join_to_the_enum() {
+    // Arms produce different variants of one enum, each of which already
+    // has the enum's type.
     check_infer(
         r#"
 type Shape = enum { Circle(usize), Point };
@@ -3399,12 +3267,12 @@ static f = fn (s: Shape) {
             84..177 'match s {        ...': Shape
             90..91 's': Shape
             111..112 'r': usize
-            117..130 'Shape::Circle': fn(usize) -> Shape::Circle
-            117..137 'Shape::Circle(r + 1)': Shape::Circle
+            117..130 'Shape::Circle': fn(usize) -> Shape
+            117..137 'Shape::Circle(r + 1)': Shape
             131..132 'r': usize
             131..136 'r + 1': usize
             135..136 '1': usize
-            158..170 'Shape::Point': Shape::Point
+            158..170 'Shape::Point': Shape
             183..184 't': Shape
         "#]],
     );
@@ -3730,28 +3598,6 @@ fn match_add_missing_arms_fix_projects_through_a_borrowed_scrutinee() {
 }
 
 #[test]
-fn match_add_missing_arms_fix_on_a_variant_typed_scrutinee_covers_only_that_variant() {
-    // Variant-typed scrutinees only ever demand ONE variant (the
-    // scrutinee's own) — `uncovered` already reflects that, so the fix
-    // generates a single arm even though the enum has two.
-    let text = r#"
-type State = enum { Idle, Running(usize) };
-static f = fn (s: State::Running) {
-    match s {};
-};
-"#;
-    let db = RootDatabase::default();
-    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
-    let diagnostics = crate::file_diagnostics(&db, file);
-    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
-    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
-    assert_eq!(
-        fix.edits[0].insert,
-        "\n        ::Running(v) => panic(\"unhandled ::Running\"),\n    "
-    );
-}
-
-#[test]
 fn match_add_missing_arms_fix_avoids_shadowing_a_visible_local() {
     // A `v` already visible at the match's own scope (a `let` right before
     // it) is not shadowed by the generated payload binder — it gets
@@ -3846,26 +3692,6 @@ static f = fn (s: Shape) -> usize {
 "#,
         expect![[r#"
             129..140: unreachable arm: `Circle` is already covered by a previous arm
-        "#]],
-    );
-}
-
-#[test]
-fn match_on_variant_typed_scrutinee_other_variant_is_unreachable() {
-    // The scrutinee can only be a `State::Running`; the `Idle` arm is dead
-    // (warning), the same-variant arm covers, and no wildcard is needed.
-    check_diagnostics(
-        r#"
-type State = enum { Idle, Running(usize) };
-static f = fn (s: State::Running) -> usize {
-    match s {
-        ::Idle => 0,
-        ::Running(n) => n,
-    }
-};
-"#,
-        expect![[r#"
-            112..118: this arm is unreachable: the scrutinee is a `State::Running`
         "#]],
     );
 }
@@ -4225,9 +4051,9 @@ fn bare_break_is_a_unit_witness() {
 }
 
 #[test]
-fn loop_break_values_join_widens_variants() {
+fn loop_break_values_of_different_variants_join_to_the_enum() {
     // Break values go through the same join seam as `if` branches and
-    // `match` arms: mixed variants of one enum LUB to the enum.
+    // `match` arms: different variants of one enum are all the enum.
     check_infer(
         r#"
 type Shape = enum { Circle(usize), Point };
@@ -4237,7 +4063,7 @@ static f = fn (stop: bool) {
         break Point_or(stop);
     };
 };
-static Point_or = fn (b: bool) -> Shape::Point { Shape::Point };
+static Point_or = fn (b: bool) -> Shape { Shape::Point };
 "#,
         expect![[r#"
             56..176 'fn (stop: bool) {...': fn(bool)
@@ -4250,17 +4076,17 @@ static Point_or = fn (b: bool) -> Shape::Point { Shape::Point };
             104..108 'stop': bool
             109..136 '{ break Shape::Ci...': ()
             111..133 'break Shape::Circ...': !
-            117..130 'Shape::Circle': fn(usize) -> Shape::Circle
-            117..133 'Shape::Circle(1)': Shape::Circle
+            117..130 'Shape::Circle': fn(usize) -> Shape
+            117..133 'Shape::Circle(1)': Shape
             131..132 '1': usize
             146..166 'break Point_or(stop)': !
-            152..160 'Point_or': fn(bool) -> Shape::Point
-            152..166 'Point_or(stop)': Shape::Point
+            152..160 'Point_or': fn(bool) -> Shape
+            152..166 'Point_or(stop)': Shape
             161..165 'stop': bool
-            196..241 'fn (b: bool) -> S...': fn(bool) -> Shape::Point
+            196..234 'fn (b: bool) -> S...': fn(bool) -> Shape
             200..201 'b': bool
-            225..241 '{ Shape::Point }': Shape::Point
-            227..239 'Shape::Point': Shape::Point
+            218..234 '{ Shape::Point }': Shape
+            220..232 'Shape::Point': Shape
         "#]],
     );
 }
@@ -6219,7 +6045,7 @@ fn same_args_unify_across_bodies() {
 }
 
 #[test]
-fn generic_variant_construction_and_widening_preserve_args() {
+fn generic_variant_construction_preserves_args() {
     check_infer(
         "type Option = enum::<T> { Some(T), None };\n\
          static main = fn () -> usize {\n\
@@ -6231,8 +6057,8 @@ fn generic_variant_construction_and_widening_preserve_args() {
             57..142 'fn () -> usize { ...': fn() -> usize
             72..142 '{ let mut o = Opt...': usize
             82..83 'o': Option::<usize>
-            86..107 'Option::<usize>::...': fn(usize) -> Option::<usize>::Some
-            86..110 'Option::<usize>::...': Option::<usize>::Some
+            86..107 'Option::<usize>::...': fn(usize) -> Option::<usize>
+            86..110 'Option::<usize>::...': Option::<usize>
             108..109 '3': usize
             112..113 'o': Option::<usize>
             116..137 'Option::<usize>::...': Option::<usize>
@@ -6249,7 +6075,7 @@ fn generic_variant_args_infer_from_the_payload() {
         expect![[r#"
             57..101 'fn () -> Option::...': fn() -> Option::<usize>
             82..101 '{ Option::Some(3) }': Option::<usize>
-            84..96 'Option::Some': fn(usize) -> Option::<usize>::Some
+            84..96 'Option::Some': fn(usize) -> Option::<usize>
             84..99 'Option::Some(3)': Option::<usize>
             97..98 '3': usize
         "#]],
@@ -6257,12 +6083,12 @@ fn generic_variant_args_infer_from_the_payload() {
 }
 
 #[test]
-fn widening_to_the_wrong_args_is_a_mismatch() {
+fn constructing_with_the_wrong_args_is_a_mismatch() {
     check_diagnostics(
         "type Option = enum::<T> { Some(T), None };\n\
          static main = fn () -> Option::<usize> { Option::<str>::Some(\"x\") };",
         expect![[r#"
-            84..108: type mismatch: expected `Option::<usize>`, found `Option::<str>::Some` (expected `Option::<usize>` because of this return type at 63..81)
+            84..108: type mismatch: expected `Option::<usize>`, found `Option::<str>` (expected `Option::<usize>` because of this return type at 63..81)
         "#]],
     );
 }
@@ -6278,8 +6104,8 @@ fn match_over_a_generic_enum_is_exhaustive_and_typed() {
             57..139 'fn () -> usize { ...': fn() -> usize
             72..139 '{ match Option::<...': usize
             74..137 'match Option::<us...': usize
-            80..101 'Option::<usize>::...': fn(usize) -> Option::<usize>::Some
-            80..104 'Option::<usize>::...': Option::<usize>::Some
+            80..101 'Option::<usize>::...': fn(usize) -> Option::<usize>
+            80..104 'Option::<usize>::...': Option::<usize>
             102..103 '3': usize
             114..115 'x': usize
             120..121 'x': usize
@@ -6459,12 +6285,39 @@ fn generic_mention_in_a_declaration_field_mirrors_lowering() {
 }
 
 #[test]
-fn generic_variant_type_annotation_is_not_spellable_yet() {
+fn a_variant_in_type_position_offers_the_use_enum_fix() {
+    let text = r#"
+type Shape = enum { Circle(usize), Point };
+static wants_circle = fn (s: Shape::Circle) {};
+"#;
+    let db = RootDatabase::default();
+    let file = SourceFile::new(&db, "test.must".to_owned(), text.to_owned());
+    let diagnostics = crate::file_diagnostics(&db, file);
+    assert_eq!(diagnostics.len(), 1, "diagnostics: {diagnostics:?}");
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.label, "Use `Shape`");
+    assert_eq!(fix.edits.len(), 1);
+    let mut fixed = text.to_owned();
+    fixed.replace_range(
+        std::ops::Range::<usize>::from(fix.edits[0].range),
+        &fix.edits[0].insert,
+    );
+    expect![[r#"
+
+        type Shape = enum { Circle(usize), Point };
+        static wants_circle = fn (s: Shape) {};
+    "#]]
+    .assert_eq(&fixed);
+    check_diagnostics(&fixed, expect![[r#""#]]);
+}
+
+#[test]
+fn a_generic_enum_variant_is_not_a_type_either() {
     check_diagnostics(
         "type Option = enum::<T> { Some(T), None };\n\
          static main = fn (o: Option::Some) {};",
         expect![[r#"
-            64..76: `Option` is generic; a generic enum's variant types cannot be written in annotations yet
+            64..76: `Option::Some` is a variant, not a type; use `Option`
         "#]],
     );
 }
@@ -7268,7 +7121,7 @@ type B = struct { data: [usize; nope] };
 }
 
 #[test]
-fn mixed_variant_array_elements_widen_to_the_enum() {
+fn mixed_variant_array_elements_have_the_enum_type() {
     check_infer(
         r#"
 type Shape = enum { Point, Circle(usize) };
@@ -7281,10 +7134,10 @@ static f = fn {
             59..113 '{     let shapes ...': ()
             69..75 'shapes': [Shape; 2]
             78..110 '[Shape::Circle(1)...': [Shape; 2]
-            79..92 'Shape::Circle': fn(usize) -> Shape::Circle
-            79..95 'Shape::Circle(1)': Shape::Circle
+            79..92 'Shape::Circle': fn(usize) -> Shape
+            79..95 'Shape::Circle(1)': Shape
             93..94 '1': usize
-            97..109 'Shape::Point': Shape::Point
+            97..109 'Shape::Point': Shape
         "#]],
     );
 }
@@ -7632,8 +7485,8 @@ type Bad = struct { r: &x };
 #[test]
 fn alloc_result_can_be_named_constructed_and_returned() {
     // The compiler-provided enum is an ordinary nominal enum: nameable in
-    // annotations, constructible through variant paths, widened
-    // variant → enum at the return boundary.
+    // annotations, constructible through variant paths, returned as the
+    // enum it is.
     check_diagnostics(
         r#"
 static maybe = fn::<T>(p: T.&raw mut, full: bool) -> AllocResult::<T> {
@@ -10714,9 +10567,9 @@ static outer = fn::<T: Size>(x: T) -> usize { const { x.size() } };
 
 #[test]
 fn qualified_variant_self_resolves_through_the_enum() {
-    // A variant-typed argument at a `Self` position determines `Self` as
-    // its ENUM (widened, so the tag is real) — the return type is the
-    // enum too, so a single-variant match is honestly non-exhaustive.
+    // A constructed variant at a `Self` position determines `Self` as its
+    // ENUM — the return type is the enum too, so a single-variant match is
+    // honestly non-exhaustive.
     check_diagnostics(
         r#"
 type Shape = enum { Circle(usize), Point } with {
@@ -11282,27 +11135,20 @@ static main = fn(n: usize) -> usize { apply(fn(t) { t.n }, n) };
 }
 
 #[test]
-fn the_expectation_does_not_reach_a_join_leaf() {
-    // THE SCOPE LIMIT, pinned so the claim stays honest: a literal in
-    // WITNESS position (an `if`/`match` branch whose value is the join's)
-    // gets NO expectation — a join leaf has none to give, the register's
-    // "none" row and the "Expectations reach join leaves" entry in
-    // `types-and-data.md`, hit here by a program with no `match` in it.
-    // The literal types as a tag-free variant return and mismatches,
-    // exactly as every literal did before this rule.
-    //
-    // The fix is that entry's, not this rule's: it is about where an
-    // expectation reaches, not about what a literal does with one.
+fn known_gap_the_expectation_does_not_reach_a_fn_literal_in_a_join_leaf() {
+    // A fn literal in a join leaf gets no expectation, so its elided
+    // `::Some` has no enum to resolve against and is refused. See
+    // "Expectations reach join leaves" in `types-and-data.md`.
     check_diagnostics(
         r#"
 type Option = enum::<T> { Some(T), None };
 static pick = fn(b: bool) -> fn(usize) -> Option::<usize> {
-    if b { fn(t) { Option::Some(t) } } else { fn(t) { Option::Some(t) } }
+    if b { fn(t) { ::Some(t) } } else { fn(t) { ::Some(t) } }
 };
 "#,
         expect![[r#"
-            115..140: type mismatch: expected `fn(usize) -> Option::<usize>`, found `fn(usize) -> Option::<usize>::Some` (expected `fn(usize) -> Option::<usize>` because of this return type at 70..101)
-            150..175: type mismatch: expected `fn(usize) -> Option::<usize>`, found `fn(usize) -> Option::<usize>::Some` (expected `fn(usize) -> Option::<usize>` because of this return type at 70..101)
+            123..129: cannot resolve `::Some` without an expected type — write `Enum::Some`
+            152..158: cannot resolve `::Some` without an expected type — write `Enum::Some`
         "#]],
     );
 }
@@ -11682,6 +11528,44 @@ fn the_five_option_members_check_clean_over_any_payload() {
             "\ntype Option = enum::<T> {{\n    Some(T),\n    None,\n}} with {{\n{OPTION_MEMBERS}\n}}\n"
         ),
         expect![[r#""#]],
+    );
+}
+
+#[test]
+fn a_constructed_variant_reaches_its_enums_borrowing_member() {
+    // `Option::<usize>::Some(11)` has the enum's type, so `o.&` is an
+    // `Option::<usize>.&` and the `Self.&` member takes it as written —
+    // no annotation on `o` needed.
+    let text = r#"
+type Option = enum::<T> { Some(T), None } with {
+    impl Self {
+        is_some = fn::<@local>(s: Self.&::<@local>) -> bool {
+            match s { ::Some(_) => true, ::None => false, }
+        }
+    }
+};
+static f = fn () -> () {
+    let o = Option::<usize>::Some(11);
+    if o.&.is_some() { }
+};
+"#;
+    check_diagnostics(text, expect![[""]]);
+    check_infer(
+        text,
+        expect![[r#"
+            218..297 'fn () -> () {    ...': fn()
+            230..297 '{     let o = Opt...': ()
+            240..241 'o': Option::<usize>
+            244..265 'Option::<usize>::...': fn(usize) -> Option::<usize>
+            244..269 'Option::<usize>::...': Option::<usize>
+            266..268 '11': usize
+            275..295 'if o.&.is_some() { }': ()
+            278..279 'o': Option::<usize>
+            278..281 'o.&': Option::<usize>.&
+            278..289 'o.&.is_some': fn(Option::<usize>.&) -> bool
+            278..291 'o.&.is_some()': bool
+            292..295 '{ }': ()
+        "#]],
     );
 }
 
@@ -13523,34 +13407,6 @@ static owned = fn(b: B) -> usize { b.get() };
 }
 
 #[test]
-fn a_variant_typed_borrow_does_not_widen_into_an_enum_member() {
-    // The boundary, pinned because it looks like an omission and is not.
-    // A variant-typed RECEIVER widens into an enum member's `Self`
-    // parameter — that is the sanctioned conversion. Through a BORROW it
-    // cannot: widening injects a tag, which changes the representation,
-    // and there is nowhere to put the tagged value when all you hold is a
-    // pointer at the untagged one. So the member is still found (the
-    // referent's enum owns it) and the receiver check reports the honest
-    // mismatch; `NoSuchMember` would have been the worse answer.
-    //
-    // Nothing here is auto-deref-adjacent: `.*.area()` reads the referent,
-    // which is a copy, and widens like any other value.
-    check_diagnostics(
-        r#"
-type Shape = enum { Circle(usize), Point } with {
-    impl Self {
-        area = fn::<@b>(s: Self.&::<@b>) -> usize { 1 };
-    }
-};
-static borrowed_variant = fn::<@a>(c: Shape::Circle.&::<@a>) -> usize { c.area() };
-"#,
-        expect![[r#"
-            205..206: type mismatch: expected `Shape.&`, found `Shape::Circle.&::<@a>`
-        "#]],
-    );
-}
-
-#[test]
 fn a_trait_requirement_may_carry_a_region_binder() {
     // `binders_match` had arms for Type and Const and none for Region, so
     // a region param in a requirement's binder made EVERY textually
@@ -13720,8 +13576,8 @@ static wrong = fn() -> usize {
     );
     // And the obligation still lands: an intermediate annotated with `@_`
     // relates the two regions, so an undeclared relation is still reported
-    // — the same message the un-annotated control gets, not an internal
-    // error.
+    // at the return, with the same message the un-annotated control gets,
+    // not an internal error.
     check_diagnostics(
         r#"
 type Opt = enum::<T> { Some(T), None } with {
@@ -13733,7 +13589,21 @@ static leaks = fn::<@a, @z>(p: usize.&::<@a>) -> usize.&::<@z> {
 };
 "#,
         expect![[r#"
-            248..277: requiring these two borrows to be the same type needs `@a` to outlive `@z`, which this signature does not declare; add `@a: @z` to the binder
+            283..293: using this borrow where a longer-lived one is expected needs `@a` to outlive `@z`, which this signature does not declare; add `@a: @z` to the binder
+        "#]],
+    );
+    check_diagnostics(
+        r#"
+type Opt = enum::<T> { Some(T), None } with {
+    impl Self { unwrap = fn(s: Self) -> T { match s { ::Some(t) => t, ::None => panic("no"), } } }
+};
+static leaks = fn::<@a, @z>(p: usize.&::<@a>) -> usize.&::<@z> {
+    let o = Opt::<usize.&::<@a>>::Some(p);
+    o.unwrap()
+};
+"#,
+        expect![[r#"
+            261..271: using this borrow where a longer-lived one is expected needs `@a` to outlive `@z`, which this signature does not declare; add `@a: @z` to the binder
         "#]],
     );
 }
@@ -14114,7 +13984,7 @@ fn no_context_shape_launders_a_region_obligation() {
     // at `Record` — a generic type constructor was a laundry, and a local
     // escaped through `Opt::<usize.&>` with no diagnostic at all. Three
     // walkers had the hole (`relate_type_regions`, `freshen_regions`,
-    // `substitute_regions`) plus the widening edge; one shape pins them.
+    // `substitute_regions`); one shape pins them.
     let opt = "type Opt = enum::<T> { Some(T), None };\n";
     check_wrapping_changes_nothing(
         &format!(
@@ -14239,33 +14109,6 @@ fn a_whole_value_binder_on_a_borrowed_scrutinee_stays_the_borrow() {
             117..118 's': Opt::<usize>.&::<@a>
             121..126 'whole': Opt::<usize>.&::<@a>
             130..135 'whole': Opt::<usize>.&::<@a>
-        "#]],
-    );
-}
-
-#[test]
-fn a_variant_typed_borrowed_scrutinee_projects_too() {
-    // Tag-free at runtime, so there is no dispatch — but the binder is
-    // still a borrow of the payload slot, and it is still writable.
-    check_infer(
-        "type State = enum { Run(usize), Stop };\n\
-         static f = fn::<@a>(s: State::Run.&mut::<@a>) -> () {\n\
-             match s { ::Run(n) => { n.* = n.* + 1; } }\n\
-         };",
-        expect![[r#"
-            51..138 'fn::<@a>(s: State...': fn(State::Run.&mut::<@a>)
-            60..61 's': State::Run.&mut::<@a>
-            92..138 '{ match s { ::Run...': ()
-            94..136 'match s { ::Run(n...': ()
-            100..101 's': State::Run.&mut::<@a>
-            110..111 'n': usize.&mut
-            116..134 '{ n.* = n.* + 1; }': ()
-            118..119 'n': usize.&mut
-            118..121 'n.*': usize
-            124..125 'n': usize.&mut
-            124..127 'n.*': usize
-            124..131 'n.* + 1': usize
-            130..131 '1': usize
         "#]],
     );
 }
@@ -14498,7 +14341,7 @@ fn a_borrow_where_the_owned_value_is_wanted_names_both_ways_out() {
 #[test]
 fn a_borrow_of_a_non_matchable_type_is_still_not_a_scrutinee() {
     // The lens is lifted only for a referent this match can DISPATCH on —
-    // an enum, a variant, or a scalar — so a `struct.&` (or a `str.&`)
+    // an enum or a scalar — so a `struct.&` (or a `str.&`)
     // scrutinee reaches exactly the diagnostics it always did, naming the
     // BORROW rather than what is behind it. Nothing here was widened by
     // accident when literal patterns arrived. (`usize.&` used to sit in
@@ -16778,8 +16621,6 @@ type Option = enum::<T> {
     }
 };
 static main = fn(text: str) -> () {
-    // Annotated so the variant widens to its enum — the ordinary
-    // variant-vs-enum story, nothing to do with the payload.
     let o: Option::<String> = Option::Some(to_owned(text.&));
     let present = o.&.is_some();
     // `as_ref` projects the payload as a BORROW, so the `Option` it hands
@@ -16800,7 +16641,7 @@ static leaks_the_payload = fn(text: str) -> () {
 };
 "#,
         expect![[r#"
-            2406..2409: `s` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`s` is born here and must be consumed at 2400..2401)
+            2276..2279: `s` is not consumed on this path; its type has no `forget` capability, so every path must consume it (`s` is born here and must be consumed at 2270..2271)
         "#]],
     );
 }
@@ -17964,11 +17805,11 @@ static main = fn () -> () {
 }
 
 #[test]
-fn an_unannotated_deferred_binding_widens_its_first_variant() {
+fn an_unannotated_deferred_binding_takes_its_assignments_type() {
     check_diagnostics(
         r#"
 type Shape = enum { Circle(usize), Point };
-static widened = fn () -> Shape {
+static assigned = fn () -> Shape {
     let mut s;
     s = Shape::Circle(1);
     s = ::Point;
@@ -17987,16 +17828,9 @@ static after_error = fn () -> Shape {
     s = ::Point;
     s
 };
-static annotated = fn () -> Shape::Circle {
-    let mut s: Shape::Circle;
-    s = Shape::Circle(1);
-    s = ::Point;
-    s
-};
 "#,
         expect![[r#"
-            359..363: unresolved name `nope`
-            525..532: type mismatch: expected `Shape::Circle`, found `Shape::Point` (expected `Shape::Circle` because of this annotation at 476..489)
+            360..364: unresolved name `nope`
         "#]],
     );
 }

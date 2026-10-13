@@ -771,14 +771,6 @@ impl LowerCtx<'_> {
         if let Some(messages) = self.value_traps.get(&expr).cloned() {
             return self.trap(b, expr, messages);
         }
-        // A widening edge: inference accepted this variant-typed value
-        // where its enum was needed — the conversion (tag injection)
-        // happens here and only here.
-        if let Some(variant) = self.infer.widened.get(expr).cloned() {
-            let dest = b.temp(variant.enum_ty());
-            b.push_assign(dest, widen_rvalue(op, variant), expr);
-            return Operand::Copy(dest.into());
-        }
         op
     }
 
@@ -928,14 +920,14 @@ impl LowerCtx<'_> {
                 }
                 // A directly-called variant constructor with payloads
                 // (`Shape::Circle(3)`): no function value, no call — the
-                // arguments assemble straight into the tag-free payload
-                // aggregate. The callee path itself is not lowered (its
-                // first-class lowering would synthesize a constructor
-                // body nothing here needs).
+                // arguments assemble straight into the enum aggregate. The
+                // callee path itself is not lowered (its first-class
+                // lowering would synthesize a constructor body nothing here
+                // needs).
                 if matches!(
                     &body.exprs[*callee],
                     ExprData::VariantPath { .. } | ExprData::ElidedVariant { .. }
-                ) && self.infer.variant_of_expr.get(*callee).is_some()
+                ) && let Some(variant) = self.infer.variant_of_expr.get(*callee).cloned()
                     && matches!(self.ty(*callee), Ty::Fn(_))
                 {
                     let arg_ops: Vec<Operand> =
@@ -946,14 +938,7 @@ impl LowerCtx<'_> {
                         return self.trap(b, expr, messages);
                     }
                     let dest = b.temp(self.ty(expr));
-                    b.push_assign(
-                        dest,
-                        Rvalue::Aggregate {
-                            kind: AggregateKind::VariantPayload,
-                            ops: arg_ops,
-                        },
-                        expr,
-                    );
+                    b.push_assign(dest, variant_aggregate(&variant, arg_ops), expr);
                     return Operand::Copy(dest.into());
                 }
                 // A BOUND-DIRECTED member call (`x.fmt(w)` on a rigid
@@ -1437,10 +1422,10 @@ impl LowerCtx<'_> {
                 }
             }
             // `Shape::Circle` as a value (not a direct call — those are
-            // intercepted in the `Call` arm). Payload-less: the variant
-            // value itself, an empty tag-free payload. With payloads: a
+            // intercepted in the `Call` arm). Payload-less: the enum
+            // value itself, a tag with no payload. With payloads: a
             // first-class constructor function, synthesized as a tiny MIR
-            // body (params → payload aggregate) so calling it through a
+            // body (params → enum aggregate) so calling it through a
             // variable runs like any function value.
             // `::None` / `::Some` — the elided sigil. Inference resolved
             // it against the expected type and recorded exactly the
@@ -1720,15 +1705,11 @@ impl LowerCtx<'_> {
         }
     }
 
-    /// Lower a `match`. Two shapes, decided by the scrutinee's type:
-    /// enum-typed (tagged) dispatches through [`TerminatorKind::SwitchVariant`];
-    /// variant-typed destructures directly — it can only be its one
-    /// variant, so there is NO switch and no tag read (the state-machine
-    /// payoff). Anything else can only be matched by a catch-all arm,
-    /// which lowers straight-line too. Arms an execution can never reach
-    /// (after a catch-all, duplicate variants, other variants of a
-    /// variant-typed scrutinee) still lower — as blocks no edge targets —
-    /// so the CFG stays total.
+    /// Lower a `match`. An enum-typed scrutinee dispatches through
+    /// [`TerminatorKind::SwitchVariant`]; anything else can only be matched
+    /// by a catch-all arm (or literal tests), which lowers straight-line.
+    /// Unreachable arms lower as blocks no edge targets, so the CFG stays
+    /// total.
     fn lower_match(
         &mut self,
         b: &mut BodyBuilder,
@@ -1772,24 +1753,6 @@ impl LowerCtx<'_> {
                 if hir::enum_variants(self.db, named.decl.to_id(self.db)).is_some() =>
             {
                 self.lower_match_switch(b, expr, &scrut, named.decl, arms, lens)
-            }
-            Ty::Variant(variant) => {
-                let covering =
-                    arms.iter()
-                        .position(|arm| match self.arm_kind(arm.pat, Some(&variant.decl)) {
-                            ArmKind::CatchAll => true,
-                            ArmKind::Variant(index) => index == variant.index,
-                            // A literal can never match a variant-typed
-                            // value; inference already refused it.
-                            ArmKind::Literal(_) | ArmKind::Dead => false,
-                        });
-                let fallback = InferenceDiagnostic::NonExhaustiveMatch {
-                    expr,
-                    decl: variant.decl.clone(),
-                    uncovered: vec![variant.name.to_string()],
-                }
-                .message();
-                self.lower_match_straight(b, expr, &scrut, arms, covering, fallback, lens)
             }
             scrut_ty => {
                 let fallback = InferenceDiagnostic::MatchWithoutCatchAll {
@@ -1869,8 +1832,7 @@ impl LowerCtx<'_> {
         // whole-match origin it always had.
         //
         // No arm dispatches (a catch-all first, or nothing but dead arms)
-        // means the tag decides nothing, and then it is not read at all —
-        // the same tag-free lowering a variant-typed scrutinee gets. It
+        // means the tag decides nothing, and then it is not read at all. It
         // matters most through a borrow, where the read would otherwise
         // freeze every payload borrow minted under the scrutinee for a
         // `match` that inspects nothing. An owned scrutinee drops the dead
@@ -2062,8 +2024,7 @@ impl LowerCtx<'_> {
     }
 
     /// The no-dispatch lowering: run the first covering arm straight-line
-    /// (variant-typed scrutinees destructure the tag-free value directly;
-    /// other scrutinees just bind), or trap when nothing covers. The
+    /// (the scrutinee just binds), or trap when nothing covers. The
     /// remaining arms lower as dead blocks.
     fn lower_match_straight(
         &mut self,
@@ -2187,9 +2148,8 @@ impl LowerCtx<'_> {
     }
 
     /// Emit the arm's pattern bindings from the pinned scrutinee operand.
-    /// A variant pattern reads its payloads out of the (tagged or
-    /// variant-typed) value by field index; a bare bind aliases the whole
-    /// value.
+    /// A variant pattern reads its payloads out of the enum value by
+    /// field index; a bare bind aliases the whole value.
     ///
     /// Through a borrow (`lens`), the payloads are not read at all: each
     /// binder gets a `Rvalue::Borrow` of the payload's SUB-PLACE, reached
@@ -2214,12 +2174,9 @@ impl LowerCtx<'_> {
             PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int { .. } => {}
             PatData::Bind(binding) => {
                 // A bare bind always binds the whole scrutinee (never
-                // narrowed to a variant), so it just aliases the value —
-                // widened to its enum for a `mut` binder of a variant-typed
-                // value (`InferenceResult::widened_bindings`).
+                // narrowed to a variant), so it just aliases the value.
                 let local = self.alloc_binding_local(b, *binding);
-                let rvalue = self.bind_rvalue(*binding, Rvalue::Use(scrut.clone()), b, origin);
-                b.push_assign(local, rvalue, origin);
+                b.push_assign(local, Rvalue::Use(scrut.clone()), origin);
             }
             PatData::Variant { bindings, .. } => {
                 let payloads = self
@@ -2247,15 +2204,10 @@ impl LowerCtx<'_> {
                                     ],
                                 },
                             },
-                            None => self.bind_rvalue(
-                                binding,
-                                Rvalue::Field {
-                                    base: scrut.clone(),
-                                    index: index as u32,
-                                },
-                                b,
-                                origin,
-                            ),
+                            None => Rvalue::Field {
+                                base: scrut.clone(),
+                                index: index as u32,
+                            },
                         };
                         b.push_assign(local, rvalue, origin);
                     } else {
@@ -2280,30 +2232,6 @@ impl LowerCtx<'_> {
             } if hir::dispatches_on(self.db, referent) => Some((*mutable, referent.as_ref())),
             _ => None,
         }
-    }
-
-    /// What a pattern binder is assigned: `rvalue`, widened to its enum
-    /// for a `mut` binder of a variant-typed value
-    /// (`InferenceResult::widened_bindings`).
-    fn bind_rvalue(
-        &mut self,
-        binding: BindingId,
-        rvalue: Rvalue,
-        b: &mut BodyBuilder,
-        origin: ExprId,
-    ) -> Rvalue {
-        let Some(variant) = self.infer.widened_bindings.get(binding).cloned() else {
-            return rvalue;
-        };
-        let op = match rvalue {
-            Rvalue::Use(op) => op,
-            rvalue => {
-                let temp = b.temp(Ty::Variant(variant.clone()));
-                b.push_assign(temp, rvalue, origin);
-                Operand::Copy(temp.into())
-            }
-        };
-        widen_rvalue(op, variant)
     }
 
     /// Allocate (and register) the MIR local for a user binding — `let`s
@@ -2392,8 +2320,7 @@ impl LowerCtx<'_> {
             PatData::Missing | PatData::Wildcard | PatData::Char(_) | PatData::Int { .. } => {}
             PatData::Bind(binding) => {
                 let local = self.alloc_binding_local(b, *binding);
-                let rvalue = self.bind_rvalue(*binding, Rvalue::Use(value.clone()), b, origin);
-                b.push_assign(local, rvalue, origin);
+                b.push_assign(local, Rvalue::Use(value.clone()), origin);
             }
             PatData::Record { fields, .. } => {
                 let rec = match self.infer.type_of_pat.get(pat) {
@@ -2415,8 +2342,7 @@ impl LowerCtx<'_> {
                                 base: value.clone(),
                                 index: index as u32,
                             };
-                            let rvalue = self.bind_rvalue(f.binding, field, b, origin);
-                            b.push_assign(local, rvalue, origin);
+                            b.push_assign(local, field, origin);
                         }
                         // Unknown field (already diagnosed): a placeholder
                         // keeps the local initialized and lowering total.
@@ -3354,19 +3280,19 @@ impl LowerCtx<'_> {
     }
 
     /// A resolved variant mention's value, whichever spelling reached it:
-    /// the payload-less variant IS the value (an empty tag-free payload),
-    /// and a payload-carrying one is a first-class constructor function,
+    /// the payload-less variant IS the value (the tag, no payload), and a
+    /// payload-carrying one is a first-class constructor function,
     /// synthesized as a tiny MIR body so calling it through a variable runs
     /// like any function value.
     ///
     /// Shared by the qualified path and the elided sigil deliberately: they
-    /// resolve to the same `VariantTy`, so they must lower to the same
+    /// resolve to the same `ResolvedVariant`, so they must lower to the same
     /// thing, and one function is how that stays true.
     fn variant_value_operand(
         &mut self,
         b: &mut BodyBuilder,
         expr: ExprId,
-        variant: &hir::VariantTy,
+        variant: &hir::ResolvedVariant,
     ) -> Operand {
         // Substituted with the mention's enum args, so a synthesized
         // constructor body's param types are the instance's, not the rigid
@@ -3374,14 +3300,7 @@ impl LowerCtx<'_> {
         let payload_tys = hir::variant_payloads_for(self.db, variant).unwrap_or_default();
         if payload_tys.is_empty() {
             let dest = b.temp(self.ty(expr));
-            b.push_assign(
-                dest,
-                Rvalue::Aggregate {
-                    kind: AggregateKind::VariantPayload,
-                    ops: Vec::new(),
-                },
-                expr,
-            );
+            b.push_assign(dest, variant_aggregate(variant, Vec::new()), expr);
             Operand::Copy(dest.into())
         } else {
             let body_id = self.synth_ctor_body(expr, variant, &payload_tys);
@@ -3391,16 +3310,16 @@ impl LowerCtx<'_> {
 
     /// Synthesize the body of a first-class variant constructor
     /// (`let f = Shape::Circle; f(3)`): one block that assembles the
-    /// parameters into the tag-free payload aggregate and returns it. The
+    /// parameters into the enum aggregate and returns it. The
     /// same shape a user-written `fn (p0, ...) { Shape::Circle(p0, ...) }`
     /// would lower to, minus the interception.
     fn synth_ctor_body(
         &mut self,
         expr: ExprId,
-        variant: &hir::VariantTy,
+        variant: &hir::ResolvedVariant,
         payload_tys: &[Ty],
     ) -> BodyId {
-        let ret_ty = Ty::Variant(variant.clone());
+        let ret_ty = variant.enum_ty();
         let mut b = BodyBuilder::new(ret_ty, expr);
         for ty in payload_tys {
             let local = b.alloc_local(LocalData {
@@ -3413,14 +3332,7 @@ impl LowerCtx<'_> {
         }
         let ops = b.params.iter().map(|&p| Operand::Copy(p.into())).collect();
         let ret = b.ret;
-        b.push_assign(
-            ret,
-            Rvalue::Aggregate {
-                kind: AggregateKind::VariantPayload,
-                ops,
-            },
-            expr,
-        );
+        b.push_assign(ret, variant_aggregate(variant, ops), expr);
         b.terminate(TerminatorKind::Return, expr);
         self.bodies.alloc(MirBody {
             locals: b.locals,
@@ -3671,11 +3583,9 @@ impl LowerCtx<'_> {
         if !self.member_owner_has_const_params(member) {
             return Operand::Const(Const::Item(member.clone()));
         }
-        // The receiver's type carries the owner's arguments — its enum's
-        // for a (widened) variant-typed receiver.
+        // The receiver's type carries the owner's arguments.
         let receiver_args = match self.ty(receiver) {
             Ty::Named(named) => named.args,
-            Ty::Variant(variant) => variant.args,
             _ => {
                 // Inference resolved the member off a Named receiver; a
                 // non-Named type here is broken code with its own
@@ -3891,13 +3801,15 @@ fn param_pats(body: &Body) -> FxHashMap<PatId, ExprId> {
     out
 }
 
-/// The variant → enum conversion of `op`, a value of type `variant`.
-fn widen_rvalue(op: Operand, variant: hir::VariantTy) -> Rvalue {
-    Rvalue::WidenToEnum {
-        op,
-        decl: variant.decl,
-        index: variant.index,
-        variant: variant.name.to_string(),
+/// The enum value `variant`'s constructor builds from `ops`, its payload.
+fn variant_aggregate(variant: &hir::ResolvedVariant, ops: Vec<Operand>) -> Rvalue {
+    Rvalue::Aggregate {
+        kind: AggregateKind::Variant {
+            decl: variant.decl.clone(),
+            index: variant.index,
+            variant: variant.name.to_string(),
+        },
+        ops,
     }
 }
 
