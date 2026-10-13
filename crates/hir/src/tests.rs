@@ -6037,6 +6037,59 @@ fn generic_variant_args_infer_from_the_payload() {
     );
 }
 
+/// A hole inside a type argument of a group signature reaches other items
+/// as `{error}`, and a call from another item asks for an annotation.
+#[test]
+fn signature_hole_in_a_type_arg_needs_annotation_across_items() {
+    check_diagnostics(
+        r#"
+type Option = enum::<T> { Some(T), None };
+static g = fn (x) -> Option::<_> { ::Some(x) };
+static main = fn () -> Option::<usize> { g(1) };
+"#,
+        expect![[r#"
+            133..134: cannot infer the type of `g` across items; add a type annotation to its definition (defined here at 51..52)
+        "#]],
+    );
+}
+
+/// A hole under a raw pointer in a group signature reaches other items as
+/// `{error}`, and a call from another item asks for an annotation.
+#[test]
+fn signature_hole_under_a_raw_pointer_needs_annotation_across_items() {
+    check_diagnostics(
+        r#"
+static g = fn (p: _.&raw) -> () { };
+static main = fn () -> () {
+    let n: usize = 1;
+    g(n.&raw)
+};
+"#,
+        expect![[r#"
+            92..93: cannot infer the type of `g` across items; add a type annotation to its definition (defined here at 8..9)
+        "#]],
+    );
+}
+
+/// An elided region in a group signature reaches other items as
+/// `@{error}`, and a call from another item asks for an annotation.
+#[test]
+fn elided_region_in_a_group_signature_needs_annotation_across_items() {
+    check_diagnostics(
+        r#"
+static g = fn (r: _.&) -> () { };
+static main = fn () -> () {
+    let n: usize = 1;
+    g(n.&)
+};
+"#,
+        expect![[r#"
+            21..22: a safe borrow must name its region (`T.&::<@a>`); regions are not elided in a signature yet
+            89..90: cannot infer the type of `g` across items; add a type annotation to its definition (defined here at 8..9)
+        "#]],
+    );
+}
+
 #[test]
 fn constructing_with_the_wrong_args_is_a_mismatch() {
     check_diagnostics(

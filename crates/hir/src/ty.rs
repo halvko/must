@@ -1744,8 +1744,9 @@ pub(crate) fn substitute_payload(payload: &[Ty], decl: &ItemLoc, args: &[Generic
 }
 
 /// Erase dangling inference variables to `Ty::Error` — for lowering done
-/// outside any inference context (declarations).
-fn erase_infer(ty: &Ty) -> Ty {
+/// outside any inference context (declarations), and for group signatures
+/// leaving the group's table.
+pub(crate) fn erase_infer(ty: &Ty) -> Ty {
     match ty {
         Ty::Infer(_) | Ty::UnresolvedNumber => Ty::Error,
         Ty::Fn(f) => f.rebuilt(
@@ -1757,7 +1758,7 @@ fn erase_infer(ty: &Ty) -> Ty {
             mutable,
             region,
             referent,
-        } => Ty::borrow(*mutable, region.clone(), erase_infer(referent)),
+        } => Ty::borrow(*mutable, erase_region_vars(region), erase_infer(referent)),
         Ty::Array { elem, len } => Ty::array(erase_infer(elem), len.clone()),
         Ty::Record(rec) => Ty::record(
             rec.fields
@@ -1776,8 +1777,25 @@ fn erase_infer(ty: &Ty) -> Ty {
 fn erase_infer_arg(arg: &GenericArg) -> GenericArg {
     match arg {
         GenericArg::Ty(ty) => GenericArg::Ty(erase_infer(ty)),
-        GenericArg::Region(region) => GenericArg::Region(region.clone()),
+        GenericArg::Region(region) => GenericArg::Region(erase_region_vars(region)),
         GenericArg::Const(value) => GenericArg::Const(value.clone()),
+    }
+}
+
+/// A region variable is as local to its table as a type variable: a region
+/// containing one becomes [`Region::Error`].
+fn erase_region_vars(region: &Region) -> Region {
+    fn has_var(region: &Region) -> bool {
+        match region {
+            Region::Var(_) => true,
+            Region::Join(parts) => parts.iter().any(has_var),
+            _ => false,
+        }
+    }
+    if has_var(region) {
+        Region::Error
+    } else {
+        region.clone()
     }
 }
 
