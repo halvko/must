@@ -178,7 +178,7 @@ type Arena = struct::<T> { state: ArenaState::<T>.&raw mut } with {
 
         // Individual free is deliberately nothing: arena memory dies all
         // at once.
-        dealloc = fn(p: T.&raw mut, n: usize, a: Self) -> () { };
+        dealloc = fn(_: T.&raw mut, _: usize, _: Self) -> () { };
 
         deinit = fn(a: Self) -> () {
             unsafe {
@@ -256,7 +256,7 @@ static main = fn () -> () {
         AllocResult::Err => print("arena: unexpected exhaustion\n"),
     }
     match a.alloc(2) {
-        AllocResult::Ok(p) => print("arena: unexpected fit\n"),
+        AllocResult::Ok(_) => print("arena: unexpected fit\n"),
         AllocResult::Err => print("arena: a further 2 don't fit — Err, by value\n"),
     }
     a.deinit();

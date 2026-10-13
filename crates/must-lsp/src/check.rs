@@ -140,7 +140,7 @@ mod tests {
     fn renders_blame_with_notes() {
         check_render(
             r#"
-static constrainer = fn (s: str, u: usize) {}
+static constrainer = fn (_s: str, _u: usize) {}
 
 static f = fn (n: usize) -> () {
     let x = if n == 0 { "" } else { if n == 0 { "" } else { 0 } };

@@ -286,6 +286,43 @@ fn non_block_fn_body_diagnostic_carries_wrap_fix() {
     assert_eq!(fix.edits[1].edit.insert, " }");
 }
 
+/// The text after the only diagnostic's one-edit fix, and the fix's label.
+fn apply_only_fix(text: &str) -> (String, String) {
+    let (analysis, file, _pos) = fixture(&format!("{text}$0"));
+    let diagnostics = analysis.diagnostics(file);
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+    let fix = diagnostics[0].fix.as_ref().expect("diagnostic has a fix");
+    assert_eq!(fix.edits.len(), 1);
+    let edit = &fix.edits[0].edit;
+    let mut fixed = text.to_owned();
+    fixed.replace_range(std::ops::Range::<usize>::from(edit.range), &edit.insert);
+    (fix.label.clone(), fixed)
+}
+
+#[test]
+fn an_unused_binding_is_renamed_with_a_leading_underscore() {
+    let (label, fixed) = apply_only_fix("static f = fn (a: usize, mut b: usize) -> usize { a };");
+    assert_eq!(label, "Rename to `_b`");
+    assert_eq!(
+        fixed,
+        "static f = fn (a: usize, mut _b: usize) -> usize { a };"
+    );
+}
+
+/// In `{ b }` one name both selects the field and binds it, so the
+/// rename keeps the field: `{ b as _b }`.
+#[test]
+fn an_unused_shorthand_field_binding_is_renamed_with_as() {
+    let (label, fixed) = apply_only_fix(
+        "static f = fn (r: struct { a: usize, b: usize }) -> usize { let struct { a, mut b } = r; a };",
+    );
+    assert_eq!(label, "Rename to `_b`");
+    assert_eq!(
+        fixed,
+        "static f = fn (r: struct { a: usize, b: usize }) -> usize { let struct { a, mut b as _b } = r; a };"
+    );
+}
+
 #[test]
 fn missing_semicolon_diagnostic_carries_insert_fix() {
     let (analysis, file, _pos) = fixture(
@@ -925,7 +962,7 @@ fn a_capability_answer_follows_an_edit_to_a_reachable_declaration() {
     // READS (`Res`, two edges from `f`).
     let pointer = "type Res = struct { fd: usize } only move;\n\
                    type Box = struct::<T> { p: T.&raw };\n\
-                   static f = fn(x: Box::<Res>) -> usize { 1 };\n";
+                   static f = fn(_x: Box::<Res>) -> usize { 1 };\n";
     let held = pointer.replace("p: T.&raw", "p: T");
     let mut host = AnalysisHost::new();
     let file = host.create_file("test.must".to_owned(), pointer.to_owned());
@@ -941,7 +978,7 @@ fn a_capability_answer_follows_an_edit_to_a_reachable_declaration() {
         .collect();
     assert_eq!(errors.len(), 1, "{errors:#?}");
     assert!(
-        errors[0].starts_with("`x` is not consumed on this path"),
+        errors[0].starts_with("`_x` is not consumed on this path"),
         "{errors:#?}"
     );
 
@@ -5799,7 +5836,7 @@ fn a_bound_receivers_offer_is_exactly_what_resolves() {
     // resolver ever part company, one of these two halves fails.
     let source = format!(
         "{BOUND_FIXTURE_HEAD}\
-         static fmt_usize = fn::<@a, W: Write>(w: W.&mut::<@a>, n: usize) -> () {{ w.push('x') }};"
+         static fmt_usize = fn::<@a, W: Write>(w: W.&mut::<@a>, _n: usize) -> () {{ w.push('x') }};"
     );
     let (analysis, file, _) = fixture(&format!("{source}$0"));
     assert_eq!(analysis.diagnostics(file), Vec::new());

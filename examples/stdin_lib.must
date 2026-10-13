@@ -266,7 +266,7 @@ static count_bytes = fn (s: str) -> usize {
     let mut i = 0;
     loop {
         match s.next_char(i) {
-            ::Char(c, next) => { i = next; },
+            ::Char(_, next) => { i = next; },
             ::End => break i,
         }
     }

@@ -164,7 +164,7 @@ use hir::{BindingId, ExprId, ItemId, RegionConstraint, Ty};
 use rustc_hash::{FxHashMap, FxHashSet};
 use syntax::TextRange;
 
-use crate::cfg::{self, BitSet, Findings, Point, operand_places, value_places};
+use crate::cfg::{self, BitSet, Findings, Point};
 use crate::{
     BlockId, CheckTrap, LocalId, MirBody, Operand, Place, ProjElem, Rvalue, Scope, Statement,
     StatementKind, TerminatorKind, paths_overlap,
@@ -589,7 +589,7 @@ impl<'a> BodyCheck<'a> {
         check.loaned_locals = check.loans.iter().map(|loan| loan.place.local).collect();
         check.loaned_locals.sort_unstable();
         check.loaned_locals.dedup();
-        check.live_before = check.compute_liveness();
+        check.live_before = cfg::liveness(check.body);
         check.live_regions = check.compute_live_regions();
         check.live_loans = check.compute_live_loans();
         check
@@ -961,129 +961,6 @@ impl<'a> BodyCheck<'a> {
 
     // ---- local liveness ---------------------------------------------------
 
-    /// The locals a point reads. A projected destination reads its root
-    /// (the write goes into or through it); a whole-local destination is
-    /// a definition, not a use.
-    fn uses_at(&self, point: Point) -> Vec<LocalId> {
-        let data = &self.body.blocks[point.block];
-        let mut uses = Vec::new();
-        let place_uses = |place: &Place, uses: &mut Vec<LocalId>| {
-            uses.push(place.local);
-            for elem in &place.projection {
-                if let ProjElem::Index(op) = elem {
-                    operand_uses(op, uses);
-                }
-            }
-        };
-        match data.statements.get(point.index) {
-            Some(stmt) => match &stmt.kind {
-                StatementKind::Assign { dest, rvalue } => {
-                    value_uses(rvalue, &mut uses);
-                    if !dest.projection.is_empty() {
-                        place_uses(dest, &mut uses);
-                    }
-                }
-                // Neither a use nor a def: counting it as a use would keep
-                // every holder live up to its own storage end.
-                StatementKind::StorageDead { .. } => {}
-            },
-            None => match &data.terminator.kind {
-                TerminatorKind::SwitchBool { discr, .. }
-                | TerminatorKind::SwitchVariant { discr, .. } => operand_uses(discr, &mut uses),
-                TerminatorKind::Call { callee, args, .. } => {
-                    operand_uses(callee, &mut uses);
-                    for arg in args {
-                        operand_uses(arg, &mut uses);
-                    }
-                }
-                TerminatorKind::Return => uses.push(self.body.return_local()),
-                TerminatorKind::Goto { .. }
-                | TerminatorKind::Trap { .. }
-                | TerminatorKind::ConstTrap { .. }
-                | TerminatorKind::Unreachable => {}
-            },
-        }
-        uses
-    }
-
-    fn def_at(&self, point: Point) -> Option<LocalId> {
-        let data = &self.body.blocks[point.block];
-        match data.statements.get(point.index) {
-            Some(stmt) => match &stmt.kind {
-                StatementKind::Assign { dest, .. } => {
-                    dest.projection.is_empty().then_some(dest.local)
-                }
-                StatementKind::StorageDead { .. } => None,
-            },
-            None => match &data.terminator.kind {
-                TerminatorKind::Call { dest, .. } | TerminatorKind::Trap { dest, .. } => {
-                    Some(*dest)
-                }
-                _ => None,
-            },
-        }
-    }
-
-    /// Backward liveness to a fixpoint, then the per-point sets.
-    fn compute_liveness(&self) -> Vec<Vec<BitSet>> {
-        let locals = self.body.locals.len();
-        let blocks = self.body.blocks.len();
-        let mut live_in: Vec<BitSet> = vec![BitSet::new(locals); blocks];
-        let transfer = |block: BlockId, live_out: BitSet| -> Vec<BitSet> {
-            let mut before: Vec<BitSet> = Vec::new();
-            let mut live = live_out;
-            for point in cfg::points_of(self.body, block)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-            {
-                if let Some(def) = self.def_at(point) {
-                    live.remove(cfg::local_index(def));
-                }
-                for local in self.uses_at(point) {
-                    live.insert(cfg::local_index(local));
-                }
-                before.push(live.clone());
-            }
-            before.reverse();
-            before
-        };
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for (block, _) in self
-                .body
-                .blocks
-                .iter()
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-            {
-                let mut out = BitSet::new(locals);
-                for succ in cfg::successors(self.body, block) {
-                    out.union_with(&live_in[cfg::block_index(succ)]);
-                }
-                let before = transfer(block, out);
-                let entry = before[0].clone();
-                if entry != live_in[cfg::block_index(block)] {
-                    live_in[cfg::block_index(block)] = entry;
-                    changed = true;
-                }
-            }
-        }
-        self.body
-            .blocks
-            .iter()
-            .map(|(block, _)| {
-                let mut out = BitSet::new(locals);
-                for succ in cfg::successors(self.body, block) {
-                    out.union_with(&live_in[cfg::block_index(succ)]);
-                }
-                transfer(block, out)
-            })
-            .collect()
-    }
-
     fn live_at(&self, point: Point) -> &BitSet {
         &self.live_before[cfg::block_index(point.block)][point.index]
     }
@@ -1347,8 +1224,9 @@ impl<'a> BodyCheck<'a> {
                     let origin = cfg::origin_at(self.body, point);
                     if let Some(temp) = self.pinned_by(point, access) {
                         out.report(point, &mut repointed, origin, || {
-                            let used =
-                                self.nearest_after(point, |at| self.uses_at(at).contains(&temp))?;
+                            let used = self.nearest_after(point, |at| {
+                                cfg::uses_at(self.body, at).contains(&temp)
+                            })?;
                             Some(LoanDiagnostic::Repointed {
                                 access: origin,
                                 kind: access.kind,
@@ -1466,7 +1344,7 @@ impl<'a> BodyCheck<'a> {
             return StillUsed::HandedBack;
         }
         let uses_holder = |point: Point| {
-            self.uses_at(point)
+            cfg::uses_at(self.body, point)
                 .iter()
                 .any(|local| holders.contains(&cfg::local_index(*local)))
         };
@@ -1623,14 +1501,6 @@ impl<'a> BodyCheck<'a> {
             _ => None,
         }
     }
-}
-
-fn operand_uses(op: &Operand, uses: &mut Vec<LocalId>) {
-    operand_places(op, &mut |place| uses.push(place.local));
-}
-
-fn value_uses(value: &Rvalue, uses: &mut Vec<LocalId>) {
-    value_places(value, &mut |place| uses.push(place.local));
 }
 
 /// Every region a type mentions in a value position. A `fn` type's
