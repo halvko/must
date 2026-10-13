@@ -2487,6 +2487,7 @@ pub fn infer<'db>(db: &'db dyn Db, item: ItemId<'db>) -> InferenceResult {
         ctx.type_params = type_params;
         ctx.own_generics = generics;
         ctx.own_item = Some(item_loc(db, item));
+        ctx.own_signature = Some(expected.clone());
         ctx.infer_expr_with(root, &expected, cause);
     } else {
         ctx = InferCtx::new(db, file, body, resolutions(db, item), &mut table, &no_group);
@@ -2576,6 +2577,13 @@ pub(crate) struct InferCtx<'a, 'db> {
     /// (`Buf::<const N>(...)`). `None` only in group mode, where const
     /// params can't occur (generic items never join groups).
     own_item: Option<ItemLoc>,
+    /// The item's own type as this body checks against it: the annotation
+    /// with its holes as variables, or one variable when there is none.
+    /// `None` in group mode.
+    own_signature: Option<Ty>,
+    /// Variables an unresolved bound obligation waits on, filled by
+    /// [`Self::resolve_obligation`]: a mention open on one of them reports.
+    open_bound_vars: rustc_hash::FxHashSet<TyVar>,
     /// Every generic-item mention instantiated with fresh variables, so
     /// [`Self::finish`] can report type params the whole traversal never
     /// pinned (the mention-site sibling of `NeedsAnnotation`).
@@ -2773,6 +2781,8 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             type_params: ParamScope::default(),
             own_generics: &[],
             own_item: None,
+            own_signature: None,
+            open_bound_vars: rustc_hash::FxHashSet::default(),
             pending_instantiations: Vec::new(),
             pending_empty_arrays: Vec::new(),
             pending_number_literals: Vec::new(),
@@ -3255,6 +3265,10 @@ impl<'a, 'db> InferCtx<'a, 'db> {
         // Instantiations the whole traversal (joins included) never pinned:
         // the mention-site sibling of `NeedsAnnotation` — the definition is
         // fine, this particular use just doesn't say which type it wants.
+
+        // Holes of the item's own signature; built on first use, since only
+        // a diagnostic needs them.
+        let mut signature_holes: Option<rustc_hash::FxHashSet<TyVar>> = None;
         let pending = std::mem::take(&mut self.pending_instantiations);
         for instantiation in pending {
             for (param, var, needs_forget) in instantiation.params {
@@ -3294,6 +3308,24 @@ impl<'a, 'db> InferCtx<'a, 'db> {
                 // would be noise.
                 if is_unresolved_number(self.table, &var) {
                     continue;
+                }
+                // A type parameter left open only by the item's own
+                // signature is the signature's incompleteness, reported as
+                // `NeedsAnnotation` where the item is used. A bounded one
+                // (`forget` or a trait) reports here: nothing else checks it.
+                if !needs_forget {
+                    let mut open = rustc_hash::FxHashSet::default();
+                    resolved.open_vars(&mut open);
+                    let holes = signature_holes.get_or_insert_with(|| {
+                        let mut holes = rustc_hash::FxHashSet::default();
+                        if let Some(sig) = &self.own_signature {
+                            resolve_fully(self.table, sig).open_vars(&mut holes);
+                        }
+                        holes
+                    });
+                    if open.is_subset(holes) && open.is_disjoint(&self.open_bound_vars) {
+                        continue;
+                    }
                 }
                 self.result
                     .diagnostics
@@ -3608,6 +3640,9 @@ impl<'a, 'db> InferCtx<'a, 'db> {
             return DictEntry::Error;
         }
         if resolved.contains_infer() {
+            // Open on a bound obligation: the instantiation reports it, since
+            // nothing else will.
+            resolved.open_vars(&mut self.open_bound_vars);
             return DictEntry::Error;
         }
         // A rigid param: satisfied exactly when the enclosing binder gives

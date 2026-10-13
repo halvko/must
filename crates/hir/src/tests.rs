@@ -6135,6 +6135,92 @@ static main = fn () -> () {
     );
 }
 
+/// A qualified variant mention whose type parameter only the signature's
+/// hole leaves open reports nothing: the hole is reported where the item
+/// is used across items.
+#[test]
+fn signature_hole_shared_with_a_qualified_mention_is_not_blamed_on_it() {
+    check_diagnostics(
+        r#"
+type Option = enum::<T> { Some(T), None };
+static some = fn (x) -> Option::<_> { Option::Some(x) };
+static none = fn () -> Option::<_> { Option::None };
+static main = fn () -> Option::<usize> { some(1) };
+"#,
+        expect![[r#"
+            195..199: cannot infer the type of `some` across items; add a type annotation to its definition (defined here at 51..55)
+        "#]],
+    );
+}
+
+/// An unannotated item's whole type is a hole: a qualified variant mention
+/// whose type parameter only it leaves open reports nothing.
+#[test]
+fn unannotated_signature_hole_is_not_blamed_on_a_qualified_mention() {
+    check_diagnostics(
+        r#"
+type Option = enum::<T> { Some(T), None };
+static g = fn (x) { Option::Some(x) };
+static main = fn () -> usize {
+    g(1);
+    0
+};
+"#,
+        expect![[r#"
+            118..119: cannot infer the type of `g` across items; add a type annotation to its definition (defined here at 51..52)
+        "#]],
+    );
+}
+
+/// A mention whose type parameter nothing ties to the signature reports.
+#[test]
+fn mention_the_body_never_pins_still_reports() {
+    check_diagnostics(
+        r#"
+type Option = enum::<T> { Some(T), None };
+static g = fn (x) -> Option::<_> {
+    let n = Option::None;
+    Option::Some(x)
+};
+"#,
+        expect![[r#"
+            91..103: cannot infer the type parameter `T` of `Option`; write `Option::<...>` to specify it (defined here at 6..12)
+        "#]],
+    );
+}
+
+/// A `forget`-bounded type parameter left open by the signature reports at
+/// the mention, the only place the bound is checked.
+#[test]
+fn forget_bound_left_open_by_the_signature_still_reports() {
+    check_diagnostics(
+        r#"
+static ignore = fn::<T: forget>(t: T) -> () { };
+static f = fn (x) { ignore(x) };
+"#,
+        expect![[r#"
+            70..76: cannot infer the type parameter `T` of `ignore`; write `ignore::<...>` to specify it (defined here at 8..14)
+        "#]],
+    );
+}
+
+/// A trait-bounded type parameter left open by the signature reports at the
+/// mention, the only place the bound is checked.
+#[test]
+fn trait_bound_left_open_by_the_signature_still_reports() {
+    check_diagnostics(
+        r#"
+trait D = requires { m: fn(Self) -> usize; };
+static d = fn::<T: D>(x: T) -> usize { x.m() };
+static f = fn (x) -> usize { d(x) };
+static g = fn () { f(true) };
+"#,
+        expect![[r#"
+            124..125: cannot infer the type parameter `T` of `d`; write `d::<...>` to specify it (defined here at 54..55)
+        "#]],
+    );
+}
+
 #[test]
 fn constructing_with_the_wrong_args_is_a_mismatch() {
     check_diagnostics(

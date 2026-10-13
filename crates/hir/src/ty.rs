@@ -809,6 +809,34 @@ impl Ty {
         }
     }
 
+    /// Collect the inference variables [`Self::contains_infer`] finds; after
+    /// `resolve_fully` each is an unbound root.
+    pub(crate) fn open_vars(&self, out: &mut rustc_hash::FxHashSet<TyVar>) {
+        match self {
+            Ty::Infer(var) => {
+                out.insert(*var);
+            }
+            Ty::Fn(f) => {
+                f.params.iter().for_each(|p| p.open_vars(out));
+                f.ret.open_vars(out);
+            }
+            Ty::RawPtr { pointee: inner, .. }
+            | Ty::Borrow {
+                referent: inner, ..
+            }
+            | Ty::Array { elem: inner, .. } => inner.open_vars(out),
+            Ty::Record(rec) => rec.fields.iter().for_each(|(_, ty)| ty.open_vars(out)),
+            Ty::Named(NamedTy { args, .. }) => {
+                for arg in args {
+                    if let GenericArg::Ty(ty) = arg {
+                        ty.open_vars(out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Whether an fn type appears anywhere in the type. Same traversal
     /// shape (and the same declared-shape blind spot on `Named`, whose args
     /// are visited) as [`Ty::contains_infer`]. Used by the
